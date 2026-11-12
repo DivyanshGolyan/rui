@@ -56,7 +56,8 @@ const model_capability = @import("model_capability.zig");
 const work_line = @import("work_line.zig");
 const queued_line = @import("queued_line.zig");
 const status_page = @import("status_page.zig");
-const preferences = @import("preferences.zig");
+const ChatInfo = @import("chat_info.zig");
+const ModelChoice = @import("model_choice.zig");
 pub const Command = reads.Command;
 pub const Requests = reads.Requests;
 pub const Status = reads.Status;
@@ -69,7 +70,7 @@ const AdmissionEnd = Submission.End;
 const Settled = departure.Settled;
 init: std.process.Init,
 /// The process's borrowed HOME, empty without one; used for answer links
-/// and the /status page's `~` paths.
+/// and the chat info panel's `~` paths.
 home: []const u8 = "",
 store: []const u8,
 session: []const u8,
@@ -89,6 +90,12 @@ app_preview: DocumentView = undefined,
 app_consent: ActionConsent = .{},
 app_card: PermissionCard = undefined,
 app_palette: Palette = undefined,
+app_info: ChatInfo = undefined,
+info_open: bool = false,
+/// One panel effect, retained through its definite answer, even when closed.
+info_effect: enum { idle, configure, refreshing, copy, archive, saved, failed } = .idle,
+info_edit: ?ChatInfo.Edit = null,
+info_bytes: [@max(status_page.max_label_bytes, status_page.max_model_bytes)]u8 = undefined,
 app_hooks: AppHooks = .{ .root = undefined, .context = undefined, .leave = undefined, .copy = undefined, .on_open = undefined },
 app_caps: overview_view.Caps = .{},
 /// Stops when the caller is signalled; a running command stops with it.
@@ -140,26 +147,13 @@ reading: struct {
 } = .{},
 // The inspection page and the command that may fill it.
 inspection: struct {
-    kind: Inspection = .status,
-    // /status was asked for; the next scan shows it.
+    kind: Inspection = .help,
+    // Chat info requested an inspection capture on the next scan.
     status_requested: bool = false,
-    // What two /status reads took of the Session, each listing its Actions
-    // in the matching `files.actions`: the shown page's, named by `status`,
-    // and the one the next read takes, so neither is copied. Null while the
-    // shown inspection page is not /status. Each scan replaces the page, in
-    // the same frame as its own, when anything it reports changed. Its one
-    // Current read follows the page's, so it is never older than the
-    // history it shows with.
+    // The shown and next captures alternate, so the worker never changes
+    // facts the panel is reading on the UI thread.
     sessions: [2]status_page.Session = undefined,
     status: ?u1 = null,
-    // The defaults new Sessions start from, read when /status opens and
-    // after a command run over it.
-    defaults: status_page.Defaults = error.Unread,
-    // The row Up and Down move `›` over and Enter changes. Each /status
-    // starts at the first; a page that comes back after a change keeps it.
-    selected: status_page.Setting = status_page.first,
-    // The submission the shown page shows under it.
-    submission: ?Submission.View = null,
     // An inspection or Host command started and its result has not been
     // presented. A command may change configuration, so Messages and consent wait
     // for every inspection; exit prints an unshown command's output, which can
@@ -208,7 +202,7 @@ notice_buffer: [notice_capacity]u8 = undefined,
 shown_notice: session_chrome.Notice(notice_capacity) = .{},
 /// What the held original's last attempt failed with, while that original
 /// is held in the state the failure left: its status-bar line, and for
-/// /status what to do. It needs the person, so it is no notice.
+/// its repair details what to do. It needs the person, so it is no notice.
 failure: ?struct { key: [36]u8, state: Submission.State, bar: session_notice.Failure, page: ?[]const u8 = null } = null,
 failure_buffer: [failure_capacity]u8 = undefined,
 /// The `?` shortcuts are open.
@@ -230,12 +224,8 @@ const failure_capacity = @max(
     "! Decision rejected: ".len + 4 * protocol.max_code_bytes + rejection_suffix.len,
     "! ".len + client.Environment.too_large_bytes + too_large_advice.len,
 );
-/// The longest built notice: a short result with a failure mark on each
-/// line, or the model's facts.
-const notice_capacity = @max(
-    @max(2048, slash_commands_shared.result_notice_bytes),
-    protocol.max_model_bytes + " · ".len + unknown_sign_in.len + model_tail.len,
-);
+/// A short command result with a failure mark on each line.
+const notice_capacity = @max(2048, slash_commands_shared.result_notice_bytes);
 
 test "a read freezes its viewport width method for live and historical answers" {
     const screen = try std.testing.allocator.create(Screen);
@@ -260,7 +250,7 @@ test "a read freezes its viewport width method for live and historical answers" 
 /// Fills the reader's job in place; the caller may add to it before launch.
 fn freeze(self: *Self, phase: ReadPhase) *Job {
     std.debug.assert(self.reader.thread == null);
-    self.job = .{ .init = self.init, .home = self.home, .store = self.store, .session = self.session, .files = self.files, .colour = self.colour, .width_method = self.screen.vx.caps.unicode, .command = self.command, .requests = self.requests, .status = self.status, .phase = phase, .cursor = self.scanCursor(), .opening = self.reading.opening, .queued_line = if (self.live.queued_line) |shown| shown.admission else 0, .inspection_kind = self.inspection.kind, .interrupted = self.interrupted, .line_read = self.line.read, .provider = self.line.provider, .hint_wanted = self.hint == .unread, .opened = self.screen.feed.opened };
+    self.job = .{ .init = self.init, .home = self.home, .store = self.store, .session = self.session, .files = self.files, .colour = self.colour, .width_method = self.screen.vx.caps.unicode, .command = self.command, .configure = self.app_hooks.configure, .requests = self.requests, .status = self.status, .phase = phase, .cursor = self.scanCursor(), .opening = self.reading.opening, .queued_line = if (self.live.queued_line) |shown| shown.admission else 0, .inspection_kind = self.inspection.kind, .interrupted = self.interrupted, .line_read = self.line.read, .provider = self.line.provider, .hint_wanted = self.hint == .unread, .opened = self.screen.feed.opened };
     const job = &self.job;
     job.latest_ending = self.live.latest_ending;
     if (phase == .activity or phase == .permission) {
@@ -408,6 +398,8 @@ pub const Lender = struct {
     /// The Upgrade, the overview's one value: its run, and what the last
     /// run left Host requests.
     upgrade: *const fn (context: *anyopaque) session_upgrade.Upgrade,
+    archive_state: ?*const fn (*anyopaque) ChatInfo.SaveState = null,
+    models: ?*const fn (*anyopaque) ModelChoice.Snapshot = null,
 
     pub const Said = struct {
         /// The overview's notice; null for none.
@@ -446,6 +438,7 @@ pub const HostAccess = struct {
 
 pub const AppHooks = struct {
     host: ?HostAccess = null,
+    configure: ?reads.Configure = null,
     drafts: ?*session_drafts.Drafts = null,
     root: *Root,
     context: *anyopaque,
@@ -458,6 +451,7 @@ pub const AppHooks = struct {
 
 pub fn attach(self: *Self, hooks: AppHooks, caps: overview_view.Caps) vxfw.Widget {
     self.app_hooks = hooks;
+    self.app_info = .{ .backend = self.infoBackend(), .home = self.home };
     if (hooks.drafts) |drafts| if (drafts.take(self.init.gpa, self.session)) |draft| {
         defer draft.deinit(self.init.gpa);
         self.input.restore(draft.snapshot);
@@ -466,15 +460,125 @@ pub fn attach(self: *Self, hooks: AppHooks, caps: overview_view.Caps) vxfw.Widge
     self.screen.setWidth(caps.width);
     self.app_preview = .{ .document = &self.screen.browsing, .colour = self.colour, .more = true, .handler = .{ .userdata = self, .on_notice = appNotice, .on_scroll = appDragScroll, .on_click = appPreviewClick } };
     self.app_card = .{ .consent = &self.app_consent, .pasting = &hooks.root.pasting, .description = "", .body = self.app_preview.widget(), .userdata = self, .on_decision = appDecision };
-    self.chrome = .init(.{ .userdata = self, .key = chromeClick(.needs), .stop = chromeClick(.{ .action = .stop }), .back = chromeClick(.{ .action = .close }), .latest = chromeClick(.{ .action = .latest }), .status_page = chromeClick(.status), .unarchive = chromeClick(.unarchive) });
+    self.chrome = .init(.{ .userdata = self, .key = chromeClick(.needs), .stop = chromeClick(.{ .action = .stop }), .back = chromeClick(.{ .action = .close }), .latest = chromeClick(.{ .action = .latest }), .status_page = chromeClick(.status), .details = chromeClick(.details), .unarchive = chromeClick(.unarchive) });
     return self.widget();
+}
+
+/// The chat's own line is the only entry to its settings panel.
+fn openInfo(self: *Self, _: *vxfw.EventContext) !void {
+    if (self.info_open) return;
+    self.info_open = true;
+    self.shortcuts_open = false;
+    if (self.inspection.status != null) self.app_info.refresh();
+    self.inspection.status_requested = true;
+    self.poll_at = 0;
+    self.dirty = true;
+}
+
+fn infoBackend(self: *Self) ChatInfo.Backend {
+    const Backend = struct {
+        fn owner(raw: *anyopaque) *Self {
+            return @ptrCast(@alignCast(raw));
+        }
+        fn read(raw: *anyopaque, session: *status_page.Session) !void {
+            const frontend = owner(raw);
+            const index = frontend.inspection.status orelse return error.Unread;
+            session.* = frontend.inspection.sessions[index];
+        }
+        fn configure(raw: *anyopaque, edit: ChatInfo.Edit) !void {
+            const frontend = owner(raw);
+            try frontend.infoMaySave();
+            var held = edit;
+            switch (edit) {
+                .label, .model => |text| {
+                    if (text.len > frontend.info_bytes.len) return error.ValueTooLong;
+                    @memcpy(frontend.info_bytes[0..text.len], text);
+                    if (edit == .label) held = .{ .label = frontend.info_bytes[0..text.len] } else held = .{ .model = frontend.info_bytes[0..text.len] };
+                },
+                else => {},
+            }
+            frontend.info_edit = held;
+            frontend.info_effect = .configure;
+            frontend.dirty = true;
+        }
+        fn archive(raw: *anyopaque) !void {
+            const frontend = owner(raw);
+            try frontend.infoMaySave();
+            if (frontend.line.archive_state != .active) {
+                frontend.info_effect = .saved;
+                return;
+            }
+            frontend.info_effect = .archive;
+            errdefer frontend.info_effect = .failed;
+            try frontend.perform(.archive);
+        }
+        fn copy(raw: *anyopaque, _: *vxfw.EventContext) !void {
+            const frontend = owner(raw);
+            try frontend.infoMaySave();
+            try frontend.clickCommand("/copy");
+            frontend.info_effect = .copy;
+        }
+        fn state(raw: *anyopaque) ChatInfo.SaveState {
+            const frontend = owner(raw);
+            return switch (frontend.info_effect) {
+                .idle => .idle,
+                .configure, .refreshing, .copy => .pending,
+                .saved => .saved,
+                .failed => .failed,
+                .archive => if (frontend.lender.archive_state) |read_state| switch (read_state(frontend.lender.context)) {
+                    .idle, .pending => .pending,
+                    .saved => .saved,
+                    .failed => .failed,
+                } else .pending,
+            };
+        }
+        fn models(raw: *anyopaque) ModelChoice.Snapshot {
+            const frontend = owner(raw);
+            return if (frontend.lender.models) |read_models| read_models(frontend.lender.context) else .{};
+        }
+        fn caps(raw: *anyopaque) overview_view.Caps {
+            return owner(raw).app_caps;
+        }
+    };
+    return .{ .context = self, .read = Backend.read, .configure = Backend.configure, .archive = Backend.archive, .copy_last_answer = Backend.copy, .state = Backend.state, .models = Backend.models, .caps = Backend.caps };
+}
+
+/// The archive owner delivers its answer to the panel's one outstanding effect.
+/// Its own ledger retains any uncertainty and departure guidance.
+pub fn archiveAnswered(self: *Self, result: overview_view.ArchiveResult) void {
+    if (self.info_effect != .archive or !std.mem.eql(u8, self.session, &result.request.reference)) return;
+    self.info_effect = switch (result.outcome) {
+        .requested => .saved,
+        .failed, .unconfirmed => .failed,
+    };
+    self.dirty = true;
+}
+
+fn infoMaySave(self: *const Self) !void {
+    if (self.hostHeld() or self.upgradeHeld() or self.reading.opening or self.commandActive() or self.submission.intent != null) return error.Busy;
+}
+
+/// A refused original keeps its repair information, independent of settings.
+fn showSubmissionFailure(self: *Self) !void {
+    // This file is never borrowed by the reader. A repair view cannot overwrite
+    // staged feed rows, Message content or unshown Configure recovery output.
+    self.dropMessageRequest();
+    const file = self.files.details;
+    try file.setLength(self.init.io, 0);
+    var buffer: [4096]u8 = undefined;
+    var output = file.writerStreaming(self.init.io, &buffer);
+    try reads.writeSubmission(self.submission.view(), if (self.heldFailure()) |failure| failure.page else null, &output.interface);
+    try output.flush();
+    try self.screen.showFile(self.init.io, file, false);
+    self.dirty = true;
 }
 
 /// What a click on the chrome runs: what its key runs.
 const Click = union(enum) {
     action: ConversationAction,
-    /// `+N more running · /status`.
+    /// The chat's info panel.
     status,
+    details,
     unarchive,
     /// The key that ends what needs the person: Ctrl-R's retry, or the
     /// command the held original's line names (`session_notice.key`).
@@ -491,12 +595,13 @@ fn chromeClick(comptime click: Click) *const fn (*anyopaque, *vxfw.EventContext)
             self.shown_notice.dismiss();
             switch (click) {
                 .action => |action| try self.perform(action),
-                .status => try self.clickCommand("/status"),
+                .status => try self.openInfo(ctx),
+                .details => try self.showSubmissionFailure(),
                 .unarchive => try self.clickCommand("/unarchive"),
                 .needs => if (self.heldOriginal()) |held| if (session_notice.key(held)) |key| switch (key) {
                     .retry => try self.perform(.recover),
                     .discard => try self.clickCommand("/discard"),
-                    .status => try self.clickCommand("/status"),
+                    .status => try self.showSubmissionFailure(),
                 },
             }
             self.dirty = true;
@@ -538,7 +643,7 @@ fn nowMs(self: *const Self) u64 {
 }
 
 pub fn widget(self: *Self) vxfw.Widget {
-    return .{ .userdata = self, .eventHandler = appEvent, .drawFn = appDraw };
+    return .{ .userdata = self, .captureHandler = appCapture, .eventHandler = appEvent, .drawFn = appDraw };
 }
 
 /// What a drag in the Transcript did, on the status bar.
@@ -656,6 +761,20 @@ fn hostFailure(self: *Self) bool {
     return true;
 }
 
+/// A modal panel takes keys before a permission card or feed child can act.
+fn appCapture(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    const opens = event == .key_press and !self.app_hooks.root.pasting and (event.key_press.matches('i', .{ .alt = true }) or (self.submission.view() != null and event.key_press.matches('d', .{ .alt = true })));
+    const input = switch (event) {
+        .key_press, .paste_start, .paste_end, .invalid_key => true,
+        else => false,
+    };
+    if (opens or (self.info_open and input)) {
+        try appEvent(raw, ctx, event);
+        ctx.consumeEvent();
+    }
+}
+
 fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     if (self.leaving != null) return;
@@ -692,6 +811,7 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
                 self.dirty = true;
             };
             try self.app_card.widget().handleEvent(ctx, .tick);
+            try self.app_info.widget().handleEvent(ctx, .tick);
             if (self.expansion.queued == .after_frame) if (try self.expand()) |peer| try self.follow(ctx, &peer);
             if (self.shown_notice.expire(self.nowMs())) self.dirty = true;
             ctx.redraw = ctx.redraw or self.dirty;
@@ -705,6 +825,36 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
                 }
             };
             self.shown_notice.dismiss();
+            if (self.info_open) {
+                if (event == .key_press and !pasting and self.submission.view() != null and event.key_press.matches('d', .{ .alt = true })) {
+                    self.app_info.cancelChoice();
+                    self.info_open = false;
+                    try ctx.requestFocus(self.app_input.composer.widget());
+                    try self.showSubmissionFailure();
+                } else if (session_keys.panelAction(Editor.selectEvent(conversation_keys, event, pasting))) |action| {
+                    try self.perform(action);
+                } else if (event == .key_press and !pasting and (Editor.named(event.key_press) == .escape or Editor.named(event.key_press) == .ctrl_g)) {
+                    if (self.app_info.hasChoice()) self.app_info.cancelChoice() else {
+                        self.info_open = false;
+                        try ctx.requestFocus(self.app_input.composer.widget());
+                    }
+                } else try self.app_info.widget().handleEvent(ctx, event);
+                ctx.consumeAndRedraw();
+                try self.afterInput(ctx);
+                return;
+            }
+            if (event == .key_press and !pasting and event.key_press.matches('i', .{ .alt = true })) {
+                try self.openInfo(ctx);
+                ctx.consumeAndRedraw();
+                try self.afterInput(ctx);
+                return;
+            }
+            if (event == .key_press and !pasting and self.submission.view() != null and event.key_press.matches('d', .{ .alt = true })) {
+                try self.showSubmissionFailure();
+                ctx.consumeAndRedraw();
+                try self.afterInput(ctx);
+                return;
+            }
             const question = self.app_consent.request == null and event == .key_press and !pasting and typesQuestion(event.key_press);
             const shortcut = session_chrome.shortcut(self.shortcuts_open, self.input.composition().bytes.len == 0, question);
             self.shortcuts_open = shortcut == .open;
@@ -756,7 +906,7 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
                 // One submission at a time: a decision or Message in flight,
                 // or an original still held, makes Enter say so and keep the draft.
                 const allowed = !self.hostHeld() and !self.reading.opening and self.reading.phase != .permission and !self.commandActive() and self.submission.intent == null;
-                if (!(event == .key_press and !pasting and Editor.isEnter(event.key_press) and (self.startChange() or self.takeShownRow()))) {
+                if (!(event == .key_press and !pasting and Editor.isEnter(event.key_press) and self.takeShownRow())) {
                     switch (self.input.appEvent(conversation_keys, event, pasting, allowed)) {
                         .message => |ticket| try self.beginMessage(.{ .message = ticket }),
                         .command => try self.commandLine(),
@@ -837,6 +987,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     };
     const facts_style = style.of(self.app_caps, .{ .colour = .quiet, .background = .bar });
     self.app_screen.style = normal;
+    self.app_input.composer.caret = !self.info_open;
     self.app_input.composer.style = normal;
     self.app_input.composer.quiet = quiet;
     self.app_input.composer.method = self.app_caps.width;
@@ -898,13 +1049,15 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
         // A conversation reading itself again says so until Host requests go on.
         .progress = if (self.upgradePhase() == .reobserving) session_upgrade.rereading else send.progress,
         .stoppable = said.stoppable,
+        .details = held != null and held.?.state != .submitting,
         .facts = .{ .current = self.line.facts(&self.hint, self.session), .name = self.session, .archive = self.line.archive_state },
         .notice = self.shown_notice.current(now_ms),
         .overview = said.text,
-        .shortcuts = self.shortcuts_open,
-        .overlay = palette,
+        .shortcuts = self.shortcuts_open and !self.info_open,
+        .overlay = if (self.info_open) self.app_info.widget() else palette,
         .width = ctx.max.width.?,
     });
+    self.app_info.narrow = !list_visible;
     self.app_preview.size = .{};
     self.app_content.size = .{};
     self.app_screen.host = if (self.app_hooks.host) |host| host.notice(host.context) else null;
@@ -939,7 +1092,7 @@ test "App Session retains the draft across a permission card arriving during pas
     var interrupted: client.Cancellation = .{};
     const self = try std.testing.allocator.create(Self);
     defer std.testing.allocator.destroy(self);
-    self.begin(init, "unused", "k7m2qx", "unused", .{ .scratch = page, .action = page, .inspection = page, .status = page, .actions = .{ page, page } }, undefined, undefined, undefined, screen, &interrupted, quiet_overview);
+    self.begin(init, "unused", "k7m2qx", "unused", .{ .scratch = page, .action = page, .inspection = page, .details = page, .actions = .{ page, page } }, undefined, undefined, undefined, screen, &interrupted, quiet_overview);
     const Hooks = struct {
         fn leave(_: *anyopaque, _: *vxfw.EventContext, _: Outcome) !void {
             return error.UnexpectedLeave;
@@ -1183,7 +1336,7 @@ test "App Session leaves from a permission card on Ctrl-C or Ctrl-D and keeps th
         var interrupted: client.Cancellation = .{};
         const self = try std.testing.allocator.create(Self);
         defer std.testing.allocator.destroy(self);
-        self.begin(init, "unused", "k7m2qx", "unused", .{ .scratch = page, .action = page, .inspection = page, .status = page, .actions = .{ page, page } }, undefined, undefined, undefined, screen, &interrupted, quiet_overview);
+        self.begin(init, "unused", "k7m2qx", "unused", .{ .scratch = page, .action = page, .inspection = page, .details = page, .actions = .{ page, page } }, undefined, undefined, undefined, screen, &interrupted, quiet_overview);
         const Hooks = struct {
             var left: ?Outcome = null;
             fn leave(_: *anyopaque, _: *vxfw.EventContext, outcome: Outcome) !void {
@@ -1247,7 +1400,7 @@ test "App Session link click leaves for the peer only where Esc would leave" {
     var interrupted: client.Cancellation = .{};
     const self = try std.testing.allocator.create(Self);
     defer std.testing.allocator.destroy(self);
-    self.begin(init, "unused", "k7m2qx", "unused", .{ .scratch = page, .action = page, .inspection = page, .status = page, .actions = .{ page, page } }, undefined, undefined, undefined, screen, &interrupted, quiet_overview);
+    self.begin(init, "unused", "k7m2qx", "unused", .{ .scratch = page, .action = page, .inspection = page, .details = page, .actions = .{ page, page } }, undefined, undefined, undefined, screen, &interrupted, quiet_overview);
     const Hooks = struct {
         var opened: ?[session_id.bytes]u8 = null;
         var left: ?Outcome = null;
@@ -1487,7 +1640,6 @@ const Slash = union(enum) {
     /// Waits for the reader, then shows its page; Host commands included.
     inspection: Inspection,
     /// The Session's model and sign-in, which never change.
-    model,
     upgrade,
     discard,
     recover: []const u8,
@@ -1507,17 +1659,15 @@ fn parse(text: []const u8) Slash {
         .exit => .exit,
         .archive => .archive,
         .unarchive => .unarchive,
-        .status => .{ .inspection = .status },
         .requests => .{ .inspection = .requests },
         .help => .{ .inspection = .help },
         // The table's /copy words are `reads.Copy`'s own names.
         .copy => .{ .inspection = .{ .copy = if (command.argument.len == 0) .answer else std.meta.stringToEnum(reads.Copy, command.argument).? } },
-        .@"inspect-action", .setup, .configure, .result, .rename, .effort, .@"reload-skills" => .{ .inspection = .command },
+        .@"inspect-action", .setup, .result, .rename, .effort, .@"reload-skills" => .{ .inspection = .command },
         .recover => .{ .recover = command.argument },
         .discard => .discard,
         .wait => .wait,
         .login => .login,
-        .model => .model,
         .upgrade => .upgrade,
     };
 }
@@ -1529,7 +1679,7 @@ fn slashCommand(self: *Self, text: []const u8) !void {
     // Lender intents have one admission boundary in converse, shared with
     // shortcuts and confirmation. Other commands retain their own hold policy.
     const admitted_elsewhere = switch (parsed) {
-        .archive, .unarchive, .upgrade, .exit, .model => true,
+        .archive, .unarchive, .upgrade, .exit => true,
         else => false,
     };
     if (self.upgradeHeld() and !admitted_elsewhere) {
@@ -1561,7 +1711,6 @@ fn slashCommand(self: *Self, text: []const u8) !void {
             writer.print("Login uses {s} in your shell.", .{provider.login()}) catch unreachable;
             self.notice = writer.buffered();
         },
-        .model => self.notice = self.modelFacts(),
         .misused => |name| {
             var writer = std.Io.Writer.fixed(&self.notice_buffer);
             writer.print("! Usage: {s}", .{slash_commands.usage.get(name)}) catch unreachable;
@@ -1569,19 +1718,6 @@ fn slashCommand(self: *Self, text: []const u8) !void {
         },
         .unknown => self.unknownCommand(text),
     }
-}
-
-const model_tail = " · new Session: /model in overview";
-const unknown_sign_in = "sign-in unknown";
-
-/// The Session's model and sign-in, first, so a narrow screen cuts only
-/// the tail. A Session keeps both for life, so a different model starts a
-/// new Session from the overview's /model.
-fn modelFacts(self: *Self) []const u8 {
-    if (self.line.read == null) return "The model shows once the Session is read.";
-    var writer = std.Io.Writer.fixed(&self.notice_buffer);
-    writer.print("{s} · {s}" ++ model_tail, .{ self.line.model.slice(), if (self.line.provider) |provider| provider.signIn() else unknown_sign_in }) catch unreachable;
-    return writer.buffered();
 }
 
 fn unknownCommand(self: *Self, text: []const u8) void {
@@ -1602,14 +1738,14 @@ test "frontend answers local and unknown commands in place and keeps Host comman
         .{ "/effort high", "" },
         .{ "/recover 01234567-89ab-4cde-8012-0123456789ab", "! Unknown command /recover · /help" },
         .{ "/wait", "Work continues." },
-        .{ "/model", "The model shows once the Session is read." },
-        .{ "/model gpt-5.5", "! Usage: /model" },
-        .{ "/configure --permission-mode ask", "" },
+        .{ "/model", "! Unknown command /model · /help" },
+        .{ "/model gpt-5.5", "! Unknown command /model · /help" },
+        .{ "/configure --permission-mode ask", "! Unknown command /configure · /help" },
         .{ "/result 01234567-89ab-4cde-8012-0123456789ab", "" },
         .{ "/inspect-action", "" },
         .{ "/archive other", "! Usage: /archive" },
         .{ "/unarchive other", "! Usage: /unarchive" },
-        .{ "/status", "" },
+        .{ "/status", "! Unknown command /status · /help" },
         .{ "/copy", "" },
         .{ "/copy code", "" },
         .{ "/copy file", "" },
@@ -1626,29 +1762,6 @@ test "frontend answers local and unknown commands in place and keeps Host comman
             try std.testing.expectEqualStrings(case[0], self.input.takeCommand().?);
         }
     }
-}
-
-test "frontend /model shows the Session's model and sign-in within 60 columns and offers no pick" {
-    var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .colour = false };
-    self.input.init();
-    for ([_][]const u8{ "gpt-6-luna", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-sol", "gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5" }) |id| for ([_]?protocol.Provider{ .codex, .openai, null }) |provider| {
-        self.line = .{ .read = .{ .revision = 1, .end = 1 }, .provider = provider };
-        try self.line.model.set(id);
-        self.notice = null;
-        try self.slashCommand("/model");
-        const said = self.notice.?;
-        // The model, then the sign-in, lead the line.
-        try std.testing.expect(std.mem.startsWith(u8, said, id));
-        const rest = said[id.len..];
-        if (provider) |known| {
-            try std.testing.expect(std.mem.indexOf(u8, rest, known.signIn()) != null);
-            try std.testing.expect(std.unicode.utf8CountCodepoints(said) catch unreachable <= 60);
-        } else for (std.enums.values(protocol.Provider)) |other| try std.testing.expect(std.mem.indexOf(u8, rest, other.signIn()) == null);
-        // A sign-in is never dropped silently: something stands in its place.
-        try std.testing.expect(!std.mem.startsWith(u8, std.mem.trimStart(u8, rest[" · ".len..], " "), "new Session"));
-        try std.testing.expect(self.input.queuedCommand() == null);
-        try std.testing.expectEqualStrings(id, self.line.model.slice());
-    };
 }
 
 test "a Session lists the skills it saved for the caret's /word, and Tab or Enter on a drawn row replaces the name" {
@@ -1944,6 +2057,15 @@ fn quiesceUpgrade(self: *Self) !void {
 }
 
 fn startQueuedCommand(self: *Self) !void {
+    if (self.reader.thread == null) if (self.info_edit) |edit| {
+        self.inspection.kind = .command;
+        const job = self.freeze(.inspection);
+        try job.setInfoEdit(edit);
+        self.info_edit = null;
+        try self.launch(job, reads.runInfoConfigure);
+        self.inspection.command_running = true;
+        return;
+    };
     if (self.reader.thread == null) if (self.input.takeCommand()) |text| {
         const kind = parse(text).inspection;
         try self.leaveFor(kind);
@@ -1955,8 +2077,8 @@ fn startQueuedCommand(self: *Self) !void {
         job.inspection_submission = self.submission.view();
         const consent = self.screen.consent;
         job.inspection_action = if (consent) |pending| (if (pending.presentation == .preview) pending.action else null) else null;
-        // The newer inspection replaces a /status not yet shown.
-        self.inspection.status_requested = false;
+        // A command is independent of the next info capture.
+        if (!self.info_open) self.inspection.status_requested = false;
         try self.launch(job, switch (kind) {
             .command => reads.runCommand,
             .copy => reads.copyAnswer,
@@ -2003,16 +2125,7 @@ fn update(self: *Self) !Updated {
     }
     if (phase != .active) return .waiting;
     try self.admit();
-    if (self.input.queuedCommand()) |text| if (parse(text).inspection == .status) {
-        // /status is the next scan's: one capture for the page, the
-        // history and the composer status.
-        _ = self.input.takeCommand();
-        try self.screen.latest();
-        self.inspection.status_requested = true;
-        self.inspection.selected = status_page.first;
-        self.poll_at = 0;
-    };
-    if (self.input.queuedCommand() != null and self.reader.thread != null and !self.reader.completed()) {
+    if (self.inspectionQueued() and self.reader.thread != null and !self.reader.completed()) {
         // No read shows anything before it joins, so an inspection
         // supersedes it. Keep servicing input until completion; never join
         // unfinished work in raw mode.
@@ -2080,7 +2193,7 @@ fn nextCommands(self: *Self, previous: ?slash_commands_shared.Shown) ?slash_comm
 /// the original's /recover while it can be retried now, then each saved
 /// Message's /result.
 fn requestList(self: *Self) ?slash_commands_shared.List {
-    if (self.screen.view != .inspection or self.inspection.kind != .requests or self.inspection.status != null) return null;
+    if (self.screen.view != .inspection or self.inspection.kind != .requests) return null;
     const lead = if (self.recoverable()) |key| slash_commands_shared.recoverEntry(&self.recover_line, key) else null;
     return self.saved_requests.list(lead);
 }
@@ -2264,9 +2377,14 @@ fn beginMessage(self: *Self, intent: Submission.Intent) !void {
     try self.jumpToEnd();
 }
 
+/// The same inspection intent supersedes a read at cancellation and settlement.
+fn inspectionQueued(self: *const Self) bool {
+    return self.info_edit != null or self.input.queuedCommand() != null;
+}
+
 /// A queued or running command holds the choice until it completes.
 fn commandActive(self: *const Self) bool {
-    return self.upgradeHeld() or self.input.queuedCommand() != null or self.inspection.command_running;
+    return self.upgradeHeld() or self.inspectionQueued() or self.inspection.command_running;
 }
 
 /// What a key does in a conversation, beside the draft or an Action's choice.
@@ -2284,7 +2402,7 @@ fn perform(self: *Self, action: ConversationAction) !void {
         .previous, .next => if (self.shownCommands()) |shown| {
             shown.move(action == .next);
             self.dirty = true;
-        } else if (!try self.moveSelection(action == .next)) try self.scroll(action == .next, 1),
+        } else try self.scroll(action == .next, 1),
         // Shift-Up/Down move half a screen; PgUp/PgDn are their aliases.
         .scroll_up, .scroll_down => if (self.shownCommands()) |shown| {
             shown.move(action == .scroll_down);
@@ -2682,6 +2800,15 @@ fn settleReader(self: *Self) !void {
     // a request left outstanding would refuse every later one.
     if (self.reading.phase == .recall and end != .complete) self.input.abandonStep();
     const phase = self.reading.phase;
+    if (phase == .inspection and self.info_effect == .configure and self.job.info_edit != null) {
+        self.info_effect = if (end == .complete and self.job.result.info_saved) .refreshing else .failed;
+        if (self.info_effect == .refreshing) {
+            self.inspection.status_requested = true;
+            self.poll_at = 0;
+        }
+    } else if (phase == .inspection and self.info_effect == .copy) {
+        self.info_effect = if (end == .complete and self.job.result.copied == .clipboard) .saved else .failed;
+    }
     // All terminal outcomes release the retry read, including supersession.
     // Keep its phase through policy/application; diagnostics retain their own.
     defer if (phase == .retry and end != .absent) {
@@ -2700,7 +2827,7 @@ fn settleReader(self: *Self) !void {
         return;
     }
     // A fatal failure leaves command output for exit to print.
-    if (end.failure(reader_policy.settleMode(self.upgradePhase() == .quiescing, self.input.queuedCommand() != null))) |err| return err;
+    if (end.failure(reader_policy.settleMode(self.upgradePhase() == .quiescing, self.inspectionQueued()))) |err| return err;
     const inspection = self.readInspection();
     if (end == .complete) switch (reader_policy.shows(phase, inspection)) {
         .tool => {
@@ -2723,14 +2850,10 @@ fn settleReader(self: *Self) !void {
     if (reader_policy.commandSettled(end == .complete, phase)) self.inspection.command_running = false;
     // A reload changed what this Session's Messages bind: its held skills
     // are stale.
-    if (end == .complete and phase == .inspection and inspection == .command) switch (slash_commands.parse(self.job.command_text[0..self.job.command_text_length])) {
+    if (end == .complete and phase == .inspection and inspection == .command and self.job.info_edit == null) switch (slash_commands.parse(self.job.command_text[0..self.job.command_text_length])) {
         .command => |command| if (command.name == .@"reload-skills") if (self.dropSkills()) |err| return err,
         else => {},
     };
-    if (end == .complete and reader_policy.defaultsChanged(phase, inspection, self.statusShown())) {
-        self.inspection.defaults = savedDefaults(self.home);
-        try self.refreshStatusPage();
-    }
     try self.applyReader(end);
 }
 
@@ -2739,7 +2862,7 @@ fn readInspection(self: *const Self) reader_policy.Inspection {
     return switch (self.inspection.kind) {
         .copy => .copy,
         .command => .command,
-        .status, .requests, .help => .other,
+        .requests, .help => .other,
     };
 }
 
@@ -3127,7 +3250,6 @@ fn showInspection(self: *Self) !void {
         self.notice = slash_commands_shared.no_output;
         return;
     }
-    self.inspection.status = null;
     try self.screen.showFile(self.init.io, self.files.inspection, false);
     if (self.inspection.kind == .requests) self.saved_requests = self.job.result.requests;
     // The page heading already says how to return.
@@ -3137,6 +3259,9 @@ fn showInspection(self: *Self) !void {
 /// A joined /copy. The clipboard's bytes go out between frames, so no frame
 /// splits the sequence.
 fn showCopy(self: *Self) !void {
+    errdefer if (self.info_effect == .saved) {
+        self.info_effect = .failed;
+    };
     self.dirty = true;
     self.notice = switch (self.job.result.copied) {
         .no_answer => "No answer to copy yet.",
@@ -3156,114 +3281,22 @@ fn showCopy(self: *Self) !void {
     };
 }
 
-/// Only a failure the person can act on is named.
-/// A settled scan's /status: the page asked for, or the shown page updated in
-/// place. An update keeps the reader's place, notice and consent.
+/// Adopt the inspection capture without ever replacing the feed with a page.
 fn applyStatus(self: *Self) !void {
-    const screen = self.screen;
-    const open = self.job.open_status and self.inspection.status_requested;
-    if (!open and !self.statusShown()) return;
-    const submission = self.submission.view();
-    if (!self.job.result.status and std.meta.eql(submission, self.inspection.submission)) return;
+    if (!self.job.result.status and self.inspection.status == null) return;
     if (self.job.result.status) self.inspection.status = @intFromBool(self.job.status_taken == &self.inspection.sessions[1]);
-    self.inspection.submission = submission;
-    if (open) {
-        self.inspection.status_requested = false;
-        self.inspection.defaults = savedDefaults(self.home);
-        try self.writeStatusPage();
-        try screen.showFile(self.init.io, self.files.status, false);
-        self.notice = null;
-    } else try self.refreshStatusPage();
+    self.inspection.status_requested = false;
+    if (self.info_effect == .refreshing) self.info_effect = .saved;
+    if (self.info_open and !self.app_info.hasChoice() and self.app_info.pending == null) self.app_info.refresh();
+    self.dirty = true;
 }
 
-/// The defaults new Sessions start from, as the page shows them.
-fn savedDefaults(home: []const u8) status_page.Defaults {
-    const values = try preferences.load(home);
-    var saved: status_page.Saved = .{
-        .provider = if (values.provider.len == 0) status_page.Saved.rui else std.meta.stringToEnum(protocol.Provider, values.provider.slice()) orelse error.UnsupportedPreferenceProvider,
-        .model = .{ .len = 0 },
-        .effort = values.reasoning_effort,
-        .notifications = values.notifications,
-        .store = .{ .len = 0 },
-    };
-    try saved.model.set(values.model.slice());
-    if (saved.store) |*store| {
-        var fallback: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        if (values.store.len != 0) try store.set(values.store.slice()) else if (preferences.defaultStore(home, &fallback)) |path| try store.set(path) else |err| saved.store = err;
-    } else |_| unreachable;
-    return saved;
+fn leaveFor(self: *Self, _: Inspection) !void {
+    if (!self.info_open) try self.screen.latest();
 }
 
-/// What the shown /status page reports.
-fn statusFacts(self: *const Self) status_page.Facts {
-    return .{ .home = self.home, .store = self.store, .session = &self.inspection.sessions[self.inspection.status.?], .defaults = &self.inspection.defaults };
-}
-
-/// Renders the /status page, `›` on the selected row, into the status file
-/// the screen shows: its facts, the Actions its read listed, then the
-/// submission under it.
-fn writeStatusPage(self: *Self) !void {
-    const io = self.init.io;
-    const file = self.files.status;
-    try file.setLength(io, 0);
-    try io.vtable.fileSeekTo(io.userdata, file, 0);
-    var buffer: [4096]u8 = undefined;
-    var output = file.writerStreaming(io, &buffer);
-    const out = &output.interface;
-    const facts = self.statusFacts();
-    try status_page.render(facts, self.inspection.selected, out);
-    var actions = self.files.actions[self.inspection.status.?].reader(io, &.{});
-    _ = actions.interface.streamRemaining(out) catch |err| return switch (err) {
-        error.ReadFailed => actions.err.?,
-        error.WriteFailed => output.err.?,
-    };
-    try status_page.writeWorkEnd(&facts.session.work, out);
-    try reads.writeSubmission(self.inspection.submission, if (self.heldFailure()) |failure| failure.page else null, out);
-    try output.flush();
-}
-
-/// Renders the shown /status page again and shows it in place.
-fn refreshStatusPage(self: *Self) !void {
-    try self.writeStatusPage();
-    try self.screen.refreshFile(self.init.io, self.files.status);
-}
-
-/// The view an inspection runs over. Input goes to the editor the latest
-/// frame shows; this stales it, so the view returned to is drawn while the
-/// inspection runs. A command run on the /status page leaves the page shown:
-/// a short reply is a notice under it, and the next read shows the change on it.
-fn leaveFor(self: *Self, kind: Inspection) !void {
-    if (kind == .command and self.statusShown()) self.dirty = true else try self.screen.latest();
-}
-
-/// The /status page is the view shown.
 fn statusShown(self: *const Self) bool {
-    return self.inspection.status != null and self.screen.view == .inspection;
-}
-
-/// Up or Down on the /status page with an empty draft moves `›` to the
-/// next changeable row, scrolling the page to show it; false otherwise.
-fn moveSelection(self: *Self, down: bool) !bool {
-    if (!self.statusShown() or self.input.composition().bytes.len != 0) return false;
-    self.inspection.selected = status_page.step(self.inspection.selected, down);
-    try self.refreshStatusPage();
-    self.screen.revealLine(status_page.line(self.inspection.selected));
-    return true;
-}
-
-/// Enter on the /status page with an empty draft starts the selected row's
-/// change: its command in the draft, whose list offers a choice row's
-/// choices, or a typed row's current value to edit. False otherwise.
-fn startChange(self: *Self) bool {
-    if (!self.statusShown() or self.input.composition().bytes.len != 0) return false;
-    var buffer: [status_page.max_draft_bytes]u8 = undefined;
-    // Up and Down select only changeable rows.
-    switch (self.input.append(status_page.draft(self.inspection.selected, self.statusFacts(), &buffer).?)) {
-        // A value too long for the draft says so, as a list word does.
-        .refused => |why| self.notice = refusedNotice(why),
-        else => {},
-    }
-    return true;
+    return self.info_open or self.info_effect == .refreshing;
 }
 
 /// A frontend attached to App as `rui` attaches it: Root before it, a
@@ -3358,6 +3391,8 @@ const HeldFrontend = struct {
         ctx.consume_event = false;
         ctx.phase = .capturing;
         try held.root.widget().captureEvent(ctx, event);
+        if (ctx.consume_event) return;
+        try held.self.widget().captureEvent(ctx, event);
         if (ctx.consume_event) return;
         ctx.phase = .at_target;
         if (held.self.app_input.permission) |card| {
@@ -3711,38 +3746,6 @@ test "App Session drafts survive switching chats with their caret and sending re
     }
 }
 
-test "sending a Message drops a /status read still waiting to start" {
-    const Worker = struct {
-        var release: std.atomic.Value(bool) = .init(false);
-        fn read(_: *anyopaque, _: *Task) !void {
-            while (!release.load(.acquire)) std.Thread.yield() catch {};
-        }
-    };
-    const held = try HeldFrontend.create();
-    defer held.destroy();
-    const self = &held.self;
-    Worker.release.store(false, .release);
-    self.job.feed_page = FeedPolicy.request(.scan, self.feedState());
-    self.job.result = .{ .at_start = true, .at_end = true };
-    try self.reader.start(std.testing.io, self, Worker.read);
-    defer {
-        Worker.release.store(true, .release);
-        self.reader.cancel();
-        self.reader.join() catch {};
-    }
-    try held.keys("/status\r");
-    try held.settle();
-    try std.testing.expect(self.inspection.status_requested);
-    try held.keys("hello\r");
-    try std.testing.expect(!self.inspection.status_requested);
-    Worker.release.store(true, .release);
-    while (!self.reader.completed()) std.Thread.yield() catch {};
-    try self.settleReader();
-    try held.settle();
-    try std.testing.expect(!self.inspection.status_requested);
-    try std.testing.expect(self.reader.thread == null);
-}
-
 test "sending a Message from a browsed page returns the screen to the latest conversation" {
     const held = try HeldFrontend.create();
     defer held.destroy();
@@ -3923,13 +3926,13 @@ test "a key on a draft changed since the latest frame acts on that draft's list 
     // highlight to `/c`'s second row, which the next frame keeps.
     try stepKeys(held, "/");
     try held.settle();
-    try stepKeys(held, "c\x1b[B");
+    try stepKeys(held, "r\x1b[B");
     try std.testing.expectEqual(@as(usize, 1), held.screen.commands.?.highlight);
     try held.settle();
-    try std.testing.expectEqualStrings("c", held.screen.commands.?.list.typed);
+    try std.testing.expectEqualStrings("r", held.screen.commands.?.list.typed);
     try std.testing.expectEqual(@as(usize, 1), held.screen.commands.?.highlight);
     // Esc on `/co`, typed after the frame drew `/c`'s list, closes the list.
-    try stepKeys(held, "o\x07");
+    try stepKeys(held, "e\x07");
     try std.testing.expectEqualStrings("", try barShows(held));
     try held.settle();
     try std.testing.expectEqual(.closed, held.screen.commands.?.seen);
@@ -3944,8 +3947,8 @@ test "Tab completes from the draft's own list, however many keys arrive before a
     try std.testing.expectEqualStrings("/help", self.input.composition().bytes);
     // Two Tabs in one batch: the second completes from the list the first
     // one's word calls for.
-    try stepKeys(held, "\x15/conf\t\t");
-    try std.testing.expectEqualStrings("/configure --permission-mode ", self.input.composition().bytes);
+    try stepKeys(held, "\x15/set\t\t");
+    try std.testing.expectEqualStrings("/setup --model ", self.input.composition().bytes);
 }
 
 test "a key before a new Session's first frame finds no list the previous Session drew" {
@@ -3970,7 +3973,7 @@ test "Esc closes the command list first only when the latest frame drew it" {
     defer held.destroy();
     try held.settle();
     // Drawn: the first Esc closes only the list, the next one acts as Esc.
-    try stepKeys(held, "/st");
+    try stepKeys(held, "/se");
     try held.settle();
     try std.testing.expectEqual(.drawn, held.screen.commands.?.seen);
     try stepKeys(held, "\x07");
@@ -3981,7 +3984,7 @@ test "Esc closes the command list first only when the latest frame drew it" {
     try std.testing.expectEqualStrings("Esc returns to the overview once the draft is empty.", try barShows(held));
     // The latest frame drew no list, the first being closed: Esc acts at
     // once.
-    try stepKeys(held, "\x15/st\x07");
+    try stepKeys(held, "\x15/se\x07");
     try std.testing.expectEqualStrings("Esc returns to the overview once the draft is empty.", try barShows(held));
 }
 
@@ -4185,7 +4188,7 @@ test "permission resolved between the activity scan and Current keeps the fronte
     defer action.close(io);
     const inspection = try held.tmp.dir.createFile(io, "inspection", .{ .read = true });
     defer inspection.close(io);
-    self.files = .{ .scratch = scratch, .action = action, .inspection = inspection, .status = inspection, .actions = .{ inspection, inspection } };
+    self.files = .{ .scratch = scratch, .action = action, .inspection = inspection, .details = inspection, .actions = .{ inspection, inspection } };
     self.store = root;
     self.session = "k7m2qx";
     self.line.read = .{ .revision = 1, .end = 0 };
@@ -4361,11 +4364,8 @@ fn rowWith(held: *HeldFrontend, needle: []const u8) !?[]const u8 {
     return null;
 }
 
-/// Shows a /status page as a scan that read it does: the page asked for,
-/// or, with `open` false, the page shown refreshed in place. Its Session is
-/// the sample's named `label`, with the model the composer names and no
-/// web search.
-fn showStatus(held: *HeldFrontend, open: bool, label: []const u8) !void {
+/// A scan hands the panel the same owned Session capture as the chat line.
+fn captureInfo(held: *HeldFrontend, label: []const u8) !void {
     const self = &held.self;
     const session = &self.inspection.sessions[if (self.inspection.status) |shown| ~shown else 0];
     status_page.sample(session);
@@ -4374,172 +4374,86 @@ fn showStatus(held: *HeldFrontend, open: bool, label: []const u8) !void {
     try session.label.set(label);
     self.job.status_taken = session;
     self.job.result.status = true;
-    self.job.open_status = open;
-    self.inspection.status_requested = open;
     try self.applyStatus();
-    self.dirty = true;
-    try held.settle();
+    self.poll_at = std.math.maxInt(i96);
 }
 
-/// Gives `held` the files a /status page needs, and a HOME with no saved
-/// defaults.
-fn statusFiles(held: *HeldFrontend) !void {
-    const io = std.testing.io;
-    held.self.files.status = try held.tmp.dir.createFile(io, "status", .{ .read = true });
-    for (&held.self.files.actions, 0..) |*file, index| file.* = try held.tmp.dir.createFile(io, if (index == 0) "actions0" else "actions1", .{ .read = true });
-    held.self.home = held.self.directory;
-}
-
-fn closeStatusFiles(held: *HeldFrontend) void {
-    held.self.files.status.close(std.testing.io);
-    for (held.self.files.actions) |file| file.close(std.testing.io);
-}
-
-test "defaults no path or file names are unreadable, and none saved are Rui's" {
-    try std.testing.expectError(error.InvalidHome, savedDefaults(""));
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const home = path[0..try tmp.dir.realPath(std.testing.io, &path)];
-    const saved = try savedDefaults(home);
-    try std.testing.expectEqual(status_page.Saved.rui, try saved.provider);
-    var store: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    try std.testing.expectEqualStrings(try std.fmt.bufPrint(&store, "{s}/.local/share/rui/store", .{home}), (try saved.store).slice());
-}
-
-test "the /status page marks one changeable row, which Up and Down move and Enter starts changing" {
-    const held = try HeldFrontend.create();
-    defer held.destroy();
-    try statusFiles(held);
-    defer closeStatusFiles(held);
-    held.self.line = .{ .read = .{ .revision = 1, .end = 1 }, .effort = .high };
-    try held.self.line.model.set("gpt-5.5");
-    try showStatus(held, true, "fix-safari-export");
-    try std.testing.expectEqualStrings("  › Effort          high  Session override", (try rowWith(held, "Effort ")).?);
-    try std.testing.expectEqualStrings("    Permissions     bypass · Bash and MCP run without asking", (try rowWith(held, "Permissions")).?);
-    // Shift-Down scrolls as before; the mark stays.
-    try sendKeys(&held.self, "\x1b[1;2B");
-    try held.settle();
-    try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "Effort ")).?, "  › Effort"));
-    // Down reaches the Session's changeable Model before the defaults;
-    // PageUp and PageDown still scroll.
-    try sendKeys(&held.self, "\x1b[B");
-    try held.settle();
-    try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "Effort ")).?, "    Effort"));
-    try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "Permissions")).?, "  › Permissions"));
-    for (0..6) |_| try sendKeys(&held.self, "\x1b[B");
-    try held.settle();
-    try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "Model           gpt-5.5")).?, "  › Model"));
-    try sendKeys(&held.self, "\r");
-    try std.testing.expectEqualStrings("/configure --model gpt-5.5", held.self.input.composition().bytes);
-    held.self.input.clear();
-    // Down skips only Store and Instructions, which remain fixed.
-    try sendKeys(&held.self, "\x1b[B");
-    try held.settle();
-    try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "Rui default")).?, "  › Model"));
-    try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "fixed for this Session")).?, "    Store"));
-    try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "set from a shell")).?, "    Instructions"));
-    // A refresh, as the open page's next read, keeps the mark.
-    try showStatus(held, false, "fix-safari-export");
-    try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "Rui default")).?, "  › Model"));
-    try sendKeys(&held.self, "\x1b[A");
-    try held.settle();
-    try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "Model           gpt-5.5")).?, "  › Model"));
-    try sendKeys(&held.self, "\x1b[A");
-    try held.settle();
-    try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "Headroom")).?, "  › Headroom"));
-    // Enter on Headroom drafts only its command, whose list offers
-    // `default`: the model's default never becomes an override of its value.
-    try sendKeys(&held.self, "\r");
-    try std.testing.expectEqualStrings("/configure --output-reservation ", held.self.input.composition().bytes);
-    // With a draft, Up and Down keep their meaning: the mark stays.
-    try sendKeys(&held.self, "\x1b[A");
-    try held.settle();
-    try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "Headroom")).?, "  › Headroom"));
-    held.self.input.clear();
-    for (0..8) |_| try sendKeys(&held.self, "\x1b[A");
-    try held.settle();
-    try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "Effort ")).?, "  › Effort"));
-    // Enter on a choice row lists its choices; Down and Enter take one and run it.
-    try sendKeys(&held.self, "\r");
-    try std.testing.expectEqualStrings("/configure --reasoning-effort ", held.self.input.composition().bytes);
-    // The list the next frame draws takes the arrows and Enter.
-    held.self.dirty = true;
-    try held.settle();
-    const list = held.screen.commands.?.list;
-    for (list.shown()) |entry| try std.testing.expectEqual(std.mem.eql(u8, entry.word, "high"), std.mem.eql(u8, entry.description, "current"));
-    try sendKeys(&held.self, "\x1b[B\r");
-    var expected: [64]u8 = undefined;
-    try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "/configure --reasoning-effort {s}", .{list.shown()[1].word}), held.self.input.queuedCommand().?);
-    try std.testing.expectEqualStrings("", held.self.input.composition().bytes);
-    try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "Effort ")).?, "  › Effort"));
-}
-
-test "a change run from the /status page replies under the page, which shows the new value on its row; a long failure opens as before" {
-    const Reply = struct {
-        var text: []const u8 = undefined;
-        fn write(context: *anyopaque, _: *Task) !void {
-            const frontend: *Self = @ptrCast(@alignCast(context));
-            try frontend.files.inspection.writePositionalAll(std.testing.io, text, 0);
-        }
-    };
-    const long = comptime long: {
-        var text: []const u8 = "";
-        for (0..40) |_| text = text ++ "rui: --label is 1-100 printable characters; nothing changed\n";
-        break :long text;
-    };
-    for ([_]bool{ true, false }) |configured| {
-        errdefer std.debug.print("configured={}\n", .{configured});
+test "chat info opens from the chat line above the input at 140 and 46 columns and Escape closes only the top choice" {
+    for ([_]u16{ 140, 46 }) |width| {
         const held = try HeldFrontend.create();
         defer held.destroy();
-        try statusFiles(held);
-        defer closeStatusFiles(held);
-        held.self.files.inspection = try held.tmp.dir.createFile(std.testing.io, "inspection", .{ .read = true });
-        defer held.self.files.inspection.close(std.testing.io);
-        try showStatus(held, true, "fix-safari-export");
-        // The defaults are read as the page opens, not on each read after.
-        const readiness: preferences.Readinesses = .initFill(.missing);
-        _ = try preferences.update(held.self.home, .{ .notifications = false }, &readiness);
-        try showStatus(held, false, "fix-safari-export");
-        try std.testing.expectEqualStrings("    Notifications   on", (try rowWith(held, "Notifications")).?);
-        for (0..3) |_| try sendKeys(&held.self, "\x1b[B");
-        try sendKeys(&held.self, "\r");
-        try std.testing.expectEqualStrings("/configure --label fix-safari-export", held.self.input.composition().bytes);
-        // Edited, and run as the loop runs a queued command.
-        for (0.."fix-safari-export".len) |_| try sendKeys(&held.self, "\x7f");
-        try sendKeys(&held.self, "\"lane four\"\r");
-        const text = held.self.input.takeCommand().?;
-        try std.testing.expectEqualStrings("/configure --label \"lane four\"", text);
-        try held.self.leaveFor(parse(text).inspection);
-        held.self.inspection.kind = .command;
-        held.self.inspection.command_running = true;
-        held.self.reading.phase = .inspection;
-        @memcpy(held.self.job.command_text[0..text.len], text);
-        held.self.job.command_text_length = text.len;
-        Reply.text = if (configured) "Rui: Configured.\n" else long;
-        try held.self.reader.start(std.testing.io, &held.self, Reply.write);
-        try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(2)), &held.self, struct {
-            fn joined(frontend: *Self) !bool {
-                return frontend.reader.completed();
-            }
-        }.joined);
-        try held.self.settleReader();
-        held.self.dirty = true;
-        try held.settle();
-        if (configured) {
-            // The reply is the notice on the last row, under the page.
-            try std.testing.expectEqualStrings("Configured.", (try rowWith(held, "Configured.")).?);
-            // A command run over the page reads them again.
-            try std.testing.expectEqualStrings("    Notifications   off", (try rowWith(held, "Notifications")).?);
-            try std.testing.expectEqualStrings("  › Name            fix-safari-export", (try rowWith(held, "Name")).?);
-            // The open page's next read shows the new value, its mark where it was.
-            try showStatus(held, false, "lane four");
-            try std.testing.expectEqualStrings("  › Name            lane four", (try rowWith(held, "Name")).?);
-        } else {
-            try std.testing.expect((try rowWith(held, "--label is 1-100")) != null);
-            try std.testing.expect((try rowWith(held, " Name ")) == null);
-        }
+        held.size = .{ .width = width, .height = 36 };
+        try seedFeed(held.screen, "feed stays here\n");
+        try captureInfo(held, "Fix retry deadline");
+        try held.keys("kept draft\x1b[D\x1b[D");
+        const before = held.self.input.composition();
+        const cursor = before.cursor;
+        try held.keys("\x1bi");
+        try std.testing.expect(held.self.info_open and held.self.inspection.status_requested);
+        try std.testing.expectEqual(Screen.ViewKind.feed, held.screen.view);
+        const surface = try held.draw();
+        // Layer's panel is independent of the feed, immediately above input.
+        try std.testing.expectEqual(@as(usize, 2), surface.children.len);
+        const base = surface.children[0].surface;
+        const panel = surface.children[1];
+        try std.testing.expectEqual(@as(u8, 2), panel.z_index);
+        try std.testing.expectEqual(base.children[1].origin.row, panel.origin.row + panel.surface.size.height);
+        try std.testing.expect((try rowWith(held, "Fix retry deadline")) != null);
+        try std.testing.expect((try rowWith(held, "Folder")) != null);
+        try std.testing.expect((try rowWith(held, "alt+i info")) != null);
+        try held.keys("\r");
+        try std.testing.expect(held.self.app_info.hasChoice());
+        try held.keys("\x07");
+        try std.testing.expect(held.self.info_open and !held.self.app_info.hasChoice());
+        // The read-only Folder is skipped; Model opens the shared choice.
+        try held.keys("\x1b[B\x1b[B\x1b[B\r");
+        try std.testing.expect(held.self.app_info.model_choice.active);
+        try std.testing.expect((try rowWith(held, "gpt-5.5")) != null);
+        try held.keys("\x07\x07");
+        try std.testing.expect(!held.self.info_open and held.left == null);
+        try std.testing.expectEqualStrings("kept draft", held.self.input.composition().bytes);
+        try std.testing.expectEqual(cursor, held.self.input.composition().cursor);
+        try std.testing.expectEqual(Screen.ViewKind.feed, held.screen.view);
     }
+}
+
+test "chat info inspection refresh preserves a choice and late captures never reopen a closed panel" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    try captureInfo(held, "Before");
+    try held.keys("\x1bi\r");
+    try captureInfo(held, "After");
+    try std.testing.expect(held.self.app_info.hasChoice());
+    try held.keys("\x07\x07");
+    try captureInfo(held, "Late");
+    try std.testing.expect(!held.self.info_open);
+    try held.keys("\x1bi");
+    try std.testing.expect((try rowWith(held, "Late")) != null);
+}
+
+test "chat info saves typed edits without touching the draft and reports refusal on the field" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    try captureInfo(held, "Fix retry deadline");
+    try held.keys("kept draft\x1bi\x1b[B\r\x1b[B\r");
+    try std.testing.expectEqual(ChatInfo.Edit{ .permission = .ask }, held.self.info_edit.?);
+    try std.testing.expectEqualStrings("kept draft", held.self.input.composition().bytes);
+    try std.testing.expect(held.self.input.queuedCommand() == null);
+    // The typed effect stays pending after closing, then lands on a fresh read.
+    try held.keys("\x07");
+    try std.testing.expect(!held.self.info_open);
+    held.self.info_edit = null;
+    held.self.info_effect = .refreshing;
+    try captureInfo(held, "Renamed");
+    var ctx = held.context();
+    try held.self.app_info.widget().handleEvent(&ctx, .tick);
+    try std.testing.expect(held.self.app_info.pending == null);
+    try held.keys("\x1bi");
+    held.self.inspection.command_running = true;
+    try held.keys("\r\r");
+    try std.testing.expect((try rowWith(held, "couldn't save")) != null);
+    try std.testing.expectEqualStrings("kept draft", held.self.input.composition().bytes);
+    held.self.inspection.command_running = false;
 }
 
 test "/upgrade starts the overview's run, consumes only its line and keeps the original submission; Esc is the run's" {
@@ -4635,7 +4549,7 @@ test "a conversation is at rest for an Upgrade only with no work running or fini
 }
 
 test "no command waits its turn across an Upgrade: /upgrade is refused while one does, and a run's hold refuses every one after" {
-    const lines = [_][]const u8{ "/status", "/requests", "/help", "/copy", "/configure --reasoning-effort low" };
+    const lines = [_][]const u8{ "/requests", "/help", "/copy", "/effort low" };
     for (lines) |line| {
         errdefer std.debug.print("line={s}\n", .{line});
         const held = try HeldFrontend.create();
@@ -5565,7 +5479,7 @@ const ChromeFixture = struct {
                 return .{ .text = ChromeFixture.overview_says, .stoppable = kind == .working };
             }
         }.line;
-        fixture.self.begin(init_, "unused", "k7m2qx", "unused", .{ .scratch = page, .action = page, .inspection = page, .status = page, .actions = .{ page, page } }, undefined, undefined, undefined, fixture.screen, &fixture.interrupted, lender);
+        fixture.self.begin(init_, "unused", "k7m2qx", "unused", .{ .scratch = page, .action = page, .inspection = page, .details = page, .actions = .{ page, page } }, undefined, undefined, undefined, fixture.screen, &fixture.interrupted, lender);
         fixture.root = .{ .overview = empty_app_text.widget(), .list = empty_app_text.widget(), .compose = empty_app_text.widget() };
         fixture.widget = fixture.self.attach(.{ .root = &fixture.root, .context = fixture.self, .leave = Hooks.leave, .copy = Hooks.copy, .on_open = Hooks.open }, .{ .depth = .none });
         fixture.self.reading.opening = false;
@@ -5672,7 +5586,7 @@ test "App Session shell gutter and back control follow list visibility through r
         try std.testing.expectEqualStrings(if (wide) "d" else "‹", screen.readCell(start + 1, 24).?.char.grapheme);
         var facts: std.Io.Writer.Allocating = .init(arena);
         for (start..width) |column| try facts.writer.writeAll(screen.readCell(@intCast(column), 24).?.char.grapheme);
-        try std.testing.expectEqualStrings(if (wide) " demo · gpt-5.5 · low · 100% left" else " ‹ demo · gpt-5.5 · low · 100% left", std.mem.trimEnd(u8, facts.written(), " "));
+        try std.testing.expectEqualStrings(if (wide) " demo · gpt-5.5 · low · 100% left" else " ‹ demo · gpt-5.5 · low · 100% left", std.mem.trimEnd(u8, facts.written()[0..std.mem.indexOf(u8, facts.written(), "alt+i info").?], " "));
         try std.testing.expect(fixture.root.session.?.eql(fixture.widget));
         try std.testing.expectEqualStrings("kept draft", self.input.composition().bytes);
         try std.testing.expectEqualDeep(anchor, fixture.screen.anchor);
@@ -5697,7 +5611,7 @@ test "App Session shows running calls in order above the input, with +N more run
     const first = ChromeFixture.find(&shown, "⠹ Read src/overview_view.zig").?;
     try std.testing.expectEqualStrings("⠹ Run zig build test", shown[first + 1]);
     try std.testing.expectEqualStrings("⠹ Read docs/using-rui.md", shown[first + 2]);
-    try std.testing.expectEqualStrings("+2 more running · /status", shown[first + 3]);
+    try std.testing.expectEqualStrings("+2 more running · info", shown[first + 3]);
     // No shown call carries the clock, so the work line follows, once.
     try std.testing.expect(std.mem.eql(u8, shown[first + 4], "⠹ Waiting · 12s") or std.mem.eql(u8, shown[first + 4], "⠹ Waiting · 13s"));
     // The chip always reserves a row between the tail and the input rule.
@@ -5768,7 +5682,8 @@ test "App Session's status bar never says Sent: an accepted Message's row is its
     const self = fixture.self;
     // Accepted with no original held: the bar is empty, so the overview's
     // line shows there.
-    try std.testing.expectEqualStrings("‹ k7m2qx", (try fixture.rows())[22]);
+    try std.testing.expect(std.mem.startsWith(u8, (try fixture.rows())[22], "‹ k7m2qx"));
+    try std.testing.expect(std.mem.endsWith(u8, (try fixture.rows())[22], "alt+i info"));
     ChromeFixture.overview_says = "Port overview to vxfw finished";
     defer ChromeFixture.overview_says = null;
     try std.testing.expect(ChromeFixture.find(&try fixture.rows(), "Port overview to vxfw finished") != null);
@@ -5811,17 +5726,17 @@ test "App Session's facts row ends with the archive badge while the Session is a
             return shown[ChromeFixture.find(shown, "‹").?];
         }
     }.row;
-    try std.testing.expectEqualStrings("‹ k7m2qx", facts(&try fixture.rows()));
+    try std.testing.expect(std.mem.startsWith(u8, facts(&try fixture.rows()), "‹ k7m2qx"));
     self.line.archive_state = .archived;
     const archived = facts(&try fixture.rows());
     try std.testing.expect(std.mem.startsWith(u8, archived, "‹ k7m2qx · Archived"));
     try std.testing.expect(std.mem.endsWith(u8, archived, "/unarchive"));
     self.line.archive_state = .archiving;
-    try std.testing.expectEqualStrings("‹ k7m2qx · Stopping and archiving", facts(&try fixture.rows()));
+    try std.testing.expect(std.mem.startsWith(u8, facts(&try fixture.rows()), "‹ k7m2qx · Stopping and archiving"));
     // A notice on the last row leaves the badge where it is.
     self.shown_notice.show("Copied 3 lines", ChromeFixture.now());
     const shown = try fixture.rows();
-    try std.testing.expectEqualStrings("‹ k7m2qx · Stopping and archiving", facts(&shown));
+    try std.testing.expect(std.mem.startsWith(u8, facts(&shown), "‹ k7m2qx · Stopping and archiving"));
     try std.testing.expect(ChromeFixture.find(&shown, "Copied 3 lines") != null);
 }
 
@@ -5836,7 +5751,7 @@ test "App Session Footer clips identity in terminal cells" {
     try self.line.label.?.set("Port the overview to vxfw and keep its key table");
     try self.line.model.set("gpt-6-sol");
     const shown = try fixture.rows();
-    try std.testing.expect(std.mem.startsWith(u8, shown[22], "‹ Port the overview to vxfw and keep its key table · gpt-6-sol · low"));
+    try std.testing.expect(std.mem.startsWith(u8, shown[22], "‹ Port the overview to vxfw and keep its key table · gpt-6-sol · …"));
     try std.testing.expect(session_line.cells(shown[22], .unicode) <= 80);
 }
 
@@ -5898,11 +5813,11 @@ test "App Session's last row keeps a rejection's code until /discard, past a key
     try std.testing.expect(ChromeFixture.find(&try fixture.rows(), "Rejected") != null);
 }
 
-test "App Session's last row says a refused environment until the original goes, and /status says why and the fix" {
+test "App Session keeps a refused environment and its repair details separate from chat info" {
     const held = try HeldFrontend.create();
     defer held.destroy();
-    try statusFiles(held);
-    defer closeStatusFiles(held);
+    held.self.files.details = try held.tmp.dir.createFile(std.testing.io, "details", .{ .read = true });
+    defer held.self.files.details.close(std.testing.io);
     var environ: std.process.Environ.Map = .init(std.testing.allocator);
     defer environ.deinit();
     const big: [200]u8 = @splat('x');
@@ -5918,9 +5833,9 @@ test "App Session's last row says a refused environment until the original goes,
     try held.settle();
     const bar = (try rowWith(held, "Environment too large")).?;
     try std.testing.expectEqualStrings("! Environment too large; nothing sent", bar);
-    try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "/status") != null);
+    try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "details") != null);
     try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "ctrl+r") == null);
-    try showStatus(held, true, "fix-safari-export");
+    try held.self.showSubmissionFailure();
     for (0..4) |_| try sendKeys(&held.self, "\x1b[6~");
     try held.settle();
     try std.testing.expect((try rowWith(held, "BIG_TOKEN")) != null);
@@ -5943,38 +5858,36 @@ test "App Session shows a command's two-line result as a page, both lines whole"
     try std.testing.expect((try rowWith(held, "Host unavailable; the Session keeps its settings")) != null);
 }
 
-test "App Session's chrome clicks that run a command say so while another waits its turn, and run nothing" {
+test "App Session info opens while commands wait and refused originals keep their repair details" {
     var fixture: ChromeFixture = undefined;
     try fixture.init();
     defer fixture.deinit();
     const self = fixture.self;
     self.input.queueCommand("/requests");
-    // `+N more running · /status`, twice before any tick.
-    for (0..2) |_| try self.chrome.activity.more.on_click(self.chrome.activity.more.userdata, &fixture.ctx);
+    // Info is inspection, not another command; opening it never replaces one.
+    for (0..2) |_| try self.chrome.info.on_click(self.chrome.info.userdata, &fixture.ctx);
+    try std.testing.expect(self.info_open);
     try std.testing.expectEqualStrings("/requests", self.input.queuedCommand().?);
-    try std.testing.expect(ChromeFixture.find(&try fixture.rows(), "! Command still running. Draft retained.") != null);
-    // A typed command meets the same rule and says the same.
-    self.shown_notice.dismiss();
-    _ = self.input.append("/model");
+    try fixture.press(.{ .codepoint = vaxis.Key.escape });
+    _ = self.input.append("/help");
     try fixture.press(.{ .codepoint = vaxis.Key.enter });
     try std.testing.expectEqualStrings("/requests", self.input.queuedCommand().?);
-    try std.testing.expectEqualStrings("/model", self.input.composition().bytes);
+    try std.testing.expectEqualStrings("/help", self.input.composition().bytes);
     try std.testing.expect(ChromeFixture.find(&try fixture.rows(), "! Command still running. Draft retained.") != null);
-    // A needs key that names a command: `/discard` on a rejected original.
     const original = self.input.submitText("original model input");
     self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty, .intent = .{ .message = original }, .state = .rejected, .key = @splat('K') };
     defer self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty };
     try self.chrome.status.key.on_click(self.chrome.status.key.userdata, &fixture.ctx);
     try std.testing.expectEqualStrings("/requests", self.input.queuedCommand().?);
     try std.testing.expectEqual(Submission.State.rejected, self.submission.view().?.state);
-    try std.testing.expectEqualStrings("! Command still running. Draft retained.", self.shown_notice.current(self.nowMs()).?);
-    // Once none waits, the key runs what the held original's line names:
-    // a refused environment's `/status`, never a retry.
     _ = self.input.takeCommand();
     self.submission.state = .not_started;
     self.holdFailure(.{ .line = session_notice.too_large, .key = .status }, null);
+    self.files.details = try fixture.tmp.dir.createFile(std.testing.io, "repair-details", .{ .read = true });
+    defer self.files.details.close(std.testing.io);
     try self.chrome.status.key.on_click(self.chrome.status.key.userdata, &fixture.ctx);
-    try std.testing.expectEqualStrings("/status", self.input.queuedCommand().?);
+    try std.testing.expect(self.input.queuedCommand() == null);
+    try std.testing.expectEqual(Screen.ViewKind.inspection, self.screen.view);
     try std.testing.expectEqual(Submission.State.not_started, self.submission.view().?.state);
 }
 
@@ -6184,7 +6097,7 @@ const FeedFixture = struct {
         const held = try HeldFrontend.createWithDrafts(id, drafts);
         errdefer held.destroy();
         const file = try held.tmp.dir.createFile(std.testing.io, "feed-page", .{ .read = true });
-        held.self.files = .{ .scratch = file, .inspection = file, .action = file, .status = file, .actions = .{ file, file } };
+        held.self.files = .{ .scratch = file, .inspection = file, .action = file, .details = file, .actions = .{ file, file } };
         return .{ .held = held, .file = file };
     }
     fn destroy(self: FeedFixture) void {
@@ -7117,7 +7030,7 @@ test "SessionFrontend capped answer Ctrl-O opens the whole authenticated source"
     defer scratch.close(io);
     const inspection = try held.tmp.dir.createFile(io, "inspection", .{ .read = true });
     defer inspection.close(io);
-    self.files = .{ .scratch = scratch, .action = inspection, .inspection = inspection, .status = inspection, .actions = .{ inspection, inspection } };
+    self.files = .{ .scratch = scratch, .action = inspection, .inspection = inspection, .details = inspection, .actions = .{ inspection, inspection } };
     self.store = root;
     self.session = "k7m2qx";
     self.line.read = .{ .revision = 1, .end = 1 };
@@ -7187,7 +7100,7 @@ test "SessionFrontend tool row Ctrl-O opens saved output in place, closes it, an
     defer scratch.close(io);
     const inspection = try held.tmp.dir.createFile(io, "inspection", .{ .read = true });
     defer inspection.close(io);
-    self.files = .{ .scratch = scratch, .action = inspection, .inspection = inspection, .status = inspection, .actions = .{ inspection, inspection } };
+    self.files = .{ .scratch = scratch, .action = inspection, .inspection = inspection, .details = inspection, .actions = .{ inspection, inspection } };
     self.store = root;
     self.session = "k7m2qx";
     self.line.read = .{ .revision = 1, .end = 2 };
@@ -8011,7 +7924,7 @@ test "SessionFrontend huge person source keeps the following short answer bottom
     defer scratch.close(io);
     const inspection = try held.tmp.dir.createFile(io, "person-answer-page", .{ .read = true });
     defer inspection.close(io);
-    self.files = .{ .scratch = scratch, .inspection = inspection, .action = inspection, .status = inspection, .actions = .{ inspection, inspection } };
+    self.files = .{ .scratch = scratch, .inspection = inspection, .action = inspection, .details = inspection, .actions = .{ inspection, inspection } };
     self.store = root;
     self.session = "k7m2qx";
     self.line.read = .{ .revision = 1, .end = 2 };
@@ -8159,4 +8072,210 @@ test "SessionFrontend summary bounds keep Ctrl-O and clicks exact across sixteen
     try Domain.click(held, 34, 0, Domain.target(34, 0));
     try Domain.click(held, 34, 15, Domain.target(34, 15));
     try std.testing.expect(held.screen.anchor.following());
+}
+
+test "chat info captures keys before a waiting permission card without deciding it" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    try captureInfo(held, "Fix retry deadline");
+    held.self.app_consent.adopt(10);
+    held.self.app_input.permission = &held.self.app_card;
+    held.self.live.work.first_action = 10;
+    const choice = held.self.app_consent.highlight;
+    try held.keys("\x1bi\x1b[B\r\x07\x07");
+    try std.testing.expect(!held.self.info_open);
+    try std.testing.expectEqual(choice, held.self.app_consent.highlight);
+    try std.testing.expectEqual(@as(?u64, 10), held.self.app_consent.request);
+    try std.testing.expect(held.self.submission.intent == null);
+    try std.testing.expect(held.left == null);
+}
+
+test "chat info Archive delegates once and settles only its exact Session answer" {
+    for (0..3) |ending| {
+        const held = try HeldFrontend.createWithDrafts("k7m2qx", null);
+        defer held.destroy();
+        var overview: ArchiveOverview = .{ .state = undefined };
+        try overview.state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
+        defer overview.state.deinit();
+        held.self.lender = overview.lender();
+        try captureInfo(held, "Fix retry deadline");
+        try held.keys("draft\x1bi");
+        _ = try held.draw();
+        held.self.app_info.panel.selected = 7;
+        try held.keys("\r");
+        try std.testing.expectEqual(@as(usize, 1), overview.archives);
+        try std.testing.expectEqual(@as(?usize, 7), held.self.app_info.pending);
+        const result: overview_view.ArchiveResult = .{ .request = .{ .reference = "k7m2qx".* }, .outcome = switch (ending) {
+            0 => .{ .requested = .pending },
+            1 => .{ .failed = "refused" },
+            else => .{ .unconfirmed = "saved-handle" },
+        } };
+        var other = result;
+        other.request.reference = "aaaaaa".*;
+        held.self.archiveAnswered(other);
+        try std.testing.expectEqual(.archive, held.self.info_effect);
+        held.self.archiveAnswered(result);
+        var ctx = held.context();
+        try held.self.app_info.widget().handleEvent(&ctx, .tick);
+        try std.testing.expect(held.self.app_info.pending == null);
+        try std.testing.expectEqual(ending != 0, held.self.app_info.failures[7] != null);
+        try std.testing.expectEqualStrings("draft", held.self.input.composition().bytes);
+        try std.testing.expect(held.self.input.queuedCommand() == null);
+    }
+}
+
+test "chat info typed configure completion never parses a slash line and retains definite failure" {
+    const Configure = struct {
+        var accepted: bool = false;
+        fn run(init: std.process.Init, _: client.ReadContext, _: []const u8, _: []const u8, edit: ChatInfo.Edit) !bool {
+            try std.testing.expectEqual(ChatInfo.Edit{ .permission = .ask }, edit);
+            if (!accepted) try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Configuration not confirmed; inspect the saved request before retrying.\n");
+            return accepted;
+        }
+    };
+    for ([_]bool{ true, false }) |accepted| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        held.self.files.inspection = try held.tmp.dir.createFile(std.testing.io, "typed-configure", .{ .read = true });
+        defer held.self.files.inspection.close(std.testing.io);
+        held.self.app_hooks.configure = Configure.run;
+        held.self.inspection.kind = .command;
+        held.self.info_effect = .configure;
+        Configure.accepted = accepted;
+        const job = held.self.freeze(.inspection);
+        try job.setInfoEdit(.{ .permission = .ask });
+        try held.self.launch(job, reads.runInfoConfigure);
+        held.self.inspection.command_running = true;
+        try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(2)), &held.self, struct {
+            fn done(self: *Self) !bool {
+                return self.reader.completed();
+            }
+        }.done);
+        try held.self.settleReader();
+        try std.testing.expect(!held.self.inspection.command_running);
+        try std.testing.expectEqual(@as(@TypeOf(held.self.info_effect), if (accepted) .refreshing else .failed), held.self.info_effect);
+        try std.testing.expectEqual(@as(usize, 0), held.self.job.command_text_length);
+        if (!accepted) {
+            var bytes: [256]u8 = undefined;
+            const count = try held.self.files.inspection.readPositionalAll(std.testing.io, &bytes, 0);
+            try std.testing.expect(std.mem.indexOf(u8, bytes[0..count], "Configuration not confirmed") != null);
+        }
+    }
+}
+
+test "chat info retains Session detach keys with every topmost choice and preserves the hidden draft" {
+    for ([_][]const u8{ "\x03", "\x04", "\x1b[99;5u", "\x1b[100;5u" }) |bytes| for (0..4) |choice| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        try captureInfo(held, "Fix retry deadline");
+        try held.keys("kept draft\x1bi");
+        _ = try held.draw();
+        if (choice != 0) {
+            held.self.app_info.panel.selected = switch (choice) {
+                1 => 0,
+                2 => 4,
+                else => 6,
+            };
+            try held.keys("\r");
+            try std.testing.expect(held.self.app_info.hasChoice());
+        }
+        try held.keys(bytes);
+        try std.testing.expectEqual(@as(?Outcome, .detached), held.left);
+        try std.testing.expectEqualStrings("kept draft", held.self.input.composition().bytes);
+        try std.testing.expect(held.self.submission.intent == null);
+    };
+}
+
+test "chat info retains Session stop and archive bindings without closing the topmost choice" {
+    for ([_][]const u8{ "\x18", "\x1ba" }) |bytes| {
+        const held = try HeldFrontend.createWithDrafts("k7m2qx", null);
+        defer held.destroy();
+        var overview: ArchiveOverview = .{ .state = undefined };
+        try overview.state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
+        defer overview.state.deinit();
+        held.self.lender = overview.lender();
+        held.self.live.work.state = .{ .working = .{ .since = 1 } };
+        try captureInfo(held, "Fix retry deadline");
+        try held.keys("kept draft\x1bi");
+        _ = try held.draw();
+        try held.keys("\r");
+        try held.keys(bytes);
+        try std.testing.expectEqual(@as(usize, 1), overview.stops + overview.archives);
+        try std.testing.expect(held.self.info_open and held.self.app_info.hasChoice());
+        try std.testing.expectEqualStrings("kept draft", held.self.input.composition().bytes);
+        try std.testing.expect(held.self.submission.intent == null);
+    }
+}
+
+test "chat info typed configure supersedes every cancellable read without making cancellation fatal" {
+    const Configure = struct {
+        var calls: usize = 0;
+        fn run(_: std.process.Init, _: client.ReadContext, _: []const u8, _: []const u8, edit: ChatInfo.Edit) !bool {
+            try std.testing.expectEqual(ChatInfo.Edit{ .permission = .ask }, edit);
+            calls += 1;
+            return false;
+        }
+        fn settled(self: *Self) !bool {
+            _ = try self.update();
+            return self.reader.thread == null and !self.inspectionQueued() and !self.inspection.command_running;
+        }
+    };
+    for ([_]ReadPhase{ .activity, .permission, .fill, .message }) |phase| {
+        errdefer std.debug.print("superseded read: {s}\n", .{@tagName(phase)});
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const self = &held.self;
+        try captureInfo(held, "Fix retry deadline");
+        self.files.inspection = try held.tmp.dir.createFile(std.testing.io, "configure-cancel", .{ .read = true });
+        defer self.files.inspection.close(std.testing.io);
+        self.app_hooks.configure = Configure.run;
+        Configure.calls = 0;
+        try self.launch(self.freeze(phase), RetrySettlementWorker.cancelled);
+        const backend = self.infoBackend();
+        try backend.configure(backend.context, .{ .permission = .ask });
+        try std.testing.expect(self.input.queuedCommand() == null);
+        try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), self, Configure.settled);
+        try std.testing.expectEqual(@as(usize, 1), Configure.calls);
+        try std.testing.expectEqual(.failed, self.info_effect);
+        try std.testing.expect(self.leaving == null and held.left == null);
+        try std.testing.expect(self.submission.intent == null);
+    }
+}
+
+test "chat info repair details never overwrite the active reader staging file" {
+    const Staging = struct {
+        var ready: std.atomic.Value(bool) = .init(false);
+        const bytes = "staged feed and exact Configure diagnostics must survive";
+        fn run(raw: *anyopaque, task: *Task) !void {
+            const job: *Job = @ptrCast(@alignCast(raw));
+            try job.files.inspection.writePositionalAll(task.io, bytes, 0);
+            ready.store(true, .release);
+            try test_poll.waitUntil(task.io, test_poll.after(task.io, .fromSeconds(10)), &task.cancellation.stopped, test_poll.isSet);
+            return error.Cancelled;
+        }
+    };
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    self.files.inspection = try held.tmp.dir.createFile(std.testing.io, "active-staging", .{ .read = true });
+    defer self.files.inspection.close(std.testing.io);
+    self.files.details = try held.tmp.dir.createFile(std.testing.io, "original-details", .{ .read = true });
+    defer self.files.details.close(std.testing.io);
+    self.submission.intent = .{ .message = self.input.submitText("original message") };
+    self.submission.state = .not_started;
+    self.submission.key = @splat('K');
+    Staging.ready.store(false, .release);
+    try self.launch(self.freeze(.activity), Staging.run);
+    defer {
+        self.reader.cancel();
+        _ = self.joinReader();
+    }
+    try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(2)), &Staging.ready, test_poll.isSet);
+    try self.showSubmissionFailure();
+    try std.testing.expectEqual(Screen.ViewKind.inspection, self.screen.view);
+    try std.testing.expect(std.mem.indexOf(u8, self.screen.browsing.text(), "Original reserved request: KKK") != null);
+    var bytes: [128]u8 = undefined;
+    const count = try self.files.inspection.readPositionalAll(std.testing.io, &bytes, 0);
+    try std.testing.expectEqualStrings(Staging.bytes, bytes[0..count]);
+    try std.testing.expect(self.reader.thread != null and !self.reader.completed());
 }

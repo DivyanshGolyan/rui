@@ -34,6 +34,7 @@ const new_session_selection = @import("new_session_selection.zig");
 const platform = @import("platform.zig");
 const preferences = @import("preferences.zig");
 const status_page = @import("status_page.zig");
+const ChatInfo = @import("chat_info.zig");
 const model_capability = @import("model_capability.zig");
 const slash_commands = @import("slash_commands.zig").conversation;
 const session_view = @import("session_view.zig");
@@ -1666,7 +1667,7 @@ fn openOverview(init: std.process.Init, options: Overview.Options) !void {
     defer init.gpa.destroy(directory_buffer);
     var with_directory = options;
     with_directory.directory = requestDirectory(init, directory_buffer) catch |err| return Overview.printFailure(err, options.store, options.open, null);
-    return Overview.run(init, with_directory, .{ .scratch = renderScratch, .command = sessionCommand, .requests = sessionRequests, .status = sessionStatus, .captured = captureGate, .start_host = startOverviewHost });
+    return Overview.run(init, with_directory, .{ .scratch = renderScratch, .command = sessionCommand, .configure = sessionConfigure, .requests = sessionRequests, .status = sessionStatus, .captured = captureGate, .start_host = startOverviewHost });
 }
 
 fn captureGate(io: std.Io) !void {
@@ -2321,7 +2322,7 @@ comptime {
     std.debug.assert(status_page.max_recent == @typeInfo(@FieldType(protocol_reply.Current, "recent")).array.len);
 }
 
-test "/status takes the Session's facts from Current, lists every Action awaiting approval, and says when they change" {
+test "chat info inspection takes Session facts from Current and detects changes" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -2337,27 +2338,13 @@ test "/status takes the Session's facts from Current, lists every Action awaitin
     taken[0].archive_state = .active;
     taken[1].archive_state = .active;
     try std.testing.expect(try sessionStatus(io, &reply.current, file, &taken[0], null, listed));
-    var defaults: status_page.Defaults = error.AccessDenied;
-    var bytes: [4096]u8 = undefined;
-    var out = std.Io.Writer.fixed(&bytes);
-    try status_page.render(.{ .home = "/home/d", .store = "/home/d/s", .session = &taken[0], .defaults = &defaults }, .effort, &out);
-    try status_page.writeWorkEnd(&taken[0].work, &out);
-    const page = out.buffered();
-    for ([_][]const u8{
-        " Status · lane four · k7m2qx\n",
-        "Folder          ~/w\n",
-        "Tools           bash\n",
-        "Permissions     ask · Bash and MCP ask first\n",
-        "Effort          high  \x1b[90mSession override",
-        "Compact at      1,000 tokens · now 310",
-        "Model           gpt-6.1-sol · API key\n",
-        "Store           ~/s  \x1b[90mfixed",
-        "Instructions    none\n",
-        " Work\n   Finished\n   Current message: m1\n   Recent messages (use /result KEY for an answer):\n     m1: completed\n",
-    }) |expected| {
-        errdefer std.debug.print("missing {s} in\n{s}\n", .{ expected, page });
-        try std.testing.expect(std.mem.indexOf(u8, page, expected) != null);
-    }
+    try std.testing.expectEqualStrings("lane four", taken[0].label.slice());
+    try std.testing.expectEqualStrings("/home/d/w", taken[0].workspace.slice());
+    try std.testing.expectEqualStrings("gpt-6.1-sol", taken[0].model.slice());
+    try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, .high), taken[0].effort);
+    try std.testing.expect(taken[0].effort_override and taken[0].permission == .ask);
+    try std.testing.expectEqual(@as(?u64, 310), taken[0].context_estimate);
+    try std.testing.expectEqual(@as(?u64, 1000), taken[0].compaction_trigger);
     try std.testing.expectEqual(@as(u64, 0), try listed.length(io));
     // The same capture again is no change, and leaves the list as it was.
     try listed.writePositionalAll(io, "kept", 0);
@@ -2476,6 +2463,51 @@ fn resumeSession(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
 }
 
 /// Runs the in-app command with its joined reader's required provenance.
+/// Typed chat-info edits reuse configuration capture, admission and recovery
+/// presentation; they never pass through the slash-command grammar.
+pub fn sessionConfigure(init: std.process.Init, read: client.ReadContext, destination: []const u8, reference: []const u8, edit: ChatInfo.Edit) !bool {
+    var tools_buffer: [info_tools_bytes]u8 = undefined;
+    const input = try infoConfiguration(destination, reference, edit, &tools_buffer);
+    const parsed: cli_args.Parsed = .{ .definition = cli_args.live_configure };
+    var step: ?client.Step = .store;
+    return configureCaptured(init, read.requests(), &parsed, .{ .store = destination, .session = reference }, input, &step) catch |err| {
+        // The shared renderer retains capture identity for uncertain outcomes.
+        // Canonical fencing still ends the screen; other failures stay on row.
+        if (err == error.CanonicalStoreFailure) return err;
+        stderr.diagnostic("rui: configure: {s}; check saved requests before retrying\n", .{@tagName(caller_error.of(err))});
+        return false;
+    };
+}
+
+const info_tools_bytes = blk: {
+    var count: usize = "none".len;
+    for (std.enums.values(@import("built_in_tool.zig").BuiltInTool)) |tool| count += @tagName(tool).len + 1;
+    break :blk count;
+};
+
+fn infoConfiguration(store: []const u8, session: []const u8, edit: ChatInfo.Edit, tools_buffer: *[info_tools_bytes]u8) !configure_input.ConfigureInput {
+    var input: configure_input.ConfigureInput = .{ .store = store, .session = .{ .named = session } };
+    switch (edit) {
+        .effort => |effort| input.reasoning_effort = .{ .present = true, .value = if (effort) |level| @tagName(level) else null },
+        .permission => |permission| input.permission_mode = .{ .present = true, .value = @tagName(permission) },
+        .tools => |tools| {
+            var out = std.Io.Writer.fixed(tools_buffer);
+            var selected = tools.iterator();
+            while (selected.next()) |tool| {
+                if (out.buffered().len != 0) try out.writeByte(',');
+                try out.writeAll(@tagName(tool));
+            }
+            input.tools = if (out.buffered().len == 0) "none" else out.buffered();
+        },
+        .model => |model| {
+            try admitModel(model);
+            input.model = .{ .present = true, .value = model };
+        },
+        .label => |label| input.label = try labelArgument(label),
+    }
+    return input;
+}
+
 pub fn sessionCommand(init: std.process.Init, read: client.ReadContext, destination: []const u8, reference: []const u8, input_buffer: []u8) !void {
     const requests_context = read.requests();
     const command = switch (slash_commands.parse(input_buffer)) {
@@ -2543,7 +2575,7 @@ pub fn sessionCommand(init: std.process.Init, read: client.ReadContext, destinat
         .@"reload-skills" => {
             _ = try liveConfigure(init, requests_context, live, &.{"--reload-skills"}, "Usage: /reload-skills\n");
         },
-        .configure, .effort, .rename => {
+        .effort, .rename => {
             const typed_usage = liveUsage(command.name);
             var arguments: [live_capacity][]const u8 = undefined;
             const spelled = liveArguments(command.name, argument, &arguments) catch
@@ -2563,7 +2595,6 @@ pub fn sessionCommand(init: std.process.Init, read: client.ReadContext, destinat
 /// name as one value, decoded as /configure decodes a quoted one.
 fn liveArguments(name: slash_commands.Name, argument: []u8, arguments: *[live_capacity][]const u8) ![]const []const u8 {
     switch (name) {
-        .configure => return arguments[0..try interactiveTokens(argument, arguments)],
         .effort => {
             arguments[0] = "--reasoning-effort";
             return arguments[0 .. 1 + try interactiveTokens(argument, arguments[1..])];
@@ -2580,35 +2611,28 @@ fn liveArguments(name: slash_commands.Name, argument: []u8, arguments: *[live_ca
 /// the usage of the command typed.
 fn liveUsage(name: slash_commands.Name) []const u8 {
     return switch (name) {
-        .configure => interactive_configure_usage,
         inline .effort, .rename => |short| "Rui: Usage: " ++ comptime slash_commands.usage.get(short) ++ "\n",
         else => unreachable,
     };
 }
 
-test "/effort and /rename give what their /configure spelling gives" {
-    const cases = [_]struct { short: []const u8, spelled: []const u8, option: []const u8 }{
-        .{ .short = "/rename \"lane four\"", .spelled = "/configure --label \"lane four\"", .option = "label" },
-        .{ .short = "/rename lane four", .spelled = "/configure --label \"lane four\"", .option = "label" },
-        .{ .short = "/rename a\\\"b", .spelled = "/configure --label a\\\"b", .option = "label" },
-        .{ .short = "/effort high", .spelled = "/configure --reasoning-effort high", .option = "reasoning-effort" },
-        .{ .short = "/effort \"high\"", .spelled = "/configure --reasoning-effort \"high\"", .option = "reasoning-effort" },
+test "/effort and /rename decode to typed configuration arguments" {
+    const cases = [_]struct { text: []const u8, option: []const u8, value: []const u8 }{
+        .{ .text = "/rename \"lane four\"", .option = "label", .value = "lane four" },
+        .{ .text = "/rename lane four", .option = "label", .value = "lane four" },
+        .{ .text = "/effort high", .option = "reasoning-effort", .value = "high" },
+        .{ .text = "/effort \"high\"", .option = "reasoning-effort", .value = "high" },
     };
     inline for (cases) |case| {
-        errdefer std.debug.print("short={s}\n", .{case.short});
-        var values: [2][]const u8 = undefined;
-        var lines: [2][64]u8 = undefined;
-        var storage: [2][live_capacity][]const u8 = undefined;
-        for ([_][]const u8{ case.short, case.spelled }, &values, &lines, &storage) |text, *value, *line, *arguments| {
-            @memcpy(line[0..text.len], text);
-            const command = slash_commands.parse(line[0..text.len]).command;
-            const argument = line[@intFromPtr(command.argument.ptr) - @intFromPtr(line) ..][0..command.argument.len];
-            var nothing = std.heap.FixedBufferAllocator.init(&.{});
-            var problem: cli_args.Refusal = undefined;
-            const parsed = try cli_args.live_configure.parse(try liveArguments(command.name, argument, arguments), nothing.allocator(), &problem);
-            value.* = parsed.get(case.option).?;
-        }
-        try std.testing.expectEqualStrings(values[1], values[0]);
+        var line: [64]u8 = undefined;
+        @memcpy(line[0..case.text.len], case.text);
+        const command = slash_commands.parse(line[0..case.text.len]).command;
+        const argument = line[case.text.len - command.argument.len .. case.text.len];
+        var arguments: [live_capacity][]const u8 = undefined;
+        var nothing = std.heap.FixedBufferAllocator.init(&.{});
+        var problem: cli_args.Refusal = undefined;
+        const parsed = try cli_args.live_configure.parse(try liveArguments(command.name, argument, &arguments), nothing.allocator(), &problem);
+        try std.testing.expectEqualStrings(case.value, parsed.getNamed(case.option).?);
     }
     // A line that does not decode names the command typed.
     for ([_][]const u8{ "/effort \"high", "/rename \"lane" }) |text| {
@@ -4042,8 +4066,6 @@ fn writeJsonFileAt(io: std.Io, file: std.Io.File, start: u64, length: u64, escap
 
 const compaction_help = cli_args.compaction_policy ++ " Inspect settings with /status or rui session inspect.";
 
-const interactive_configure_usage = "Rui: Usage: /configure [--model MODEL] [--tools bash,find_tools,message_agent,read_transcript,start_agent,web_search|none] [--loaded-tools a,b|none] [--permission-mode " ++ cli_args.live_configure.argumentOf("permission-mode").?.? ++ "] [--reasoning-effort " ++ cli_args.live_configure.argumentOf("reasoning-effort").?.? ++ "] [--compaction-trigger TOKENS|default] [--output-reservation TOKENS|default] [--label TEXT] (settings for this Session only)\n" ++ cli_args.label_help ++ cli_args.reasoning_help ++ compaction_help ++ "\n";
-
 const usage_text =
     \\usage:
     \\  rui [--store PATH] [--provider codex] [--model MODEL]
@@ -4897,4 +4919,33 @@ test "archive mutation presentation preserves requested intent and pending settl
         try presentMutationReply(&human, reply, .human);
         try std.testing.expect(std.mem.endsWith(u8, human.buffered(), if (archived) "archived: true; completion: pending\n" else "archived: false; completion: completed\n"));
     }
+}
+
+test "chat info edits produce sparse typed Session configuration without slash parsing" {
+    var tools_buffer: [info_tools_bytes]u8 = undefined;
+    const effort = try infoConfiguration("/store", "k7m2qx", .{ .effort = .high }, &tools_buffer);
+    try std.testing.expectEqualStrings("/store", effort.store);
+    try std.testing.expectEqualStrings("k7m2qx", effort.session.named);
+    try std.testing.expect(effort.reasoning_effort.present);
+    try std.testing.expectEqualStrings("high", effort.reasoning_effort.value.?);
+    const reset = try infoConfiguration("/store", "k7m2qx", .{ .effort = null }, &tools_buffer);
+    try std.testing.expect(reset.reasoning_effort.present and reset.reasoning_effort.value == null);
+    for ([_]@FieldType(status_page.Session, "permission"){ .ask, .bypass }) |mode| {
+        const permission = try infoConfiguration("/store", "k7m2qx", .{ .permission = mode }, &tools_buffer);
+        try std.testing.expect(permission.permission_mode.present);
+        try std.testing.expectEqualStrings(@tagName(mode), permission.permission_mode.value);
+        try std.testing.expect(!permission.model.present and !permission.provider.present and !permission.workspace.present and !permission.label.present and !permission.reasoning_effort.present);
+    }
+    const none = try infoConfiguration("/store", "k7m2qx", .{ .tools = .{} }, &tools_buffer);
+    try std.testing.expectEqualStrings("none", none.tools.?);
+    const selected = try infoConfiguration("/store", "k7m2qx", .{ .tools = .initMany(&.{ .bash, .skill, .web_search }) }, &tools_buffer);
+    try std.testing.expectEqualStrings("bash,skill,web_search", selected.tools.?);
+    const model = try infoConfiguration("/store", "k7m2qx", .{ .model = "future-chat" }, &tools_buffer);
+    try std.testing.expect(model.model.present and !model.provider.present);
+    try std.testing.expectEqualStrings("future-chat", model.model.value);
+    const label = try infoConfiguration("/store", "k7m2qx", .{ .label = "lane \"four\"" }, &tools_buffer);
+    try std.testing.expect(label.label.present);
+    try std.testing.expectEqualStrings("lane \"four\"", label.label.value.?);
+    const clear = try infoConfiguration("/store", "k7m2qx", .{ .label = "" }, &tools_buffer);
+    try std.testing.expect(clear.label.present and clear.label.value == null);
 }

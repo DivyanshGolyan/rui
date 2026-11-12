@@ -28,9 +28,9 @@ pub fn key(held: Held) ?Key {
 }
 
 /// What a Message refused for its environment needs: a retry from this
-/// process fails the same way, so no Ctrl-R; /status says the size, the
+/// process fails the same way, so no Ctrl-R; the details show the size, the
 /// largest variables and the fix.
-pub const too_large = "! Environment too large; nothing sent · /status";
+pub const too_large = "! Environment too large; nothing sent · details";
 
 /// The status above the input: the opening, else nothing over a waiting
 /// Action, which says how to decide it under the input, else the held

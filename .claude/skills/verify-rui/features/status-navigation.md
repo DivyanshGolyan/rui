@@ -1,37 +1,37 @@
-# Status and navigation
+# Chat info and navigation
 
-`/status` shows the Session's settings and current work as a browsing page. The user scrolls history with PgUp/PgDn, arrows or the wheel, returns to live with Esc, End or Ctrl-G, and loses no draft.
+Alt-I or the clickable **alt+i info** footer opens chat info in a Layer above the retained chat input, never in the feed.
+History still scrolls with PgUp/PgDn, arrows or the wheel when the panel is closed; Esc, End or Ctrl-G returns to live without losing the draft.
 
 ## Sub-features
 
-- `status-page`: `/status` shows ` Status · NAME · ID`, the `Permissions` row (bypass is described only here), the `Work` section and the compaction rows, under `Browsing · Esc returns`.
-- `status-refresh`: a second `/status` during or after work shows the current `Work` state, not stale text.
-- `tool-output`: Ctrl-O or a click on a tool heading opens its saved output under it, at most 20 rows then `… N more lines`; the same key or click closes it.
-- `scroll-page`: PgUp/PgDn move by pages through one continuous feed; repeated PgUp stops at the first saved row, with no start label.
-- `scroll-wheel`: the physical wheel scrolls. Rui enables alternate scroll (`?1007h`) when the terminal reports it reset, so the terminal sends arrow keys. Rui does not enable mouse tracking.
+- `chat-info`: Effort, Permissions, Tools, Folder, Model and Context, followed by Rename, Archive and Copy last answer. No Session IDs, Store paths or recovery records.
+- `chat-info-model`: the Model field's full-width, provider-scoped choice; typing filters, arrows move and Enter saves.
+- `chat-info-refresh`: current inspection facts refresh without resetting an open choice; late reads do not reopen a closed panel.
+- `tool-output`: Ctrl-O or a click on a tool heading opens its saved output in place, at most 20 rows then `… N more lines`; the same key or click closes it.
+- `scroll-page`: PgUp/PgDn move through one continuous feed; repeated PgUp stops at the first saved row.
 - `return-live`: Esc, End (empty draft) and Ctrl-G return to the latest messages with the draft unchanged.
 
 ## How to get to it (user POV)
 
-- Type `/status` and Enter, or press Ctrl-O on a tool heading. Press PgUp/PgDn/Up/Down or use the wheel. Press Esc, End or Ctrl-G.
+Press Alt-I or click **alt+i info**. Use Up/Down and Enter on fields; Esc closes the topmost choice first, then info.
+While an original is held unresolved or rejected, Alt-D or the clickable **alt+d details** footer opens its separate repair and identity page. An environment-too-large notice also has clickable **details**; opening info must not show those recovery details.
 
 ## Driving it with verify-rui
 
-Preconditions:
+Preconditions: a run with `--seed 3` or more, `doctor` PASS, and a terminal on `demo`.
 
-- A run with `--seed 3` or more, `doctor` PASS, and a terminal on `demo`.
-
-- **Status.** Run `$V send "$RUN" s1 --text /status`, `--keys Enter`, then `$V wait "$RUN" s1 --marker 'Status · ' --after G`. The frame starts with `Browsing · Esc returns` and ` Status · ` with the Session's ID, marks the `Effort` row with `›`, contains `Permissions     bypass · Bash runs without asking`, and its `Work` section's state matches `$V rui "$RUN" session inspect --store STORE ID`, where ID is `sessions.demo` in the run's `run.json` (with seeded history that is `completed`, not `idle`).
-- **Return.** Run `$V send "$RUN" s1 --keys C-g` and `wait --marker '›' --composer --after G`. The live view shows no `Browsing` line.
-- **Refresh during work.** Send `slow please` and Enter, then `/status` while it streams. The `Work` section names the running state. After the answer, the open page must not keep `Working` once `Working…` is gone (a known 968d909 defect, C1); a fresh `/status` shows the completed work.
-- **Settings.** On `/status`, `Down` moves `›` to `Permissions`, then over the Session's fixed `Model`, `Store` and `Instructions` to New Sessions' `Model`; `Shift-Down` and PgDn still scroll. Enter on `Permissions` puts `/configure --permission-mode ` in the draft with `bypass` and `ask` listed; Down, Enter runs it and the page comes back with `ask · Bash asks first` and `›` on `Permissions`. Enter on `Name` puts `/configure --label` and the current name in the draft.
-- **Page.** Run `$V send "$RUN" s1 --keys PgUp` repeatedly until the first Message of the Session is on screen and another PgUp changes nothing. Then `PgDn` until the composer is live.
-- **Wheel path (L1–L3 only).** Rui scrolls the wheel through alternate scroll (`?1007h`), so a terminal turns the wheel into `Up`/`Down`. `--keys Up` therefore stands in for the wheel, except on `/status`, where `Up` and `Down` move `›`. `--keys SGRWheelUp` sends an unsolicited mouse report, which Rui ignores by design. Both are byte replay, not hardware.
-- **Draft survives.** Type `keep me`, PgUp, then Ctrl-G. The caret row is still `› keep me` and the provider count is unchanged.
-- **Proof.** Snapshots per step, plus `frames.jsonl` gens and times.
+- **Info.** Run `$V send "$RUN" s1 --keys M-i`, then `$V wait "$RUN" s1 --marker 'Copy last answer' --after G`. Capture at 140×40 and 46×30; verify the fields above the input and no IDs or Store paths in the panel.
+- **Nested choice.** From Effort, send Down three times (Folder is not selectable), then Enter. Wait for the current model. Esc closes only the choice; another Esc closes info and restores the input's focus.
+- **Settings.** From Effort, Down and Enter open Permissions. Choose **ask first**, wait for the save, and compare with `$V rui "$RUN" session inspect --store STORE --session ID` (ID is `sessions.demo` in `run.json`). A failed save stays on the field; opening or saving must not send a Message.
+- **Refresh.** Send `slow please` and Enter, then open info while it streams. Check Context against a fresh Session inspection; a choice stays open as new reads settle, and a closed panel stays closed.
+- **Draft survives.** Type `keep me`, open info, open and close a choice, then close info. The caret row remains `› keep me` and the provider count is unchanged. Separately test PgUp then Ctrl-G on that draft.
+- **Page.** With info closed, send PgUp until another PgUp leaves the first Message unchanged, then PgDn until live.
+- **Wheel path (L1–L3 only).** Byte replay of Up/Down or SGR mouse reports is not hardware proof. Inside info, Up/Down selects fields rather than scrolling history.
+- **Proof.** Save snapshots per step with committed-frame generations and times. Use `frames --only chat-info,chat-info-model,model-picker,model-filter` for layout captures; overview model states open app settings, not a composer command.
 
 ## Gotchas
 
-- Rows wrap at narrow widths. Match `Permissions` rows by joined words, as `permission_row` does in `human_cli_integration.py`.
-- After Esc, wait for the next frame before sending more input (the lone-Esc deadline).
-- `/status` typed on a non-empty draft is draft text, not a command. Clear the draft first (`--keys BSpace` repeatedly).
+- Match fields by joined words at narrow widths.
+- After a lone Esc, wait for the next frame before sending another key.
+- Info does not clear or consume a draft; recovery handles belong to `/requests` and refused-environment repair details, not info.

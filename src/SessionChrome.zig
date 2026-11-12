@@ -23,6 +23,7 @@ const empty_marker: vxfw.Text = .{ .text = "" };
 /// The screen's actions a click runs.
 pub const Actions = struct {
     userdata: *anyopaque,
+    details: ?*const fn (*anyopaque, *vxfw.EventContext) anyerror!void = null,
     /// `ctrl+r retries`, or whatever key the needs text ends with.
     key: *const fn (*anyopaque, *vxfw.EventContext) anyerror!void,
     /// `ctrl+x stop`.
@@ -33,7 +34,7 @@ pub const Actions = struct {
     unarchive: *const fn (*anyopaque, *vxfw.EventContext) anyerror!void,
     /// `↓`: the latest view, as Esc.
     latest: *const fn (*anyopaque, *vxfw.EventContext) anyerror!void,
-    /// `+N more running · /status`.
+    /// The chat info panel.
     status_page: *const fn (*anyopaque, *vxfw.EventContext) anyerror!void,
 };
 
@@ -71,6 +72,7 @@ pub const View = struct {
     /// Where a send stands (`chrome.Send.progress`).
     progress: ?[]const u8 = null,
     stoppable: bool = false,
+    details: bool = false,
     /// Identity after the narrow back control, or the wide input gutter.
     facts: Identity = .{},
     /// The reply to the last key that shows now (`Notice.current`), and
@@ -99,6 +101,8 @@ marker_text: [chrome.marker_bytes]u8 = undefined,
 shortcuts: Shortcuts = .{},
 state: vxfw.Text = .{ .text = "", .softwrap = false, .overflow = .clip, .width_basis = .parent },
 unarchive: Chip,
+info: Chip,
+details: Chip,
 list_visible: bool = false,
 stoppable: bool = false,
 
@@ -114,6 +118,8 @@ pub fn init(actions: Actions) Self {
         .activity = .{ .more = chip(actions.status_page, actions.userdata) },
         .marker = chip(actions.latest, actions.userdata),
         .unarchive = chip(actions.unarchive, actions.userdata),
+        .info = chip(actions.status_page, actions.userdata),
+        .details = chip(actions.details orelse actions.key, actions.userdata),
     };
 }
 
@@ -131,6 +137,7 @@ pub fn place(self: *Self, screen: *AppScreen.Session, view: View) void {
     self.facts.identity = view.facts;
     self.list_visible = view.list_visible;
     self.stoppable = view.stoppable;
+    self.details.label = if (view.details) "alt+d details" else "";
     self.state.text = stateText(self.status.bar.left, self.status.key.label);
     self.state.style = if (self.status.bar.tone == .attention) self.status.attention else self.status.quiet;
     screen.input.facts = .{ .userdata = self, .drawFn = drawFooter };
@@ -157,7 +164,10 @@ fn drawFooter(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vx
     const self: *Self = @ptrCast(@alignCast(raw));
     self.unarchive.label = if (self.facts.identity.archive == .archived) "/unarchive" else "";
     self.status.stop.label = if (self.stoppable) chrome.stop_key else "";
-    const keys = [_]*Chip{ &self.status.key, &self.unarchive, &self.status.stop };
+    self.info.label = "alt+i info";
+    const primary_width = self.info.width() + self.status.key.width() + self.unarchive.width() + self.status.stop.width() + 9;
+    if (primary_width + self.details.width() > ctx.max.width.?) self.details.label = "";
+    const keys = [_]*Chip{ &self.info, &self.details, &self.status.key, &self.unarchive, &self.status.stop };
     var right: std.ArrayList(u8) = .empty;
     for (keys) |key| if (key.label.len != 0) {
         if (right.items.len != 0) try right.appendSlice(ctx.arena, " · ");
@@ -379,13 +389,15 @@ test "SessionChrome footer drops whole items with an ellipsis at narrow widths" 
         const footer = try drawFooter(&self, .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 1 }, .cell_size = .{} });
         var text: std.Io.Writer.Allocating = .init(arena.allocator());
         for (footer.buffer) |cell| try text.writer.writeAll(cell.char.grapheme);
-        try std.testing.expectEqualStrings(if (list_visible) " Fix retry deadline · gpt-6.1-sol · high · …" else " ‹ Fix retry deadline · gpt-6.1-sol · high · …", std.mem.trimEnd(u8, text.written(), " "));
+        try std.testing.expectEqualStrings(if (list_visible) " Fix retry deadline · …" else " ‹ Fix retry deadline · …", std.mem.trimEnd(u8, text.written()[0..std.mem.indexOf(u8, text.written(), "alt+i info").?], " "));
+        try std.testing.expect(std.mem.endsWith(u8, text.written(), "alt+i info"));
     };
     self.stoppable = true;
     const stopped = try drawFooter(&self, .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 1 }, .cell_size = .{} });
     var text: std.Io.Writer.Allocating = .init(arena.allocator());
     for (stopped.buffer) |cell| try text.writer.writeAll(cell.char.grapheme);
-    try std.testing.expectEqualStrings(" Fix retry deadline · …            ctrl+x stop", text.written());
+    try std.testing.expect(std.mem.startsWith(u8, text.written(), " Fix retry deadline"));
+    try std.testing.expect(std.mem.endsWith(u8, text.written(), "alt+i info · ctrl+x stop"));
 }
 
 test "Session chrome back control exists only while the shell hides the list" {
@@ -404,7 +416,7 @@ test "Session chrome back control exists only while the shell hides the list" {
         const row = try input.facts.draw(draw);
         if (list_visible) {
             try std.testing.expectEqualStrings("d", row.readCell(1, 0).char.grapheme);
-            try std.testing.expectEqual(@as(usize, 0), row.children.len);
+            try std.testing.expectEqual(@as(usize, 1), row.children.len);
         } else {
             try std.testing.expectEqualStrings("d", row.readCell(3, 0).char.grapheme);
             try std.testing.expectEqualStrings("‹", row.children[0].surface.readCell(0, 0).char.grapheme);

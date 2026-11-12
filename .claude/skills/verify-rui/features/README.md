@@ -25,7 +25,7 @@ The maintained source for verifying Rui's full-screen interactive terminal. Read
 
 - [Compose and submit](./compose-submit.md): draft entry, multiline paste, a single submission, the answer, capture correlation, and the input matrix every editor-hosting surface must pass.
 - [Consent](./consent.md): approval prompt reading, allow `a` and deny `d`, and pasted choices.
-- [Status and navigation](./status-navigation.md): `/status`, tool output (Ctrl-O), PgUp/PgDn, arrows, wheel, Ctrl-G and Esc.
+- [Chat info and navigation](./status-navigation.md): Alt-I, tool output (Ctrl-O), PgUp/PgDn, arrows, wheel, Ctrl-G and Esc.
 - [Exit and terminal restoration](./exit-restore.md): `/exit`, Ctrl-C and SIGTERM restore termios and the screen.
 - [tmux attached and detached](./tmux.md): the same journeys through a private tmux server, with or without a client.
 - [Hardware input](./hardware-input.md): physical keys and wheel in a GUI terminal (L4, needs a human).

@@ -696,8 +696,8 @@ def conversation_case(root, binary, releases, artifacts):
             proof_ready(c, previous, old_host)
             # The run's ending shows once the conversation has read itself
             # again under the new Host, so a command that asks the Host answers.
-            screen.send("/status\r")
-            screen.contains("Notifications")
+            screen.send("\x1bi")
+            screen.contains("Copy last answer")
             screen.save(artifacts, "conversation-returned")
         after = c.json("session", "inspect", "--store", c.store, "--session", session)
         assert after["session"] == before["session"], "Upgrade submitted work or changed the open Session"

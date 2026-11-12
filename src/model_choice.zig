@@ -9,6 +9,7 @@ const picker_view = @import("model_picker_view.zig");
 const catalog = @import("model_catalog.zig");
 const Editor = @import("TerminalEditor.zig");
 const keymap = @import("keymap.zig");
+const Panel = @import("widgets/Panel.zig");
 const Self = @This();
 
 /// The owner changes revision whenever it replaces or releases a list. A
@@ -27,6 +28,7 @@ const fallback_entries = blk: {
 };
 const fallback: picker.Menu = .{ .entries = &fallback_entries };
 
+unicode: bool = true,
 active: bool = false,
 source: ?Source = null,
 revision: u64 = 0,
@@ -198,7 +200,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     if (!self.validate()) return surface;
     if (size.width == 0 or size.height == 0) return surface;
     const search = try std.fmt.allocPrint(ctx.arena, "  Filter: {s}{s}", .{ self.editor.buffer[0..self.editor.length], if (self.no_match) " · no matches" else "" });
-    paint(ctx, surface, search, 0, self.quiet);
+    paint(ctx, surface, try Panel.displayText(ctx.arena, search, self.unicode), 0, self.quiet);
     var indices: std.array_list.Managed(usize) = .init(ctx.arena);
     var widest: usize = 0;
     var selected_row: usize = 0;
@@ -216,7 +218,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     self.hits = shown;
     for (shown, 1..) |at, y| {
         const entry = self.menu.entries[at];
-        const line = try picker_view.modelLine(ctx.arena, entry, self.row(entry).?, widest, size.width);
+        const line = try picker_view.modelLine(ctx.arena, entry, self.row(entry).?, widest, size.width, self.unicode);
         const style = if (self.selected == at) self.selection else self.ground;
         for (0..size.width) |x| surface.writeCell(@intCast(x), @intCast(y), .{ .style = style });
         paint(ctx, surface, line.text, @intCast(y), style);
@@ -356,4 +358,22 @@ test "Model choice invalidates every replaced or released source before keys mou
         try std.testing.expect(!choice.active);
         try std.testing.expectEqual(@as(usize, 0), choice.hits.len);
     };
+}
+
+test "Model choice shared ASCII drawing covers the current mark and no-match feedback" {
+    const entries = [_]picker.Entry{.{ .id = "gpt-6.1-sol", .known = true, .catalogued = true, .providers = .initOne(.codex) }};
+    const menu: picker.Menu = .{ .entries = &entries };
+    var choice: Self = .{ .unicode = false };
+    choice.open(&menu, .codex, entries[0].id);
+    choice.no_match = true;
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    for ([_]u16{ 46, 99 }) |width| {
+        const drawn = try choice.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 8 }, .cell_size = .{} });
+        var out: std.Io.Writer.Allocating = .init(arena.allocator());
+        for (drawn.buffer) |cell| try out.writer.writeAll(cell.char.grapheme);
+        for (out.written()) |byte| try std.testing.expect(byte < 0x80);
+        try std.testing.expect(std.mem.indexOf(u8, out.written(), ". no matches") != null);
+        try std.testing.expectEqualStrings("+", drawn.readCell(0, 1).char.grapheme);
+    }
 }

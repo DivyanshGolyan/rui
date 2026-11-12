@@ -9,6 +9,7 @@ import select
 import struct
 import subprocess
 import termios
+import threading
 import time
 
 import model_fixture as fixture
@@ -247,6 +248,70 @@ def overview_frame(master, accept, keys=b"", timeout=15):
     """The first overview frame after `keys` that `accept`s, with its
     composer taking input."""
     return keyed_frame(master, keys, lambda screen, x, y: accept(screen) and overview_composer(screen, x, y), timeout)
+
+
+
+def panel_frame(master, accept, keys=b"", timeout=15):
+    """A committed panel frame; panel focus need not leave a composer cursor."""
+    return keyed_frame(master, keys, lambda screen, x, y: accept(screen), timeout)
+
+
+def chat_info_open(master, timeout=15):
+    """Open chat info through the chat footer's Alt-I binding."""
+    return panel_frame(master, lambda screen: "unavailable" not in screen and all(word in screen for word in
+                       ("Effort", "Permissions", "Tools", "Folder", "Model", "Context", "Rename", "Archive", "Copy last answer")),
+                       b"\x1bi", timeout)
+
+
+def chat_info_frame(master, timeout=15):
+    """Inspect chat info, then restore chat focus for the next interaction."""
+    screen = chat_info_open(master, timeout)
+    panel_frame(master, lambda frame: "Copy last answer" not in frame, b"\x1b", timeout)
+    return screen
+
+
+def app_settings_open(master):
+    """Select the pinned Settings row with End, then open its panel."""
+    overview_frame(master, lambda screen: "Settings" in screen, b"\x1b[F")
+    return panel_frame(master, lambda screen: any("Rui" in row and "settings" in row
+                       for row in screen.splitlines()), b"\r")
+
+
+class AppModelCatalog:
+    """Hold the first catalog reply so initial-choice invalidation is ordered."""
+
+    def __init__(self, host):
+        from canonical_fixture import ReplyProxy
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.proxy = ReplyProxy(host, "/v1/model-list", lambda response: response,
+                                before_forward=self.hold)
+
+    def hold(self, _):
+        self.entered.set()
+        fixture.wait_for(self.release.is_set, "initial Model catalog release", timeout=20)
+        return True
+
+    def close(self):
+        self.release.set()
+        if self.proxy is not None:
+            proxy, self.proxy = self.proxy, None
+            proxy.close()
+
+
+def app_model_open(master, query=b"", *, catalog=None):
+    """Open settings Model; an ordered initial catalog replaces its fallback."""
+    app_settings_open(master)
+    shown = panel_frame(master, lambda screen: "Filter:" in screen, b"\r")
+    if catalog is not None:
+        fixture.wait_for(catalog.entered.is_set, "initial Model catalog requested")
+        catalog.release.set()
+        panel_frame(master, lambda screen: "Filter:" not in screen)
+        catalog.close()
+        shown = panel_frame(master, lambda screen: "Filter:" in screen, b"\r")
+    if query:
+        shown = panel_frame(master, lambda screen: "Filter: " + query.decode() in screen, query)
+    return shown
 
 
 def read_terminal(master, marker, timeout=15, preserve_colour=False, *, composer=False, redraw=False, initial=b"", fresh=False):

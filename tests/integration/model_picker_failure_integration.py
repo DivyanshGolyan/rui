@@ -9,7 +9,7 @@ import threading
 import codex_fixture
 import host_process
 import model_fixture as fixture
-from human_cli_fixture import overview_frame, overview_title, read_terminal, terminal_exit
+from human_cli_fixture import AppModelCatalog, app_model_open, panel_frame, overview_frame, overview_title, read_terminal, terminal_exit
 from terminal_process import close_pty, open_pty, spawn
 
 
@@ -24,6 +24,7 @@ def main():
     thread = threading.Thread(target=endpoint.serve_forever)
     thread.start()
     host = caller = None
+    catalog = None
     master = slave = None
     completed = False
     try:
@@ -38,15 +39,14 @@ def main():
 
         cli("defaults", "configure", "--store", store, "--provider", "codex", "--model", "gpt-5.5")
         master, slave = open_pty(columns=50, rows=12)
+        catalog = AppModelCatalog(host)
         caller = spawn([str(fixture.RUI), "--store", str(store)], cwd=state,
                        env=env, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         overview_frame(master, overview_title)
-        filtered = overview_frame(master, lambda screen: "gpt-5.6-luna" in screen and "gpt-6-luna" in screen,
-                                  b"/model luna")
-        assert "/model luna" in filtered, filtered
-        moved = overview_frame(master, lambda screen: any(
-            "gpt-6-luna" in row and "‹" in row for row in screen.splitlines()), b"\x1b[B")
-        assert "/model luna" in moved, moved
+        filtered = app_model_open(master, b"luna", catalog=catalog)
+        assert "gpt-5.6-luna" in filtered and "gpt-6-luna" in filtered, filtered
+        moved = panel_frame(master, lambda screen: "Filter: luna" in screen, b"\x1b[B")
+        assert len(moved.splitlines()) == 12, moved
         os.write(master, b"\x03")
         _, errors = terminal_exit(caller, master)
         assert caller.returncode == 0, errors
@@ -57,23 +57,21 @@ def main():
 
         # Keep 120 columns for the compose pane; the notice fits before its keys.
         master, slave = open_pty(columns=161, rows=24)
+        catalog = AppModelCatalog(host)
         caller = spawn([str(fixture.RUI), "--store", str(store)], cwd=state,
                        env=env, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         overview_frame(master, overview_title)
-        overview_frame(master, lambda screen: "gpt-6-luna" in screen, b"/model luna")
+        app_model_open(master, b"luna", catalog=catalog)
         preferences = config / "preferences"
         original = preferences.read_bytes()
         preferences.write_bytes(b"version=1\n")
-        overview_frame(master, lambda screen: any(
-            "gpt-6-luna" in row and "‹" in row for row in screen.splitlines()), b"\x1b[B")
-        overview_frame(master, lambda screen: any(
-            "gpt-6-luna" in row and "‹ medium ›" in row for row in screen.splitlines()), b"\x1b[C")
-        failed = overview_frame(master, lambda screen: "Default not saved" in screen, b"\r")
-        assert "new Sessions here still use gpt-6-luna · medium" in failed, failed
-        assert "enter start" in failed, failed
+        panel_frame(master, lambda screen: "Filter: luna" in screen, b"\x1b[B")
+        failed = panel_frame(master, lambda screen: "couldn't save" in screen, b"\r")
+        assert "Model" in failed, failed
         assert preferences.read_bytes() == b"version=1\n"
         preferences.write_bytes(original)
-
+        # A failed panel save must not change the next Session's defaults.
+        panel_frame(master, lambda screen: "Rui · settings" not in screen, b"\x1b")
         os.write(master, b"hello\r")
         read_terminal(master, "› ")
 
@@ -83,19 +81,20 @@ def main():
 
         session = host_process.wait_for(created_session, "Session after failed save")
         settings = json.loads(cli("session", "inspect", "--store", store, "--session", session))["session"]
-        assert settings["model"] == "gpt-6-luna" and settings["reasoning_effort"] == "medium", settings
+        assert settings["model"] == "gpt-5.5", settings
         saved = json.loads(cli("defaults", "inspect"))
         assert saved["model"] == "gpt-5.5", saved
         os.write(master, b"\x03")
         _, errors = terminal_exit(caller, master)
         assert caller.returncode == 0, errors
         completed = True
-        print("model picker: narrow navigation and failed-save Session recovery passed", flush=True)
+        print("model picker: narrow navigation and failed-save default isolation passed", flush=True)
     finally:
         host_process.dispose_all(
             lambda: host_process.stop_process(caller, timeout=5) if caller else None,
             lambda: close_pty(master) if master is not None else None,
             lambda: close_pty(slave) if slave is not None else None,
+            lambda: catalog.close() if catalog else None,
             lambda: fixture.stop_host(host) if host else None,
             endpoint.shutdown, endpoint.server_close, lambda: thread.join(timeout=5),
         )

@@ -21,6 +21,7 @@ from host_process import dispose_all, screen_fixture_root, stop_process
 from human_cli_fixture import (
     admit,
     chat_content_row,
+    chat_info_open,
     keyed_frame,
     run,
     settle_screen,
@@ -328,7 +329,7 @@ def scroll_marker_case():
 
 
 def pages_case():
-    """/status and /help open as Transcript pages with no heading over them;
+    """Chat info opens above the input; /help remains a Transcript page;
     the `↓` marker says more is below; Esc returns to the latest. A page
     opened while work runs keeps the stop key on the last row."""
     release = threading.Event()
@@ -342,10 +343,21 @@ def pages_case():
         chrome.answered(session, "seed")
         master, caller, _ = chrome.open(session, lambda screen: "SEED-ANSWER" in screen)
         try:
-            status = chrome.frame(master, b"/status\r", lambda screen: transcript_rows(screen)[0].strip() == f"Status · {session}")
-            assert marker(status) == "↓" and composing(status, ""), status
+            chrome.frame(master, b"kept draft", lambda screen: composing(screen, "kept draft"))
+            status = chat_info_open(master)
+            assert "Folder" in status and "Model" in status, status
             assert not any(row.startswith("Browsing") for row in transcript_rows(status)), status
-            chrome.frame(master, b"\x1b", lambda screen: latest(screen, "SEED-ANSWER"))
+            # Folder is read-only: three Downs reach Model, not Folder.
+            choice = chrome.frame(master, b"\x1b[B\x1b[B\x1b[B\r", lambda screen: "Filter:" in screen)
+            assert "kept draft" in choice, choice
+            chrome.frame(master, b"\x1b", lambda screen: "Filter:" not in screen and "Copy last answer" in screen)
+            # Context is read-only: the next selectable row is Rename.
+            chrome.frame(master, b"\x1b[B\rCANCELLED-NAME", lambda screen: "CANCELLED-NAME" in screen)
+            chrome.frame(master, b"\x1b", lambda screen: "CANCELLED-NAME" not in screen and "Copy last answer" in screen)
+            returned = chrome.frame(master, b"\x1b", lambda screen: latest(screen, "SEED-ANSWER") and composing(screen, "kept draft"))
+            assert "Copy last answer" not in returned and "Filter:" not in returned, returned
+            assert len(chrome.endpoint.requests) == 1, chrome.endpoint.requests
+            chrome.frame(master, b"\x15", lambda screen: composing(screen, ""))
             help_page = chrome.frame(master, b"/help\r", lambda screen: transcript_rows(screen)[0] == "Marks")
             assert "ctrl+x                 stop" in help_page and "shift+↑↓               scroll" in help_page, help_page
             assert "ctrl+o                 open" in help_page and marker(help_page) == "↓", help_page
@@ -353,7 +365,7 @@ def pages_case():
             os.write(master, b"HOLD-QUESTION\r")
             release.set()
             chrome.frame(master, b"", lambda screen: "⠹ Held call · " in screen)
-            working = chrome.frame(master, b"/status\r", lambda screen: transcript_rows(screen)[0].strip() == f"Status · {session}")
+            working = chat_info_open(master)
             assert rows(working)[FOOTER].endswith("ctrl+x stop"), working
             chrome.frame(master, b"\x1b", lambda screen: "⠹ Held call · " in screen and marker(screen) is None)
             (chrome.workspace / "release").write_text("")
@@ -362,7 +374,7 @@ def pages_case():
         finally:
             release.set()
             (chrome.workspace / "release").write_text("")
-    print("session chrome: /status and /help open as pages with the return marker and no extra heading, Esc returns; a page during work keeps ctrl+x stop", flush=True)
+    print("session chrome: chat info Layer and help page return with Esc; info during work keeps ctrl+x stop", flush=True)
 
 
 def approval_overflow_case():

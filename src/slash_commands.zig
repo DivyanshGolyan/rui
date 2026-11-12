@@ -96,10 +96,6 @@ comptime {
     for (@typeInfo(Copy).@"enum".field_names[1..], copy_words) |field, choice| std.debug.assert(std.mem.eql(u8, field, choice.word));
 }
 
-/// The settings a live Session changes. Its model and sign-in never change,
-/// and its instructions come only from a shell.
-const live_options: Options = .of(cli_args.live_configure, settingNames(false), false, true);
-
 /// Completion has its own presentation order, independent of protocol and
 /// help order. Membership and spellings still come from the setting table.
 fn settingNames(comptime on_start: bool) []const []const u8 {
@@ -134,7 +130,6 @@ const setup_options: Options = .of(cli_args.live_setup, &.{ "model", "provider",
 /// show them.
 const ConversationName = enum {
     archive,
-    configure,
     copy,
     discard,
     effort,
@@ -142,14 +137,12 @@ const ConversationName = enum {
     help,
     @"inspect-action",
     login,
-    model,
     recover,
     @"reload-skills",
     rename,
     requests,
     result,
     setup,
-    status,
     unarchive,
     upgrade,
     wait,
@@ -158,7 +151,6 @@ const ConversationName = enum {
 /// A conversation's commands.
 pub const conversation = Commands(ConversationName, .{
     .archive = .{ .description = "stop active work and archive this Session" },
-    .configure = .{ .argument = .{ .options = live_options }, .description = "change this Session's settings" },
     .copy = .{ .argument = .{ .choice = copy_words }, .description = "copy the last answer; code its last block, file saves it here" },
     .discard = .{ .description = "release rejected input, retaining the draft", .listed = false },
     .effort = .{ .argument = .effort, .description = "this Session's effort, also the default for new ones" },
@@ -166,14 +158,12 @@ pub const conversation = Commands(ConversationName, .{
     .help = .{ .description = "keys and commands" },
     .@"inspect-action" = .{ .description = "exact one-shot diagnostics", .listed = false },
     .login = .{ .description = null },
-    .model = .{ .description = "this Session's model and sign-in" },
     .recover = .{ .argument = .{ .required = "KEY" }, .description = "the original request", .listed = false },
     .@"reload-skills" = .{ .description = "rescan skills and append catalog changes without model work" },
     .rename = .{ .argument = .{ .required = "NAME" }, .description = "name this Session" },
     .requests = .{ .description = "recovery handles; pick one to recover it or read its answer", .listed = false },
     .result = .{ .argument = .{ .required = "KEY" }, .description = "a saved answer", .listed = false },
     .setup = .{ .argument = .{ .options = setup_options }, .description = "future defaults" },
-    .status = .{ .description = "settings and work" },
     .unarchive = .{ .description = "restore this Session without restarting work" },
     .upgrade = .{ .description = "check stable Rui; install restarts this Store's Host" },
     .wait = .{ .description = null },
@@ -191,12 +181,11 @@ const session_views = &[_]Choice{
     .{ .word = "all", .description = "unarchived and archived Sessions" },
 };
 
-pub const overview = Commands(enum { archive, configure, exit, help, model, rename, sessions, setup, unarchive, upgrade }, .{
+pub const overview = Commands(enum { archive, configure, exit, help, rename, sessions, setup, unarchive, upgrade }, .{
     .archive = .{ .description = "archive the selected Session; stop active work first" },
     .configure = .{ .argument = .{ .options = start_options }, .description = "hold settings for the next Session" },
     .exit = .{ .description = "leave; Host work continues" },
     .help = conversation.table.get(.help),
-    .model = .{ .description = "choose the model new Sessions use" },
     .rename = .{ .argument = conversation.table.get(.rename).argument, .description = "name the selected Session" },
     .sessions = .{ .choice_name = "VIEW", .argument = .{ .choice = session_views }, .description = "view Unarchived, Archived or All Sessions" },
     .setup = conversation.table.get(.setup),
@@ -747,9 +736,6 @@ test "a /requests list takes only keys the parser reads back as one word the lis
 
 test "a command admits exactly the arguments its shape names" {
     const cases = .{
-        .{ "/status", conversation.Parsed{ .command = .{ .name = .status, .argument = "" } } },
-        .{ "/status ", conversation.Parsed{ .command = .{ .name = .status, .argument = "" } } },
-        .{ "/status now", conversation.Parsed{ .misused = .status } },
         .{ "/copy", conversation.Parsed{ .command = .{ .name = .copy, .argument = "" } } },
         .{ "/copy code", conversation.Parsed{ .command = .{ .name = .copy, .argument = "code" } } },
         .{ "/copy file", conversation.Parsed{ .command = .{ .name = .copy, .argument = "file" } } },
@@ -761,13 +747,9 @@ test "a command admits exactly the arguments its shape names" {
         .{ "/rename lane four", conversation.Parsed{ .command = .{ .name = .rename, .argument = "lane four" } } },
         .{ "/result", conversation.Parsed{ .misused = .result } },
         .{ "/inspect-action", conversation.Parsed{ .command = .{ .name = .@"inspect-action", .argument = "" } } },
-        .{ "/configure --label \"a b\"", conversation.Parsed{ .command = .{ .name = .configure, .argument = "--label \"a b\"" } } },
-        .{ "/configure --label lane\\  ", conversation.Parsed{ .command = .{ .name = .configure, .argument = "--label lane\\ " } } },
-        .{ "/configure --label lane\\\\  ", conversation.Parsed{ .command = .{ .name = .configure, .argument = "--label lane\\\\" } } },
         .{ "/configurex", @as(conversation.Parsed, .unknown) },
         .{ "/", @as(conversation.Parsed, .unknown) },
         .{ "//status", @as(conversation.Parsed, .unknown) },
-        .{ "/status\tnow", @as(conversation.Parsed, .unknown) },
     };
     inline for (cases) |case| {
         const parsed = conversation.parse(case[0]);
@@ -786,13 +768,13 @@ test "a command admits exactly the arguments its shape names" {
 test "the list names the listed commands a command word starts, and Tab puts the highlighted one in" {
     const Case = struct { draft: []const u8, shown: ?[]const []const u8, first: ?[]const u8 = null };
     const cases = [_]Case{
-        .{ .draft = "/", .shown = &.{ "archive", "configure ", "copy ", "effort ", "exit", "help", "model", "reload-skills", "rename ", "setup ", "status", "unarchive", "upgrade" } },
-        .{ .draft = "/c", .shown = &.{ "configure ", "copy " }, .first = "onfigure " },
+        .{ .draft = "/", .shown = &.{ "archive", "copy ", "effort ", "exit", "help", "reload-skills", "rename ", "setup ", "unarchive", "upgrade" } },
+        .{ .draft = "/c", .shown = &.{"copy "}, .first = "opy " },
         .{ .draft = "/cop", .shown = &.{"copy "}, .first = "y " },
-        .{ .draft = "/st", .shown = &.{"status"}, .first = "atus" },
+        .{ .draft = "/st", .shown = &.{} },
         .{ .draft = "/re", .shown = &.{ "reload-skills", "rename " } },
         .{ .draft = "/rel", .shown = &.{"reload-skills"}, .first = "oad-skills" },
-        .{ .draft = "/s", .shown = &.{ "setup ", "status" }, .first = "etup " },
+        .{ .draft = "/s", .shown = &.{"setup "}, .first = "etup " },
         // Recovery commands work, and /help names them, but the list leaves them out.
         .{ .draft = "/req", .shown = &.{} },
         .{ .draft = "/w", .shown = &.{} },
@@ -860,24 +842,24 @@ test "/effort lists the efforts the screen's model offers, the one in force mark
 }
 
 test "/configure lists its options, then an option's fixed values" {
-    const options = conversation.suggest("/configure ", .{}).?;
+    const options = overview.suggest("/configure ", .{}).?;
     try std.testing.expectEqualStrings("--permission-mode ", options.shown()[0].word);
     try std.testing.expectEqualStrings("--permission-mode ask|bypass", options.shown()[0].shown);
-    for (options.shown()) |entry| try std.testing.expect(!std.mem.eql(u8, entry.word, "--model ") and !std.mem.eql(u8, entry.word, "--instructions "));
-    const narrowed = conversation.suggest("/configure --label x --p", .{}).?;
-    try std.testing.expectEqual(@as(usize, 1), narrowed.count);
+    for (options.shown()) |entry| try std.testing.expect(!std.mem.eql(u8, entry.word, "--instructions "));
+    const narrowed = overview.suggest("/configure --label x --p", .{}).?;
+    try std.testing.expectEqual(@as(usize, 2), narrowed.count);
     try std.testing.expectEqualStrings("ermission-mode ", narrowed.completion(0));
-    const modes = conversation.suggest("/configure --permission-mode ", .{}).?;
+    const modes = overview.suggest("/configure --permission-mode ", .{}).?;
     try std.testing.expectEqual(@as(usize, 2), modes.count);
     try std.testing.expectEqualStrings("ask", modes.shown()[0].word);
     try std.testing.expectEqualStrings("bypass", modes.shown()[1].word);
     // A shape with a placeholder offers only its fixed words; free text
     // offers nothing.
-    const trigger = conversation.suggest("/configure --compaction-trigger ", .{}).?;
+    const trigger = overview.suggest("/configure --compaction-trigger ", .{}).?;
     try std.testing.expectEqual(@as(usize, 1), trigger.count);
     try std.testing.expectEqualStrings("default", trigger.shown()[0].word);
-    try std.testing.expectEqual(@as(usize, 0), conversation.suggest("/configure --label ", .{}).?.count);
-    const efforts = conversation.suggest("/configure --reasoning-effort ", .{ .model = "gpt-5.5" }).?;
+    try std.testing.expectEqual(@as(usize, 0), overview.suggest("/configure --label ", .{}).?.count);
+    const efforts = overview.suggest("/configure --reasoning-effort ", .{ .model = "gpt-5.5" }).?;
     try std.testing.expectEqualStrings("default", efforts.shown()[efforts.count - 1].word);
     // /setup saves a default for any model, so it lists every effort,
     // whatever this Session's model offers.
@@ -885,7 +867,7 @@ test "/configure lists its options, then an option's fixed values" {
     try std.testing.expectEqual(std.enums.values(ReasoningEffort).len + 1, saved.count);
     // Every option of every list is offered, and one with a value is
     // followed by a list of its fixed words, empty for free text.
-    inline for (.{ .{ conversation, "/configure ", live_options }, .{ conversation, "/setup ", setup_options }, .{ overview, "/configure ", start_options } }) |case| {
+    inline for (.{ .{ conversation, "/setup ", setup_options }, .{ overview, "/configure ", start_options } }) |case| {
         const listed = case[0].suggest(case[1], .{ .model = "gpt-6-luna" }).?;
         try std.testing.expectEqual(case[2].entries.len, listed.count);
         for (case[2].entries, listed.shown()) |entry, shown| {
@@ -901,15 +883,15 @@ test "/configure lists its options, then an option's fixed values" {
     try std.testing.expectEqual(@as(usize, 0), narrowed_under.highlight);
     try std.testing.expectEqualStrings("default", trigger.completion(narrowed_under.highlight));
     // After a value, options again.
-    try std.testing.expectEqualStrings("--tools ", conversation.suggest("/configure --permission-mode ask --t", .{}).?.shown()[0].word);
+    try std.testing.expectEqualStrings("--tools ", overview.suggest("/configure --permission-mode ask --t", .{}).?.shown()[0].word);
     // Quoted text is the shell's to read; the list stops.
-    try std.testing.expect(conversation.suggest("/configure --label \"a ", .{}) == null);
+    try std.testing.expect(overview.suggest("/configure --label \"a ", .{}) == null);
     try std.testing.expectEqualStrings("--permission-mode ", overview.suggest("/configure ", .{}).?.shown()[0].word);
 }
 
 test "a key's list is the draft's own, and counts as drawn when the latest frame drew a list" {
-    const c = conversation.suggest("/c", .{}).?;
-    const co = conversation.suggest("/co", .{}).?;
+    const c = conversation.suggest("/re", .{}).?;
+    const co = conversation.suggest("/rel", .{}).?;
     var stored: ?Shown = Shown.next(null, 1, c);
     stored.?.drew(true);
     Shown.drawnNow(&stored, Shown.next(stored, 1, c)).?.move(true);
@@ -947,7 +929,6 @@ test "the list order is the names' order and every listed usage fits before the 
     try std.testing.expectEqualStrings("/copy [code|file]", conversation.usage.get(.copy));
     try std.testing.expectEqualStrings("/rename NAME", conversation.usage.get(.rename));
     try std.testing.expectEqualStrings("/effort LEVEL", conversation.usage.get(.effort));
-    try std.testing.expectEqualStrings("/configure [OPTIONS]", conversation.usage.get(.configure));
     try std.testing.expectEqualStrings("/reload-skills", conversation.usage.get(.@"reload-skills"));
 }
 
@@ -1046,9 +1027,8 @@ test "archive and upgrade retain separate local command identities after merge" 
     }
 }
 
-test "Session settings slash options retain both screens membership and order" {
+test "overview start settings slash options retain membership and order" {
     inline for (.{
-        .{ live_options, &[_][]const u8{ "--permission-mode ", "--tools ", "--loaded-tools ", "--reasoning-effort ", "--label ", "--workspace ", "--compaction-trigger ", "--output-reservation ", "--output-schema ", "--text-output " } },
         .{ start_options, &[_][]const u8{ "--permission-mode ", "--tools ", "--loaded-tools ", "--reasoning-effort ", "--label ", "--workspace ", "--compaction-trigger ", "--output-reservation ", "--model ", "--provider " } },
     }) |case| {
         try std.testing.expectEqual(case[1].len, case[0].entries.len);
@@ -1063,4 +1043,16 @@ test "older conversation is feed navigation, not a slash command" {
     try std.testing.expectEqual(@as(usize, 1), list.count);
     try std.testing.expectEqualStrings("help", list.shown()[0].word);
     try std.testing.expect(conversation.parse("/details") == .unknown);
+}
+
+test "chat info replaces conversation settings commands and overview model has no slash path" {
+    for ([_][]const u8{ "/status", "/status now", "/configure", "/configure --label chat", "/model", "/model gpt-5.5" }) |line| {
+        try std.testing.expect(conversation.parse(line) == .unknown);
+        if (conversation.suggest(line, .{})) |list| try std.testing.expectEqual(@as(usize, 0), list.count);
+    }
+    for ([_][]const u8{ "/model", "/model gpt-5.5" }) |line| {
+        try std.testing.expect(overview.parse(line) == .unknown);
+        if (overview.suggest(line, .{})) |list| try std.testing.expectEqual(@as(usize, 0), list.count);
+    }
+    try std.testing.expect(overview.parse("/configure --label next") == .command);
 }

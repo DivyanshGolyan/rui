@@ -129,6 +129,8 @@ fn bind(self: *Self) void {
     self.panel.fields = &self.fields;
     self.panel.actions = &.{ "Rename", "Archive", "Copy last answer" };
     const caps = self.backend.caps(self.backend.context);
+    self.panel.unicode = caps.unicode;
+    self.model_choice.unicode = caps.unicode;
     self.panel.ground = widget_style.of(caps, .{ .background = .bar });
     self.panel.selection = widget_style.of(caps, .{ .background = .selection });
     self.panel.title_style = widget_style.of(caps, .{ .background = .bar, .colour = .strong, .bold = true });
@@ -377,8 +379,8 @@ fn drawContents(raw: *anyopaque, ctx: vxfw.DrawContext) !vxfw.Surface {
     children[0] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = try self.panel.widget().draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = size.height - 1 })) };
     const footer = try ctx.arena.create(Footer);
     footer.* = .{
-        .left = try std.fmt.allocPrint(ctx.arena, "{s}{s} · info", .{ if (self.narrow) " ‹ " else " ", name }),
-        .right = if (self.narrow) "esc close" else if (self.tool_draft != null) "↑↓ · space toggle · enter save · esc close" else "↑↓ · enter change · esc close",
+        .left = try Panel.displayText(ctx.arena, try std.fmt.allocPrint(ctx.arena, "{s}{s} · info", .{ if (self.narrow) " ‹ " else " ", name }), self.panel.unicode),
+        .right = try Panel.displayText(ctx.arena, if (self.narrow) "esc close" else if (self.tool_draft != null) "↑↓ · space toggle · enter save · esc close" else "↑↓ · enter change · esc close", self.panel.unicode),
         .style = self.panel.quiet,
     };
     children[1] = .{ .origin = .{ .row = size.height - 1, .col = 0 }, .surface = try footer.widget().draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = 1 })) };
@@ -391,11 +393,12 @@ fn drawTitle(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxf
     var surface = try vxfw.Surface.init(ctx.arena, self.widget(), size);
     @memset(surface.buffer, .{ .style = self.panel.ground });
     if (size.width == 0 or size.height == 0) return surface;
-    const failure = self.failures[6] orelse if (self.pending == 6) " · saving" else "";
+    const failure = try Panel.displayText(ctx.arena, self.failures[6] orelse if (self.pending == 6) " · saving" else "", self.panel.unicode);
     const tail_width: u16 = @intCast(@min(ctx.stringWidth(failure), size.width));
     const edit_width = size.width - tail_width;
-    const bytes = if (self.renaming) self.rename_editor.buffer[0..self.rename_editor.length] else self.panel.title;
-    const cursor = if (self.renaming) self.rename_editor.cursor else 0;
+    const original = if (self.renaming) self.rename_editor.buffer[0..self.rename_editor.length] else self.panel.title;
+    const bytes = try Panel.displayText(ctx.arena, original, self.panel.unicode);
+    const cursor = if (self.renaming) (try Panel.displayText(ctx.arena, original[0..self.rename_editor.cursor], self.panel.unicode)).len else 0;
     var start: usize = 0;
     var iter = ctx.graphemeIterator(bytes);
     while (ctx.stringWidth(bytes[start..cursor]) >= edit_width and start < cursor) {
@@ -415,6 +418,7 @@ fn drawTitle(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxf
 }
 
 const Fixture = struct {
+    unicode: bool = true,
     session: status.Session = undefined,
     state_value: SaveState = .idle,
     fail_read: bool = false,
@@ -473,8 +477,9 @@ const Fixture = struct {
     fn models(_: *anyopaque) ModelChoice.Snapshot {
         return .{};
     }
-    fn caps(_: *anyopaque) view.Caps {
-        return .{};
+    fn caps(raw: *anyopaque) view.Caps {
+        const self: *Fixture = @ptrCast(@alignCast(raw));
+        return .{ .unicode = self.unicode };
     }
 };
 
@@ -907,4 +912,37 @@ test "Chat info static title keeps late and cancelled rename failures visible fo
             try std.testing.expect(std.mem.indexOf(u8, text, if (outcome == 1) "couldn't read chat" else "couldn't save") != null);
         }
     };
+}
+
+test "Chat info shared ASCII capability reaches tools model rename failures and footer" {
+    var fixture: Fixture = .{ .unicode = false };
+    fixture.init();
+    var page: Self = .{ .backend = fixture.backend() };
+    page.refresh();
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    for ([_]u16{ 46, 99 }) |width| {
+        page.narrow = width == 46;
+        for (0..5) |state| {
+            page.cancelChoice();
+            page.failures[1] = " · couldn't save";
+            page.failures[6] = " · name couldn't be entered";
+            if (state > 0) {
+                page.panel.selected = switch (state) {
+                    1 => 0,
+                    2 => 2,
+                    else => 4,
+                };
+                try press(&page, &ctx, vaxis.Key.enter);
+                if (state == 4) page.model_choice.no_match = true;
+            }
+            const text = try dump(&page, arena.allocator(), width, 20);
+            for (text) |byte| try std.testing.expect(byte < 0x80);
+            try std.testing.expect(!page.panel.unicode and !page.model_choice.unicode);
+            try std.testing.expect(std.mem.indexOf(u8, text, if (page.narrow) " < Fix retry deadline . info" else " Fix retry deadline . info") != null);
+            if (state == 2) try std.testing.expect(std.mem.indexOf(u8, text, "+ bash") != null);
+            if (state >= 3) try std.testing.expect(std.mem.indexOf(u8, text, "Filter:") != null);
+        }
+    }
 }

@@ -25,7 +25,6 @@ const failure_class = @import("failure_class.zig");
 const state_marks = @import("marks.zig");
 const keymap = @import("keymap.zig");
 const model_capability = @import("model_capability.zig");
-const model_list = @import("model_list.zig");
 const model_picker = @import("model_picker.zig");
 const model_picker_view = @import("model_picker_view.zig");
 const overview_style = @import("overview_style.zig");
@@ -132,8 +131,8 @@ pub const marks = state_marks.marks;
 pub const spinner = state_marks.spinner;
 
 /// What a key does in the overview. `clear` empties the draft, else the
-/// held start settings. `select_*` choose a Session even while the picker
-/// shows; `previous` and `next` move the picker's highlight there.
+/// held start settings. `select_*` always choose a Session; `previous`
+/// and `next` move a shown command list's highlight instead.
 pub const Action = enum { previous, next, select_previous, select_next, first, last, clear, exit, stop, archive };
 
 /// The one key table.
@@ -339,7 +338,6 @@ pub const StartResult = union(enum) {
 
 pub const Event = union(enum) {
     composed: Composed,
-    picker_action: struct { action: model_picker_view.Action, draft: Draft },
     /// The size of the screen the shell draws next; keys read until the
     /// next one act on that screen.
     resized: Size,
@@ -365,9 +363,7 @@ pub const Event = union(enum) {
     conversed: Conversed,
     /// A model-list read ended.
     models: ModelsRead,
-    /// A save of the default ended.
-    saved: SaveAnswer,
-    /// A write of the saved defaults that was no pick ended: the default a
+    /// A write of app settings ended: the default a
     /// fresh launch would now take from them, null when they decide none.
     defaults_saved: ?Default,
     /// The app settings page asked for the Upgrade /upgrade starts.
@@ -424,7 +420,7 @@ pub fn unconfirmedLine(state: *const State, buffer: *[max_unconfirmed_line_bytes
 pub const StatusBuffer = [@max(upgrade_status.max_line_bytes, max_unconfirmed_line_bytes)]u8;
 
 /// What fills the list's lines; `State.listArea` says which.
-pub const ListArea = enum { sessions, panel, picker };
+pub const ListArea = enum { sessions, panel };
 
 pub const StatusLine = struct { text: []const u8, colour: Colour };
 
@@ -601,8 +597,7 @@ pub const ModelsRead = union(enum) {
     invalid,
 
     /// How a failed read ended: a list Rui cannot read, else no answer,
-    /// which leaves the person nothing to do but try /model again, as when
-    /// the Host is gone.
+    /// which leaves the person the catalog choices until a later read.
     pub fn failed(err: anyerror) ModelsRead {
         return switch (err) {
             error.InvalidModelList, error.InvalidResponse, error.ResponseTooLarge => .invalid,
@@ -610,14 +605,6 @@ pub const ModelsRead = union(enum) {
         };
     }
 };
-
-/// A save of `binding` as the default ended as `outcome`.
-pub const SaveEnded = struct { binding: Default, outcome: Saved };
-
-/// How a save ended, with the effort the saved defaults hold once it
-/// ended, as this overview's starts read them: null when the launch reads
-/// none or they could not be read.
-pub const SaveAnswer = struct { ended: SaveEnded, saved_effort: ?ReasoningEffort = null };
 
 const ReasoningEffort = model_capability.ReasoningEffort;
 
@@ -644,21 +631,6 @@ pub const StartEffort = struct {
 
 /// A saved effort as the lines that name the next Session's model show it
 /// after the model, as a conversation's status line does.
-fn effortSuffix(effort: ?ReasoningEffort) []const u8 {
-    return switch (effort orelse return "") {
-        inline else => |tag| session_line.separator ++ @tagName(tag),
-    };
-}
-
-/// How a save of the default ended.
-pub const Saved = union(enum) {
-    done,
-    /// The file holds the pick, but a crash may yet lose it.
-    unconfirmed,
-    /// Not saved; why, in words, when more than the file's path helps.
-    failed: ?[]const u8,
-};
-
 /// A read the open conversation of `reference` applied, which showed its
 /// work as `work`; `opening` when it is the read the conversation opened on.
 pub const Observed = struct { reference: Reference, work: session_work.Work, opening: bool };
@@ -728,9 +700,6 @@ pub const Effect = union(enum) {
     archive: ArchiveRequest,
     /// Read the Host's model lists.
     list_models,
-    /// Save the person's default for new Sessions, as `rui defaults
-    /// configure --provider --model` does, and answer with `saved`.
-    save_default: Default,
     /// Esc asked the running Upgrade to cancel before it publishes.
     cancel_upgrade,
     /// Empty the line editor.
@@ -768,37 +737,10 @@ pub const Default = struct {
 pub const Binding = struct {
     provider: ?[]const u8 = null,
     model: ?[]const u8 = null,
-
-    /// The provider's sign-in, as the terminal names it, else as given.
-    fn signIn(self: Binding) []const u8 {
-        const name = self.provider orelse return "sign-in unknown";
-        return if (std.meta.stringToEnum(Provider, name)) |provider| provider.signIn() else name;
-    }
-};
-
-/// Picks on their way to the preferences file. One save runs at a time:
-/// a pick made while one runs waits, and only the newest waits. Only `step`
-/// changes it.
-pub const Save = struct {
-    /// The newest pick waiting for the running save to end.
-    wanted: ?Default = null,
-    /// The pick the shell is saving.
-    running: ?Default = null,
-    /// The newest save that ended since the person left, which the way out
-    /// tells; one that ended before, the overview said.
-    last: ?SaveEnded = null,
 };
 
 /// The screen in cells.
 pub const Size = struct { width: u16 = 0, height: u16 = 0 };
-
-/// The model picker /model opens.
-pub const Picker = struct {
-    choice: ?model_picker_view.Choice = null,
-    edits: ?u32 = null,
-    query_effort: ?ReasoningEffort = null,
-    query_provider: ?Provider = null,
-};
 
 /// Each event brings at most two effects today; the shell runs them in order.
 pub const Effects = struct {
@@ -872,21 +814,12 @@ pub const StartSettings = struct {
 /// A start Enter asked for. Its slices borrow the state and the event's
 /// draft until the next `step`, as every slice the core hands out does; the
 /// shell keeps an `own` copy.
-pub const LocalEffort = struct {
-    value: ?ReasoningEffort,
-    only_when_explicit: bool,
-
-    pub fn applies(self: LocalEffort, reads_preferences: bool) bool {
-        return !self.only_when_explicit or !reads_preferences;
-    }
-};
 pub const StartRequest = struct {
     settings: *const StartSettings,
     text: []const u8,
     /// The provider and model, `nextBinding`'s: the shell reads these, never
     /// the settings' own.
     binding: Binding = .{},
-    local_effort: ?LocalEffort = null,
 
     pub fn own(self: StartRequest, gpa: Allocator) error{OutOfMemory}!OwnedStart {
         const provider = self.binding.provider orelse "";
@@ -894,7 +827,7 @@ pub const StartRequest = struct {
         const bytes = try gpa.alloc(u8, self.text.len + self.settings.used + provider.len + model.len);
         var writer = std.Io.Writer.fixed(bytes);
         inline for (.{ self.text, self.settings.bytes[0..self.settings.used], provider, model }) |part| writer.writeAll(part) catch unreachable;
-        return .{ .bytes = bytes, .text_len = self.text.len, .held = self.settings.held, .provider_len = if (self.binding.provider) |name| name.len else null, .model_len = if (self.binding.model) |name| name.len else null, .local_effort = self.local_effort };
+        return .{ .bytes = bytes, .text_len = self.text.len, .held = self.settings.held, .provider_len = if (self.binding.provider) |name| name.len else null, .model_len = if (self.binding.model) |name| name.len else null };
     }
 };
 
@@ -907,7 +840,6 @@ pub const OwnedStart = struct {
     /// The binding's lengths, its bytes last: the provider, then the model.
     provider_len: ?usize = null,
     model_len: ?usize = null,
-    local_effort: ?LocalEffort = null,
 
     pub fn text(self: *const OwnedStart) []const u8 {
         return self.bytes[0..self.text_len];
@@ -1079,20 +1011,14 @@ pub const State = struct {
     /// The one value both screens read.
     upgrade: session_upgrade.Upgrade = .{},
 
-    /// The person's default for new Sessions. A pick replaces it at once,
-    /// and a save follows it to the preferences file. `nextBinding` says
-    /// what the next Session starts on.
+    /// The default for new Sessions, refreshed after app settings are saved.
+    /// `nextBinding` applies any held start settings over it.
     default: ?Default = null,
-    default_sign_in_shown: bool = false,
-    save: Save = .{},
     /// The screen the shell draws, which `layout` divides.
     size: Size = .{},
     /// The shell shows its one Host line above the input this frame. The
     /// shell owns what the line says; `layout` owns the row it takes.
     host_line: bool = false,
-    /// Open from /model until a pick, Esc or typing; it acts only while
-    /// `layout` shows it.
-    picker: ?Picker = null,
     /// The command list the latest frame built for the draft, which the
     /// shell keeps from each `Screen.commands`: the one value Enter, Esc,
     /// the arrows and Tab act on, as in a conversation.
@@ -1103,11 +1029,11 @@ pub const State = struct {
     /// nothing.
     skills_workspace: Bounded(workspace_path.max_bytes) = .{},
     skill_rows: skill_completion.Rows = .{},
-    /// The open picker's latest model lists, freed when it closes.
+    /// Shared live model choices, borrowed by app settings and chat info.
     menu: model_picker.Menu = .{},
     /// Changes before a borrowed list is replaced or released.
     menu_revision: u64 = 0,
-    /// How the open picker's latest model-list read ended.
+    /// How the latest shared model-list read ended.
     menu_read: model_picker_view.Read = .unread,
     /// A model-list read is in flight.
     asking_models: bool = false,
@@ -1170,18 +1096,11 @@ pub const State = struct {
         };
     }
 
-    /// What fills the list's lines: the model picker over a panel, a panel
-    /// over the Sessions. The frame draws this and a click lands on it, so
+    /// What fills the list's lines: a panel over the Sessions. The frame draws this and a click lands on it, so
     /// neither decides it again.
     pub fn listArea(self: *const State) ListArea {
-        if (self.picker != null) return .picker;
         if (self.panel != null) return .panel;
         return .sessions;
-    }
-
-    /// The picker remains actionable even on a screen too small to show it.
-    pub fn shownPicker(self: *const State) ?*const Picker {
-        return if (self.picker) |*open| open else null;
     }
 
     /// What the next Session starts on: what `/configure` holds, else the
@@ -1199,18 +1118,7 @@ pub const State = struct {
         };
     }
 
-    pub fn localEffort(self: *const State) ?LocalEffort {
-        const binding = self.default orelse return null;
-        const pending = self.save.wanted != null or self.save.running != null;
-        const last = self.save.last;
-        const same = if (last) |ended| ended.binding.eql(&binding) else false;
-        if (!pending and !same) return null;
-        const failed = if (last) |ended| same and ended.outcome == .failed else false;
-        return .{ .value = binding.effort, .only_when_explicit = !pending and !failed };
-    }
-
-    fn closePicker(self: *State) void {
-        self.picker = null;
+    fn releaseModels(self: *State) void {
         self.menu_revision += 1;
         self.menu.deinit(self.gpa);
         self.menu_read = .unread;
@@ -1762,8 +1670,7 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
         },
         .leave => {
             state.left = true;
-            // The person saw how every earlier save ended.
-            state.save.last = null;
+            state.releaseModels();
         },
         .resized => |size| state.size = size,
         .observed => |read| try state.observe(read),
@@ -1788,38 +1695,8 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
             }
         },
         .models => |read| readModels(state, read),
-        .picker_action => |input| if (state.picker) |*shown| {
-            syncPicker(state, input.draft);
-            _ = model_picker_view.step(&state.menu, pickerWords(input.draft.bytes), pickerDefaults(state), &shown.choice, input.action);
-        },
         .ran => |ran| try ranCommand(state, ran),
-        .saved => |answer| {
-            const ended = answer.ended;
-            // That pick's save ended, failed or not: only a new pick asks again.
-            std.debug.assert(ended.binding.eql(&state.save.running.?));
-            state.save.running = null;
-            state.save.last = ended;
-            // A pick that came while this save ran is said by its own save.
-            if (state.save.wanted == null) {
-                const next = state.nextBinding();
-                const model = next.model orelse "";
-                const sign_in = next.signIn();
-                const start: StartEffort = .{ .held = state.heldEffort(), .model = next.model };
-                const local = state.localEffort();
-                const effort = if (local) |value| if (value.applies(true)) value.value else answer.saved_effort else answer.saved_effort;
-                const effort_suffix = effortSuffix(start.applied(effort));
-                switch (ended.outcome) {
-                    .done => {},
-                    .unconfirmed => state.say(.attention, "! Saved {s} · {s}; durability unconfirmed", .{ ended.binding.model.slice(), ended.binding.provider.signIn() }),
-                    .failed => |why| state.say(.quiet, "Default not saved ({s}); new Sessions here still use {s}{s} · {s}", .{ why orelse "check ~/.config/rui/preferences", model, effort_suffix, sign_in }),
-                }
-            }
-            startSave(state, &effects);
-        },
-        // A pick still on its way to the file was asked after the edit that
-        // wrote this snapshot, as `admitsDefaultsEdit` keeps it: the pick
-        // stands, and its own save writes over the snapshot.
-        .defaults_saved => |saved| if (state.save.running == null and state.save.wanted == null) {
+        .defaults_saved => |saved| {
             if (saved) |binding| state.default = binding;
         },
         .start_upgrade => startUpgrade(state),
@@ -1829,56 +1706,34 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
     return effects;
 }
 
-/// Takes a model-list answer. A failed read keeps the open picker's list.
+/// Takes a shared model-list answer. A failed read keeps the last menu.
 fn readModels(state: *State, read: ModelsRead) void {
     state.asking_models = false;
     switch (read) {
         .menu => |menu| {
             var owned = menu;
-            // The answer came after the picker closed.
-            const picker = if (state.picker) |*open| open else return owned.deinit(state.gpa);
-            // Keep the owned ID and controls until the next frame reconciles
-            // them with this menu AND the current draft. A previously typed ID
-            // must yield to listed matches, not become an extra row.
-            picker.edits = null;
+            if (state.left) return owned.deinit(state.gpa);
             state.menu_revision += 1;
             state.menu.deinit(state.gpa);
             state.menu = owned;
             state.menu_read = .read;
         },
-        .unanswered => if (state.picker != null) {
+        .unanswered => {
             state.menu_read = .unanswered;
         },
-        .invalid => if (state.picker != null) {
+        .invalid => {
             state.menu_read = .invalid;
         },
     }
 }
-
-/// The most bytes `writeDeparture` writes for a save the person did not see
-/// end.
-pub const max_late_save_bytes = 512;
 
 /// The most bytes `writeDeparture` writes for a command the person did not
 /// see end: its name, its output and a line that says it was cut.
 pub const max_late_command_bytes = max_output_bytes + 96;
 
 /// What the shell prints once the terminal is restored: one line for each
-/// request left in the ledger, and one for a save the person did not see
-/// end. `saved_effort` is the effort the saved defaults hold now, which a
-/// later launch that reads them applies.
-pub fn writeDeparture(state: *const State, saved_effort: ?ReasoningEffort, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-    if (state.save.last) |*late| {
-        const model = late.binding.model.slice();
-        const sign_in = late.binding.provider.signIn();
-        // Held start settings end with the overview.
-        const effort_suffix = effortSuffix((StartEffort{ .held = null, .model = model }).applied(saved_effort));
-        switch (late.outcome) {
-            .done => try writer.print("rui: New Sessions use {s}{s} · {s}.\n", .{ model, effort_suffix, sign_in }),
-            .unconfirmed => try writer.print("rui: New Sessions use {s}{s} · {s}; durability unconfirmed, inspect ~/.config/rui/preferences.\n", .{ model, effort_suffix, sign_in }),
-            .failed => |why| try writer.print("rui: {s} · {s} was not saved as the default ({s}).\n", .{ model, sign_in, why orelse "check ~/.config/rui/preferences" }),
-        }
-    }
+/// request left in the ledger and any command the person did not see end.
+pub fn writeDeparture(state: *const State, _: ?ReasoningEffort, writer: *std.Io.Writer) std.Io.Writer.Error!void {
     if (state.command) |*command| {
         const name = @tagName(command.name);
         if (!command.answered) {
@@ -1929,7 +1784,7 @@ fn tick(state: *State, now_ms: u64, effects: *Effects) error{OutOfMemory}!void {
         state.next_list_ms = now_ms + list_interval_ms;
         effects.add(.{ .list = state.token });
         // A list still loading is read again with the next listing.
-        if (state.picker != null and state.menu.loading()) askModels(state, effects);
+        if (state.menu.loading()) askModels(state, effects);
     }
 }
 
@@ -1939,21 +1794,9 @@ fn askModels(state: *State, effects: *Effects) void {
     effects.add(.list_models);
 }
 
-/// Whether the shell may queue a write of the saved defaults that is no
-/// pick. The shell writes in the order it queued, and a pick waiting here
-/// for the running save is not queued yet: an edit queued now would be
-/// written before that older pick and lost to it.
+/// Whether the shell may accept an app-settings write.
 pub fn admitsDefaultsEdit(state: *const State) bool {
-    return !state.left and !state.upgrade.held() and state.save.wanted == null;
-}
-
-/// Hands the waiting pick to the shell to save once no save runs. A
-/// failed save is not retried; picking again is.
-fn startSave(state: *State, effects: *Effects) void {
-    if (state.save.running != null) return;
-    const binding = state.save.wanted orelse return;
-    state.save = .{ .running = binding, .last = state.save.last };
-    effects.add(.{ .save_default = binding });
+    return !state.left and !state.upgrade.held();
 }
 
 fn listPage(state: *State, page: Page, effects: *Effects) error{OutOfMemory}!void {
@@ -2261,17 +2104,12 @@ fn firstLine(state: *State, result: FirstLine) error{OutOfMemory}!void {
     retitle(state, row, was);
 }
 
-/// Keys act on the picker only while the screen shows it. A key that acts
-/// on a Session closes a panel, so it acts where the Sessions show.
+/// A key that acts on a Session closes a panel so it acts where Sessions show.
 fn compose(state: *State, value: Composed, effects: *Effects) error{OutOfMemory}!void {
     // Session mutations enter their semantic owner before the generic
     // notice clearing below.
     const action: ?Action = switch (value.input) {
         .composer => |outcome| if (outcome == .action) outcome.action else null,
-    };
-    if (state.picker != null) if (action) |pressed| switch (pressed) {
-        .archive, .stop, .select_previous, .select_next => return,
-        else => {},
     };
     if (action) |pressed| {
         if ((pressed == .archive or pressed == .stop) and state.selected != .session) return;
@@ -2282,38 +2120,24 @@ fn compose(state: *State, value: Composed, effects: *Effects) error{OutOfMemory}
         else => {},
     };
     state.notice = null;
-    const model_draft = std.mem.eql(u8, value.draft.bytes, "/model") or std.mem.startsWith(u8, value.draft.bytes, "/model ");
-    if (state.picker == null and model_draft) {
-        openModelPicker(state, effects);
-    } else if (state.picker != null and !model_draft) {
-        state.closePicker();
-    }
-    if (state.picker != null) syncPicker(state, value.draft);
     const outcome: keymap.Outcome(Action) = switch (value.input) {
         .composer => |outcome| outcome,
     };
-    const picker: ?*Picker = if (state.shownPicker() != null) &state.picker.? else null;
     switch (outcome) {
         .action => |pressed| switch (pressed) {
-            .previous, .next, .first, .last => if (picker) |shown| {
-                const operation: model_picker_view.Action = if (pressed == .previous or pressed == .first) .previous else .next;
-                _ = model_picker_view.step(&state.menu, pickerWords(value.draft.bytes), pickerDefaults(state), &shown.choice, operation);
-            } else if (pressed == .previous or pressed == .next) {
-                // A shown command list takes the arrows, as the picker
-                // does. Home and End stay the draft's: the list shows only
+            .previous, .next, .first, .last => if (pressed == .previous or pressed == .next) {
+                // A shown command list takes the arrows. Home and End stay
+                // the draft's: the list shows only
                 // over a draft, where the composer takes them.
                 if (shownCommands(state, value.draft)) |shown| shown.move(pressed == .next) else select(state, pressed);
             } else select(state, pressed),
             .select_previous => select(state, .previous),
             .select_next => select(state, .next),
-            // Esc closes the picker; else it cancels an Upgrade that can
+            // Esc cancels an Upgrade that can
             // still change nothing, as the status row offers, even while the
             // draft still lists `/upgrade`; else a shown command list closes,
             // then a panel, each keeping the draft.
-            .clear => if (picker != null) {
-                state.closePicker();
-                effects.add(.clear_draft);
-            } else if (state.upgrade.takesEscape()) {
+            .clear => if (state.upgrade.takesEscape()) {
                 effects.add(.cancel_upgrade);
             } else if (shownCommands(state, value.draft)) |shown| {
                 shown.close();
@@ -2329,7 +2153,6 @@ fn compose(state: *State, value: Composed, effects: *Effects) error{OutOfMemory}
         .submit => {
             const listed = shownCommands(state, value.draft);
             switch (enterAction(state, listed != null, value.draft.bytes)) {
-                .pick_model => pick(state, effects),
                 .pick_command => try pickCommand(state, value.draft, listed.?, effects),
                 else => try enter(state, value.draft.bytes, effects),
             }
@@ -2357,22 +2180,13 @@ fn pickCommand(state: *State, draft: Draft, shown: *slash_commands.Shown, effect
         @memcpy(line[0..draft.bytes.len], draft.bytes);
         @memcpy(line[draft.bytes.len..][0..taken.rest.len], taken.rest);
         const completed = line[0 .. draft.bytes.len + taken.rest.len];
-        if (std.mem.eql(u8, completed, "/model")) {
-            effects.add(.{ .replace = .{ .start = draft.bytes.len, .end = draft.bytes.len, .text = "/model "[draft.bytes.len..] } });
-            openModelPicker(state, effects);
-        } else try enter(state, completed, effects);
+        try enter(state, completed, effects);
     } else {
         // The draft grows, or refuses a word it cannot hold, so the
         // next list starts at its top.
         effects.add(.{ .replace = skill_completion.edit(draft.bytes, draft.cursor, shown) });
         shown.highlight = 0;
     }
-}
-
-fn openModelPicker(state: *State, effects: *Effects) void {
-    state.picker = .{};
-    state.closePanel();
-    askModels(state, effects);
 }
 
 const StopTarget = struct { reference: Reference, work: Kind };
@@ -2469,8 +2283,6 @@ fn startUpgrade(state: *State) void {
 pub const EnterAction = enum {
     /// Nothing: the composer is frozen, or no task could start now.
     none,
-    /// Saves the model picker's highlighted row as the default.
-    pick_model,
     /// Takes the command list's highlighted entry.
     pick_command,
     /// A blank draft on the New Session row: Enter waits for the task it
@@ -2490,12 +2302,11 @@ pub const EnterAction = enum {
 /// `listed` says a command list is on the screen.
 pub fn enterAction(state: *const State, listed: bool, text: []const u8) EnterAction {
     if (state.inputMode() == .frozen) return .none;
-    if (state.picker != null) return .pick_model;
     if (listed) return .pick_command;
     return textAction(state, text);
 }
 
-/// What `enter` does with `text`, without a picker or a list.
+/// What `enter` does with `text`, without a command list.
 fn textAction(state: *const State, text: []const u8) EnterAction {
     const blank = std.mem.trim(u8, text, " \t\r\n").len == 0;
     // As in a conversation, `//` starts text with one slash.
@@ -2521,7 +2332,7 @@ fn textAction(state: *const State, text: []const u8) EnterAction {
 fn enterWords(action: EnterAction) []const u8 {
     return switch (action) {
         .none, .held => "",
-        .pick_model, .pick_command => "enter pick / esc close",
+        .pick_command => "enter pick / esc close",
         .await_task, .start => "enter start",
         .open_settings, .open_session => "enter open",
         .run => "enter run",
@@ -2530,7 +2341,7 @@ fn enterWords(action: EnterAction) []const u8 {
 
 fn enter(state: *State, text: []const u8, effects: *Effects) error{OutOfMemory}!void {
     switch (textAction(state, text)) {
-        .pick_model, .pick_command => unreachable, // Decided over the draft, never its text.
+        .pick_command => unreachable, // Decided over the draft, never its text.
         .none, .await_task => if (text.len != 0) effects.add(.clear_draft),
         .open_settings => {
             if (text.len != 0) effects.add(.clear_draft);
@@ -2549,7 +2360,7 @@ fn enter(state: *State, text: []const u8, effects: *Effects) error{OutOfMemory}!
         },
         .start => {
             if (!state.request(.start, null)) return;
-            effects.add(.{ .start = .{ .settings = &state.settings, .text = if (text[0] == '/') text[1..] else text, .binding = state.nextBinding(), .local_effort = state.localEffort() } });
+            effects.add(.{ .start = .{ .settings = &state.settings, .text = if (text[0] == '/') text[1..] else text, .binding = state.nextBinding() } });
         },
         .run => try runCommand(state, text, effects),
     }
@@ -2579,7 +2390,6 @@ fn runCommand(state: *State, text: []const u8, effects: *Effects) error{OutOfMem
         },
         .exit => effects.add(.exit),
         .upgrade => startUpgrade(state),
-        .model => unreachable, // The draft-backed picker takes /model before submission.
         .configure => if (configure(state, command.argument)) effects.add(.clear_draft),
         .help => {
             const help: Panel = .help;
@@ -2741,58 +2551,6 @@ fn ranCommand(state: *State, ran: Ran) error{OutOfMemory}!void {
 fn keptOutput(gpa: Allocator, text: []const u8, cut: bool) error{OutOfMemory}![]u8 {
     if (!cut) return gpa.dupe(u8, text);
     return std.fmt.allocPrint(gpa, "{s}\nOutput cut at {d} KiB.", .{ text, max_output_bytes / 1024 });
-}
-
-pub fn pickerWords(draft: []const u8) []const u8 {
-    return if (std.mem.startsWith(u8, draft, "/model")) std.mem.trimStart(u8, draft[6..], " ") else draft;
-}
-
-pub fn pickerDefaults(state: *const State) model_picker.Defaults {
-    const binding = state.nextBinding();
-    return .{
-        .model = binding.model,
-        .provider = std.meta.stringToEnum(Provider, binding.provider orelse ""),
-        .effort = if (state.default) |default| default.effort else null,
-    };
-}
-
-pub fn syncPicker(state: *State, draft: Draft) void {
-    const shown = &state.picker.?;
-    if (shown.edits != null and shown.edits.? == draft.edits and shown.choice != null) return;
-    const previous = shown.choice;
-    const wanted = if (shown.choice) |choice| choice.index(&state.menu) else if (state.nextBinding().model) |id| state.menu.find(id) else null;
-    const words = pickerWords(draft.bytes);
-    const query = model_picker.Query.parse(words);
-    shown.choice = model_picker_view.select(&state.menu, words, pickerDefaults(state), wanted);
-    if (previous) |old| if (shown.choice) |current| {
-        var kept = model_picker_view.retain(current, old);
-        if (query.effort != null and query.effort != shown.query_effort) kept.row.effort = current.row.effort;
-        if (query.provider != null and query.provider != shown.query_provider) kept.row.provider = current.row.provider;
-        shown.choice = kept;
-    };
-    shown.query_effort = query.effort;
-    shown.query_provider = query.provider;
-    shown.edits = draft.edits;
-}
-
-/// Enter saves the highlighted model, sign-in and effort together.
-fn pick(state: *State, effects: *Effects) void {
-    const picker = &state.picker.?;
-    const choice = picker.choice orelse return;
-    var binding: Default = .{ .provider = choice.row.provider, .model = .{ .len = 0 }, .effort = choice.row.effort };
-    binding.model.set(choice.id.slice()) catch unreachable;
-    state.default = binding;
-    state.default_sign_in_shown = choice.row.providers.count() > 1;
-    // The pick is newer than what /configure holds for the next Session.
-    var kept: StartSettings = .{};
-    inline for (start_options, 0..) |name, option| if (comptime !std.mem.eql(u8, name, "provider") and !std.mem.eql(u8, name, "model")) {
-        if (state.settings.get(option)) |value| kept.put(option, value) catch unreachable;
-    };
-    state.settings = kept;
-    state.save.wanted = binding;
-    state.closePicker();
-    effects.add(.clear_draft);
-    startSave(state, effects);
 }
 
 const configure_usage = blk: {
@@ -3105,7 +2863,7 @@ const unicode_glyphs: Glyphs = .{ .prompt = "›", .dot = work_line.glyphs.get(.
 const ascii_glyphs: Glyphs = .{ .prompt = ">", .dot = work_line.glyphs.get(.ascii).dot, .rule = "-", .ellipsis = work_line.glyphs.get(.ascii).ellipsis, .arrows = "^v", .sides = "<>", .up = "^", .down = "v", .newline = "|" };
 
 /// Where App's rows go: any provider band from row 0, the list (or the
-/// panel or picker in its place), the pinned Settings tail, any Host line,
+/// panel in its place), the pinned Settings tail, any Host line,
 /// then the input area. The core reads it to know what shows, and the
 /// overview's widgets draw by it.
 pub const Layout = struct {
@@ -3163,7 +2921,7 @@ fn topRows(state: *const State) usize {
 /// types a command, after the latest frame's; null for any other draft or
 /// when nothing matches. The next Session's model offers its efforts.
 pub fn nextCommands(state: *State, draft: Draft) ?slash_commands.Shown {
-    if (state.inputMode() != .compose or state.picker != null) return null;
+    if (state.inputMode() != .compose) return null;
     const held = state.heldEffort();
     const context: slash_commands.Context = .{
         .model = state.nextBinding().model,
@@ -3649,8 +3407,7 @@ pub fn listSegments(arena: Allocator, state: *const State, item: Item, width: u1
 pub fn footerRight(state: *const State, draft: Draft) []const u8 {
     const listed = if (state.commands) |shown| shown.seen != .closed else false;
     const action = enterAction(state, listed, draft.bytes);
-    // Esc closes the picker first (`compose`).
-    if (action != .pick_model and state.upgrade.takesEscape()) return "esc cancels";
+    if (state.upgrade.takesEscape()) return "esc cancels";
     return enterWords(action);
 }
 
@@ -3677,7 +3434,7 @@ pub fn factsSegments(arena: Allocator, state: *const State, width: u16, caps: Ca
     return segmentsOf(arena, try built.finish(), width, plain(caps, facts_style));
 }
 
-/// A panel or model picker supplies its own rows instead of Session groups.
+/// A panel supplies its own rows instead of Session groups.
 /// A panel's rows in the list's place, as many as `layout` gives the
 /// list; null while no panel shows.
 pub fn panelItems(arena: Allocator, state: *const State, width: u16, caps: Caps) error{OutOfMemory}!?[]const ListRow {
@@ -3946,10 +3703,6 @@ fn expectEffects(expected: []const Effect, actual: Effects) !void {
             .archive => |request| {
                 try std.testing.expectEqualStrings(&request.reference, &got.archive.reference);
                 try std.testing.expectEqual(request.archived, got.archive.archived);
-            },
-            .save_default => |binding| {
-                try std.testing.expectEqual(binding.provider, got.save_default.provider);
-                try std.testing.expectEqualStrings(binding.model.slice(), got.save_default.model.slice());
             },
             .replace => |change| {
                 try std.testing.expectEqual(change.start, got.replace.start);
@@ -4496,15 +4249,6 @@ test "a needs-you row reads its waiting Action's command once, and again only wh
     try std.testing.expectEqual(@as(u64, 43), returned.?.items[0].action);
 }
 
-/// The rows the picker tests open on: work, ends and an approval.
-const picker_rows = [_]Listed{
-    session("s0rt00", .{ .working = ago(0) }, .{ .label = "Started just now" }),
-    session("f1n1sh", .{ .finished = ago(1) }, .{ .label = "Finished a second ago" }),
-    session("a5k1ng", .{ .approval = ago(2) }, .{ .label = "Asked two seconds ago" }),
-    session("f4iled", .{ .failed = .{ .since = test_now_s - 3, .code = bounded(session_work.max_code_bytes, "provider_error"), .resets_at = null } }, .{ .label = "Failed three seconds ago" }),
-    session("w0rk00", .{ .working = ago(40) }, .{ .label = "Working a while" }),
-};
-
 /// Your Sessions at work and waiting, beside others' work and ends.
 const spinning = [_]Listed{
     session("y0urs1", .{ .working = ago(40) }, .{ .label = "Mine, thinking", .yours = true }),
@@ -4835,10 +4579,10 @@ test "typing / lists the overview's commands between the rule and the draft, as 
     defer state.deinit();
     // App's palette draws the list (Overview's tests); the core keeps it.
     _ = try typeText(&state, "/");
-    try std.testing.expectEqual(@as(usize, 10), state.commands.?.list.shown().len);
+    try std.testing.expectEqual(@as(usize, 9), state.commands.?.list.shown().len);
     // Typing narrows the list; Tab completes the one left.
-    _ = try typeText(&state, "/m");
-    try std.testing.expectEqualStrings("odel", state.commands.?.list.completion(0));
+    _ = try typeText(&state, "/r");
+    try std.testing.expectEqualStrings("ename ", state.commands.?.list.completion(0));
     _ = try typeText(&state, "/c");
     try std.testing.expectEqualStrings("onfigure ", state.commands.?.list.completion(0));
     // No list for text, `//`, a word past its command, or a name no command
@@ -4848,9 +4592,6 @@ test "typing / lists the overview's commands between the rule and the draft, as 
         _ = try typeText(&state, text);
         try std.testing.expect(state.commands == null);
     }
-    const model: Draft = .{ .bytes = "/model ", .cursor = 7, .edits = test_edits +% 1 };
-    try expectEffects(&.{.list_models}, try step(&state, .{ .composed = .{ .input = .{ .composer = .redraw }, .draft = model } }));
-    try std.testing.expect(state.picker != null);
 }
 
 test "Enter takes a row only from a list the latest frame drew, and a long line still runs" {
@@ -4881,9 +4622,9 @@ test "a key on a draft changed since the latest frame acts on that draft's list 
     const typed: Draft = .{ .bytes = "/ex", .cursor = 3, .edits = drawn.edits +% 1 };
     try expectEffects(&.{}, try step(&state, .{ .composed = .{ .input = .{ .composer = .append }, .draft = typed } }));
     try expectEffects(&.{.exit}, try submit(&state, typed));
-    // The frame drew `/m`'s list; Backspace leaves `/`, whose list Down
+    // The frame drew `/r`'s list; Backspace leaves `/`, whose list Down
     // moves through, the selected Session kept.
-    const model = try typeText(&state, "/m");
+    const model = try typeText(&state, "/r");
     const erased: Draft = .{ .bytes = "/", .cursor = 1, .edits = model.edits +% 1 };
     try expectEffects(&.{}, try step(&state, .{ .composed = .{ .input = .{ .composer = .redraw }, .draft = erased } }));
     const selected = state.selected;
@@ -4941,7 +4682,7 @@ test "Esc closes a shown command list and keeps the draft; a change opens it aga
     var state = try opened(&mixed);
     defer state.deinit();
     try expectEffects(&.{}, try step(&state, .{ .resized = .{ .width = 80, .height = 24 } }));
-    var draft: Draft = .{ .bytes = "/m", .cursor = 2, .edits = 2 };
+    var draft: Draft = .{ .bytes = "/r", .cursor = 2, .edits = 2 };
     try expectEffects(&.{}, try step(&state, .{ .composed = .{ .input = .{ .composer = .redraw }, .draft = draft } }));
     drawWithRoom(&state, draft);
     try std.testing.expectEqual(.drawn, state.commands.?.seen);
@@ -4953,7 +4694,7 @@ test "Esc closes a shown command list and keeps the draft; a change opens it aga
     try std.testing.expectEqual(.closed, state.commands.?.seen);
     try expectEffects(&.{.clear_draft}, try press(&state, draft, .clear));
     // An edit opens it again.
-    draft = .{ .bytes = "/mo", .cursor = 3, .edits = 3 };
+    draft = .{ .bytes = "/re", .cursor = 3, .edits = 3 };
     drawWithRoom(&state, draft);
     try std.testing.expectEqual(.drawn, state.commands.?.seen);
     // The hint says what Enter does to each slash draft.
@@ -5495,7 +5236,7 @@ test "overview settings and New Session clicks follow Enter and draft rules" {
         try std.testing.expectEqual(null, state.notice);
     }
     const draft = try typeText(&state, "start from Settings");
-    try expectEffects(&.{.{ .start = .{ .text = draft.bytes, .settings = &state.settings, .binding = state.nextBinding(), .local_effort = state.localEffort() } }}, try submit(&state, draft));
+    try expectEffects(&.{.{ .start = .{ .text = draft.bytes, .settings = &state.settings, .binding = state.nextBinding() } }}, try submit(&state, draft));
 }
 
 test "overview list items are New Session then all Sessions, with no trailing item" {
@@ -5926,590 +5667,6 @@ test "the skin follows the terminal's background, night when it gave none" {
     try std.testing.expectEqual(Skin.night, (Caps{ .background = .{ 0, 0, 255 } }).skin());
 }
 
-/// Answers the picker's model-list read with the menu of `lists`.
-fn answerModels(state: *State, lists: []const model_list.Entry) !void {
-    try expectEffects(&.{}, try step(state, .{ .models = .{ .menu = try model_picker.testMenu(lists) } }));
-}
-
-/// Types /model and answers its model-list read with `lists`.
-fn openPicker(state: *State, lists: []const model_list.Entry) !void {
-    test_edits +%= 1;
-    const draft: Draft = .{ .bytes = "/model", .cursor = 6, .edits = test_edits };
-    try expectEffects(&.{.list_models}, try step(state, .{ .composed = .{ .input = .{ .composer = .redraw }, .draft = draft } }));
-    try answerModels(state, lists);
-}
-
-/// An overview on a 60 by 24 screen with `default`.
-fn pickerState(default: ?Default) !State {
-    var state = try opened(&picker_rows);
-    state.default = default;
-    try expectEffects(&.{}, try step(&state, .{ .resized = .{ .width = 60, .height = 24 } }));
-    return state;
-}
-
-fn highlightModel(state: *State, draft: Draft, model: []const u8) !void {
-    const index = state.menu.find(model) orelse return error.TestModelNotOffered;
-    try expectEffects(&.{}, try step(state, .{ .picker_action = .{ .draft = draft, .action = .{ .select = index } } }));
-}
-
-// A bounded menu for navigation tests; catalog-list coverage belongs to model_list.
-const chatgpt: model_list.Entry = .{ .provider = .codex, .list = .{ .live = .{ .bytes = "gpt-6-luna\ngpt-6.1-sol\ngpt-6.1-terra\ngpt-6-sol\ngpt-6-astra\ngpt-5.6-sol\ngpt-5.6-terra\ngpt-5.6-luna\ngpt-5.5\n" } } };
-const both = [_]model_list.Entry{ chatgpt, .{ .provider = .openai, .list = .{ .live = .{ .bytes = "gpt-6-luna\ngpt-5.5\nunlisted-a\nunlisted-z\n" } } } };
-
-test "/model filters and saves a model with its effort" {
-    var state = try pickerState(Default.of("codex", "gpt-6.1-sol"));
-    defer state.deinit();
-    try openPicker(&state, &.{chatgpt});
-    const draft = try typeText(&state, "/model gpt-6-luna high");
-    const effects = try submit(&state, draft);
-    try std.testing.expectEqual(@as(usize, 2), effects.len);
-    try std.testing.expectEqualStrings("gpt-6-luna", effects.items[1].save_default.model.slice());
-    try std.testing.expectEqual(@as(?ReasoningEffort, .high), effects.items[1].save_default.effort);
-    try std.testing.expect(state.picker == null and state.menu.entries.len == 0);
-    try std.testing.expectEqualStrings("gpt-6-luna", state.default.?.model.slice());
-    try std.testing.expectEqual(Provider.codex, state.default.?.provider);
-}
-
-test "/model retains selected row and effort when a pending list refreshes" {
-    var state = try pickerState(Default.of("codex", "gpt-6.1-sol"));
-    defer state.deinit();
-    try openPicker(&state, &.{ chatgpt, .{ .provider = .openai, .list = .pending } });
-    const draft = try typeText(&state, "/model gpt-6-luna");
-    _ = try step(&state, .{ .picker_action = .{ .action = .higher_effort, .draft = draft } });
-    const chosen = state.picker.?.choice.?;
-    const expected = chosen.row.effort;
-    try answerModels(&state, &both);
-    try std.testing.expectEqual(true, state.picker.?.choice != null);
-    const refreshed = state.picker.?.choice.?;
-    try std.testing.expectEqualStrings("gpt-6-luna", refreshed.id.slice());
-    try std.testing.expectEqual(expected, refreshed.row.effort);
-    const effects = try submit(&state, draft);
-    try std.testing.expectEqual(expected, effects.items[1].save_default.effort);
-}
-
-test "/model reconciles owned choices across absent listed and changed sign-ins" {
-    const id = "private-refresh";
-    const Scenario = struct {
-        served: model_picker.Providers,
-        listed: model_picker.Providers,
-        provider: Provider,
-    };
-    const all: model_picker.Providers = .initMany(&.{ .codex, .openai });
-    const scenarios = [_]Scenario{
-        .{ .served = all, .listed = .empty, .provider = .openai },
-        .{ .served = .initOne(.codex), .listed = .empty, .provider = .codex },
-        .{ .served = .initOne(.openai), .listed = .empty, .provider = .openai },
-        .{ .served = all, .listed = all, .provider = .openai },
-        .{ .served = .initOne(.codex), .listed = .initOne(.codex), .provider = .codex },
-        .{ .served = .initOne(.openai), .listed = .initOne(.openai), .provider = .openai },
-        .{ .served = all, .listed = .initOne(.codex), .provider = .codex },
-        .{ .served = all, .listed = .initOne(.openai), .provider = .openai },
-    };
-    for ([_]bool{ false, true }) |initially_listed| {
-        for (scenarios) |scenario| {
-            var state = try pickerState(Default.of("codex", "gpt-6.1-sol"));
-            defer state.deinit();
-            state.default.?.effort = .low;
-            var initial: [2]model_list.Entry = undefined;
-            for (std.enums.values(Provider), &initial) |provider, *entry| entry.* = .{
-                .provider = provider,
-                .list = .{ .live = .{ .bytes = if (initially_listed) "first-chat\nprivate-refresh\n" else "first-chat\n" } },
-            };
-            try openPicker(&state, &initial);
-            const draft = try typeText(&state, "/model " ++ id);
-            _ = try step(&state, .{ .picker_action = .{ .action = .higher_effort, .draft = draft } });
-            _ = try step(&state, .{ .picker_action = .{ .action = .next_sign_in, .draft = draft } });
-            try std.testing.expectEqual(ReasoningEffort.medium, state.picker.?.choice.?.row.effort.?);
-            try std.testing.expectEqual(Provider.openai, state.picker.?.choice.?.row.provider);
-            var refreshed_lists: [2]model_list.Entry = undefined;
-            var count: usize = 0;
-            var served = scenario.served.iterator();
-            while (served.next()) |provider| {
-                refreshed_lists[count] = .{
-                    .provider = provider,
-                    .list = .{ .live = .{ .bytes = if (scenario.listed.contains(provider)) "private-refresh\nz-other-chat\n" else "z-other-chat\n" } },
-                };
-                count += 1;
-            }
-            try answerModels(&state, refreshed_lists[0..count]);
-            syncPicker(&state, draft);
-            // The next-frame reconciliation and cached frames keep controls
-            // while this ID remains the choice, whether listed or typed.
-            for (0..2) |_| {
-                try std.testing.expectEqual(true, state.picker.?.choice != null);
-                const choice = state.picker.?.choice.?;
-                try std.testing.expectEqualStrings(id, choice.id.slice());
-                try std.testing.expectEqual(ReasoningEffort.medium, choice.row.effort.?);
-                try std.testing.expectEqual(scenario.provider, choice.row.provider);
-                try std.testing.expectEqual(if (scenario.listed.count() == 0) scenario.served else scenario.listed, choice.row.providers);
-                var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-                defer arena.deinit();
-                const plan = try model_picker_view.rows(arena.allocator(), &state.menu, pickerWords(draft.bytes), pickerDefaults(&state), choice, 100, .unicode, true, .read);
-                const line = try plan.row(arena.allocator(), plan.selected.?);
-                try std.testing.expectEqual(state.menu.find(id) orelse state.menu.entries.len, line.model.?);
-                try std.testing.expect(std.mem.indexOf(u8, line.text, id) != null);
-                try std.testing.expect(std.mem.indexOf(u8, line.text, "‹ medium ›") != null);
-                syncPicker(&state, draft);
-            }
-            const effects = try submit(&state, draft);
-            const saved = effects.items[1].save_default;
-            try std.testing.expectEqualStrings(id, saved.model.slice());
-            try std.testing.expectEqual(ReasoningEffort.medium, saved.effort.?);
-            try std.testing.expectEqual(scenario.provider, saved.provider);
-        }
-    }
-}
-
-test "/model pending typed choices yield only to listed matches after a menu reply" {
-    const Case = struct { models: []const u8, matches: usize };
-    const cases = [_]Case{
-        .{ .models = "unrelated-chat\n", .matches = 0 },
-        .{ .models = "gpt-6-luna\n", .matches = 1 },
-        .{ .models = "gpt-5.6-luna\ngpt-6-luna\n", .matches = 2 },
-    };
-    for ([_]bool{ false, true }) |saved_matches| {
-        for (cases) |case| {
-            var state = try pickerState(Default.of("codex", if (saved_matches) "gpt-6-luna" else "gpt-5.5"));
-            defer state.deinit();
-            state.default.?.effort = .medium;
-            try openPicker(&state, &.{
-                .{ .provider = .codex, .list = .{ .live = .{ .bytes = "unrelated-chat\n" } } },
-                .{ .provider = .openai, .list = .{ .live = .{ .bytes = "unrelated-chat\n" } } },
-            });
-            const draft = try typeText(&state, "/model luna");
-            _ = try step(&state, .{ .picker_action = .{ .action = .higher_effort, .draft = draft } });
-            _ = try step(&state, .{ .picker_action = .{ .action = .next_sign_in, .draft = draft } });
-            try std.testing.expectEqualStrings("luna", state.picker.?.choice.?.id.slice());
-            try std.testing.expectEqual(ReasoningEffort.high, state.picker.?.choice.?.row.effort.?);
-            try std.testing.expectEqual(Provider.openai, state.picker.?.choice.?.row.provider);
-            try answerModels(&state, &.{
-                .{ .provider = .codex, .list = .{ .live = .{ .bytes = case.models } } },
-                .{ .provider = .openai, .list = .{ .live = .{ .bytes = case.models } } },
-            });
-            // Even an unreconciled owned choice cannot add a synthetic row
-            // beside matching entries. Exercise both locales and fixture widths.
-            for ([_]bool{ false, true }) |use_unicode| {
-                for ([_]usize{ 50, 80 }) |width| {
-                    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-                    defer arena.deinit();
-                    const plan = try model_picker_view.rows(arena.allocator(), &state.menu, "luna", pickerDefaults(&state), state.picker.?.choice, width, .unicode, use_unicode, .read);
-                    try std.testing.expectEqual(@max(@as(usize, 1), case.matches), plan.count);
-                    try std.testing.expectEqual(case.matches == 0, plan.typed_row);
-                    for (0..plan.count) |at| {
-                        const line = try plan.row(arena.allocator(), at);
-                        try std.testing.expectEqual(case.matches == 0, line.model.? == state.menu.entries.len);
-                    }
-                }
-            }
-            // No draft edit occurs: the model reply itself must invalidate
-            // cached selection and reconcile it against the current query.
-            syncPicker(&state, draft);
-            const expected = if (case.matches == 0) "luna" else if (case.matches == 1 or saved_matches) "gpt-6-luna" else "gpt-5.6-luna";
-            try std.testing.expectEqualStrings(expected, state.picker.?.choice.?.id.slice());
-            try std.testing.expectEqual(if (case.matches == 0) ReasoningEffort.high else .medium, state.picker.?.choice.?.row.effort.?);
-            try std.testing.expectEqual(if (case.matches == 0) Provider.openai else .codex, state.picker.?.choice.?.row.provider);
-            // Down moves among listed matches, with no extra typed stop.
-            _ = try step(&state, .{ .picker_action = .{ .action = .next, .draft = draft } });
-            const final_id = if (case.matches == 0) "luna" else "gpt-6-luna";
-            try std.testing.expectEqualStrings(final_id, state.picker.?.choice.?.id.slice());
-            const effects = try submit(&state, draft);
-            const saved = effects.items[1].save_default;
-            try std.testing.expectEqualStrings(final_id, saved.model.slice());
-            try std.testing.expectEqual(if (case.matches == 0) ReasoningEffort.high else .medium, saved.effort.?);
-            try std.testing.expectEqual(if (case.matches == 0) Provider.openai else .codex, saved.provider);
-        }
-    }
-}
-
-test "/model keeps adjusted controls after a whitespace edit" {
-    var state = try pickerState(Default.of("codex", "gpt-6-luna"));
-    defer state.deinit();
-    try openPicker(&state, &both);
-    var draft = try typeText(&state, "/model gpt-6-luna");
-    _ = try step(&state, .{ .picker_action = .{ .action = .higher_effort, .draft = draft } });
-    _ = try step(&state, .{ .picker_action = .{ .action = .next_sign_in, .draft = draft } });
-    const adjusted = state.picker.?.choice.?.row;
-    try std.testing.expect(adjusted.effort != null);
-    try std.testing.expectEqual(Provider.openai, adjusted.provider);
-    draft = try typeText(&state, "/model gpt-6-luna ");
-    const effects = try submit(&state, draft);
-    try std.testing.expectEqual(adjusted.effort, effects.items[1].save_default.effort);
-    try std.testing.expectEqual(adjusted.provider, effects.items[1].save_default.provider);
-}
-
-test "/model explicit effort overrides an adjusted control" {
-    var state = try pickerState(Default.of("codex", "gpt-6-luna"));
-    defer state.deinit();
-    try openPicker(&state, &both);
-    var draft = try typeText(&state, "/model gpt-6-luna");
-    _ = try step(&state, .{ .picker_action = .{ .action = .higher_effort, .draft = draft } });
-    _ = try step(&state, .{ .picker_action = .{ .action = .next_sign_in, .draft = draft } });
-    try std.testing.expectEqual(@as(?ReasoningEffort, .medium), state.picker.?.choice.?.row.effort);
-    draft = try typeText(&state, "/model gpt-6-luna high");
-    const effects = try submit(&state, draft);
-    try std.testing.expectEqual(@as(?ReasoningEffort, .high), effects.items[1].save_default.effort);
-    try std.testing.expectEqual(Provider.openai, effects.items[1].save_default.provider);
-}
-
-test "/model explicit sign-in overrides an adjusted control" {
-    var state = try pickerState(Default.of("codex", "gpt-6-luna"));
-    defer state.deinit();
-    try openPicker(&state, &both);
-    var draft = try typeText(&state, "/model gpt-6-luna");
-    _ = try step(&state, .{ .picker_action = .{ .action = .higher_effort, .draft = draft } });
-    _ = try step(&state, .{ .picker_action = .{ .action = .next_sign_in, .draft = draft } });
-    draft = try typeText(&state, "/model gpt-6-luna chatgpt");
-    const effects = try submit(&state, draft);
-    try std.testing.expectEqual(@as(?ReasoningEffort, .medium), effects.items[1].save_default.effort);
-    try std.testing.expectEqual(Provider.codex, effects.items[1].save_default.provider);
-}
-
-test "with both sign-ins, one Enter saves the selected sign-in and Escape closes the picker" {
-    var state = try pickerState(Default.of("openai", "gpt-6-luna"));
-    defer state.deinit();
-    try openPicker(&state, &both);
-    const draft = try typeText(&state, "/model gpt-6-luna api");
-    const effects = try submit(&state, draft);
-    try std.testing.expectEqual(@as(usize, 2), effects.len);
-    try std.testing.expectEqual(Provider.openai, effects.items[1].save_default.provider);
-    try std.testing.expectEqualStrings("gpt-6-luna", effects.items[1].save_default.model.slice());
-    try std.testing.expect(state.picker == null);
-    try openPicker(&state, &both);
-    try expectEffects(&.{.clear_draft}, try press(&state, draft, .clear));
-    try std.testing.expect(state.picker == null);
-}
-
-test "a model Rui does not list shows under Other models and is picked like any other" {
-    var state = try pickerState(Default.of("openai", "gpt-6-luna"));
-    defer state.deinit();
-    try openPicker(&state, &both);
-    const draft = try typeText(&state, "/model unlisted-z");
-    try highlightModel(&state, draft, "unlisted-z");
-    const choice = state.picker.?.choice.?;
-    try std.testing.expect(!state.menu.entries[choice.index(&state.menu)].known);
-    const effects = try submit(&state, draft);
-    try std.testing.expectEqual(Provider.openai, effects.items[1].save_default.provider);
-    try std.testing.expectEqualStrings("unlisted-z", effects.items[1].save_default.model.slice());
-}
-
-test "a pick remains selected before its save ends and refresh preserves matching identity" {
-    var state = try pickerState(Default.of("codex", "gpt-6-luna"));
-    defer state.deinit();
-    try openPicker(&state, &.{chatgpt});
-    const picked = try typeText(&state, "/model gpt-5.5");
-    const effects = try submit(&state, picked);
-    try std.testing.expectEqualStrings("gpt-5.5", effects.items[1].save_default.model.slice());
-    const running = state.save.running.?;
-    try openPicker(&state, &.{chatgpt});
-    const draft = try typeText(&state, "/model");
-    try std.testing.expectEqualStrings("gpt-5.5", state.picker.?.choice.?.id.slice());
-    try highlightModel(&state, draft, "gpt-6.1-sol");
-    try expectEffects(&.{}, try step(&state, .{ .saved = .{ .ended = .{ .binding = running, .outcome = .done } } }));
-    try std.testing.expectEqualStrings("gpt-6.1-sol", state.picker.?.choice.?.id.slice());
-    try answerModels(&state, &.{.{ .provider = .openai, .list = .{ .live = .{ .bytes = "gpt-6-sol\ngpt-6.1-sol\n" } } }});
-    try std.testing.expectEqualStrings("gpt-6.1-sol", state.picker.?.choice.?.id.slice());
-    try answerModels(&state, &.{.{ .provider = .openai, .list = .{ .live = .{ .bytes = "gpt-5.5\n" } } }});
-    syncPicker(&state, draft);
-    try std.testing.expectEqualStrings("gpt-5.5", state.picker.?.choice.?.id.slice());
-}
-
-test "a start submitted before the pick's save ends runs on the pick" {
-    var state = try pickerState(Default.of("codex", "gpt-6.1-sol"));
-    defer state.deinit();
-    try openPicker(&state, &.{chatgpt});
-    var draft = try typeText(&state, "/model gpt-6-luna high");
-    const pick_effects = try submit(&state, draft);
-    try std.testing.expectEqual(@as(usize, 2), pick_effects.len);
-    try std.testing.expectEqualStrings("gpt-6-luna", pick_effects.items[1].save_default.model.slice());
-    // The save is left unanswered.
-    draft = try typeText(&state, "Try");
-    const effects = try submit(&state, draft);
-    try std.testing.expectEqual(@as(usize, 1), effects.len);
-    const binding = effects.slice()[0].start.binding;
-    try std.testing.expectEqualStrings("codex", binding.provider.?);
-    try std.testing.expectEqualStrings("gpt-6-luna", binding.model.?);
-    try std.testing.expectEqual(@as(?ReasoningEffort, .high), effects.slice()[0].start.local_effort.?.value);
-}
-
-test "picks made during one save are saved after it, only the newest" {
-    var state = try pickerState(Default.of("codex", "gpt-6-luna"));
-    defer state.deinit();
-    try openPicker(&state, &.{chatgpt});
-    const first = try submit(&state, try typeText(&state, "/model gpt-5.5"));
-    try std.testing.expectEqualStrings("gpt-5.5", first.items[1].save_default.model.slice());
-    const running = state.save.running.?;
-    // Two more picks while it runs: neither is refused, and neither saves yet.
-    for ([_][]const u8{ "gpt-6-luna", "gpt-6.1-sol" }) |model| {
-        try openPicker(&state, &.{chatgpt});
-        var input: [64]u8 = undefined;
-        const draft = try typeText(&state, try std.fmt.bufPrint(&input, "/model {s}", .{model}));
-        try expectEffects(&.{.clear_draft}, try submit(&state, draft));
-        try std.testing.expectEqualStrings(model, state.default.?.model.slice());
-        try std.testing.expect(state.notice == null);
-    }
-    // The first save ends: the newest pick is saved next, and the overview
-    // does not claim the first one stands.
-    const next = try step(&state, .{ .saved = .{ .ended = .{ .binding = running, .outcome = .done } } });
-    try std.testing.expectEqual(@as(usize, 1), next.len);
-    try std.testing.expectEqualStrings("gpt-6.1-sol", next.items[0].save_default.model.slice());
-    try std.testing.expect(state.notice == null);
-    try expectEffects(&.{}, try step(&state, .{ .saved = .{ .ended = .{ .binding = state.save.running.?, .outcome = .done } } }));
-    try std.testing.expect(state.notice == null);
-}
-
-test "every pick is saved, even of the default the overview opened on, and an untouched overview saves nothing" {
-    var state = try pickerState(Default.of("codex", "gpt-6-luna"));
-    defer state.deinit();
-    try std.testing.expect(state.save.wanted == null and state.save.running == null);
-    for (0..2) |_| {
-        try openPicker(&state, &.{chatgpt});
-        const effects = try submit(&state, try typeText(&state, "/model gpt-6-luna"));
-        try std.testing.expectEqual(@as(usize, 2), effects.len);
-        try std.testing.expectEqualStrings("gpt-6-luna", effects.items[1].save_default.model.slice());
-        try expectEffects(&.{}, try step(&state, .{ .saved = .{ .ended = .{ .binding = state.save.running.?, .outcome = .done } } }));
-    }
-}
-
-test "a failed save is not retried, but picking the same model again saves it" {
-    var state = try pickerState(Default.of("codex", "gpt-6-luna"));
-    defer state.deinit();
-    try openPicker(&state, &.{chatgpt});
-    const first = try submit(&state, try typeText(&state, "/model gpt-5.5"));
-    try std.testing.expectEqualStrings("gpt-5.5", first.items[1].save_default.model.slice());
-    try expectEffects(&.{}, try step(&state, .{ .saved = .{ .ended = .{ .binding = state.save.running.?, .outcome = .{ .failed = null } } } }));
-    try std.testing.expect(std.mem.indexOf(u8, state.notice.?.text(), "not saved") != null);
-    try openPicker(&state, &.{chatgpt});
-    const second = try submit(&state, try typeText(&state, "/model gpt-5.5"));
-    try std.testing.expectEqualStrings("gpt-5.5", second.items[1].save_default.model.slice());
-    try expectEffects(&.{}, try step(&state, .{ .saved = .{ .ended = .{ .binding = state.save.running.?, .outcome = .done } } }));
-    try std.testing.expect(state.notice == null);
-}
-
-test "a defaults write that was no pick moves the default only when no pick is on its way, and is admitted in pick order" {
-    const written = Default.of("codex", "gpt-6.1-sol").?;
-    const Picks = enum { none, running, waiting };
-    for (std.enums.values(Picks)) |picks| {
-        for ([_]?Default{ null, written }) |saved| {
-            var state = try pickerState(Default.of("codex", "gpt-6-luna"));
-            defer state.deinit();
-            if (picks != .none) {
-                try openPicker(&state, &.{chatgpt});
-                _ = try submit(&state, try typeText(&state, "/model gpt-5.5"));
-                try std.testing.expect(state.save.running != null);
-            }
-            if (picks == .waiting) {
-                try openPicker(&state, &.{chatgpt});
-                _ = try submit(&state, try typeText(&state, "/model gpt-6-luna"));
-                try std.testing.expect(state.save.wanted != null);
-            }
-            // Only a pick outside the shell's queue could be written after a
-            // newer edit.
-            try std.testing.expectEqual(picks != .waiting, admitsDefaultsEdit(&state));
-            const before = state.default.?;
-            try expectEffects(&.{}, try step(&state, .{ .defaults_saved = saved }));
-            const expected = if (picks == .none) saved orelse before else before;
-            try std.testing.expect(expected.eql(&state.default.?));
-        }
-    }
-    var held = try pickerState(Default.of("codex", "gpt-6-luna"));
-    defer held.deinit();
-    try expectEffects(&.{}, try step(&held, .start_upgrade));
-    try std.testing.expect(held.upgrade.run.? == .checking);
-    try std.testing.expect(!admitsDefaultsEdit(&held));
-    var left = try pickerState(Default.of("codex", "gpt-6-luna"));
-    defer left.deinit();
-    _ = try step(&left, .leave);
-    try std.testing.expect(!admitsDefaultsEdit(&left));
-}
-
-test "the lines that name the next Session's model name the saved effort its start applies" {
-    // gpt-6-luna offers max and gpt-5.5 does not. An effort /configure
-    // holds, `default` included, keeps the saved one from the next start,
-    // but not from launches after this overview.
-    const Case = struct { model: []const u8, held: ?[]const u8 = null, saved: ?ReasoningEffort, later: []const u8 };
-    const cases = [_]Case{
-        .{ .model = "gpt-6-luna", .saved = .max, .later = " · max" },
-        .{ .model = "gpt-6-luna", .saved = null, .later = "" },
-        .{ .model = "gpt-5.5", .saved = .max, .later = "" },
-        .{ .model = "gpt-6-luna", .held = "low", .saved = .max, .later = " · max" },
-        .{ .model = "gpt-6-luna", .held = "default", .saved = .max, .later = " · max" },
-    };
-    for (cases) |case| for ([_]Saved{ .done, .{ .failed = null }, .unconfirmed }) |outcome| {
-        var state = try pickerState(Default.of("codex", case.model));
-        defer state.deinit();
-        var line: [64]u8 = undefined;
-        if (case.held) |held| try expectEffects(&.{.clear_draft}, try submit(&state, try typeText(&state, try std.fmt.bufPrint(&line, "/configure --reasoning-effort {s}", .{held}))));
-        try openPicker(&state, &.{chatgpt});
-        const effects = try submit(&state, try typeText(&state, try std.fmt.bufPrint(&line, "/model {s}", .{case.model})));
-        try std.testing.expectEqualStrings(case.model, effects.items[1].save_default.model.slice());
-        var ended: Event = .{ .saved = .{ .ended = .{ .binding = state.save.running.?, .outcome = outcome } } };
-        ended.saved.saved_effort = case.saved;
-        // Each outcome but `unconfirmed` is said on screen, the one after
-        // leaving on the way out.
-        if (outcome == .unconfirmed) _ = try step(&state, .leave);
-        try expectEffects(&.{}, try step(&state, ended));
-        var expected: [160]u8 = undefined;
-        switch (outcome) {
-            .done => try std.testing.expect(state.notice == null),
-            .failed => {
-                const next = if (case.held == null) " · low" else "";
-                try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "Default not saved (check ~/.config/rui/preferences); new Sessions here still use {s}{s} · ChatGPT", .{ case.model, next }), state.notice.?.text());
-            },
-            .unconfirmed => {
-                var departure: std.Io.Writer.Allocating = .init(std.testing.allocator);
-                defer departure.deinit();
-                try writeDeparture(&state, case.saved, &departure.writer);
-                try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "rui: New Sessions use {s}{s} · ChatGPT; durability unconfirmed, inspect ~/.config/rui/preferences.\n", .{ case.model, case.later }), departure.written());
-            },
-        }
-    };
-}
-
-test "a loading list is read again with the next listing, and a failed read keeps the list under a note" {
-    var state = try pickerState(Default.of("openai", "gpt-6-luna"));
-    defer state.deinit();
-    try openPicker(&state, &.{.{ .provider = .openai, .list = .pending }});
-    // The next listing asks for the lists again, once.
-    const asked = try step(&state, .{ .tick = state.now_ms + list_interval_ms });
-    try expectEffects(&.{ .{ .list = testToken(1) }, .list_models }, asked);
-    try answerModels(&state, &.{.{ .provider = .openai, .list = .catalog_fallback }});
-    const count = state.menu.entries.len;
-    try std.testing.expect(count > 0);
-    for ([_]ModelsRead{ .unanswered, .invalid }) |read| {
-        try expectEffects(&.{}, try step(&state, .{ .models = read }));
-        try std.testing.expectEqual(count, state.menu.entries.len);
-        try std.testing.expectEqual(if (read == .unanswered) model_picker_view.Read.unanswered else .invalid, state.menu_read);
-    }
-}
-
-test "picker tag columns admit ids at and beyond the 24-column cap" {
-    for ([_]usize{ 24, model_capability.max_model_bytes }) |length| {
-        var state = try pickerState(null);
-        defer state.deinit();
-        const id: [model_capability.max_model_bytes]u8 = @splat('m');
-        var bytes: [model_capability.max_model_bytes + 1]u8 = undefined;
-        @memcpy(bytes[0..length], id[0..length]);
-        bytes[length] = '\n';
-        try openPicker(&state, &.{.{ .provider = .codex, .list = .{ .live = .{ .bytes = bytes[0 .. length + 1] } } }});
-        try std.testing.expectEqual(length, state.menu.widest);
-        const draft = try typeText(&state, "/model");
-        try highlightModel(&state, draft, id[0..length]);
-        try std.testing.expectEqualStrings(id[0..length], state.picker.?.choice.?.id.slice());
-    }
-}
-
-test "a long model list identifies the highlighted row for the list widget" {
-    var state = try pickerState(null);
-    defer state.deinit();
-    try openPicker(&state, &.{.{ .provider = .codex, .list = .{ .live = .{ .bytes = "gpt-6-luna\ngpt-6.1-sol\ngpt-6-sol\ngpt-6-astra\ngpt-5.6-sol\ngpt-5.6-terra\ngpt-5.6-luna\ngpt-5.5\no1\no2\no3\no4\n" } } }});
-    const draft = try typeText(&state, "/model");
-    try highlightModel(&state, draft, "o4");
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    const rows = try model_picker_view.rows(arena.allocator(), &state.menu, "", pickerDefaults(&state), state.picker.?.choice, 60, .unicode, true, .read);
-    const selected = try rows.row(arena.allocator(), rows.selected.?);
-    try std.testing.expectEqualStrings("o4", state.menu.entries[selected.model.?].id);
-    try std.testing.expect(rows.count > 10);
-}
-
-test "picker retains highlighted model across narrow widths" {
-    var state = try pickerState(null);
-    defer state.deinit();
-    try openPicker(&state, &both);
-    const draft = try typeText(&state, "/model");
-    try highlightModel(&state, draft, "unlisted-z");
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    for ([_]usize{ 10, 20, 40, 60 }) |width| {
-        const rows = try model_picker_view.rows(arena.allocator(), &state.menu, "", pickerDefaults(&state), state.picker.?.choice, width, .unicode, true, .read);
-        const selected = try rows.row(arena.allocator(), rows.selected.?);
-        try std.testing.expectEqualStrings("unlisted-z", state.menu.entries[selected.model.?].id);
-    }
-}
-
-test "Shift-Up and Shift-Down leave hidden Sessions unchanged while picking a model" {
-    var state = try pickerState(Default.of("codex", "gpt-6-luna"));
-    defer state.deinit();
-    try openPicker(&state, &both);
-    const draft = try typeText(&state, "/model");
-    const chosen = state.selected.session;
-    const picker_choice = state.picker.?.choice;
-    try expectEffects(&.{}, try press(&state, draft, .select_next));
-    try expectEffects(&.{}, try press(&state, draft, .select_previous));
-    try std.testing.expectEqualSlices(u8, &chosen, &state.selected.session);
-    try std.testing.expect(std.meta.eql(picker_choice, state.picker.?.choice));
-}
-
-test "with no sign-in served, the picker has no model rows or shell instructions" {
-    var state = try pickerState(null);
-    defer state.deinit();
-    try openPicker(&state, &.{});
-    const draft = try typeText(&state, "/model");
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    const rows = try model_picker_view.rows(arena.allocator(), &state.menu, "", pickerDefaults(&state), state.picker.?.choice, 80, .unicode, true, .read);
-    try std.testing.expectEqual(@as(usize, 0), rows.count);
-    try std.testing.expect(rows.selected == null and state.picker.?.choice == null);
-    const screen = try screenText(&state, 80, 24, .{});
-    defer std.testing.allocator.free(screen);
-    for (std.enums.values(Provider)) |provider| {
-        try std.testing.expect(state.menu.sources.get(provider) == null);
-        try std.testing.expect(std.mem.indexOf(u8, screen, provider.login()) == null);
-    }
-    try expectEffects(&.{}, try submit(&state, draft));
-    try std.testing.expect(state.default == null);
-}
-
-test "a save that ends after the person left is told on the way out" {
-    for ([_]Saved{ .done, .unconfirmed, .{ .failed = null } }) |saved| {
-        var state = try pickerState(null);
-        defer state.deinit();
-        try openPicker(&state, &.{chatgpt});
-        const effects = try submit(&state, try typeText(&state, "/model gpt-6-luna"));
-        try std.testing.expectEqualStrings("gpt-6-luna", effects.items[1].save_default.model.slice());
-        try expectEffects(&.{}, try step(&state, .leave));
-        try expectEffects(&.{}, try step(&state, .{ .saved = .{ .ended = .{ .binding = state.save.running.?, .outcome = saved } } }));
-        var bytes: [max_late_save_bytes]u8 = undefined;
-        var departure = std.Io.Writer.fixed(&bytes);
-        try writeDeparture(&state, null, &departure);
-        try std.testing.expect(std.mem.indexOf(u8, departure.buffered(), "gpt-6-luna") != null);
-    }
-}
-
-test "the unknown-command notice fits a 40-column screen" {
-    var state = try pickerState(null);
-    defer state.deinit();
-    const draft = try typeText(&state, "/status");
-    _ = try submit(&state, draft);
-    const screen = try screenText(&state, 40, 24, .{ .unicode = true });
-    defer std.testing.allocator.free(screen);
-    try std.testing.expect(std.mem.indexOf(u8, screen, "Unknown command") != null);
-    try std.testing.expect(std.mem.endsWith(u8, screen, "enter open"));
-    try std.testing.expectEqualStrings("! Unknown command /status · /help", state.notice.?.text());
-}
-
-test "a start the Host refuses for want of its sign-in names the sign-in and its login" {
-    var state = try pickerState(Default.of("codex", "gpt-6-luna"));
-    defer state.deinit();
-    const draft = try typeText(&state, "Try");
-    _ = try submit(&state, draft);
-    try expectEffects(&.{}, try step(&state, .{ .start = .{ .failed = "model_capability_unavailable" } }));
-    const said = state.notice.?.text();
-    try std.testing.expect(std.mem.indexOf(u8, said, Provider.codex.signIn()) != null);
-    try std.testing.expect(std.mem.indexOf(u8, said, Provider.codex.login()) != null);
-    try std.testing.expect(std.mem.indexOf(u8, said, "model_capability_unavailable") == null);
-}
-
-test "a picker survives a tiny screen" {
-    var state = try pickerState(Default.of("codex", "gpt-6.1-sol"));
-    defer state.deinit();
-    try openPicker(&state, &.{chatgpt});
-    try expectEffects(&.{}, try step(&state, .{ .resized = .{ .width = 1, .height = 1 } }));
-    try std.testing.expect(state.shownPicker() != null);
-    try expectEffects(&.{}, try step(&state, .{ .resized = .{ .width = 60, .height = 24 } }));
-    try std.testing.expect(state.shownPicker() != null);
-}
-
 /// The rows the Sessions' list or a panel takes on an 80 by 24 screen.
 fn listRows(state: *State, draft: Draft) ![]u8 {
     var shown: Frame = try .drafted(state, draft, 80, 24, .{}, 0);
@@ -6548,7 +5705,6 @@ test "/help shows the overview's keys and commands in the Sessions' rows until E
         " /configure [OPTIONS]  hold settings for the next Session",
         " /exit                 leave; Host work continues",
         " /help                 keys and commands",
-        " /model                choose the model new Sessions use",
         " /rename NAME          name the selected Session",
         " /sessions [VIEW]      view Unarchived, Archived or All Sessions",
         " /setup [OPTIONS]      future defaults",
@@ -6726,26 +5882,6 @@ test "a command the person did not see end is named on the way out" {
         try writeDeparture(&state, null, &departure);
         try std.testing.expectEqualStrings(case.expected, departure.buffered());
     }
-}
-
-test "upgrade emits only its local effect and preserves selection settings and unresolved handles" {
-    var state = try pickerState(Default.of("codex", "gpt-6-luna"));
-    defer state.deinit();
-    const selected = state.selected;
-    const configured = try typeText(&state, "/configure --permission-mode ask");
-    _ = try submit(&state, configured);
-    const settings = state.settings;
-    try std.testing.expect(state.request(.stop, selected.session));
-    state.answer(0, .unknown, "01234567-89ab-4cde-8012-0123456789ab");
-    const request = state.requests[0];
-    const draft = try typeText(&state, "/upgrade");
-    try expectEffects(&.{}, try submit(&state, draft));
-    try std.testing.expectEqual(selected, state.selected);
-    try std.testing.expect(std.meta.eql(settings, state.settings));
-    try std.testing.expectEqual(@as(usize, 1), state.request_count);
-    try std.testing.expect(std.meta.eql(request, state.requests[0]));
-    try std.testing.expectEqualStrings("/upgrade", draft.bytes);
-    try std.testing.expect(state.command == null);
 }
 
 test "/upgrade runs inline: Esc cancels it before the draft, checking or preparing, and its end sets the Host hold" {
@@ -6933,23 +6069,6 @@ fn segmentText(arena: Allocator, segments: []const Segment) ![]const u8 {
     var texts = try arena.alloc([]const u8, segments.len);
     for (segments, 0..) |segment, n| texts[n] = segment.text;
     return std.mem.concat(arena, u8, texts);
-}
-
-test "upgrade protocol hold refuses starts opens stops and Host commands but permits local recovery" {
-    var state = try pickerState(Default.of("codex", "gpt-6-luna"));
-    defer state.deinit();
-    state.upgrade.after = .blocked;
-    const selected = state.selected;
-    for ([_][]const u8{ "new model work", "", "/rename new name", "/setup --model gpt-5.5" }) |text| {
-        try expectEffects(&.{}, try submit(&state, try typeText(&state, text)));
-        try std.testing.expectEqual(selected, state.selected);
-        try std.testing.expectEqual(@as(usize, 0), state.request_count);
-        try std.testing.expectEqualStrings(upgrade_recovery, state.notice.?.text());
-    }
-    try expectEffects(&.{}, try press(&state, try typeText(&state, "draft"), .stop));
-    try std.testing.expectEqual(@as(usize, 0), state.request_count);
-    try expectEffects(&.{}, try submit(&state, try typeText(&state, "/upgrade")));
-    try expectEffects(&.{.exit}, try submit(&state, try typeText(&state, "/exit")));
 }
 
 test "archive views remove changed rows outside the server filter and select the nearest Session" {
@@ -7310,21 +6429,6 @@ test "an Upgrade's end lists again at once, whatever it leaves Host intents" {
     }
 }
 
-test "the one-pick model flow leaves typing with the composer" {
-    var state = try opened(&.{});
-    defer state.deinit();
-    try std.testing.expectEqual(Route.edit, state.route(.enter));
-    try std.testing.expectEqual(Route.edit, state.route(.{ .action = .previous }));
-    var picked = try pickerState(Default.of("openai", "gpt-6-luna"));
-    defer picked.deinit();
-    try openPicker(&picked, &both);
-    _ = try typeText(&picked, "/model");
-    try std.testing.expectEqual(Route.edit, picked.route(.enter));
-    try std.testing.expectEqual(Route.edit, picked.route(.left));
-    try std.testing.expectEqual(Route.edit, picked.route(.right));
-    try std.testing.expectEqual(Route.edit, picked.route(.text));
-}
-
 test "while a start waits the composer is frozen" {
     var state = try opened(&.{});
     defer state.deinit();
@@ -7595,9 +6699,9 @@ test "overview single footer keeps the working Enter key for every selection and
 
 test "the Footer names the Enter action submission takes, over every composer state" {
     // How the composer stands before Enter: as typed (a slash draft's list
-    // drawn), its list dismissed with Esc, the model picker open, a start
+    // drawn), its list dismissed with Esc, a start
     // in flight, or Host requests held after an Upgrade (its list dismissed).
-    const Setup = enum { typed, dismissed, picker, frozen, held };
+    const Setup = enum { typed, dismissed, frozen, held };
     const Tag = std.meta.Tag(Effect);
     const k7: Selection = .{ .session = "k7m2qx".* };
     const cases = [_]struct { setup: Setup, selection: Selection = .new_session, draft: []const u8, action: EnterAction, right: []const u8, effects: []const Tag }{
@@ -7618,8 +6722,6 @@ test "the Footer names the Enter action submission takes, over every composer st
         .{ .setup = .dismissed, .draft = "/he", .action = .run, .right = "enter run", .effects = &.{} },
         .{ .setup = .dismissed, .draft = "/exit", .action = .run, .right = "enter run", .effects = &.{.exit} },
         .{ .setup = .typed, .selection = k7, .draft = "/rename NAME", .action = .run, .right = "enter run", .effects = &.{ .clear_draft, .command } },
-        // The model picker saves the highlighted default.
-        .{ .setup = .picker, .draft = "/model gpt-6-luna", .action = .pick_model, .right = "enter pick / esc close", .effects = &.{ .clear_draft, .save_default } },
         // A frozen composer takes no Enter.
         .{ .setup = .frozen, .draft = "a task", .action = .none, .right = "", .effects = &.{} },
         .{ .setup = .frozen, .selection = k7, .draft = "", .action = .none, .right = "", .effects = &.{} },
@@ -7633,13 +6735,12 @@ test "the Footer names the Enter action submission takes, over every composer st
         .{ .setup = .held, .draft = "/exit", .action = .run, .right = "enter run", .effects = &.{.exit} },
     };
     for (cases) |case| {
-        var state = if (case.setup == .picker) try pickerState(Default.of("codex", "gpt-6.1-sol")) else try opened(&mixed);
+        var state = try opened(&mixed);
         defer state.deinit();
         try expectEffects(&.{}, try step(&state, .{ .resized = .{ .width = 80, .height = 24 } }));
         state.selected = case.selection;
         switch (case.setup) {
             .typed, .dismissed => {},
-            .picker => try openPicker(&state, &.{chatgpt}),
             .frozen => try expectEffects(&.{.{ .start = .{ .settings = &state.settings, .text = "first" } }}, try submit(&state, try typeText(&state, "first"))),
             .held => state.upgrade.after = .reobserving,
         }

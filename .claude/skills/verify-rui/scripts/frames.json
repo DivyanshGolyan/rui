@@ -123,7 +123,7 @@
       "expect": [
         "Schema migration",
         "Settings",
-        "■"
+        "\u25a0"
       ]
     },
     {
@@ -199,9 +199,9 @@
         }
       ],
       "expect": [
-        "✓ List project files",
-        "× Fail with exit 127 · exit 127",
-        "× Fail with an excerpt · exit 1",
+        "\u2713 List project files",
+        "\u00d7 Fail with exit 127 \u00b7 exit 127",
+        "\u00d7 Fail with an excerpt \u00b7 exit 1",
         "The project has a README",
         "retry policy notes"
       ],
@@ -227,7 +227,7 @@
           "wait": "    stderr tail:"
         },
         {
-          "gone": "Opening tool output…"
+          "gone": "Opening tool output\u2026"
         },
         {
           "keys": [
@@ -238,13 +238,13 @@
           "wait": "    unknown option --help"
         },
         {
-          "gone": "▸"
+          "gone": "\u25b8"
         }
       ],
       "expect": [
-        "✓ List project files",
-        "× Fail with exit 127 · exit 127",
-        "× Fail with an excerpt · exit 1",
+        "\u2713 List project files",
+        "\u00d7 Fail with exit 127 \u00b7 exit 127",
+        "\u00d7 Fail with an excerpt \u00b7 exit 1",
         "    Bash failed. Exit code: 1.",
         "    stderr tail:",
         "    usage: example",
@@ -269,7 +269,7 @@
           ]
         },
         {
-          "gone": "Opening tool output…"
+          "gone": "Opening tool output\u2026"
         },
         {
           "keys": [
@@ -296,10 +296,10 @@
           ]
         },
         {
-          "wait": "✓ List project files"
+          "wait": "\u2713 List project files"
         },
         {
-          "gone": "× Fail with exit 127"
+          "gone": "\u00d7 Fail with exit 127"
         },
         {
           "keys": [
@@ -307,7 +307,7 @@
           ]
         },
         {
-          "gone": "Opening tool output…"
+          "gone": "Opening tool output\u2026"
         },
         {
           "keys": [
@@ -320,17 +320,17 @@
           "wait": "    unknown option --help"
         },
         {
-          "gone": "▸"
+          "gone": "\u25b8"
         }
       ],
       "expect": [
-        "✓ List project files",
+        "\u2713 List project files",
         "    Bash succeeded. Exit code: 0.",
         "    stdout tail:",
         "    README.md",
         "    src",
-        "× Fail with exit 127 · exit 127",
-        "× Fail with an excerpt · exit 1",
+        "\u00d7 Fail with exit 127 \u00b7 exit 127",
+        "\u00d7 Fail with an excerpt \u00b7 exit 1",
         "    Bash failed. Exit code: 1.",
         "    stderr tail:",
         "    usage: example",
@@ -368,18 +368,18 @@
           "wait": "more lines"
         },
         {
-          "gone": "Opening tool output…"
+          "gone": "Opening tool output\u2026"
         },
         {
-          "gone": "▸"
+          "gone": "\u25b8"
         }
       ],
       "expect": [
-        "✓ Print thirty-two lines",
+        "\u2713 Print thirty-two lines",
         "    Bash succeeded. Exit code: 0.",
         "    stdout tail:",
         "    output line 18",
-        "    … 14 more lines"
+        "    \u2026 14 more lines"
       ],
       "sizes": [
         "46x30",
@@ -406,7 +406,7 @@
           "wait": "    stderr tail:"
         },
         {
-          "gone": "Opening tool output…"
+          "gone": "Opening tool output\u2026"
         },
         {
           "keys": [
@@ -417,13 +417,13 @@
           "wait": "    unknown option --help"
         },
         {
-          "gone": "▸"
+          "gone": "\u25b8"
         }
       ],
       "expect": [
-        "✓ List project files",
-        "× Fail with exit 127 · exit 127",
-        "× Fail with an excerpt · exit 1",
+        "\u2713 List project files",
+        "\u00d7 Fail with exit 127 \u00b7 exit 127",
+        "\u00d7 Fail with an excerpt \u00b7 exit 1",
         "    Bash failed. Exit code: 1.",
         "    stderr tail:",
         "    usage: example",
@@ -440,11 +440,27 @@
       "note": "chat draft and caret kept after Esc and reopening",
       "open": "Fix retry deadline",
       "steps": [
-        { "text": "Keep this chat draft" },
-        { "keys": ["Left", "Left", "Esc"] },
-        { "wait": "Type a task" },
-        { "keys": ["Enter"] },
-        { "wait": "Keep this chat draft" }
+        {
+          "text": "Keep this chat draft"
+        },
+        {
+          "keys": [
+            "Left",
+            "Left",
+            "Esc"
+          ]
+        },
+        {
+          "wait": "Type a task"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Keep this chat draft"
+        }
       ],
       "expect": "Keep this chat draft"
     },
@@ -459,11 +475,11 @@
           ]
         },
         {
-          "wait": "↓"
+          "wait": "\u2193"
         }
       ],
       "expect": [
-        "↓"
+        "\u2193"
       ]
     },
     {
@@ -485,7 +501,7 @@
       ],
       "expect": [
         "The retry loop waits",
-        "↓"
+        "\u2193"
       ]
     },
     {
@@ -517,7 +533,7 @@
       ],
       "expect": [
         "The retry loop waits",
-        "↓",
+        "\u2193",
         "new"
       ]
     },
@@ -635,7 +651,7 @@
           ]
         },
         {
-          "wait": "◌ and one more thing"
+          "wait": "\u25cc and one more thing"
         }
       ],
       "cast": [
@@ -652,7 +668,7 @@
     },
     {
       "name": "tools-running",
-      "note": "14-tools-running: ⠹ marks active tool calls; owns its parallel jobs, leaving the retry transcript unchanged",
+      "note": "14-tools-running: \u2839 marks active tool calls; owns its parallel jobs, leaving the retry transcript unchanged",
       "open": "Run parallel checks",
       "steps": [
         {
@@ -673,7 +689,7 @@
         }
       ],
       "expect": [
-        "⠹ Build the docs",
+        "\u2839 Build the docs",
         "Run the slow tests",
         "ctrl+x stop"
       ],
@@ -713,7 +729,7 @@
           }
         },
         {
-          "wait": "⠹ Sleep eight seconds"
+          "wait": "\u2839 Sleep eight seconds"
         },
         {
           "keys": [
@@ -721,32 +737,32 @@
           ]
         },
         {
-          "wait": "■ Stopped",
+          "wait": "\u25a0 Stopped",
           "timeout": 60
         }
       ],
-      "expect": "■ Stopped",
+      "expect": "\u25a0 Stopped",
       "absent": [
         "Stopping"
       ]
     },
     {
       "name": "stopped",
-      "note": "14d-stopped: one ■ Stopped line, without continuation advice; independently seeded with settle: stop",
+      "note": "14d-stopped: one \u25a0 Stopped line, without continuation advice; independently seeded with settle: stop",
       "open": "Profile the Host under load",
       "steps": [
         {
-          "wait": "■ Stopped"
+          "wait": "\u25a0 Stopped"
         }
       ]
     },
     {
       "name": "chat-failed",
-      "note": "16-conversation-failed: × Model reply unreadable, without a saved code or provider report",
+      "note": "16-conversation-failed: \u00d7 Model reply unreadable, without a saved code or provider report",
       "open": "Flaky upload test",
       "steps": [
         {
-          "wait": "× Model reply unreadable · ctrl+r retries"
+          "wait": "\u00d7 Model reply unreadable \u00b7 ctrl+r retries"
         }
       ],
       "absent": [
@@ -771,7 +787,7 @@
         "asks before Bash/MCP",
         "Type a message",
         "enter sends",
-        "more lines · shift+↓"
+        "more lines \u00b7 shift+\u2193"
       ]
     },
     {
@@ -794,7 +810,7 @@
         "approving it."
       ],
       "absent": [
-        "more lines · shift+↓"
+        "more lines \u00b7 shift+\u2193"
       ]
     },
     {
@@ -844,6 +860,11 @@
         "ctrl+o                 open",
         "Commands",
         "/copy [code|file]"
+      ],
+      "absent": [
+        "/status",
+        "/configure",
+        "/model"
       ]
     },
     {
@@ -865,6 +886,11 @@
         "/copy [code|file]",
         "/effort LEVEL",
         "/help"
+      ],
+      "absent": [
+        "/status",
+        "/configure",
+        "/model"
       ]
     },
     {
@@ -873,10 +899,10 @@
       "open": "Release notes for 0.60",
       "steps": [
         {
-          "text": "/stat"
+          "text": "/cop"
         },
         {
-          "wait": "/status"
+          "wait": "/copy"
         }
       ]
     },
@@ -904,7 +930,7 @@
       "open": "Release notes for 0.60",
       "steps": [
         {
-          "text": "/configure --reasoning-effort \"\""
+          "text": "/effort \"\""
         },
         {
           "keys": [
@@ -912,10 +938,10 @@
           ]
         },
         {
-          "wait": "Usage: /configure"
+          "wait": "Usage: /effort"
         },
         {
-          "text": "/status extra"
+          "text": "/requests extra"
         },
         {
           "keys": [
@@ -923,87 +949,127 @@
           ]
         },
         {
-          "wait": "Usage: /status"
+          "wait": "Usage: /requests"
         }
       ]
     },
     {
-      "name": "status",
-      "note": "20-status",
+      "name": "chat-info",
+      "note": "Chat info above the retained chat input",
       "open": "Fix retry deadline",
       "steps": [
         {
-          "text": "/status"
-        },
-        {
           "keys": [
-            "Enter"
+            "M-i"
           ]
         },
         {
-          "wait": "This Session"
-        }
-      ]
-    },
-    {
-      "name": "status-page2",
-      "note": "20b-status-page2",
-      "open": "Fix retry deadline",
-      "steps": [
-        {
-          "text": "/status"
-        },
-        {
-          "keys": [
-            "Enter"
-          ]
-        },
-        {
-          "wait": "This Session"
-        },
-        {
-          "keys": [
-            "PgDn"
-          ]
+          "wait": "Copy last answer"
         }
       ],
-      "expect": "New Sessions"
-    },
-    {
-      "name": "model-picker",
-      "note": "41-model-picker",
-      "open": "overview",
-      "steps": [
-        {
-          "text": "/model"
-        },
-        {
-          "wait": "tab sign-in"
-        }
+      "expect": [
+        "Effort",
+        "Permissions",
+        "Tools",
+        "Folder",
+        "Model",
+        "Context",
+        "Copy last answer"
       ]
     },
     {
-      "name": "model-filter",
-      "note": "41d-model-filter",
-      "open": "overview",
+      "name": "chat-info-model",
+      "note": "Chat info Model field with the shared choice open",
+      "open": "Fix retry deadline",
       "steps": [
         {
-          "text": "/model ter"
+          "keys": [
+            "M-i"
+          ]
         },
         {
-          "wait": "gpt-6.1-terra"
+          "wait": "Copy last answer"
         },
         {
           "keys": [
             "Down",
-            "Right",
-            "Right"
+            "Down",
+            "Down",
+            "Enter"
           ]
+        },
+        {
+          "wait": "gpt-6.1-sol"
         }
       ],
       "expect": [
+        "Model",
+        "gpt-6.1-sol",
+        "Filter:"
+      ]
+    },
+    {
+      "name": "model-picker",
+      "note": "App settings Model field",
+      "open": "overview",
+      "steps": [
+        {
+          "keys": [
+            "End",
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Notifications"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "gpt-6.1-sol"
+        }
+      ],
+      "expect": [
+        "Model",
+        "gpt-6.1-sol",
+        "Filter:"
+      ]
+    },
+    {
+      "name": "model-filter",
+      "note": "App settings Model field with a typed filter",
+      "open": "overview",
+      "steps": [
+        {
+          "keys": [
+            "End",
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Notifications"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "gpt-6.1-sol"
+        },
+        {
+          "text": "ter"
+        },
+        {
+          "wait": "gpt-6.1-terra"
+        }
+      ],
+      "expect": [
+        "Model",
         "gpt-6.1-terra",
-        "‹ high ›"
+        "Filter:"
       ]
     },
     {
@@ -1071,7 +1137,7 @@
       ],
       "expect": [
         "Batch job",
-        "↓",
+        "\u2193",
         "more",
         "Settings"
       ]
@@ -1178,12 +1244,12 @@
           ]
         },
         {
-          "wait": "↓"
+          "wait": "\u2193"
         }
       ],
       "theme": "mist",
       "expect": [
-        "↓"
+        "\u2193"
       ]
     },
     {

@@ -1,6 +1,6 @@
 ---
 name: verify-rui
-description: Drive Rui's full-screen interactive terminal (the renderer) the way a user does, on a pinned build, in a synthetic HOME/Store with a deterministic provider, through a plain PTY or tmux (detached or with an attached client), and capture byte-exact evidence. Use to prove or diagnose the overview, compose/submit, consent, /status, scrolling, exit/signal restoration, tmux and hardware-input behavior on macOS or Linux.
+description: Drive Rui's full-screen interactive terminal (the renderer) the way a user does, on a pinned build, in a synthetic HOME/Store with a deterministic provider, through a plain PTY or tmux (detached or with an attached client), and capture byte-exact evidence. Use to prove or diagnose the overview, compose/submit, consent, chat info, scrolling, exit/signal restoration, tmux and hardware-input behavior on macOS or Linux.
 ---
 
 # verify-rui
@@ -88,7 +88,7 @@ It also prints macOS Accessibility and Screen Recording status for information o
 | Action | Command |
 | --- | --- |
 | Type text | `$V send "$RUN" NAME --text 'hello'` (tmux: `send-keys -l`; pty: FIFO) |
-| Keys | `$V send "$RUN" NAME --keys Enter`. Names: `Enter Esc C-c C-g C-r C-x BSpace PgUp PgDn S-PgUp Up Down Left Right End Home Tab SGRWheelUp SGRWheelDown`. Through tmux these are sent as exact bytes with `send-keys -H`. The SGR names send unsolicited mouse reports; a real wheel reaches Rui as `Up`/`Down`. |
+| Keys | `$V send "$RUN" NAME --keys Enter`. Names: `Enter Esc C-c C-g C-r C-x M-i M-d BSpace PgUp PgDn S-PgUp Up Down Left Right End Home Tab SGRWheelUp SGRWheelDown`. Through tmux these are sent as exact bytes with `send-keys -H`. The SGR names send unsolicited mouse reports; a real wheel reaches Rui as `Up`/`Down`. |
 | Raw bytes | `$V send "$RUN" NAME --hex 1b5b4d2069730a` (tmux: `send-keys -H`) |
 | Through the attached client | add `--via client` (bytes enter tmux as terminal input, not `send-keys`) |
 | Signal Rui | `$V signal "$RUN" NAME INT\|TERM\|HUP` (verifies the PID is this terminal's Rui) |
@@ -103,7 +103,8 @@ It also prints macOS Accessibility and Screen Recording status for information o
 Stable handles from the product:
 - `›`: the composer prompt.
 - `Browsing · Esc returns`: an inspection or scrolled view.
-- `Session: NAME` and `Work:`: the /status page.
+- `Effort`, `Permissions` and `Copy last answer`: chat info, opened with Alt-I (`--keys M-i` or `--hex 1b69`).
+- `alt+d details`: separate submission repair/identity page while an original is held unresolved or rejected (`--keys M-d` or `--hex 1b64`).
 - `Start of conversation`.
 - `Detached. Host work continues.` and `Resume: rui session resume …`: shown after exit.
 - `Run Bash`: the consent prompt.

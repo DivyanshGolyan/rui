@@ -12,6 +12,7 @@ pub const CustomChoice = struct { field: usize, widget: vxfw.Widget, height: u16
 const Target = struct { row: u16, start: u16, end: u16, index: usize, choice: bool = false };
 
 title: []const u8,
+unicode: bool = true,
 title_widget: ?vxfw.Widget = null,
 action_gap: u16 = 0,
 stacked_actions: bool = false,
@@ -160,9 +161,9 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     @memset(surface.buffer, .{ .style = self.ground });
     self.targets = &.{};
     if (size.width == 0 or size.height == 0) return surface;
-    for (0..size.width) |col| surface.writeCell(@intCast(col), 0, .{ .char = .{ .grapheme = "─", .width = 1 }, .style = self.rule_style });
+    for (0..size.width) |col| surface.writeCell(@intCast(col), 0, .{ .char = .{ .grapheme = if (self.unicode) "─" else "-", .width = 1 }, .style = self.rule_style });
     if (size.height == 1) return surface;
-    _ = paint(ctx, surface, self.title, 1, 1, self.title_style);
+    _ = paint(ctx, surface, try displayText(ctx.arena, self.title, self.unicode), 1, 1, self.title_style);
     var children: std.array_list.Managed(vxfw.SubSurface) = .init(ctx.arena);
     if (self.title_widget) |title_widget| if (size.width > 1) {
         try children.append(.{ .origin = .{ .row = 1, .col = 1 }, .surface = try title_widget.draw(ctx.withConstraints(.{}, .{ .width = size.width - 1, .height = 1 })) });
@@ -187,12 +188,13 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
             const selected = self.choice == null and self.custom_choice == null and self.selected == index and field.selectable;
             const style = if (selected) self.selection else self.ground;
             fillRow(surface, row, style);
-            _ = paintTo(ctx, surface, field.label, 3, row, style, @min(19, size.width));
+            _ = paintTo(ctx, surface, try displayText(ctx.arena, field.label, self.unicode), 3, row, style, @min(19, size.width));
             // Status/failure words belong to the field, even beside a long
             // saved value. Reserve them here for every Panel consumer.
-            const limit: u16 = @intCast(size.width -| ctx.stringWidth(field.tail orelse ""));
-            const end = paintTo(ctx, surface, field.value, 19, row, style, limit);
-            if (field.tail) |tail| {
+            const tail = try displayText(ctx.arena, field.tail orelse "", self.unicode);
+            const limit: u16 = @intCast(size.width -| ctx.stringWidth(tail));
+            const end = paintTo(ctx, surface, try displayText(ctx.arena, field.value, self.unicode), 19, row, style, limit);
+            if (tail.len > 0) {
                 var quiet = self.quiet;
                 quiet.bg = style.bg;
                 quiet.reverse = style.reverse;
@@ -205,8 +207,8 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
                 const row = self.visible(index + 1 + at, size.height) orelse continue;
                 const style = if (at == choice.selected) self.selection else self.ground;
                 fillRow(surface, row, style);
-                _ = paint(ctx, surface, if (choice.current == at) "✓" else " ", 5, row, style);
-                _ = paint(ctx, surface, label, 7, row, style);
+                _ = paint(ctx, surface, if (choice.current == at) (if (self.unicode) "✓" else "+") else " ", 5, row, style);
+                _ = paint(ctx, surface, try displayText(ctx.arena, label, self.unicode), 7, row, style);
                 try targets.append(.{ .row = row, .start = 0, .end = size.width, .index = at, .choice = true });
             }
         };
@@ -225,7 +227,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
             if (self.stacked_actions) col = @min(3, size.width);
             const start = col;
             const style = if (self.choice == null and self.custom_choice == null and self.selected == self.fields.len + at) self.selection else self.ground;
-            col = paint(ctx, surface, action, col, row, style);
+            col = paint(ctx, surface, try displayText(ctx.arena, action, self.unicode), col, row, style);
             if (col > start) try targets.append(.{ .row = row, .start = start, .end = col, .index = self.fields.len + at });
             col = @intCast(@min(@as(u32, col) + 5, size.width));
         }
@@ -242,6 +244,38 @@ fn visible(self: *const Self, logical: usize, height: u16) ?u16 {
 
 fn fillRow(surface: vxfw.Surface, row: u16, style: vaxis.Style) void {
     for (0..surface.size.width) |col| surface.writeCell(@intCast(col), row, .{ .style = style });
+}
+
+/// Presentation only: keep canonical text unchanged. Unicode and ASCII text
+/// are borrowed; an ASCII fallback for decoration or other scalars lives in
+/// the draw arena. Unknown non-ASCII scalars use the overview's `?` stand-in.
+pub fn displayText(arena: std.mem.Allocator, text: []const u8, unicode: bool) std.mem.Allocator.Error![]const u8 {
+    if (unicode) return text;
+    for (text) |byte| {
+        if (byte >= 0x80) break;
+    } else return text;
+    const out = try arena.alloc(u8, text.len);
+    var used: usize = 0;
+    var at: usize = 0;
+    while (at < text.len) {
+        const length = std.unicode.utf8ByteSequenceLength(text[at]) catch 1;
+        const end = @min(at + length, text.len);
+        const scalar = std.unicode.utf8Decode(text[at..end]) catch 0xfffd;
+        out[used] = switch (scalar) {
+            0...0x7f => @intCast(scalar),
+            '─' => '-',
+            '✓' => '+',
+            '·', '…' => '.',
+            '↑' => '^',
+            '↓' => 'v',
+            '‹' => '<',
+            '›' => '>',
+            else => '?',
+        };
+        used += 1;
+        at = end;
+    }
+    return out[0..used];
 }
 
 /// Single-line, terminal-cell clipping, including labels and quiet tails.
@@ -479,4 +513,20 @@ test "Panel reserves failure words beside long ASCII and Unicode field values" {
         try std.testing.expect(std.mem.indexOf(u8, text.written(), "couldn't save") != null);
         try std.testing.expectEqualStrings(value, panel.fields[0].value);
     };
+}
+
+test "Panel shared ASCII rendering keeps rules choices tails and canonical values" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expectEqualStrings("- + . . ^v <> ?", try displayText(arena.allocator(), "─ ✓ · … ↑↓ ‹› 界", false));
+    const original = "model 界";
+    var panel: Self = .{ .title = "Title", .unicode = false, .fields = &.{.{ .label = "Model", .value = original, .tail = " · saving…" }} };
+    panel.openChoice(&.{ "one", "✓ two" }, 1);
+    for ([_]u16{ 1, 19, 28, 46, 99 }) |width| {
+        const drawn = try panel.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 9 }, .cell_size = .{} });
+        for (drawn.buffer) |cell| for (cell.char.grapheme) |byte| try std.testing.expect(byte < 0x80);
+        try std.testing.expectEqualStrings("-", drawn.readCell(0, 0).char.grapheme);
+        if (width > 7) try std.testing.expectEqualStrings("+", drawn.readCell(5, 4).char.grapheme);
+    }
+    try std.testing.expectEqualStrings(original, panel.fields[0].value);
 }

@@ -96,13 +96,23 @@ def retained(state, binary, label):
         samples = [sample(process.pid)]
         for _ in range(3):
             for _ in range(10):
-                assert "Configured." in cli.terminal_step(master, "/configure --model gpt-6-sol",
-                    prompt if label == "baseline" else "Configured.", composer=label != "baseline")
+                if label == "baseline":
+                    # Historical binary evidence deliberately retains its own UI.
+                    assert "Configured." in cli.terminal_step(master, "/configure --model gpt-6-sol", prompt)
+                else:
+                    cli.chat_info_open(master)
+                    cli.panel_frame(master, lambda frame: "Filter:" in frame,
+                                    b"\x1b[B\x1b[B\x1b[B\r")
+                    cli.panel_frame(master, lambda frame: "Filter: gpt-6-sol" in frame, b"gpt-6-sol")
+                    cli.panel_frame(master, lambda frame: "Filter:" not in frame and "saving" not in frame, b"\r")
+                    cli.panel_frame(master, lambda frame: "Copy last answer" not in frame, b"\x1b")
                 listing = cli.terminal_step(master, "/requests",
                     prompt if label == "baseline" else "Local recovery handles", composer=label != "baseline")
                 assert "01234567-89ab-4cde-8012-" not in listing
-                cli.terminal_step(master, "/status",
-                    prompt if label == "baseline" else " Status · ", composer=label != "baseline")
+                if label == "baseline":
+                    cli.terminal_step(master, "/status", prompt)
+                else:
+                    cli.chat_info_frame(master)
             samples.append(sample(process.pid))
         cli.terminal_step(master, "/exit", "Detached.")
         assert process.wait(timeout=5) == 0

@@ -41,7 +41,7 @@ Preconditions:
   - `a` + Enter: exactly 30 lines in `progress.log`, tool summary sent;
   - a second proposal, then `d` + Enter: still 30 lines, tool result delivered;
   - Ctrl-C: rc 0, termios restored, alternate screen left.
-- **tmux steps:** `hello tmux` + Enter; wheel up then Ctrl-G; `/status` (page shown, no provider request); Esc then Ctrl-C.
+- **tmux steps:** `hello tmux` + Enter; wheel up then Ctrl-G; Alt-I (chat info shown, no provider request); Esc then Ctrl-C.
 - **Result.** It prints `VERDICT PASS|ISSUES` and writes `evidence/physical/result.json` and `steps.jsonl`. Each step records its received bytes with monotonic times, its facts and a snapshot (`terms/phys*/shots/phys-NN-*`). A step not observed within its timeout is `MISSING`. The command then prints `FAIL: physical events missing` and exits 1. A missing step is never a pass.
 - **Launch check, no human needed.** Run `$V physical FULLSHA --smoke`. It opens the owned window, reaches the composer, ends Rui with SIGTERM and checks restoration. It injects no input and is not hardware evidence.
 - **Tooling rehearsal.** Run `$V physical FULLSHA --rehearse` (synthetic L1/L3 input, `REHEARSAL-PASS`). Run `--rehearse --no-tmux --rehearse-omit pgup wheel-up` as the negative control: it must print `REHEARSAL-ISSUES` and exit 1. A rehearsal validates the grader only.

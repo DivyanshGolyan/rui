@@ -1,5 +1,5 @@
 //! Work under way, at the transcript's tail: the running calls, each
-//! running Bash call with its own clock; `+N more running · /status` when
+//! running Bash call with its own clock; `+N more running · info` when
 //! more run than fit; the work line (`⠹ Waiting · 12s`, `⠹ Rate limited ·
 //! retry 2 in 18s`, `Stopping…`) when no shown call carries it; and the
 //! newest Message waiting its turn, `◌ also update docs …`. One row each, in
@@ -16,7 +16,7 @@ const queued_line = @import("queued_line.zig");
 const Chip = @import("Chip.zig");
 const Self = @This();
 
-const more_bytes = std.fmt.count("+{d} more running · /status", .{std.math.maxInt(u64)});
+const more_bytes = std.fmt.count("+{d} more running · info", .{std.math.maxInt(u64)});
 
 pub const Styles = struct {
     ink: vaxis.Style = .{},
@@ -31,7 +31,7 @@ work: ?work_line.Line = null,
 queued: ?queued_line.Waiting = null,
 method: vaxis.gwidth.Method = .unicode,
 styles: Styles = .{},
-/// `+N more running · /status`; clicking it opens /status. It lives as
+/// `+N more running · info`; clicking it opens chat info. It lives as
 /// long as the block, so the press that starts a click survives the redraw
 /// before its release; its label is written into `more_label` while
 /// drawing, never into a frame's arena.
@@ -130,8 +130,8 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
             const omitted = self.live.total - shown;
             // Indented under the calls' words, as the mocks set it.
             const indent: u16 = @min(2, width - 1);
-            const full = std.fmt.bufPrint(&self.more_label, "+{d} more running · /status", .{omitted}) catch unreachable;
-            self.more.label = if (vaxis.gwidth.gwidth(full, self.method) <= width - indent) full else std.fmt.bufPrint(&self.more_label, "+{d} · /status", .{omitted}) catch unreachable;
+            const full = std.fmt.bufPrint(&self.more_label, "+{d} more running · info", .{omitted}) catch unreachable;
+            self.more.label = if (vaxis.gwidth.gwidth(full, self.method) <= width - indent) full else std.fmt.bufPrint(&self.more_label, "+{d} · info", .{omitted}) catch unreachable;
             self.more.style = self.styles.quiet;
             self.more.hover = self.styles.quiet;
             self.more.hover.ul_style = .single;
@@ -263,7 +263,7 @@ test "the activity tail puts the clock on the running call's own row, and the wo
     try std.testing.expectEqual(@as(usize, 1), drawn.children.len);
     try std.testing.expectEqual(@as(i17, 3), drawn.children[0].origin.row);
     try std.testing.expectEqual(@as(i17, 2), drawn.children[0].origin.col);
-    try std.testing.expectEqualStrings("+2 more running · /status", block.more.label);
+    try std.testing.expectEqualStrings("+2 more running · info", block.more.label);
     try std.testing.expect(drawn.children[0].surface.widget.eql(block.more.widget()));
 
     // NO_COLOR clears both heading colours without changing the rows or clock.
@@ -319,10 +319,10 @@ test "a narrow or short activity tail keeps the clock and the oldest calls" {
     defer arena.deinit();
     const narrow = try block.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 30, .height = 20 }, .cell_size = .{} });
     try std.testing.expectEqualStrings("⠹ Run the whole store… · 1m 1s", try rowText(narrow, 1));
-    try std.testing.expectEqualStrings("+28 more running · /status", block.more.label);
+    try std.testing.expectEqualStrings("+28 more running · info", block.more.label);
     try std.testing.expectEqualStrings("◌ 3 · and then summarize", try rowText(narrow, 3));
-    _ = try block.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 27, .height = 20 }, .cell_size = .{} });
-    try std.testing.expectEqualStrings("+28 · /status", block.more.label);
+    _ = try block.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 21, .height = 20 }, .cell_size = .{} });
+    try std.testing.expectEqualStrings("+28 · info", block.more.label);
     // Two rows of room: the call carrying the clock is clipped, so the work
     // line keeps the clock above the waiting row.
     const short = try block.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 30, .height = 2 }, .cell_size = .{} });
@@ -332,7 +332,7 @@ test "a narrow or short activity tail keeps the clock and the oldest calls" {
     // Three rows: the oldest call would leave the clock's call clipped, so
     // the work line takes the row and the overflow counts all 30.
     const three = try block.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 30, .height = 3 }, .cell_size = .{} });
-    try std.testing.expectEqualStrings("+30 more running · /status", block.more.label);
+    try std.testing.expectEqualStrings("+30 more running · info", block.more.label);
     try std.testing.expectEqualStrings("⠹ Run the whole store… · 1m 1s", try rowText(three, 1));
     try std.testing.expectEqualStrings("◌ 3 · and then summarize", try rowText(three, 2));
     // Every running call retained, but not every one fits: the clipped ones
@@ -343,11 +343,11 @@ test "a narrow or short activity tail keeps the clock and the oldest calls" {
     // three retained are the oldest, and counts the other 29.
     const oldest = try block.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 30, .height = 3 }, .cell_size = .{} });
     try std.testing.expectEqualStrings("✓ Read src/overview_view.zig", try rowText(oldest, 0));
-    try std.testing.expectEqualStrings("+29 more running · /status", block.more.label);
+    try std.testing.expectEqualStrings("+29 more running · info", block.more.label);
     block.live.total = 2;
     const clipped = try block.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 30, .height = 2 }, .cell_size = .{} });
     try std.testing.expectEqual(@as(usize, 1), clipped.children.len);
-    try std.testing.expectEqualStrings("+2 more running · /status", block.more.label);
+    try std.testing.expectEqualStrings("+2 more running · info", block.more.label);
     try std.testing.expectEqualStrings("◌ 3 · and then summarize", try rowText(clipped, 1));
     block.live.total = 30;
     block.work = work;
