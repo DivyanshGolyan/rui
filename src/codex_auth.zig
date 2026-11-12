@@ -452,7 +452,12 @@ fn refresh(io: std.Io, source: Source, current: *const credentials.Record, repla
     var request = source.wire.refreshRequest(current, &room.body) catch return error.RefreshRequestNotSent;
     switch (source.refresh) {
         .issuer => {},
-        .fixture_endpoint => |url| request.url = url,
+        // Only a record issued to the fixture client goes to a fixture's
+        // token endpoint, so a real refresh token never does.
+        .fixture_endpoint => |url| {
+            if (!std.mem.eql(u8, current.client_id.slice(), policy.fixture_client_id)) return error.RefreshRequestNotSent;
+            request.url = url;
+        },
         .synthetic => unreachable,
     }
     const status = post(io, request, answer, null) catch |err| {

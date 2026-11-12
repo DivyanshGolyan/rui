@@ -168,7 +168,10 @@ pub const Row = struct {
 pub const Query = struct {
     words: []const u8,
     effort: ?ReasoningEffort = null,
-    provider: ?Provider = null,
+    /// The providers the last whole sign-in word names: `chatgpt` names
+    /// each provider signed in with ChatGPT, and a row takes the one it
+    /// offers.
+    providers: Providers = .empty,
 
     pub fn parse(words: []const u8) Query {
         var query: Query = .{ .words = words };
@@ -177,9 +180,11 @@ pub const Query = struct {
             for (std.enums.values(ReasoningEffort)) |effort| {
                 if (std.ascii.eqlIgnoreCase(@tagName(effort), word)) query.effort = effort;
             }
+            var named: Providers = .empty;
             for (std.enums.values(Provider)) |provider| {
-                if (std.ascii.eqlIgnoreCase(signInWord(provider), word)) query.provider = provider;
+                if (std.ascii.eqlIgnoreCase(signInWord(provider), word)) named.insert(provider);
             }
+            if (named.count() != 0) query.providers = named;
         }
         return query;
     }
@@ -196,7 +201,7 @@ pub const Query = struct {
     /// An explicitly typed, unlisted choice bypasses list admission. Its ID
     /// and controls go to the provider rather than pretending it is listed.
     pub fn typed(self: Query, entry: Entry, defaults: Defaults) Row {
-        return (Query{ .words = "", .effort = self.effort, .provider = self.provider }).match(entry, defaults).?;
+        return (Query{ .words = "", .effort = self.effort, .providers = self.providers }).match(entry, defaults).?;
     }
 
     fn match(self: Query, entry: Entry, defaults: Defaults) ?Row {
@@ -211,11 +216,15 @@ pub const Query = struct {
             return null;
         }
         const product_provider = comptime std.meta.stringToEnum(Provider, product_defaults.provider).?;
-        // An entry's providers are never empty.
-        const provider = for ([_]?Provider{ self.provider, defaults.provider, product_provider }) |wanted| {
-            if (wanted) |one| if (entry.providers.contains(one)) break one;
+        // The typed sign-in's providers the entry offers, else all it
+        // offers, which are never empty; among them the saved, the
+        // product's, else the first.
+        var offered = self.providers.intersectWith(entry.providers);
+        if (offered.count() == 0) offered = entry.providers;
+        const provider = for ([_]?Provider{ defaults.provider, product_provider }) |wanted| {
+            if (wanted) |one| if (offered.contains(one)) break one;
         } else for (std.enums.values(Provider)) |one| {
-            if (entry.providers.contains(one)) break one;
+            if (offered.contains(one)) break one;
         } else unreachable;
         return .{
             .effort = model_capability.startEffort(catalog.shipped, self.effort, entry.id) orelse client_defaults.startEffort(entry.id, defaults.effort),

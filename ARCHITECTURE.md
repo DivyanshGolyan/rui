@@ -1175,6 +1175,13 @@ A missing or unreadable key fails startup.
 A 401 on the key is final, `provider_api_key_rejected`, with no refresh or resend; the Session and overview say to save a new key and restart the Host, which keeps the key it started with.
 An auto-started Host adds `--provider openai` whenever a usable key is saved.
 
+`--provider chatgpt` serves a ChatGPT plan sign-in from an owner-only `~/.config/rui/chatgpt.json`, or the absolute path `RUI_CHATGPT_CREDENTIAL_FILE` names, in the same credential format and custody as Codex; its record carries the issued client id and its account is the ID token's `sub`.
+It speaks `openai-responses/3` and sends the access token as `authorization: Bearer` with user-agent only to `https://api.openai.com/v1/responses`, with no account or FedRAMP header; its route is `chatgpt_plan`, and it accepts structured output.
+Its token must carry `exp`, so it refreshes within 300 seconds of expiry and never on the eight-day opaque clock; a 401 forces one refresh over the plan's token wire, as Codex's does over its own.
+The Host's one sign-in worker serves both sign-ins; each lease or forced refresh names the sign-in it is for.
+An auto-started Host adds `--provider chatgpt` whenever that credential is usable.
+`subscription_sharing_usage_limit_exceeded` and `subscription_sharing_usage_unavailable` are quota refusals, never retried.
+
 The credential owner serializes mutations across Hosts and login processes.
 Login advances a generation.
 A compact access token with `exp` refreshes at or within 300 seconds of expiry; otherwise Rui refreshes eight days after the last successful exchange.
@@ -1804,7 +1811,7 @@ Malformed JSON or framing, explicit incomplete generation and contradictory comp
 No failed prefix becomes accepted output.
 Scheduled retries save no rejection content; exhaustion retains only the settling Attempt's diagnostic and request correlation in the existing Resolution.
 
-HTTP 429 whose code the codec names a quota or plan refusal is a permanent quota refusal, not a temporary rate limit; the Responses codec names `usage_limit_reached`, `insufficient_quota`, `credit_balance_exhausted` and the two spend limits a quota and `usage_not_included` a plan.
+HTTP 429 whose code the codec names a quota or plan refusal is a permanent quota refusal, not a temporary rate limit; the Responses codec names `usage_limit_reached`, `insufficient_quota`, `credit_balance_exhausted`, the two spend limits and the two `subscription_sharing_usage_*` codes a quota and `usage_not_included` a plan.
 Each retains its neutral failure code, its refusal and optional nonnegative integer `resets_at` timestamp in the existing Resolution diagnostic and failed-response record.
 A Turn saved before refusal and sign-in codes became neutral keeps its old code (such as `provider_usage_limit_reached` or `provider_authentication_failed`), which now reads as an unknown failure: it shows its code, no trouble band and no reset time, and the Store does not fence it.
 Missing, null, invalid or duplicate reset metadata stays absent without making the quota refusal retryable.
@@ -2473,7 +2480,7 @@ Codex owns the local identifier syntax: 1–256 printable non-space ASCII bytes,
 Syntax validation is the only model check: an ID Rui's [list](#supported-model-ids) lacks runs with default limits, as the picker offers it from the provider's live list (Divyansh, 2026-11-01, picker plan "Where the list comes from").
 A bad ID fails at the provider's first request, whose remedy is `/model` in the overview.
 Old pins remain readable and clearable, never substituted.
-The built-in providers are Codex and OpenAI; they share one catalog and the recommended model `gpt-6.1-sol`.
+The built-in providers are Codex, OpenAI and ChatGPT; they share one catalog and the recommended model `gpt-6.1-sol`.
 `rui defaults inspect` shows the prospective choice, each provider's local Rui-owned credential state (`local_credentials` in JSON) and separately the selected Store's actual readable Host capabilities.
 It never refreshes, contacts a provider, creates a Host/Session or imports another CLI's credentials.
 The bare-entry provider chooser can begin Codex device login or defer; explicit `rui auth login codex` uses the same publication rule.
@@ -2818,6 +2825,8 @@ The queued strip keeps its row when space runs short and leaves in the same fram
 A stop finds excluded Messages by walking Admission-only pages backward from itself, then renders them in admission order; no previous read's queue or drawing state decides placement.
 Every page carries `queued`: the field came with wire version 3, and a frontend and Host on different wire versions refuse each other as incompatible.
 Wire version 10 makes the refused-send target required and nullable under the [public activity contract](#public-session-activity); non-null peers keep their canonical ID grammar.
+
+Wire version 13 adds the `chatgpt` provider key, and the `chatgpt_plan` route, to `host_info`'s `capabilities.providers`; different versions refuse each other.
 
 Wire version 11 drops wire 10's exclusive `skill` field: a Message's `/name` words bind skills instead. It adds the full report's `skill` Conversation entries with `source_skill_position`, and bounded skill suggestions; different versions, including saved request records, refuse each other.
 
@@ -3839,7 +3848,7 @@ Host information is a read-only, bounded `/v1/host-info` exchange for the canoni
 A client first probes the existing `host.lock` with a nonblocking shared lock, without creating a Store or lock: no owner means unavailable even if a stale socket exists; an exclusive owner permits a protected socket request.
 One absolute probe deadline covers connect, write, first byte, header and full body; ordinary commands retain their separate processing and transfer waits.
 The shared response parser accepts only valid bounded HTTP/1.1 headers with one decimal Content-Length, supported Content-Type and wire version; it rejects malformed field names/values, duplicates of consequential fields and unsupported transfer or content encodings rather than interpreting ambiguous framing.
-A complete compatible reply from that owner means ready and reports the canonical Store selector, wire version, actual allocated Active Capacity, slots in use, the Host's start time, whether it holds new Turns (`paused`), its Bash capability and each built-in provider's route (`unserved`, `endpoint`, `chatgpt_device` or `key_file`). **Slots in use** (`custody_occupied`) counts held custody records, including detached cleanup; it is the value Current reports as `execution.custody_occupied`.
+A complete compatible reply from that owner means ready and reports the canonical Store selector, wire version, actual allocated Active Capacity, slots in use, the Host's start time, whether it holds new Turns (`paused`), its Bash capability and each built-in provider's route (`unserved`, `endpoint`, `chatgpt_device`, `key_file` or `chatgpt_plan`). **Slots in use** (`custody_occupied`) counts held custody records, including detached cleanup; it is the value Current reports as `execution.custody_occupied`.
 The start time (`started_at`) is the Host Unix second read once before execution starts; every reply of one Host reports the same value, and like every Host time it orders nothing across clock changes.
 Both are read from Host memory, so the reply still never touches SQLite.
 Missing credentials do not change readiness.

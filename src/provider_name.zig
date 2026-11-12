@@ -8,6 +8,7 @@ const std = @import("std");
 pub const Provider = enum {
     codex,
     openai,
+    chatgpt,
 
     /// The request and output grammar a new Session of this provider pins.
     pub fn codec(self: Provider) Codec {
@@ -41,16 +42,10 @@ pub const Provider = enum {
     /// The table: the one switch on which provider it is.
     pub fn facts(self: Provider) Facts {
         return switch (self) {
-            .codex => .{ .codec = .@"openai-responses/2", .shown = "ChatGPT", .sign_in = "ChatGPT", .credential = .sign_in, .model_list = .catalog, .runs_tools = &.{"web_search"} },
+            .codex => .{ .codec = .@"openai-responses/2", .shown = "ChatGPT (device code)", .sign_in = "ChatGPT", .credential = .sign_in, .model_list = .catalog, .runs_tools = &.{"web_search"} },
             .openai => .{ .codec = .@"openai-responses/2", .shown = "OpenAI", .sign_in = "API key", .credential = .api_key, .model_list = .live, .runs_tools = &.{"web_search"} },
+            .chatgpt => .{ .codec = .@"openai-responses/3", .shown = "ChatGPT", .sign_in = "ChatGPT", .credential = .sign_in, .model_list = .catalog, .runs_tools = &.{"web_search"} },
         };
-    }
-
-    /// The one provider whose credential is `kind`. A second one is a
-    /// compile error: a view that names it must then learn which provider
-    /// a failure belongs to.
-    pub fn onlyWith(comptime kind: Facts.Credential) Provider {
-        return comptime only("credential", kind);
     }
 
     /// The one provider whose model list is fetched live: the Host keeps
@@ -94,15 +89,13 @@ pub const Facts = struct {
 /// older one keeps it.
 pub const Codec = enum { @"openai-responses/1", @"openai-responses/2", @"openai-responses/3" };
 
-test "both OpenAI providers run web_search, and neither runs bash" {
+test "every OpenAI provider runs web_search, and none runs bash" {
     for (std.enums.values(Provider)) |provider| {
         try std.testing.expect(provider.runsTool("web_search"));
         try std.testing.expect(!provider.runsTool("bash"));
     }
 }
 
-test "each credential kind names its one provider" {
-    try std.testing.expectEqual(Provider.codex, comptime Provider.onlyWith(.sign_in));
-    try std.testing.expectEqual(Provider.openai, comptime Provider.onlyWith(.api_key));
+test "one provider fetches its model list live" {
     try std.testing.expectEqual(Provider.openai, comptime Provider.onlyLiveList());
 }

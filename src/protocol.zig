@@ -2329,12 +2329,12 @@ pub const max_control_response_bytes = @max(max_mutation_response_bytes, command
 pub const host_info_reply = struct {
     pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"host_info\",\"store\":", Hole{ .string = max_store_bytes }, ",\"instance\":\"", Hole{ .hex = @typeInfo(InstanceId).array.len }, "\",\"active_capacity\":\"", Hole.decimal, "\",\"intake_capacity\":\"", Hole.decimal, "\",\"descriptor_limit\":\"", Hole{ .text = Hole.maxBytes(.decimal) }, "\",\"started_at\":\"", Hole.decimal, "\",\"custody_occupied\":\"", Hole.decimal, "\",\"paused\":", Hole.boolean };
     pub const doublewrite = .{ ",\"innodb_doublewrite\":", Hole{ .string = 32 } };
-    pub const tail = .{ ",\"capabilities\":{\"bash\":true,\"providers\":{\"codex\":\"", Hole{ .tag = Route }, "\",\"openai\":\"", Hole{ .tag = Route }, "\"}}}" };
+    pub const tail = .{ ",\"capabilities\":{\"bash\":true,\"providers\":{\"codex\":\"", Hole{ .tag = Route }, "\",\"openai\":\"", Hole{ .tag = Route }, "\",\"chatgpt\":\"", Hole{ .tag = Route }, "\"}}}" };
     pub const max_bytes = shapeBytes(head) + shapeBytes(doublewrite) + shapeBytes(tail);
 };
 comptime {
     const names = @typeInfo(Provider).@"enum".field_names;
-    if (names.len != 2 or !std.mem.eql(u8, names[0], "codex") or !std.mem.eql(u8, names[1], "openai"))
+    if (names.len != 3 or !std.mem.eql(u8, names[0], "codex") or !std.mem.eql(u8, names[1], "openai") or !std.mem.eql(u8, names[2], "chatgpt"))
         @compileError("host_info_reply names one Route hole per provider, in Provider order");
 }
 pub const max_host_info_response_bytes: usize = host_info_reply.max_bytes;

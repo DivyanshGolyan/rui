@@ -719,7 +719,7 @@ def main():
             started = run_start(invalid_store, invalid_env)
             assert started.returncode == 0, started.stderr
             providers = status(invalid_store, invalid_env)["capabilities"]["providers"]
-            assert providers == {"codex": "chatgpt_device", "openai": "unserved"}, providers
+            assert providers == {"codex": "chatgpt_device", "openai": "unserved", "chatgpt": "unserved"}, providers
         finally:
             forced_crash_cleanup(invalid_store)
         # A saved OpenAI key adds openai to an auto-started Host. A bad base
@@ -736,7 +736,7 @@ def main():
                 if message:
                     assert message in started.stderr, started.stderr
                 providers = status(openai_store, openai_env)["capabilities"]["providers"]
-                assert providers == {"codex": "chatgpt_device", "openai": served}, providers
+                assert providers == {"codex": "chatgpt_device", "openai": served, "chatgpt": "unserved"}, providers
             finally:
                 forced_crash_cleanup(openai_store)
 

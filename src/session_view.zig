@@ -564,7 +564,7 @@ test "list rows share every mark and script with the chat heading table" {
         defer state.deinit();
         _ = try overview.step(&state, .{ .tick = 100_000 });
         _ = try overview.step(&state, .{ .list = .{ .page = .{
-            .rows = &.{.{ .reference = "k7m2qx".*, .workspace = "/work", .label = "Work", .state = case.state }},
+            .rows = &.{.{ .reference = "k7m2qx".*, .workspace = "/work", .provider = .codex, .label = "Work", .state = case.state }},
             .answer = .{ .delta = .full, .since = .{ .instance = @splat(7), .generation = 1 } },
         } } });
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);

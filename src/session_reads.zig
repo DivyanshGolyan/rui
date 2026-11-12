@@ -1070,7 +1070,12 @@ pub fn inspectPage(raw: *anyopaque, task: *Task) !void {
             try output.interface.writeAll("\n");
         }
         try output.interface.writeAll(session_chrome.help ++ slash_commands.conversation.help ++ "\nLogin: ");
-        try output.interface.print("{s} in your shell.\n", .{(job.provider orelse comptime protocol.Provider.onlyWith(.sign_in)).login()});
+        // The Session's own provider, once its line is read; until then
+        // no provider is named.
+        if (job.provider) |provider|
+            try output.interface.print("{s} in your shell.\n", .{provider.login()})
+        else
+            try output.interface.writeAll("rui auth login, for this Session's provider, in your shell.\n");
     } else {
         std.debug.assert(job.inspection_kind == .requests);
         try job.requests(job.init, task.readContext(), job.store, job.session, &output.interface, &job.result.requests);

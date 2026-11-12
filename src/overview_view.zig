@@ -211,6 +211,7 @@ pub const Listed = struct {
     reference: Reference,
     archive_state: ArchiveState = .active,
     workspace: []const u8,
+    provider: Provider,
     label: ?[]const u8 = null,
     state: WorkState,
     /// The Turn the state belongs to.
@@ -228,6 +229,7 @@ pub const Listed = struct {
             .reference = referenceOf(row.reference.slice()),
             .archive_state = row.archive_state,
             .workspace = row.workspace.slice(),
+            .provider = row.provider,
             .label = if (row.label) |*text| text.slice() else null,
             .state = row.work.state,
             .turn = row.work.turn,
@@ -797,7 +799,7 @@ pub const Picker = struct {
     choice: ?model_picker_view.Choice = null,
     edits: ?u32 = null,
     query_effort: ?ReasoningEffort = null,
-    query_provider: ?Provider = null,
+    query_providers: model_picker.Providers = .empty,
 };
 
 /// Each event brings at most two effects today; the shell runs them in order.
@@ -995,6 +997,8 @@ pub const Row = struct {
     archive_state: ArchiveState = .active,
     /// Index of its Workspace in `State.workspaces`.
     workspace: u32,
+    /// The provider it reaches: whose sign-in or key a failure names.
+    provider: Provider,
     label: ?Bounded(max_label_bytes),
     state: WorkState,
     /// The Turn the state belongs to: which finish or failure the row shows.
@@ -1972,6 +1976,7 @@ fn listPage(state: *State, page: Page, effects: *Effects) error{OutOfMemory}!voi
             .reference = listed.reference,
             .archive_state = listed.archive_state,
             .workspace = try state.intern(listed.workspace),
+            .provider = listed.provider,
             .label = if (listed.label) |text| labelOf(text) else null,
             .state = shown,
             .turn = listed.turn,
@@ -2763,11 +2768,11 @@ pub fn syncPicker(state: *State, draft: Draft) void {
     if (previous) |old| if (shown.choice) |current| {
         var kept = model_picker_view.retain(current, old);
         if (query.effort != null and query.effort != shown.query_effort) kept.row.effort = current.row.effort;
-        if (query.provider != null and query.provider != shown.query_provider) kept.row.provider = current.row.provider;
+        if (query.providers.count() != 0 and !query.providers.eql(shown.query_providers)) kept.row.provider = current.row.provider;
         shown.choice = kept;
     };
     shown.query_effort = query.effort;
-    shown.query_provider = query.provider;
+    shown.query_providers = query.providers;
     shown.edits = draft.edits;
 }
 
@@ -2912,6 +2917,9 @@ pub const Band = struct {
     sessions: u32 = 0,
     /// When the provider said the quota resets, Unix seconds.
     resets_at: ?u64 = null,
+    /// The provider of the newest failure the band names; null for a rate
+    /// limit, which counts rows.
+    provider: ?Provider = null,
 };
 
 const BandRule = struct {
@@ -2952,14 +2960,14 @@ fn quotaCode(code: []const u8) bool {
 
 pub fn band(rows: []const Row, now_ms: u64, login_at: ?u64) ?Band {
     var finished: u64 = 0;
-    var newest: [band_rules.len]?WorkState.Failed = @splat(null);
+    var newest: [band_rules.len]?struct { failed: WorkState.Failed, provider: Provider } = @splat(null);
     var retrying: [band_rules.len]u32 = @splat(0);
     for (rows) |*row| {
         const state = row.state.asOf(now_ms);
         switch (state) {
             .finished => |value| finished = @max(finished, value.since),
             .failed => |failed| for (band_rules, &newest) |rule, *held| {
-                if (rule.kind == .failed and rule.matches(failed.code.slice()) and (held.* == null or held.*.?.since < failed.since)) held.* = failed;
+                if (rule.kind == .failed and rule.matches(failed.code.slice()) and (held.* == null or held.*.?.failed.since < failed.since)) held.* = .{ .failed = failed, .provider = row.provider };
             },
             .retrying => |retry| for (band_rules, &retrying) |rule, *count| {
                 if (rule.kind == .retrying and rule.matches(retry.cause.slice())) count.* += 1;
@@ -2972,11 +2980,11 @@ pub fn band(rows: []const Row, now_ms: u64, login_at: ?u64) ?Band {
             if (count != 0) return .{ .trouble = rule.trouble, .sessions = count };
             continue;
         }
-        const failed = held orelse continue;
+        const failed = (held orelse continue).failed;
         if (failed.since <= finished) continue;
         if (rule.after_login) if (login_at) |at| if (failed.since <= at) continue;
         if (rule.until_reset) if (failed.resets_at) |at| if (at <= now_ms / 1000) continue;
-        return .{ .trouble = rule.trouble, .resets_at = failed.resets_at };
+        return .{ .trouble = rule.trouble, .resets_at = failed.resets_at, .provider = held.?.provider };
     }
     return null;
 }
@@ -3446,10 +3454,9 @@ fn bandLine(built: *Spans, text: []const u8) error{OutOfMemory}![]const Span {
 fn providerBand(built: *Spans, trouble: Band, now_ms: u64) error{OutOfMemory}![]const Span {
     var buffer: [8]u8 = undefined;
     return bandLine(built, switch (trouble.trouble) {
-        // A row does not carry its provider, so each names the one provider
-        // with that kind of credential.
-        .sign_in => "Sign-in expired. Run " ++ comptime Provider.onlyWith(.sign_in).login() ++ ".",
-        .api_key => comptime Provider.onlyWith(.api_key).shown() ++ " API key rejected. Run " ++ Provider.onlyWith(.api_key).login() ++ ", then rui host pause.",
+        // Each names the provider of the newest failure it shows.
+        .sign_in => try std.fmt.allocPrint(built.arena, "Sign-in expired. Run {s}.", .{trouble.provider.?.login()}),
+        .api_key => try std.fmt.allocPrint(built.arena, "{s} API key rejected. Run {s}, then rui host pause.", .{ trouble.provider.?.shown(), trouble.provider.?.login() }),
         .quota => if (trouble.resets_at) |at|
             try std.fmt.allocPrint(built.arena, "Quota used up. Resets in {s}.", .{ageText(&buffer, at -| now_ms / 1000)})
         else
@@ -3823,6 +3830,7 @@ const TestSession = struct {
     archive_state: ArchiveState = .active,
     label: ?[]const u8 = null,
     workspace: []const u8 = "/home/d/code/rui",
+    provider: Provider = .codex,
     first: ?First = .{ .position = 1, .admission = 4, .sender = null },
     yours: bool = false,
     turn: ?u64 = null,
@@ -3834,6 +3842,7 @@ fn session(ref: *const [6]u8, state: WorkState, options: TestSession) Listed {
         .reference = ref.*,
         .archive_state = options.archive_state,
         .workspace = options.workspace,
+        .provider = options.provider,
         .label = options.label,
         .state = state,
         .turn = options.turn,
@@ -4437,6 +4446,25 @@ test "App header preserves provider recovery without a counts or Host-stopped ba
     const text = try segmentText(arena.allocator(), segments);
     try std.testing.expect(std.mem.indexOf(u8, text, "Host stopped") == null);
     try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, text, "\n"));
+}
+
+test "the band names the provider of the newest sign-in or key failure" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const rows = [_]Listed{
+        session("aaaaaa", .{ .failed = .{ .since = test_now_s - 90, .code = bounded(session_work.max_code_bytes, "provider_http_401"), .resets_at = null } }, .{ .provider = .codex }),
+        session("bbbbbb", .{ .failed = .{ .since = test_now_s - 30, .code = bounded(session_work.max_code_bytes, "provider_http_401"), .resets_at = null } }, .{ .provider = .chatgpt }),
+    };
+    for ([_]struct { []const Listed, []const u8 }{
+        .{ &rows, "Sign-in expired. Run rui auth login chatgpt." },
+        .{ rows[0..1], "Sign-in expired. Run rui auth login codex." },
+        .{ &.{session("cccccc", .{ .failed = .{ .since = test_now_s - 60, .code = bounded(session_work.max_code_bytes, failure_class.api_key_rejected), .resets_at = null } }, .{ .provider = .openai })}, "OpenAI API key rejected. Run rui auth login openai, then rui host pause." },
+    }) |case| {
+        var state = try opened(case[0]);
+        defer state.deinit();
+        const text = try segmentText(arena.allocator(), try headerSegments(arena.allocator(), &state, 200, .{}));
+        try std.testing.expect(std.mem.indexOf(u8, text, case[1]) != null);
+    }
 }
 
 test "a needs-you row reads its waiting Action's command once, and again only when the Action changes" {
@@ -5720,19 +5748,19 @@ fn bandOf(rows: []const Listed, login_at: ?u64) !?Band {
 test "the band derives provider trouble from rows, in priority order" {
     const done = session("ffffff", .{ .finished = ago(600) }, .{ .label = "Done" });
     // Sign-in: an authentication failure newer than the newest completion.
-    for ([_][]const u8{ "provider_http_401", "provider_sign_in_required", "provider_sign_in_refresh_token_expired" }) |code| try std.testing.expectEqual(Band{ .trouble = .sign_in }, (try bandOf(&.{ done, failedRow("aaaaaa", 60, code, null) }, null)).?);
+    for ([_][]const u8{ "provider_http_401", "provider_sign_in_required", "provider_sign_in_refresh_token_expired" }) |code| try std.testing.expectEqual(Band{ .trouble = .sign_in, .provider = .codex }, (try bandOf(&.{ done, failedRow("aaaaaa", 60, code, null) }, null)).?);
     try std.testing.expect(signInCode("provider_sign_in_refresh_token_expired") and signInCode("provider_http_401") and signInCode("provider_sign_in_required"));
     try std.testing.expect(!signInCode("provider_authentication_backend_failed"));
     // A later completion clears it; a login in this terminal hides it until a newer failure.
     try std.testing.expectEqual(@as(?Band, null), try bandOf(&.{ session("ffffff", .{ .finished = ago(30) }, .{}), failedRow("aaaaaa", 60, "provider_http_401", null) }, null));
     try std.testing.expectEqual(@as(?Band, null), try bandOf(&.{ done, failedRow("aaaaaa", 60, "provider_http_401", null) }, test_now_s - 30));
-    try std.testing.expectEqual(Band{ .trouble = .sign_in }, (try bandOf(&.{ done, failedRow("aaaaaa", 10, "provider_http_401", null) }, test_now_s - 30)).?);
+    try std.testing.expectEqual(Band{ .trouble = .sign_in, .provider = .codex }, (try bandOf(&.{ done, failedRow("aaaaaa", 10, "provider_http_401", null) }, test_now_s - 30)).?);
     // A rejected API key: its own remedy, not a sign-in.
-    try std.testing.expectEqual(Band{ .trouble = .api_key }, (try bandOf(&.{ done, failedRow("aaaaaa", 60, failure_class.api_key_rejected, null) }, null)).?);
+    try std.testing.expectEqual(Band{ .trouble = .api_key, .provider = .codex }, (try bandOf(&.{ done, failedRow("aaaaaa", 60, failure_class.api_key_rejected, null) }, null)).?);
     try std.testing.expect(!signInCode(failure_class.api_key_rejected));
     // Quota: shown with its reset time until that time passes.
-    try std.testing.expectEqual(Band{ .trouble = .quota, .resets_at = test_now_s + 1200 }, (try bandOf(&.{ done, failedRow("aaaaaa", 60, "provider_quota", test_now_s + 1200) }, null)).?);
-    try std.testing.expectEqual(Band{ .trouble = .quota }, (try bandOf(&.{ done, failedRow("aaaaaa", 60, "provider_quota", null) }, null)).?);
+    try std.testing.expectEqual(Band{ .trouble = .quota, .resets_at = test_now_s + 1200, .provider = .codex }, (try bandOf(&.{ done, failedRow("aaaaaa", 60, "provider_quota", test_now_s + 1200) }, null)).?);
+    try std.testing.expectEqual(Band{ .trouble = .quota, .provider = .codex }, (try bandOf(&.{ done, failedRow("aaaaaa", 60, "provider_quota", null) }, null)).?);
     try std.testing.expectEqual(@as(?Band, null), try bandOf(&.{ done, failedRow("aaaaaa", 60, "provider_plan", test_now_s) }, null));
     // Rate limit: while any row retries for a 429.
     try std.testing.expectEqual(Band{ .trouble = .rate_limit, .sessions = 2 }, (try bandOf(&.{ retryRow("aaaaaa", "provider_temporary_http_429", 10), retryRow("bbbbbb", "provider_temporary_http_429", 20), retryRow("cccccc", "provider_temporary_error", 20) }, null)).?);
@@ -6018,7 +6046,7 @@ test "/model reconciles owned choices across absent listed and changed sign-ins"
             defer state.deinit();
             state.default.?.effort = .low;
             var initial: [2]model_list.Entry = undefined;
-            for (std.enums.values(Provider), &initial) |provider, *entry| entry.* = .{
+            for ([_]Provider{ .codex, .openai }, &initial) |provider, *entry| entry.* = .{
                 .provider = provider,
                 .list = .{ .live = .{ .bytes = if (initially_listed) "first-chat\nprivate-refresh\n" else "first-chat\n" } },
             };
