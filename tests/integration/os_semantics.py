@@ -138,6 +138,13 @@ def user_file_flags(flags):
     return flags & ~_module.FILE_FLAG_HISTORY
 
 
+def terminal_bash_reads_login_files():
+    """Whether a new terminal starts bash as a login shell, so it reads
+    ~/.bash_profile, ~/.bash_login or ~/.profile instead of ~/.bashrc
+    (Terminal.app does; Linux terminals do not)."""
+    return _module.DARWIN
+
+
 def shared_library_command(source, library):
     """The compiler command that builds a preloadable fixture library."""
     darwin = _module.DARWIN
