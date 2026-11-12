@@ -72,4 +72,7 @@ pub const ProposalMetadata = struct {
     action: ?u64,
     rejection: ?tool_proposal.Rejection,
     fields: [3]ProposalFieldReference, // ProposalField order.
+    description: ?@import("bounded.zig").Bounded(@import("tool_presentation.zig").max_description_bytes) = null,
+    tool: ?@import("bounded.zig").Bounded(@import("tool_name.zig").max_bytes) = null,
+    server: ?@import("bounded.zig").Bounded(@import("tool_name.zig").max_bytes) = null,
 };

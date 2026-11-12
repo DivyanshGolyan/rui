@@ -15262,6 +15262,215 @@ test "MCP settlement saves one decoded presentation line or the tool name" {
     }.run);
 }
 
+/// Both real format-69 fixtures call this after the owning 69 -> 70 step.
+/// The fixed historical rows contain a finished root and two Bash calls in
+/// its attached child's open Turn, one authorized and one awaiting approval.
+pub fn expectWireMigrationFacts(storage: *Store, tmp: *std.testing.TmpDir) !void {
+    _ = try expectOneWork(storage, tmp, "d8mv7p", "finished");
+    _ = try expectOneWork(storage, tmp, "brhkcj", "pending");
+    var row = try testingListRow(storage, tmp, "brhkcj");
+    defer row.deinit();
+    try std.testing.expectEqualStrings("d8mv7p", row.get(&.{"parent"}).string);
+    var child: protocol.Bounded(protocol.max_session_bytes) = .{};
+    try child.set("brhkcj");
+    const page = try store_core.activityPageForTesting(storage, .{ .session = child, .kinds = .initMany(&.{ .call, .approval_requested }) });
+    try std.testing.expectEqual(@as(usize, 4), page.count);
+    var calls: usize = 0;
+    var approvals: usize = 0;
+    for (page.items[0..page.count]) |item| {
+        const ordinal = switch (item.value) {
+            .call => |call| ordinal: {
+                calls += 1;
+                try std.testing.expectEqualStrings("bash", call.tool.?.slice());
+                try std.testing.expectEqualStrings(if (call.call_ordinal == 0) "Run first command" else "Run second command", call.description.?.slice());
+                try std.testing.expect(call.server == null);
+                break :ordinal call.call_ordinal;
+            },
+            .approval_requested => |approval| ordinal: {
+                approvals += 1;
+                try std.testing.expectEqualStrings("brhkcj", approval.session.slice());
+                try std.testing.expectEqualStrings("bash", approval.tool.?.slice());
+                try std.testing.expectEqualStrings(if (approval.call_ordinal == 0) "Run first command" else "Run second command", approval.description.?.slice());
+                try std.testing.expect(approval.server == null);
+                break :ordinal approval.call_ordinal;
+            },
+            else => return error.UnexpectedActivity,
+        };
+        try expectActivityArguments(storage, child, item, if (ordinal == 0)
+            "{\"description\":\"Run first command\",\"cmd\":\"one\",\"timeout_ms\":null}"
+        else
+            "{\"description\":\"Run second command\",\"cmd\":\"two\",\"timeout_ms\":null}");
+    }
+    try std.testing.expectEqual(@as(usize, 2), calls);
+    try std.testing.expectEqual(@as(usize, 2), approvals);
+}
+
+test "call and forwarded approval rows expose saved identity description and original arguments" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var digests: [membership_records.len][32]u8 = undefined;
+            const host_tool_set = membershipToolSet(&digests);
+            for ([_][]const u8{ "fetch_page", "bash", "start_agent" }) |tool| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStoreWith(case, &storage, &tmp, std.testing.io, .{ .host_tool_set = &host_tool_set });
+                defer storage.close() catch unreachable;
+                const parent = try configureTestSession(&storage, "inline-parent");
+                var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+                var configure = try completeConfiguration("inline-child", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
+                configure.configuration.tools = try .of(&.{tool});
+                configure.configuration.permission_mode.state = .value;
+                try configure.configuration.permission_mode.value.set("ask");
+                const child = (try storage.configure(&configure, .{})).accepted.session;
+                try store_testing.exec(&storage, "UPDATE session SET parent_ref=?1 WHERE session_ref=?2", .{ parent.slice(), child.slice() });
+                try submitTestMessage(&storage, &tmp, "inline-input", "inline-message", child.slice(), "call");
+                const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                const mcp = std.mem.eql(u8, tool, "fetch_page");
+                const bash = std.mem.eql(u8, tool, "bash");
+                const arguments = if (mcp) "{ \"rui_call_description\": \"Fetch inline\", \"url\": \"https://example.test\" }" else if (bash) "{ \"description\": \"Print inline\", \"cmd\": \"printf inline\", \"timeout_ms\": null }" else "{ \"task\": \"child task\" }";
+                const encoded = try std.json.Stringify.valueAlloc(std.testing.allocator, arguments, .{});
+                defer std.testing.allocator.free(encoded);
+                try settleCallsForTesting(&storage, &tmp, model, "inline-call", &.{.{ .item_id = "inline-item", .name = tool, .encoded_call_id = "inline-id", .decoded_call_id = "inline-id", .encoded_arguments = encoded[1 .. encoded.len - 1], .decoded_arguments = arguments }});
+                const own = try store_core.activityPageForTesting(&storage, .{ .session = child, .kinds = .initMany(&.{ .call, .approval_requested }) });
+                const call = own.items[0].value.call;
+                try std.testing.expectEqualStrings(tool, call.tool.?.slice());
+                if (mcp or bash) {
+                    try std.testing.expect(call.description != null);
+                    try std.testing.expectEqualStrings(if (mcp) "Fetch inline" else "Print inline", call.description.?.slice());
+                }
+                if (mcp) try std.testing.expectEqualStrings("docs", call.server.?.slice()) else try std.testing.expect(call.server == null);
+                try expectActivityArguments(&storage, child, own.items[0], arguments);
+                // Core built-ins need no Permission Decision; Bash and MCP do.
+                try std.testing.expectEqual(@as(usize, if (mcp or bash) 2 else 1), own.count);
+                if (mcp or bash) {
+                    const approval = own.items[1].value.approval_requested;
+                    try std.testing.expectEqualDeep(call.description, approval.description);
+                    try std.testing.expectEqualDeep(call.tool, approval.tool);
+                    try std.testing.expectEqualDeep(call.server, approval.server);
+                    try expectActivityArguments(&storage, child, own.items[1], arguments);
+                    try std.testing.expect(try storage.deliverSessionForward((try storage.nextCoreWork()).?.forward, .{}));
+                    const forwarded = try store_core.activityPageForTesting(&storage, .{ .session = parent, .kinds = .initOne(.approval_requested) });
+                    try std.testing.expectEqual(@as(usize, 1), forwarded.count);
+                    try std.testing.expectEqualDeep(approval, forwarded.items[0].value.approval_requested);
+                    try expectActivityArguments(&storage, parent, forwarded.items[0], arguments);
+                }
+                try std.testing.expect(!storage.isFenced());
+            }
+        }
+    }.run);
+}
+
+fn expectActivityArguments(storage: *Store, session: protocol.Bounded(protocol.max_session_bytes), item: protocol.ActivityItem, expected: []const u8) !void {
+    var reader: ContentReader = undefined;
+    reader.open(try storage.openActivityContent(&.{ .session = session, .position = item.position, .ordinal = item.ordinal }));
+    defer reader.close();
+    var bytes: [1024]u8 = undefined;
+    const length = try reader.read(0, &bytes);
+    try std.testing.expectEqualStrings(expected, bytes[0..length]);
+}
+
+test "Activity full page keeps call approval and model decoder scratch disjoint" {
+    try store_testing.forEachEngine(struct {
+        fn run(engine: *store_testing.Case) !void {
+            var digests: [membership_records.len][32]u8 = undefined;
+            const host_tool_set = membershipToolSet(&digests);
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStoreWith(engine, &storage, &tmp, std.testing.io, .{ .host_tool_set = &host_tool_set });
+            defer storage.close() catch unreachable;
+            var workspace: [protocol.max_workspace_bytes]u8 = undefined;
+            var configure = try completeConfiguration("scratch-config", "", try canonicalCwd(std.testing.io, &workspace), "model-a");
+            configure.configuration.tools = try .of(&.{ "bash", "fetch_page" });
+            configure.configuration.permission_mode.state = .value;
+            try configure.configuration.permission_mode.value.set("ask");
+            const session = (try storage.configure(&configure, .{})).accepted.session;
+            try submitTestMessage(&storage, &tmp, "scratch-first", "scratch-first-message", session.slice(), "first");
+            try answerTestTurn(&storage, &tmp, session.slice(), "scratch-answer", &.{.{ .encoded = "done", .decoded = "done" }});
+            try submitTestMessage(&storage, &tmp, "scratch-next", "scratch-next-message", session.slice(), "next");
+            const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer arena.deinit();
+            const allocator = arena.allocator();
+            var calls: [protocol.ActivityPage.items / 2]TestingCall = undefined;
+            var descriptions: [calls.len][]const u8 = undefined;
+            for (&calls, &descriptions, 0..) |*call, *description, i| {
+                const bytes = try allocator.alloc(u8, 1 + i * @as(usize, if (i % 2 == 0) 28 else 12));
+                @memset(bytes, @as(u8, @intCast('a' + i)));
+                description.* = bytes;
+                const mcp = i % 2 == 0;
+                const arguments = try std.fmt.allocPrint(allocator, "{{\"{s}\":\"{s}\",\"cmd\":\"true\"}}", .{ if (mcp) "rui_call_description" else "description", bytes });
+                const encoded = try std.json.Stringify.valueAlloc(allocator, arguments, .{});
+                const id = try std.fmt.allocPrint(allocator, "scratch-{d}", .{i});
+                call.* = .{ .item_id = id, .name = if (mcp) "fetch_page" else "bash", .encoded_call_id = id, .decoded_call_id = id, .encoded_arguments = encoded[1 .. encoded.len - 1], .decoded_arguments = arguments };
+            }
+            try settleCallsForTesting(&storage, &tmp, model, "scratch-calls", &calls);
+            var request: protocol.ActivityPage = .{ .session = session, .kinds = .initMany(&.{ .call, .approval_requested }) };
+            const full = try store_core.activityPageForTesting(&storage, request);
+            try std.testing.expectEqual(@as(usize, protocol.ActivityPage.items), full.count);
+            try std.testing.expect(!full.more);
+            for (full.items[0..full.count]) |item| try check(&storage, session, item, &calls, &descriptions);
+            // Two distinct model rows decode beside retained call/approval state.
+            // Repeat in reverse to exercise reused slots and optional text fields.
+            request.kinds.insert(.model_call);
+            inline for (.{ .forward, .backward }) |direction| {
+                request.direction = direction;
+                request.position = 0;
+                request.ordinal = null;
+                var count: usize = 0;
+                var models: usize = 0;
+                var answered = false;
+                var proposed = false;
+                while (true) {
+                    const page = try store_core.activityPageForTesting(&storage, request);
+                    for (page.items[0..page.count]) |item| {
+                        count += 1;
+                        if (item.value == .model_call) {
+                            const decoded = item.value.model_call;
+                            try std.testing.expectEqualStrings("model-a", decoded.model.slice());
+                            try std.testing.expectEqual(@as(u64, 1), decoded.attempts);
+                            if (std.mem.eql(u8, decoded.status.slice(), "answer")) {
+                                try std.testing.expect(!answered);
+                                answered = true;
+                            } else {
+                                try std.testing.expectEqualStrings("tool_proposals", decoded.status.slice());
+                                try std.testing.expect(!proposed);
+                                proposed = true;
+                            }
+                            models += 1;
+                        } else try check(&storage, session, item, &calls, &descriptions);
+                    }
+                    if (!page.more) break;
+                    const edge = page.items[page.count - 1];
+                    request.position = edge.position;
+                    request.ordinal = edge.ordinal;
+                }
+                try std.testing.expectEqual(@as(usize, calls.len * 2 + 2), count);
+                try std.testing.expectEqual(@as(usize, 2), models);
+            }
+            try std.testing.expect(!storage.isFenced());
+        }
+
+        fn check(storage: *Store, session: protocol.Bounded(protocol.max_session_bytes), item: protocol.ActivityItem, calls: []const TestingCall, descriptions: []const []const u8) !void {
+            const ordinal = switch (item.value) {
+                .call => |call| call.call_ordinal,
+                .approval_requested => |approval| approval.call_ordinal,
+                else => return error.UnexpectedActivityKind,
+            };
+            const description, const tool, const server = switch (item.value) {
+                .call => |call| .{ call.description, call.tool, call.server },
+                .approval_requested => |approval| .{ approval.description, approval.tool, approval.server },
+                else => unreachable,
+            };
+            try std.testing.expectEqualStrings(descriptions[ordinal], description.?.slice());
+            try std.testing.expectEqualStrings(calls[ordinal].name, tool.?.slice());
+            if (ordinal % 2 == 0) try std.testing.expectEqualStrings("docs", server.?.slice()) else try std.testing.expect(server == null);
+            try expectActivityArguments(storage, session, item, calls[ordinal].decoded_arguments);
+        }
+    }.run);
+}
+
 test "saved MCP call lines survive all work reads pending, running and completed at every boundary" {
     try store_testing.forEachEngine(struct {
         fn run(engine: *store_testing.Case) !void {
@@ -15994,6 +16203,152 @@ test "session message writer covers peer message_agent start_agent and ending wi
                     try std.testing.expectEqual(command_domain.AgentDelivery.failed, try storage.deliverAgentMessage(missing.binding, "zzzzzz", text, .{}));
                 }
             }
+        }
+    }.run);
+}
+
+// The core-call writes, over their paths: a fault injected before their
+// commit, with or without bound skills, leaves the call unresolved or the
+// ending owed, with nothing admitted; a Message saves every skill its text
+// bound, in order, after it; a call whose key is taken sends nothing; a
+// call whose Session owes a stop is left to it; a core call resolves with
+// its own code and result; and an ending to an archived parent settles
+// without a Message.
+test "core call writes roll back on injected faults and save every bound skill" {
+    try store_testing.forEachEngine(struct {
+        fn reopen(case: *store_testing.Case, storage: *Store, tmp: *std.testing.TmpDir, opened: *bool) !void {
+            try storage.close();
+            opened.* = false;
+            try store_testing.testingStore(case, storage, tmp, std.testing.io);
+            opened.* = true;
+        }
+
+        fn expectSkills(storage: *Store, session: []const u8, comptime names: []const []const u8) !void {
+            try std.testing.expectEqual(@as(u64, names.len), try store_testing.queryU64(storage, "SELECT count(*) FROM message_skill k JOIN message_admission m ON m.admission_id=k.admission_id WHERE m.session_ref=?1", .{session}));
+            inline for (names, 1..) |name, position| {
+                const content_id = try store_testing.queryU64(storage, "SELECT k.content_id FROM message_skill k JOIN message_admission m ON m.admission_id=k.admission_id WHERE m.session_ref=?1 AND k.position=?2 AND k.name=?3", .{ session, @as(u64, position), name });
+                try expectContent(storage, try testingContentReference(storage, content_id), name ++ " body");
+            }
+        }
+
+        fn stop(storage: *Store, key: []const u8, session: []const u8) !void {
+            var command = try completeSessionStop(key, session);
+            try std.testing.expect(storage.stopSession(&command, .{}) == .accepted);
+        }
+
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            var opened = true;
+            defer if (opened) {
+                storage.close() catch unreachable;
+            };
+            var path: [protocol.max_workspace_bytes]u8 = undefined;
+            var create = try completeConfiguration("faults-sender", "", try canonicalCwd(std.testing.io, &path), "model-a");
+            create.configuration.tools = try .of(&.{"message_agent"});
+            create.configuration.permission_mode.state = .value;
+            try create.configuration.permission_mode.value.set("bypass");
+            const sender = (try storage.configure(&create, .{})).accepted.session;
+            const receiver = try configureTestSession(&storage, "faults-receiver");
+            // The sender is a child, so its parent's stop makes it owe one.
+            const root = try configureTestSession(&storage, "faults-root");
+            try store_testing.exec(&storage, "UPDATE session SET parent_ref=?1 WHERE session_ref=?2", .{ root.slice(), sender.slice() });
+            try submitTestMessage(&storage, &tmp, "faults-task", "faults-task", sender.slice(), "send");
+            const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            var arguments_buffer: [128]u8 = undefined;
+            const arguments = try std.fmt.bufPrint(&arguments_buffer, "{{\"id\":\"{s}\",\"text\":\"hello\"}}", .{receiver.slice()});
+            var encoded_buffer: [192]u8 = undefined;
+            const encoded = try std.fmt.bufPrint(&encoded_buffer, "{{\\\"id\\\":\\\"{s}\\\",\\\"text\\\":\\\"hello\\\"}}", .{receiver.slice()});
+            var calls: [5]TestingCall = undefined;
+            for (&calls, [_][]const u8{ "send", "fail", "succeed", "taken", "owed" }) |*call, name| call.* = .{ .item_id = name, .name = "message_agent", .encoded_call_id = name, .decoded_call_id = name, .encoded_arguments = encoded, .decoded_arguments = arguments };
+            try settleCallsForTesting(&storage, &tmp, model, "faults-calls", &calls);
+            const injected = [_]struct { Faults, anyerror }{
+                .{ .{ .content_import = true }, error.InjectedContentImportFailure },
+                .{ .{ .before_commit = true }, error.InjectedCommitFailure },
+            };
+
+            const bound: skills_fixture_domain.MessageCapture = .{ .bound = &.{ .{ .name = "first", .bytes = "first body" }, .{ .name = "second", .bytes = "second body" } } };
+            for (injected) |fault| for ([_]?*const skills_fixture_domain.MessageCapture{ null, &bound }) |captured| {
+                const send = (try storage.nextCoreWork()).?.action;
+                try std.testing.expectError(fault[1], storage.deliverAgentMessageBound(send.binding, receiver.slice(), "hello", captured, fault[0]));
+                try reopen(case, &storage, &tmp, &opened);
+                try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE session_ref=?1", .{receiver.slice()}));
+                try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_skill", .{}));
+                try std.testing.expectEqual(send.binding.action_id, (try storage.nextCoreWork()).?.action.binding.action_id);
+            };
+            const send = (try storage.nextCoreWork()).?.action;
+            try std.testing.expectEqual(command_domain.AgentDelivery.delivered, try storage.deliverAgentMessageBound(send.binding, receiver.slice(), "hello", &bound, .{}));
+            try expectSkills(&storage, receiver.slice(), &.{ "first", "second" });
+
+            const Resolution = struct { code: []const u8, result: []const u8 };
+            inline for (.{ Resolution{ .code = "failed", .result = "the call failed" }, Resolution{ .code = "succeeded", .result = "the call succeeded" } }) |expected| {
+                const resolve = if (comptime std.mem.eql(u8, expected.code, "failed")) Store.failCoreCall else Store.succeedCoreCall;
+                const call = (try storage.nextCoreWork()).?.action;
+                for (injected) |fault| {
+                    try std.testing.expectError(fault[1], resolve(&storage, call.binding, expected.result, fault[0]));
+                    try reopen(case, &storage, &tmp, &opened);
+                    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE action_id=?1 AND resolution_code IS NULL", .{call.binding.action_id}));
+                }
+                try std.testing.expect(try resolve(&storage, call.binding, expected.result, .{}));
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE action_id=?1 AND resolution_code=?2", .{ call.binding.action_id, expected.code }));
+                const result_id = try store_testing.queryU64(&storage, "SELECT resolution_content_id FROM action_operation WHERE action_id=?1", .{call.binding.action_id});
+                try expectContent(&storage, try testingContentReference(&storage, result_id), expected.result);
+            }
+
+            // A call whose command key is taken sends nothing and fails.
+            const taken = (try storage.nextCoreWork()).?.action;
+            var key_buffer: [128]u8 = undefined;
+            const key = try std.fmt.bufPrint(&key_buffer, "rui.core/message_agent/{d}", .{taken.binding.action_id});
+            try store_testing.exec(&storage, "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) VALUES(?1,2,?2,?3,1,'',0,0,1000000)", .{ key, receiver.slice(), store_testing.Blob{ .bytes = &protocol.contentDigest("taken") } });
+            try std.testing.expectEqual(command_domain.AgentDelivery.failed, try storage.deliverAgentMessage(taken.binding, receiver.slice(), "hello", .{}));
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE session_ref=?1", .{receiver.slice()}));
+            const taken_id = try store_testing.queryU64(&storage, "SELECT resolution_content_id FROM action_operation WHERE action_id=?1 AND resolution_code='failed'", .{taken.binding.action_id});
+            try expectContent(&storage, try testingContentReference(&storage, taken_id), "Rui could not send this Message: its command key is already taken. Nothing was sent.");
+
+            // A call selected before its Session came to owe a stop is left
+            // to that stop.
+            const owed = (try storage.nextCoreWork()).?.action;
+            try stop(&storage, "faults-root-stop", root.slice());
+            try std.testing.expect(!try storage.failCoreCall(owed.binding, "too late", .{}));
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE action_id=?1 AND resolution_code IS NULL", .{owed.binding.action_id}));
+
+            // Two children's done Turns each owe their parent an ending.
+            // Stops leave the children's the only Turns to admit.
+            try stop(&storage, "faults-sender-stop", sender.slice());
+            try stop(&storage, "faults-receiver-stop", receiver.slice());
+            const parent = try configureTestSession(&storage, "faults-parent");
+            var endings: [2]u64 = undefined;
+            inline for (.{ "faults-child", "faults-other-child" }) |name| {
+                const child = try configureTestSession(&storage, name);
+                try store_testing.exec(&storage, "UPDATE session SET parent_ref=?1 WHERE session_ref=?2", .{ parent.slice(), child.slice() });
+                try submitTestMessage(&storage, &tmp, name ++ "-task", name ++ "-task", child.slice(), "answer");
+            }
+            for (&endings) |*ending| {
+                const child_model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                try settleItemsForTesting(&storage, &tmp, child_model, &.{"{\"type\":\"message\",\"id\":\"answer\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"saved answer\"}]}"}, "saved answer");
+                ending.* = child_model.turn_id;
+            }
+            const ending_bound: skills_fixture_domain.MessageCapture = .{ .bound = &.{ .{ .name = "third", .bytes = "third body" }, .{ .name = "fourth", .bytes = "fourth body" } } };
+            for (injected) |fault| for ([_]?*const skills_fixture_domain.MessageCapture{ null, &ending_bound }) |captured| {
+                try std.testing.expectError(fault[1], storage.deliverChildEndingBound(endings[0], captured, fault[0]));
+                try reopen(case, &storage, &tmp, &opened);
+                try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE session_ref=?1", .{parent.slice()}));
+            };
+            try std.testing.expect(try storage.deliverChildEndingBound(endings[0], &ending_bound, .{}));
+            try expectSkills(&storage, parent.slice(), &.{ "third", "fourth" });
+            try std.testing.expect(!try storage.deliverChildEndingBound(endings[0], &ending_bound, .{}));
+
+            // Archiving the parent quiets the other ending; one that is
+            // owed loudly all the same settles without a Message.
+            var archive: protocol.SessionArchiveCommand = .{ .session = parent, .archived = true };
+            try archive.key.set("faults-parent-archive");
+            try std.testing.expect(storage.archiveSession(&archive, .{}) == .accepted);
+            try store_testing.exec(&storage, "UPDATE session_forward SET suppress_message=0 WHERE source_id=?1 AND kind=2", .{endings[1]});
+            try std.testing.expect(try storage.deliverChildEnding(endings[1], .{}));
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE session_ref=?1", .{parent.slice()}));
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT message_delivered FROM session_forward WHERE source_id=?1 AND kind=2", .{endings[1]}));
         }
     }.run);
 }

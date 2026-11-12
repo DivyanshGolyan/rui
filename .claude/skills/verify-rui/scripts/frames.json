@@ -2179,11 +2179,15 @@
         "\u2193",
         "more",
         "Settings"
+      ],
+      "absent": [
+        "↑",
+        "↓ 0 more"
       ]
     },
     {
-      "name": "many-sessions-end",
-      "note": "51b-many-sessions-end",
+      "name": "many-sessions-middle",
+      "note": "51a-many-sessions-middle",
       "open": "overview",
       "steps": [
         {
@@ -2191,26 +2195,6 @@
         },
         {
           "keys": [
-            "Down",
-            "Down",
-            "Down",
-            "Down",
-            "Down",
-            "Down",
-            "Down",
-            "Down",
-            "Down",
-            "Down",
-            "Down",
-            "Down",
-            "Down",
-            "Down",
-            "Down",
-            "Down",
-            "Down",
-            "Down",
-            "Down",
-            "Down",
             "Down",
             "Down",
             "Down",
@@ -2242,8 +2226,141 @@
         "140x40"
       ],
       "expect": [
+        "↑",
+        "↓",
+        "more",
         "Settings",
-        "enter open"
+        "+ New Session"
+      ],
+      "absent": [
+        "↑ 0 more",
+        "↓ 0 more"
+      ]
+    },
+    {
+      "name": "many-sessions-end",
+      "note": "51b-many-sessions-end",
+      "open": "overview",
+      "steps": [
+        {
+          "wait": "Batch job"
+        },
+        {
+          "keys": [
+            "End",
+            "Up"
+          ]
+        },
+        {
+          "wait": "Settings"
+        }
+      ],
+      "sizes": [
+        "46x30",
+        "140x40"
+      ],
+      "expect": [
+        "Settings",
+        "enter open",
+        "↑",
+        "more",
+        "+ New Session"
+      ],
+      "absent": [
+        "↓",
+        "↑ 0 more"
+      ]
+    },
+    {
+      "name": "many-sessions-pinned-end",
+      "note": "51c-many-sessions-pinned-end",
+      "open": "overview",
+      "steps": [
+        {
+          "wait": "Batch job"
+        },
+        {
+          "keys": [
+            "End",
+            "Up"
+          ]
+        },
+        {
+          "wait": "Settings"
+        }
+      ],
+      "sizes": [
+        "46x30",
+        "140x40"
+      ],
+      "expect": [
+        "+ New Session",
+        "↑",
+        "more",
+        "Settings"
+      ],
+      "absent": [
+        "↓",
+        "↑ 0 more"
+      ]
+    },
+    {
+      "name": "chat-no-new-session",
+      "note": "51d-chat-no-new-session",
+      "open": "Sidebar chat",
+      "steps": [
+        {
+          "wait": "Check this sidebar."
+        },
+        {
+          "wait": "Schema migration"
+        }
+      ],
+      "sizes": [
+        "140x40",
+        "46x30"
+      ],
+      "expect": [
+        "Check this sidebar.",
+        "alt+i info"
+      ],
+      "expect_last": "alt+i info",
+      "absent": [
+        "+ New Session"
+      ],
+      "cast": [
+        {
+          "label": "Sidebar chat",
+          "workspace": "code/rui",
+          "messages": [
+            "Check this sidebar."
+          ],
+          "mode": "bypass",
+          "effort": "high"
+        }
+      ]
+    },
+    {
+      "name": "chat-sidebar-rows",
+      "note": "51e-chat-sidebar-populated",
+      "open": "Sidebar chat",
+      "steps": [
+        {
+          "wait": "Schema migration"
+        }
+      ],
+      "sizes": [
+        "140x40"
+      ],
+      "expect": [
+        "Schema migration",
+        "Sidebar chat",
+        "Batch job",
+        "Check this sidebar."
+      ],
+      "expect_last": "alt+i info",
+      "absent": [
+        "+ New Session"
       ]
     },
     {

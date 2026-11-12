@@ -12,7 +12,9 @@ const Self = @This();
 pub const list_width = 40;
 pub const split_at = 100;
 
-pub const OverviewKeys = struct {
+/// A pane core's key owner: Root hands it each key, paste mark and
+/// malformed key `app_input.step` routes to that pane, with its delivery.
+pub const Keys = struct {
     context: *anyopaque,
     take: *const fn (*anyopaque, *vxfw.EventContext, vxfw.Event, app_input.Effects.Delivery) anyerror!void,
 };
@@ -29,11 +31,15 @@ overview: vxfw.Widget,
 /// malformed key `app_input.step` routes to the overview, with what it
 /// arrived under. A Root with no overview core (UI-only tests and native
 /// probes) hands those events to the `overview` widget instead.
-overview_keys: ?OverviewKeys = null,
+overview_keys: ?Keys = null,
 list: vxfw.Widget,
 compose: vxfw.Widget,
 divider: Split.Divider = .{},
 session: ?vxfw.Widget = null,
+/// The open Session's key owner, which `openSession` and `closeSession`
+/// set with `session`. A Session with none (UI-only tests) has its widget
+/// handed those events instead.
+session_keys: ?Keys = null,
 settings_page: AppSettings = .{},
 /// The sign-in page its owner supplies; Root only routes to and draws it.
 sign_in: ?vxfw.Widget = null,
@@ -72,9 +78,10 @@ pub fn closeMainPresentation(self: *Self) void {
     if (self.main_presentation) |owner| owner.close(owner.context);
 }
 
-pub fn openSession(self: *Self, ctx: *vxfw.EventContext, session: vxfw.Widget) !void {
+pub fn openSession(self: *Self, ctx: *vxfw.EventContext, session: vxfw.Widget, keys: ?Keys) !void {
     std.debug.assert(self.session == null);
     self.session = session;
+    self.session_keys = keys;
     try self.showMain(ctx);
     try session.handleEvent(ctx, .init);
     ctx.redraw = true;
@@ -160,6 +167,10 @@ fn apply(self: *Self, ctx: *vxfw.EventContext, effects: app_input.Effects, route
             if (self.overview_keys) |keys| try keys.take(keys.context, ctx, routed.?, delivery) else try self.overview.handleEvent(ctx, routed.?);
             ctx.consumeEvent();
         },
+        .session => |delivery| {
+            if (self.session_keys) |keys| try keys.take(keys.context, ctx, routed.?, delivery) else try self.session.?.handleEvent(ctx, routed.?);
+            ctx.consumeEvent();
+        },
         .colors => {
             try self.overview.handleEvent(ctx, routed.?);
             ctx.consumeEvent();
@@ -174,6 +185,7 @@ fn apply(self: *Self, ctx: *vxfw.EventContext, effects: app_input.Effects, route
 pub fn closeSession(self: *Self, ctx: *vxfw.EventContext) !void {
     self.closeMainPresentation();
     self.session = null;
+    self.session_keys = null;
     if (!self.input.layer.settingsOpen()) self.settings_page.closeStandaloneChoice();
     if (self.input.layer == .main) try ctx.requestFocus(self.overview);
     ctx.redraw = true;
@@ -294,7 +306,7 @@ test "App root switches between overview and Session without retaining the hidde
     const initial = try root.widget().draw(draw_context);
     try std.testing.expectEqual(@as(usize, 1), initial.children.len);
     try std.testing.expectEqualStrings("O", initial.children[0].surface.buffer[0].char.grapheme);
-    try root.openSession(&ctx, session.widget());
+    try root.openSession(&ctx, session.widget(), null);
     const opened = try root.widget().draw(draw_context);
     try std.testing.expectEqual(@as(usize, 1), opened.children.len);
     try std.testing.expectEqualStrings("S", opened.children[0].surface.buffer[0].char.grapheme);
@@ -375,7 +387,7 @@ test "App root resizing keeps the open child's draft scroll and focus without an
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
-    try root.openSession(&events, opened.widget());
+    try root.openSession(&events, opened.widget(), null);
     try std.testing.expectEqual(@as(usize, 1), events.cmds.items.len);
     try std.testing.expect(events.cmds.items[0].request_focus.eql(opened.widget()));
     for ([_]u16{ 140, 46, 99, 100, 46, 140 }) |width| {
@@ -502,7 +514,7 @@ test "App root opens settings in both layouts and Escape closes the choice, then
         try std.testing.expect(ctx.consume_event and !root.input.layer.settingsOpen());
 
         try root.openSettings(&ctx);
-        try root.openSession(&ctx, session.widget());
+        try root.openSession(&ctx, session.widget(), null);
         try std.testing.expect(!root.input.layer.settingsOpen());
         try std.testing.expect(root.session.?.eql(session.widget()));
         // Escape from settings shows the retained Session again at both
@@ -654,9 +666,8 @@ test "App root gives Escape to a cancellable Upgrade after a choice and before c
     try page.openSettings(&events);
     try page.widget().captureEvent(&events, escape);
     try std.testing.expect(!page.input.layer.settingsOpen());
-    // With settings closed Escape is the overview's to decide: Root hands
-    // it over once and stops it, and leaves a Session's to the focused
-    // screen.
+    // With settings closed Escape is the main pane's to decide: Root hands
+    // it to the overview, or to the open Session, once and stops it.
     var fixture: Fixture = .{ .run = .checking };
     var root: Self = .{ .overview = fixture.widget(), .list = fixture.widget(), .compose = fixture.widget() };
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty, .phase = .capturing };
@@ -667,8 +678,9 @@ test "App root gives Escape to a cancellable Upgrade after a choice and before c
     root.session = session.widget();
     ctx.consume_event = false;
     try root.widget().captureEvent(&ctx, escape);
-    try std.testing.expect(!ctx.consume_event);
+    try std.testing.expect(ctx.consume_event);
     try std.testing.expectEqual(@as(usize, 1), fixture.escapes);
+    try std.testing.expectEqual(@as(usize, 1), session.escapes);
 }
 
 test "App root keeps settings focus while a hidden Session ticks and retains other commands" {
@@ -998,7 +1010,7 @@ test "Root navigation closes the composed main presentation before focusing anot
     try std.testing.expectEqual(@as(usize, 2), owner.closes);
     // The reducer commits the main layer before its reset effect closes scope.
     try std.testing.expect(!owner.settings_when_closed);
-    try root.openSession(&ctx, empty.widget());
+    try root.openSession(&ctx, empty.widget(), null);
     try std.testing.expectEqual(@as(usize, 3), owner.closes);
     try root.closeSession(&ctx);
     try std.testing.expectEqual(@as(usize, 4), owner.closes);
@@ -1006,7 +1018,7 @@ test "Root navigation closes the composed main presentation before focusing anot
     try std.testing.expect(root.session == null);
     // An unseen Session may leave while ordinary Settings remains active.
     // Its main presentation ends without cancelling the Settings field edit.
-    try root.openSession(&ctx, empty.widget());
+    try root.openSession(&ctx, empty.widget(), null);
     try root.openSettings(&ctx);
     root.settings_page.panel.fields = &.{.{ .label = "Effort", .value = "high" }};
     root.settings_page.panel.selected = 0;

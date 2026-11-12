@@ -115,13 +115,28 @@ pub fn mcpServerSql(comptime action_alias: []const u8, comptime operation_alias:
     return "(" ++ mcpCallSelectSql(action_alias, operation_alias, "tool.server") ++ ")";
 }
 
+/// The MCP server in the Operation's frozen offer, for the saved name content.
+/// Rejected proposals can also name an offered MCP tool without an Action.
+pub fn mcpServerForNameSql(comptime operation_alias: []const u8, comptime name_content: []const u8) []const u8 {
+    return "(" ++ mcpToolSelectSql(operation_alias, name_content, "tool.server") ++ ")";
+}
+
+fn mcpOfferJoinsSql(comptime operation_alias: []const u8) []const u8 {
+    return "JOIN tool_set_member member ON member.tool_set_id=" ++ operation_alias ++ ".tool_set_id " ++
+        "JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id ";
+}
+
+const mcp_name_sql = "AND @bytes(tool.name)=@payload(name) AND tool.owner='mcp'";
+
+fn mcpToolSelectSql(comptime operation_alias: []const u8, comptime name_content: []const u8, comptime selected: []const u8) []const u8 {
+    return "SELECT " ++ selected ++ " FROM content name " ++ mcpOfferJoinsSql(operation_alias) ++
+        "WHERE name.content_id=" ++ name_content ++ " " ++ mcp_name_sql;
+}
+
 fn mcpCallSelectSql(comptime action_alias: []const u8, comptime operation_alias: []const u8, comptime selected: []const u8) []const u8 {
     return "SELECT " ++ selected ++ " FROM model_tool_call tool_call " ++
-        "JOIN content name ON name.content_id=tool_call.name_content_id " ++
-        "JOIN tool_set_member member ON member.tool_set_id=" ++ operation_alias ++ ".tool_set_id " ++
-        "JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id " ++
-        "WHERE tool_call.operation_id=" ++ action_alias ++ ".parent_operation_id AND tool_call.call_ordinal=" ++ action_alias ++ ".call_ordinal " ++
-        "AND @bytes(tool.name)=@payload(name) AND tool.owner='mcp'";
+        "JOIN content name ON name.content_id=tool_call.name_content_id " ++ mcpOfferJoinsSql(operation_alias) ++
+        "WHERE tool_call.operation_id=" ++ action_alias ++ ".parent_operation_id AND tool_call.call_ordinal=" ++ action_alias ++ ".call_ordinal " ++ mcp_name_sql;
 }
 
 /// Calls that must never enter Bash's Attempt path.
