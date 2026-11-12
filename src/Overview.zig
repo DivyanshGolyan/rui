@@ -1121,6 +1121,7 @@ fn drawPart(self: *Self, ctx: vxfw.DrawContext, part: AppScreen.Overview.Part) s
             self.app_palette.shown = shown;
             self.app_palette.style = normal;
             self.app_palette.quiet = quiet;
+            self.app_palette.hover_style = @import("widget_style.zig").of(self.caps, .{ .background = .hover });
             self.app_palette.method = self.caps.width;
             self.app_palette.userdata = self;
             self.app_palette.on_select = appPaletteSelect;
@@ -2052,10 +2053,11 @@ fn drawHostNotice(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Erro
     const target: Hover.Rect = .{ .row = 0, .width = surface.size.width, .height = surface.size.height };
     self.app_host_hover.targets = if (self.hostNext() != null and surface.size.width > 0 and surface.size.height > 0) try ctx.arena.dupe(Hover.Rect, &.{target}) else &.{};
     if (self.app_host_hover.targets.len != 0 and self.app_host_hover.contains(target)) {
-        const selection = @import("widget_style.zig").of(self.caps, .{ .background = .selection });
+        const hover = @import("widget_style.zig").of(self.caps, .{ .background = .hover });
         for (surface.buffer) |*cell| {
-            cell.style.bg = selection.bg;
-            cell.style.reverse = selection.reverse;
+            cell.style.bg = hover.bg;
+            cell.style.reverse = hover.reverse;
+            cell.style.ul_style = hover.ul_style;
         }
     }
     surface.widget = hostNotice(self).?;
@@ -7158,8 +7160,15 @@ test "Overview mouse model rows hover without selection or focus and click saves
         try rig.overview.app_picker.widget().handleEvent(&ctx, .{ .mouse = .{ .col = 4, .row = @intCast(row), .button = .none, .type = .motion, .mods = .{} } });
         var hovered = try rig.shown(width, 24);
         defer hovered.deinit();
-        try std.testing.expectEqual(@import("widget_style.zig").of(rig.overview.caps, .{ .background = .selection }).bg, hovered.screen.readCell(4, row).?.style.bg);
-        try std.testing.expectEqual(@import("widget_style.zig").of(rig.overview.caps, .{ .background = .selection }).reverse, hovered.screen.readCell(4, row).?.style.reverse);
+        const hover = @import("widget_style.zig").of(rig.overview.caps, .{ .background = .hover });
+        const highlight = @import("widget_style.zig").of(rig.overview.caps, .{ .background = .selection }).bg;
+        try std.testing.expectEqual(hover.bg, hovered.screen.readCell(4, row).?.style.bg);
+        try std.testing.expectEqual(hover.reverse, hovered.screen.readCell(4, row).?.style.reverse);
+        // The keyboard's row keeps the selection while another row is hovered.
+        const chosen: u16 = for (0..24) |y| {
+            if (y != row and std.meta.eql(plain.screen.readCell(4, @intCast(y)).?.style.bg, highlight)) break @intCast(y);
+        } else return error.TestExpectedSelectedRow;
+        try std.testing.expectEqual(highlight, hovered.screen.readCell(4, chosen).?.style.bg);
         try std.testing.expectEqualStrings(choice.id.slice(), rig.overview.state.picker.?.choice.?.id.slice());
         try std.testing.expectEqual(selection, rig.overview.state.selected);
         for (ctx.cmds.items) |cmd| try std.testing.expect(cmd != .request_focus);
@@ -7190,8 +7199,8 @@ test "Overview mouse Settings hover persists across frames and never changes sel
     try rig.overview.app_settings_line.widget().handleEvent(&ctx, .{ .mouse = .{ .col = 4, .row = 1, .button = .none, .type = .motion, .mods = .{} } });
     var hovered = try rig.shown(80, 24);
     defer hovered.deinit();
-    try std.testing.expectEqual(@import("widget_style.zig").of(rig.overview.caps, .{ .background = .selection }).bg, hovered.screen.readCell(4, row).?.style.bg);
-    try std.testing.expectEqual(@import("widget_style.zig").of(rig.overview.caps, .{ .background = .selection }).reverse, hovered.screen.readCell(4, row).?.style.reverse);
+    try std.testing.expectEqual(@import("widget_style.zig").of(rig.overview.caps, .{ .background = .hover }).bg, hovered.screen.readCell(4, row).?.style.bg);
+    try std.testing.expectEqual(@import("widget_style.zig").of(rig.overview.caps, .{ .background = .hover }).reverse, hovered.screen.readCell(4, row).?.style.reverse);
     try std.testing.expectEqual(selection, rig.overview.state.selected);
     for (ctx.cmds.items) |cmd| try std.testing.expect(cmd != .request_focus);
     try rig.overview.app_settings_line.widget().handleEvent(&ctx, .mouse_leave);
@@ -7223,7 +7232,10 @@ test "Overview mouse Palette hover survives redraw and a click follows Enter exc
     try rig.overview.app_palette.widget().handleEvent(&ctx, .{ .mouse = .{ .col = 4, .row = local_row, .button = .none, .type = .motion, .mods = .{} } });
     var hovered = try rig.shown(80, 24);
     defer hovered.deinit();
-    try std.testing.expect(hovered.screen.readCell(4, row).?.style.reverse);
+    try std.testing.expect(highlight != index);
+    try std.testing.expect(!hovered.screen.readCell(4, row).?.style.reverse);
+    try std.testing.expectEqual(@import("widget_style.zig").of(rig.overview.caps, .{ .background = .hover }).bg, hovered.screen.readCell(4, row).?.style.bg);
+    try std.testing.expect(hovered.screen.readCell(4, row - @as(u16, @intCast(local_row)) + @as(u16, @intCast(highlight - rig.overview.app_palette.first))).?.style.reverse);
     try std.testing.expectEqual(highlight, rig.overview.state.commands.?.highlight);
     try std.testing.expectEqual(selection, rig.overview.state.selected);
     for (ctx.cmds.items) |cmd| try std.testing.expect(cmd != .request_focus);
@@ -7394,10 +7406,10 @@ test "Overview mouse Host start and retry hover preserve foreground selection an
         try host_widget.handleEvent(&events, .mouse_enter);
         try host_widget.handleEvent(&events, .{ .mouse = .{ .col = 2, .row = 0, .button = .none, .type = .motion, .mods = .{} } });
         const hovered = try host_widget.draw(draw_ctx);
-        const selection = @import("widget_style.zig").of(overview.caps, .{ .background = .selection });
+        const hover = @import("widget_style.zig").of(overview.caps, .{ .background = .hover });
         for (hovered.buffer, plain.buffer) |cell, before| {
-            try std.testing.expectEqual(selection.bg, cell.style.bg);
-            try std.testing.expectEqual(selection.reverse, cell.style.reverse);
+            try std.testing.expectEqual(hover.bg, cell.style.bg);
+            try std.testing.expectEqual(hover.ul_style, cell.style.ul_style);
             try std.testing.expectEqual(before.style.fg, cell.style.fg);
         }
         try std.testing.expect(overview.app_host_hover.pointing);
