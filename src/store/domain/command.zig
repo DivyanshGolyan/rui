@@ -2,7 +2,7 @@
 //! interruptions, permission decisions), their replay, and their observed results.
 
 const std = @import("std");
-const model_resolution = @import("model_resolution.zig");
+const model_attempt = @import("model_attempt.zig");
 const command_reply = @import("../../command_reply.zig");
 const skills_domain = @import("skills.zig");
 const turn_ending = @import("../../turn_ending.zig");
@@ -1334,7 +1334,8 @@ const save_interruption = rsql.Write(.{
 
 /// Interrupts the unresolved Operation `operation_id` of `session`'s
 /// Session, for the command `command_key`.
-const interrupt_operation = model_resolution.Write(.{
+const interrupt_operation = model_attempt.Write(.{
+    .end = .resolution,
     .set = "retry_due_at_ms=NULL," ++ store_schema.resolutionIs("resolution_code", .interrupted) ++ ",interrupted_by_command_key=?2",
     .where = "operation_id=?1 AND session_ref=@session(?3) AND resolution_code IS NULL",
     .Args = struct { operation_id: u64, command_key: []const u8, session: rsql.SessionHead },

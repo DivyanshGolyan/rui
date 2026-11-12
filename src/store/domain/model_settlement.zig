@@ -2,7 +2,7 @@
 //! reports, and fencing Attempts superseded by a control.
 
 const std = @import("std");
-const model_resolution = @import("model_resolution.zig");
+const model_attempt = @import("model_attempt.zig");
 const tool_proposal = @import("../../tool_proposal.zig");
 const content_string = @import("../../content_string.zig");
 const idempotency_key = @import("../../idempotency_key.zig");
@@ -329,7 +329,8 @@ pub fn claimModelAuthRefresh(a: anytype, binding: AttemptBinding) !bool {
 /// Resolves an unresolved Attempt with a failure: `ordinary`, a context
 /// overflow and an exhausted retry. `last_failure_code` null keeps the
 /// saved one.
-const resolve_failure = model_resolution.Write(.{
+const resolve_failure = model_attempt.Write(.{
+    .end = .resolution,
     .set = "retry_due_at_ms=NULL,resolution_code=?2,resolution_content_id=?3,request_id=?4," ++
         "last_failure_code=coalesce(?5,last_failure_code)",
     .where = "operation_id=?1 AND session_ref=@session(?7) AND resolution_code IS NULL AND attempt_ordinal=?6",
@@ -338,9 +339,10 @@ const resolve_failure = model_resolution.Write(.{
 });
 
 /// Ends a failed Attempt with a retry due at `due_at_ms`.
-const schedule_retry = rsql.Write(.{
-    .sql = "UPDATE model_operation SET retry_due_at_ms=?2,last_failure_code=?3,retry_scheduled_at=@now,attempt_at=NULL " ++
-        "WHERE operation_id=?1 AND session_ref=@session(?5) AND resolution_code IS NULL AND attempt_ordinal=?4",
+const schedule_retry = model_attempt.Write(.{
+    .end = .retry,
+    .set = "retry_due_at_ms=?2,last_failure_code=?3",
+    .where = "operation_id=?1 AND session_ref=@session(?5) AND resolution_code IS NULL AND attempt_ordinal=?4",
     .Args = struct { operation_id: u64, due_at_ms: u64, code: []const u8, attempt_ordinal: u64, session: rsql.SessionHead },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.StaleAttemptBinding } },
 });
@@ -386,7 +388,7 @@ fn settleEffortRefusal(a: anytype, io: std.Io, binding: AttemptBinding, failure:
     const revision = (source orelse return .unmatched).revision.get();
     if (binding.attempt_ordinal >= retry_policy.maximum_attempts) return .{ .exhausted = revision };
     try queueEffortRefusal(a, row.session, revision, binding.operation_id, failure.report());
-    a.write(schedule_retry, .{
+    schedule_retry.queue(a, .{
         .operation_id = binding.operation_id,
         .due_at_ms = @intCast(@max(1, try store_core.readUnixMilliseconds(io))),
         .code = failure.code(),
@@ -524,7 +526,7 @@ pub fn settleModelAttemptFailure(
         },
         .refreshed => {
             if (!row.refresh_claimed or binding.attempt_ordinal >= retry_policy.maximum_attempts) return error.StaleAttemptBinding;
-            a.write(schedule_retry, .{
+            schedule_retry.queue(a, .{
                 .operation_id = binding.operation_id,
                 .due_at_ms = @intCast(@max(1, try store_core.readUnixMilliseconds(io))),
                 .code = code,
@@ -533,7 +535,7 @@ pub fn settleModelAttemptFailure(
             });
         },
         .retryable => |policy| switch (try retry_policy.decide(binding.attempt_ordinal, policy, try store_core.readUnixMilliseconds(io), retry_random)) {
-            .schedule_at_ms => |due_at_ms| a.write(schedule_retry, .{
+            .schedule_at_ms => |due_at_ms| schedule_retry.queue(a, .{
                 .operation_id = binding.operation_id,
                 .due_at_ms = std.math.cast(u64, due_at_ms) orelse return error.IntegerOutOfRange,
                 .code = code,
@@ -587,7 +589,8 @@ const exhausted_attempts = rsql.Read(.{
     .cardinality = .each,
 });
 
-const resolve_exhausted = model_resolution.Write(.{
+const resolve_exhausted = model_attempt.Write(.{
+    .end = .resolution,
     .set = "retry_due_at_ms=NULL,resolution_code='retry_exhausted'",
     .where = "operation_id=?1 AND session_ref=@session(?2) AND " ++ retry_exhausted_sql,
     .Args = struct { operation_id: u64, session: rsql.SessionHead },
@@ -869,7 +872,8 @@ const insert_action = rsql.Write(.{
 });
 
 /// Resolves the settling Attempt with its output.
-const resolve_success = model_resolution.Write(.{
+const resolve_success = model_attempt.Write(.{
+    .end = .resolution,
     .set = "retry_due_at_ms=NULL,resolution_code=?2,resolution_content_id=?3,response_id=?4,model_evidence=?5,request_id=?6,output_item_count=?7," ++
         "usage_uncached_tokens=?8,usage_cache_read_tokens=?9,usage_cache_write_tokens=?10,usage_output_tokens=?11",
     .where = "operation_id=?1 AND session_ref=@session(?13) AND resolution_code IS NULL AND attempt_ordinal=?12",

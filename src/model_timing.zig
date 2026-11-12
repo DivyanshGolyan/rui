@@ -1,5 +1,5 @@
 //! Live final-Attempt observations. The transport publishes boundaries;
-//! the Store snapshots them only in the write that resolves an Operation.
+//! the Store saves them in the write ending an attempt (resolution or retry).
 const std = @import("std");
 
 pub const Values = struct {
@@ -8,7 +8,7 @@ pub const Values = struct {
 };
 
 /// Stable custody-owned storage, borrowed by a Transfer until its deinit.
-/// Atomics cross the transport/Store threads; no resolution is written here.
+/// Atomics cross the transport/Store threads; no durable timing is owned here.
 pub const Attempt = struct {
     sent_at_ms: std.atomic.Value(i64) = .init(-1),
     first_event_ms: std.atomic.Value(i64) = .init(-1),
@@ -52,8 +52,8 @@ pub const Attempt = struct {
     }
 };
 
-/// The Host lends its bounded custody registry to the Store. An absent
-/// source/Operation (prelaunch or recovery) has no observed boundaries.
+/// The Host lends live attempt observations to the attempt-ending writer.
+/// Backoff uses the pair already saved on the row, not this volatile source.
 pub const Source = struct {
     context: ?*anyopaque = null,
     read: ?*const fn (*anyopaque, u64, std.Io) Values = null,
