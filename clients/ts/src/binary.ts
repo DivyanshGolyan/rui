@@ -5,8 +5,8 @@ import { dirname, join } from "node:path";
 
 /** The platform packages, by `process.platform` and `process.arch` (D127, D186). */
 export const PLATFORM_PACKAGES: Record<string, Record<string, string>> = {
-	linux: { x64: "rui-linux-x64", arm64: "rui-linux-arm64" },
-	darwin: { arm64: "rui-darwin-arm64" },
+	linux: { x64: "ruicode-linux-x64", arm64: "ruicode-linux-arm64" },
+	darwin: { arm64: "ruicode-darwin-arm64" },
 };
 
 export interface BinaryLookup {

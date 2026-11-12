@@ -19,7 +19,7 @@ See the [data and method](docs/waiting-agent-memory.md) for measurement scope an
 The client launches a child Host:
 
 ```ts
-import { Rui } from "rui";
+import { Rui } from "ruicode";
 const rui = await Rui.connect({
 	database: "./app-rui-store",
 	provider: {
@@ -29,7 +29,7 @@ const rui = await Rui.connect({
 });
 ```
 
-Use Node.js 22.6+ and matching client and binary tarballs from [GitHub releases](https://github.com/DivyanshGolyan/rui/releases).
+Install with `npm install ruicode` on Node.js 22.6+; the package brings the matching `rui` executable for your platform.
 A TypeScript Host uses an OpenAI-compatible Responses API key, not the terminal's ChatGPT sign-in.
 Provider usage may incur charges.
 
