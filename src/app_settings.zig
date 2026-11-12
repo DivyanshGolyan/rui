@@ -32,6 +32,7 @@ pub const Backend = struct {
     caps: *const fn (*anyopaque) view.Caps,
     /// Live lists change revision on every replacement or release.
     models: ?*const fn (*anyopaque) ModelChoice.Snapshot = null,
+    sign_in: ?*const fn (*anyopaque, *vxfw.EventContext) anyerror!void = null,
 };
 
 /// The page's rows, in drawn order: the Panel's field index of each.
@@ -203,8 +204,13 @@ fn activate(raw: *anyopaque, ctx: *vxfw.EventContext, index: usize) !void {
         .version => backend.upgrade(backend.context) catch {
             self.failures.set(.version, " · couldn't start upgrade");
         },
-        // Sign-in stays selectable until its screen exists.
-        .sign_in => return,
+        .sign_in => {
+            if (backend.sign_in) |open| open(backend.context, ctx) catch |err| {
+                if (err != error.DefaultsUnavailable) return err;
+                self.failures.set(.sign_in, " · settings busy");
+            };
+            return;
+        },
         .keys => unreachable,
         .model, .effort, .permissions, .notifications => {
             try self.refresh();
@@ -714,6 +720,38 @@ test "App settings Model shares the provider list at full width and preserves ma
     try press(&page, &ctx, vaxis.Key.enter);
     try press(&page, &ctx, vaxis.Key.enter);
     try std.testing.expectEqualStrings("future-chat", fixture.last_edit.?.model.set);
+}
+
+test "App settings Sign-in row opens the shared sign-in screen on Enter" {
+    const SignIn = struct {
+        opens: usize = 0,
+        busy: bool = false,
+        fn open(raw: *anyopaque, _: *vxfw.EventContext) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (self.busy) return error.DefaultsUnavailable;
+            self.opens += 1;
+        }
+    };
+    var owner: SignIn = .{};
+    var fixture: Fixture = .{};
+    var backend = fixture.backend();
+    var page: Self = .{ .backend = backend };
+    try page.refresh();
+    // Other backend operations are not used by this row.
+    backend.context = &owner;
+    backend.sign_in = SignIn.open;
+    page.backend = backend;
+    page.select(.sign_in);
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    try press(&page, &ctx, vaxis.Key.enter);
+    try std.testing.expectEqual(@as(usize, 1), owner.opens);
+    try std.testing.expect(!page.hasChoice());
+    owner.busy = true;
+    try press(&page, &ctx, vaxis.Key.enter);
+    try std.testing.expectEqual(@as(usize, 1), owner.opens);
+    try std.testing.expectEqualStrings(" · settings busy", page.failures.get(.sign_in).?);
 }
 
 test "App settings mouse hover and click use the same field choices as Enter" {
