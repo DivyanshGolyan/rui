@@ -12,7 +12,8 @@ repository='DivyanshGolyan/rui'
 if [ $# = 1 ] && { [ "$1" = --help ] || [ "$1" = -h ]; }; then
     printf '%s\n' "Usage: install.sh" \
         "Download Rui $version for this platform and install it in ~/.local/bin." \
-        'Preserves Stores, credentials, shell profiles, running Hosts and earlier builds.'
+        'Adds ~/.local/bin to your shell profile when PATH lacks it (RUI_NO_MODIFY_PATH=1 skips this).' \
+        'Preserves Stores, credentials, running Hosts and earlier builds.'
     exit 0
 fi
 if [ $# != 0 ]; then

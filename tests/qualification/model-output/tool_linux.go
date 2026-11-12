@@ -549,14 +549,14 @@ func (t *toolTerminal) prompted() (int, int) {
 
 func (t *toolTerminal) Close(deadline measurement.Deadline) (map[string]any, error) {
 	result := map[string]any{}
-	_, writeError := t.master.Write([]byte("/exit\n"))
+	_, writeError := t.master.Write([]byte("\x03"))
 	exited := make(chan error, 1)
 	go func() { exited <- t.cmd.Wait() }()
 	var waitError error
 	select {
 	case waitError = <-exited:
 	case <-time.After(10 * time.Second):
-		waitError = errors.Join(errors.New("TUI did not exit after /exit"), t.cmd.Process.Kill(), <-exited)
+		waitError = errors.Join(errors.New("TUI did not exit after Ctrl-C"), t.cmd.Process.Kill(), <-exited)
 	}
 	result["exit_code"] = t.cmd.ProcessState.ExitCode()
 	t.slave.Close()
