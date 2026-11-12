@@ -113,6 +113,7 @@ pub const Queued = struct {
 /// Workspace a permission prompt shows.
 pub const PageWork = struct {
     work: session_work.Work = .{ .state = .{ .idle = .{ .since = 0 } } },
+    /// From the same live read as work, even when history has a pinned end.
     last_line: ?session_list.SavedLastLine = null,
     revision: u64 = 0,
     workspace: Bounded(workspace_path.max_bytes) = .{},

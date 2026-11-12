@@ -1258,7 +1258,11 @@
       ],
       "sizes": [
         "140x40"
-      ]
+      ],
+      "first_frame": true,
+      "expect_next": {
+        "■ Stop the slow job": "   Stopped"
+      }
     },
     {
       "name": "stop-narrow",
@@ -1291,7 +1295,8 @@
       ],
       "sizes": [
         "46x30"
-      ]
+      ],
+      "first_frame": true
     },
     {
       "name": "stopped",

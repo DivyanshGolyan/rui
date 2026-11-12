@@ -6,7 +6,7 @@ Output defaults to `RUN/evidence/frames/`: `.txt`, `.ansi`, `.html`, `.png`, ord
 
 ## Scenario
 
-A scenario has `sizes` and ordered `states`. Each state has `name`, `open` (`overview` or an earlier cast label), `steps`, optional `cast`, `sizes`, `theme` (`night`, `day`, `mist`), `env`, `expect`, `absent`, `record` and one-line `note`. Themes configure the terminal's real background, foreground and dark/light query response. Cast entries have `label`, HOME-relative `workspace`, `mode`, `messages`, optional `model`, `effort`, `settle` (`answered`, `pending`, `stop`), and `count` with `{n}` labels. `run.json` maps labels to Session IDs.
+A scenario has `sizes` and ordered `states`. Each state has `name`, `open` (`overview` or an earlier cast label), `steps`, optional `cast`, `sizes`, `first_frame`, `expect_next`, `theme` (`night`, `day`, `mist`), `env`, `expect`, `absent`, `record` and one-line `note`. Themes configure the terminal's real background, foreground and dark/light query response. Cast entries have `label`, HOME-relative `workspace`, `mode`, `messages`, optional `model`, `effort`, `settle` (`answered`, `pending`, `stop`), and `count` with `{n}` labels. `run.json` maps labels to Session IDs.
 
 Steps:
 - `{"text": "draft"}` or `{"keys": ["Enter", "PgUp"]}`: exact PTY input using the helper's key names. Lone Esc still needs Rui's decoder deadline; no tmux settle sleeps.
@@ -17,7 +17,9 @@ Steps:
 
 Only the first size runs steps; later sizes set the PTY window size and wait for a committed repaint, not a sleep. An exited terminal instead reflows its final screen. Sizes accept `140x40,46x30` or `["140x40", "46x30"]`; `--sizes` overrides all state sizes. `--only` captures chosen states while executing their predecessors through the last selection, preserving cumulative side effects.
 
-Each size waits for the combined `expect`/`absent` predicate, then verifies the actual saved snapshot again. `expect` defaults to the last `wait`, or none when there is no wait. An action after the last wait requires explicit `expect` (text/list, or `[]` deliberately); `absent` is a list. Use content waits before acting on asynchronously loaded transcripts or Session lists. The tool-fold states wait for stored results before navigating; `many-sessions-end` waits for list population before Down. The Host-stopped chat starts the fixture-owned Host before pausing its live connection.
+Each size waits for the combined `expect`/`absent` predicate, then verifies the actual saved snapshot again.
+`expect_next: {"row text": "detail text"}` additionally requires the line containing that row to be followed by its expected detail.
+For a transition regression, `first_frame: true` skips readiness polling after the steps and asserts their last committed frame directly, so a later refresh cannot hide a wrong first frame. `expect` defaults to the last `wait`, or none when there is no wait. An action after the last wait requires explicit `expect` (text/list, or `[]` deliberately); `absent` is a list. Use content waits before acting on asynchronously loaded transcripts or Session lists. The tool-fold states wait for stored results before navigating; `many-sessions-end` waits for list population before Down. The Host-stopped chat starts the fixture-owned Host before pausing its live connection.
 
 ## Recordings
 

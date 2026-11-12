@@ -1856,6 +1856,14 @@ test "last line follows ended Turns and pending approvals with bounded public te
                 try std.testing.expectEqual(at, line.position);
                 if (text) |expected| try std.testing.expectEqualStrings(expected, line.text.?.slice()) else try std.testing.expect(line.text == null);
             } else try std.testing.expect(activity.work.last_line == null);
+            if (position) |at| if (at > 1) {
+                // Work is live even when historical rows are pinned to an
+                // older end. Its canonical preview must travel with it.
+                request.end = 1;
+                try storage.activityPage(&request, &activity);
+                try std.testing.expectEqual(@as(u64, 1), activity.end);
+                try std.testing.expectEqual(at, activity.work.last_line.?.position);
+            };
         }
 
         fn ended(storage: *Store, session: []const u8) !u64 {

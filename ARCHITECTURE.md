@@ -3473,6 +3473,7 @@ The ending is read from the saved outcome, so it is no Store format: `completed`
 An assistant row is `final` exactly when it is its done Turn's answer: the message the causing Operation selected by answer selection's rule (its last `final_answer` message, or with no phased message its last message), read from the saved items' phases rather than matched by text, so a repeated or blank answer still marks its own row, and only on a page whose end reaches the Turn's `turn_ended` row.
 Stop selection/cutoff and pending/completed status are likewise evaluated at end.
 The page's live work also carries `last_line`, the same bounded public last-line projection as a Session listing, read under that work's Store Access.
+Like live work, this preview may postdate a page's pinned historical end.
 An open conversation's list row takes work, last line and age from that snapshot together; listing rows remain intact for return to the list.
 This is a logical inventory prefix, not a historical transaction snapshot: immutable call classification remains attached to its item even at an interior end before the rejection-result position.
 Call fields are in `name`, `call_id`, `arguments` order.

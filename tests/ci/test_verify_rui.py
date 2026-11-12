@@ -841,6 +841,8 @@ while True:
             {"wait": "■ Stopped", "timeout": 60},
         ])
         self.assertEqual(state["expect"], ["■ Stopped", "   Stopped"])
+        self.assertTrue(state["first_frame"])
+        self.assertEqual(state["expect_next"], {"■ Stop the slow job": "   Stopped"})
         narrow = states["stop-narrow"]
         self.assertEqual(narrow["sizes"], [(46, 30)])
         self.assertEqual(narrow["steps"], state["steps"])
@@ -888,6 +890,10 @@ while True:
             lambda d: d["states"][1].update(open="missing"),
             lambda d: d["states"][1].update(open=[]),
             lambda d: d["states"][1].update(theme=[]),
+            lambda d: d["states"][1].update(first_frame="yes"),
+            lambda d: d["states"][1].update(expect_next=[]),
+            lambda d: d["states"][1].update(expect_next={"label": 42}),
+            lambda d: d["states"][1].update(expect_next={"label": "line\nbreak"}),
             lambda d: d["states"][1].update(expect=None),
             lambda d: d["states"][1].update(expect=["valid", 42]),
             lambda d: d["states"][1].update(expect=""),
@@ -1272,9 +1278,9 @@ while True:
         ready = self.helper["frame_ready"]
         def wait(predicate, *_args, **_kwargs):
             self.assertFalse(predicate(types.SimpleNamespace(completed=stale)))
-            self.assertTrue(predicate(types.SimpleNamespace(completed="■ Stopped")))
+            self.assertTrue(predicate(types.SimpleNamespace(completed="■ Stopped\n   Stopped")))
         terminal.wait = wait
-        ready(terminal, state)
+        ready(terminal, {**state, "first_frame": False, "expect_next": {}})
         with tempfile.TemporaryDirectory() as temp:
             out = Path(temp)
             for size in state["sizes"]:
@@ -1283,6 +1289,17 @@ while True:
                     self.assertFalse(record["ok"])
                     self.assertEqual(record["reason"], "unexpected on screen: Stopping")
                     self.assertEqual((out / record["files"]["txt"]).read_text(), stale)
+
+    def test_first_settled_frame_asserts_its_own_row_not_another_stopped_session(self):
+        state = next(state for state in self.helper["load_scenario"](SCRIPT.with_name("frames.json"))["states"]
+                     if state["name"] == "stop")
+        terminal = types.SimpleNamespace(wait=unittest.mock.Mock(side_effect=AssertionError("must not poll past the observed ending")))
+        self.helper["frame_ready"](terminal, state)
+        terminal.wait.assert_not_called()
+        failure = self.helper["frame_row_failure"]
+        wrong = "■ Stop the slow job  0s\n   Old completed answer\n■ Another Session\n   Stopped\n■ Stopped"
+        self.assertIsNotNone(failure(state, wrong))
+        self.assertIsNone(failure(state, wrong.replace("Old completed answer", "Stopped")))
 
     def test_stop_waits_for_a_running_bash_not_an_approval(self):
         running = self.helper["frame_bash_running"]
