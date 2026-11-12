@@ -710,8 +710,8 @@ pub const Store = struct {
             error.OutOfMemory => return error.OutOfMemory,
             else => .infrastructure_failure,
         };
-        if (reply == .rejected and reply.rejected.code == .mcp_server_unavailable)
-            reply.rejected.message = configuration_domain.missingToolMessage(self.hostTools().host_tool_set, &command.configuration.tools);
+        if (reply == .rejected)
+            reply.rejected.message = configuration_domain.missingToolMessage(self.hostTools().host_tool_set, reply.rejected.code, &command.configuration.tools);
         return reply;
     }
 
@@ -766,8 +766,10 @@ pub const Store = struct {
         var access: Access(.write, error{SessionUpdateFailed}) = .open(&entry);
         defer access.deinit();
         var reply = entry.finishTransaction(Ordinary.none, faults, access.end(faults, command_domain.submitMessage(&access, self.io, self.served, self.selector.slice(), command, committed, initial_skills, captured_skill, faults))) catch .infrastructure_failure;
-        if (reply == .rejected and reply.rejected.code == .mcp_server_unavailable)
-            reply.rejected.message = configuration_domain.missingToolMessage(self.hostTools().host_tool_set, &command.configuration.?.tools);
+        if (reply == .rejected) {
+            if (command.configuration) |*configuration|
+                reply.rejected.message = configuration_domain.missingToolMessage(self.hostTools().host_tool_set, reply.rejected.code, &configuration.tools);
+        }
         return reply;
     }
 
@@ -785,11 +787,7 @@ pub const Store = struct {
         command: *const command_input.SessionStopCommand,
         faults: Faults,
     ) SessionStopReply {
-        const entry = enter(self, .fromControl(faults.control_trace)) catch return .infrastructure_failure;
-        defer entry.release();
-        var access: Access(.write, error{ InterruptionTargetChanged, StopSelectionChanged }) = .open(&entry);
-        defer access.deinit();
-        return self.noteControl(entry.finishTransaction(Ordinary.none, faults, access.end(faults, command_domain.stopSession(&access, command, faults))) catch .infrastructure_failure);
+        return self.noteControl(transition.apply(self, command_domain.StopSession, .ofStop(command, false), faults) catch .infrastructure_failure);
     }
 
     pub fn archiveSession(self: *Store, command: *const command_input.SessionArchiveCommand, faults: Faults) SessionArchiveReply {
@@ -798,11 +796,7 @@ pub const Store = struct {
     }
 
     fn archiveSessionHeld(self: *Store, command: *const command_input.SessionArchiveCommand, faults: Faults) SessionArchiveReply {
-        const entry = enter(self, .fromControl(faults.control_trace)) catch return .infrastructure_failure;
-        defer entry.release();
-        var access: Access(.write, error{ InterruptionTargetChanged, StopSelectionChanged }) = .open(&entry);
-        defer access.deinit();
-        return self.noteControl(entry.finishTransaction(Ordinary.none, faults, access.end(faults, command_domain.archiveSession(&access, command, faults))) catch .infrastructure_failure);
+        return self.noteControl(transition.apply(self, command_domain.ArchiveSession, .{ .command = command }, faults) catch .infrastructure_failure);
     }
 
     /// The stop an attached child owes (D38), as `nextCoreWork` names it.
@@ -811,11 +805,7 @@ pub const Store = struct {
     }
 
     fn stopOwedSessionHeld(self: *Store, command: *const command_input.SessionStopCommand, faults: Faults) SessionStopReply {
-        const entry = enter(self, .none) catch return .infrastructure_failure;
-        defer entry.release();
-        var access: Access(.write, error{ InterruptionTargetChanged, StopSelectionChanged }) = .open(&entry);
-        defer access.deinit();
-        return self.noteControl(entry.finishTransaction(Ordinary.none, faults, access.end(faults, command_domain.stopOwedSession(&access, command, faults))) catch .infrastructure_failure);
+        return self.noteControl(transition.apply(self, command_domain.StopSession, .ofStop(command, true), faults) catch .infrastructure_failure);
     }
 
     pub fn interruptModel(
@@ -832,11 +822,7 @@ pub const Store = struct {
         command: *const command_input.ModelInterruptionCommand,
         faults: Faults,
     ) ModelInterruptionReply {
-        const entry = enter(self, .fromControl(faults.control_trace)) catch return .infrastructure_failure;
-        defer entry.release();
-        var access: Access(.write, error{InterruptionTargetChanged}) = .open(&entry);
-        defer access.deinit();
-        return self.noteControl(entry.finishTransaction(Ordinary.none, faults, access.end(faults, command_domain.interruptModel(&access, command, faults))) catch .infrastructure_failure);
+        return self.noteControl(transition.apply(self, command_domain.InterruptModel, .{ .command = command }, faults) catch .infrastructure_failure);
     }
 
     pub fn decidePermission(
@@ -853,11 +839,7 @@ pub const Store = struct {
         command: *const command_input.PermissionDecisionCommand,
         faults: Faults,
     ) PermissionDecisionReply {
-        const entry = enter(self, .fromControl(faults.control_trace)) catch return .infrastructure_failure;
-        defer entry.release();
-        var access: Access(.write, error{ActionSelectionChanged}) = .open(&entry);
-        defer access.deinit();
-        return self.noteControl(entry.finishTransaction(Ordinary.none, faults, access.end(faults, command_domain.decidePermission(&access, command, faults))) catch .infrastructure_failure);
+        return self.noteControl(transition.apply(self, command_domain.DecidePermission, .{ .command = command }, faults) catch .infrastructure_failure);
     }
 
     /// Tier 1: atomics only, with no holder or connection access.
@@ -1291,11 +1273,8 @@ pub const Store = struct {
     }
 
     fn deliverChildEndingHeld(self: *Store, turn_id: u64, captured: ?*const skills_domain.MessageCapture, faults: Faults) !bool {
-        const entry = try enter(self, .none);
-        defer entry.release();
-        var access: Access(.write, error{}) = .open(&entry);
-        defer access.deinit();
-        return entry.finishTransaction(Ordinary.none, faults, access.end(faults, command_domain.deliverChildEnding(&access, turn_id, captured, faults)));
+        var ending: command_domain.DeliverChildEnding.Ending = undefined;
+        return transition.apply(self, command_domain.DeliverChildEnding, .{ .turn_id = turn_id, .captured = captured, .ending = &ending }, faults);
     }
 
     /// Positions one ancestor feed row and durably queues its next hop.
@@ -1361,11 +1340,7 @@ pub const Store = struct {
     }
 
     fn deliverAgentMessageHeld(self: *Store, binding: ActionAttemptBinding, target: []const u8, text: []const u8, captured: ?*const skills_domain.MessageCapture, faults: Faults) !AgentDelivery {
-        const entry = try enter(self, .none);
-        defer entry.release();
-        var access: Access(.write, Ordinary.action_attempt) = .open(&entry);
-        defer access.deinit();
-        return entry.finishTransaction(Ordinary.action_attempt, faults, access.end(faults, command_domain.deliverAgentMessage(&access, binding, target, text, captured, faults)));
+        return transition.apply(self, command_domain.DeliverAgentMessage, .{ .binding = binding, .target = target, .text = text, .captured = captured }, faults);
     }
 
     /// Runs the `start_agent` call `binding` names with its checked
@@ -1428,11 +1403,7 @@ pub const Store = struct {
     }
 
     fn resolveCoreCallHeld(self: *Store, binding: ActionAttemptBinding, code: ActionResolutionCode, result: []const u8, faults: Faults) !bool {
-        const entry = try enter(self, .none);
-        defer entry.release();
-        var access: Access(.write, Ordinary.action_attempt) = .open(&entry);
-        defer access.deinit();
-        return entry.finishTransaction(Ordinary.action_attempt, faults, access.end(faults, command_domain.resolveCoreCall(&access, binding, code, result, faults)));
+        return transition.apply(self, command_domain.ResolveCoreCall, .{ .binding = binding, .code = code, .result = result }, faults);
     }
 
     pub fn nextAction(self: *Store, comptime runner: tool_record.Runner) !?ReadyAction {
@@ -1875,7 +1846,7 @@ const EntryTrace = union(enum) {
     control: ControlTrace,
     settlement: SettlementTrace,
 
-    fn fromControl(trace: ?ControlTrace) EntryTrace {
+    pub fn fromControl(trace: ?ControlTrace) EntryTrace {
         return if (trace) |value| .{ .control = value } else .none;
     }
 

@@ -112,7 +112,7 @@ pub const every: Keymap(Key) = blk: {
 
 /// The app's one reference list, in pairs across a fitting panel. Each
 /// screen key is represented directly or explicitly grouped under a listed
-/// key as an alias. Empty `keys` name draft operations, not screen actions.
+/// key as an alias. Empty `keys` name input handled separately from `Key`.
 pub const Reference = struct {
     key: []const u8,
     meaning: []const u8,
@@ -121,9 +121,11 @@ pub const Reference = struct {
 };
 
 pub const list = [_]Reference{
-    .{ .key = "enter", .meaning = "send" },
+    .{ .key = "enter", .meaning = "open / send" },
     .{ .key = "esc", .meaning = "back", .keys = &.{.escape}, .aliases = &.{.ctrl_g} },
     .{ .key = "⇧enter", .meaning = "new line" },
+    .{ .key = "tab", .meaning = "next footer field" },
+    .{ .key = "⇧tab", .meaning = "previous footer field" },
     .{ .key = "ctrl+x", .meaning = "stop", .keys = &.{.ctrl_x} },
     .{ .key = "↑↓", .meaning = "scroll", .keys = &.{ .up, .down }, .aliases = &.{ .shift_up, .shift_down, .page_up, .page_down, .home, .end, .ctrl_end } },
     .{ .key = "ctrl+o", .meaning = "tool output", .keys = &.{.ctrl_o} },
@@ -166,12 +168,17 @@ test "keys reference rejects unbound rows and covers every screen key" {
     try std.testing.expectEqual(@as(?ListError, .unbound_row), listError(.{missing}));
     try std.testing.expectEqual(@as(?ListError, null), listError(.{ missing, every }));
     try std.testing.expectEqual(@as(?ListError, .missing_bound_key), referenceError(list[0 .. list.len - 1], .{every}));
-    const duplicate = list ++ .{list[3]};
+    const duplicate = list ++ .{list[list.len - 1]};
     try std.testing.expectEqual(@as(?ListError, .duplicate_key), referenceError(&duplicate, .{every}));
 }
 
+test "keys reference gives Enter both its list and chat meanings" {
+    try std.testing.expectEqualStrings("enter", list[0].key);
+    try std.testing.expectEqualStrings("open / send", list[0].meaning);
+}
+
 test "keys reference aliases are explicit under their listed rows" {
-    try std.testing.expectEqual(@as(usize, 11), list.len);
+    try std.testing.expectEqual(@as(usize, 13), list.len);
     for ([_]struct { key: Key, row: []const u8 }{
         .{ .key = .ctrl_g, .row = "esc" },
         .{ .key = .ctrl_d, .row = "ctrl+c" },

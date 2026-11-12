@@ -1,5 +1,5 @@
 //! Shared input stack. The composer's lower rule and identity/keys line form
-//! the chat footer; the bottom state slot stays below it, blank while idle.
+//! the chat footer; persistent state takes space only while present.
 //! The floating palette belongs to the content above this area.
 const std = @import("std");
 const vaxis = @import("vaxis");
@@ -30,7 +30,10 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     // short result has, while the content keeps a row.
     const facts_rows: u16 = @min(1, size.height - 1);
     const status_room: u16 = @min(status_lines, size.height -| 1 -| facts_rows);
-    const status = if (status_room == 0) null else if (self.status) |shown| try shown.draw(ctx.withConstraints(.{ .width = size.width, .height = 1 }, .{ .width = size.width, .height = status_room })) else null;
+    const status = if (status_room == 0) null else if (self.status) |shown| status: {
+        const drawn = try shown.draw(ctx.withConstraints(.{ .width = size.width }, .{ .width = size.width, .height = status_room }));
+        break :status if (drawn.size.height == 0) null else drawn;
+    } else null;
     const footer_rows = facts_rows + if (status) |drawn| @min(drawn.size.height, status_room) else 0;
     const children = try ctx.arena.alloc(vxfw.SubSurface, 1 + facts_rows + @intFromBool(status != null));
     // A draft grows to a third of the screen at most, between its two rules.
@@ -67,7 +70,6 @@ test "InputArea keeps facts below the composer when a notice replaces the status
         const idle = try input.widget().draw(ctx);
         try std.testing.expectEqual(@as(u16, 5), idle.size.height);
         try std.testing.expectEqual(@as(i17, 3), idle.children[1].origin.row);
-        try std.testing.expectEqual(@as(i17, 4), idle.children[2].origin.row);
         try std.testing.expectEqualStrings("n", idle.children[1].surface.readCell(0, 0).char.grapheme);
         try std.testing.expectEqualStrings("e", idle.children[2].surface.readCell(0, 0).char.grapheme);
         // A command's two-line result takes two rows; the composer moves up.
@@ -133,8 +135,7 @@ test "InputArea permission hides and restores the draft and its caret after deci
     const editor: @import("TerminalEditor.zig") = .{ .buffer = &bytes, .length = bytes.len, .cursor = 9 };
     var consent: Consent = .{};
     const command: vxfw.Text = .{ .text = "$ zig build test-store" };
-    const pasting = false;
-    var card: PermissionCard = .{ .consent = &consent, .pasting = &pasting, .description = "Run tests", .body = command.widget(), .userdata = &owner, .on_decision = Owner.decide };
+    var card: PermissionCard = .{ .consent = &consent, .description = "Run tests", .body = command.widget(), .userdata = &owner, .on_decision = Owner.decide };
     var input: Self = .{ .composer = .{ .editor = &editor } };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -147,11 +148,11 @@ test "InputArea permission hides and restores the draft and its caret after deci
         const shown = try input.widget().draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = size.height }));
         try std.testing.expect(shown.children[0].surface.widget.eql(card.widget()));
         try std.testing.expectEqual(null, shown.children[0].surface.cursor);
-        try card.widget().handleEvent(&events, .{ .key_press = .{ .codepoint = 'x' } });
+        try card.take(&events, .other, false);
         try std.testing.expectEqualStrings("only the retry tests", editor.buffer[0..editor.length]);
         try std.testing.expectEqual(@as(usize, 9), editor.cursor);
     }
-    try card.widget().handleEvent(&events, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
+    try card.take(&events, .enter, false);
     try std.testing.expectEqual(@as(u64, 37), owner.decision.?.action);
     input.permission = null;
     const after = try input.widget().draw(ctx);
@@ -186,8 +187,7 @@ test "InputArea approval has one document title above a choice between composer 
     const editor: @import("TerminalEditor.zig") = .{ .buffer = &bytes, .length = bytes.len, .cursor = 4 };
     var consent: @import("ActionConsent.zig") = .{};
     const document: vxfw.Text = .{ .text = "? Record thirty progress steps\n$ set -eu\n│ printf 'step 01'" };
-    const pasting = false;
-    var card: PermissionCard = .{ .consent = &consent, .pasting = &pasting, .description = "Record thirty progress steps", .body = document.widget(), .userdata = &owner, .on_decision = Owner.decide };
+    var card: PermissionCard = .{ .consent = &consent, .description = "Record thirty progress steps", .body = document.widget(), .userdata = &owner, .on_decision = Owner.decide };
     var input: Self = .{ .composer = .{ .editor = &editor }, .permission = &card };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -228,7 +228,7 @@ test "InputArea approval has one document title above a choice between composer 
     }
 }
 
-test "InputArea chat keeps a two-row footer above the unchanged bottom state slot" {
+test "InputArea has no empty status row below the footer" {
     var bytes: [16]u8 = undefined;
     const editor: @import("TerminalEditor.zig") = .{ .buffer = &bytes };
     const footer: @import("widgets/Footer.zig") = .{ .left = "Chat · model", .right = "ctrl+x stop" };
@@ -240,11 +240,10 @@ test "InputArea chat keeps a two-row footer above the unchanged bottom state slo
         const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = size.width, .height = size.height }, .cell_size = .{} };
 
         const idle = try input.widget().draw(ctx);
-        try std.testing.expectEqual(@as(u16, 5), idle.size.height);
-        try std.testing.expectEqual(@as(usize, 3), idle.children.len);
+        try std.testing.expectEqual(@as(u16, 4), idle.size.height);
+        try std.testing.expectEqual(@as(usize, 2), idle.children.len);
         try std.testing.expectEqualStrings("─", idle.children[0].surface.readCell(0, 2).char.grapheme);
         try std.testing.expectEqual(@as(i17, 3), idle.children[1].origin.row);
-        try std.testing.expectEqual(@as(i17, 4), idle.children[2].origin.row);
 
         notice.text = "Copied 12 lines";
         const noticed = try input.widget().draw(ctx);

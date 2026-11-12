@@ -22,7 +22,7 @@ fn Screen(comptime Body: type) type {
         const Self = @This();
 
         content: *Body,
-        input: *InputArea,
+        input: vxfw.Widget,
         style: @import("vaxis").Style = .{},
         header: ?vxfw.Widget = null,
         tail: ?vxfw.Widget = null,
@@ -37,8 +37,7 @@ fn Screen(comptime Body: type) type {
         userdata: *anyopaque,
         on_event: *const fn (*anyopaque, *vxfw.EventContext, vxfw.Event) anyerror!void,
 
-        pub const Part = enum { whole, list, compose };
-        const empty: vxfw.Text = .{ .text = "" };
+        pub const Part = enum { whole, list };
 
         pub fn widget(self: *Self) vxfw.Widget {
             return .{ .userdata = self, .eventHandler = event, .drawFn = draw };
@@ -48,18 +47,9 @@ fn Screen(comptime Body: type) type {
             return .{ .userdata = self, .drawFn = drawList };
         }
 
-        pub fn composeWidget(self: *Self) vxfw.Widget {
-            return .{ .userdata = self, .eventHandler = event, .drawFn = drawCompose };
-        }
-
         fn drawList(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
             const self: *Self = @ptrCast(@alignCast(raw));
             return self.drawPart(ctx, .list);
-        }
-
-        fn drawCompose(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
-            const self: *Self = @ptrCast(@alignCast(raw));
-            return self.drawPart(ctx, .compose);
         }
 
         fn event(raw: *anyopaque, ctx: *vxfw.EventContext, value: vxfw.Event) !void {
@@ -81,7 +71,6 @@ fn Screen(comptime Body: type) type {
             const own = switch (part) {
                 .whole => self.widget(),
                 .list => self.listWidget(),
-                .compose => self.composeWidget(),
             };
             const size = ctx.max.size();
             if (size.width == 0 or size.height == 0) return .empty(own);
@@ -90,7 +79,7 @@ fn Screen(comptime Body: type) type {
             const lower = try ctx.arena.create(Stack);
             const lower_children = try ctx.arena.alloc(Stack.Child, 4);
             var count: usize = 1;
-            lower_children[0] = .{ .widget = if (part == .compose) empty.widget() else self.content.widget(), .sizing = .fill };
+            lower_children[0] = .{ .widget = self.content.widget(), .sizing = .fill };
             if (part == .whole) if (self.marker) |marker| {
                 const row = try ctx.arena.create(Marker);
                 row.* = .{ .child = marker, .style = self.style };
@@ -114,10 +103,10 @@ fn Screen(comptime Body: type) type {
             const upper = try ctx.arena.create(Stack);
             const upper_children = try ctx.arena.alloc(Stack.Child, 2);
             count = 0;
-            if (part != .compose) if (self.header) |header| {
+            if (self.header) |header| {
                 upper_children[count] = .{ .widget = header };
                 count += 1;
-            };
+            }
             upper_children[count] = .{ .widget = feed, .sizing = .fill };
             upper.* = .{ .children = upper_children[0 .. count + 1] };
             const overlay = if (part == .list) null else self.overlay;
@@ -131,7 +120,7 @@ fn Screen(comptime Body: type) type {
             column_children[0] = .{ .widget = upper.widget(), .sizing = .fill };
             if (reserved) |slot| column_children[1] = .{ .widget = slot.spaceWidget() };
             const input_index = column_children.len - 1;
-            if (part != .list) column_children[input_index] = .{ .widget = self.input.widget() };
+            if (part != .list) column_children[input_index] = .{ .widget = self.input };
             column.* = .{ .children = column_children };
             // Stack measures from the bottom: input first, panel second, feed
             // last. Layer then paints the very same panel surface, once.
@@ -222,9 +211,9 @@ test "App screens compose content input facts status and an overlay without owni
             count.* += 1;
         }
     };
-    var overview: Overview = .{ .content = &list, .input = &input, .userdata = &events, .on_event = Handler.event };
+    var overview: Overview = .{ .content = &list, .input = input.widget(), .userdata = &events, .on_event = Handler.event };
     var facade: Content = .{ .shown = transcript.widget() };
-    var session: Session = .{ .content = &facade, .input = &input, .userdata = &events, .on_event = Handler.event };
+    var session: Session = .{ .content = &facade, .input = input.widget(), .userdata = &events, .on_event = Handler.event };
     const overlay: vxfw.Text = .{ .text = "Commands" };
     overview.overlay = overlay.widget();
     session.overlay = overlay.widget();
@@ -237,8 +226,8 @@ test "App screens compose content input facts status and an overlay without owni
         const drawn = try screen.draw(ctx);
         try std.testing.expectEqual(@as(usize, 2), drawn.children.len);
         const column = drawn.children[0].surface;
-        try std.testing.expectEqual(@as(i17, 19), column.children[1].origin.row);
-        try std.testing.expectEqual(@as(i17, 18), drawn.children[1].origin.row);
+        try std.testing.expectEqual(@as(i17, 20), column.children[1].origin.row);
+        try std.testing.expectEqual(@as(i17, 19), drawn.children[1].origin.row);
         try std.testing.expect(column.children[1].surface.widget.eql(input.widget()));
         for ([_]vxfw.Size{ .{ .width = 1, .height = 1 }, .{ .width = 0, .height = 1 }, .{ .width = 1, .height = 0 } }) |size| {
             const tiny = try screen.draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = size.height }));
@@ -260,22 +249,22 @@ test "App screens compose content input facts status and an overlay without owni
     const column = active.children[0].surface;
     const upper = column.children[0].surface;
     const lower = upper.children[1];
-    try std.testing.expectEqual(@as(i17, 17), lower.origin.row + lower.surface.children[2].origin.row);
+    try std.testing.expectEqual(@as(i17, 18), lower.origin.row + lower.surface.children[2].origin.row);
     // The marker owns a whole row above the tail; the content ends above it.
     const marker_row = lower.surface.children[1];
-    try std.testing.expectEqual(vxfw.RelativePoint{ .row = 16, .col = 0 }, vxfw.RelativePoint{ .row = lower.origin.row + marker_row.origin.row, .col = marker_row.origin.col });
+    try std.testing.expectEqual(vxfw.RelativePoint{ .row = 17, .col = 0 }, vxfw.RelativePoint{ .row = lower.origin.row + marker_row.origin.row, .col = marker_row.origin.col });
     try std.testing.expectEqual(@as(u16, 80), marker_row.surface.size.width);
     try std.testing.expectEqual(@as(i17, 78), marker_row.surface.children[0].origin.col);
     try std.testing.expectEqual(@as(u8, 1), marker_row.surface.children[0].z_index);
-    try std.testing.expectEqual(@as(u16, 15), lower.surface.children[0].surface.size.height);
-    try std.testing.expectEqual(@as(i17, 19), column.children[1].origin.row);
+    try std.testing.expectEqual(@as(u16, 16), lower.surface.children[0].surface.size.height);
+    try std.testing.expectEqual(@as(i17, 20), column.children[1].origin.row);
     try std.testing.expectEqual(@as(u8, 2), active.children[1].z_index);
     session.tail = null;
     const browsing = try session.widget().draw(ctx);
     const browsing_lower = browsing.children[0].surface.children[0].surface.children[1];
     const browsing_marker = browsing_lower.surface.children[1];
-    try std.testing.expectEqual(vxfw.RelativePoint{ .row = 18, .col = 0 }, vxfw.RelativePoint{ .row = browsing_lower.origin.row + browsing_marker.origin.row, .col = browsing_marker.origin.col });
-    try std.testing.expectEqual(@as(u16, 17), browsing_lower.surface.children[0].surface.size.height);
+    try std.testing.expectEqual(vxfw.RelativePoint{ .row = 19, .col = 0 }, vxfw.RelativePoint{ .row = browsing_lower.origin.row + browsing_marker.origin.row, .col = browsing_marker.origin.col });
+    try std.testing.expectEqual(@as(u16, 18), browsing_lower.surface.children[0].surface.size.height);
     for ([_]vxfw.Size{ .{ .width = 1, .height = 1 }, .{ .width = 0, .height = 1 }, .{ .width = 1, .height = 0 } }) |size| {
         const tiny = try session.widget().draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = size.height }));
         try std.testing.expect(tiny.size.width <= size.width and tiny.size.height <= size.height);
@@ -301,7 +290,7 @@ test "App screens render the original composition with painted marker rows" {
     const editor: @import("TerminalEditor.zig") = .{ .buffer = &bytes, .length = bytes.len, .cursor = 2 };
     var input: InputArea = .{ .composer = .{ .editor = &editor } };
     var content: TestContent = .{};
-    var screen: Screen(TestContent) = .{ .content = &content, .input = &input, .userdata = &content, .on_event = TestContent.event, .style = .{ .bg = .{ .index = 4 } } };
+    var screen: Screen(TestContent) = .{ .content = &content, .input = input.widget(), .userdata = &content, .on_event = TestContent.event, .style = .{ .bg = .{ .index = 4 } } };
     const header: vxfw.Text = .{ .text = "Header", .style = .{ .bold = true } };
     const tail: vxfw.Text = .{ .text = "Tail\nSecond" };
     const marker: vxfw.Text = .{ .text = "Up" };
@@ -341,9 +330,9 @@ test "App screens render the original composition with painted marker rows" {
             std.hash.autoHash(&hash, cell.style);
         }
     };
-    // Based on c347313's composition, with marker rows filled to the ground,
+    // c347313's composition with grounded marker rows and no empty status slot,
     // across all optional rows and tiny, narrow and wide terminals.
-    try std.testing.expectEqual(@as(u64, 15741834227597727779), hash.final());
+    try std.testing.expectEqual(@as(u64, 9710008619075226950), hash.final());
 }
 
 test "App screens update layout state through exhausted resizes for every optional row combination" {
@@ -381,9 +370,9 @@ test "App screens update layout state through exhausted resizes for every option
         var all: []const GroupedList.Row = rows[0..3];
         var list: GroupedList = .{ .rows = .of(&all) };
         var transcript: @import("DocumentView.zig") = .{ .document = document };
-        var overview: Overview = .{ .content = &list, .input = &input, .userdata = &list, .on_event = Row.event };
+        var overview: Overview = .{ .content = &list, .input = input.widget(), .userdata = &list, .on_event = Row.event };
         var facade: Content = .{ .shown = transcript.widget() };
-        var session: Session = .{ .content = &facade, .input = &input, .userdata = &transcript, .on_event = Row.event };
+        var session: Session = .{ .content = &facade, .input = input.widget(), .userdata = &transcript, .on_event = Row.event };
         inline for (.{ &overview, &session }) |screen| {
             var header: Row = .{ .text = .{ .text = "Header" } };
             var tail: Row = .{ .text = .{ .text = "Tail\nSecond" } };
@@ -466,7 +455,7 @@ test "App screens reserve one measured natural panel before feed without shrinki
     var input: InputArea = .{ .composer = .{ .editor = &editor }, .status = null };
     var body: Body = .{};
     var panel: Panel = .{};
-    var screen: Screen(Body) = .{ .content = &body, .input = &input, .userdata = &body, .on_event = Body.event, .overlay_reserves_space = true };
+    var screen: Screen(Body) = .{ .content = &body, .input = input.widget(), .userdata = &body, .on_event = Body.event, .overlay_reserves_space = true };
     for ([_]u16{ 1, 2, 46, 140 }) |width| for ([_]u16{ 1, 2, 4, 7, 18, 30, 40 }) |height| {
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();

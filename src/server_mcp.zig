@@ -216,6 +216,7 @@ noinline fn prepare(host: *Host, active: *Active) !void {
         .id = 1,
         .server_name = config.name,
         .timeout_ms = input.timeout_ms,
+        .bash_offered = input.runner.mcp.bash_offered,
         .retention = .{
             .queue = host.retention,
             .action_id = active.binding.action_id,
@@ -265,4 +266,90 @@ test "MCP Host call bound refuses admission before touching the Store" {
     try std.testing.expectEqual(@import("execution_turn.zig").Admission.retry_later, calls.admit(undefined, .{ .action_id = 17, .runner = .mcp, .server = .{} }));
     calls.entries[0] = null;
     try std.testing.expect(!calls.full());
+}
+
+test "MCP full output hints follow the frozen Bash offer despite later settings" {
+    const store_testing = store.testing;
+    const tools = @import("tools.zig");
+    const wire_request = @import("wire_request.zig");
+    const output_retention = @import("output_retention.zig");
+    const Script = @import("mcp/test_server.zig");
+    const poll = @import("test_poll");
+    const gpa = std.testing.allocator;
+    const records = comptime store_testing.hostToolRecordsWith(&.{.{ .name = "fetch_page", .owner = .mcp, .server = "docs", .description = "Fetch a page.", .input_schema = "{\"type\":\"object\"}" }});
+    var digests: [records.len][32]u8 = undefined;
+    for (&records, &digests) |*record, *digest| digest.* = tools.recordDigest(record);
+    const host_tool_set: tools.HostToolSet = .{ .records = &records, .digests = &digests };
+    const payload = try gpa.alloc(u8, @import("mcp/result_text.zig").excerpt_bytes + 1);
+    defer gpa.free(payload);
+    @memset(payload, 'x');
+    const body = try std.fmt.allocPrint(gpa, "{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{\"content\":[{{\"type\":\"text\",\"text\":\"{s}\"}}]}}}}", .{payload});
+    defer gpa.free(body);
+    const reply = try std.fmt.allocPrint(gpa, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {d}\r\n\r\n{s}", .{ body.len, body });
+    defer gpa.free(reply);
+    for ([_]bool{ false, true }) |bash_offered| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: store.Store = undefined;
+        try store_testing.testingStoreWith(&.{ .engine = .sqlite }, &storage, &tmp, std.testing.io, .{ .host_tool_set = &host_tool_set });
+        defer storage.close() catch unreachable;
+        var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+        const workspace = try store.testingCanonicalCwd(std.testing.io, &workspace_buffer);
+        var configure = try store_testing.completeConfiguration("mcp-output-configure", "", workspace, "model-a");
+        configure.configuration.tools = try .of(if (bash_offered) &.{ "bash", "fetch_page" } else &.{"fetch_page"});
+        configure.configuration.permission_mode.state = .value;
+        try configure.configuration.permission_mode.value.set("bypass");
+        const session = (try storage.configure(&configure, .{})).accepted.session;
+        try store_testing.submitTestMessage(&storage, &tmp, "task", "mcp-output-task", session.slice(), "fetch");
+        const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        // Both adding and removing Bash after admission must be irrelevant.
+        var update: wire_request.ConfigureCommand = .{ .session = session };
+        try update.key.set("mcp-output-live-tools");
+        update.configuration.tools = try .of(if (bash_offered) &.{"fetch_page"} else &.{ "bash", "fetch_page" });
+        try std.testing.expect(try storage.configure(&update, .{}) == .accepted);
+        try store.settleCallsForTesting(&storage, &tmp, model, "mcp-output-calls", &.{.{ .item_id = "item", .name = "fetch_page", .encoded_call_id = "call", .decoded_call_id = "call", .encoded_arguments = "{}", .decoded_arguments = "{}" }});
+        const selected = (try storage.nextAction(.mcp)).?;
+        var script: Script = .{ .reply = reply };
+        try script.start();
+        defer script.stop();
+        var url_buffer: [128]u8 = undefined;
+        const url = try std.fmt.bufPrint(&url_buffer, "http://127.0.0.1:{d}/mcp", .{script.port});
+        var server_name = "docs".*;
+        var token = "t".*;
+        var configs = [_]Server{.{ .name = &server_name, .url = url, .token = &token, .target = try @import("http1/request.zig").parseTarget(url), .timeout_ms = 10_000 }};
+        var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+        const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+        var used: std.atomic.Value(u64) = .init(0);
+        var entries: [2]output_retention.Entry = @splat(.{});
+        var retention = output_retention.Queue.initialize(std.testing.io, root, .{ .used = &used, .limit = Running.max_answer_bytes }, &entries);
+        defer retention.cleanupAll();
+        var host: Host = .{ .io = std.testing.io, .allocator = gpa, .lease = undefined, .store = &storage, .mcp_servers = .{ .entries = &configs }, .retention = &retention };
+        var calls: Calls = .{};
+        defer calls.shutdown(&host);
+        try std.testing.expectEqual(@import("execution_turn.zig").Admission.admitted, calls.admit(&host, selected));
+        const Drive = struct {
+            calls: *Calls,
+            host: *Host,
+            fn step(self: *@This()) !bool {
+                _ = self.calls.service(self.host);
+                return !self.calls.any();
+            }
+        };
+        var drive: Drive = .{ .calls = &calls, .host = &host };
+        try poll.waitUntil(std.testing.io, poll.after(std.testing.io, .fromSeconds(10)), &drive, Drive.step);
+        try std.testing.expect(script.request_received.load(.acquire));
+        try std.testing.expect(!storage.isFenced());
+        const report = try store.testingSessionReportWithProfile(&storage, &tmp, session.slice(), 128 * 1024, .full);
+        defer gpa.free(report);
+        const parsed = try std.json.parseFromSlice(std.json.Value, gpa, report, .{});
+        defer parsed.deinit();
+        const result = parsed.value.object.get("full").?.object.get("actions").?.array.items[0].object.get("result").?.object.get("text").?.string;
+        const expected = if (bash_offered)
+            try std.fmt.allocPrint(gpa, "{s}\n[1 more bytes not shown]\nFull output: {s}/mcp-output-{d}-1.tmp\n", .{ payload[0 .. payload.len - 1], root, selected.action_id })
+        else
+            try std.fmt.allocPrint(gpa, "{s}\n[1 more bytes not shown]", .{payload[0 .. payload.len - 1]});
+        defer gpa.free(expected);
+        try std.testing.expectEqualStrings(expected, result);
+        try std.testing.expectEqual(@as(usize, @intFromBool(bash_offered)), retention.occupied());
+    }
 }

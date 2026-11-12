@@ -579,7 +579,7 @@ test "model call timing MySQL format 68 migration preserves format 67 resolution
     try setup("DROP DATABASE IF EXISTS " ++ migrated_database ++ ";CREATE DATABASE " ++ migrated_database);
     try load(migrated_database, store_testing.baseline_mysql_ddl, false);
     try load(migrated_database, store_testing.baseline_rows, true);
-    inline for (schema.migrations[0 .. schema.migrations.len - 1]) |step| {
+    inline for (schema.migrations[0 .. 67 - schema.migration_baseline]) |step| {
         try load(migrated_database, schema.mysqlMigration(step.from), false);
     }
     const facts = "SELECT operation_id,attempt_ordinal,resolution_code,resolved_at FROM model_operation ORDER BY operation_id";
@@ -587,7 +587,7 @@ test "model call timing MySQL format 68 migration preserves format 67 resolution
     defer before.deinit();
     try writeResult(facts, &before.writer);
     try std.testing.expect(before.written().len > 0);
-    try load(migrated_database, schema.mysqlMigration(schema.migrations[schema.migrations.len - 1].from), false);
+    try load(migrated_database, schema.mysqlMigration(67), false);
     var after: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer after.deinit();
     try writeResult(facts, &after.writer);
@@ -596,6 +596,7 @@ test "model call timing MySQL format 68 migration preserves format 67 resolution
     defer timings.deinit();
     try writeResult("SELECT count(*) FROM model_operation WHERE latency_ms IS NOT NULL OR first_event_ms IS NOT NULL", &timings.writer);
     try std.testing.expectEqualStrings("\n 1:0", timings.written());
+    try load(migrated_database, schema.mysqlMigrationFrom(68).?, false);
     try expectCatalog(migrated_database);
     done.migrations += 1;
     writeRecord();
@@ -840,6 +841,64 @@ test "frozen context window schema 69 MySQL migration pins legacy policy and pre
         "SELECT 4",
         "SELECT 'NO',NULL",
     });
+    try expectCatalog(migrated_database);
+    done.migrations += 1;
+    writeRecord();
+}
+
+test "schema 71 MySQL migration updates the saved wire label and preserves ordinary rows" {
+    const io = std.testing.io;
+    mutex.lockUncancelable(io);
+    defer mutex.unlock(io);
+    _ = connection() orelse return if (state == .absent) error.SkipZigTest else error.MysqlUnavailable;
+    defer restore("USE " ++ database);
+    try setup("DROP DATABASE IF EXISTS " ++ migrated_database ++ ";CREATE DATABASE " ++ migrated_database);
+    try load(migrated_database, store_testing.baseline_mysql_ddl, false);
+    try load(migrated_database, store_testing.baseline_rows, true);
+    inline for (schema.migrations) |step| {
+        if (step.from < 70) try load(migrated_database, schema.mysqlMigration(step.from), false);
+    }
+    try load(migrated_database, "INSERT INTO store_meta(meta_key,meta_value) VALUES('format','70'),('wire_version','14')", false);
+    try load(migrated_database, schema.mysqlMigration(70), false);
+    try expectSameResults(&.{
+        "SELECT meta_value FROM store_meta WHERE meta_key='wire_version'",
+        "SELECT meta_value FROM store_meta WHERE meta_key='format'",
+        "SELECT count(*) FROM session WHERE session_ref='d8mv7p'",
+    }, &.{
+        "SELECT '15'",
+        "SELECT '70'",
+        "SELECT 1",
+    });
+    try load(migrated_database, schema.mysqlMigrationFrom(70).?, false);
+    try expectCatalog(migrated_database);
+    done.migrations += 1;
+    writeRecord();
+}
+
+test "schema 70 MySQL migration updates the saved wire label and preserves ordinary rows" {
+    const io = std.testing.io;
+    mutex.lockUncancelable(io);
+    defer mutex.unlock(io);
+    _ = connection() orelse return if (state == .absent) error.SkipZigTest else error.MysqlUnavailable;
+    defer restore("USE " ++ database);
+    try setup("DROP DATABASE IF EXISTS " ++ migrated_database ++ ";CREATE DATABASE " ++ migrated_database);
+    try load(migrated_database, store_testing.baseline_mysql_ddl, false);
+    try load(migrated_database, store_testing.baseline_rows, true);
+    inline for (schema.migrations) |step| {
+        if (step.from < 69) try load(migrated_database, schema.mysqlMigration(step.from), false);
+    }
+    try load(migrated_database, "INSERT INTO store_meta(meta_key,meta_value) VALUES('format','69'),('wire_version','13')", false);
+    try load(migrated_database, schema.mysqlMigration(69), false);
+    try expectSameResults(&.{
+        "SELECT meta_value FROM store_meta WHERE meta_key='wire_version'",
+        "SELECT meta_value FROM store_meta WHERE meta_key='format'",
+        "SELECT count(*) FROM session WHERE session_ref='d8mv7p'",
+    }, &.{
+        "SELECT '14'",
+        "SELECT '69'",
+        "SELECT 1",
+    });
+    try load(migrated_database, schema.mysqlMigrationFrom(69).?, false);
     try expectCatalog(migrated_database);
     done.migrations += 1;
     writeRecord();

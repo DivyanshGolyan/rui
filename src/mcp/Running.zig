@@ -6,6 +6,7 @@ const post = @import("post.zig");
 const result_text = @import("result_text.zig");
 const output_retention = @import("../output_retention.zig");
 const named_scratch = @import("../named_scratch.zig");
+const pages = @import("../os/pages.zig");
 const Allocator = std.mem.Allocator;
 const Running = @This();
 
@@ -24,6 +25,8 @@ pub const Input = struct {
     id: u64,
     server_name: []const u8,
     timeout_ms: u64,
+    /// From the Operation's frozen offer, not the Session's current settings.
+    bash_offered: bool,
     retention: ?Retention = null,
 };
 
@@ -39,6 +42,7 @@ request: []u8,
 answer: []u8,
 server_name: []const u8,
 timeout_ms: u64,
+bash_offered: bool,
 deadline_ms: u64,
 state: State,
 retention: ?Retention,
@@ -54,6 +58,7 @@ pub fn start(self: *Running, gpa: Allocator, input: Input, now_ms: u64) error{Ou
         .answer = &.{},
         .server_name = input.server_name,
         .timeout_ms = input.timeout_ms,
+        .bash_offered = input.bash_offered,
         .deadline_ms = now_ms +| input.timeout_ms,
         .state = .done,
         .retention = input.retention,
@@ -62,7 +67,7 @@ pub fn start(self: *Running, gpa: Allocator, input: Input, now_ms: u64) error{Ou
     self.scratch = try gpa.alloc(u8, input.arguments.len);
     const request_bytes = std.math.add(usize, input.arguments.len, request_margin) catch return error.OutOfMemory;
     self.request = try gpa.alloc(u8, request_bytes);
-    self.answer = try gpa.alloc(u8, max_answer_bytes);
+    self.answer = pages.mapZeroed(u8, max_answer_bytes) catch return error.OutOfMemory;
     self.call.init(.{
         .server = input.server,
         .client = input.client,
@@ -87,7 +92,7 @@ pub fn start(self: *Running, gpa: Allocator, input: Input, now_ms: u64) error{Ou
 pub fn deinit(self: *Running) void {
     if (self.state == .active) self.call.deinit();
     self.state = .done;
-    self.gpa.free(self.answer);
+    pages.unmapZeroed(self.answer);
     self.gpa.free(self.request);
     self.gpa.free(self.scratch);
     self.answer = &.{};
@@ -141,7 +146,8 @@ fn finish(self: *Running, out: *std.Io.Writer, ending: result_text.Ending) !resu
     defer self.deinit();
     const ended: result_text.Ended = .{ .server_name = self.server_name, .ended = ending };
     const excerpt = try result_text.writeExcerpt(out, ended);
-    if (excerpt.omitted) {
+    // Without Bash there is no consumer for optional full output or its path.
+    if (excerpt.omitted and self.bash_offered) {
         if (self.retention) |retention| {
             var name_buffer: [96]u8 = undefined;
             const name = named_scratch.NumericName.@"mcp-output".format(&name_buffer, retention.action_id, retention.attempt_ordinal) catch unreachable;
@@ -174,6 +180,7 @@ fn testInput(port: u16) Input {
         .id = 7,
         .server_name = "test",
         .timeout_ms = 600_000,
+        .bash_offered = true,
     };
 }
 
@@ -387,71 +394,81 @@ test "Running retains only omitted rendered MCP answers and preserves the excerp
     const running = try gpa.create(Running);
     defer gpa.destroy(running);
     const Case = struct { length: usize, kind: enum { text, mixed_error, structured, rpc_error, refused } = .text };
-    for ([_]Case{
-        .{ .length = 32 },
-        .{ .length = result_text.excerpt_bytes },
-        .{ .length = result_text.excerpt_bytes + 128 },
-        .{ .length = result_text.excerpt_bytes + 128, .kind = .mixed_error },
-        .{ .length = result_text.excerpt_bytes + 128, .kind = .structured },
-        .{ .length = result_text.excerpt_bytes + 128, .kind = .rpc_error },
-        .{ .length = result_text.excerpt_bytes + 128, .kind = .refused },
-    }) |case| {
-        const payload = try gpa.alloc(u8, case.length);
-        defer gpa.free(payload);
-        @memset(payload, 'x');
-        if (case.length > result_text.excerpt_bytes) @memcpy(payload[result_text.excerpt_bytes - 1 ..][0..2], "é");
-        const body = switch (case.kind) {
-            .text => try std.fmt.allocPrint(gpa, "{{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{{\"content\":[{{\"type\":\"text\",\"text\":\"{s}\"}}]}}}}", .{payload}),
-            .mixed_error => try std.fmt.allocPrint(gpa, "{{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{{\"isError\":true,\"content\":[{{\"type\":\"text\",\"text\":\"{s}\"}},{{\"type\":\"image\",\"data\":\"x\"}}]}}}}", .{payload}),
-            .structured => try std.fmt.allocPrint(gpa, "{{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{{\"content\":[],\"structuredContent\":{{\"data\":\"{s}\"}}}}}}", .{payload}),
-            .rpc_error => try std.fmt.allocPrint(gpa, "{{\"jsonrpc\":\"2.0\",\"id\":7,\"error\":{{\"code\":-1,\"message\":\"{s}\"}}}}", .{payload}),
-            .refused => try gpa.dupe(u8, payload),
-        };
-        defer gpa.free(body);
-        const full = switch (case.kind) {
-            .text, .refused => try std.fmt.allocPrint(gpa, "{s}{s}", .{ if (case.kind == .refused) "Outcome unknown: The MCP server answered HTTP 502. The call may or may not have run; it was not retried.\n" else "", payload }),
-            .mixed_error => try std.fmt.allocPrint(gpa, "The tool reported an error:\n{s}\n{{\"type\":\"image\",\"data\":\"x\"}}", .{payload}),
-            .structured => try std.fmt.allocPrint(gpa, "{{\"data\":\"{s}\"}}", .{payload}),
-            .rpc_error => try std.fmt.allocPrint(gpa, "The MCP server returned error -1: {s}", .{payload}),
-        };
-        defer gpa.free(full);
-        const wire = try std.fmt.allocPrint(gpa, "HTTP/1.1 {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\n\r\n{s}", .{ if (case.kind == .refused) "502 Bad Gateway" else "200 OK", if (case.kind == .refused) "text/plain" else "application/json", body.len, body });
-        defer gpa.free(wire);
-        var script: Script = .{ .reply = wire };
-        try script.start();
-        defer script.stop();
-        var input = testInput(script.port);
-        input.retention = .{ .queue = &queue, .action_id = 17, .attempt_ordinal = 1 };
-        try running.start(gpa, input, 0);
-        defer running.deinit();
-        var out: std.Io.Writer.Allocating = .init(gpa);
-        defer out.deinit();
-        const expected_code: result_text.Code = switch (case.kind) {
-            .text, .structured => .succeeded,
-            .refused => .indeterminate,
-            else => .failed,
-        };
-        try std.testing.expectEqual(expected_code, try drive(running, &out.writer));
-        if (full.len <= result_text.excerpt_bytes) {
-            try std.testing.expectEqualStrings(full, out.written());
-            try std.testing.expectEqual(@as(usize, 0), queue.occupied());
-            try std.testing.expectError(error.FileNotFound, tmp.dir.openFile(std.testing.io, "mcp-output-17-1.tmp", .{}));
-        } else {
-            var kept: usize = result_text.excerpt_bytes;
-            while (full[kept] & 0xc0 == 0x80) kept -= 1;
-            const expected = try std.fmt.allocPrint(gpa, "{s}\n[{d} more bytes not shown]\nFull output: {s}/mcp-output-17-1.tmp\n", .{ full[0..kept], full.len - kept, root });
-            defer gpa.free(expected);
-            try std.testing.expectEqualStrings(expected, out.written());
-            const saved = try tmp.dir.readFileAlloc(std.testing.io, "mcp-output-17-1.tmp", gpa, .limited(max_answer_bytes));
-            defer gpa.free(saved);
-            try std.testing.expectEqualStrings(full, saved);
-            try std.testing.expectEqual(@as(u64, full.len), used.load(.acquire));
-            try std.testing.expectEqual(@as(usize, 1), queue.occupied());
-            queue.cleanupAll();
-            // Losing optional scratch never rewrites the saved resolution.
-            try std.testing.expectEqualStrings(expected, out.written());
+    for ([_]bool{ false, true }) |bash_offered| {
+        for ([_]Case{
+            .{ .length = 32 },
+            .{ .length = result_text.excerpt_bytes },
+            .{ .length = result_text.excerpt_bytes + 128 },
+            .{ .length = result_text.excerpt_bytes + 128, .kind = .mixed_error },
+            .{ .length = result_text.excerpt_bytes + 128, .kind = .structured },
+            .{ .length = result_text.excerpt_bytes + 128, .kind = .rpc_error },
+            .{ .length = result_text.excerpt_bytes + 128, .kind = .refused },
+        }) |case| {
+            const payload = try gpa.alloc(u8, case.length);
+            defer gpa.free(payload);
+            @memset(payload, 'x');
+            if (case.length > result_text.excerpt_bytes) @memcpy(payload[result_text.excerpt_bytes - 1 ..][0..2], "é");
+            const body = switch (case.kind) {
+                .text => try std.fmt.allocPrint(gpa, "{{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{{\"content\":[{{\"type\":\"text\",\"text\":\"{s}\"}}]}}}}", .{payload}),
+                .mixed_error => try std.fmt.allocPrint(gpa, "{{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{{\"isError\":true,\"content\":[{{\"type\":\"text\",\"text\":\"{s}\"}},{{\"type\":\"image\",\"data\":\"x\"}}]}}}}", .{payload}),
+                .structured => try std.fmt.allocPrint(gpa, "{{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{{\"content\":[],\"structuredContent\":{{\"data\":\"{s}\"}}}}}}", .{payload}),
+                .rpc_error => try std.fmt.allocPrint(gpa, "{{\"jsonrpc\":\"2.0\",\"id\":7,\"error\":{{\"code\":-1,\"message\":\"{s}\"}}}}", .{payload}),
+                .refused => try gpa.dupe(u8, payload),
+            };
+            defer gpa.free(body);
+            const full = switch (case.kind) {
+                .text, .refused => try std.fmt.allocPrint(gpa, "{s}{s}", .{ if (case.kind == .refused) "Outcome unknown: The MCP server answered HTTP 502. The call may or may not have run; it was not retried.\n" else "", payload }),
+                .mixed_error => try std.fmt.allocPrint(gpa, "The tool reported an error:\n{s}\n{{\"type\":\"image\",\"data\":\"x\"}}", .{payload}),
+                .structured => try std.fmt.allocPrint(gpa, "{{\"data\":\"{s}\"}}", .{payload}),
+                .rpc_error => try std.fmt.allocPrint(gpa, "The MCP server returned error -1: {s}", .{payload}),
+            };
+            defer gpa.free(full);
+            const wire = try std.fmt.allocPrint(gpa, "HTTP/1.1 {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\n\r\n{s}", .{ if (case.kind == .refused) "502 Bad Gateway" else "200 OK", if (case.kind == .refused) "text/plain" else "application/json", body.len, body });
+            defer gpa.free(wire);
+            var script: Script = .{ .reply = wire };
+            try script.start();
+            defer script.stop();
+            var input = testInput(script.port);
+            input.bash_offered = bash_offered;
+            input.retention = .{ .queue = &queue, .action_id = 17, .attempt_ordinal = 1 };
+            try running.start(gpa, input, 0);
+            defer running.deinit();
+            var out: std.Io.Writer.Allocating = .init(gpa);
+            defer out.deinit();
+            const expected_code: result_text.Code = switch (case.kind) {
+                .text, .structured => .succeeded,
+                .refused => .indeterminate,
+                else => .failed,
+            };
+            try std.testing.expectEqual(expected_code, try drive(running, &out.writer));
+            if (full.len <= result_text.excerpt_bytes) {
+                try std.testing.expectEqualStrings(full, out.written());
+                try std.testing.expectEqual(@as(usize, 0), queue.occupied());
+                try std.testing.expectError(error.FileNotFound, tmp.dir.openFile(std.testing.io, "mcp-output-17-1.tmp", .{}));
+            } else {
+                var kept: usize = result_text.excerpt_bytes;
+                while (full[kept] & 0xc0 == 0x80) kept -= 1;
+                var expected: std.Io.Writer.Allocating = .init(gpa);
+                defer expected.deinit();
+                try expected.writer.print("{s}\n[{d} more bytes not shown]", .{ full[0..kept], full.len - kept });
+                if (bash_offered) try expected.writer.print("\nFull output: {s}/mcp-output-17-1.tmp\n", .{root});
+                try std.testing.expectEqualStrings(expected.written(), out.written());
+                if (bash_offered) {
+                    const saved = try tmp.dir.readFileAlloc(std.testing.io, "mcp-output-17-1.tmp", gpa, .limited(max_answer_bytes));
+                    defer gpa.free(saved);
+                    try std.testing.expectEqualStrings(full, saved);
+                    try std.testing.expectEqual(@as(u64, full.len), used.load(.acquire));
+                    try std.testing.expectEqual(@as(usize, 1), queue.occupied());
+                    queue.cleanupAll();
+                    // Losing optional scratch never rewrites the saved resolution.
+                    try std.testing.expectEqualStrings(expected.written(), out.written());
+                } else {
+                    try std.testing.expectEqual(@as(usize, 0), queue.occupied());
+                    try std.testing.expectError(error.FileNotFound, tmp.dir.openFile(std.testing.io, "mcp-output-17-1.tmp", .{}));
+                }
+            }
+            try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
         }
-        try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
     }
 }
 

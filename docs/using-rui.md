@@ -8,16 +8,16 @@ For a first conversation, see [Start a conversation](../README.md#start-a-conver
 Open **Settings › Keys** for the full key list. In the overview, End then Enter opens the pinned Settings row; select the last **Keys** row and press Enter.
 In a wide conversation, click the pinned Settings row without leaving the chat.
 Esc returns to Settings; another Esc returns to the conversation or overview.
-The footer shows the keys available in the current state. A typed `?` is ordinary draft text, not a shortcut.
+The footer shows the keys available in the current state. In a chat, a typed `?` is ordinary draft text, not a shortcut; on the overview, printable keys and paste do nothing.
 There is no `/help` command.
 
 ## Commands
 
-Typing `/` in a chat lists loaded skills, `/reload-skills`, `/new` and `/clear`. The overview lists skills and `/reload-skills` only. A skill row fills its name into the Message; `/reload-skills` refreshes skills. App actions are clicks and keys on the screen: chat info contains Rename, Archive and Copy last answer, and Settings contains defaults and Version.
+At the chat’s `›` prompt, typing `/` lists loaded skills, `/reload-skills`, `/new` and `/clear`. The overview has no input or slash commands. A skill row fills its name into the Message; `/reload-skills` refreshes skills. App actions are clicks and keys: chat info contains Rename, Archive and Copy last answer, and Settings contains defaults and Version.
 
 `/new` and `/clear` both open a new empty chat, just like **+ New Session**. The old chat stays unchanged in the list. The cursor starts in the new input, and its footer shows model · effort · folder. These commands accept no arguments; `/new foo` is misuse, not a Message.
 
-Unlisted fallbacks remain until those screens have equivalent controls: `/requests` in a conversation; `/configure` and `/sessions` in the overview. They are not offered by `/`. Failed-send retry and discard remain on the failed-send line.
+`/requests` remains an unlisted chat action until it has a drawn entry point. Failed-send retry and discard remain on the failed-send line. The overview has no command input.
 
 While the model works on a reply, the work line says `Thinking` with elapsed time.
 Rate-limited retries keep their countdown, and running tools show their descriptions.
@@ -35,8 +35,8 @@ Ctrl+C closes the client without stopping background work; unsent draft text is 
 
 Select **Settings**, then **Version**, to check for and install a stable release. The same run is available with a conversation open; its status stays on the status row, and Esc cancels until publishing starts.
 
-Upgrade installs the latest published stable release and restarts the selected Store's Host only if it is already running and its launch is supported.
-Restart affects all Sessions in that Store and may interrupt work; no running Host means install only.
+Upgrade installs the latest published stable release and uses the same restart-all owner as `rui host restart --all` for every eligible running same-user Host.
+The check names the discovered Host count, Stores and unsupported reasons. Restart may interrupt all Sessions across those Stores; `--store` selects the client context, not the restart scope. No running Hosts means install only; absent Stores are not started.
 The panel retains your draft, selected Session and unresolved capture handles without replaying uncertain effects.
 It reports installation separately from activation, including when an application-owned or unsupported Host cannot be restarted safely.
 
@@ -101,27 +101,32 @@ If that happens, run your terminal's reset command.
 
 Rui calls a saved conversation a **Session**.
 Bare `rui` opens the overview of unarchived Sessions in this Store; each row shows its project.
-Type in its composer to start a new Session; Enter on a row opens one, and Esc returns.
-Ctrl-X stops the selected Session, and Ctrl-D leaves.
+Select the pinned **+ New Session** at the top with Home, then Enter, or click it, to create an empty Session and open its focused chat input.
+Creating it sends configuration only: it has no Messages until you type and send one in the chat.
+The empty chat footer shows its model, effort and folder; model and effort are buttons for changing that Session’s settings.
+An existing populated chat keeps its usual footer.
+Enter on a Session row opens it, and Esc returns to the overview.
+**Settings** stays on the penultimate row, immediately above the list footer; there is no composer, hidden draft, model/effort footer or footer buttons on the overview.
+The overview list uses the full width at every terminal size, with no empty chat pane. A wide chat or its settings keeps the list sidebar’s existing navigation, without an input of its own.
 `rui session resume` still opens one Session directly, inside the overview.
 
 | Key in the overview | What it does |
 | --- | --- |
-| Up, Down, Home, End | Select a Session while the composer is empty. In a draft, Home and End move the caret, and Up and Down select a Session once past its first or last line. While a start waits for its answer, all four select. |
-| Shift-Up, Shift-Down | Select the Session above or below, whatever the composer holds. |
-| Enter | Sends the composer's text: a task starts a new Session, and `/configure` sets the next start's settings. Select **Settings** in the overview, then its **Model** field, to pick the default for new Sessions; type to filter, use ↑ and ↓ to move, and Enter to save. Esc closes the choice before settings. On a blank composer, opens the selected Session. |
-| Esc, Ctrl-G | Clears the composer's draft. On an empty composer, clears the settings `/configure` held. A start already sent keeps its own text and settings. In a conversation's latest view, returns to the overview. |
-| Ctrl-X | Asks to stop the selected Session while it works, waits or needs approval. Press Ctrl-X again to stop it; any other key cancels. The row reads `stopping` until the Host answers, then `■ stopped`; if the stop fails, a message says why and the row keeps its state. On any other row a message says why nothing was stopped. |
-| Ctrl-D | Leaves, when the composer is empty or a start waits for its answer. |
-| Ctrl-C | Leaves. |
+| Up, Down, Home, End | Move through the whole list, including pinned **+ New Session** and **Settings**. |
+| Shift-Up, Shift-Down | Select the row above or below. |
+| Enter | Opens the selected Session, creates an empty chat from **+ New Session**, or opens **Settings**. In Settings, open **Model** to pick the default for future Sessions. |
+| Esc, Ctrl-G | Closes the topmost choice or panel; no draft or per-start settings exist to clear. |
+| Ctrl-X | Stops the selected Session’s work through the same request owner as the CLI. |
+| Ctrl-D, Ctrl-C | Leaves. |
 
-While a start waits for its answer, its text stays in the composer and typing does not change it; if the start fails, Enter sends the text again.
-A key not in this table does nothing in the overview.
+Printable keys, including `/` and `?`, and bracketed paste are ignored on the list: they cannot start work or create a draft.
+While empty-Session creation awaits its answer, another Enter or click cannot create it again.
+A rejected creation shows its failure; an unconfirmed creation retains its original recovery key rather than fabricating a Message receipt.
 
 A stop works like `rui session stop`: if its reply is lost, the overview says it is not sure the Session stopped, and prints the `rui request recover` command when you leave.
 To stop every Session that Ctrl-X could stop at once, run `rui session stop --all`.
 A stop still waiting to be sent when you leave is reported as not sent.
-The overview holds at most eight starts and stops awaiting answers, and refuses more until one is answered.
+The overview holds at most eight creation and stop requests awaiting answers, and refuses more until one is answered.
 Sessions the stopped Session messaged keep running.
 
 The overview paints its own colours, in khadi: an indigo ground with cotton text on a dark terminal, a cotton ground with indigo ink on a light one.
@@ -147,10 +152,9 @@ Existing Sessions keep their saved settings, including approval mode and model.
 
 ### Archive Sessions
 
-Select a Session in the overview and press **Alt+A**, or use **Archive** in its chat info panel. Alt+A also works inside a conversation and keeps your draft intact. A busy Session stops and archives immediately, without confirmation; it stays visible until the stop completes.
+Select a Session in the overview and press **Alt+A**, or use **Archive** in its chat info panel. Alt+A also works inside a conversation and keeps your draft intact. If it has work, confirm **Stop and archive**; it stays visible until the stop completes. Press Enter to confirm or Esc to cancel; neither sends or clears your draft.
 
-Use `/sessions archived` to show archived Sessions, `/sessions all` to show both views, or `/sessions unarchived` to return.
-Open the archived Session, then click **Restore** in its footer.
+The overview shows unarchived Sessions and has no archive-view commands. Use the shell commands below to list archived Sessions or restore one without starting work. An open archived chat has **Restore** in its footer.
 
 Archive keeps history, saved results, settings, and files.
 Opening an archived Session does not restore it.

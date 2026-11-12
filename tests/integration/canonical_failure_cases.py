@@ -298,7 +298,6 @@ def interactive_cases(state, binding=False, null_code=False):
     endpoint = fixture.SuccessEndpoint([fixture.sse_tool_calls("canonical-tool", [("bash", "canonical-call",
         '{"cmd":"true","timeout_ms":null,"description":"Check successful shell exit"}')]),
         fixture.sse_answer("canonical-answer", "canonical-reason", "canonical-message", "denied tool saved")[0],
-        fixture.sse_answer("overview-answer", "overview-reason", "overview-message", "overview start answered")[0],
         fixture.sse_answer("confirmed-answer", "confirmed-reason", "confirmed-message", "accepted work remains accepted")[0]])
     endpoint_thread = threading.Thread(target=endpoint.serve_forever)
     endpoint_thread.start()
@@ -311,7 +310,7 @@ def interactive_cases(state, binding=False, null_code=False):
         codex.credentials(home / ".config/rui/codex.json")
         for route, line in (("/v1/configure", "panel Permissions"),
                 ("/v1/message", "original terminal bytes"), ("/v1/control/permission-decision", ""),
-                ("/v1/message", None), ("/v1/activity-page", "confirmed terminal bytes")):
+                ("/v1/configure", None), ("/v1/activity-page", "confirmed terminal bytes")):
             if binding and route == "/v1/activity-page":
                 continue  # Activity framing/binding is covered by opening cases.
             master, slave = open_pty()
@@ -333,14 +332,13 @@ def interactive_cases(state, binding=False, null_code=False):
                     env={**os.environ, "HOME": str(home), "RUI_TEST_ACTION_READY_FD": str(ready_write)},
                     pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=subprocess.PIPE)
                 if line is None:
-                    # Bare rui opens the overview; its composer starts the Session.
+                    # Bare rui opens the list. New Session sends Configure
+                    # only; a malformed reply must retain that exact capture.
                     requested = len(endpoint.requests)
                     human.overview_frame(master, human.overview_title)
-                    os.write(master, b"fresh overview bytes\r")
+                    os.write(master, b"\x1b[H\r")
                     if binding:
-                        # An unconfirmed start stays recoverable: the overview
-                        # says so and Ctrl-D still leaves.
-                        human.read_terminal(master, "! Start unsure; details on exit")
+                        human.read_terminal(master, "! Creation unsure; details on exit")
                         os.write(master, b"\x04")
                 else:
                     if route == "/v1/control/permission-decision":
@@ -467,12 +465,12 @@ def interactive_cases(state, binding=False, null_code=False):
                     assert caller.returncode != 0, "fatal mutation resumed the Session prompt"
                 errors = errors.decode()
                 if line is None:
-                    # Once the terminal is restored, the start's recovery again.
+                    # The unresolved empty creation names its exact recovery key.
                     started = json.loads(proxy.exchanges[0][0])["key"]
                     assert f"Check with: rui request recover {started}" in errors, errors
                 if not binding:
                     assert "[internal_unexpected]" in errors, errors
-                elif route == "/v1/configure":
+                elif route == "/v1/configure" and line is not None:
                     # The in-screen command showed its own diagnostic; exit
                     # prints only command output that was never shown.
                     assert reason in output and reason not in errors, (output, errors)
@@ -503,9 +501,13 @@ def interactive_cases(state, binding=False, null_code=False):
                 record = home / ".config/rui/requests" / f"{key}.json"
                 assert json.loads(record.read_bytes())["key"] == key
                 if line is None:
-                    # The admitted first Message takes its own answer before
-                    # the next case asks for one.
-                    fixture.wait_for(lambda: len(endpoint.requests) > requested, "overview start's model request")
+                    assert json.loads(record.read_bytes())["kind"] == "configure", record.read_text()
+                    assert len(endpoint.requests) == requested, "empty creation sent work to the provider"
+                    assert {
+                        path.name: path.read_bytes()
+                        for path in (home / ".config/rui/requests").glob("*.json")
+                        if json.loads(path.read_bytes())["kind"] == "message"
+                    } == before_messages, "empty creation captured a Message"
             finally:
                 if sys.exc_info()[0] is not None:
                     preserve_failure_metadata(state / "pty-failure.json", lambda: {
@@ -665,9 +667,12 @@ def permission_read_cases(state):
             os.write(master, b"\x0f")
             human.read_terminal(master, "host_busy", timeout=10)
             output = human.current_screen(master)
-            # The notice under the input names what failed, then the Host's
-            # own words, whole within the row. A diagnostic is never a feed row.
-            assert output.rstrip("\n").rsplit("\n", 1)[1] == "! Tool output unavailable. HTTP 503; type: busy; code: host_busy", output
+            # The Footer's right slot names what failed, then the Host's
+            # own words, once. A diagnostic is never an extra or feed row.
+            from human_cli_fixture import chat_footer_row
+            notice = "! Tool output unavailable. HTTP 503; type: busy; code: host_busy"
+            assert output.split("\n")[chat_footer_row(output)].endswith(notice), output
+            assert output.count(notice) == 1, output
             assert caller.poll() is None, output
             os.write(master, b"\x03")
             _, errors = human.terminal_exit(caller, master, timeout=10)

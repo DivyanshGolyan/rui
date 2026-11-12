@@ -189,9 +189,32 @@ def composer_line(screen, y):
     return line
 
 
+def composer_bounds(screen):
+    """The input's last two rules, measured in the rendered compose pane.
+
+    Short replies replace the footer's keys, never changing input or feed
+    geometry. Persistent state can still take rows below the chat footer.
+    Return None while no complete input is drawn.
+    """
+    rules = [index for index in range(len(screen.split("\n")))
+             if set(composer_line(screen, index)) == {"─"}]
+    return tuple(rules[-2:]) if len(rules) >= 2 else None
+
+
+def chat_footer_row(screen):
+    """The chat's one facts/keys row follows the input's lower rule.
+
+    While quiet (including a transient reply or modal info) it is the last
+    row; persistent send/recovery state below it reduces the feed capacity.
+    """
+    bounds = composer_bounds(screen)
+    assert bounds is not None, ("composer rules", screen)
+    return bounds[1] + 1
+
+
 def composer_empty(screen, y):
-    """The composer holds no draft: the cursor's row is its bare mark."""
-    return composer_line(screen, y) in (" ›", " >")
+    """No draft: the cursor row is a bare mark or the empty-chat placeholder."""
+    return composer_line(screen, y) in (" ›", " >", " › Type a task", " > Type a task")
 
 
 def composer_ready(screen, x, y):
@@ -200,12 +223,6 @@ def composer_ready(screen, x, y):
         return False
     line = composer_line(screen, y)
     # The composer's mark follows the screen's one-column margin.
-    return x >= 3 and any(line == " " + mark or line.startswith(" " + mark + " ") for mark in ("›", ">"))
-
-
-def overview_composer(screen, x, y):
-    """Input is accepted at the overview's composer: the cursor is on its row."""
-    line = composer_line(screen, y)
     return x >= 3 and any(line == " " + mark or line.startswith(" " + mark + " ") for mark in ("›", ">"))
 
 
@@ -241,13 +258,25 @@ def keyed_frame(master, keys, accept, timeout=15):
 
 def overview_title(frame):
     """The overview's list and pinned Settings row, without a title band."""
-    return "  + New Session" in frame and "  Settings" in frame
+    return "  + New Session" in frame and "  Settings" in frame and "Type a task" not in frame
 
 
-def overview_frame(master, accept, keys=b"", timeout=15):
-    """The first overview frame after `keys` that `accept`s, with its
-    composer taking input."""
-    return keyed_frame(master, keys, lambda screen, x, y: accept(screen) and overview_composer(screen, x, y), timeout)
+def overview_frame(master, accept, keys=b"", timeout=15, *, ready=True):
+    """The first committed list frame after `keys` that `accept`s.
+
+    Overview has no editor or cursor-readiness condition; its pinned rows
+    and bottom action footer identify the screen instead. A known retained
+    reply can replace the action: opt out of readiness and accept that reply.
+    """
+    return keyed_frame(master, keys, lambda screen, x, y: accept(screen) and overview_title(screen)
+                       and (not ready or "enter open" in screen)
+                       and not re.search(r"(?m)(?:^|│)\s*[›>](?: |$)", screen), timeout)
+
+
+def open_new_chat(master, timeout=15):
+    """Open the pinned New Session row, then wait for its focused editor."""
+    return keyed_frame(master, b"\x1b[H\r", lambda screen, x, y: "Type a task" in screen
+                       and composer_ready(screen, x, y), timeout)
 
 
 
@@ -289,10 +318,10 @@ def chat_info_geometry(screen):
 
 
 
-def footer_click(screen, *, column=None, marker=None, info=False):
+def footer_click(screen, *, column=None, marker=None):
     """An SGR mouse click in the visible Session identity/footer line."""
     content = screen.split("\n")
-    row = len(content) - (1 if info else 2)
+    row = chat_footer_row(screen)
     line = content[row]
     if marker is not None:
         column = line.index(marker)

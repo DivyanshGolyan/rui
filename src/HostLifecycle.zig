@@ -2,6 +2,7 @@ const std = @import("std");
 const client = @import("client.zig");
 const HostStartupWait = @import("HostStartupWait.zig");
 const protocol = @import("protocol.zig");
+const protocol_reply = @import("protocol_reply.zig");
 const platform = @import("platform.zig");
 const identity = @import("host_identity.zig");
 const process = @import("upgrade_process.zig");
@@ -265,19 +266,15 @@ pub fn activate(init: std.process.Init, allocator: std.mem.Allocator, observatio
 
 fn stopObserved(io: std.Io, allocator: std.mem.Allocator, plan: *const Plan) !client.HostStopResult {
     const store = plan.observed.facts.store.slice();
-    switch (plan.observed.profile) {
-        .current => {
-            var reply: client.ReplyBuffer = .{};
-            return client.stopHost(io, .{ .store = store, .instance = plan.observed.facts.instance }, &reply);
-        },
-        .released_9 => {
-            const instance = std.fmt.bytesToHex(plan.observed.facts.instance, .lower);
-            const result = try process.runWithTimeout(allocator, io, &.{ plan.snapshot.executable, "host", "pause", "--store", store, "--instance", &instance }, null, 8192, .fromSeconds(product_defaults.host_shutdown_seconds + 5));
-            defer process.dispose(allocator, result);
-            if (!result.term.success()) return error.UpgradeChildFailed;
-            return .acknowledged;
-        },
+    if (plan.observed.profile.historical()) {
+        const instance = std.fmt.bytesToHex(plan.observed.facts.instance, .lower);
+        const result = try process.runWithTimeout(allocator, io, &.{ plan.snapshot.executable, "host", "pause", "--store", store, "--instance", &instance }, null, 8192, .fromSeconds(product_defaults.host_shutdown_seconds + 5));
+        defer process.dispose(allocator, result);
+        if (!result.term.success()) return error.UpgradeChildFailed;
+        return .acknowledged;
     }
+    var reply: client.ReplyBuffer = .{};
+    return client.stopHost(io, .{ .store = store, .instance = plan.observed.facts.instance }, &reply);
 }
 
 const PreparedActivation = struct {
@@ -286,7 +283,7 @@ const PreparedActivation = struct {
     buffers: ?PrivateLaunch,
 
     fn init(process_init: std.process.Init, allocator: std.mem.Allocator, plan: *const Plan, target: []const u8, cancellation: ?*const client.Cancellation) !PreparedActivation {
-        if (plan.observed.profile == .released_9) {
+        if (plan.observed.profile.historical()) {
             const stop_help = try process.output(allocator, process_init.io, &.{ plan.snapshot.executable, "host", "pause", "--help" }, cancellation, 32768);
             defer allocator.free(stop_help);
             const first = stop_help[0 .. std.mem.indexOfScalar(u8, stop_help, '\n') orelse stop_help.len];
@@ -637,23 +634,27 @@ test "upgrade lifecycle derives launch semantics before disruption" {
 }
 
 test "upgrade lifecycle control cannot equate different wire profiles or instances" {
-    var original: client.HostControlObservation = .{
-        .profile = .released_9,
-        .pid = 123,
-        .facts = .{ .store = .{ .len = 0 }, .instance = @splat(1), .active_capacity = 2, .started_at = 0, .custody_occupied = 0, .paused = false, .capabilities = .{ .bash = true, .providers = protocol.routesAll(.unserved) } },
-    };
-    try original.facts.store.set("/fixture/store");
-    try std.testing.expect(sameHost(original, original));
-    var replacement = original;
-    replacement.profile = .current;
-    try std.testing.expect(!sameHost(original, replacement));
-    replacement = original;
-    replacement.facts.instance = @splat(2);
-    try std.testing.expect(!sameHost(original, replacement));
-    replacement = original;
-    replacement.pid += 1;
-    try std.testing.expect(!sameHost(original, replacement));
-    replacement = original;
-    try replacement.facts.store.set("/fixture/other");
-    try std.testing.expect(!sameHost(original, replacement));
+    for (std.enums.values(protocol_reply.HostInfoProfile)) |profile| {
+        var original: client.HostControlObservation = .{
+            .profile = profile,
+            .pid = 123,
+            .facts = .{ .store = .{ .len = 0 }, .instance = @splat(1), .active_capacity = 2, .started_at = 0, .custody_occupied = 0, .paused = false, .capabilities = .{ .bash = true, .providers = protocol.routesAll(.unserved) } },
+        };
+        try original.facts.store.set("/fixture/store");
+        try std.testing.expect(sameHost(original, original));
+        var replacement = original;
+        for (std.enums.values(protocol_reply.HostInfoProfile)) |other| {
+            replacement.profile = other;
+            try std.testing.expectEqual(profile == other, sameHost(original, replacement));
+        }
+        replacement = original;
+        replacement.facts.instance = @splat(2);
+        try std.testing.expect(!sameHost(original, replacement));
+        replacement = original;
+        replacement.pid += 1;
+        try std.testing.expect(!sameHost(original, replacement));
+        replacement = original;
+        try replacement.facts.store.set("/fixture/other");
+        try std.testing.expect(!sameHost(original, replacement));
+    }
 }

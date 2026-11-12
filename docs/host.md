@@ -27,8 +27,8 @@ Rui installs no OS service and never restarts a crashed Host.
 Run `rui --version` to see the selected build.
 `rui upgrade --check` inspects the latest published stable release without installing it or starting a Host.
 `rui upgrade` updates an eligible released managed installation under `~/.local` to that release.
-It restarts the selected Store's Host only if that Host is already running and can be safely activated.
-With an eligible installation and no running Host, Upgrade only installs.
+It uses the same restart-all core as `rui host restart --all`: every running same-user Host it can safely activate is restarted, one at a time. The read-only check names the discovered Stores and Host count, including unsupported Hosts and their reasons.
+`--store` selects the client context, not the restart scope. With an eligible installation and no running Hosts, Upgrade only installs; it starts no absent Store. Discovery runs again after publication to include Hosts started during preparation.
 The Version row in the terminal's app settings starts the same run from the overview or with a conversation open, on the status row: it installs a found release at once, and Esc cancels until publishing starts.
 After installing, it redraws in the new Rui and returns to the same place with unsent drafts intact.
 Restart keeps the current Store even if saved defaults changed, and restores existing work without requiring fresh-session preferences or local sign-in.
@@ -59,10 +59,10 @@ A verified exact pinned launch with a different protocol is reported as restarte
 A failed or unconfirmed restart returns an operational caller error; installer activation failures print a note without failing the completed install.
 The selected build must report a verified release version; an unversioned source target cannot be activated by the existing lifecycle and is reported without stopping Hosts.
 
-The Upgrade restart affects all Sessions in the selected Store and may interrupt their work.
+The Upgrade restart may interrupt work in all Sessions across every affected Store, not only the client's selected Store.
 A running Host keeps its configured capacity through the restart.
 Installation and activation are reported separately.
-An unsupported or application-owned Host launch may remain running after a release is installed, with activation reported as incomplete.
+Unsupported or application-owned Hosts remain running with an explained successful skip. A failed or unconfirmed Host restart returns `host_restart_failed` (exit 6) after the installation receipt; the binary upgrade is not rolled back.
 Automatic activation supports released and source managed `host serve` launches whose public settings can be preserved and whose executable reports a verified numeric version.
 Unknown managed builds, foreign executables, application-owned `--launch-frame`, hidden-option, and relative configuration-path launches are not paused.
 This does not make a selected source installation eligible for `rui upgrade`; Upgrade still requires a selected managed release.

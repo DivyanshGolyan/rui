@@ -20,7 +20,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 69;
+pub const schema_version: u32 = 71;
 
 pub const IdentityMismatch = struct {
     saved_selector: Bounded(store_path.max_bytes) = .{},
@@ -56,6 +56,8 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 67, .digest = 0xfe425e8cc64247f5 },
     .{ .schema_version = 68, .digest = 0x7bec7f8f004abc7c },
     .{ .schema_version = 69, .digest = 0x8db67f4a14f18a37 },
+    .{ .schema_version = 70, .digest = 0xb60d036b364ad267 },
+    .{ .schema_version = 71, .digest = 0xa61e85ed49f9fa8b },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -635,6 +637,24 @@ pub const migrations = [_]Migration{
             "UPDATE model_operation o JOIN session_revision r ON r.session_ref=o.session_ref AND r.revision=o.settings_revision LEFT JOIN operation_window_backfill pinned ON pinned.model_id=r.model SET o.context_window=coalesce(pinned.context_window,128000)",
             "ALTER TABLE model_operation MODIFY COLUMN context_window BIGINT NOT NULL, ADD CHECK(context_window BETWEEN 0 AND 4294967295)",
             "DROP TEMPORARY TABLE operation_window_backfill",
+        },
+    },
+    .{
+        .from = 69,
+        .sqlite = &.{
+            "UPDATE store_meta SET meta_value='14' WHERE meta_key='wire_version' AND meta_value='13'",
+        },
+        .mysql = &.{
+            "UPDATE store_meta SET meta_value='14' WHERE meta_key='wire_version' AND meta_value='13'",
+        },
+    },
+    .{
+        .from = 70,
+        .sqlite = &.{
+            "UPDATE store_meta SET meta_value='15' WHERE meta_key='wire_version' AND meta_value='14'",
+        },
+        .mysql = &.{
+            "UPDATE store_meta SET meta_value='15' WHERE meta_key='wire_version' AND meta_value='14'",
         },
     },
 };
@@ -2400,7 +2420,7 @@ const version_sql = std.fmt.comptimePrint("PRAGMA user_version={d}", .{schema_ve
 /// `schema_version` as store_meta's `format` row holds it.
 const format_text = std.fmt.comptimePrint("{d}", .{schema_version});
 /// The wire version is bound, not spliced: it has its own check on open, so
-/// a wire bump is no schema change.
+/// a wire bump still appends a format step to migrate the saved label.
 /// The Store id is 16 bytes from SQLite's randomness, which it seeds from
 /// the OS, in lower-case hex, as `migrations` writes it too.
 pub fn sqliteMetaSeedSql() [:0]const u8 {
@@ -2913,6 +2933,28 @@ test "MySQL sessions read literals as rsql copies them, and strictly" {
     }
 }
 
+test "schema 71 migration updates only wire metadata on SQLite and MySQL" {
+    const step = migrations[70 - migration_baseline];
+    try std.testing.expectEqual(@as(u32, 70), step.from);
+    inline for (.{ rsql.Dialect.sqlite, rsql.Dialect.mysql }) |dialect| {
+        const statements = if (dialect == .sqlite) step.sqlite else step.mysql;
+        try std.testing.expectEqual(@as(usize, 1), statements.len);
+        for (statements) |statement| try std.testing.expectEqualStrings("UPDATE store_meta SET meta_value='15' WHERE meta_key='wire_version' AND meta_value='14'", statement);
+    }
+    try std.testing.expectEqualStrings("UPDATE store_meta SET meta_value='15' WHERE meta_key='wire_version' AND meta_value='14';\n", mysqlMigration(70));
+}
+
+test "schema 70 migration updates only wire metadata on SQLite and MySQL" {
+    const step = migrations[69 - migration_baseline];
+    try std.testing.expectEqual(@as(u32, 69), step.from);
+    inline for (.{ rsql.Dialect.sqlite, rsql.Dialect.mysql }) |dialect| {
+        const statements = if (dialect == .sqlite) step.sqlite else step.mysql;
+        try std.testing.expectEqual(@as(usize, 1), statements.len);
+        for (statements) |statement| try std.testing.expectEqualStrings("UPDATE store_meta SET meta_value='14' WHERE meta_key='wire_version' AND meta_value='13'", statement);
+    }
+    try std.testing.expectEqualStrings("UPDATE store_meta SET meta_value='14' WHERE meta_key='wire_version' AND meta_value='13';\n", mysqlMigration(69));
+}
+
 test "schema 58 migration updates only wire metadata on SQLite and MySQL" {
     const step = migrations[57 - migration_baseline];
     try std.testing.expectEqual(@as(u32, 57), step.from);
@@ -3280,12 +3322,12 @@ test "model call timing format 68 migration preserves format 67 resolutions with
     try sqlite.exec(database, @embedFile("migration_baseline.sqlite.sql"));
     try sqlite.exec(database, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
     try sqlite.exec(database, @embedFile("migration_baseline_rows.sql"));
-    for (migrations[0 .. migrations.len - 1]) |step| {
+    for (migrations[0 .. 67 - migration_baseline]) |step| {
         for (step.sqlite) |statement| try sqlite.exec(database, statement);
     }
     try sqlite.exec(database, "CREATE TEMP TABLE old_model_resolutions AS SELECT operation_id,attempt_ordinal,resolution_code,resolved_at FROM model_operation");
     try std.testing.expect((try sqlite.pragmaInt(database, "SELECT count(*) FROM old_model_resolutions")) > 0);
-    for (migrations[migrations.len - 1].sqlite) |statement| try sqlite.exec(database, statement);
+    for (migrations[67 - migration_baseline].sqlite) |statement| try sqlite.exec(database, statement);
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM model_operation WHERE latency_ms IS NOT NULL OR first_event_ms IS NOT NULL"));
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM old_model_resolutions EXCEPT SELECT operation_id,attempt_ordinal,resolution_code,resolved_at FROM model_operation)"));
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT operation_id,attempt_ordinal,resolution_code,resolved_at FROM model_operation EXCEPT SELECT * FROM old_model_resolutions)"));

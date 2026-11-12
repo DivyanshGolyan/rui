@@ -1,6 +1,7 @@
 //! One persistent caller owns drafts, terminal and joined Client borrowers.
 //! No worker writes the terminal; canonical activity supplies live output.
 const std = @import("std");
+const session_list = @import("session_list.zig");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 const AppScreen = @import("AppScreen.zig");
@@ -105,6 +106,7 @@ interrupted: *client.Cancellation = undefined,
 lender: Lender = quiet_overview,
 colour: bool,
 input: Input = undefined,
+footer: session_chrome.Footer = .{},
 submission: Submission = undefined,
 /// What the latest /requests page offers to act on, which its list shows
 /// while the page does.
@@ -397,7 +399,7 @@ pub const Lender = struct {
     /// Hands the overview each read of the Session's work; the read the
     /// conversation opens on is an outcome the person has seen. Its failure
     /// is the overview's and ends the conversation.
-    observed: *const fn (context: *anyopaque, work: protocol.session_work.Work, opening: bool) anyerror!void,
+    observed: *const fn (context: *anyopaque, snapshot: session_list.Snapshot, opening: bool) anyerror!void,
 
     /// The Upgrade, the overview's one value: its run, and what the last
     /// run left Host requests.
@@ -408,6 +410,7 @@ pub const Lender = struct {
     pub const Said = struct {
         /// The overview's notice; null for none.
         text: ?[]const u8 = null,
+        notice: ?[]const u8 = null,
         /// Ctrl-X would stop the work.
         stoppable: bool = false,
     };
@@ -426,7 +429,7 @@ pub fn begin(self: *Self, init: std.process.Init, store: []const u8, session: []
     self.app_input = .{ .composer = .{ .editor = &self.input.editors[self.input.active] } };
     self.app_document = .{ .document = &screen.browsing, .colour = self.colour, .handler = .{ .userdata = self, .on_open = appOpen, .on_notice = appNotice, .on_scroll = appDragScroll } };
     self.app_body = .{ .shown = self.app_content.widget() };
-    self.app_screen = .{ .content = &self.app_body, .input = &self.app_input, .content_gutter = true, .userdata = self, .on_event = appEvent };
+    self.app_screen = .{ .content = &self.app_body, .input = self.app_input.widget(), .content_gutter = true, .userdata = self, .on_event = appEvent };
 }
 
 /// The shell owns Host availability; the Session only reads it and forwards
@@ -436,6 +439,8 @@ pub const HostAccess = struct {
     /// Unreachable, not the reachable Host's new-Turn admission hold.
     held: *const fn (*anyopaque) bool,
     lost: *const fn (*anyopaque) void,
+    /// The Host is stopped and a start can mend it now.
+    startable: *const fn (*anyopaque) bool,
     start: *const fn (*anyopaque, *vxfw.EventContext) anyerror!bool,
     notice: *const fn (*anyopaque) ?vxfw.Widget,
 };
@@ -463,19 +468,78 @@ pub fn attach(self: *Self, hooks: AppHooks, caps: overview_view.Caps) vxfw.Widge
     self.app_caps = caps;
     self.screen.setWidth(caps.width);
     self.app_preview = .{ .document = &self.screen.browsing, .colour = self.colour, .more = true, .handler = .{ .userdata = self, .on_notice = appNotice, .on_scroll = appDragScroll, .on_click = appPreviewClick } };
-    self.app_card = .{ .consent = &self.app_consent, .pasting = &hooks.root.pasting, .description = "", .body = self.app_preview.widget(), .userdata = self, .on_decision = appDecision };
-    self.chrome = .init(.{ .userdata = self, .key = chromeClick(.needs), .stop = chromeClick(.{ .action = .stop }), .back = chromeClick(.{ .action = .close }), .latest = chromeClick(.{ .action = .latest }), .status_page = chromeClick(.status), .details = chromeClick(.details), .unarchive = chromeClick(.unarchive) });
+    self.app_card = .{ .consent = &self.app_consent, .description = "", .body = self.app_preview.widget(), .userdata = self, .on_decision = appDecision };
+    self.chrome = .init(.{ .userdata = self, .key = chromeClick(.needs), .stop = chromeClick(.{ .action = .stop }), .back = chromeClick(.{ .action = .close }), .latest = chromeClick(.{ .action = .latest }), .status_page = chromeClick(.status), .unarchive = chromeClick(.unarchive), .details = chromeClick(.details), .pick = chromeClick(.footer_pick), .close = chromeClick(.footer_close), .model = chromeClick(.{ .footer = .model }), .effort = chromeClick(.{ .footer = .effort }) });
     return self.widget();
 }
 
 /// The chat's own line is the only entry to its settings panel.
 fn openInfo(self: *Self, _: *vxfw.EventContext) !void {
     if (self.info_open) return;
+    self.closePresentation();
     self.info_open = true;
     if (self.inspection.status != null) self.app_info.refresh();
     self.inspection.status_requested = true;
     self.poll_at = 0;
     self.dirty = true;
+}
+
+/// A drawn footer click steps the footer as its key does (`session_keys.footer`).
+fn footerClick(self: *Self, ctx: *vxfw.EventContext, field: ?session_chrome.FooterField) !void {
+    if (session_keys.footer(&self.footer, self.footerKeyFacts(), .{ .click = field }) == .open_choice) try self.startFooterChoice(ctx);
+    self.dirty = true;
+}
+
+fn footerKeyFacts(self: *const Self) session_keys.FooterFacts {
+    return .{ .has_effort = self.hasEffort(), .opens = !self.info_open and self.app_info.pending == null };
+}
+
+fn hasEffort(self: *const Self) bool {
+    return if (self.footerFacts()) |value| value.effort != null else false;
+}
+
+/// Opens the choice footer focus chose, once its read is ready.
+fn startFooterChoice(self: *Self, ctx: *vxfw.EventContext) !void {
+    self.app_info.closeStandaloneChoice();
+    if (self.inspection.status != null) self.app_info.refresh();
+    self.inspection.status_requested = true;
+    self.poll_at = 0;
+    try self.openFooterChoice(ctx);
+}
+
+/// Navigation ends the presentation, never the admitted backend effect.
+/// The application owner also calls this before showing Settings/sign-in.
+pub fn closePresentation(self: *Self) void {
+    self.app_info.closeStandaloneChoice();
+    _ = self.footer.step(false, .escape);
+    self.info_open = false;
+}
+
+fn closeStandaloneChoice(self: *Self, ctx: *vxfw.EventContext) !void {
+    if (self.app_info.standaloneField() == null) return;
+    self.closePresentation();
+    try ctx.requestFocus(self.app_input.composer.widget());
+}
+
+fn openFooterChoice(self: *Self, ctx: *vxfw.EventContext) !void {
+    const field = self.footer.pending orelse return;
+    if (!self.app_info.ready) return;
+    if (field == .model) if (self.lender.models) |snapshot| {
+        if (!snapshot(self.lender.context).ready) return;
+    };
+    try self.app_info.openStandaloneChoice(ctx, switch (field) {
+        .model => .model,
+        .effort => .effort,
+    });
+    self.footer.pending = null;
+}
+
+/// Only the current Session read owns footer facts; an unread line must
+/// not borrow a permission from the independently refreshed info panel.
+fn footerFacts(self: *const Self) ?@import("session_line.zig").Facts {
+    var facts = self.line.facts(&self.hint, self.session) orelse return null;
+    facts.home = self.home;
+    return facts;
 }
 
 fn infoBackend(self: *Self) ChatInfo.Backend {
@@ -578,6 +642,9 @@ const Click = union(enum) {
     action: ConversationAction,
     /// The chat's info panel.
     status,
+    footer: session_chrome.FooterField,
+    footer_pick,
+    footer_close,
     details,
     unarchive,
     /// The key that ends what needs the person: Ctrl-R's retry, or the
@@ -596,6 +663,11 @@ fn chromeClick(comptime click: Click) *const fn (*anyopaque, *vxfw.EventContext)
             switch (click) {
                 .action => |action| try self.perform(action),
                 .status => try self.openInfo(ctx),
+                .footer => |field| try self.footerClick(ctx, field),
+                .footer_close => try self.closeStandaloneChoice(ctx),
+                .footer_pick => if (self.app_info.standaloneOpen()) {
+                    try self.app_info.standaloneWidget().handleEvent(ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
+                },
                 .details => try self.showSubmissionFailure(),
                 .unarchive => try self.converse(.unarchive),
                 .needs => if (self.heldOriginal()) |held| if (session_notice.key(held)) |key| switch (key) {
@@ -623,17 +695,6 @@ fn sayBusy(self: *Self, action: ?session_notice.Action, letter: bool) void {
     const phase = self.upgradePhase();
     const command = self.input.queuedCommand() != null or self.inspection.command_running;
     self.notice = if (phase != .active and !command) session_upgrade.refusal(phase) else session_notice.busy(.{ .command = self.commandActive(), .held = self.heldOriginal(), .preparing = self.reading.phase == .permission, .action = action, .letter = letter });
-}
-
-/// A captured empty chat has no Message-derived identity yet. Its footer
-/// shows its saved model, effort and Folder; the title/info owners stay intact.
-fn footerFacts(self: *const Self) ?session_line.Facts {
-    var facts = self.line.facts(&self.hint, self.session) orelse return null;
-    if (self.line.first_position == null and self.line.folder.len != 0 and self.line.label == null) {
-        facts.name = "";
-        facts.folder = self.line.folder.slice();
-    }
-    return facts;
 }
 
 /// The Session's name as the terminal title leads with it.
@@ -764,17 +825,12 @@ fn hostFailure(self: *Self) bool {
     return true;
 }
 
-/// A modal panel takes keys before a permission card or feed child can act.
+/// A press anywhere off the footer's words moves its focus back to the
+/// input before the pressed widget acts.
 fn appCapture(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
-    const opens = event == .key_press and !self.app_hooks.root.pasting and (event.key_press.matches('i', .{ .alt = true }) or (self.submission.view() != null and event.key_press.matches('d', .{ .alt = true })));
-    const input = switch (event) {
-        .key_press, .paste_start, .paste_end, .invalid_key => true,
-        else => false,
-    };
-    if (opens or (self.info_open and input)) {
-        try appEvent(raw, ctx, event);
-        ctx.consumeEvent();
+    if (event == .mouse and event.mouse.button == .left and event.mouse.type == .press and !self.info_open and !self.app_info.standaloneOpen()) {
+        try self.footerClick(ctx, null);
     }
 }
 
@@ -782,12 +838,127 @@ fn appCapture(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void
 /// command choices run, incomplete words and skills replace the draft.
 fn appSelectCommand(raw: *anyopaque, ctx: *vxfw.EventContext, pressed: slash_commands_shared.Shown.Pick) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
-    if (self.app_consent.request != null or self.app_hooks.root.pasting) return;
+    if (self.app_consent.request != null) return;
     // A pointer names the row in the list the last frame drew, not the
     // list a key has stored since for a newly edited draft.
     const stored = &self.screen.commands;
     _ = slash_commands_shared.Shown.pickedNow(stored, self.nextCommands(stored.*), pressed) orelse return;
-    try appEvent(raw, ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
+    try appKey(raw, ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } }, .{ .under = .main, .pasted = false });
+}
+
+/// The Session's key owner, which Root hands each key, paste mark and
+/// malformed key while the Session is the main pane.
+pub fn keyOwner(self: *Self) Root.Keys {
+    return .{ .context = self, .take = appKey };
+}
+
+/// Root hands the Session each key, paste mark and malformed key with
+/// whether it is pasted. `session_keys.step` decides what it means; this
+/// reads the facts other owners hold and applies the answer.
+fn appKey(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event, delivery: @import("app_input.zig").Effects.Delivery) anyerror!void {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    if (self.leaving != null) return;
+    self.shown_notice.dismiss();
+    const input: session_keys.Input = .{ .key = sessionKey(event), .pasted = delivery.pasted };
+    // Only Enter takes a row, so only Enter reads the list.
+    const shown = if (input.key == .enter and !input.pasted) self.shownRow() else null;
+    const previous = self.app_consent.row;
+    const consent: ?*ActionConsent = if (self.app_consent.request != null) &self.app_consent else null;
+    const take = session_keys.step(.{ .footer = &self.footer, .consent = consent }, .{
+        .info_open = self.info_open,
+        .info_choice = self.app_info.hasChoice(),
+        .choice = if (self.app_info.standaloneField() == null) .closed else if (self.app_info.standaloneOpen()) .shown else .pending,
+        .has_effort = self.hasEffort(),
+        .saving = self.app_info.pending != null,
+        .details = self.submission.view() != null,
+        .draft_empty = self.input.composition().bytes.len == 0,
+        .host_startable = if (self.app_hooks.host) |host| host.startable(host.context) else false,
+        .shown_row = shown != null,
+        .send = self.sendFacts(),
+    }, input);
+    switch (take) {
+        .taken => {},
+        .close_choice => try self.closeStandaloneChoice(ctx),
+        .panel => try self.app_info.widget().handleEvent(ctx, event),
+        .cancel_panel_choice => self.app_info.cancelChoice(),
+        .close_info => {
+            self.closePresentation();
+            try ctx.requestFocus(self.app_input.composer.widget());
+        },
+        .panel_details => {
+            self.closePresentation();
+            try ctx.requestFocus(self.app_input.composer.widget());
+            try self.showSubmissionFailure();
+        },
+        .perform => |action| try self.perform(action),
+        .open_choice => try self.startFooterChoice(ctx),
+        .start_host => {
+            const host = self.app_hooks.host.?;
+            _ = try host.start(host.context, ctx);
+            ctx.consumeEvent();
+            return;
+        },
+        .open_info => try self.openInfo(ctx),
+        .details => try self.showSubmissionFailure(),
+        .card => |choice| try self.app_card.take(ctx, choice, delivery.pasted),
+        .needs_decision => self.notice = "Not sent: this Action needs a decision",
+        .consent_draft => switch (self.input.appEvent(conversation_keys, event, delivery.pasted, false)) {
+            .busy => self.notice = "Not sent: this Action needs a decision",
+            .editor => |outcome| switch (outcome) {
+                .action => |action| try self.perform(action),
+                .refused => |why| if (why != .unbound) {
+                    self.notice = refusedNotice(why);
+                },
+                .none, .append, .redraw, .submit => {},
+            },
+            .message, .command => unreachable, // Sending is disabled while consent waits.
+        },
+        .take_row => {
+            self.notice = null;
+            self.takeRow(shown.?);
+        },
+        .edit => |edit| {
+            self.notice = null;
+            switch (self.input.appEvent(conversation_keys, event, delivery.pasted, edit.send)) {
+                .message => |ticket| try self.beginMessage(.{ .message = ticket }),
+                .command => try self.commandLine(),
+                .busy => self.sayBusy(null, false),
+                .editor => |outcome| switch (outcome) {
+                    .action => |action| try self.perform(action),
+                    .refused => |why| if (why != .unbound) {
+                        self.notice = refusedNotice(why);
+                    },
+                    .submit => if (self.shownCommands() != null) try self.commandLine(),
+                    .none, .append, .redraw => {},
+                },
+            }
+        },
+    }
+    if (self.app_consent.request != null and previous != self.app_consent.row) {
+        try ctx.requestFocus(if (self.app_consent.row == .selector) self.app_card.widget() else self.app_input.composer.widget());
+    }
+    ctx.consumeEvent();
+    ctx.redraw = true;
+    try self.afterInput(ctx);
+}
+
+/// The Session core's name for one terminal input. Bindings match exact
+/// modifiers, as the line editor's do; Alt-I and Alt-D match as the
+/// chat's own keys.
+fn sessionKey(event: vxfw.Event) session_keys.Key {
+    return switch (event) {
+        .paste_start => .paste_start,
+        .paste_end => .paste_end,
+        .invalid_key => .invalid,
+        .key_press => |key| if (Editor.named(key)) |name| .{ .named = name } else if (Editor.isEnter(key)) .enter else if (key.matchExact(vaxis.Key.tab, .{})) .tab else if (key.matchExact(vaxis.Key.tab, .{ .shift = true })) .shift_tab else if (key.matches('i', .{ .alt = true })) .info else if (key.matches('d', .{ .alt = true })) .details else if (hostStartKey(key)) .host_start else switch (Editor.selectKey(conversation_keys, key)) {
+            .left => .left,
+            .right => .right,
+            .text => .text,
+            else => .other,
+        },
+        // Root routes only these to the Session.
+        else => unreachable,
+    };
 }
 
 fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
@@ -814,7 +985,7 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
             if (self.reader.thread == null) if (self.reading.prepared_action) |request| {
                 // Close the editor's paste transaction before hiding it. Root
                 // keeps the terminal paste flag until its actual end arrives.
-                const blurred = self.input.appEvent(conversation_keys, .focus_out, self.app_hooks.root.pasting, false);
+                const blurred = self.input.appEvent(conversation_keys, .focus_out, self.app_hooks.root.input.pasting, false);
                 if (blurred == .editor and blurred.editor == .refused) self.notice = refusedNotice(blurred.editor.refused);
                 try self.screen.showFile(self.init.io, self.files.action, .action);
                 self.action_summary = self.reading.prepared_summary;
@@ -827,116 +998,15 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
             };
             try self.app_card.widget().handleEvent(ctx, .tick);
             try self.app_info.widget().handleEvent(ctx, .tick);
+            try self.openFooterChoice(ctx);
             if (self.expansion.queued == .after_frame) if (try self.expand()) |peer| try self.follow(ctx, &peer);
             if (self.shown_notice.expire(self.nowMs())) self.dirty = true;
             ctx.redraw = ctx.redraw or self.dirty;
         },
-        .key_press, .paste_start, .paste_end, .invalid_key => {
-            const pasting = self.app_hooks.root.pasting;
-            self.shown_notice.dismiss();
-            if (self.info_open) {
-                if (event == .key_press and !pasting and self.submission.view() != null and event.key_press.matches('d', .{ .alt = true })) {
-                    self.app_info.cancelChoice();
-                    self.info_open = false;
-                    try ctx.requestFocus(self.app_input.composer.widget());
-                    try self.showSubmissionFailure();
-                } else if (session_keys.panelAction(Editor.selectEvent(conversation_keys, event, pasting))) |action| {
-                    try self.perform(action);
-                } else if (event == .key_press and !pasting and (Editor.named(event.key_press) == .escape or Editor.named(event.key_press) == .ctrl_g)) {
-                    if (self.app_info.hasChoice()) self.app_info.cancelChoice() else {
-                        self.info_open = false;
-                        try ctx.requestFocus(self.app_input.composer.widget());
-                    }
-                } else try self.app_info.widget().handleEvent(ctx, event);
-                ctx.consumeAndRedraw();
-                try self.afterInput(ctx);
-                return;
-            }
-            // The empty-composer restart shortcut has no authority over a
-            // panel's input, including its Rename and Model editors.
-            if (event == .key_press and !pasting and self.input.composition().bytes.len == 0 and hostStartKey(event.key_press)) if (self.app_hooks.host) |host| {
-                if (try host.start(host.context, ctx)) {
-                    ctx.consumeEvent();
-                    return;
-                }
-            };
-            if (event == .key_press and !pasting and event.key_press.matches('i', .{ .alt = true })) {
-                try self.openInfo(ctx);
-                ctx.consumeAndRedraw();
-                try self.afterInput(ctx);
-                return;
-            }
-            if (event == .key_press and !pasting and self.submission.view() != null and event.key_press.matches('d', .{ .alt = true })) {
-                try self.showSubmissionFailure();
-                ctx.consumeAndRedraw();
-                try self.afterInput(ctx);
-                return;
-            }
-            if (self.app_consent.request != null) {
-                // Choice classification has no authority over draft editing.
-                // Only Esc and Enter bypass the normal editor on that row.
-                const selected = if (self.app_consent.row == .selector) Editor.selectEvent(conversation_keys, event, pasting) else .none;
-                const row_key: ActionConsent.RowKey = if (self.app_consent.row == .draft)
-                    if (event == .key_press and !pasting) key: {
-                        if (Editor.isEnter(event.key_press)) break :key .enter;
-                        if (Editor.named(event.key_press)) |named| if (named == .escape or named == .ctrl_g) break :key .escape;
-                        break :key .other;
-                    } else .other
-                else switch (selected) {
-                    .text => if (event == .paste_start or pasting) .paste else if (event == .invalid_key) .other else .printable,
-                    .enter => .enter,
-                    .left, .right => .arrows,
-                    .action => |action| if (action == .close) .escape else .screen,
-                    else => .other,
-                };
-                const previous = self.app_consent.row;
-                switch (self.app_consent.route(row_key)) {
-                    .screen => if (selected == .action) {
-                        try self.perform(selected.action);
-                    },
-                    .selector => try self.app_card.widget().handleEvent(ctx, event),
-                    .blocked => if (row_key == .enter) {
-                        self.notice = "Not sent: this Action needs a decision";
-                    },
-                    .draft => switch (self.input.appEvent(conversation_keys, event, pasting, false)) {
-                        .busy => self.notice = "Not sent: this Action needs a decision",
-                        .editor => |outcome| switch (outcome) {
-                            .action => |action| try self.perform(action),
-                            .refused => |why| if (why != .unbound) {
-                                self.notice = refusedNotice(why);
-                            },
-                            .none, .append, .redraw, .submit => {},
-                        },
-                        .message, .command => unreachable, // Sending is disabled while consent waits.
-                    },
-                }
-                if (self.app_consent.request != null and previous != self.app_consent.row) {
-                    try ctx.requestFocus(if (self.app_consent.row == .selector) self.app_card.widget() else self.app_input.composer.widget());
-                }
-            } else {
-                self.notice = null;
-                // One submission at a time: a decision or Message in flight,
-                // or an original still held, makes Enter say so and keep the draft.
-                const allowed = self.admitsMessage();
-                if (!(event == .key_press and !pasting and Editor.isEnter(event.key_press) and self.takeShownRow())) {
-                    switch (self.input.appEvent(conversation_keys, event, pasting, allowed)) {
-                        .message => |ticket| try self.beginMessage(.{ .message = ticket }),
-                        .command => try self.commandLine(),
-                        .busy => self.sayBusy(null, false),
-                        .editor => |outcome| switch (outcome) {
-                            .action => |action| try self.perform(action),
-                            .refused => |why| if (why != .unbound) {
-                                self.notice = refusedNotice(why);
-                            },
-                            .submit => if (self.shownCommands() != null) try self.commandLine(),
-                            .none, .append, .redraw => {},
-                        },
-                    }
-                }
-            }
-            ctx.consumeEvent();
-            ctx.redraw = true;
-        },
+        // Root hands the Session its keys through `appKey`. A key that
+        // reaches the widget is the overlay's close action, which the
+        // screen sends as Esc, or a Root without the Session's key owner.
+        .key_press, .paste_start, .paste_end, .invalid_key => return appKey(raw, ctx, event, .{ .under = .main, .pasted = false }),
         .mouse => |mouse| switch (mouse.button) {
             .wheel_up, .wheel_down => {
                 try self.scroll(mouse.button == .wheel_down, 1);
@@ -970,7 +1040,8 @@ fn afterInput(self: *Self, ctx: *vxfw.EventContext) !void {
 /// Hands the Session back to the overview once it is leaving.
 fn depart(self: *Self, ctx: *vxfw.EventContext) !void {
     if (self.leaving) |outcome| {
-        const blurred = self.input.appEvent(conversation_keys, .focus_out, self.app_hooks.root.pasting, false);
+        self.closePresentation();
+        const blurred = self.input.appEvent(conversation_keys, .focus_out, self.app_hooks.root.input.pasting, false);
         if (blurred == .editor and blurred.editor == .refused) self.notice = refusedNotice(blurred.editor.refused);
         if (self.app_hooks.drafts) |drafts| {
             try drafts.put(self.init.gpa, self.session, self.input.snapshot());
@@ -1000,10 +1071,11 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     };
     const facts_style = style.of(self.app_caps, .{ .colour = .quiet, .background = .bar });
     self.app_screen.style = normal;
-    self.app_input.composer.caret = !self.info_open;
+    self.app_input.composer.caret = !self.info_open and !self.app_info.standaloneOpen() and self.footer.focus == .input;
     self.app_input.composer.style = normal;
     self.app_input.composer.quiet = quiet;
     self.app_input.composer.method = self.app_caps.width;
+    self.app_input.composer.placeholder = if (self.line.read != null and self.line.folder != null) "Type a task" else "";
     self.app_input.composer.editor = &self.input.editors[self.input.active];
     self.app_card.style = normal;
     self.app_card.quiet = quiet;
@@ -1056,13 +1128,16 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     chrome.status.attention = attention;
     chrome.facts.method = self.app_caps.width;
     chrome.facts.style = facts_style;
+    chrome.facts.selected = style.of(self.app_caps, .{ .colour = .normal, .background = .selection });
+    chrome.facts.focus = self.footer.focus;
     chrome.marker.method = self.app_caps.width;
     chrome.marker.style = .{ .reverse = true };
     const held = self.heldOriginal();
     const send = session_chrome.send(session_notice.status(self.reading.opening, self.app_consent.request != null, held), self.reading.opening or (held != null and held.?.state == .submitting));
     const list_visible = self.app_hooks.root.listVisible();
-    chrome.place(&self.app_screen, .{
+    chrome.place(&self.app_screen, &self.app_input, .{
         .list_visible = list_visible,
+        .choice = if (!self.app_info.standaloneOpen()) .closed else if (self.app_info.hasChoice()) .pick else .retry,
         .browsing = browsing,
         .new_entries = self.new_below,
         .needs = send.needs,
@@ -1072,14 +1147,14 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
         .stoppable = said.stoppable,
         .details = held != null and held.?.state != .submitting,
         .facts = .{ .current = self.footerFacts(), .name = self.session, .archive = self.line.archive_state },
-        .notice = self.shown_notice.current(now_ms),
+        .notice = self.shown_notice.current(now_ms) orelse said.notice,
         .overview = said.text,
 
-        .overlay = if (self.info_open) self.app_info.bodyWidget() else palette,
+        .overlay = if (self.info_open) self.app_info.bodyWidget() else if (self.app_info.standaloneOpen()) self.app_info.standaloneWidget() else palette,
 
         .width = ctx.max.width.?,
     });
-    self.app_screen.overlay_reserves_space = self.info_open;
+    self.app_screen.overlay_reserves_space = self.info_open or self.app_info.standaloneOpen();
     self.app_info.narrow = !list_visible;
     if (self.info_open) {
         // The panel supplies the one screen footer in the ordinary footer slot.
@@ -1133,7 +1208,7 @@ test "App Session retains the draft across a permission card arriving during pas
             return error.UnexpectedOpen;
         }
     };
-    var root: Root = .{ .overview = empty_app_text.widget(), .list = empty_app_text.widget(), .compose = empty_app_text.widget() };
+    var root: Root = .{ .overview = empty_app_text.widget(), .list = empty_app_text.widget() };
     const widget_ = self.attach(.{ .root = &root, .context = self, .leave = Hooks.leave, .copy = Hooks.copy, .on_open = Hooks.open }, .{ .depth = .none });
     self.reading.opening = false;
     self.screen.feed.at_end = true;
@@ -1162,39 +1237,38 @@ test "App Session retains the draft across a permission card arriving during pas
         try std.testing.expectEqual(style.of(case.caps, .{ .colour = .quiet }).fg, user.style.fg);
         try std.testing.expect(!user.style.dim);
         try std.testing.expectEqual(case.ground, rendered.readCell(79, 10).?.style.bg);
-        try std.testing.expectEqual(case.band, rendered.readCell(79, 22).?.style.bg);
-        try std.testing.expectEqual(case.ground, rendered.readCell(79, 23).?.style.bg);
+        try std.testing.expectEqual(case.ground, rendered.readCell(79, 22).?.style.bg);
+        try std.testing.expectEqual(case.band, rendered.readCell(79, 23).?.style.bg);
     }
     self.app_caps = .{ .depth = .none };
     _ = self.input.append("headTAIL");
     self.input.editors[self.input.active].cursor = 4;
-    root.pasting = true;
-    try widget_.handleEvent(&ctx, .paste_start);
-    try widget_.handleEvent(&ctx, .{ .key_press = .{ .codepoint = 0, .text = "12" } });
+    // Root hands the Session's core its keys with the paste they arrive in.
+    const pasted: @import("app_input.zig").Effects.Delivery = .{ .under = .main, .pasted = true };
+    const typed: @import("app_input.zig").Effects.Delivery = .{ .under = .main, .pasted = false };
+    root.input.pasting = true;
+    try appKey(self, &ctx, .paste_start, pasted);
+    try appKey(self, &ctx, .{ .key_press = .{ .codepoint = 0, .text = "12" } }, pasted);
     self.reading.prepared_action = 17;
     self.live.work.first_action = 17;
     try widget_.handleEvent(&ctx, .tick);
     _ = try widget_.draw(draw_context);
     try std.testing.expectEqual(@as(?u64, 17), self.app_consent.drawn);
-    try self.app_card.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
+    try self.app_card.take(&ctx, .enter, true);
     try std.testing.expectEqual(@as(?u64, 17), self.app_consent.request);
-    root.pasting = false;
+    root.input.pasting = false;
     const before_scroll = self.app_preview.first;
     try std.testing.expect(screen.height > 0);
-    const page_down: vxfw.Event = .{ .key_press = .{ .codepoint = vaxis.Key.page_down } };
-    ctx.consume_event = false;
-    try self.app_card.widget().handleEvent(&ctx, page_down);
-    try std.testing.expect(!ctx.consume_event);
-    try widget_.handleEvent(&ctx, page_down);
+    try appKey(self, &ctx, .{ .key_press = .{ .codepoint = vaxis.Key.page_down } }, typed);
     _ = try widget_.draw(draw_context);
     try std.testing.expect(self.app_preview.first.order(before_scroll) == .gt);
     try std.testing.expectEqualStrings("head12TAIL", self.input.composition().bytes);
-    root.pasting = true;
+    root.input.pasting = true;
     self.live.work.first_action = null;
     try widget_.handleEvent(&ctx, .tick);
-    try widget_.handleEvent(&ctx, .{ .key_press = .{ .codepoint = 0, .text = "discarded" } });
-    root.pasting = false;
-    try widget_.handleEvent(&ctx, .paste_end);
+    try appKey(self, &ctx, .{ .key_press = .{ .codepoint = 0, .text = "discarded" } }, pasted);
+    root.input.pasting = false;
+    try appKey(self, &ctx, .paste_end, typed);
     try std.testing.expectEqualStrings("head12TAIL", self.input.composition().bytes);
     try std.testing.expectEqual(@as(usize, 6), self.input.composition().cursor);
     _ = try widget_.draw(draw_context);
@@ -1379,7 +1453,7 @@ test "App Session leaves from a permission card on Ctrl-C or Ctrl-D and keeps th
             }
         };
         Hooks.left = null;
-        var root: Root = .{ .overview = empty_app_text.widget(), .list = empty_app_text.widget(), .compose = empty_app_text.widget() };
+        var root: Root = .{ .overview = empty_app_text.widget(), .list = empty_app_text.widget() };
         const widget_ = self.attach(.{ .root = &root, .context = self, .leave = Hooks.leave, .copy = Hooks.copy, .on_open = Hooks.open }, .{ .depth = .none });
         self.reading.opening = false;
         self.screen.feed.at_end = true;
@@ -1447,7 +1521,7 @@ test "App Session link click leaves for the peer only where Esc would leave" {
     };
     Hooks.opened = null;
     Hooks.left = null;
-    var root: Root = .{ .overview = empty_app_text.widget(), .list = empty_app_text.widget(), .compose = empty_app_text.widget() };
+    var root: Root = .{ .overview = empty_app_text.widget(), .list = empty_app_text.widget() };
     const widget_ = self.attach(.{ .root = &root, .context = self, .leave = Hooks.leave, .copy = Hooks.copy, .on_open = Hooks.open }, .{ .depth = .none });
     self.reading.opening = false;
     self.screen.feed.at_end = true;
@@ -1495,6 +1569,7 @@ fn draftSafeToLeave(self: *const Self) bool {
 /// the screen's list was the previous Session's, at revisions this input
 /// counts again.
 fn startInput(self: *Self) void {
+    self.footer = .{};
     self.input.init();
     self.input.complete(.{ .context = self, .add = tabCompletion });
     self.screen.commands = null;
@@ -1869,9 +1944,9 @@ test "a Session lists the skills it saved for the caret's /word, and Tab or Ente
     shown = try held.shown();
     try std.testing.expect(std.mem.indexOf(u8, shown, "/recap") == null);
     try std.testing.expect(std.mem.indexOf(u8, shown, "Review a change") != null);
-    // Mid-draft, Tab replaces the caret's name, adds no space and leaves
+    // Mid-draft, Enter on the drawn row replaces the caret's name, adds no space and leaves
     // the caret after it.
-    try held.keys("\t");
+    try held.keys("\r");
     try std.testing.expectEqualStrings("please /review now", held.self.input.composition().bytes);
     try std.testing.expectEqual("please /review".len, held.self.input.composition().cursor);
     // At the draft's end, Enter on the drawn row puts the highlighted skill
@@ -2405,8 +2480,12 @@ fn withdrawDecided(self: *Self) void {
 
 /// The normal Message lane, including a leading loaded skill. No draft loan
 /// transfers while another submission or read holds it.
+fn sendFacts(self: *const Self) session_keys.Facts.Send {
+    return .{ .host_held = self.hostHeld(), .opening = self.reading.opening, .preparing = self.reading.phase == .permission, .command_active = self.commandActive(), .submitting = self.submission.intent != null };
+}
+
 fn admitsMessage(self: *const Self) bool {
-    return !self.hostHeld() and !self.reading.opening and self.reading.phase != .permission and !self.commandActive() and self.submission.intent == null and self.input.submitted == null;
+    return self.sendFacts().allowed() and self.input.submitted == null;
 }
 
 /// Sends a Message, alone or as the reason an Action is denied.
@@ -2741,16 +2820,14 @@ fn runLine(self: *Self) !void {
     try self.slashCommand(text);
 }
 
-/// Enter on a Message draft whose list the latest frame drew: takes its
-/// highlighted row. A command line's Enter goes to `commandLine`.
-fn takeShownRow(self: *Self) bool {
+/// The list whose highlighted row Enter takes: one the latest frame drew
+/// for a Message draft. A command line's Enter goes to `commandLine`.
+fn shownRow(self: *Self) ?*slash_commands_shared.Shown {
     // A rejected line is the editor's to refuse and clear.
-    if (self.input.editors[self.input.active].rejected != null) return false;
+    if (self.input.editors[self.input.active].rejected != null) return null;
     const draft = self.input.composition().bytes;
-    if (draft.len == 0 or (draft[0] == '/' and !std.mem.startsWith(u8, draft, "//"))) return false;
-    const shown = self.shownCommands() orelse return false;
-    self.takeRow(shown);
-    return true;
+    if (draft.len == 0 or (draft[0] == '/' and !std.mem.startsWith(u8, draft, "//"))) return null;
+    return self.shownCommands();
 }
 
 /// Enter on a row that runs nothing: its word in place of the caret's
@@ -3200,7 +3277,7 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
         return;
     }
     if (end != .complete) return;
-    var observed: ?struct { work: protocol.session_work.Work, opening: bool } = null;
+    var observed: ?struct { snapshot: session_list.Snapshot, opening: bool } = null;
     const phase = self.reading.phase;
     if (phase == .message or phase == .tool) {
         self.notice = null; // Clears "Opening message…" or "Opening tool output…".
@@ -3209,7 +3286,7 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
         // Filtered fills never overwrite current work or move the scan cursor.
         if (read == .opening or read == .scan or phase == .permission) {
             const result = &self.job.result;
-            observed = .{ .work = result.work.work, .opening = read == .opening };
+            observed = .{ .snapshot = .{ .read_version = result.work.read_version, .work = result.work.work, .last_line = result.work.last_line }, .opening = read == .opening };
             self.live.work = .fromCore(result.work.work);
             self.live.queued = result.queued;
             if (result.queued_line) |shown| self.live.queued_line = shown;
@@ -3230,7 +3307,7 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
             if (self.reading.prepared_action == null) self.reading.phase = .activity;
         }
     }
-    if (observed) |read| try self.lender.observed(self.lender.context, read.work, read.opening);
+    if (observed) |read| try self.lender.observed(self.lender.context, read.snapshot, read.opening);
     self.dirty = true;
 }
 
@@ -3349,7 +3426,7 @@ fn applyStatus(self: *Self) !void {
     if (self.job.result.status) self.inspection.status = @intFromBool(self.job.status_taken == &self.inspection.sessions[1]);
     self.inspection.status_requested = false;
     if (self.info_effect == .refreshing) self.info_effect = .saved;
-    if (self.info_open and !self.app_info.hasChoice() and self.app_info.pending == null) self.app_info.refresh();
+    if ((self.info_open or self.footer.pending != null) and !self.app_info.hasChoice() and self.app_info.pending == null) self.app_info.refresh();
     self.dirty = true;
 }
 
@@ -3358,12 +3435,23 @@ fn leaveFor(self: *Self, _: Inspection) !void {
 }
 
 fn statusShown(self: *const Self) bool {
-    return self.info_open or self.info_effect == .refreshing;
+    return self.info_open or self.footer.pending != null or self.info_effect == .refreshing;
 }
 
 /// A frontend attached to App as `rui` attaches it: Root before it, a
 /// permission card that holds focus while it shows, and hooks that record
 /// leaving and an Upgrade instead of acting on them.
+/// Test Hosts' answer to whether a start can mend them now: a Host that
+/// fails a test when started says it can, so a wrongful start is caught.
+const TestHost = struct {
+    fn always(_: *anyopaque) bool {
+        return true;
+    }
+    fn never(_: *anyopaque) bool {
+        return false;
+    }
+};
+
 const HeldFrontend = struct {
     self: Self,
     screen: *Screen,
@@ -3371,7 +3459,7 @@ const HeldFrontend = struct {
     tmp: std.testing.TmpDir,
     directory: [std.Io.Dir.max_path_bytes]u8 = undefined,
     interrupted: client.Cancellation = .{},
-    root: Root = .{ .overview = empty_app_text.widget(), .list = empty_app_text.widget(), .compose = empty_app_text.widget() },
+    root: Root = .{ .overview = empty_app_text.widget(), .list = empty_app_text.widget() },
     arena: std.heap.ArenaAllocator,
     /// What the frontend asked of its lender, in order.
     left: ?Outcome = null,
@@ -3404,7 +3492,10 @@ const HeldFrontend = struct {
         // No read is due: a test hands the frontend what a read would.
         held.self.poll_at = std.math.maxInt(i96);
         held.self.submission.environment = .empty;
-        _ = held.self.attach(.{ .drafts = drafts, .root = &held.root, .context = held, .leave = onLeave, .copy = onCopy, .on_open = onOpen }, .{ .depth = .none });
+        const child = held.self.attach(.{ .drafts = drafts, .root = &held.root, .context = held, .leave = onLeave, .copy = onCopy, .on_open = onOpen }, .{ .depth = .none });
+        // The Session is the main pane, so Root hands its keys to its core.
+        held.root.session = child;
+        held.root.session_keys = held.self.keyOwner();
         return held;
     }
 
@@ -3446,9 +3537,9 @@ const HeldFrontend = struct {
         return .{ .io = std.testing.io, .alloc = held.arena.allocator(), .cmds = .empty };
     }
 
-    /// One event as App delivers it: Root's capture first, then the
-    /// focused permission card when one shows, then the Session, which
-    /// takes what the card leaves.
+    /// One event as App delivers it: Root's capture first, which hands
+    /// the Session's core its keys, then the focused permission card when
+    /// one shows, then the Session, which takes what the card leaves.
     fn deliver(held: *HeldFrontend, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
         ctx.consume_event = false;
         ctx.phase = .capturing;
@@ -3537,9 +3628,9 @@ test "App Session request overflow opens in place with Ctrl-O or a continuation 
                 defer file.close(std.testing.io);
                 if (typing) try held.keys("kept draft");
                 const before = try held.shown();
-                // Footer/state, selector or single-line draft (five rows),
+                // Footer and selector or single-line draft (four rows),
                 // then one quiet row reporting the undisplayed request rows.
-                const expected = if (size.height.? == 30) "… 16 more lines" else "… 6 more lines";
+                const expected = if (size.height.? == 30) "… 15 more lines" else "… 5 more lines";
                 try std.testing.expect(std.mem.indexOf(u8, before, expected) != null);
                 try std.testing.expect(std.mem.indexOf(u8, before, "row 039") == null);
                 try std.testing.expectEqual(.action, held.screen.view);
@@ -3644,10 +3735,10 @@ test "a held frontend stops a read still running and joins it before it is freed
 }
 
 /// Terminal bytes into the frontend's App, as `HeldFrontend.keys`.
-/// What the state notice below the footer shows.
+/// The transient Footer reply, else the persistent state below it.
 fn barShows(held: *HeldFrontend) ![]const u8 {
     _ = try held.draw();
-    return held.self.chrome.state.text;
+    return held.self.chrome.status.bar.notice orelse held.self.chrome.state.text;
 }
 
 fn sendKeys(frontend: *Self, bytes: []const u8) !void {
@@ -3964,10 +4055,9 @@ test "Esc at the latest view returns to the overview unless unsent text or a cho
         try sendKeys(self, "\x07");
         if (case[2]) |why| {
             try std.testing.expect(self.leaving == null);
-            // Esc says why, but what needs the person, which names the
-            // same key, outranks it on the bar.
-            try std.testing.expectEqualStrings(why, self.shown_notice.current(self.nowMs()).?);
-            try std.testing.expectEqualStrings(if (case[0] == .not_started) "Not sent" else "! Decision not confirmed", try barShows(held));
+            // Esc replies in Footer while persistent needs remain below it.
+            try std.testing.expectEqualStrings(why, try barShows(held));
+            try std.testing.expectEqualStrings(if (case[0] == .not_started) "Not sent" else "! Decision not confirmed", self.chrome.state.text);
             try std.testing.expectEqualStrings("ctrl+r retries original", self.chrome.status.key.label);
         } else try std.testing.expectEqual(@as(?Outcome, .returned), self.leaving);
     }
@@ -4050,17 +4140,19 @@ test "a key on a draft changed since the latest frame acts on that draft's list 
     try std.testing.expect(held.screen.commands == null);
 }
 
-test "Tab completes from the draft's own list, however many keys arrive before a frame" {
+test "Tab focuses footer without completing a command and Enter still takes drawn command choices" {
     const held = try HeldFrontend.create();
     defer held.destroy();
     const self = &held.self;
     try held.settle();
     try stepKeys(held, "/rel\t");
-    try std.testing.expectEqualStrings("/reload-skills", self.input.composition().bytes);
-    // Two Tabs in one batch: the second completes from the list the first
-    // one's word calls for.
-    try stepKeys(held, "\x15/rel\t\t");
-    try std.testing.expectEqualStrings("/reload-skills", self.input.composition().bytes);
+    try std.testing.expectEqualStrings("/rel", self.input.composition().bytes);
+    try std.testing.expectEqual(session_chrome.FooterFocus.model, self.footer.focus);
+    try held.keys("\x07");
+    try held.settle();
+    try held.keys("\r");
+    try std.testing.expectEqualStrings("/reload-skills", self.input.takeCommand().?);
+    try std.testing.expectEqualStrings("", self.input.composition().bytes);
 }
 
 test "a key before a new Session's first frame finds no list the previous Session drew" {
@@ -4071,13 +4163,17 @@ test "a key before a new Session's first frame finds no list the previous Sessio
     try stepKeys(held, "/r");
     try held.settle();
     try std.testing.expectEqual(.drawn, held.screen.commands.?.seen);
-    // The next Session's input starts over; no frame of it drew a list, so
-    // Enter runs `/rel` as typed, and Tab still completes.
     self.startInput();
     try stepKeys(held, "/rel\r");
     try std.testing.expectEqualStrings("! Unknown command /rel", try barShows(held));
     try stepKeys(held, "/rel\t");
-    try std.testing.expectEqualStrings("/reload-skills", self.input.composition().bytes);
+    try std.testing.expectEqualStrings("/rel", self.input.composition().bytes);
+    try std.testing.expectEqual(session_chrome.FooterFocus.model, self.footer.focus);
+    try held.keys("\x07");
+    try held.settle();
+    try held.keys("\r");
+    try std.testing.expectEqualStrings("/reload-skills", self.input.takeCommand().?);
+    try std.testing.expectEqualStrings("", self.input.composition().bytes);
 }
 
 test "Esc closes the command list first only when the latest frame drew it" {
@@ -4102,7 +4198,7 @@ test "Esc closes the command list first only when the latest frame drew it" {
     try std.testing.expectEqualStrings("Esc returns to the overview once the draft is empty.", try barShows(held));
 }
 
-test "the /requests page lists its rows over an empty draft, and Enter or Tab takes the row's command as typed" {
+test "the /requests page lists its rows over an empty draft, Enter takes a row and Tab focuses the footer" {
     const held = try HeldFrontend.create();
     defer held.destroy();
     const self = &held.self;
@@ -4137,7 +4233,7 @@ test "the /requests page lists its rows over an empty draft, and Enter or Tab ta
     try std.testing.expectEqualSlices(u8, original, &(self.submission.retry orelse return error.TestUnexpectedResult));
     try std.testing.expectEqualStrings("", self.input.composition().bytes);
     self.submission.retry = null;
-    // Down twice reaches the older Message, and Enter queues its /result.
+    // Down twice reaches the older Message, and Enter reads its saved answer.
     try held.settle();
     try held.keys("\x1b[B\x1b[B");
     try std.testing.expectEqual(@as(usize, 2), held.screen.commands.?.highlight);
@@ -4156,13 +4252,16 @@ test "the /requests page lists its rows over an empty draft, and Enter or Tab ta
     try std.testing.expect(self.input.queuedCommand() == null);
     try std.testing.expect(self.submission.retry == null);
     try held.settle();
-    try std.testing.expectEqualStrings("" ++ original, held.screen.commands.?.list.entries[0].word);
-    // Tab puts the highlighted row's line in the draft, for editing.
+    try std.testing.expectEqualStrings(original, held.screen.commands.?.list.entries[0].word);
+    // Tab leaves the highlighted row and draft intact; Enter retains its action.
     try held.keys("\x1b[B\t");
     try std.testing.expectEqualStrings("", self.input.composition().bytes);
-    try std.testing.expectEqualStrings(newer, self.input.queuedCommand().?);
-    _ = self.input.takeCommand();
+    try std.testing.expectEqual(session_chrome.FooterFocus.model, self.footer.focus);
+    try held.keys("\x07\r");
+    try std.testing.expectEqualStrings(newer, self.input.takeCommand().?);
+    try std.testing.expectEqual(.result, self.queued_inspection.?);
     self.queued_inspection = null;
+    try held.settle();
     // Esc closes the rows first, then leaves the page, which takes them.
     try held.keys("\x15");
     try held.settle();
@@ -4175,11 +4274,12 @@ test "the /requests page lists its rows over an empty draft, and Enter or Tab ta
     try held.settle();
     try std.testing.expect(held.screen.view != .inspection);
     try std.testing.expect(held.screen.commands == null);
-    // Enter on an empty draft with no rows does nothing, and Tab is a tab.
+    // Enter on an empty draft with no rows does nothing; Tab focuses the model.
     try held.keys("\r");
     try std.testing.expect(self.input.queuedCommand() == null);
     try held.keys("\t");
-    try std.testing.expectEqualStrings("\t", self.input.composition().bytes);
+    try std.testing.expectEqualStrings("", self.input.composition().bytes);
+    try std.testing.expectEqual(session_chrome.FooterFocus.model, self.footer.focus);
 }
 
 test "a pending decision, or a Message that carries one, has no /recover row, and Enter on the page sends nothing" {
@@ -4401,7 +4501,7 @@ const quiet_overview: Lender = .{ .context = undefined, .step = struct {
         return .{};
     }
 }.line, .observed = struct {
-    fn observed(_: *anyopaque, _: protocol.session_work.Work, _: bool) !void {}
+    fn observed(_: *anyopaque, _: session_list.Snapshot, _: bool) !void {}
 }.observed, .upgrade = struct {
     fn upgrade(_: *anyopaque) session_upgrade.Upgrade {
         return .{};
@@ -4539,7 +4639,7 @@ test "chat info opens from the chat line above the input at 140 and 46 columns a
     }
 }
 
-test "chat identity click and Alt-I share natural panel opening and Escape restores the feed" {
+test "chat info hint click and Alt-I share natural panel opening and Escape restores the feed" {
     for ([_]u16{ 46, 140 }) |width| {
         const held = try HeldFrontend.create();
         defer held.destroy();
@@ -4551,9 +4651,13 @@ test "chat identity click and Alt-I share natural panel opening and Escape resto
         const ordinary = try held.draw();
         const input = ordinary.children[0].surface.children[1];
         const facts = input.surface.children[1];
-        // The displayed name begins after the gutter/back control; locate it
-        // independently of whether the implementation installed a hit target.
-        const col: i16 = if (held.self.chrome.list_visible) 1 else 3;
+        // The info hint retains its existing page action; model and effort
+        // have their own standalone actions instead of a blanket identity hit.
+        var info_column: ?i16 = null;
+        for (facts.surface.children) |child| if (child.surface.widget.eql(held.self.chrome.info.widget())) {
+            info_column = @intCast(input.origin.col + facts.origin.col + child.origin.col);
+        };
+        const col = info_column orelse return error.TestUnexpectedResult;
         const row: i16 = @intCast(input.origin.row + facts.origin.row);
         var ctx = held.context();
         defer ctx.cmds.deinit(held.arena.allocator());
@@ -4613,7 +4717,7 @@ test "chat info owns typed keys before Host restart across every modal editor an
         try captureInfo(held, "Before");
         if (draft) try held.keys("kept draft");
         var host: Host = .{ .stopped = stopped };
-        held.self.app_hooks.host = .{ .context = &host, .held = Host.held, .lost = Host.lost, .start = Host.start, .notice = Host.notice };
+        held.self.app_hooks.host = .{ .context = &host, .held = Host.held, .lost = Host.lost, .startable = Host.held, .start = Host.start, .notice = Host.notice };
         defer held.self.app_hooks.host = null;
         try held.keys("\x1bi");
         const page = &held.self.app_info;
@@ -4649,11 +4753,12 @@ test "chat info owns typed keys before Host restart across every modal editor an
             .rows => try std.testing.expect(!page.hasChoice()),
             .effort, .permissions, .tools => try std.testing.expect(page.panel.choice != null),
         }
-        // Once the panel is closed, only an empty composer delegates r to Host.
+        // Once the panel is closed, only an empty composer delegates r to
+        // a Host a start can mend.
         page.cancelChoice();
         try held.keys("\x1b");
         try held.keys("r");
-        try std.testing.expectEqual(@as(usize, @intFromBool(!draft)), host.starts);
+        try std.testing.expectEqual(@as(usize, @intFromBool(!draft and stopped)), host.starts);
         try std.testing.expectEqualStrings(if (draft) "kept draftr" else if (stopped) "" else "r", held.self.input.composition().bytes);
     };
 }
@@ -4906,7 +5011,7 @@ const ArchiveOverview = struct {
     fn line(raw: *anyopaque, work: protocol.session_work.Kind) Lender.Said {
         const self: *ArchiveOverview = @ptrCast(@alignCast(raw));
         const said = overview_view.conversation(&self.state, "k7m2qx".*, work, .{}, self.said[0..160]);
-        return .{ .text = said.text, .stoppable = said.stoppable };
+        return .{ .text = said.text, .notice = said.notice, .stoppable = said.stoppable };
     }
 
     fn upgrade(raw: *anyopaque) session_upgrade.Upgrade {
@@ -4914,10 +5019,69 @@ const ArchiveOverview = struct {
         return self.state.upgrade;
     }
 
+    fn observed(raw: *anyopaque, snapshot: session_list.Snapshot, opening: bool) !void {
+        const self: *ArchiveOverview = @ptrCast(@alignCast(raw));
+        const effects = try overview_view.step(&self.state, .{ .observed = .{ .reference = "k7m2qx".*, .read_version = snapshot.read_version, .work = snapshot.work, .last_line = snapshot.last_line, .opening = opening } });
+        try std.testing.expectEqual(@as(usize, 0), effects.len);
+    }
+
     fn lender(self: *ArchiveOverview) Lender {
-        return .{ .context = self, .step = ArchiveOverview.step, .line = ArchiveOverview.line, .service = quiet_overview.service, .observed = quiet_overview.observed, .upgrade = ArchiveOverview.upgrade };
+        return .{ .context = self, .step = ArchiveOverview.step, .line = ArchiveOverview.line, .service = quiet_overview.service, .observed = ArchiveOverview.observed, .upgrade = ArchiveOverview.upgrade };
     }
 };
+
+test "one settled stop read updates the chat and its list row without a listing" {
+    const fixture = try FeedFixture.createWithDrafts("k7m2qx", null);
+    defer fixture.destroy();
+    const held = fixture.held;
+    const self = &held.self;
+    var overview: ArchiveOverview = .{ .state = undefined };
+    try overview.state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
+    defer overview.state.deinit();
+    _ = try overview_view.step(&overview.state, .{ .host = .{ .instance = @splat(0xab), .started_at = 1, .slots = 2, .slots_in_use = 0 } });
+    const ref = "k7m2qx".*;
+    const stopping: protocol.WorkState = .{ .stopping = .{ .since = 1 } };
+    const stopped: protocol.session_work.Work = .{ .state = .{ .stopped = .{ .since = 2, .cause = .stop } }, .turn = 7 };
+    _ = try overview_view.step(&overview.state, .{ .tick = 1000 });
+    _ = try overview_view.step(&overview.state, .{ .list = .{ .page = .{
+        .rows = &.{.{ .read_version = .{ .instance = @splat(0xab), .generation = 1 }, .reference = ref, .workspace = "/work", .provider = .codex, .label = "Stop the slow job", .state = stopping, .turn = 7, .last_line = .{ .position = 1, .text = "Old completed answer" } }},
+        .answer = .{ .delta = .full, .since = .{ .instance = @splat(0xab), .generation = 1 } },
+    } } });
+    _ = try overview_view.step(&overview.state, .{ .conversation = ref });
+    self.lender = overview.lender();
+    self.live.work.state = stopping;
+    // One completed activity read publishes the chat's stop row and its
+    // current work together, through the production reader handoff.
+    const job = self.freeze(.activity);
+    const text = "■ Stopped\n";
+    try fixture.file.writePositionalAll(std.testing.io, text, 0);
+    job.result = .{
+        .work = .{ .read_version = .{ .instance = @splat(0xab), .generation = 2 }, .work = stopped, .last_line = .{ .position = 2 } },
+        .row_count = 1,
+        .new_rows = 1,
+        .at_start = true,
+        .at_end = true,
+        .low = .{ .position = 1 },
+        .high = .{ .position = 1 },
+        .cursor = .{ .position = 1, .end = 1 },
+    };
+    job.result.rows[0] = .{ .key = .{ .position = 1 }, .offset = 0, .length = text.len, .tight = false, .provisional = false };
+    try self.launch(job, struct {
+        fn complete(_: *anyopaque, _: *Task) !void {}
+    }.complete);
+    try self.settleReader();
+    const chat = try held.shown();
+    try std.testing.expect(std.mem.indexOf(u8, chat, "■ Stopped") != null);
+    try std.testing.expect(std.mem.indexOf(u8, chat, "Stopping") == null);
+    try std.testing.expectEqualDeep(stopped.state, self.live.work.state);
+    const row = overview.state.find(ref).?;
+    try std.testing.expectEqualDeep(stopped.state, overview.state.workOf(row).state);
+    try std.testing.expectEqual(stopped.turn, overview.state.workOf(row).turn);
+    var detail: [overview_view.max_second_line_bytes]u8 = undefined;
+    try std.testing.expectEqualStrings("Stopped", overview_view.secondLine(&overview.state, row, &detail));
+    try std.testing.expect(!ArchiveOverview.line(&overview, .stopped).stoppable);
+    try std.testing.expectEqual(@as(usize, 0), overview.state.summary.counts.working);
+}
 
 test "Alt-A archives the open conversation at once without submitting or changing its draft or retained original" {
     for ([_][]const u8{ "\x1ba", "\x1b[97;3u", "\x1b[27;3;97~" }) |chord| for ([_]bool{ false, true }) |original| {
@@ -5278,7 +5442,7 @@ test "reader failure provenance keeps transport loss separate from local copy fa
         self.reading.opening = mode == .read_disconnect;
         _ = self.input.replace(.{ .start = 0, .end = 0, .text = "kept draft" });
         var discovery: Discovery = .{};
-        self.app_hooks.host = .{ .context = &discovery, .held = Discovery.held, .lost = Discovery.lost, .start = Discovery.start, .notice = Discovery.notice };
+        self.app_hooks.host = .{ .context = &discovery, .held = Discovery.held, .lost = Discovery.lost, .startable = TestHost.always, .start = Discovery.start, .notice = Discovery.notice };
         self.command = Probe.command;
         self.inspection.kind = if (mode == .command_disconnect) .command else .copy;
         const job = self.freeze(if (mode == .read_disconnect) .activity else .inspection);
@@ -5401,7 +5565,7 @@ test "skills transport recovery retains the held page and retries the same prefi
     try lease.prepareForServing(false);
     self.store = root;
     var discovery: Discovery = .{};
-    self.app_hooks.host = .{ .context = &discovery, .held = Discovery.held, .lost = Discovery.lost, .start = Discovery.start, .notice = Discovery.notice };
+    self.app_hooks.host = .{ .context = &discovery, .held = Discovery.held, .lost = Discovery.lost, .startable = TestHost.never, .start = Discovery.start, .notice = Discovery.notice };
     const old = self.skills.ask("old").?;
     try std.testing.expect(self.skills.answer(old.read, .{}, "old") == null);
     _ = self.input.replace(.{ .start = 0, .end = 0, .text = "please /re" });
@@ -5484,7 +5648,7 @@ test "Host recovery joins unavailable reads in every phase without losing the Se
     for (std.enums.values(ReadPhase)) |phase| {
         for ([_]anyerror{ error.FileNotFound, error.ConnectionRefused, error.UnixConnectFailed, error.ConnectionResetByPeer, error.BrokenPipe, error.TruncatedResponse, error.ResponseInactive, error.HostNotServing, error.HostStopping }) |failure| {
             var fault: Fault = .{ .failure = failure, .origin = .host_transport };
-            self.app_hooks.host = .{ .context = &fault, .held = Fault.held, .lost = Fault.lose, .start = Fault.start, .notice = Fault.notice };
+            self.app_hooks.host = .{ .context = &fault, .held = Fault.held, .lost = Fault.lose, .startable = TestHost.never, .start = Fault.start, .notice = Fault.notice };
             self.reading.phase = phase;
             self.reading.opening = true;
             self.inspection.command_running = phase == .inspection;
@@ -5503,7 +5667,7 @@ test "Host recovery joins unavailable reads in every phase without losing the Se
         // request: the same row opens again once the Host is back.
         const key: feed_window.Key = .{ .position = 41, .ordinal = 1 };
         var fault: Fault = .{ .failure = error.ConnectionRefused, .origin = .host_transport };
-        self.app_hooks.host = .{ .context = &fault, .held = Fault.held, .lost = Fault.lose, .start = Fault.start, .notice = Fault.notice };
+        self.app_hooks.host = .{ .context = &fault, .held = Fault.held, .lost = Fault.lose, .startable = TestHost.never, .start = Fault.start, .notice = Fault.notice };
         self.reading.opening = false;
         for (0..2) |round| {
             self.expansion.reading = .{ .target = .{ .tool = .{ .key = key, .open = true } }, .asked = self.pageAsked() };
@@ -5516,7 +5680,7 @@ test "Host recovery joins unavailable reads in every phase without losing the Se
         }
     }
     var fenced: Fault = .{ .failure = error.HostInvocationFailed, .fenced = true };
-    self.app_hooks.host = .{ .context = &fenced, .held = Fault.held, .lost = Fault.lose, .start = Fault.start, .notice = Fault.notice };
+    self.app_hooks.host = .{ .context = &fenced, .held = Fault.held, .lost = Fault.lose, .startable = TestHost.never, .start = Fault.start, .notice = Fault.notice };
     self.reading.phase = .activity;
     try self.reader.start(std.testing.io, &fenced, Fault.run);
     try self.settleReader();
@@ -5524,7 +5688,7 @@ test "Host recovery joins unavailable reads in every phase without losing the Se
     try std.testing.expect(self.reading.pending_diagnostic == null);
     // Cancellation wins even if earlier work on this invocation touched transport.
     var cancelled: Fault = .{ .failure = error.Cancelled, .origin = .host_transport };
-    self.app_hooks.host = .{ .context = &cancelled, .held = Fault.held, .lost = Fault.lose, .start = Fault.start, .notice = Fault.notice };
+    self.app_hooks.host = .{ .context = &cancelled, .held = Fault.held, .lost = Fault.lose, .startable = TestHost.never, .start = Fault.start, .notice = Fault.notice };
     self.reading.phase = .activity;
     try self.reader.start(std.testing.io, &cancelled, Fault.run);
     try std.testing.expectError(error.Cancelled, self.settleReader());
@@ -5532,7 +5696,7 @@ test "Host recovery joins unavailable reads in every phase without losing the Se
     // A canonical or unrelated failure still has its original fatal boundary.
     for ([_]anyerror{ error.CanonicalStoreFailure, error.AccessDenied }) |failure| {
         var fault: Fault = .{ .failure = failure };
-        self.app_hooks.host = .{ .context = &fault, .held = Fault.held, .lost = Fault.lose, .start = Fault.start, .notice = Fault.notice };
+        self.app_hooks.host = .{ .context = &fault, .held = Fault.held, .lost = Fault.lose, .startable = TestHost.never, .start = Fault.start, .notice = Fault.notice };
         self.reading.phase = .activity;
         try self.reader.start(std.testing.io, &fault, Fault.run);
         try std.testing.expectError(failure, self.settleReader());
@@ -5579,11 +5743,11 @@ const ChromeFixture = struct {
         var lender = quiet_overview;
         lender.line = struct {
             fn line(_: *anyopaque, kind: protocol.session_work.Kind) Lender.Said {
-                return .{ .text = ChromeFixture.overview_says, .stoppable = kind == .working };
+                return .{ .notice = ChromeFixture.overview_says, .stoppable = kind == .working };
             }
         }.line;
         fixture.self.begin(init_, "unused", "k7m2qx", "unused", .{ .scratch = page, .action = page, .inspection = page, .details = page, .actions = .{ page, page } }, undefined, undefined, undefined, fixture.screen, &fixture.interrupted, lender);
-        fixture.root = .{ .overview = empty_app_text.widget(), .list = empty_app_text.widget(), .compose = empty_app_text.widget() };
+        fixture.root = .{ .overview = empty_app_text.widget(), .list = empty_app_text.widget() };
         fixture.widget = fixture.self.attach(.{ .root = &fixture.root, .context = fixture.self, .leave = Hooks.leave, .copy = Hooks.copy, .on_open = Hooks.open }, .{ .depth = .none });
         fixture.self.reading.opening = false;
         fixture.screen.feed.at_end = true;
@@ -5612,7 +5776,19 @@ const ChromeFixture = struct {
     }
 
     fn press(fixture: *ChromeFixture, key: vaxis.Key) !void {
-        try fixture.widget.handleEvent(&fixture.ctx, .{ .key_press = key });
+        // Mount the real key owner for App's captured path, including paste
+        // state. Tests that explicitly open Root do so before the first key.
+        fixture.root.session = fixture.widget;
+        fixture.root.session_keys = fixture.self.keyOwner();
+        fixture.ctx.consume_event = false;
+        const phase = fixture.ctx.phase;
+        defer fixture.ctx.phase = phase;
+        fixture.ctx.phase = .capturing;
+        try fixture.root.widget().captureEvent(&fixture.ctx, .{ .key_press = key });
+        if (!fixture.ctx.consume_event) {
+            fixture.ctx.phase = .at_target;
+            try fixture.widget.handleEvent(&fixture.ctx, .{ .key_press = key });
+        }
     }
 
     fn now() u64 {
@@ -5647,6 +5823,11 @@ const ChromeFixture = struct {
         return null;
     }
 
+    fn findEnding(shown: *const [24][]const u8, suffix: []const u8) ?usize {
+        for (shown, 0..) |line, row| if (std.mem.endsWith(u8, line, suffix)) return row;
+        return null;
+    }
+
     fn call(operation: u64, ordinal: u64, description: []const u8) View.Live.Entry {
         var value: View.Live.Entry = std.mem.zeroes(View.Live.Entry);
         value.operation = operation;
@@ -5669,7 +5850,7 @@ test "App Session shell gutter and back control follow list visibility through r
     _ = self.input.replace(.{ .start = 0, .end = 0, .text = "kept draft" });
     try seedFeed(fixture.screen, "› Build the docs…\n✓ Build the docs\n");
     const anchor = fixture.screen.anchor;
-    try fixture.root.openSession(&fixture.ctx, fixture.widget);
+    try fixture.root.openSession(&fixture.ctx, fixture.widget, fixture.self.keyOwner());
     const arena = fixture.arena.allocator();
     for ([_]u16{ 140, 46, 100, 99, 140, 46 }) |width| {
         const frame = try fixture.root.widget().draw(.{ .arena = arena, .min = .{}, .max = .{ .width = width, .height = 26 }, .cell_size = .{} });
@@ -5686,9 +5867,9 @@ test "App Session shell gutter and back control follow list visibility through r
         try std.testing.expectEqualStrings(" ", screen.readCell(start, sent).?.char.grapheme);
         try std.testing.expectEqualStrings(" ", screen.readCell(start, sent + 1).?.char.grapheme);
         try std.testing.expectEqualStrings("✓", screen.readCell(start + 1, sent + 1).?.char.grapheme);
-        try std.testing.expectEqualStrings(if (wide) "d" else "‹", screen.readCell(start + 1, 24).?.char.grapheme);
+        try std.testing.expectEqualStrings(if (wide) "d" else "‹", screen.readCell(start + 1, 25).?.char.grapheme);
         var facts: std.Io.Writer.Allocating = .init(arena);
-        for (start..width) |column| try facts.writer.writeAll(screen.readCell(@intCast(column), 24).?.char.grapheme);
+        for (start..width) |column| try facts.writer.writeAll(screen.readCell(@intCast(column), 25).?.char.grapheme);
         try std.testing.expectEqualStrings(if (wide) " demo · gpt-5.5 · low · 100% left" else " ‹ demo · gpt-5.5 · low · 100% left", std.mem.trimEnd(u8, facts.written()[0..std.mem.indexOf(u8, facts.written(), "alt+i info").?], " "));
         try std.testing.expect(fixture.root.session.?.eql(fixture.widget));
         try std.testing.expectEqualStrings("kept draft", self.input.composition().bytes);
@@ -5785,11 +5966,11 @@ test "App Session's status bar never says Sent: an accepted Message's row is its
     const self = fixture.self;
     // Accepted with no original held: the bar is empty, so the overview's
     // line shows there.
-    try std.testing.expect(std.mem.startsWith(u8, (try fixture.rows())[22], "‹ k7m2qx"));
-    try std.testing.expect(std.mem.endsWith(u8, (try fixture.rows())[22], "alt+i info"));
+    try std.testing.expect(std.mem.startsWith(u8, (try fixture.rows())[23], "‹ k7m2qx"));
+    try std.testing.expect(std.mem.endsWith(u8, (try fixture.rows())[23], "alt+i info"));
     ChromeFixture.overview_says = "Port overview to vxfw finished";
     defer ChromeFixture.overview_says = null;
-    try std.testing.expect(ChromeFixture.find(&try fixture.rows(), "Port overview to vxfw finished") != null);
+    try std.testing.expect(ChromeFixture.findEnding(&try fixture.rows(), "Port overview to vxfw finished") != null);
     ChromeFixture.overview_says = null;
     // A Message waiting behind work shows as its waiting row at the latest
     // view; scrolled back, where that row is out of view, nothing says Sent.
@@ -5814,7 +5995,7 @@ test "App Session's Ctrl-X while the Session opens says why it stopped nothing, 
     self.reading.opening = true;
     try std.testing.expect(ChromeFixture.find(&try fixture.rows(), "Opening…") != null);
     try fixture.press(.{ .codepoint = 'x', .mods = .{ .ctrl = true } });
-    try std.testing.expect(ChromeFixture.find(&try fixture.rows(), "Session is opening.") != null);
+    try std.testing.expect(ChromeFixture.findEnding(&try fixture.rows(), "Session is opening.") != null);
     try fixture.press(.{ .codepoint = 'a', .text = "a" });
     try std.testing.expect(ChromeFixture.find(&try fixture.rows(), "Opening…") != null);
 }
@@ -5834,13 +6015,14 @@ test "App Session's facts row ends with the archive badge while the Session is a
     const archived = facts(&try fixture.rows());
     try std.testing.expect(std.mem.startsWith(u8, archived, "‹ k7m2qx · Archived"));
     try std.testing.expect(std.mem.endsWith(u8, archived, "Restore"));
+    try std.testing.expect(std.mem.indexOf(u8, archived, "/unarchive") == null);
     self.line.archive_state = .archiving;
     try std.testing.expect(std.mem.startsWith(u8, facts(&try fixture.rows()), "‹ k7m2qx · Stopping and archiving"));
-    // A notice on the last row leaves the badge where it is.
+    // A notice shares Footer with the badge, rather than adding a row.
     self.shown_notice.show("Copied 3 lines", ChromeFixture.now());
     const shown = try fixture.rows();
     try std.testing.expect(std.mem.startsWith(u8, facts(&shown), "‹ k7m2qx · Stopping and archiving"));
-    try std.testing.expect(ChromeFixture.find(&shown, "Copied 3 lines") != null);
+    try std.testing.expect(ChromeFixture.findEnding(&shown, "Copied 3 lines") != null);
 }
 
 test "App Session Footer clips identity in terminal cells" {
@@ -5848,17 +6030,18 @@ test "App Session Footer clips identity in terminal cells" {
     try fixture.init();
     defer fixture.deinit();
     const self = fixture.self;
-    // Identity exceeds the cells left after ` ‹ `; Footer clips it,
-    // without changing the chat name or the original facts.
+    // The name gives way before model and effort within the footer's cell
+    // budget, without changing the original facts.
     self.line = .{ .read = .{ .revision = 1, .end = 1 }, .effort = .low, .left = 100, .label = .{} };
     try self.line.label.?.set("Port the overview to vxfw and keep its key table");
     try self.line.model.set("gpt-6-sol");
     const shown = try fixture.rows();
-    try std.testing.expect(std.mem.startsWith(u8, shown[22], "‹ Port the overview to vxfw and keep its key table · gpt-6-sol · …"));
-    try std.testing.expect(session_line.cells(shown[22], .unicode) <= 80);
+    try std.testing.expect(std.mem.startsWith(u8, shown[23], "‹ Port the overview to vxfw and keep… · gpt-6-sol · low · 100% left"));
+    try std.testing.expectEqualStrings("Port the overview to vxfw and keep its key table", self.line.label.?.slice());
+    try std.testing.expect(session_line.cells(shown[23], .unicode) <= 80);
 }
 
-test "App Session's last row offers ctrl+x stop at the right while work runs, beside the overview's notice" {
+test "App Session Footer notice replaces the stop hint without changing stoppability" {
     var fixture: ChromeFixture = undefined;
     try fixture.init();
     defer fixture.deinit();
@@ -5867,12 +6050,14 @@ test "App Session's last row offers ctrl+x stop at the right while work runs, be
     ChromeFixture.overview_says = "Port overview to vxfw finished";
     defer ChromeFixture.overview_says = null;
     const shown = try fixture.rows();
-    try std.testing.expect(ChromeFixture.find(&shown, "Port overview to vxfw finished") != null);
-    try std.testing.expect(std.mem.startsWith(u8, shown[22], "‹ k7m2qx"));
-    try std.testing.expect(std.mem.endsWith(u8, shown[22], " ctrl+x stop"));
+    try std.testing.expect(ChromeFixture.findEnding(&shown, "Port overview to vxfw finished") != null);
+    try std.testing.expect(std.mem.startsWith(u8, shown[23], "‹ k7m2qx"));
+    try std.testing.expect(std.mem.endsWith(u8, shown[23], "Port overview to vxfw finished"));
+    try std.testing.expect(std.mem.indexOf(u8, shown[23], "ctrl+x stop") == null);
+    try std.testing.expect(self.chrome.stoppable);
     // Work ends: the stop key goes; the overview's notice stays its own.
     self.live.work.state = .{ .idle = .{ .since = 0 } };
-    try std.testing.expect(ChromeFixture.find(&try fixture.rows(), "Port overview to vxfw finished") != null);
+    try std.testing.expect(ChromeFixture.findEnding(&try fixture.rows(), "Port overview to vxfw finished") != null);
 }
 
 test "App Session's last row says the send state, which stays past a key and five seconds" {
@@ -5976,7 +6161,7 @@ test "App Session info opens while commands wait and refused originals keep thei
     try fixture.press(.{ .codepoint = vaxis.Key.enter });
     try std.testing.expectEqualStrings("/requests", self.input.queuedCommand().?);
     try std.testing.expectEqualStrings("/effort low", self.input.composition().bytes);
-    try std.testing.expect(ChromeFixture.find(&try fixture.rows(), "! Command still running. Draft retained.") != null);
+    try std.testing.expect(ChromeFixture.findEnding(&try fixture.rows(), "! Command still running. Draft retained.") != null);
     const original = self.input.submitText("original model input");
     self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty, .intent = .{ .message = original }, .state = .rejected, .key = @splat('K') };
     defer self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty };
@@ -6001,14 +6186,14 @@ test "App Session notice goes after five seconds or at the next key" {
     const self = fixture.self;
     self.shown_notice.show("Copied 12 lines", ChromeFixture.now() - 4_000);
     _ = try fixture.draw();
-    try std.testing.expectEqualStrings("Copied 12 lines", self.chrome.status.bar.left);
+    try std.testing.expectEqualStrings("Copied 12 lines", self.chrome.status.bar.notice.?);
     self.shown_notice.show("Copied 12 lines", ChromeFixture.now() - 6_000);
     _ = try fixture.draw();
-    try std.testing.expectEqualStrings("", self.chrome.status.bar.left);
+    try std.testing.expect(self.chrome.status.bar.notice == null);
     self.shown_notice.show("Copied 12 lines", ChromeFixture.now());
     try fixture.press(.{ .codepoint = 'a', .text = "a" });
     _ = try fixture.draw();
-    try std.testing.expectEqualStrings("", self.chrome.status.bar.left);
+    try std.testing.expect(self.chrome.status.bar.notice == null);
 }
 
 test "App Session question mark encodings append ordinary text to empty and nonempty drafts" {
@@ -6063,17 +6248,17 @@ test "App Session drag-copy notices follow the notice rule" {
     const handler = self.app_content.handler.?;
     try handler.on_notice(handler.userdata, &fixture.ctx, "Copied 3 lines");
     _ = try fixture.draw();
-    try std.testing.expectEqualStrings("Copied 3 lines", self.chrome.status.bar.left);
+    try std.testing.expectEqualStrings("Copied 3 lines", self.chrome.status.bar.notice.?);
     try std.testing.expect(self.shown_notice.expire(ChromeFixture.now() + 5_000));
     _ = try fixture.draw();
-    try std.testing.expectEqualStrings("", self.chrome.status.bar.left);
+    try std.testing.expect(self.chrome.status.bar.notice == null);
 }
 
 test "App Session keeps its real draft browsing anchor and focused composer across the split threshold" {
     var fixture: ChromeFixture = undefined;
     try fixture.init();
     defer fixture.deinit();
-    try fixture.root.openSession(&fixture.ctx, fixture.widget);
+    try fixture.root.openSession(&fixture.ctx, fixture.widget, fixture.self.keyOwner());
     const draw: vxfw.DrawContext = .{ .arena = fixture.arena.allocator(), .min = .{}, .max = .{ .width = 140, .height = 26 }, .cell_size = .{} };
     _ = try fixture.root.widget().draw(draw);
     try fixture.press(.{ .codepoint = vaxis.Key.up, .mods = .{ .shift = true } });
@@ -6108,6 +6293,7 @@ test "App Session footer takes list visibility from Root across desktop and phon
     try fixture.init();
     defer fixture.deinit();
     fixture.root.session = fixture.widget;
+    fixture.root.session_keys = fixture.self.keyOwner();
     for ([_]struct { width: u16, list: bool }{
         .{ .width = 140, .list = true },
         .{ .width = 46, .list = false },
@@ -6123,11 +6309,11 @@ test "App Session footer takes list visibility from Root across desktop and phon
         surface.render(window, fixture.self.app_input.composer.widget());
         const chat_col: u16 = if (case.list) Root.list_width + 1 else 0;
         var row: std.Io.Writer.Allocating = .init(arena);
-        for (chat_col..case.width) |col| try row.writer.writeAll(screen.readCell(@intCast(col), 28).?.char.grapheme);
+        for (chat_col..case.width) |col| try row.writer.writeAll(screen.readCell(@intCast(col), 29).?.char.grapheme);
         try std.testing.expectEqual(@as(usize, if (case.list) 0 else 1), std.mem.count(u8, row.written(), "‹"));
         try std.testing.expect(std.mem.indexOf(u8, row.written(), "k7m2qx") != null);
-        try std.testing.expectEqualStrings("─", screen.readCell(chat_col, 27).?.char.grapheme);
-        for (chat_col..case.width) |col| try std.testing.expectEqualStrings(" ", screen.readCell(@intCast(col), 29).?.char.grapheme);
+        try std.testing.expectEqualStrings("─", screen.readCell(chat_col, 28).?.char.grapheme);
+        try std.testing.expect(std.mem.trim(u8, row.written(), " ").len != 0);
     }
 }
 
@@ -6359,7 +6545,8 @@ test "SessionFrontend feed jump after high eviction keeps old rows until the ope
     try std.testing.expect(held.self.reading.opening);
     try std.testing.expectEqualDeep(anchor, held.screen.anchor.anchor);
     try std.testing.expectEqual(feed_reads.Read.opening, FeedPolicy.nextRead(held.self.feedState()).?);
-    try std.testing.expectEqualStrings(firstRows(old, held.screen.height), firstRows(try held.shown(), held.screen.height));
+    const opening = try held.shown();
+    try std.testing.expectEqualStrings(firstRows(old, held.screen.height), firstRows(opening, held.screen.height));
     try fixture.longPage(.opening, 300);
     try std.testing.expect(held.screen.anchor.following());
     try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "entry 315 line 7") != null);
@@ -6938,7 +7125,7 @@ test "failed reply retry completion revalidates every submission hold" {
             .upgrade => held.upgrade = .{ .after = .blocked },
             .working => self.live.work.state = .{ .working = .{ .since = 2 } },
             .queued => self.live.queued.count = 1,
-            .host => self.app_hooks.host = .{ .context = self, .held = Host.held, .lost = Host.lost, .start = Host.start, .notice = Host.notice },
+            .host => self.app_hooks.host = .{ .context = self, .held = Host.held, .lost = Host.lost, .startable = TestHost.never, .start = Host.start, .notice = Host.notice },
         }
         try self.settleReader();
         try std.testing.expect(self.retryable() == null);
@@ -7343,16 +7530,16 @@ test "SessionFrontend history physical feed geometry" {
     try fixture.page(.opening, &.{.{ .key = 1, .text = words.buffered() }}, true, true);
     // Every feed row sits one column in: the shell owns that gutter.
     const initial = try held.shown();
-    try std.testing.expectEqual(@as(u16, 18), held.screen.height);
+    try std.testing.expectEqual(@as(u16, 19), held.screen.height);
     var initial_rows = std.mem.splitScalar(u8, initial, '\n');
-    for (83..100) |line| {
+    for (82..100) |line| {
         var expected: [32]u8 = undefined;
         try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, " History line{d:0>3}", .{line}), std.mem.trimEnd(u8, initial_rows.next().?, " "));
     }
     try std.testing.expectEqualStrings(" TD4 history end", std.mem.trimEnd(u8, initial_rows.next().?, " "));
     try held.keys("\x1b[5~");
     var older_rows = std.mem.splitScalar(u8, try held.shown(), '\n');
-    for (74..92) |line| {
+    for (73..92) |line| {
         var expected: [32]u8 = undefined;
         try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, " History line{d:0>3}", .{line}), std.mem.trimEnd(u8, older_rows.next().?, " "));
     }
@@ -7692,7 +7879,7 @@ test "failed reply retry reader keeps every read failure at the shared settlemen
             self.failedRetryForTest();
             self.live.latest_ending.?.key = .{ .position = 3 };
             var host: Host = .{ .frontend = self, .listener = &listener, .fault = fault, .target = target };
-            if (app) self.app_hooks.host = .{ .context = &host, .held = Host.held, .lost = Host.lost, .start = Host.start, .notice = Host.notice };
+            if (app) self.app_hooks.host = .{ .context = &host, .held = Host.held, .lost = Host.lost, .startable = TestHost.always, .start = Host.start, .notice = Host.notice };
             defer self.app_hooks.host = null;
             defer {
                 self.reader.cancel();
@@ -8348,7 +8535,7 @@ test "chat info Configure and Copy admission either owns work or refuses before 
         try captureInfo(held, "Fix retry deadline");
         switch (hold) {
             .none => {},
-            .host => self.app_hooks.host = .{ .context = held, .held = Host.held, .lost = Host.lost, .start = Host.start, .notice = Host.notice },
+            .host => self.app_hooks.host = .{ .context = held, .held = Host.held, .lost = Host.lost, .startable = TestHost.always, .start = Host.start, .notice = Host.notice },
             .upgrade_running => held.upgrade = .{ .run = .checking },
             .upgrade_blocked => held.upgrade = .{ .after = .blocked },
             .upgrade_reobserving => held.upgrade = .{ .after = .reobserving },
@@ -8438,14 +8625,19 @@ test "chat info typed configure completion never parses a slash line and retains
     }
 }
 
-test "chat info retains Session detach keys with every topmost choice and preserves the hidden draft" {
-    for ([_][]const u8{ "\x03", "\x04", "\x1b[99;5u", "\x1b[100;5u" }) |bytes| for (0..4) |choice| {
+test "chat info retains Session detach keys with full-page and standalone choices and preserves the hidden draft" {
+    for ([_][]const u8{ "\x03", "\x04", "\x1b[99;5u", "\x1b[100;5u" }) |bytes| for (0..6) |choice| {
         const held = try HeldFrontend.create();
         defer held.destroy();
         try captureInfo(held, "Fix retry deadline");
-        try held.keys("kept draft\x1bi");
+        try held.keys("kept draft");
+        if (choice >= 4) {
+            var ctx = held.context();
+            try held.self.footerClick(&ctx, if (choice == 4) .effort else .model);
+            try std.testing.expect(held.self.app_info.standaloneOpen());
+        } else try held.keys("\x1bi");
         _ = try held.draw();
-        if (choice != 0) {
+        if (choice != 0 and choice < 4) {
             held.self.app_info.panel.selected = switch (choice) {
                 1 => 0,
                 2 => 4,
@@ -8461,8 +8653,8 @@ test "chat info retains Session detach keys with every topmost choice and preser
     };
 }
 
-test "chat info retains Session stop and archive bindings without closing the topmost choice" {
-    for ([_][]const u8{ "\x18", "\x1ba" }) |bytes| {
+test "chat info retains Session stop and archive bindings in full-page and standalone choices" {
+    for ([_][]const u8{ "\x18", "\x1ba" }) |bytes| for ([_]bool{ false, true }) |standalone| {
         const held = try HeldFrontend.createWithDrafts("k7m2qx", null);
         defer held.destroy();
         var overview: ArchiveOverview = .{ .state = undefined };
@@ -8471,15 +8663,23 @@ test "chat info retains Session stop and archive bindings without closing the to
         held.self.lender = overview.lender();
         held.self.live.work.state = .{ .working = .{ .since = 1 } };
         try captureInfo(held, "Fix retry deadline");
-        try held.keys("kept draft\x1bi");
-        _ = try held.draw();
-        try held.keys("\r");
+        try held.keys("kept draft");
+        if (standalone) {
+            var ctx = held.context();
+            try held.self.footerClick(&ctx, .effort);
+            // Text and marked paste belong to this modal owner, not the draft.
+            try held.keys("ignored\x1b[200~paste\t\r\x1b[201~");
+        } else {
+            try held.keys("\x1bi");
+            _ = try held.draw();
+            try held.keys("\r");
+        }
         try held.keys(bytes);
         try std.testing.expectEqual(@as(usize, 1), overview.stops + overview.archives);
-        try std.testing.expect(held.self.info_open and held.self.app_info.hasChoice());
+        try std.testing.expect((held.self.info_open or held.self.app_info.standaloneOpen()) and held.self.app_info.hasChoice());
         try std.testing.expectEqualStrings("kept draft", held.self.input.composition().bytes);
         try std.testing.expect(held.self.submission.intent == null);
-    }
+    };
 }
 
 test "chat info typed configure supersedes every cancellable read without making cancellation fatal" {
@@ -8730,6 +8930,7 @@ test "chat info supplies the one bottom footer after the input and both dividers
         held.size = .{ .width = size.width, .height = size.height };
         held.root.size = size;
         held.root.session = held.self.widget();
+        held.root.session_keys = held.self.keyOwner();
         try captureInfo(held, "Fix retry deadline");
         try held.keys("kept draft\x1bi");
         _ = try held.draw();
@@ -8833,7 +9034,7 @@ test "App Session palette refuses clicks on stale drafts closed lists and during
     const widget_ = held.self.app_palette.widget();
     var events = held.context();
     const click: vxfw.Event = .{ .mouse = .{ .col = 2, .row = 0, .button = .left, .type = .press, .mods = .{} } };
-    try held.keys("el"); // The drawn /reload-skills row is not the new /relame row.
+    try held.keys("el"); // The drawn /r row is stale after the draft becomes /rel.
     try widget_.handleEvent(&events, click);
     try std.testing.expectEqualStrings("/rel", held.self.input.composition().bytes);
     // A key that acts on `/rel`'s list before a frame draws it does not make
@@ -8843,10 +9044,13 @@ test "App Session palette refuses clicks on stale drafts closed lists and during
     try std.testing.expectEqualStrings("/rel", held.self.input.composition().bytes);
     try std.testing.expectEqual(null, held.self.input.queuedCommand());
     _ = try held.draw();
-    held.root.pasting = true;
-    try widget_.handleEvent(&events, click);
+    // Inside a paste Root takes the click before the palette sees it.
+    held.root.input.pasting = true;
+    events.consume_event = false;
+    try held.root.widget().captureEvent(&events, click);
+    try std.testing.expect(events.consume_event);
     try std.testing.expectEqualStrings("/rel", held.self.input.composition().bytes);
-    held.root.pasting = false;
+    held.root.input.pasting = false;
     held.self.app_consent.adopt(41);
     try widget_.handleEvent(&events, click);
     try std.testing.expectEqualStrings("/rel", held.self.input.composition().bytes);
@@ -8939,16 +9143,543 @@ test "new and clear navigate without sending or changing the old chat and reject
     }
 }
 
-test "empty chat footer derives model effort and Folder from Current at both widths" {
-    const held = try HeldFrontend.createWithDrafts("n3w5es", null);
-    defer held.destroy();
-    held.self.line = .{ .read = .{ .revision = 1, .end = 0 }, .effort = .low };
-    try held.self.line.model.set("gpt-5.5");
-    try held.self.line.folder.set("project");
-    for ([_]u16{ 46, 140 }) |width| {
-        held.size = .{ .width = width, .height = 30 };
-        const text = try held.shown();
-        try std.testing.expect(std.mem.indexOf(u8, text, "gpt-5.5 · low · project") != null);
-        try std.testing.expect(std.mem.indexOf(u8, text, "n3w5es") == null);
+test "chat footer navigation opens existing standalone choices and preserves draft cursor and paste" {
+    for ([_]?model_capability.ReasoningEffort{ null, .high }) |effort| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const self = &held.self;
+        try captureInfo(held, "Chat");
+        self.line.read = .{ .revision = 1, .end = 1 };
+        try self.line.model.set("gpt-5.5");
+        self.line.effort = effort;
+        try held.keys("kept draft\x1b[D\x1b[D");
+        const cursor = self.input.composition().cursor;
+        try held.keys("\t");
+        try std.testing.expectEqual(session_chrome.FooterFocus.model, self.footer.focus);
+        try std.testing.expectEqualStrings("kept draft", self.input.composition().bytes);
+        try std.testing.expectEqual(cursor, self.input.composition().cursor);
+        try held.keys("\x1b[Z");
+        try std.testing.expectEqual(session_chrome.FooterFocus.input, self.footer.focus);
+        try held.keys("\x1b[Z");
+        try std.testing.expectEqual(if (effort != null) session_chrome.FooterFocus.effort else .model, self.footer.focus);
+        try held.keys("\x07");
+        try std.testing.expectEqual(session_chrome.FooterFocus.input, self.footer.focus);
+        try std.testing.expect(held.left == null);
+        try held.keys("\t\r");
+        try std.testing.expect(!self.info_open and self.app_info.standaloneOpen() and self.app_info.model_choice.active);
+        try std.testing.expectEqualStrings("kept draft", self.input.composition().bytes);
+        try held.keys("\x07");
+        try std.testing.expect(!self.app_info.standaloneOpen());
+        try std.testing.expectEqual(cursor, self.input.composition().cursor);
+        if (effort != null) {
+            try held.keys("\t\t\r");
+            try std.testing.expect(self.app_info.standaloneOpen() and self.app_info.panel.choice != null);
+            try std.testing.expectEqual(@as(usize, 0), self.app_info.panel.choice.?.field);
+            try held.keys("\x07");
+        }
+        // Printable input leaves the focused button and is edited exactly once.
+        try held.keys("\t!");
+        try std.testing.expectEqual(session_chrome.FooterFocus.input, self.footer.focus);
+        try std.testing.expectEqualStrings("kept dra!ft", self.input.composition().bytes);
+        // Marked paste keeps literal tabs instead of navigating the footer.
+        try held.keys("\t\x1b[200~\t\x1b[201~");
+        try std.testing.expectEqual(session_chrome.FooterFocus.input, self.footer.focus);
+        try std.testing.expectEqualStrings("kept dra!\tft", self.input.composition().bytes);
     }
+}
+
+test "chat footer drawn model and effort clicks configure only this Session after confirmation" {
+    inline for ([_]session_chrome.FooterField{ .model, .effort }) |field| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const self = &held.self;
+        try captureInfo(held, "Chat");
+        self.line.read = .{ .revision = 1, .end = 1 };
+        try self.line.model.set("gpt-5.5");
+        self.line.effort = .high;
+        self.inspection.sessions[self.inspection.status.?].effort_override = true;
+        try held.keys("draft\x1b[D");
+        const cursor = self.input.composition().cursor;
+        var ctx = held.context();
+        try chromeClick(.{ .footer = field })(self, &ctx);
+        try std.testing.expect(self.app_info.standaloneOpen() and !self.info_open);
+        try std.testing.expectEqualStrings("draft", self.input.composition().bytes);
+        try std.testing.expectEqual(cursor, self.input.composition().cursor);
+        try std.testing.expect(self.info_edit == null);
+        if (field == .model) {
+            try std.testing.expect(self.app_info.model_choice.active);
+            try held.keys("gpt-5.5\r");
+            try std.testing.expectEqualStrings("gpt-5.5", self.info_edit.?.model);
+        } else {
+            try held.keys("\x1b[A\r");
+            try std.testing.expectEqual(ChatInfo.Edit{ .effort = .medium }, self.info_edit.?);
+        }
+        try std.testing.expectEqual(.configure, self.info_effect);
+        try std.testing.expect(!self.app_info.standaloneOpen());
+        try std.testing.expectEqualStrings("gpt-5.5", self.footerFacts().?.model);
+        try std.testing.expectEqual(model_capability.ReasoningEffort.high, self.footerFacts().?.effort.?);
+        // The existing owner retains the field and reports a failed save.
+        self.info_effect = .failed;
+        try self.app_info.widget().handleEvent(&ctx, .tick);
+        try std.testing.expect(self.app_info.standaloneOpen());
+        try std.testing.expect(self.app_info.failures[if (field == .model) @as(usize, 4) else 0] != null);
+        try held.keys("\x07");
+        try std.testing.expect(!self.app_info.standaloneOpen());
+        try std.testing.expectEqualStrings("draft", self.input.composition().bytes);
+        try std.testing.expectEqual(cursor, self.input.composition().cursor);
+    }
+}
+
+test "chat footer facts use current Session permission and applied default or explicit effort at both widths" {
+    for ([_]u16{ 140, 46 }) |width| for ([_]bool{ false, true }) |explicit| for ([_]bool{ false, true }) |ask| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const self = &held.self;
+        try captureInfo(held, "Chat");
+        const inspected = &self.inspection.sessions[self.inspection.status.?];
+        inspected.effort = if (explicit) .low else .high;
+        inspected.effort_override = explicit;
+        inspected.permission = if (ask) .bypass else .ask;
+        self.line.read = .{ .revision = 1, .end = 1 };
+        try self.line.model.set("model");
+        self.line.label = .{ .len = 0 };
+        try self.line.label.?.set("Chat");
+        self.line.effort = inspected.effort;
+        self.line.left = 62;
+        self.line.asks = ask; // An older info inspection cannot override the current read.
+        var buffer: [session_chrome.facts_bytes]u8 = undefined;
+        const text = session_chrome.factsRow(&buffer, self.footerFacts(), "ref", null, width, .unicode);
+        const want = if (explicit) (if (ask) "Chat · model · low · 62% left · ask" else "Chat · model · low · 62% left") else (if (ask) "Chat · model · high · 62% left · ask" else "Chat · model · high · 62% left");
+        try std.testing.expectEqualStrings(want, text);
+    };
+}
+
+test "chat footer pending save retains the original choice owner when another word is clicked" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    try captureInfo(held, "Chat");
+    var ctx = held.context();
+    try chromeClick(.{ .footer = .effort })(self, &ctx);
+    try std.testing.expect(self.app_info.standaloneOpen());
+    try held.keys("\x1b[B\r");
+    try std.testing.expectEqual(@as(?usize, 0), self.app_info.pending);
+    try std.testing.expectEqual(@as(?ChatInfo.Row, .effort), self.app_info.standaloneField());
+    const edit = self.info_edit.?;
+    try chromeClick(.{ .footer = .model })(self, &ctx);
+    try std.testing.expectEqual(@as(?usize, 0), self.app_info.pending);
+    try std.testing.expectEqual(@as(?ChatInfo.Row, .effort), self.app_info.standaloneField());
+    try std.testing.expectEqualDeep(edit, self.info_edit.?);
+    self.info_effect = .failed;
+    try self.app_info.widget().handleEvent(&ctx, .tick);
+    try std.testing.expect(self.app_info.standaloneOpen());
+    try std.testing.expect(self.app_info.failures[0] != null);
+    try std.testing.expect(self.app_info.failures[4] == null);
+}
+
+test "chat footer unread choice waits for the existing status read and Escape leaves draft intact" {
+    for ([_]bool{ false, true }) |cancel| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const self = &held.self;
+        try held.keys("kept draft\x1b[D");
+        const cursor = self.input.composition().cursor;
+        var ctx = held.context();
+        try chromeClick(.{ .footer = .effort })(self, &ctx);
+        try std.testing.expectEqual(@as(?session_chrome.FooterField, .effort), self.footer.pending);
+        try std.testing.expect(self.inspection.status_requested and !self.info_open);
+        try std.testing.expect(!self.app_info.standaloneOpen());
+        if (cancel) try held.keys("\x07");
+        try captureInfo(held, "Chat");
+        try self.openFooterChoice(&ctx);
+        try std.testing.expectEqual(!cancel, self.app_info.standaloneOpen());
+        try std.testing.expectEqual(@as(?session_chrome.FooterField, null), self.footer.pending);
+        try std.testing.expectEqualStrings("kept draft", self.input.composition().bytes);
+        try std.testing.expectEqual(cursor, self.input.composition().cursor);
+        try std.testing.expect(held.left == null);
+    }
+}
+
+test "chat footer model waits for the borrowed source readiness and Escape cancels the deferred choice" {
+    const Source = struct {
+        ready: bool = false,
+        fn snapshot(raw: *anyopaque) ModelChoice.Snapshot {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            return .{ .ready = self.ready, .revision = 1 };
+        }
+    };
+    for ([_]bool{ false, true }) |cancel| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const self = &held.self;
+        try captureInfo(held, "Chat");
+        try held.keys("draft\x1b[D");
+        const cursor = self.input.composition().cursor;
+        var source: Source = .{};
+        self.lender = quiet_overview;
+        self.lender.context = &source;
+        self.lender.models = Source.snapshot;
+        var ctx = held.context();
+        try chromeClick(.{ .footer = .model })(self, &ctx);
+        try std.testing.expectEqual(@as(?session_chrome.FooterField, .model), self.footer.pending);
+        try std.testing.expect(!self.app_info.standaloneOpen() and !self.app_info.model_choice.active);
+        if (cancel) try held.keys("\x07");
+        source.ready = true;
+        try self.openFooterChoice(&ctx);
+        try std.testing.expectEqual(!cancel, self.app_info.standaloneOpen());
+        try std.testing.expectEqual(!cancel, self.app_info.model_choice.active);
+        try std.testing.expectEqual(@as(?session_chrome.FooterField, null), self.footer.pending);
+        try std.testing.expectEqual(session_chrome.FooterFocus.input, self.footer.focus);
+        try std.testing.expectEqualStrings("draft", self.input.composition().bytes);
+        try std.testing.expectEqual(cursor, self.input.composition().cursor);
+    }
+    // Effort does not borrow the model menu and need not wait for that read.
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    try captureInfo(held, "Chat");
+    var source: Source = .{};
+    held.self.lender = quiet_overview;
+    held.self.lender.context = &source;
+    held.self.lender.models = Source.snapshot;
+    var ctx = held.context();
+    try chromeClick(.{ .footer = .effort })(&held.self, &ctx);
+    try std.testing.expect(held.self.app_info.standaloneOpen());
+    try std.testing.expectEqual(@as(?session_chrome.FooterField, null), held.self.footer.pending);
+}
+
+test "chat footer enter pick hint clicks the existing choice without opening Chat Info" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    try captureInfo(held, "Chat");
+    try held.keys("draft\x1b[D");
+    const cursor = self.input.composition().cursor;
+    var ctx = held.context();
+    try chromeClick(.{ .footer = .effort })(self, &ctx);
+    const low = for (self.app_info.panel.choice.?.labels, 0..) |label, index| {
+        if (std.mem.eql(u8, label, "low")) break index;
+    } else return error.TestExpectedLowChoice;
+    for (0..self.app_info.panel.choice.?.labels.len) |_| {
+        const selected = self.app_info.panel.choice.?.selected;
+        if (selected == low) break;
+        try held.keys(if (selected < low) "\x1b[B" else "\x1b[A");
+    }
+    try std.testing.expectEqual(low, self.app_info.panel.choice.?.selected);
+    try chromeClick(.footer_pick)(self, &ctx);
+    try std.testing.expectEqual(ChatInfo.Edit{ .effort = .low }, self.info_edit.?);
+    try std.testing.expectEqual(.configure, self.info_effect);
+    try std.testing.expect(!self.info_open and !self.app_info.standaloneOpen());
+    try std.testing.expectEqualStrings("draft", self.input.composition().bytes);
+    try std.testing.expectEqual(cursor, self.input.composition().cursor);
+    // A stale drawn hint never opens another page or sends a second edit.
+    try chromeClick(.footer_pick)(self, &ctx);
+    try std.testing.expect(!self.info_open);
+    try std.testing.expectEqual(ChatInfo.Edit{ .effort = .low }, self.info_edit.?);
+}
+
+test "chat footer deferred model choice is cancelled by text paste tab or background click without losing input" {
+    const Source = struct {
+        ready: bool = false,
+        fn snapshot(raw: *anyopaque) ModelChoice.Snapshot {
+            return .{ .ready = @as(*@This(), @ptrCast(@alignCast(raw))).ready };
+        }
+    };
+    for (0..4) |interaction| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const self = &held.self;
+        try captureInfo(held, "Chat");
+        try held.keys("draft");
+        var source: Source = .{};
+        self.lender = quiet_overview;
+        self.lender.context = &source;
+        self.lender.models = Source.snapshot;
+        var ctx = held.context();
+        try self.footerClick(&ctx, .model);
+        try std.testing.expectEqual(@as(?session_chrome.FooterField, .model), self.footer.pending);
+        switch (interaction) {
+            0 => try held.keys("!"),
+            1 => try held.keys("\x1b[200~!\t\x1b[201~"),
+            2 => try held.keys("\t"),
+            else => try self.widget().captureEvent(&ctx, .{ .mouse = .{ .row = 0, .col = 0, .button = .left, .type = .press, .mods = .{} } }),
+        }
+        try std.testing.expectEqual(@as(?session_chrome.FooterField, null), self.footer.pending);
+        source.ready = true;
+        try self.openFooterChoice(&ctx);
+        try std.testing.expect(!self.app_info.standaloneOpen());
+        try std.testing.expectEqualStrings(switch (interaction) {
+            0 => "draft!",
+            1 => "draft!\t",
+            else => "draft",
+        }, self.input.composition().bytes);
+        try std.testing.expectEqual(if (interaction == 2) session_chrome.FooterFocus.model else .input, self.footer.focus);
+    }
+}
+
+test "chat footer permission transitions follow the current line with absent current or stale inspection" {
+    const InspectionState = enum { absent, current, stale };
+    for ([_]bool{ true, false }) |before| for (std.enums.values(InspectionState)) |inspection| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const self = &held.self;
+        if (inspection != .absent) {
+            try captureInfo(held, "Cached name");
+            const cached = &self.inspection.sessions[self.inspection.status.?];
+            cached.permission = if (before) .ask else .bypass;
+            try cached.model.set("cached-model");
+            cached.effort = .high;
+        }
+        self.line.read = .{ .revision = 1, .end = 1 };
+        self.line.label = .{ .len = 0 };
+        try self.line.label.?.set("Chat");
+        try self.line.model.set("model");
+        self.line.effort = .low;
+        self.line.left = 62;
+        for ([_]bool{ before, !before }) |ask| {
+            self.line.read.?.revision += 1;
+            self.line.asks = ask;
+            if (inspection == .current) self.inspection.sessions[self.inspection.status.?].permission = if (ask) .ask else .bypass;
+            const facts = self.footerFacts().?;
+            try std.testing.expectEqual(ask, facts.asks);
+            // Other identity facts also stay with the current line, even
+            // when the info panel keeps visibly different cached values.
+            try std.testing.expectEqualStrings("Chat", facts.name);
+            try std.testing.expectEqualStrings("model", facts.model);
+            try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, .low), facts.effort);
+            try std.testing.expectEqual(@as(?u8, 62), facts.left);
+            for ([_]u16{ 140, 46 }) |width| {
+                var buffer: [session_chrome.facts_bytes]u8 = undefined;
+                const text = session_chrome.factsRow(&buffer, facts, "ref", null, width, .unicode);
+                try std.testing.expectEqualStrings(if (ask) "Chat · model · low · 62% left · ask" else "Chat · model · low · 62% left", text);
+            }
+        }
+        // Missing current facts must not resurrect a cached ask value.
+        self.line.read = null;
+        if (self.inspection.status) |index| self.inspection.sessions[index].permission = .ask;
+        try std.testing.expect(self.footerFacts() == null);
+        for ([_]u16{ 140, 46 }) |width| {
+            var buffer: [session_chrome.facts_bytes]u8 = undefined;
+            try std.testing.expectEqualStrings("ref", session_chrome.factsRow(&buffer, self.footerFacts(), "ref", null, width, .unicode));
+        }
+        // Focus stops use the same current effort, not the cached choice's.
+        var ctx = held.context();
+        defer ctx.cmds.deinit(std.testing.allocator);
+        self.footer.focus = .model;
+        try held.keys("\t");
+        try std.testing.expectEqual(session_chrome.FooterFocus.input, self.footer.focus);
+        self.line.read = .{ .revision = 4, .end = 1 };
+        if (self.inspection.status) |index| self.inspection.sessions[index].effort = null;
+        self.footer.focus = .model;
+        try held.keys("\t");
+        try std.testing.expectEqual(session_chrome.FooterFocus.effort, self.footer.focus);
+    };
+}
+
+test "chat standalone footer close clicks match Escape preserve paste and preserve admitted saves" {
+    const Rejected = struct {
+        fn configure(_: *anyopaque, _: ChatInfo.Edit) !void {
+            return error.AccessDenied;
+        }
+    };
+    for ([_]u16{ 140, 46 }) |width| for ([_]ChatInfo.Row{ .model, .effort }) |row| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const self = &held.self;
+        try captureInfo(held, "Chat");
+        held.size = .{ .width = width, .height = 40 };
+        try held.keys("kept draft\x1b[D");
+        const cursor = self.input.composition().cursor;
+        var ctx = held.context();
+        for ([_]bool{ false, true }) |failed| {
+            try self.app_info.openStandaloneChoice(&ctx, row);
+            if (failed) {
+                const configure = self.app_info.backend.configure;
+                self.app_info.backend.configure = Rejected.configure;
+                try self.app_info.standaloneWidget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
+                self.app_info.backend.configure = configure;
+            }
+            _ = try held.draw();
+            const footer = try self.app_input.facts.draw(.{ .arena = held.arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 1 }, .cell_size = .{} });
+            const close = for (footer.children) |child| {
+                if (child.surface.widget.eql(self.chrome.close.widget())) break child;
+            } else return error.TestExpectedCloseTarget;
+            try std.testing.expectEqual(@as(u16, 9), close.surface.size.width);
+            try std.testing.expect(close.origin.col + close.surface.size.width <= width);
+            var text: std.Io.Writer.Allocating = .init(held.arena.allocator());
+            for (footer.buffer) |cell| try text.writer.writeAll(cell.char.grapheme);
+            try std.testing.expect(std.mem.endsWith(u8, text.written(), if (failed) "enter retry · esc close" else "enter pick · esc close"));
+            // Inside a paste Root takes the click before the footer sees it.
+            self.app_hooks.root.input.pasting = true;
+            for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| {
+                ctx.consume_event = false;
+                try held.root.widget().captureEvent(&ctx, .{ .mouse = .{ .row = 0, .col = @intCast(close.origin.col), .button = .left, .mods = .{}, .type = kind } });
+                try std.testing.expect(ctx.consume_event);
+            }
+            try std.testing.expect(self.app_info.standaloneOpen());
+            self.app_hooks.root.input.pasting = false;
+            for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| try @import("testing/app_events.zig").mouse(&ctx, footer, .{ .row = 0, .col = @intCast(close.origin.col), .button = .left, .mods = .{}, .type = kind });
+            try std.testing.expect(!self.app_info.standaloneOpen() and !self.info_open);
+            try std.testing.expectEqual(session_chrome.FooterFocus.input, self.footer.focus);
+            try std.testing.expectEqualStrings("kept draft", self.input.composition().bytes);
+            try std.testing.expectEqual(cursor, self.input.composition().cursor);
+            try std.testing.expect(self.info_edit == null);
+            try self.app_info.openStandaloneChoice(&ctx, row);
+            try held.keys("\x07");
+            try std.testing.expect(!self.app_info.standaloneOpen());
+        }
+        try self.app_info.openStandaloneChoice(&ctx, row);
+        _ = try held.draw();
+        const stale_footer = try self.app_input.facts.draw(.{ .arena = held.arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 1 }, .cell_size = .{} });
+        const close = for (stale_footer.children) |child| {
+            if (child.surface.widget.eql(self.chrome.close.widget())) break child;
+        } else return error.TestExpectedCloseTarget;
+        const pick = for (stale_footer.children) |child| {
+            if (child.surface.widget.eql(self.chrome.pick.widget())) break child;
+        } else return error.TestExpectedPickTarget;
+        for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| try @import("testing/app_events.zig").mouse(&ctx, stale_footer, .{ .row = 0, .col = @intCast(pick.origin.col), .button = .left, .mods = .{}, .type = kind });
+        try std.testing.expect(!self.app_info.standaloneOpen());
+        const pending = self.app_info.pending;
+        try std.testing.expect(pending != null);
+        for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| try @import("testing/app_events.zig").mouse(&ctx, stale_footer, .{ .row = 0, .col = @intCast(close.origin.col), .button = .left, .mods = .{}, .type = kind });
+        try std.testing.expect(self.app_info.standaloneField() == null);
+        try std.testing.expectEqual(pending, self.app_info.pending);
+        try std.testing.expectEqualStrings("kept draft", self.input.composition().bytes);
+        try std.testing.expectEqual(cursor, self.input.composition().cursor);
+    };
+}
+
+test "chat standalone lifetime shared domain closes every phase through real screen endings" {
+    const Cases = session_chrome.StandaloneCases;
+    const Fault = struct {
+        fn read(_: *anyopaque, _: *status_page.Session) !void {
+            return error.AccessDenied;
+        }
+        fn configure(_: *anyopaque, _: ChatInfo.Edit) !void {
+            return error.AccessDenied;
+        }
+        fn close(raw: *anyopaque) void {
+            const self: *Self = @ptrCast(@alignCast(raw));
+            self.closePresentation();
+        }
+    };
+    for (Cases.all) |case| {
+        if (case.screen != .chat) continue;
+        errdefer std.debug.print("Chat lifecycle {s}/{s}/{s}\n", .{ @tagName(case.field), @tagName(case.phase), @tagName(case.ending) });
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const self = &held.self;
+        try captureInfo(held, "Chat");
+        self.app_hooks.root.main_presentation = .{ .context = self, .close = Fault.close };
+        try held.keys("kept draft");
+        const cursor = self.input.composition().cursor;
+        const row: ChatInfo.Row = if (case.field == .model) .model else .effort;
+        var ctx = held.context();
+        if (case.phase == .read_failed) self.app_info.backend.read = Fault.read;
+        if (case.phase == .save_failed) self.app_info.backend.configure = Fault.configure;
+        try self.app_info.openStandaloneChoice(&ctx, row);
+        _ = try held.draw();
+        const footer = try self.app_input.facts.draw(.{ .arena = held.arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 1 }, .cell_size = .{} });
+        const close = for (footer.children) |child| {
+            if (child.surface.widget.eql(self.chrome.close.widget())) break child;
+        } else return error.TestExpectedCloseTarget;
+        if (case.phase == .pending or case.phase == .save_failed) try self.app_info.standaloneWidget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
+        try std.testing.expectEqual(@as(?ChatInfo.Row, row), self.app_info.standaloneField());
+        try std.testing.expectEqual(case.phase == .pending, self.app_info.pending != null);
+        try std.testing.expectEqual(case.phase != .pending, self.app_info.standaloneOpen());
+        switch (case.ending) {
+            .escape => try held.keys("\x1b"),
+            .close_click => for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| try @import("testing/app_events.zig").mouse(&ctx, footer, .{ .row = 0, .col = @intCast(close.origin.col), .button = .left, .mods = .{}, .type = kind }),
+            .navigate => {
+                try self.app_hooks.root.openSettings(&ctx);
+                try std.testing.expect(!self.app_info.standaloneOpen() and self.app_info.standaloneField() == null);
+                try self.app_hooks.root.showMain(&ctx);
+            },
+            .refresh => self.app_info.refresh(),
+        }
+        try std.testing.expect(!self.app_info.standaloneOpen());
+        try std.testing.expect(self.app_info.standaloneField() == null);
+        try std.testing.expectEqualStrings("kept draft", self.input.composition().bytes);
+        try std.testing.expectEqual(cursor, self.input.composition().cursor);
+        if (case.phase == .pending) {
+            try std.testing.expect(self.app_info.pending != null);
+            self.info_effect = .failed;
+            try self.app_info.widget().handleEvent(&ctx, .tick);
+            try std.testing.expect(self.app_info.pending == null);
+            try std.testing.expect(!self.app_info.standaloneOpen() and self.app_info.standaloneField() == null);
+        }
+        try held.keys("!");
+        try std.testing.expectEqualStrings("kept draft!", self.input.composition().bytes);
+        try std.testing.expectEqual(cursor, self.input.composition().cursor - 1);
+    }
+}
+
+test "chat standalone accepted departure ends presentation before handing back an intact draft" {
+    for ([_]ChatInfo.Row{ .model, .effort }) |row| for ([_]bool{ false, true }) |pending| {
+        var drafts: session_drafts.Drafts = .{};
+        defer drafts.deinit(std.testing.allocator);
+        const held = try HeldFrontend.createWithDrafts("aaaaaa", &drafts);
+        defer held.destroy();
+        const self = &held.self;
+        try captureInfo(held, "Chat");
+        try held.keys("kept draft");
+        var ctx = held.context();
+        try self.app_info.openStandaloneChoice(&ctx, row);
+        if (pending) try self.app_info.standaloneWidget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
+        const admitted = self.app_info.pending;
+        try held.keys("\x03");
+        try std.testing.expectEqual(@as(?Outcome, .detached), held.left);
+        try std.testing.expect(self.app_info.standaloneField() == null);
+        try std.testing.expectEqual(admitted, self.app_info.pending);
+        try std.testing.expect(self.footer.pending == null);
+        try std.testing.expectEqualStrings("kept draft", self.input.composition().bytes);
+        const saved = drafts.take(std.testing.allocator, "aaaaaa").?;
+        defer saved.deinit(std.testing.allocator);
+        try std.testing.expectEqualStrings("kept draft", saved.snapshot.bytes);
+    };
+}
+
+test "empty chat footer folder comes from current line with frontend home" {
+    var self: Self = undefined;
+    self.home = "/home/u";
+    self.session = "ref";
+    self.hint = .absent;
+    self.line = .{ .read = .{ .revision = 1, .end = 0 } };
+    try self.line.model.set("gpt-6.1-sol");
+    self.line.effort = .low;
+    self.line.folder = .{};
+    try self.line.folder.?.set("/home/u/code/rui");
+    for ([_]usize{ 46, 140 }) |width| {
+        var buffer: [session_chrome.facts_bytes]u8 = undefined;
+        try std.testing.expectEqualStrings("gpt-6.1-sol · low · ~/code/rui", session_chrome.factsRow(&buffer, self.footerFacts(), "ref", null, width, .unicode));
+    }
+    self.line.folder = null;
+    try std.testing.expect(self.footerFacts().?.folder == null);
+    self.line.read = null;
+    try std.testing.expect(self.footerFacts() == null);
+}
+
+test "empty chat composer placeholder follows current no-message facts" {
+    var fixture: ChromeFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    fixture.self.line.read = .{ .revision = 1, .end = 0 };
+    fixture.self.line.folder = .{};
+    try fixture.self.line.folder.?.set("/work");
+    for ([_]u16{ 46, 140 }) |width| {
+        const ctx: vxfw.DrawContext = .{ .arena = fixture.arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 24 }, .cell_size = .{} };
+        _ = try fixture.widget.draw(ctx);
+        try std.testing.expectEqualStrings("Type a task", fixture.self.app_input.composer.placeholder);
+        const composer = try fixture.self.app_input.composer.widget().draw(ctx.withConstraints(.{}, .{ .width = width, .height = 3 }));
+        var text: std.ArrayList(u8) = .empty;
+        for (0..width) |col| try text.appendSlice(fixture.arena.allocator(), composer.readCell(col, 1).char.grapheme);
+        try std.testing.expect(std.mem.indexOf(u8, text.items, "Type a task") != null);
+        fixture.self.line.folder = null;
+        _ = try fixture.widget.draw(ctx);
+        try std.testing.expectEqualStrings("", fixture.self.app_input.composer.placeholder);
+        fixture.self.line.folder = .{};
+        try fixture.self.line.folder.?.set("/work");
+    }
+    fixture.self.line.read = null;
+    _ = try fixture.draw();
+    try std.testing.expectEqualStrings("", fixture.self.app_input.composer.placeholder);
 }

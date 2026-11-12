@@ -134,6 +134,16 @@ def leave(tty):
     tty.finish()
 
 
+def escaped_overview(tty, session):
+    """A standalone Esc returns to the list, never to another editor."""
+    tty.wait(lambda: all(marker in tty.screen.completed for marker in
+                         ("+ New Session", f"○ {session}", "Settings", "enter open")),
+             label="overview after expired standalone Esc")
+    assert "Type a task" not in tty.screen.completed, ("overview has an editor", tty.screen.completed)
+    assert not re.search(r"(?m)(?:^|│)\s*[›>](?: |$)", tty.screen.completed), \
+        ("overview has a composer", tty.screen.completed)
+
+
 def editor(fixture, row):
     fixture.answer("TD4 exact answer")
     tty = fixture.terminal()
@@ -142,11 +152,9 @@ def editor(fixture, row):
         # The expired standalone Esc leaves the chat, saving its draft. The
         # fixture creates exactly one Session, so Enter must reopen that row.
         # If Esc merged with a later byte, this overview observation must fail.
-        tty.marker("+ New Session")
-        tty.marker(f"○ {fixture.session}")
-        tty.marker("enter open")
+        escaped_overview(tty, fixture.session)
         tty.send(b"\r")
-        tty.marker(f"‹ {fixture.session} · ")
+        # Its unsent chat shows model facts, not the Session reference.
         tty.draft(row["reopen_draft"], 2 + len(row["reopen_draft"]))
         chunks(tty, row["submit_chunks"])
     # Each vector supplies its own submit byte(s). This makes wrong Enter,
@@ -204,14 +212,30 @@ def recovery(fixture, row):
     leave(tty)
 
 
-def assert_navigation_history(screen, first, browsing):
-    # 24 terminal rows minus the composer between its two rules, the
-    # facts, status and permanently reserved chip row leave 18 feed rows.
-    # At end the answer's last line takes one; away from end all 18 show
-    # numbered lines. Moving the anchor never switches documents or
-    # borrows the chip row. These literal anchors are fixture-owned.
-    count = 18 if browsing else 17
-    expected = [f"History line {number:03d}" for number in range(first, min(first + count, 100))]
+HISTORY_LINES = 100
+
+
+def navigation_rows(screen):
+    """Feed capacity from the composer boundary, not from visible history."""
+    lines = screen.splitlines()
+    prompts = [at for at, line in enumerate(lines) if re.match(r"\s*[›>]($|\s)", line)]
+    assert len(prompts) == 1, ("navigation composer", prompts)
+    top_rule = prompts[0] - 1
+    assert top_rule > 1 and set(lines[top_rule].strip()) in ({"─"}, {"-"}), ("navigation composer rule", lines)
+    # One permanently reserved marker row directly precedes the input.
+    return top_rule - 1
+
+
+def navigation_first(live_first, feed_rows, back):
+    return live_first - back["pages"] * max(1, feed_rows // 2) - back["lines"]
+
+
+def assert_navigation_history(screen, first, browsing, feed_rows):
+    assert navigation_rows(screen) == feed_rows, ("navigation feed capacity changed", screen)
+    # The answer's last line takes one feed row at end. Away from end all
+    # feed rows hold numbered lines, followed by the separately reserved chip.
+    count = feed_rows if browsing else feed_rows - 1
+    expected = [f"History line {number:03d}" for number in range(first, min(first + count, HISTORY_LINES))]
     lines = screen.splitlines()
     actual = [found.group(0) for found in (re.match(r"History line \d{3}", line.strip()) for line in lines) if found]
     assert actual == expected, ("navigation history anchor/distance", actual, expected)
@@ -248,12 +272,15 @@ def navigation(fixture, row):
     # A real completed answer supplies enough history for page and wheel input
     # to move the viewport; an empty Session cannot distinguish ignored keys.
     fixture.answer("TD4 history end", text="\n".join(
-        [f"History line {number:03d}" for number in range(100)] + ["TD4 history end"]))
+        [f"History line {number:03d}" for number in range(HISTORY_LINES)] + ["TD4 history end"]))
     tty = fixture.terminal()
     tty.send(b"seed history\r")
     tty.marker("TD4 history end")
     tty.draft("", 2)
     captures = set((fixture.home / ".config/rui/requests").glob("*.json"))
+    feed_rows = navigation_rows(tty.screen.completed)
+    live_first = HISTORY_LINES + 1 - feed_rows
+
     def scrolled_back():
         # The answer's last line leaves the screen once the view is above the
         # latest.
@@ -266,28 +293,28 @@ def navigation(fixture, row):
         tty.send(b"~")
         tty.draft("~", 3)
         assert scrolled_back() == browsing, "navigation view changed before ordered marker"
-        assert_navigation_history(tty.screen.completed, first, browsing)
+        assert_navigation_history(tty.screen.completed, first, browsing, feed_rows)
         tty.send(b"\x15")
         tty.draft("", 2)
-    history(83, False)
+    history(live_first, False)
     generation = tty.screen.generation
     chunks(tty, row["chunks"])
     if row.get("chat_info"):
         chat_info_ready(tty, fixture.root.name)
     else:
         tty.wait(scrolled_back, label="navigation moved feed anchor", after=generation)
-        history(row["first_history"], True)
+        history(navigation_first(live_first, feed_rows, row["back"]), True)
         for step in row.get("middle", []):
             generation = tty.screen.generation
             chunks(tty, step["chunks"])
             if not step.get("still"):
                 tty.wait(scrolled_back, label="navigation intermediate movement", after=generation)
-            history(step["first_history"], True)
+            history(navigation_first(live_first, feed_rows, step["back"]), True)
     generation = tty.screen.generation
     chunks(tty, row["return_chunks"])
     tty.wait(lambda: not scrolled_back() and tty.screen.draft("", 2),
              label="navigation returned to live empty composer", after=generation)
-    history(83, False)
+    history(live_first, False)
     tty.marker("TD4 history end")
     assert_submitted(fixture.endpoint.requests, ["seed history"])
     assert set((fixture.home / ".config/rui/requests").glob("*.json")) == captures, "navigation captured intent"

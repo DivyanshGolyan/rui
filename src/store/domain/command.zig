@@ -33,6 +33,7 @@ const rsql = @import("../rsql.zig");
 const store_access = @import("../access.zig");
 const sqlite = @import("../sqlite.zig");
 const tool_set = @import("tool_set.zig");
+const transition = @import("../transition.zig");
 const turn_domain = @import("turn.zig");
 const AcceptedMessageQueue = reads_domain.AcceptedMessageQueue;
 const AttemptBinding = store_core.AttemptBinding;
@@ -134,6 +135,8 @@ const admit_sent_message = rsql.Write(.{
 
 /// The one writer of a Message from another Session. Heads were read (or
 /// created) by the caller in this transaction; admission never adds a round.
+/// The caller then saves the skills its text bound
+/// (`skills_domain.SavingBound`), a round each.
 fn admitFromSession(
     a: anytype,
     sender: *const rsql.SessionHead,
@@ -143,8 +146,6 @@ fn admitFromSession(
     digest: *const [32]u8,
     configured: ?*const configuration_domain.Applied,
     answer: *const StoredAnswer,
-    bound: []const skills_domain.BoundSkill,
-    faults: Faults,
 ) !u64 {
     try queueMessageCommand(a, target, key, content_id, digest, configured, answer);
     const admission_id = try a.identity(.admission_id);
@@ -157,7 +158,6 @@ fn admitFromSession(
         .sender = sender.*,
         .sender_position = try (try a.positions(sender.*)).take(1),
     });
-    try skills_domain.saveBound(a, admission_id, bound, faults);
     return admission_id;
 }
 
@@ -314,14 +314,14 @@ fn admitMessage(
     const text_id = try content_domain.importSealed(a, io, &command.text, &reads.text, faults);
     const answer: StoredAnswer = .{ .accepted = true };
     const admission_id = if (command.sender != null)
-        try admitFromSession(a, &reads.sender.?.session, &head, command.key.slice(), text_id, &reads.digest, configured, &answer, reads.bound, faults)
+        try admitFromSession(a, &reads.sender.?.session, &head, command.key.slice(), text_id, &reads.digest, configured, &answer)
     else person: {
         try queueMessageCommand(a, &head, command.key.slice(), text_id, &reads.digest, configured, &answer);
         const admission_id = try a.identity(.admission_id);
         a.write(admit_message, .{ .admission_id = admission_id, .session = head, .key = command.key.slice(), .content_id = text_id, .position = try (try a.positions(head)).take(1) });
-        try skills_domain.saveBound(a, admission_id, reads.bound, faults);
         break :person admission_id;
     };
+    try skills_domain.saveBound(a, admission_id, reads.bound, faults);
     try commitMessage(a, head, admission_id, command.sender != null, committed, faults);
     return .{
         .accepted = .{
@@ -495,71 +495,122 @@ fn agentMessageKey(buffer: *[idempotency_key.max_bytes]u8, action_id: u64) []con
 /// `text` to the Session `target` names, from the call's own Session, and
 /// resolves the call with what happened, in one transaction. A Message it
 /// sends carries no client environment (D169).
-pub fn deliverAgentMessage(
-    a: anytype,
-    binding: action_domain.ActionAttemptBinding,
-    target: []const u8,
-    text: []const u8,
-    captured: ?*const skills_domain.MessageCapture,
-    faults: Faults,
-) !AgentDelivery {
-    var key_buffer: [idempotency_key.max_bytes]u8 = undefined;
-    const key = agentMessageKey(&key_buffer, binding.action_id);
-    var facts: action_domain.core_facts.Result = undefined;
-    const names: action_domain.CoreNames = .of();
-    a.read(action_domain.core_facts, names.args(.{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id }), &facts);
-    var saved: saved_command.Result = undefined;
-    lookupCommand(a, key, &saved);
-    var receiver: target_session.Result = null;
-    readTarget(a, target, &receiver);
-    var message: content_domain.Import = .ofBytes(text, false);
-    content_domain.lookup(a, &message);
-    try a.run();
-    const found = facts orelse return error.StaleActionAttemptBinding;
-    if (found.stopped) {
-        try a.abandon(.{});
-        return .stopped;
-    }
-    var result_buffer: [160]u8 = undefined;
-    // The Host bound the text's `/name` words to the receiver's skills.
-    const unreadable: ?skills_domain.MessageFailure = if (captured) |value| switch (value.*) {
-        .failed => |failure| failure,
-        .bound => null,
-    } else null;
-    const delivered = receiver != null and receiver.?.archive_state != .archiving and saved == null and unreadable == null;
-    const result = if (receiver == null)
-        std.fmt.bufPrint(&result_buffer, "No Session {s} in this Store; nothing was sent.", .{target}) catch unreachable
-    else if (receiver.?.archive_state == .archiving)
-        "Rui could not send this Message: the Session is archiving. Nothing was sent."
-    else if (saved != null)
-        "Rui could not send this Message: its command key is already taken. Nothing was sent."
-    else if (unreadable) |failure|
-        std.fmt.bufPrint(&result_buffer, "{s} Nothing was sent.", .{failure.bytes[0..@min(failure.bytes.len, 120)]}) catch unreachable
-    else
-        std.fmt.bufPrint(&result_buffer, "Delivered to {s}.", .{target}) catch unreachable;
-    var outcome: content_domain.Import = .ofBytes(result, false);
-    content_domain.lookup(a, &outcome);
-    try a.run();
+///
+/// Round `.facts` reads the call's Action, the saved answer of the call's
+/// key, the receiving Session and the text's content row; `.outcome` reads
+/// the call's result text's row. A delivered Message is admitted, then
+/// saves the skills its text bound, one `.skill` round each, which also
+/// runs the writes queued before it. The commit round resolves the call.
+pub const DeliverAgentMessage = struct {
+    pub const rounds = transition.rounds(.{ .facts = .{.always}, .outcome = .{.always}, .skill = .{.paged} });
+    pub const round_budget = 3;
+    pub const commit: transition.Commit = .transaction;
+    pub const begin: ?rounds.At = .facts;
+    /// `target`, `text` and what `captured` binds are the caller's, which
+    /// outlive the transition.
+    pub const Input = struct {
+        binding: action_domain.ActionAttemptBinding,
+        target: []const u8,
+        text: []const u8,
+        captured: ?*const skills_domain.MessageCapture,
+    };
+    pub const Result = AgentDelivery;
+    pub const Ordinary = store_core.Ordinary.action_attempt;
+    pub const Guards = store_core.Ordinary.action_attempt;
+    pub const Declined = error{};
 
-    if (faults.content_import) return error.InjectedContentImportFailure;
-    var admission_id: u64 = 0;
-    if (delivered) {
-        const head = receiver.?.session;
-        if (receiver.?.archive_state == .archived) a.write(clear_archive, .{ .session = head });
-        const text_id = try content_domain.importBytes(a, &message, text);
-        const digest = sentDigest("rui/core/message_agent/v1", &content_string.digest(text));
-        admission_id = try admitFromSession(a, &found.session, &receiver.?.session, key, text_id, &digest, null, &.{ .accepted = true }, boundOf(captured), faults);
+    input: Input,
+    /// The command key, which its writes read in place.
+    key_buffer: [idempotency_key.max_bytes]u8 = undefined,
+    key: []const u8 = &.{},
+    facts: action_domain.core_facts.Result = undefined,
+    saved: saved_command.Result = undefined,
+    receiver: target_session.Result = null,
+    message: content_domain.Import = undefined,
+    /// The call's result, which its content write reads in place.
+    result_buffer: [160]u8 = undefined,
+    result: []const u8 = &.{},
+    outcome: content_domain.Import = undefined,
+    delivered: bool = false,
+    skills: skills_domain.SavingBound = .{},
+
+    pub fn step(t: *DeliverAgentMessage, r: *transition.Round(DeliverAgentMessage), ran: ?rounds.At) !transition.Next(DeliverAgentMessage) {
+        const binding = t.input.binding;
+        const at = ran orelse {
+            t.key = agentMessageKey(&t.key_buffer, binding.action_id);
+            const names: action_domain.CoreNames = .of();
+            r.read(action_domain.core_facts, names.args(.{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id }), &t.facts);
+            lookupCommand(r, t.key, &t.saved);
+            readTarget(r, t.input.target, &t.receiver);
+            t.message = .ofBytes(t.input.text, false);
+            content_domain.lookup(r, &t.message);
+            return .{ .round = .facts };
+        };
+        if (t.facts == null) return error.StaleActionAttemptBinding;
+        switch (at) {
+            .facts => return t.decide(r),
+            .outcome => {
+                if (r.faults().content_import) return error.InjectedContentImportFailure;
+                if (!t.delivered) return t.resolve(r);
+                const receiver = &t.receiver.?;
+                if (receiver.archive_state == .archived) r.write(clear_archive, .{ .session = receiver.session });
+                const text_id = try content_domain.importBytes(r, &t.message, t.input.text);
+                const digest = sentDigest("rui/core/message_agent/v1", &content_string.digest(t.input.text));
+                const admission_id = try admitFromSession(r, &t.facts.?.session, &receiver.session, t.key, text_id, &digest, null, &.{ .accepted = true });
+                t.skills = .{ .admission_id = admission_id, .bound = boundOf(t.input.captured) };
+                return t.saveSkills(r);
+            },
+            .skill => {
+                try t.skills.save(r, r.faults());
+                return t.saveSkills(r);
+            },
+        }
     }
-    const outcome_id = try content_domain.importBytes(a, &outcome, result);
-    try action_domain.queueResolution(a, binding, found.session, if (delivered) .succeeded else .failed, outcome_id);
-    if (delivered) {
-        try commitMessage(a, receiver.?.session, admission_id, true, null, faults);
-    } else {
-        if (faults.before_commit) return error.InjectedCommitFailure;
-        try a.commit();
+
+    /// After `.facts`: a stopped call ends; any other is delivered, or
+    /// fails with a result saying why nothing was sent.
+    fn decide(t: *DeliverAgentMessage, r: *transition.Round(DeliverAgentMessage)) !transition.Next(DeliverAgentMessage) {
+        if (t.facts.?.stopped) return .{ .done = .stopped };
+        const target = t.input.target;
+        // The Host bound the text's `/name` words to the receiver's skills.
+        const unreadable: ?skills_domain.MessageFailure = if (t.input.captured) |value| switch (value.*) {
+            .failed => |failure| failure,
+            .bound => null,
+        } else null;
+        t.delivered = t.receiver != null and t.receiver.?.archive_state != .archiving and t.saved == null and unreadable == null;
+        t.result = if (t.receiver == null)
+            std.fmt.bufPrint(&t.result_buffer, "No Session {s} in this Store; nothing was sent.", .{target}) catch unreachable
+        else if (t.receiver.?.archive_state == .archiving)
+            "Rui could not send this Message: the Session is archiving. Nothing was sent."
+        else if (t.saved != null)
+            "Rui could not send this Message: its command key is already taken. Nothing was sent."
+        else if (unreadable) |failure|
+            std.fmt.bufPrint(&t.result_buffer, "{s} Nothing was sent.", .{failure.bytes[0..@min(failure.bytes.len, 120)]}) catch unreachable
+        else
+            std.fmt.bufPrint(&t.result_buffer, "Delivered to {s}.", .{target}) catch unreachable;
+        t.outcome = .ofBytes(t.result, false);
+        content_domain.lookup(r, &t.outcome);
+        return .{ .round = .outcome };
     }
-    return if (delivered) .delivered else .failed;
-}
+
+    /// A `.skill` round for the next bound skill, or the call's
+    /// resolution once every one is saved.
+    fn saveSkills(t: *DeliverAgentMessage, r: *transition.Round(DeliverAgentMessage)) !transition.Next(DeliverAgentMessage) {
+        if (t.skills.lookupNext(r)) return .{ .round = .skill };
+        return t.resolve(r);
+    }
+
+    fn resolve(t: *DeliverAgentMessage, r: *transition.Round(DeliverAgentMessage)) !transition.Next(DeliverAgentMessage) {
+        const outcome_id = try content_domain.importBytes(r, &t.outcome, t.result);
+        try action_domain.queueResolution(r, t.input.binding, t.facts.?.session, if (t.delivered) .succeeded else .failed, outcome_id);
+        if (r.faults().before_commit) return error.InjectedCommitFailure;
+        return .commit;
+    }
+
+    pub fn committed(t: *const DeliverAgentMessage) Result {
+        return if (t.delivered) .delivered else .failed;
+    }
+};
 
 fn childEndingKey(buffer: *[idempotency_key.max_bytes]u8, turn_id: u64) []const u8 {
     return std.fmt.bufPrint(buffer, "rui.core/ending/{d}", .{turn_id}) catch unreachable;
@@ -609,48 +660,89 @@ fn endingText(buffer: []u8, ending: turn_ending.TurnEnding, report: ?[]const u8)
 /// own stop caused only settles (D139).
 /// False when nothing was owed any more. Its `rui.core/` key is free:
 /// clients cannot use one, and settling marks the row with the admission.
-pub fn deliverChildEnding(a: anytype, turn_id: u64, captured: ?*const skills_domain.MessageCapture, faults: Faults) !bool {
-    var key_buffer: [idempotency_key.max_bytes]u8 = undefined;
-    const key = childEndingKey(&key_buffer, turn_id);
-    var owed: owed_ending_facts.Result = undefined;
-    a.read(owed_ending_facts, .{ .turn_id = turn_id }, &owed);
-    try a.run();
-    const found = owed orelse {
-        try a.abandon(.{});
-        return false;
+///
+/// Round `.owed` reads what is owed. Unless the ending is quiet, `.parent`
+/// reads the parent and the ending line's content row, and runs the
+/// settling write. The Message is admitted, then saves the skills its text
+/// bound, one `.skill` round each; the commit round runs the rest.
+pub const DeliverChildEnding = struct {
+    pub const rounds = transition.rounds(.{ .owed = .{.always}, .parent = .{.branch}, .skill = .{.paged} });
+    pub const round_budget = 2;
+    pub const commit: transition.Commit = .transaction;
+    pub const begin: ?rounds.At = .owed;
+    /// What `captured` binds and `ending` are the caller's, which outlive
+    /// the transition.
+    pub const Input = struct { turn_id: u64, captured: ?*const skills_domain.MessageCapture, ending: *Ending };
+
+    /// What is owed and the ending line, over 1 KiB together, so held in
+    /// the caller's frame. `.parent`'s read reads the parent's reference in
+    /// place, and the line's content write reads the line.
+    pub const Ending = struct {
+        owed: owed_ending_facts.Result,
+        text_buffer: [96 + outcome_code.max_report_bytes]u8,
     };
-    a.write(settle_owed_ending, .{ .turn_id = turn_id });
-    if (found.quiet) {
-        if (faults.before_commit) return error.InjectedCommitFailure;
-        try a.commit();
+    pub const Result = bool;
+    pub const Ordinary = store_core.Ordinary.none;
+    pub const Guards = error{};
+    pub const Declined = error{};
+
+    input: Input,
+    /// The command key, which its writes read in place.
+    key_buffer: [idempotency_key.max_bytes]u8 = undefined,
+    key: []const u8 = &.{},
+    outcome: TurnOutcome = undefined,
+    text: []const u8 = &.{},
+    receiver: target_session.Result = null,
+    message: content_domain.Import = undefined,
+    skills: skills_domain.SavingBound = .{},
+
+    pub fn step(t: *DeliverChildEnding, r: *transition.Round(DeliverChildEnding), ran: ?rounds.At) !transition.Next(DeliverChildEnding) {
+        const at = ran orelse {
+            t.key = childEndingKey(&t.key_buffer, t.input.turn_id);
+            r.read(owed_ending_facts, .{ .turn_id = t.input.turn_id }, &t.input.ending.owed);
+            return .{ .round = .owed };
+        };
+        switch (at) {
+            .owed => {
+                const found = if (t.input.ending.owed) |*row| row else return .{ .done = false };
+                r.write(settle_owed_ending, .{ .turn_id = t.input.turn_id });
+                if (found.quiet) return finish(r);
+                t.outcome = try TurnOutcome.decode(found.outcome_code.slice(), if (found.outcome_content_id) |id| @intCast(id.get()) else null);
+                t.text = endingText(&t.input.ending.text_buffer, t.outcome.ending(found.stopped), if (found.report) |*report| report.slice() else null);
+                readTarget(r, found.parent.slice(), &t.receiver);
+                t.message = .ofBytes(t.text, false);
+                if (t.outcome != .completed) content_domain.lookup(r, &t.message);
+                return .{ .round = .parent };
+            },
+            .parent => {
+                if (r.faults().content_import) return error.InjectedContentImportFailure;
+                const parent = if (t.receiver) |*row| row else return error.CorruptStore;
+                if (parent.archive_state != .active) return finish(r);
+                const found = &t.input.ending.owed.?;
+                const content_id: u64, const content_digest: [32]u8 = switch (t.outcome) {
+                    .completed => |answer| .{ @intCast(answer), found.digest orelse return error.CorruptStore },
+                    else => .{ try content_domain.importBytes(r, &t.message, t.text), content_string.digest(t.text) },
+                };
+                const digest = sentDigest("rui/core/child_ending/v1", &content_digest);
+                // An owed ending cannot be refused; unreadable skills leave it unbound.
+                const admission_id = try admitFromSession(r, &found.child, &parent.session, t.key, content_id, &digest, null, &.{ .accepted = true });
+                t.skills = .{ .admission_id = admission_id, .bound = boundOf(t.input.captured) };
+            },
+            .skill => try t.skills.save(r, r.faults()),
+        }
+        if (t.skills.lookupNext(r)) return .{ .round = .skill };
+        return finish(r);
+    }
+
+    fn finish(r: *transition.Round(DeliverChildEnding)) !transition.Next(DeliverChildEnding) {
+        if (r.faults().before_commit) return error.InjectedCommitFailure;
+        return .commit;
+    }
+
+    pub fn committed(_: *const DeliverChildEnding) Result {
         return true;
     }
-    const outcome = try TurnOutcome.decode(found.outcome_code.slice(), if (found.outcome_content_id) |id| @intCast(id.get()) else null);
-    var text_buffer: [96 + outcome_code.max_report_bytes]u8 = undefined;
-    const text = endingText(&text_buffer, outcome.ending(found.stopped), if (found.report) |*report| report.slice() else null);
-    var receiver: target_session.Result = null;
-    readTarget(a, found.parent.slice(), &receiver);
-    var message: content_domain.Import = .ofBytes(text, false);
-    if (outcome != .completed) content_domain.lookup(a, &message);
-    try a.run();
-    if (faults.content_import) return error.InjectedContentImportFailure;
-    const parent = receiver orelse return error.CorruptStore;
-    if (parent.archive_state != .active) {
-        if (faults.before_commit) return error.InjectedCommitFailure;
-        try a.commit();
-        return true;
-    }
-    const head = parent.session;
-    const content_id: u64, const content_digest: [32]u8 = switch (outcome) {
-        .completed => |answer| .{ @intCast(answer), found.digest orelse return error.CorruptStore },
-        else => .{ try content_domain.importBytes(a, &message, text), content_string.digest(text) },
-    };
-    const digest = sentDigest("rui/core/child_ending/v1", &content_digest);
-    // An owed ending cannot be refused; unreadable skills leave it unbound.
-    const admission_id = try admitFromSession(a, &found.child, &head, key, content_id, &digest, null, &.{ .accepted = true }, boundOf(captured), faults);
-    try commitMessage(a, head, admission_id, true, null, faults);
-    return true;
-}
+};
 
 /// What running a `start_agent` call did.
 pub const AgentStart = enum {
@@ -712,8 +804,7 @@ pub fn startAgent(
     const refusal: ?[]const u8 = refusal: {
         if (saved != null) break :refusal "Rui could not start the agent: its command key is already taken. Nothing was started.";
         if (try configuration_domain.inheritParent(a.store.hostTools().host_tool_set, configuration, creation)) |code| {
-            if (code == .unknown_tool or code == .mcp_server_unavailable) {
-                const detail = configuration_domain.missingToolMessage(a.store.hostTools().host_tool_set, &configuration.tools).?;
+            if (configuration_domain.missingToolMessage(a.store.hostTools().host_tool_set, code, &configuration.tools)) |detail| {
                 var writer = std.Io.Writer.fixed(&result_buffer);
                 try detail.write(&writer);
                 try writer.print(" ({s}). Nothing was started.", .{@tagName(code)});
@@ -755,7 +846,8 @@ pub fn startAgent(
         const text_id = try content_domain.importBytes(a, &message, task);
         const digest = sentDigest("rui/core/start_agent/v1", &content_string.digest(task));
         const answer: StoredAnswer = .{ .accepted = true, .revision = value.revision, .created = true };
-        admission_id = try admitFromSession(a, &found.session, &value.head, key, text_id, &digest, value, &answer, boundOf(captured), faults);
+        admission_id = try admitFromSession(a, &found.session, &value.head, key, text_id, &digest, value, &answer);
+        try skills_domain.saveBound(a, admission_id, boundOf(captured), faults);
     }
     const outcome_id = try content_domain.importBytes(a, &outcome, result);
     try action_domain.queueResolution(a, binding, found.session, if (applied != null) .succeeded else .failed, outcome_id);
@@ -770,26 +862,47 @@ pub fn startAgent(
 }
 
 /// Resolves a core tool call and lets its Turn continue in one transaction.
-/// A call whose Turn a stop selected is left to the stop.
-pub fn resolveCoreCall(a: anytype, binding: action_domain.ActionAttemptBinding, code: action_domain.ActionResolutionCode, result: []const u8, faults: Faults) !bool {
-    var facts: action_domain.core_facts.Result = undefined;
-    const names: action_domain.CoreNames = .of();
-    a.read(action_domain.core_facts, names.args(.{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id }), &facts);
-    var outcome: content_domain.Import = .ofBytes(result, false);
-    content_domain.lookup(a, &outcome);
-    try a.run();
-    const found = facts orelse return error.StaleActionAttemptBinding;
-    if (found.stopped) {
-        try a.abandon(.{});
-        return false;
+/// A call whose Turn a stop selected is left to the stop. Round `.facts`
+/// reads the call's Action and its result's content row; the commit round
+/// resolves it.
+pub const ResolveCoreCall = struct {
+    pub const rounds = transition.rounds(.{ .facts = .{.always} });
+    pub const round_budget = 2;
+    pub const commit: transition.Commit = .transaction;
+    pub const begin: ?rounds.At = .facts;
+    /// `result` is the caller's, which outlives the transition.
+    pub const Input = struct { binding: action_domain.ActionAttemptBinding, code: action_domain.ActionResolutionCode, result: []const u8 };
+    pub const Result = bool;
+    pub const Ordinary = store_core.Ordinary.action_attempt;
+    pub const Guards = store_core.Ordinary.action_attempt;
+    pub const Declined = error{};
+
+    input: Input,
+    facts: action_domain.core_facts.Result = undefined,
+    outcome: content_domain.Import = undefined,
+
+    pub fn step(t: *ResolveCoreCall, r: *transition.Round(ResolveCoreCall), ran: ?rounds.At) !transition.Next(ResolveCoreCall) {
+        const binding = t.input.binding;
+        if (ran == null) {
+            const names: action_domain.CoreNames = .of();
+            r.read(action_domain.core_facts, names.args(.{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id }), &t.facts);
+            t.outcome = .ofBytes(t.input.result, false);
+            content_domain.lookup(r, &t.outcome);
+            return .{ .round = .facts };
+        }
+        const found = t.facts orelse return error.StaleActionAttemptBinding;
+        if (found.stopped) return .{ .done = false };
+        if (r.faults().content_import) return error.InjectedContentImportFailure;
+        const outcome_id = try content_domain.importBytes(r, &t.outcome, t.input.result);
+        try action_domain.queueResolution(r, binding, found.session, t.input.code, outcome_id);
+        if (r.faults().before_commit) return error.InjectedCommitFailure;
+        return .commit;
     }
-    if (faults.content_import) return error.InjectedContentImportFailure;
-    const outcome_id = try content_domain.importBytes(a, &outcome, result);
-    try action_domain.queueResolution(a, binding, found.session, code, outcome_id);
-    if (faults.before_commit) return error.InjectedCommitFailure;
-    try a.commit();
-    return true;
-}
+
+    pub fn committed(_: *const ResolveCoreCall) Result {
+        return true;
+    }
+};
 
 /// The Session a stop names, and the last Message admitted to it: the
 /// stop excludes every Message up to that one. Also the stop it owes, if
@@ -947,148 +1060,229 @@ fn stopObservation(row: *const stop_selection.Row) SessionStopObservation {
     };
 }
 
-/// A stop's own interruption finding the Operation changed is the stop's
-/// selection changing, as on main.
-pub fn stopSession(a: anytype, command: *const command_input.SessionStopCommand, faults: Faults) !SessionStopReply {
-    return stopRounds(a, command, false, faults, null) catch |err| switch (err) {
-        error.InterruptionTargetChanged => error.StopSelectionChanged,
-        else => err,
-    };
-}
-
-/// The stop an attached child owes (D38), under its owed key. Clients
-/// cannot use `rui.core/` keys (`idempotency_key.reserved_prefix`), so the
-/// key is free while the obligation stands. Any stop settles what the
-/// Session owes, and a newer obligation has another key: an owed stop
-/// whose key is not the one owed now runs nothing and answers conflict.
-pub fn stopOwedSession(a: anytype, command: *const command_input.SessionStopCommand, faults: Faults) !SessionStopReply {
-    return stopRounds(a, command, true, faults, null) catch |err| switch (err) {
-        error.InterruptionTargetChanged => error.StopSelectionChanged,
-        else => err,
-    };
-}
-
-/// Round 1 reads the saved answer, the Session with its admission cutoff,
-/// and its open Turn with its Actions' counts. A replay reads the saved
-/// selection and the Operation it interrupted in a round of its own.
+/// A Session stop, the stop an attached child owes (D38), or an archive's
+/// stop. Round `.facts` reads the saved answer, the Session with its
+/// admission cutoff, and its open Turn with its Actions' counts. A replay
+/// reads the saved selection and the Operation it interrupted in
+/// `.replay`, and ends.
 ///
 /// Otherwise the writes are queued in this order: the command, the stop,
 /// the interruption of a running Operation, the cancelled Actions and the
 /// Turn's close (unless an attempted Action keeps it open). When Actions
 /// are cancelled, the cancellation text's row and the first page of up to
-/// `cancel_chunk` Actions are read in a second round (they depend on the
-/// Turn), which also runs the command, stop and interruption writes queued
-/// before it. Each further page is one more round, which runs the previous
-/// page's write (the first one with the cancellation text's insert, when
-/// the text is new). The last page's write and the Turn's close run in the
-/// final round, at commit, with the position advance. With no Actions to
-/// cancel, every write runs at commit.
-fn stopRounds(a: anytype, command: *const command_input.SessionStopCommand, owed: bool, faults: Faults, archive: ?*const command_input.SessionArchiveCommand) !SessionStopReply {
-    const digest = if (archive) |request| request.semanticDigest() else command.semanticDigest();
-    const kind: cli_value.CommandKind = if (archive != null) .session_archive else .session_stop;
-    const key = command.key.slice();
-    const session = command.session.slice();
-    var saved: saved_command.Result = undefined;
-    lookupCommand(a, key, &saved);
-    var target: stop_target.Result = null;
-    var turn: stop_turn.Result = null;
-    var archive_existing: archive_record.Result = null;
-    var archive_endings: archive_ending_count.Row = .{ .count = 0 };
-    if (session_id.valid(session)) {
-        a.read(stop_target, .{ .session = session }, &target);
-        a.read(stop_turn, .{ .session = session }, &turn);
-        if (archive != null) {
-            a.read(archive_record, .{ .session = session }, &archive_existing);
-            a.read(archive_ending_count, .{ .parent = session }, &archive_endings);
+/// `cancel_chunk` Actions are read in `.cancel` (they depend on the Turn),
+/// which also runs the command, stop and interruption writes queued
+/// before it. Each further page is one more `.page` round, which runs the
+/// previous page's write (the first one with the cancellation text's
+/// insert, when the text is new). The last page's write and the Turn's
+/// close run in the commit round, with the position advance. With no
+/// Actions to cancel, every write runs at commit.
+///
+/// A stop's own interruption finding the Operation changed fails it, as
+/// the stop's selection changing would.
+pub const StopSession = struct {
+    pub const rounds = transition.rounds(.{ .facts = .{.always}, .replay = .{.branch}, .cancel = .{.branch}, .page = .{.paged} });
+    pub const round_budget = 2;
+    pub const commit: transition.Commit = .transaction;
+    pub const begin: ?rounds.At = .facts;
+    pub const Result = SessionStopReply;
+    pub const Ordinary = store_core.Ordinary.none;
+    pub const Guards = error{ InterruptionTargetChanged, StopSelectionChanged };
+    pub const Declined = error{};
+
+    /// The stop a command asks for. Its key and Session are the caller's,
+    /// which outlive the transition.
+    pub const Input = struct {
+        key: []const u8,
+        session: []const u8,
+        digest: [32]u8,
+        /// An owed stop runs only while its obligation stands: a stop
+        /// under another key, or a newer obligation, settled or replaced
+        /// it. Clients cannot use `rui.core/` keys
+        /// (`idempotency_key.reserved_prefix`), so the key is free while
+        /// the obligation stands; an owed stop whose key is not the one
+        /// owed now runs nothing and answers conflict.
+        owed: bool = false,
+        /// It also archives the Session.
+        archive: bool = false,
+
+        pub fn ofStop(command: *const command_input.SessionStopCommand, owed: bool) Input {
+            return .{ .key = command.key.slice(), .session = command.session.slice(), .digest = command.semanticDigest(), .owed = owed };
+        }
+
+        pub fn ofArchive(command: *const command_input.SessionArchiveCommand) Input {
+            return .{ .key = command.key.slice(), .session = command.session.slice(), .digest = command.semanticDigest(), .archive = true };
+        }
+
+        fn kind(input: *const Input) cli_value.CommandKind {
+            return if (input.archive) .session_archive else .session_stop;
+        }
+    };
+
+    input: Input,
+    saved: saved_command.Result = undefined,
+    target: stop_target.Result = null,
+    turn: stop_turn.Result = null,
+    archive_existing: archive_record.Result = null,
+    archive_endings: archive_ending_count.Row = .{ .count = 0 },
+    selection: stop_selection.Result = undefined,
+    interrupted: stop_interrupted.Result = undefined,
+    /// The command's write reads its code in place.
+    answer: StoredAnswer = undefined,
+    /// The cancellation text's identity: its queued row reads the digest
+    /// in place until commit.
+    cancellation: content_domain.Import = unattempted_stop_content,
+    chunk: CancelChunk = .{},
+    cancellation_id: u64 = 0,
+    cancelled: u64 = 0,
+    reply: SessionStopReply = undefined,
+    trace: ?store_core.ControlTrace = null,
+
+    pub fn step(t: *StopSession, r: *transition.Round(StopSession), ran: ?rounds.At) !transition.Next(StopSession) {
+        const at = ran orelse {
+            const session = t.input.session;
+            lookupCommand(r, t.input.key, &t.saved);
+            if (session_id.valid(session)) {
+                r.read(stop_target, .{ .session = session }, &t.target);
+                r.read(stop_turn, .{ .session = session }, &t.turn);
+                if (t.input.archive) {
+                    r.read(archive_record, .{ .session = session }, &t.archive_existing);
+                    r.read(archive_ending_count, .{ .parent = session }, &t.archive_endings);
+                }
+            }
+            return .{ .round = .facts };
+        };
+        switch (at) {
+            .facts => return t.decide(r),
+            .replay => {
+                const observed = stopObservation(&t.selection);
+                return .{ .done = .{ .accepted = .{
+                    .replayed = true,
+                    .selection = observed.selection,
+                    .completion = observed.completion,
+                    .interrupted_operation_id = if (t.interrupted) |row| row.operation_id.get() else null,
+                } } };
+            },
+            .cancel => {
+                if (r.faults().content_import) return error.InjectedContentImportFailure;
+                t.cancellation_id = try content_domain.importBytes(r, &t.cancellation, unattempted_stop_text);
+                return t.cancelPage(r);
+            },
+            .page => return t.cancelPage(r),
         }
     }
-    try a.run();
-    // An owed stop runs only while its obligation stands: a stop under
-    // another key, or a newer obligation, settled or replaced it.
-    if (owed and !(target != null and target.?.owedUnder(key) and saved == null)) {
-        try a.abandon(.{});
-        return .conflict;
-    }
-    switch (try classify(mutation_answer.SessionStopRejection, &saved, kind, session, &digest)) {
-        .fresh => {},
-        .conflict => {
-            try a.abandon(.{});
-            return .conflict;
-        },
-        .accepted => {
-            var selection: stop_selection.Result = undefined;
-            var interrupted: stop_interrupted.Result = undefined;
-            a.read(stop_selection, .{ .key = key }, &selection);
-            a.read(stop_interrupted, .{ .key = key }, &interrupted);
-            try a.run();
-            try a.abandon(.{});
-            const observed = stopObservation(&selection);
-            return .{ .accepted = .{
-                .replayed = true,
-                .selection = observed.selection,
-                .completion = observed.completion,
-                .interrupted_operation_id = if (interrupted) |row| row.operation_id.get() else null,
-            } };
-        },
-        .rejected => |code| {
-            try a.abandon(.{});
-            return .{ .rejected = .{ .replayed = true, .code = code } };
-        },
-    }
 
-    const rejection: ?mutation_answer.SessionStopRejection = if (!session_id.valid(session)) .invalid_session_reference else if (target == null) .unknown_session else null;
-    if (rejection) |code| {
-        var answer = StoredAnswer{ .accepted = false };
-        try answer.code.set(@tagName(code));
-        try queueCommand(a, key, kind, session, &digest, null, null, &answer);
-        if (faults.before_commit) return error.InjectedCommitFailure;
-        try a.commit();
-        return .{ .rejected = .{ .replayed = false, .code = code } };
-    }
-
-    const found = target.?;
-    const head = found.session;
-    const positions = try a.positions(head);
-    const answer: StoredAnswer = .{ .accepted = true };
-    try queueCommand(a, key, kind, session, &digest, null, null, &answer);
-    const selection = SessionStopSelection{ .selected_turn_id = if (turn) |open| open.turn_id.get() else null, .admission_cutoff = found.admission_cutoff };
-    const stop_position = try positions.take(1);
-    a.write(insert_stop, .{ .key = key, .session = head, .selected_turn_id = selection.selected_turn_id, .admission_cutoff = selection.admission_cutoff, .position = stop_position, .parent_caused = found.owed_cause != null });
-    if (archive != null) {
-        a.write(insert_archive_command, .{ .key = key, .archived = true });
-        if (archive_existing != null) a.write(update_archive, .{ .session = head, .key = key }) else a.write(insert_archive, .{ .session = head, .key = key });
-        if (archive_endings.count != 0) a.writeCount(suppress_archive_endings, .{ .parent = &head.ref }, archive_endings.count);
-    }
-    // A stop settles any stop this Session owed, and its attached children
-    // now owe theirs (D38).
-    if (found.owed_cause != null) a.write(settle_owed_stop, .{ .session = &head.ref });
-    turn_domain.queueOwedStops(a, &head.ref, stop_position, found.unowed_children);
-    var completion: mutation_answer.SessionStopCompletion = .completed;
-    var interrupted_operation_id: ?u64 = null;
-    // The cancellation text's identity: its queued row reads the digest in
-    // place until commit.
-    var cancellation = unattempted_stop_content;
-    if (turn) |open| {
-        if (open.running) {
-            interrupt_operation.queue(a, .{ .operation_id = open.operation_id.get(), .command_key = key, .session = head });
-            interrupted_operation_id = open.operation_id.get();
+    fn decide(t: *StopSession, r: *transition.Round(StopSession)) !transition.Next(StopSession) {
+        const key = t.input.key;
+        const session = t.input.session;
+        const kind = t.input.kind();
+        if (t.input.owed and !(t.target != null and t.target.?.owedUnder(key) and t.saved == null)) return .{ .done = .conflict };
+        switch (try classify(mutation_answer.SessionStopRejection, &t.saved, kind, session, &t.input.digest)) {
+            .fresh => {},
+            .conflict => return .{ .done = .conflict },
+            .accepted => {
+                r.read(stop_selection, .{ .key = key }, &t.selection);
+                r.read(stop_interrupted, .{ .key = key }, &t.interrupted);
+                return .{ .round = .replay };
+            },
+            .rejected => |code| return .{ .done = .{ .rejected = .{ .replayed = true, .code = code } } },
         }
-        if (open.cancellable != 0) try cancelActions(a, positions, head, &open, &cancellation, faults);
-        // The stop now selects the Turn and has resolved every Action
-        // never attempted, so the Turn is ready (`turn.stopped_turn`)
-        // unless an attempted Action is unresolved.
-        if (open.in_flight) completion = .pending else try turn_domain.queueClose(a, positions, open.turn_id.get(), .cancelled);
+
+        const rejection: ?mutation_answer.SessionStopRejection = if (!session_id.valid(session)) .invalid_session_reference else if (t.target == null) .unknown_session else null;
+        if (rejection) |code| {
+            t.answer = .{ .accepted = false };
+            try t.answer.code.set(@tagName(code));
+            try queueCommand(r, key, kind, session, &t.input.digest, null, null, &t.answer);
+            if (r.faults().before_commit) return error.InjectedCommitFailure;
+            t.reply = .{ .rejected = .{ .replayed = false, .code = code } };
+            return .commit;
+        }
+
+        const found = &t.target.?;
+        const head = &found.session;
+        const positions = try r.positions(head.*);
+        t.answer = .{ .accepted = true };
+        try queueCommand(r, key, kind, session, &t.input.digest, null, null, &t.answer);
+        const selection = SessionStopSelection{ .selected_turn_id = if (t.turn) |open| open.turn_id.get() else null, .admission_cutoff = found.admission_cutoff };
+        const stop_position = try positions.take(1);
+        r.write(insert_stop, .{ .key = key, .session = head.*, .selected_turn_id = selection.selected_turn_id, .admission_cutoff = selection.admission_cutoff, .position = stop_position, .parent_caused = found.owed_cause != null });
+        if (t.input.archive) {
+            r.write(insert_archive_command, .{ .key = key, .archived = true });
+            if (t.archive_existing != null) r.write(update_archive, .{ .session = head.*, .key = key }) else r.write(insert_archive, .{ .session = head.*, .key = key });
+            if (t.archive_endings.count != 0) r.writeCount(suppress_archive_endings, .{ .parent = &head.ref }, t.archive_endings.count);
+        }
+        // A stop settles any stop this Session owed, and its attached children
+        // now owe theirs (D38).
+        if (found.owed_cause != null) r.write(settle_owed_stop, .{ .session = &head.ref });
+        turn_domain.queueOwedStops(r, &head.ref, stop_position, found.unowed_children);
+        t.trace = r.faults().control_trace;
+        t.reply = .{ .accepted = .{ .replayed = false, .selection = selection, .completion = .completed, .interrupted_operation_id = null } };
+        if (t.turn) |open| {
+            if (open.running) {
+                interrupt_operation.queue(r, .{ .operation_id = open.operation_id.get(), .command_key = key, .session = head.* });
+                t.reply.accepted.interrupted_operation_id = open.operation_id.get();
+            }
+            if (open.cancellable != 0) {
+                content_domain.lookup(r, &t.cancellation);
+                r.readEach(cancellable_actions, .{ .operation_id = open.operation_id.get(), .after = 0 }, cancel_chunk, &t.chunk);
+                return .{ .round = .cancel };
+            }
+        }
+        return t.finish(r);
     }
-    if (faults.before_commit) return error.InjectedCommitFailure;
-    try a.commit();
-    if (faults.control_trace) |trace| trace.mark(.durable_acceptance);
-    return .{ .accepted = .{
-        .replayed = false,
-        .selection = selection,
-        .completion = completion,
-        .interrupted_operation_id = interrupted_operation_id,
-    } };
-}
+
+    /// After a round that read a page of the open Turn's cancellable
+    /// Actions: cancels them in call order, each at the Session's next
+    /// position, with the stop's cancellation text. A statement binds when
+    /// it is queued, so `cancel_actions[n - 1]` runs once a round: the next
+    /// page reads in the round that runs this page's write. The count says
+    /// when the last page was read, so a multiple of `cancel_chunk` costs no
+    /// empty round.
+    fn cancelPage(t: *StopSession, r: *transition.Round(StopSession)) !transition.Next(StopSession) {
+        const open = t.turn.?;
+        const chunk = &t.chunk;
+        if (chunk.len != 0) {
+            switch (chunk.len) {
+                inline 1...cancel_chunk => |n| {
+                    @setEvalBranchQuota(100_000);
+                    var args: CancelArgs(n) = undefined;
+                    args.content_id = t.cancellation_id;
+                    args.first_position = try (try r.positions(t.target.?.session)).take(n);
+                    args.session = t.target.?.session;
+                    inline for (0..n) |k| @field(args, cancelField(k)) = chunk.action_ids[k];
+                    r.write(cancel_actions[n - 1], args);
+                },
+                else => unreachable,
+            }
+            t.cancelled += chunk.len;
+            if (t.cancelled < open.cancellable and chunk.len == cancel_chunk) {
+                chunk.len = 0;
+                r.readEach(cancellable_actions, .{ .operation_id = open.operation_id.get(), .after = chunk.next }, cancel_chunk, chunk);
+                return .{ .round = .page };
+            }
+        }
+        // Main checked that the cancelling UPDATE changed as many rows as it
+        // counted.
+        if (t.cancelled != open.cancellable) return error.StopSelectionChanged;
+        return t.finish(r);
+    }
+
+    /// The stop now selects the Turn and has resolved every Action never
+    /// attempted, so the Turn is ready (`turn.stopped_turn`) unless an
+    /// attempted Action is unresolved; then the commit.
+    fn finish(t: *StopSession, r: *transition.Round(StopSession)) !transition.Next(StopSession) {
+        if (t.turn) |open| {
+            if (open.in_flight) t.reply.accepted.completion = .pending else try turn_domain.queueClose(r, try r.positions(t.target.?.session), open.turn_id.get(), .cancelled);
+        }
+        if (r.faults().before_commit) return error.InjectedCommitFailure;
+        return .commit;
+    }
+
+    pub fn committed(t: *const StopSession) Result {
+        if (t.reply == .accepted) if (t.trace) |trace| trace.mark(.durable_acceptance);
+        return t.reply;
+    }
+};
 
 /// All unattempted runners use the same bytes today. Prove that before
 /// sharing one content import and one cancellation batch, without another
@@ -1107,52 +1301,6 @@ const unattempted_stop_content: content_domain.Import = blk: {
     @setEvalBranchQuota(1_000_000);
     break :blk .ofBytes(unattempted_stop_text, false);
 };
-
-/// Cancels the open Turn's `open.cancellable` Actions in call order, each
-/// at the Session's next position, with the stop's cancellation text.
-fn cancelActions(
-    a: anytype,
-    positions: anytype,
-    head: rsql.SessionHead,
-    open: *const stop_turn.Row,
-    cancellation: *content_domain.Import,
-    faults: Faults,
-) !void {
-    var chunk: CancelChunk = .{};
-    content_domain.lookup(a, cancellation);
-    a.readEach(cancellable_actions, .{ .operation_id = open.operation_id.get(), .after = 0 }, cancel_chunk, &chunk);
-    try a.run();
-    if (faults.content_import) return error.InjectedContentImportFailure;
-    const content_id = try content_domain.importBytes(a, cancellation, unattempted_stop_text);
-    var cancelled: u64 = 0;
-    // The count says when the last page was read, so a multiple of
-    // `cancel_chunk` costs no empty round.
-    while (chunk.len != 0) {
-        switch (chunk.len) {
-            inline 1...cancel_chunk => |n| {
-                @setEvalBranchQuota(100_000);
-                var args: CancelArgs(n) = undefined;
-                args.content_id = content_id;
-                args.first_position = try positions.take(n);
-                args.session = head;
-                inline for (0..n) |k| @field(args, cancelField(k)) = chunk.action_ids[k];
-                a.write(cancel_actions[n - 1], args);
-            },
-            else => unreachable,
-        }
-        cancelled += chunk.len;
-        if (cancelled >= open.cancellable or chunk.len < cancel_chunk) break;
-        // A statement binds when it is queued, so `cancel_actions[n - 1]`
-        // runs once a round: the next page reads in the round that runs
-        // this page's write.
-        chunk.len = 0;
-        a.readEach(cancellable_actions, .{ .operation_id = open.operation_id.get(), .after = chunk.next }, cancel_chunk, &chunk);
-        try a.run();
-    }
-    // Main checked that the cancelling UPDATE changed as many rows as it
-    // counted.
-    if (cancelled != open.cancellable) return error.StopSelectionChanged;
-}
 
 const archive_ending_count = rsql.Read(.{
     .sql = "SELECT count(*) AS count FROM session_forward ending WHERE ending.target_ref=?1 AND ending.message_delivered=0 AND ending.suppress_message=0",
@@ -1210,64 +1358,104 @@ const archive_request = rsql.Read(.{
     .cardinality = .one,
 });
 
-pub fn archiveSession(a: anytype, command: *const command_input.SessionArchiveCommand, faults: Faults) !SessionArchiveReply {
-    if (!command.archived) return restoreSession(a, command, faults);
-    const stop: command_input.SessionStopCommand = .{ .store = command.store, .key = command.key, .session = command.session };
-    const result = try stopRounds(a, &stop, false, faults, command);
-    return switch (result) {
-        .accepted => |accepted| .{ .accepted = .{
-            .replayed = accepted.replayed,
-            .archived = true,
-            .completion = accepted.completion,
-            .interrupted_operation_id = accepted.interrupted_operation_id,
-        } },
-        .rejected => |rejected| .{ .rejected = .{ .replayed = rejected.replayed, .code = switch (rejected.code) {
-            .invalid_session_reference => .invalid_session_reference,
-            .unknown_session => .unknown_session,
-        } } },
-        .conflict => .conflict,
-        .infrastructure_failure => .infrastructure_failure,
-    };
-}
+/// Archives a Session through its stop (`StopSession`), or restores it.
+/// A restore's round reads the saved answer and the Session; its commit
+/// saves the command, clears the archive and advances the Session's
+/// position.
+pub const ArchiveSession = struct {
+    pub const rounds = StopSession.rounds;
+    pub const round_budget = StopSession.round_budget;
+    pub const commit = StopSession.commit;
+    pub const begin = StopSession.begin;
+    pub const Input = struct { command: *const command_input.SessionArchiveCommand };
+    pub const Result = SessionArchiveReply;
+    pub const Ordinary = StopSession.Ordinary;
+    pub const Guards = StopSession.Guards;
+    pub const Declined = error{};
 
-fn restoreSession(a: anytype, command: *const command_input.SessionArchiveCommand, faults: Faults) !SessionArchiveReply {
-    const digest = command.semanticDigest();
-    const key = command.key.slice();
-    const session = command.session.slice();
-    var saved: saved_command.Result = undefined;
-    lookupCommand(a, key, &saved);
-    var target: target_session.Result = null;
-    readTarget(a, session, &target);
-    try a.run();
-    switch (try classify(mutation_answer.SessionArchiveRejection, &saved, .session_archive, session, &digest)) {
-        .fresh => {},
-        .conflict => {
-            try a.abandon(.{});
-            return .conflict;
-        },
-        .accepted => {
-            try a.abandon(.{});
-            return .{ .accepted = .{ .replayed = true, .archived = false, .completion = .completed } };
-        },
-        .rejected => |code| {
-            try a.abandon(.{});
-            return .{ .rejected = .{ .replayed = true, .code = code } };
-        },
+    input: Input,
+    way: union(enum) { stop: StopSession, restore: Restore } = undefined,
+
+    pub fn step(t: *ArchiveSession, r: *transition.Round(ArchiveSession), ran: ?rounds.At) !transition.Next(ArchiveSession) {
+        const command = t.input.command;
+        if (ran == null) t.way = if (command.archived) .{ .stop = .{ .input = .ofArchive(command) } } else .{ .restore = .{ .command = command } };
+        switch (t.way) {
+            .stop => |*stop| return switch (try stop.step(r, ran)) {
+                .round => |at| .{ .round = at },
+                .commit => .commit,
+                .done => |reply| .{ .done = archiveReply(reply) },
+            },
+            .restore => |*restore| return restore.step(r, ran),
+        }
     }
-    const rejection: ?mutation_answer.SessionArchiveRejection = if (!session_id.valid(session)) .invalid_session_reference else if (target == null) .unknown_session else if (target.?.archive_state == .archiving) .archive_pending else null;
-    var answer: StoredAnswer = .{ .accepted = rejection == null };
-    if (rejection) |code| try answer.code.set(@tagName(code));
-    try queueCommand(a, key, .session_archive, session, &digest, null, null, &answer);
-    if (rejection == null) {
-        a.write(insert_archive_command, .{ .key = key, .archived = false });
-        const head = target.?.session;
-        a.write(clear_archive, .{ .session = head });
-        _ = try (try a.positions(head)).take(1);
+
+    pub fn committed(t: *const ArchiveSession) Result {
+        return switch (t.way) {
+            .stop => |*stop| archiveReply(stop.committed()),
+            .restore => |*restore| restore.committed(),
+        };
     }
-    if (faults.before_commit) return error.InjectedCommitFailure;
-    try a.commit();
-    return if (rejection) |code| .{ .rejected = .{ .replayed = false, .code = code } } else .{ .accepted = .{ .replayed = false, .archived = false, .completion = .completed } };
-}
+
+    fn archiveReply(reply: SessionStopReply) SessionArchiveReply {
+        return switch (reply) {
+            .accepted => |accepted| .{ .accepted = .{
+                .replayed = accepted.replayed,
+                .archived = true,
+                .completion = accepted.completion,
+                .interrupted_operation_id = accepted.interrupted_operation_id,
+            } },
+            .rejected => |rejected| .{ .rejected = .{ .replayed = rejected.replayed, .code = switch (rejected.code) {
+                .invalid_session_reference => .invalid_session_reference,
+                .unknown_session => .unknown_session,
+            } } },
+            .conflict => .conflict,
+            .infrastructure_failure => .infrastructure_failure,
+        };
+    }
+
+    const Restore = struct {
+        command: *const command_input.SessionArchiveCommand,
+        digest: [32]u8 = undefined,
+        saved: saved_command.Result = undefined,
+        target: target_session.Result = null,
+        /// The command's write reads its code in place.
+        answer: StoredAnswer = undefined,
+        rejection: ?mutation_answer.SessionArchiveRejection = null,
+
+        fn step(t: *Restore, r: *transition.Round(ArchiveSession), ran: ?rounds.At) !transition.Next(ArchiveSession) {
+            const key = t.command.key.slice();
+            const session = t.command.session.slice();
+            if (ran == null) {
+                t.digest = t.command.semanticDigest();
+                lookupCommand(r, key, &t.saved);
+                readTarget(r, session, &t.target);
+                return .{ .round = .facts };
+            }
+            switch (try classify(mutation_answer.SessionArchiveRejection, &t.saved, .session_archive, session, &t.digest)) {
+                .fresh => {},
+                .conflict => return .{ .done = .conflict },
+                .accepted => return .{ .done = .{ .accepted = .{ .replayed = true, .archived = false, .completion = .completed } } },
+                .rejected => |code| return .{ .done = .{ .rejected = .{ .replayed = true, .code = code } } },
+            }
+            t.rejection = if (!session_id.valid(session)) .invalid_session_reference else if (t.target == null) .unknown_session else if (t.target.?.archive_state == .archiving) .archive_pending else null;
+            t.answer = .{ .accepted = t.rejection == null };
+            if (t.rejection) |code| try t.answer.code.set(@tagName(code));
+            try queueCommand(r, key, .session_archive, session, &t.digest, null, null, &t.answer);
+            if (t.rejection == null) {
+                r.write(insert_archive_command, .{ .key = key, .archived = false });
+                const head = t.target.?.session;
+                r.write(clear_archive, .{ .session = head });
+                _ = try (try r.positions(head)).take(1);
+            }
+            if (r.faults().before_commit) return error.InjectedCommitFailure;
+            return .commit;
+        }
+
+        fn committed(t: *const Restore) SessionArchiveReply {
+            return if (t.rejection) |code| .{ .rejected = .{ .replayed = false, .code = code } } else .{ .accepted = .{ .replayed = false, .archived = false, .completion = .completed } };
+        }
+    };
+};
 
 /// A Session a command names, as a round reads it: its head, and the
 /// provider a Message's model check needs.
@@ -1359,71 +1547,96 @@ fn interruptionRejection(
     return null;
 }
 
-/// Round 1 reads the saved answer, the Session, the Operation with its
-/// Turn, and whether a pending Message keeps the Turn open. A replay reads
-/// the saved target in a round of its own. The decision is
-/// `interruptionRejection`; the write round saves the command and its
+/// Round `.facts` reads the saved answer, the Session, the Operation with
+/// its Turn, and whether a pending Message keeps the Turn open. A replay
+/// reads the saved target in `.replay` and ends. The decision is
+/// `interruptionRejection`; the commit round saves the command and its
 /// target, interrupts the Operation and closes the Turn when nothing is
-/// pending, then commits.
-pub fn interruptModel(a: anytype, command: *const command_input.ModelInterruptionCommand, faults: Faults) !ModelInterruptionReply {
-    const digest = command.semanticDigest();
-    const session = command.session.slice();
-    var saved: saved_command.Result = undefined;
-    lookupCommand(a, command.key.slice(), &saved);
-    var target: target_session.Result = null;
-    var operation: interruption_operation.Result = null;
-    var pending: applicable_pending.Result = .{ .pending = false };
-    if (validId(command.turn_id) and validId(command.operation_id)) {
-        readTarget(a, session, &target);
-        if (session_id.valid(session)) {
-            a.read(interruption_operation, .{ .operation_id = command.operation_id }, &operation);
-            a.read(applicable_pending, .{ .session = session }, &pending);
-        }
-    }
-    try a.run();
-    const replay = try classify(mutation_answer.ModelInterruptionRejection, &saved, .model_interruption, session, &digest);
-    if (replay != .fresh) {
-        if (replay != .conflict) {
-            var saved_target: interruption_target.Result = undefined;
-            a.read(interruption_target, .{ .key = command.key.slice() }, &saved_target);
-            try a.run();
-            const named = try modelInterruptionTarget(&saved_target);
-            if (!named.session.eql(session) or named.turn_id != command.turn_id or named.operation_id != command.operation_id) return error.CorruptStore;
-        }
-        try a.abandon(.{});
-        return switch (replay) {
-            .fresh => unreachable,
-            .conflict => .conflict,
-            .accepted => .{ .accepted = .{ .replayed = true } },
-            .rejected => |code| .{ .rejected = .{ .replayed = true, .code = code } },
+/// pending.
+pub const InterruptModel = struct {
+    pub const rounds = transition.rounds(.{ .facts = .{.always}, .replay = .{.branch} });
+    pub const round_budget = 2;
+    pub const commit: transition.Commit = .transaction;
+    pub const begin: ?rounds.At = .facts;
+    pub const Input = struct { command: *const command_input.ModelInterruptionCommand };
+    pub const Result = ModelInterruptionReply;
+    pub const Ordinary = store_core.Ordinary.none;
+    pub const Guards = error{InterruptionTargetChanged};
+    pub const Declined = error{};
+
+    input: Input,
+    digest: [32]u8 = undefined,
+    saved: saved_command.Result = undefined,
+    target: target_session.Result = null,
+    operation: interruption_operation.Result = null,
+    pending: applicable_pending.Result = .{ .pending = false },
+    saved_target: interruption_target.Result = undefined,
+    /// The command's writes read these in place.
+    answer: StoredAnswer = undefined,
+    turn_text: [20]u8 = undefined,
+    operation_text: [20]u8 = undefined,
+    reply: ModelInterruptionReply = undefined,
+    trace: ?store_core.ControlTrace = null,
+
+    pub fn step(t: *InterruptModel, r: *transition.Round(InterruptModel), ran: ?rounds.At) !transition.Next(InterruptModel) {
+        const command = t.input.command;
+        const session = command.session.slice();
+        const at = ran orelse {
+            t.digest = command.semanticDigest();
+            lookupCommand(r, command.key.slice(), &t.saved);
+            if (validId(command.turn_id) and validId(command.operation_id)) {
+                readTarget(r, session, &t.target);
+                if (session_id.valid(session)) {
+                    r.read(interruption_operation, .{ .operation_id = command.operation_id }, &t.operation);
+                    r.read(applicable_pending, .{ .session = session }, &t.pending);
+                }
+            }
+            return .{ .round = .facts };
         };
+        if (at == .replay) {
+            const named = try modelInterruptionTarget(&t.saved_target);
+            if (!named.session.eql(session) or named.turn_id != command.turn_id or named.operation_id != command.operation_id) return error.CorruptStore;
+            return .{ .done = t.reply };
+        }
+        const replay = try classify(mutation_answer.ModelInterruptionRejection, &t.saved, .model_interruption, session, &t.digest);
+        if (replay != .fresh) {
+            t.reply = switch (replay) {
+                .fresh => unreachable,
+                .conflict => .conflict,
+                .accepted => .{ .accepted = .{ .replayed = true } },
+                .rejected => |code| .{ .rejected = .{ .replayed = true, .code = code } },
+            };
+            if (replay == .conflict) return .{ .done = t.reply };
+            r.read(interruption_target, .{ .key = command.key.slice() }, &t.saved_target);
+            return .{ .round = .replay };
+        }
+
+        const rejection = interruptionRejection(command, t.target, t.operation);
+        t.answer = .{ .accepted = rejection == null };
+        if (rejection) |code| try t.answer.code.set(@tagName(code));
+        try queueCommand(r, command.key.slice(), .model_interruption, session, &t.digest, null, null, &t.answer);
+        r.write(save_interruption, .{
+            .key = command.key.slice(),
+            .session = session,
+            .turn_id = try std.fmt.bufPrint(&t.turn_text, "{d}", .{command.turn_id}),
+            .operation_id = try std.fmt.bufPrint(&t.operation_text, "{d}", .{command.operation_id}),
+        });
+        if (rejection == null) {
+            const head = t.target.?.session;
+            interrupt_operation.queue(r, .{ .operation_id = command.operation_id, .command_key = command.key.slice(), .session = head });
+            if (!t.pending.pending) try turn_domain.queueCloseOr(r, try r.positions(head), command.turn_id, .cancelled, error.InterruptionTargetChanged);
+        }
+        if (r.faults().before_commit) return error.InjectedCommitFailure;
+        t.trace = r.faults().control_trace;
+        t.reply = if (rejection) |code| .{ .rejected = .{ .replayed = false, .code = code } } else .{ .accepted = .{ .replayed = false } };
+        return .commit;
     }
 
-    const rejection = interruptionRejection(command, target, operation);
-    var answer = StoredAnswer{ .accepted = rejection == null };
-    if (rejection) |code| try answer.code.set(@tagName(code));
-    try queueCommand(a, command.key.slice(), .model_interruption, session, &digest, null, null, &answer);
-    var turn_buffer: [20]u8 = undefined;
-    var operation_buffer: [20]u8 = undefined;
-    a.write(save_interruption, .{
-        .key = command.key.slice(),
-        .session = session,
-        .turn_id = try std.fmt.bufPrint(&turn_buffer, "{d}", .{command.turn_id}),
-        .operation_id = try std.fmt.bufPrint(&operation_buffer, "{d}", .{command.operation_id}),
-    });
-    if (rejection == null) {
-        const head = target.?.session;
-        interrupt_operation.queue(a, .{ .operation_id = command.operation_id, .command_key = command.key.slice(), .session = head });
-        if (!pending.pending) try turn_domain.queueCloseOr(a, try a.positions(head), command.turn_id, .cancelled, error.InterruptionTargetChanged);
+    pub fn committed(t: *const InterruptModel) Result {
+        if (t.reply == .accepted) if (t.trace) |trace| trace.mark(.durable_acceptance);
+        return t.reply;
     }
-    if (faults.before_commit) return error.InjectedCommitFailure;
-    try a.commit();
-    const code = rejection orelse {
-        if (faults.control_trace) |trace| trace.mark(.durable_acceptance);
-        return .{ .accepted = .{ .replayed = false } };
-    };
-    return .{ .rejected = .{ .replayed = false, .code = code } };
-}
+};
 
 /// The Action a permission decision names, with its Turn.
 const decision_action = rsql.Read(.{
@@ -1479,65 +1692,84 @@ fn decisionRejection(
     return null;
 }
 
-/// Round 1 reads the saved answer, the Session, the Action with its Turn
-/// and, for a denial, its result text's row. The decision is
-/// `decisionRejection`; the write round saves the command and its target,
-/// then authorizes or denies the Action, and commits.
-pub fn decidePermission(a: anytype, command: *const command_input.PermissionDecisionCommand, faults: Faults) !PermissionDecisionReply {
-    const digest = command.semanticDigest();
-    const session = command.session.slice();
-    var saved: saved_command.Result = undefined;
-    lookupCommand(a, command.key.slice(), &saved);
-    var target: target_session.Result = null;
-    var action: decision_action.Result = null;
-    var content = denial;
-    if (validId(command.action_id)) {
-        readTarget(a, session, &target);
-        if (session_id.valid(session)) a.read(decision_action, .{ .action_id = command.action_id, .target = session }, &action);
-    }
-    if (command.decision == .deny) content_domain.lookup(a, &content);
-    try a.run();
-    switch (try classify(mutation_answer.PermissionDecisionRejection, &saved, .permission_decision, session, &digest)) {
-        .fresh => {},
-        .conflict => {
-            try a.abandon(.{});
-            return .conflict;
-        },
-        .accepted => {
-            try a.abandon(.{});
-            return .{ .accepted = .{ .replayed = true } };
-        },
-        .rejected => |code| {
-            try a.abandon(.{});
-            return .{ .rejected = .{ .replayed = true, .code = code } };
-        },
+/// Round `.facts` reads the saved answer, the Session, the Action with its
+/// Turn and, for a denial, its result text's row. The decision is
+/// `decisionRejection`; the commit round saves the command and its target,
+/// then authorizes or denies the Action.
+pub const DecidePermission = struct {
+    pub const rounds = transition.rounds(.{ .facts = .{.always} });
+    pub const round_budget = 2;
+    pub const commit: transition.Commit = .transaction;
+    pub const begin: ?rounds.At = .facts;
+    pub const Input = struct { command: *const command_input.PermissionDecisionCommand };
+    pub const Result = PermissionDecisionReply;
+    pub const Ordinary = store_core.Ordinary.none;
+    pub const Guards = error{ActionSelectionChanged};
+    pub const Declined = error{};
+
+    input: Input,
+    digest: [32]u8 = undefined,
+    saved: saved_command.Result = undefined,
+    target: target_session.Result = null,
+    action: decision_action.Result = null,
+    /// The denial's content row, which its import reads in place.
+    content: content_domain.Import = denial,
+    /// The command's writes read these in place.
+    answer: StoredAnswer = undefined,
+    action_text: [20]u8 = undefined,
+    rejection: ?mutation_answer.PermissionDecisionRejection = null,
+    trace: ?store_core.ControlTrace = null,
+
+    pub fn step(t: *DecidePermission, r: *transition.Round(DecidePermission), ran: ?rounds.At) !transition.Next(DecidePermission) {
+        const command = t.input.command;
+        const session = command.session.slice();
+        if (ran == null) {
+            t.digest = command.semanticDigest();
+            lookupCommand(r, command.key.slice(), &t.saved);
+            if (validId(command.action_id)) {
+                readTarget(r, session, &t.target);
+                if (session_id.valid(session)) r.read(decision_action, .{ .action_id = command.action_id, .target = session }, &t.action);
+            }
+            if (command.decision == .deny) content_domain.lookup(r, &t.content);
+            return .{ .round = .facts };
+        }
+        switch (try classify(mutation_answer.PermissionDecisionRejection, &t.saved, .permission_decision, session, &t.digest)) {
+            .fresh => {},
+            .conflict => return .{ .done = .conflict },
+            .accepted => return .{ .done = .{ .accepted = .{ .replayed = true } } },
+            .rejected => |code| return .{ .done = .{ .rejected = .{ .replayed = true, .code = code } } },
+        }
+
+        t.rejection = decisionRejection(command, t.target, t.action);
+        t.answer = .{ .accepted = t.rejection == null };
+        if (t.rejection) |code| try t.answer.code.set(@tagName(code));
+        try queueCommand(r, command.key.slice(), .permission_decision, session, &t.digest, null, null, &t.answer);
+        r.write(save_decision, .{ .key = command.key.slice(), .action_id = try std.fmt.bufPrint(&t.action_text, "{d}", .{command.action_id}), .decision = command.decision });
+        if (t.rejection == null) {
+            const found = t.action.?;
+            const head = found.session;
+            switch (command.decision) {
+                .allow_once => r.write(allow_action, .{ .action_id = command.action_id, .session = head }),
+                .deny => {
+                    if (r.faults().content_import) return error.InjectedContentImportFailure;
+                    const positions = try r.positions(head);
+                    const content_id = try content_domain.importBytes(r, &t.content, denial_text);
+                    r.write(deny_action, .{ .action_id = command.action_id, .content_id = content_id, .position = try positions.take(1), .session = head });
+                    turn_domain.queueContinuation(r, found.turn_id.get(), head);
+                },
+            }
+        }
+        if (r.faults().before_commit) return error.InjectedCommitFailure;
+        t.trace = r.faults().control_trace;
+        return .commit;
     }
 
-    const rejection = decisionRejection(command, target, action);
-    var answer = StoredAnswer{ .accepted = rejection == null };
-    if (rejection) |code| try answer.code.set(@tagName(code));
-    try queueCommand(a, command.key.slice(), .permission_decision, session, &digest, null, null, &answer);
-    var action_buffer: [20]u8 = undefined;
-    a.write(save_decision, .{ .key = command.key.slice(), .action_id = try std.fmt.bufPrint(&action_buffer, "{d}", .{command.action_id}), .decision = command.decision });
-    if (rejection == null) {
-        const head = action.?.session;
-        switch (command.decision) {
-            .allow_once => a.write(allow_action, .{ .action_id = command.action_id, .session = head }),
-            .deny => {
-                if (faults.content_import) return error.InjectedContentImportFailure;
-                const positions = try a.positions(head);
-                const content_id = try content_domain.importBytes(a, &content, denial_text);
-                a.write(deny_action, .{ .action_id = command.action_id, .content_id = content_id, .position = try positions.take(1), .session = head });
-                turn_domain.queueContinuation(a, action.?.turn_id.get(), head);
-            },
-        }
+    pub fn committed(t: *const DecidePermission) Result {
+        if (t.rejection) |code| return .{ .rejected = .{ .replayed = false, .code = code } };
+        if (t.trace) |trace| trace.mark(.durable_acceptance);
+        return .{ .accepted = .{ .replayed = false } };
     }
-    if (faults.before_commit) return error.InjectedCommitFailure;
-    try a.commit();
-    if (rejection) |code| return .{ .rejected = .{ .replayed = false, .code = code } };
-    if (faults.control_trace) |trace| trace.mark(.durable_acceptance);
-    return .{ .accepted = .{ .replayed = false } };
-}
+};
 
 const ExistingCommand = struct {
     kind: cli_value.CommandKind,

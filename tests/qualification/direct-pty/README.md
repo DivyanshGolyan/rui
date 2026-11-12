@@ -34,7 +34,8 @@ PgUp/PgDn, Shift-PgUp, CSI/SS3 Up, three End forms, Esc and Ctrl-G return,
 alternate-scroll wheel Up/Down encodings, and chat info (Alt-I opens its fields and footer; Esc returns to the feed).
 Unsolicited SGR/X10
 wheel and split-X10 reports must leave submitted text unchanged.
-The bare ESC expiry row waits 150 ms, observes the overview, then reopens the
+The bare ESC expiry row waits 150 ms, observes the pinned New Session and
+Settings rows and the overview footer with no editor, then reopens the
 fixture's only Session with Enter and checks its identity and restored `ab`
 draft before typing `Z` and submitting `abZ`. Esc-with-text leaves the chat;
 it does not discard the draft or stay in the chat with a notice.

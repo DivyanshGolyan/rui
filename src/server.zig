@@ -31,6 +31,7 @@ const store_module = @import("store.zig");
 const session_list_reply = @import("session_list_reply.zig");
 const session_report_reply = @import("session_report_reply.zig");
 const launch_frame = @import("launch_frame.zig");
+const start_report = @import("start_report.zig");
 const core_tools = @import("core_tools.zig");
 const tools = @import("tools.zig");
 const mcp_offered = @import("mcp/offered.zig");
@@ -74,6 +75,85 @@ fn captureFailedResponse(host: *Host, request: *const protocol.InspectSession, r
 // The complete Debug request -> SQLite -> response path exceeds 512 KiB.
 // Only the two shared workers reserve these stacks, independent of exchanges.
 const intake_worker_stack_bytes = 1024 * 1024;
+
+/// SIGINT, SIGTERM and SIGHUP ask the Host to stop, as `host-stop` does:
+/// Ctrl-C on a foreground Host, closing its terminal or `kill <pid>` is a
+/// stop someone meant. The handler only
+/// records the ask and writes intake's wake socket; intake's loop applies it
+/// through `Host.stopAsked`, the one owner of the stop record. SIGKILL and a
+/// crash leave no record. Bash children start with every signal at its
+/// default (`rui_bash_spawn`), and exec resets a caught signal anyway.
+const StopSignals = struct {
+    const signals = .{ std.posix.SIG.INT, std.posix.SIG.TERM, std.posix.SIG.HUP };
+
+    var asked: std.atomic.Value(bool) = .init(false);
+    /// Intake's wake socket while it is open, else -1.
+    var wake: std.atomic.Value(std.posix.fd_t) = .init(-1);
+    /// Handlers between reading `wake` and finishing their write; `detach`
+    /// waits for none before intake may close the socket. With `wake`, a
+    /// store-buffering handshake: both sides store, then load the other's
+    /// value, all seq_cst, so either `detach` sees the handler in flight or
+    /// the handler sees -1.
+    var writing: std.atomic.Value(u32) = .init(0);
+
+    /// The handlers `install` replaced. Static, like the handlers themselves:
+    /// serve's frame stays resident for the Host's life.
+    var previous: [signals.len]std.posix.Sigaction = undefined;
+
+    /// Installed before startup, so an ask during startup stops the Host
+    /// once intake runs. `restore` puts the previous handlers back.
+    noinline fn install() void {
+        var blocked = std.posix.sigemptyset();
+        inline for (signals) |signal| std.posix.sigaddset(&blocked, signal);
+        var previous_mask: std.posix.sigset_t = undefined;
+        std.posix.sigprocmask(std.posix.SIG.BLOCK, &blocked, &previous_mask);
+        defer std.posix.sigprocmask(std.posix.SIG.SETMASK, &previous_mask, null);
+        asked.store(false, .release);
+        const action: std.posix.Sigaction = .{ .handler = .{ .handler = handle }, .mask = std.posix.sigemptyset(), .flags = 0 };
+        inline for (signals, 0..) |signal, i| std.posix.sigaction(signal, &action, &previous[i]);
+    }
+
+    noinline fn restore() void {
+        inline for (signals, 0..) |signal, i| std.posix.sigaction(signal, &previous[i], null);
+    }
+
+    fn handle(_: std.posix.SIG) callconv(.c) void {
+        asked.store(true, .seq_cst);
+        _ = writing.fetchAdd(1, .seq_cst);
+        defer _ = writing.fetchSub(1, .seq_cst);
+        const fd = wake.load(.seq_cst);
+        if (fd < 0) return;
+        const saved = std.c._errno().*;
+        hint(fd);
+        std.c._errno().* = saved;
+    }
+
+    /// Coalesced: a full nonblocking socket is already readable. Never raises
+    /// SIGPIPE: MSG_NOSIGNAL on Linux, SO_NOSIGPIPE set by `Intake.init` on
+    /// Darwin.
+    fn hint(fd: std.posix.fd_t) void {
+        _ = std.c.send(fd, "x", 1, socket_os.send_flags);
+    }
+
+    fn attach(fd: std.posix.fd_t) void {
+        wake.store(fd, .seq_cst);
+        // An ask that arrived before this wake socket existed.
+        if (asked.load(.seq_cst)) hint(fd);
+    }
+
+    /// After it returns no handler holds the socket, so it may be closed.
+    fn detach() void {
+        wake.store(-1, .seq_cst);
+        // A handler writes one byte and returns; it never waits.
+        while (writing.load(.seq_cst) != 0) std.atomic.spinLoopHint();
+    }
+
+    /// Applies a pending ask on intake's loop. A repeated ask while the Host
+    /// is already stopping changes nothing (`Host.stopAsked`).
+    fn apply(host: *Host) void {
+        if (asked.swap(false, .seq_cst)) _ = host.stopAsked();
+    }
+};
 
 // One socket owner and one ordinary/one control local-work stack replace
 // per-exchange threads. Workers never wait on peers. Complete requests waiting
@@ -514,7 +594,10 @@ const Intake = struct {
             _ = std.c.close(self.wake[0]);
             _ = std.c.close(self.wake[1]);
         }
-        for (self.wake) |fd| try setNonblocking(fd);
+        for (self.wake) |fd| {
+            try setNonblocking(fd);
+            if (!socket_os.suppressSigpipe(fd)) return error.SocketFlagsFailed;
+        }
         errdefer self.stopWorkers();
         for (&self.workers, &self.threads) |*worker, *thread| {
             worker.* = .{ .owner = self };
@@ -649,6 +732,7 @@ const Intake = struct {
             // readable, so the bounded poll below cannot sleep past it.
             var bytes: [256]u8 = undefined;
             while (std.c.read(self.wake[0], &bytes, bytes.len) > 0) {}
+            StopSignals.apply(self.host);
             if (self.host.stopping()) {
                 self.armShutdownDeadline();
                 for (self.exchanges.items) |exchange| exchange.retireUnhanded();
@@ -888,7 +972,7 @@ pub const Launch = struct {
 /// Lists each MCP server and saves the Host tool set: the built-ins and
 /// the servers' tools, with an unreachable server's last saved tools kept
 /// (D147). A name two sources share refuses the start (D142).
-noinline fn offerMcpTools(io: std.Io, arena: std.mem.Allocator, scratch: std.mem.Allocator, storage: *store_module.Store, servers: []const launch_frame.Frame.McpServer, stop: ?std.posix.fd_t) !void {
+noinline fn offerMcpTools(io: std.Io, arena: std.mem.Allocator, scratch: std.mem.Allocator, storage: *store_module.Store, servers: []const launch_frame.Frame.McpServer, stop: ?std.posix.fd_t, failure: *?start_report.Failure) !void {
     var saved = try storage.readHostToolSet(arena);
     const kept: ?tools.HostToolSet = if (saved) |*found| found.toolSet() else null;
     var collision: mcp_offered.Collision = .{};
@@ -896,15 +980,12 @@ noinline fn offerMcpTools(io: std.Io, arena: std.mem.Allocator, scratch: std.mem
         // The launcher closed stdin: stop as a closed stdin does later.
         error.Stopped => return error.EffectAwareShutdown,
         error.ToolNameCollision => {
-            var message: [256]u8 = undefined;
-            launch_frame.writeRefusal(io, .{
-                .code = .tool_name_collision,
-                .message = std.fmt.bufPrint(&message, "tool name {s} is offered by {s} and by {s}", .{ collision.name, collision.first, collision.second }) catch "a tool name is offered twice",
-            });
+            var message: [start_report.max_refusal_message_bytes]u8 = undefined;
+            failure.* = .init(.tool_name_collision, std.fmt.bufPrint(&message, "tool name {s} is offered by {s} and by {s}", .{ collision.name, collision.first, collision.second }) catch "a tool name is offered twice");
             return err;
         },
         error.TooManyTools => {
-            launch_frame.writeRefusal(io, .{ .code = .launch_frame_invalid, .message = "the MCP servers list more tools than a Host offers" });
+            failure.* = .init(.launch_frame_invalid, "the MCP servers list more tools than a Host offers");
             return err;
         },
         else => |other| return other,
@@ -926,7 +1007,9 @@ pub fn serve(
     bash_timeout_ms: u64,
     home: ?[]const u8,
     launch: ?Launch,
+    failure: *?start_report.Failure,
 ) !void {
+    failure.* = null;
     const mcp_servers: []const launch_frame.Frame.McpServer = if (launch) |value| value.mcp_servers else &.{};
     // The Host owns child waits. Automatic reaping or an inherited handler
     // would release process identities before their signal owners retire.
@@ -936,6 +1019,8 @@ pub fn serve(
         .flags = 0,
     };
     std.posix.sigaction(.CHLD, &child_action, null);
+    StopSignals.install();
+    defer StopSignals.restore();
     var descriptor_observation = try descriptor_limit.observe(io);
     var descriptor_requirement = try descriptor_capacity.calculate(
         descriptor_observation.open_descriptors,
@@ -1024,7 +1109,7 @@ pub fn serve(
         return err;
     };
     defer storage.close() catch |err| stderr.print("rui: Store close failed: {s}\n", .{@errorName(err)});
-    return finishServing(io, &storage, launch != null, serveOpened(
+    return finishServing(&storage, launch != null, failure, serveOpened(
         io,
         allocator,
         &storage,
@@ -1046,6 +1131,7 @@ pub fn serve(
         &diagnostics,
         diagnostic_open_error,
         &readiness_owned,
+        failure,
     ));
 }
 
@@ -1072,8 +1158,9 @@ fn serveOpened(
     diagnostics: *?HostDiagnostics,
     diagnostic_open_error: ?anyerror,
     readiness_owned: *bool,
+    failure: *?start_report.Failure,
 ) !void {
-    if (mcp_servers.len != 0) try offerMcpTools(io, tool_set_memory.allocator(), allocator, storage, mcp_servers, if (launch) |value| value.stdin else null);
+    if (mcp_servers.len != 0) try offerMcpTools(io, tool_set_memory.allocator(), allocator, storage, mcp_servers, if (launch) |value| value.stdin else null, failure);
     try storage.validateRetryWaits(limits.retry_waits_ms);
     try lease.prepareForServing(hooks.fails(.startup_cleanup));
 
@@ -1155,6 +1242,10 @@ fn serveOpened(
         try provider.checkLibraries();
     }
     try std.Io.randomSecure(io, &host.instance);
+    // One served incarnation: readiness fences the same opening whose
+    // Store-read generations order listing and activity presentation.
+    // Intake and execution have not started, so no external token exists.
+    storage.instance = host.instance;
     const started_at = std.Io.Clock.real.now(io).toSeconds();
     if (started_at <= 0) return error.ClockReadFailed;
     host.started_at = @intCast(started_at);
@@ -1170,6 +1261,9 @@ fn serveOpened(
         intake.launched = true;
     }
     host.intake_wake = intake.wake[1];
+    StopSignals.attach(intake.wake[1]);
+    // Before intake.deinit closes the socket a handler would write.
+    defer StopSignals.detach();
     const execution_thread = try signal_stack.spawn(.{}, executionMain, .{&host});
     defer {
         // Stop admitting new connections before releasing any Host-owned
@@ -1200,11 +1294,11 @@ fn serveOpened(
     return intake.run(&listener, &listener_open, &socket_owned);
 }
 
-fn finishServing(io: std.Io, storage: *const store_module.Store, launched: bool, result: anyerror!void) !void {
-    // This is the sole decision and publication site, after intake, workers
+fn finishServing(storage: *const store_module.Store, launched: bool, failure: *?start_report.Failure, result: anyerror!void) !void {
+    // This is the sole fence decision site, after intake, workers
     // and execution have drained. A fence wins over every serving outcome.
     if (launched and storage.kind() == .mysql and storage.isFenced()) {
-        launch_frame.writeRefusal(io, .{ .code = .store_fenced, .message = "the MySQL Store lost ownership or its connection; restart the Host" });
+        failure.* = .init(.store_fenced, "the MySQL Store lost ownership or its connection; restart the Host");
         return error.StoreFenced;
     }
     return result;
@@ -3859,13 +3953,17 @@ test "launch frame fenced MySQL shutdown is decided once at the return boundary 
         var open = true;
         var owned = true;
         defer if (open) listener.deinit(io);
-        const outcome = finishServing(io, &storage, case.launched, intake.run(&listener, &open, &owned));
+        var failure: ?start_report.Failure = null;
+        const outcome = finishServing(&storage, case.launched, &failure, intake.run(&listener, &open, &owned));
         const fenced = case.mysql and case.launched and (case.early or case.late);
         try std.testing.expectError(if (fenced) error.StoreFenced else error.EffectAwareShutdown, outcome);
+        try std.testing.expectEqual(@as(usize, 0), Probe.used); // The Host never publishes stdout.
+        var line_buffer: [start_report.max_line_bytes]u8 = undefined;
+        try std.testing.expectEqual(fenced, failure != null);
         try std.testing.expectEqualStrings(if (fenced)
             "{\"rui_start_error\":{\"code\":\"store_fenced\",\"message\":\"the MySQL Store lost ownership or its connection; restart the Host\"}}\n"
         else
-            "", Probe.output[0..Probe.used]);
+            "", if (failure) |*value| start_report.line(value, &line_buffer) else "");
         try std.testing.expectEqual(@as(usize, 0), intake.exchanges.items.len);
     }
 }
@@ -4784,6 +4882,50 @@ test "inline skills suggestions answer heap exhaustion as busy, not a catalog re
     try std.testing.expect(fail_index > 0);
 }
 
+test "Host startup reports MCP tool collision and excess tools as owned failures" {
+    const Script = @import("mcp/test_server.zig");
+    for ([_]bool{ false, true }) |too_many| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: store_module.Store = undefined;
+        try store_module.testing.testingStoreToolSet(&storage, &tmp, std.testing.io, null);
+        defer storage.close() catch unreachable;
+        var json: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer json.deinit();
+        try json.writer.writeAll("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"tools\":[");
+        if (too_many) {
+            for (0..tools.max_host_tool_records) |i| {
+                if (i != 0) try json.writer.writeByte(',');
+                try json.writer.print("{{\"name\":\"tool_{d}\",\"inputSchema\":{{\"type\":\"object\"}}}}", .{i});
+            }
+        } else try json.writer.writeAll("{\"name\":\"bash\",\"inputSchema\":{\"type\":\"object\"}}");
+        try json.writer.writeAll("]}}");
+        const reply = try std.fmt.allocPrint(std.testing.allocator, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}", .{ json.written().len, json.written() });
+        defer std.testing.allocator.free(reply);
+        var script: Script = .{ .reply = reply };
+        try script.start();
+        defer script.stop();
+        var server: launch_frame.Frame.McpServer = .{};
+        try server.name.set("docs");
+        @memcpy(server.bearer_token.bytes[0..6], "secret");
+        server.bearer_token.len = 6;
+        var url: [128]u8 = undefined;
+        try server.url.set(try std.fmt.bufPrint(&url, "http://127.0.0.1:{d}/mcp", .{script.port}));
+        var failure: ?start_report.Failure = null;
+        {
+            var memory: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer memory.deinit();
+            try std.testing.expectError(if (too_many) error.TooManyTools else error.ToolNameCollision, offerMcpTools(std.testing.io, memory.allocator(), std.testing.allocator, &storage, &.{server}, null, &failure));
+        } // Failure's formatted bytes must survive the listing arena.
+        try std.testing.expect(failure != null);
+        var buffer: [start_report.max_line_bytes]u8 = undefined;
+        try std.testing.expectEqualStrings(if (too_many)
+            "{\"rui_start_error\":{\"code\":\"launch_frame_invalid\",\"message\":\"the MCP servers list more tools than a Host offers\"}}\n"
+        else
+            "{\"rui_start_error\":{\"code\":\"tool_name_collision\",\"message\":\"tool name bash is offered by Rui and by docs\"}}\n", start_report.line(&failure.?, &buffer));
+    }
+}
+
 test "Host startup projects MCP offers after a changed listing and restart" {
     const Script = @import("mcp/test_server.zig");
     const testing = store_module.testing;
@@ -4809,7 +4951,9 @@ test "Host startup projects MCP offers after a changed listing and restart" {
         server.bearer_token.len = 6;
         var url: [128]u8 = undefined;
         try server.url.set(try std.fmt.bufPrint(&url, "http://127.0.0.1:{d}/mcp", .{script.port}));
-        try offerMcpTools(std.testing.io, tool_memory.allocator(), std.testing.allocator, &storage, &.{server}, null);
+        var failure: ?start_report.Failure = null;
+        try offerMcpTools(std.testing.io, tool_memory.allocator(), std.testing.allocator, &storage, &.{server}, null, &failure);
+        try std.testing.expect(failure == null);
         if (round == 0) {
             var cwd: [protocol.max_workspace_bytes]u8 = undefined;
             var configure = try testing.completeConfiguration("restart-mcp-config", "", try testing.canonicalCwd(std.testing.io, &cwd), "model-a");
@@ -4886,4 +5030,124 @@ test "configure parent inherits the Host environment only after a fresh creation
     try std.testing.expect(refusal == .rejected);
     try std.testing.expectEqual(protocol.ConfigurationRejection.parent_provider_forbidden, refusal.rejected.code);
     try std.testing.expectEqual(count, environments.len);
+}
+
+test "SIGINT, SIGTERM and SIGHUP ask the Host to stop once through intake's loop, in every phase" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "{s}/store", .{root});
+    var wake: [2]std.posix.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &wake));
+    defer for (wake) |fd| {
+        _ = std.c.close(fd);
+    };
+    for (wake) |fd| try setNonblocking(fd);
+    StopSignals.attach(wake[1]);
+    defer StopSignals.detach();
+    inline for (StopSignals.signals) |signal| for (std.enums.values(server_host.Phase)) |before| {
+        errdefer std.debug.print("signal {t}, phase before it: {t}\n", .{ signal, before });
+        StopSignals.asked.store(false, .release);
+        var lease = try platform.StoreLease.acquire(io, path);
+        defer lease.release();
+        try lease.prepareForServing(false);
+        var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = &lease, .store = undefined };
+        _ = host.advance(before);
+        // No signal: the loop's pass changes nothing.
+        StopSignals.apply(&host);
+        try std.testing.expectEqual(before, host.phase.load(.acquire));
+        try std.testing.expectEqual(platform.StoreLease.LastStop.unasked, platform.StoreLease.lastStop(io, path));
+        // The handler, as the OS calls it, wakes intake and stops nothing.
+        StopSignals.handle(signal);
+        var bytes: [8]u8 = undefined;
+        try std.testing.expectEqual(@as(isize, 1), std.c.read(wake[0], &bytes, bytes.len));
+        try std.testing.expectEqual(before, host.phase.load(.acquire));
+        StopSignals.apply(&host);
+        try std.testing.expect(host.stopping());
+        // A stop the Host had already begun is not the ask's (Host.stopAsked).
+        const recorded: platform.StoreLease.LastStop = if (before != .stopping) .asked else .unasked;
+        try std.testing.expectEqual(recorded, platform.StoreLease.lastStop(io, path));
+        // A second signal while stopping changes nothing.
+        StopSignals.handle(signal);
+        StopSignals.apply(&host);
+        try std.testing.expect(host.stopping());
+        try std.testing.expectEqual(recorded, platform.StoreLease.lastStop(io, path));
+        while (std.c.read(wake[0], &bytes, bytes.len) > 0) {}
+    };
+}
+
+test "the Host's stop signals reach its handler until serve restores the previous ones" {
+    const ignored: std.posix.Sigaction = .{ .handler = .{ .handler = std.posix.SIG.IGN }, .mask = std.posix.sigemptyset(), .flags = 0 };
+    var original: [StopSignals.signals.len]std.posix.Sigaction = undefined;
+    inline for (StopSignals.signals, 0..) |signal, i| std.posix.sigaction(signal, &ignored, &original[i]);
+    defer inline for (StopSignals.signals, 0..) |signal, i| std.posix.sigaction(signal, &original[i], null);
+    var unblocked = std.posix.sigemptyset();
+    inline for (StopSignals.signals) |signal| std.posix.sigaddset(&unblocked, signal);
+    var previous_mask: std.posix.sigset_t = undefined;
+    std.posix.sigprocmask(std.posix.SIG.UNBLOCK, &unblocked, &previous_mask);
+    defer std.posix.sigprocmask(std.posix.SIG.SETMASK, &previous_mask, null);
+    StopSignals.install();
+    inline for (StopSignals.signals) |signal| {
+        try std.testing.expect(!StopSignals.asked.load(.acquire));
+        // raise delivers to this thread before it returns.
+        try std.posix.raise(signal);
+        try std.testing.expect(StopSignals.asked.swap(false, .acq_rel));
+    }
+    StopSignals.restore();
+    inline for (StopSignals.signals) |signal| {
+        try std.posix.raise(signal);
+        try std.testing.expect(!StopSignals.asked.load(.acquire));
+    }
+}
+
+test "a stop signal handler racing detach never writes to the closed or a reused wake socket" {
+    const Hammer = struct {
+        calls: std.atomic.Value(u64) = .init(0),
+        stop: std.atomic.Value(bool) = .init(false),
+
+        fn run(self: *@This()) void {
+            while (!self.stop.load(.acquire)) {
+                StopSignals.handle(std.posix.SIG.INT);
+                _ = self.calls.fetchAdd(1, .release);
+            }
+        }
+
+        fn advance(self: *@This(), count: u64) void {
+            const target = self.calls.load(.acquire) + count;
+            while (self.calls.load(.acquire) < target) std.atomic.spinLoopHint();
+        }
+    };
+    var hammers: [3]Hammer = @splat(.{});
+    var threads: [hammers.len]std.Thread = undefined;
+    for (&hammers, &threads) |*hammer, *thread| thread.* = try std.Thread.spawn(.{}, Hammer.run, .{hammer});
+    defer {
+        for (&hammers) |*hammer| hammer.stop.store(true, .release);
+        for (threads) |thread| thread.join();
+        StopSignals.asked.store(false, .seq_cst);
+    }
+    var bytes: [256]u8 = undefined;
+    for (0..20000) |round| {
+        errdefer std.debug.print("round {d}\n", .{round});
+        var wake: [2]std.posix.fd_t = undefined;
+        try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &wake));
+        for (wake) |fd| try setNonblocking(fd);
+        StopSignals.attach(wake[1]);
+        for (&hammers) |*hammer| hammer.advance(1);
+        StopSignals.detach();
+        // Closing the peer first would turn a late write into EPIPE.
+        _ = std.c.close(wake[0]);
+        _ = std.c.close(wake[1]);
+        // The lowest free numbers: a late handler's write would land here.
+        var reused: [2]std.posix.fd_t = undefined;
+        try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &reused));
+        defer for (reused) |fd| {
+            _ = std.c.close(fd);
+        };
+        for (reused) |fd| try setNonblocking(fd);
+        for (&hammers) |*hammer| hammer.advance(1);
+        for (reused) |fd| try std.testing.expect(std.c.read(fd, &bytes, bytes.len) < 0);
+    }
 }

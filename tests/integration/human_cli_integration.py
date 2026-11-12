@@ -71,9 +71,10 @@ def time_limit(milliseconds):
 
 from terminal_process import close_pty, answers_to, open_pty, spawn, terminal_process
 import model_fixture as fixture
+from session_list_fixture import session_values
 import codex_fixture
 import os_semantics
-from human_cli_fixture import chat_info_geometry, model_choice_frame, model_choice_shown, chat_info_frame, chat_info_open, panel_frame, ALLOW, CAPTURE_NOTICE, CHOICE, highlighted, _captures, action_ready, admit, await_screen, chat_content_row, command_frame, composer_ready, conversation_text, current_screen, draining, drop_spent_readiness, keyed_frame, next_frame, overview_frame, overview_title, pick_deny, read_terminal, return_to_live, run, settle_screen, shown, saved_result, terminal_capture, terminal_exit, terminal_gate, terminal_step
+from human_cli_fixture import chat_info_geometry, model_choice_frame, model_choice_shown, chat_info_frame, chat_info_open, panel_frame, ALLOW, CAPTURE_NOTICE, CHOICE, highlighted, _captures, action_ready, admit, await_screen, chat_content_row, command_frame, composer_ready, chat_footer_row, conversation_text, current_screen, draining, drop_spent_readiness, keyed_frame, next_frame, overview_frame, overview_title, pick_deny, read_terminal, return_to_live, run, settle_screen, shown, saved_result, terminal_capture, terminal_exit, terminal_gate, terminal_step
 
 
 def terminal_safe_json(text):
@@ -516,7 +517,7 @@ def info_frame(master, session, timeout=15):
 
 
 def leave_overview(master, timeout=15):
-    """Ctrl-D on an empty composer leaves the overview; returns the text
+    """Ctrl-D leaves the overview; returns the text
     printed after it, through the notice's Overview line."""
     capture = terminal_capture(master)
     total = capture.plain_total
@@ -997,8 +998,9 @@ def saved_capture_cases(state, store, workspace):
         recovered = json.loads(run(home, "request", "recover", rejected_handle, success=False))
         assert recovered["answer"] == {**rejected_answer, "replayed": True}, recovered
         assert rejected_record.read_bytes() == rejected_bytes
-        # The saved rejection is a commit, so only the listing's token moves.
-        assert json.loads(run(home, "session", "list", "--store", store, "--all"))["sessions"] == json.loads(sessions_before)["sessions"]
+        # The rejected record advances Store freshness, not Session facts.
+        after = json.loads(run(home, "session", "list", "--store", store, "--all"))
+        assert session_values(after) == session_values(json.loads(sessions_before))
 
     # Later capture faults update that same allocated Session, so /requests
     # must retain all of its recoverable configuration handles together.
@@ -2295,7 +2297,8 @@ def main(selected="all"):
             # waits for a choice. Its explicit selectors must still bypass the
             # malformed prospective defaults when it rechecks readiness.
             codex_fixture.credentials(explicit_config / "codex.json")
-            welcome = overview_frame(master, overview_title, keys=b"\r", timeout=10)
+            welcome = overview_frame(master, lambda frame: "Sign-in saved; couldn't save default" in frame,
+                                     keys=b"\r", timeout=10, ready=False)
             assert all(noise not in welcome for noise in ("Session:", "Provider:", "Model:", "request:")), welcome
             assert not (explicit_config / "requests").exists(), "the overview captured a request"
             assert malformed.read_text() == "version=9\n"
@@ -2323,7 +2326,8 @@ def main(selected="all"):
             renewed_at = int(time.time()) - 8 * 24 * 60 * 60 - 1
             credential_file.write_text(credential_file.read_text().replace("expires_at=4102444800", "expires_at=0").replace("refreshed_at=1750000000", f"refreshed_at={renewed_at}"))
             assert defaults(preferences_home, environment={"RUI_CODEX_CREDENTIAL_FILE": str(credential_file)})["local_credentials"]["codex"] == "renewal_due"
-            welcome = overview_frame(master, overview_title, keys=b"\r")
+            welcome = overview_frame(master, lambda frame: "Sign-in saved; couldn't save default" in frame,
+                                     keys=b"\r", ready=False)
             assert "Session:" not in welcome and "Permission:" not in welcome, welcome
             leave_overview(master)
             assert expiring.wait(timeout=5) == 0
@@ -2432,10 +2436,12 @@ def main(selected="all"):
         try:
             blocked = spawn([str(fixture.RUI)], cwd=workspace,
                 env={**os.environ, "HOME": str(blocked_home)}, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
-            # The composer's capture fails before any send: the draft stays.
+            # New Session's Configure capture fails before any send; no
+            # editor, Session or Message is created.
             overview_frame(master, overview_title)
-            refused = overview_frame(master, lambda frame: "Not started: NotDir" in frame, keys=b"never captured\r")
-            assert "never captured" in refused, refused
+            refused = overview_frame(master, lambda frame: "Not created: NotDir" in frame,
+                                     keys=b"\x1b[H\r", ready=False)
+            assert "Type a task" not in refused, refused
             os.write(master, b"\x03")
             # Keep the slave alive until all output is collected: Darwin can
             # discard unread PTY bytes when the last slave closes.
@@ -2583,7 +2589,7 @@ def main(selected="all"):
             app_settings = keyed_frame(master, gesture, lambda screen, x, y: "Notifications" in screen and "Version" in screen)
             assert any("Sign-in" in row and "Codex" in row for row in app_settings.splitlines()), app_settings
             keys = keyed_frame(master, b"\x1b[B" * 6 + b"\r", lambda screen, x, y: "earlier message" in screen)
-            for expected in ('enter    send', 'esc      back', '⇧enter   new line', 'ctrl+x   stop', '↑↓       scroll', 'ctrl+o   tool output', 'ctrl+p   earlier message', 'ctrl+r   retry', '/        skills', 'alt+a    archive', 'ctrl+c   leave'):
+            for expected in ('enter    open / send', 'esc      back', '⇧enter   new line', 'ctrl+x   stop', '↑↓       scroll', 'ctrl+o   tool output', 'ctrl+p   earlier message', 'ctrl+r   retry', '/        skills', 'alt+a    archive', 'ctrl+c   leave'):
                 assert expected in keys, (expected, keys)
             assert all(stale not in keys for stale in ("/help", "Commands", "Marks", "Esc returns", "Ctrl-X twice", "shift+enter or ctrl+j", "‹ Rui · settings", 'ctrl+g', 'ctrl+d', 'ctrl+n', 'ctrl+end', 'ctrl+c/d', 'pgup/pgdn', 'first session', 'latest / last', 'scroll / select')), keys
             settings = keyed_frame(master, b"\x1b", lambda screen, x, y: "Notifications" in screen and "Version" in screen)
@@ -3239,6 +3245,31 @@ def main(selected="all"):
                         lambda: stop_process(entered, timeout=5),
                         lambda: proxy.close() if proxy is not None else None,
                         lambda: close_pty(master), lambda: close_pty(slave))
+        # SIGTERM, SIGINT and SIGHUP to the Host are a stop someone asked for, as
+        # host-stop is: the open conversation says so and leaves it to r.
+        for stop_signal in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+            master, slave = open_pty()
+            entered = spawn([str(fixture.RUI), "session", "resume", "--store", str(store),
+                "--", empty_session], env={**os.environ, "HOME": str(home)},
+                stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+            served, host = host, None
+            try:
+                read_terminal(master, "› ")
+                served.send_signal(stop_signal)
+                # The Host shuts down itself; the signal does not end it.
+                assert served.wait(timeout=10) >= 0, (stop_signal, served.returncode)
+                stopped = read_terminal(master, "Host stopped · r start")
+                assert "Host starting" not in stopped, stopped
+                assert entered.poll() is None, "the Host's stop ended the TUI"
+                os.write(master, b"\x03")
+                _, errors = terminal_exit(entered, master)
+                assert entered.returncode == 0, errors
+            finally:
+                dispose_all(lambda: stop_process(served),
+                            lambda: stop_process(entered, timeout=5),
+                            lambda: close_pty(master), lambda: close_pty(slave))
+            # The TUI started no Host, so the Store's lease is free again.
+            host = fixture.start_host(store, url)
         completed = True
         print("human CLI: saved recovery, one-shot observation/re-entry, exact PTY approval, bounded input and Host restart passed")
     finally:

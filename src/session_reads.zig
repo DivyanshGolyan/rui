@@ -89,7 +89,7 @@ pub const Line = struct {
     read: ?Moment = null,
     label: ?Bounded(protocol.max_label_bytes) = null,
     first_position: ?u64 = null,
-    folder: Bounded(session_line.max_line_bytes) = .{},
+    folder: ?Bounded(protocol.max_workspace_bytes) = null,
     model: Bounded(protocol.max_model_bytes) = .{},
     provider: ?protocol.Provider = null,
     effort: ?protocol.ReasoningEffort = null,
@@ -112,7 +112,7 @@ pub const Line = struct {
             .read = moment,
             .label = if (settings.label) |label| plain(protocol.max_label_bytes, label.slice()) else null,
             .first_position = if (first) |message| message.value.position else null,
-            .folder = plain(session_line.max_line_bytes, std.fs.path.basename(settings.workspace.slice())),
+            .folder = if (first == null) plain(protocol.max_workspace_bytes, settings.workspace.slice()) else null,
             .model = plain(protocol.max_model_bytes, settings.model.slice()),
             .provider = settings.provider.value,
             .effort = if (settings.reasoning_effort) |effort| effort.value else null,
@@ -133,6 +133,7 @@ pub const Line = struct {
         return .{
             .name = session_line.name(label, line, reference).text,
             .model = self.model.slice(),
+            .folder = if (self.folder) |*folder| folder.slice() else null,
             .effort = self.effort,
             .left = self.left,
             .asks = self.asks,
@@ -1119,6 +1120,9 @@ test "session_reads the Session line takes archive and other facts from Current 
             try std.testing.expect(!Line.stale(line.?.read, &page));
             const facts = line.?.facts(&unread, "k7m2qx").?;
             try std.testing.expectEqualStrings(case.name, facts.name);
+            if (std.mem.eql(u8, case.first, "null")) {
+                try std.testing.expectEqualStrings("/w", facts.folder.?);
+            } else try std.testing.expect(facts.folder == null);
             // The model's control byte shows as text, not as a terminal control.
             try std.testing.expectEqualStrings("gpt\\x01x", facts.model);
             try std.testing.expectEqual(case.left, facts.left);

@@ -31,6 +31,7 @@ const model_adapter = @import("model_adapter.zig");
 const providers = @import("providers.zig");
 const api_key = @import("api_key.zig");
 const launch_frame = @import("launch_frame.zig");
+const start_report = @import("start_report.zig");
 const new_session_selection = @import("new_session_selection.zig");
 const platform = @import("platform.zig");
 const preferences = @import("preferences.zig");
@@ -497,7 +498,7 @@ fn writeDefaultsJson(io: std.Io, facts: DefaultsFacts) !void {
 // omitted destinations use the same saved/HOME rule in every CLI mode.
 // Missing HOME is an environment repair, not a Store or request outcome:
 // report what needed it before any capture or transmission.
-const upgrade_usage = "Usage: rui upgrade [--check] [--store PATH]\nInstall the latest published stable release in the managed user installation.\nRestart the selected Store's Host only if already running; affects ALL Sessions there.\n--check only observes, without installation, Host startup, restart or Store migration.\n";
+const upgrade_usage = "Usage: rui upgrade [--check] [--store PATH]\nInstall the latest published stable release in the managed user installation.\nRestart every running same-user Host with a supported launch; affects ALL Sessions across their Stores.\n--store selects the client context, not the restart scope.\n--check only observes, without installation, Host startup, restart or Store migration.\n";
 
 noinline fn runUpgrade(init: std.process.Init, args: []const []const u8) !void {
     failure_held.resource = "upgrade";
@@ -540,10 +541,10 @@ noinline fn runUpgrade(init: std.process.Init, args: []const []const u8) !void {
         return error.Reported;
     };
     defer checked.deinit(allocator);
-    var buffer: [16384]u8 = undefined;
-    var writer = std.Io.Writer.fixed(&buffer);
-    try upgrade.writeCheck(&writer, &checked);
-    try std.Io.File.stdout().writeStreamingAll(init.io, writer.buffered());
+    var buffer: [4096]u8 = undefined;
+    var output = std.Io.File.stdout().writerStreaming(init.io, &buffer);
+    try upgrade.writeCheck(&output.interface, &checked);
+    try output.flush();
     if (checking) return;
     if (!upgrade.canInstall(&checked)) {
         recordExit(.environment);
@@ -552,10 +553,10 @@ noinline fn runUpgrade(init: std.process.Init, args: []const []const u8) !void {
     var cleanup: upgrade.CleanupReceipts = .{};
     defer {
         var cleanup_buffer: [512]u8 = undefined;
-        var output = std.Io.File.stdout().writerStreaming(init.io, &cleanup_buffer);
+        var cleanup_output = std.Io.File.stdout().writerStreaming(init.io, &cleanup_buffer);
         const written: anyerror!void = emitted: {
-            cleanup.write(&output.interface) catch |err| break :emitted err;
-            break :emitted output.flush();
+            cleanup.write(&cleanup_output.interface) catch |err| break :emitted err;
+            break :emitted cleanup_output.flush();
         };
         written catch |err| stderr.diagnostic("rui: could not write the retained installation cleanup receipt ({s}).\n", .{@tagName(caller_error.of(@as(anyerror, err)))});
     }
@@ -566,14 +567,9 @@ noinline fn runUpgrade(init: std.process.Init, args: []const []const u8) !void {
         return error.Reported;
     };
     defer result.deinit(allocator);
-    writer = .fixed(&buffer);
-    try upgrade.writeResult(&writer, &result);
-    try std.Io.File.stdout().writeStreamingAll(init.io, writer.buffered());
-    switch (result.activation) {
-        .failed, .unconfirmed, .replacement_observed, .unsupported, .cancelled, .client_incompatible => recordExit(.environment),
-        else => {},
-    }
-    if (exit_status != .done) return error.Reported;
+    try upgrade.writeResult(&output.interface, &result);
+    try output.flush();
+    if (result.hosts.totals().failed != 0) return error.HostRestartFailed;
 }
 
 noinline fn upgradeDownloadDiagnostic(err: anyerror, download: *const @import("upgrade.zig").DownloadDiagnostic) void {
@@ -1864,7 +1860,7 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     }
     if (launched) |frame| {
         const endpoint = providers.endpointUnder(init.arena.allocator(), frame.base_url.slice()) catch |err| {
-            if (err == error.InvalidBaseUrl) launch_frame.writeRefusal(io, .{ .code = .launch_frame_invalid, .message = "provider.baseUrl must be an https URL with a host and no query" });
+            if (err == error.InvalidBaseUrl) return writeRefusal(io, &.init(.launch_frame_invalid, "provider.baseUrl must be an https URL with a host and no query"));
             return err;
         };
         served.ca_file = if (frame.ca_file.len == 0) null else frame.ca_file.slice();
@@ -1890,7 +1886,8 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
         return error.Reported;
     }
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    return server.serve(
+    var failure: ?start_report.Failure = null;
+    const result = server.serve(
         io,
         std.heap.c_allocator,
         try selectedStore(init, store_path, &selected_buffer),
@@ -1905,12 +1902,85 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
             .mysql_url => |url| url,
             .sqlite_dir => null,
         } } else null,
-    ) catch |err| {
-        // A launched Host stops when its stdin closes; that is its clean end.
-        if (launched != null and err == error.EffectAwareShutdown) return;
-        if (launched) |frame| if (launch_frame.startRefusal(frame.store, err)) |refusal| launch_frame.writeRefusal(io, refusal);
-        return err;
+        &failure,
+    );
+    return finishServe(io, if (launched) |frame| switch (frame.store) {
+        .sqlite_dir => .sqlite,
+        .mysql_url => .mysql,
+    } else null, &failure, result);
+}
+
+/// Settle the whole Host outcome before treating stdin closure as a clean end.
+fn finishServe(io: std.Io, store: ?start_report.Store, failure: *const ?start_report.Failure, result: anyerror!void) !void {
+    if (store) |kind| {
+        if (failure.*) |*value| return writeRefusal(io, value);
+        result catch |err| {
+            // Without a refusal, closing a launched Host's stdin is clean.
+            if (err == error.EffectAwareShutdown) return;
+            if (start_report.classify(kind, err)) |value| return writeRefusal(io, &value);
+            return err;
+        };
+    }
+    return result;
+}
+
+test "start report CLI publishes once before settling every Host outcome" {
+    const Probe = struct {
+        var output: [4096]u8 = undefined;
+        var used: usize = 0;
+
+        fn operate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
+            if (operation == .file_write_streaming and operation.file_write_streaming.file.handle == 1) {
+                const write = operation.file_write_streaming;
+                var out = std.Io.Writer.fixed(output[used..]);
+                out.writeAll(write.header) catch return .{ .file_write_streaming = error.NoSpaceLeft };
+                for (write.data, 0..) |part, index| {
+                    const repeats = if (index == write.data.len - 1) write.splat else 1;
+                    for (0..repeats) |_| out.writeAll(part) catch return .{ .file_write_streaming = error.NoSpaceLeft };
+                }
+                used += out.buffered().len;
+                return .{ .file_write_streaming = out.buffered().len };
+            }
+            return std.testing.io.vtable.operate(userdata, operation);
+        }
     };
+    var vtable = std.testing.io.vtable.*;
+    vtable.operate = Probe.operate;
+    const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+    const supplied_line = "{\"rui_start_error\":{\"code\":\"store_fenced\",\"message\":\"the MySQL Store lost ownership or its connection; restart the Host\"}}\n";
+    const fallback_line = "{\"rui_start_error\":{\"code\":\"runtime_dir_unusable\",\"message\":\"another Host owns this runtimeDir\"}}\n";
+    const mysql_line = "{\"rui_start_error\":{\"code\":\"store_locked\",\"message\":\"another Host owns this Store\"}}\n";
+    for ([_]?start_report.Store{ null, .sqlite, .mysql }) |store| {
+        for ([_]bool{ false, true }) |supplied| {
+            for ([_]?anyerror{ null, error.EffectAwareShutdown, error.RuntimeDirectoryInUse, error.StoreLocked, error.StoreFenced, error.OutOfMemory }) |err| {
+                var failure: ?start_report.Failure = if (supplied)
+                    .init(.store_fenced, "the MySQL Store lost ownership or its connection; restart the Host")
+                else
+                    null;
+                Probe.used = 0;
+                const outcome = finishServe(io, store, &failure, if (err) |value| value else {});
+                const expected = if (store == null) "" else if (supplied) supplied_line else if (err != null and err.? == error.RuntimeDirectoryInUse) fallback_line else if (store == .mysql and err != null and err.? == error.StoreLocked) mysql_line else "";
+                if (expected.len != 0) {
+                    // Every refusal is already reported, even when a fence
+                    // overrides success or an otherwise clean stdin closure.
+                    try std.testing.expectError(error.Reported, outcome);
+                } else if (err) |value| {
+                    if (store != null and value == error.EffectAwareShutdown) {
+                        try outcome;
+                    } else try std.testing.expectError(value, outcome);
+                } else try outcome;
+                try std.testing.expectEqualStrings(expected, Probe.output[0..Probe.used]);
+            }
+        }
+    }
+}
+
+/// Startup-only rendering scratch does not stay in serve's resident frame.
+// The CLI owns publication and the already-reported status, through cleanup.
+noinline fn writeRefusal(io: std.Io, failure: *const start_report.Failure) error{Reported} {
+    var buffer: [start_report.max_line_bytes]u8 = undefined;
+    std.Io.File.stdout().writeStreamingAll(io, start_report.line(failure, &buffer)) catch {};
+    return error.Reported;
 }
 
 /// Reads the launch frame from stdin, or reports its refusal on stdout.
@@ -1918,9 +1988,9 @@ noinline fn readLaunchFrame(init: std.process.Init) !*launch_frame.Frame {
     const frame = try std.heap.c_allocator.create(launch_frame.Frame);
     errdefer std.heap.c_allocator.destroy(frame);
     frame.* = .{};
-    var refusal: launch_frame.Refusal = undefined;
+    var refusal: start_report.Failure = undefined;
     launch_frame.read(init.io, .stdin(), std.heap.c_allocator, frame, &refusal) catch |err| {
-        if (err == error.LaunchFrameInvalid) launch_frame.writeRefusal(init.io, refusal);
+        if (err == error.LaunchFrameInvalid) return writeRefusal(init.io, &refusal);
         return err;
     };
     return frame;
@@ -3750,7 +3820,7 @@ const usage_text =
     \\  rui RESOURCE COMMAND --help
     \\    Installed operation help owns exact options. Help needs no Host or credentials.
     \\  rui upgrade [--check] [--store PATH]
-    \\    Check/install published stable; restart only an already-running managed Host.
+    \\    Check/install published stable; restart every eligible running same-user Host.
     \\  rui --version
     \\    Print the release version and source revision.
     \\

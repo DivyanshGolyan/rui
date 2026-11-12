@@ -48,6 +48,13 @@ pub const Backend = struct {
     caps: *const fn (*anyopaque) view.Caps,
 };
 
+pub const Row = enum { model, effort };
+
+const Phase = enum { open, pending, failed };
+// Context remains the existing Session inspection, never a second facts cache.
+const Standalone = struct { row: Row, phase: Phase = .open };
+
+standalone: ?Standalone = null,
 backend: Backend,
 /// The process's HOME, borrowed; only the workspace is shortened with it.
 home: []const u8 = "",
@@ -84,13 +91,55 @@ pub fn footerWidget(self: *Self) vxfw.Widget {
     return .{ .userdata = self, .drawFn = drawFooter };
 }
 
+/// Open the existing field choice without its enclosing settings page.
+pub fn openStandaloneChoice(self: *Self, ctx: *vxfw.EventContext, row: Row) !void {
+    if (self.pending != null) return;
+    self.closeStandaloneChoice();
+    self.standalone = .{ .row = row };
+    const index: usize = if (row == .model) 4 else 0;
+    self.bind();
+    self.panel.selected = index;
+    try activate(self, ctx, index);
+}
+
+pub fn standaloneOpen(self: *const Self) bool {
+    return if (self.standalone) |shown| shown.phase != .pending else false;
+}
+
+/// The presentation intent, including an admitted save hidden while pending.
+pub fn standaloneField(self: *const Self) ?Row {
+    return if (self.standalone) |shown| shown.row else null;
+}
+
+pub fn closeStandaloneChoice(self: *Self) void {
+    self.standalone = null;
+    self.cancelEdit();
+}
+
+pub fn standaloneWidget(self: *Self) vxfw.Widget {
+    return .{ .userdata = self, .eventHandler = standaloneEvent, .drawFn = drawStandalone };
+}
+
+fn drawStandalone(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    self.bind();
+    if (!self.standaloneOpen()) return .empty(self.standaloneWidget());
+    var surface = try self.panel.drawChoice(ctx, if (self.standalone.?.row == .model) 4 else 0);
+    surface.widget = self.standaloneWidget();
+    return surface;
+}
+
 pub fn hasChoice(self: *const Self) bool {
     return self.renaming or self.panel.choice != null or self.model_choice.active;
 }
 
-/// Cancel only the topmost edit. The enclosing Layer closes this panel only
-/// when hasChoice is false, preserving the chat input and its draft beneath.
+/// Cancel the current edit. A standalone edit ends its whole presentation;
+/// an ordinary Chat page retains the enclosing page beneath its topmost edit.
 pub fn cancelChoice(self: *Self) void {
+    if (self.standalone != null) {
+        self.closeStandaloneChoice();
+        return;
+    }
     if (self.renaming) {
         // Cancel deliberately discards an unfinished paste or refused edit.
         _ = self.rename_editor.blur();
@@ -104,8 +153,25 @@ pub fn cancelChoice(self: *Self) void {
     self.panel.custom_choice = null;
 }
 
+/// End all transient editing without changing admitted backend work.
+fn cancelEdit(self: *Self) void {
+    if (self.renaming) _ = self.rename_editor.blur();
+    self.renaming = false;
+    self.panel.closeChoice();
+    self.model_choice.cancel();
+    self.panel.custom_choice = null;
+    self.tool_draft = null;
+    self.pasting = false;
+}
+
 pub fn refresh(self: *Self) void {
-    self.cancelChoice();
+    self.closeStandaloneChoice();
+    self.readSession();
+}
+
+/// Read the same Session without discarding a standalone retry's field.
+fn readSession(self: *Self) void {
+    self.cancelEdit();
     self.backend.read(self.backend.context, &self.session) catch {
         self.read_failed = true;
         self.ready = false;
@@ -122,7 +188,8 @@ fn title(self: *const Self) []const u8 {
 }
 
 fn bind(self: *Self) void {
-    _ = self.model_choice.validate();
+    const model_was_active = self.model_choice.active;
+    if (!self.model_choice.validate() and model_was_active and self.standalone != null) self.closeStandaloneChoice();
     self.panel.userdata = self;
     self.panel.on_activate = activate;
     self.panel.on_pick = pick;
@@ -149,6 +216,12 @@ fn bind(self: *Self) void {
     self.panel.title_style = widget_style.of(caps, .{ .background = .bar, .colour = .strong, .bold = true });
     self.panel.quiet = widget_style.of(caps, .{ .background = .bar, .colour = .quiet });
     self.panel.rule_style = widget_style.of(caps, .{ .background = .bar, .colour = .rule });
+    if (self.standalone != null) {
+        self.panel.ground = widget_style.of(caps, .{});
+        self.panel.title_style = widget_style.of(caps, .{ .colour = .strong, .bold = true });
+        self.panel.quiet = widget_style.of(caps, .{ .colour = .quiet });
+    }
+    self.model_choice.show_more = self.standalone == null;
     self.model_choice.ground = self.panel.ground;
     self.model_choice.selection = self.panel.selection;
     self.model_choice.hover_style = self.panel.hover_style;
@@ -160,7 +233,10 @@ fn bind(self: *Self) void {
 fn activate(raw: *anyopaque, ctx: *vxfw.EventContext, row: usize) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     if (self.pending != null) return;
-    self.refresh();
+    defer if (self.standalone) |*shown| {
+        if (self.pending == null) shown.phase = if (self.failures[row] != null) .failed else .open;
+    };
+    self.readSession();
     if (self.read_failed) {
         self.failures[row] = " · couldn't read chat";
         ctx.redraw = true;
@@ -171,10 +247,11 @@ fn activate(raw: *anyopaque, ctx: *vxfw.EventContext, row: usize) !void {
         0 => {
             self.effort_labels[0] = "model default";
             self.effort_count = 1;
-            var current: ?usize = if (!self.session.effort_override or self.session.effort == null) 0 else null;
+            const shown = if (self.standalone != null or self.session.effort_override) self.session.effort else null;
+            var current: ?usize = if (shown == null) 0 else null;
             for (std.enums.values(catalog.ReasoningEffort)) |effort| {
                 if (!capability.supportsReasoningEffort(catalog.shipped, self.session.model.slice(), effort)) continue;
-                if (self.session.effort_override and self.session.effort == effort) current = self.effort_count;
+                if (shown == effort) current = self.effort_count;
                 self.effort_labels[self.effort_count] = @tagName(effort);
                 self.effort_count += 1;
             }
@@ -251,10 +328,12 @@ fn save(self: *Self, ctx: *vxfw.EventContext, row: usize, edit: Edit) !void {
     self.failures[row] = null;
     self.backend.configure(self.backend.context, edit) catch {
         self.failures[row] = " · couldn't save";
+        if (self.standalone) |*shown| shown.phase = .failed;
         ctx.redraw = true;
         return;
     };
     self.pending = row;
+    if (self.standalone) |*shown| shown.phase = .pending;
     self.poll();
     ctx.redraw = true;
 }
@@ -263,7 +342,12 @@ fn poll(self: *Self) void {
     const row = self.pending orelse return;
     const state = self.backend.state(self.backend.context);
     if (state == .idle or state == .pending) return;
-    self.refresh();
+    self.readSession();
+    if (state == .failed or self.read_failed) {
+        if (self.standalone) |*shown| shown.phase = .failed;
+    } else {
+        self.closeStandaloneChoice();
+    }
     self.failures[row] = if (state == .failed) switch (row) {
         7 => " · couldn't archive",
         8 => " · couldn't copy",
@@ -275,6 +359,7 @@ fn poll(self: *Self) void {
 fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     if (self.model_choice.active and !self.model_choice.validate()) {
+        if (self.standalone != null) self.closeStandaloneChoice();
         self.panel.custom_choice = null;
         ctx.consumeAndRedraw();
         return;
@@ -289,8 +374,8 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
     defer if (input == .paste_end) {
         self.pasting = false;
     };
-    if (input == .key_press and (Editor.named(input.key_press) == .escape or Editor.named(input.key_press) == .ctrl_g) and self.hasChoice() and !self.pasting) {
-        self.cancelChoice();
+    if (input == .key_press and (Editor.named(input.key_press) == .escape or Editor.named(input.key_press) == .ctrl_g) and (self.hasChoice() or self.standalone != null) and !self.pasting) {
+        if (self.standalone != null) self.closeStandaloneChoice() else self.cancelChoice();
         ctx.consumeAndRedraw();
         return;
     }
@@ -334,7 +419,17 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
         }
     }
     self.bind();
-    try self.panel.widget().handleEvent(ctx, input);
+    if (self.standalone) |shown| {
+        if (shown.phase == .pending) return;
+        try self.panel.choiceEvent(ctx, input, if (shown.row == .model) 4 else 0);
+    } else {
+        try self.panel.widget().handleEvent(ctx, input);
+    }
+}
+
+fn standaloneEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    if (input == .tick or self.standaloneOpen()) try event(raw, ctx, input);
 }
 
 fn safe(arena: std.mem.Allocator, text: []const u8) ![]const u8 {
@@ -495,6 +590,8 @@ fn drawTitle(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxf
 
 const Fixture = struct {
     unicode: bool = true,
+    read_calls: usize = 0,
+    save_calls: usize = 0,
     session: status.Session = undefined,
     state_value: SaveState = .idle,
     fail_read: bool = false,
@@ -519,11 +616,13 @@ const Fixture = struct {
     }
     fn read(raw: *anyopaque, out: *status.Session) !void {
         const self: *Fixture = @ptrCast(@alignCast(raw));
+        self.read_calls += 1;
         if (self.fail_read) return error.AccessDenied;
         out.* = self.session;
     }
     fn configure(raw: *anyopaque, edit: Edit) !void {
         const self: *Fixture = @ptrCast(@alignCast(raw));
+        self.save_calls += 1;
         if (self.fail_submit) return error.AccessDenied;
         self.edit = switch (edit) {
             .label, .model => |text| blk: {
@@ -1409,5 +1508,281 @@ test "Chat info hover follows editable fields and action click regions without c
         _ = try page.widget().draw(draw_ctx);
         try page.widget().handleEvent(&events, .{ .mouse = .{ .col = @intCast(width - 1), .row = 4, .button = .left, .type = .press, .mods = .{} } });
         try std.testing.expectEqual(@as(@FieldType(status.Session, "permission"), .bypass), fixture.edit.?.permission);
+    }
+}
+
+test "Chat info standalone choices reuse edits hide pending preserve failures and close success" {
+    var fixture: Fixture = .{};
+    fixture.init();
+    var page: Self = .{ .backend = fixture.backend() };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    try page.openStandaloneChoice(&ctx, .effort);
+    try std.testing.expect(page.standaloneOpen());
+    try std.testing.expectEqual(Row.effort, page.standalone.?.row);
+    const drawn = try page.standaloneWidget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 30 }, .cell_size = .{} });
+    try std.testing.expectEqualStrings("E", drawn.readCell(1, 0).char.grapheme);
+    try std.testing.expectEqual(@as(u16, @intCast(1 + page.effort_count)), drawn.size.height);
+    try page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
+    try std.testing.expect(!page.hasChoice());
+    try std.testing.expect(!page.standaloneOpen());
+    try std.testing.expectEqual(@as(?usize, 0), page.pending);
+    try page.openStandaloneChoice(&ctx, .model);
+    try std.testing.expectEqual(Row.effort, page.standalone.?.row);
+    fixture.state_value = .failed;
+    try page.widget().handleEvent(&ctx, .tick);
+    try std.testing.expect(page.standaloneOpen());
+    try std.testing.expectEqualStrings(" · couldn't save", page.failures[0].?);
+    page.closeStandaloneChoice();
+    try std.testing.expect(!page.standaloneOpen());
+    try page.openStandaloneChoice(&ctx, .model);
+    try std.testing.expect(page.model_choice.active);
+    for ([_]u16{ 0, 1, 2, 46, 140 }) |width| for (0..12) |height| {
+        const model_surface = try page.standaloneWidget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = @intCast(height) }, .cell_size = .{} });
+        try std.testing.expect(model_surface.size.height <= height);
+        for (model_surface.children) |child| {
+            try std.testing.expect(child.origin.row + child.surface.size.height <= model_surface.size.height);
+            try std.testing.expect(child.origin.col + child.surface.size.width <= model_surface.size.width);
+        }
+    };
+    try std.testing.expect(!page.model_choice.show_more);
+    try page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
+    fixture.state_value = .saved;
+    try page.widget().handleEvent(&ctx, .tick);
+    try std.testing.expect(!page.standaloneOpen());
+    try std.testing.expect(page.standalone == null);
+    try page.openStandaloneChoice(&ctx, .effort);
+    page.refresh();
+    try std.testing.expect(!page.standaloneOpen());
+    page.bind();
+    try std.testing.expect(page.model_choice.show_more);
+}
+
+test "Chat info standalone draw invalidation never falls through to enclosing page" {
+    const Live = struct {
+        fn read(raw: *anyopaque) ModelChoice.Snapshot {
+            const revision: *u64 = @ptrCast(@alignCast(raw));
+            return .{ .revision = revision.* };
+        }
+    };
+    var fixture: Fixture = .{};
+    fixture.init();
+    var page: Self = .{ .backend = fixture.backend() };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 30 }, .cell_size = .{} };
+    try page.openStandaloneChoice(&events, .model);
+    var revision: u64 = 0;
+    page.model_choice.source = .{ .context = &revision, .read = Live.read };
+    page.model_choice.revision = revision;
+    _ = try page.standaloneWidget().draw(ctx);
+    revision += 1;
+    const closed = try page.standaloneWidget().draw(ctx);
+    try std.testing.expectEqual(@as(u16, 0), closed.size.height);
+    try std.testing.expectEqual(@as(usize, 0), closed.buffer.len);
+    try std.testing.expectEqual(@as(usize, 0), closed.children.len);
+    try std.testing.expect(!page.standaloneOpen());
+    try page.openStandaloneChoice(&events, .effort);
+    try page.widget().handleEvent(&events, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
+    const pending = try page.standaloneWidget().draw(ctx);
+    try std.testing.expectEqual(@as(u16, 0), pending.size.height);
+}
+
+test "Chat info standalone effort checks the actual Session effort without changing full-page override semantics" {
+    for ([_]bool{ false, true }) |explicit| for ([_]?catalog.ReasoningEffort{ .high, .low, null }) |effort| {
+        var fixture: Fixture = .{};
+        fixture.init();
+        try fixture.session.model.set("azure/gpt-5-pro");
+        fixture.session.effort = effort;
+        fixture.session.effort_override = explicit;
+        var page: Self = .{ .backend = fixture.backend() };
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        page.refresh();
+        try press(&page, &ctx, vaxis.Key.enter);
+        const actual: ?usize = if (effort == null) 0 else if (effort == .high) 1 else null;
+        try std.testing.expectEqual(if (!explicit) @as(?usize, 0) else actual, page.panel.choice.?.current);
+        page.cancelChoice();
+        try page.openStandaloneChoice(&ctx, .effort);
+        try std.testing.expectEqual(@as(usize, 2), page.effort_count);
+        try std.testing.expectEqualStrings("model default", page.effort_labels[0]);
+        try std.testing.expectEqualStrings("high", page.effort_labels[1]);
+        try std.testing.expectEqual(actual, page.panel.choice.?.current);
+        for ([_]u16{ 46, 140 }) |width| {
+            const drawn = try page.standaloneWidget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
+            for (0..page.effort_count) |row| try std.testing.expectEqualStrings(if (actual == row) "✓" else " ", drawn.readCell(1, @intCast(row + 1)).char.grapheme);
+        }
+    };
+}
+
+test "Chat info standalone failure retry preserves field-only presentation and the actual effort check" {
+    var fixture: Fixture = .{};
+    fixture.init();
+    try fixture.session.model.set("azure/gpt-5-pro");
+    fixture.session.effort = .high;
+    fixture.session.effort_override = false;
+    var page: Self = .{ .backend = fixture.backend() };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    try page.openStandaloneChoice(&ctx, .effort);
+    try press(&page, &ctx, vaxis.Key.enter);
+    try std.testing.expectEqual(Edit{ .effort = .high }, fixture.edit.?);
+    fixture.state_value = .failed;
+    try page.widget().handleEvent(&ctx, .tick);
+    try std.testing.expect(page.standaloneOpen());
+    try press(&page, &ctx, vaxis.Key.enter);
+    try std.testing.expectEqual(Row.effort, page.standalone.?.row);
+    try std.testing.expectEqual(Row.effort, page.standalone.?.row);
+    try std.testing.expectEqual(@as(?usize, 1), page.panel.choice.?.current);
+    try press(&page, &ctx, vaxis.Key.enter);
+    fixture.state_value = .saved;
+    try page.widget().handleEvent(&ctx, .tick);
+    try std.testing.expect(!page.standaloneOpen() and page.standalone == null);
+    try page.openStandaloneChoice(&ctx, .effort);
+    page.refresh();
+    try std.testing.expect(!page.standaloneOpen());
+}
+
+test "Chat info standalone Model and Effort retry read and save failures by drawn click or Enter" {
+    const Failure = enum { read, save, publication };
+    for ([_]Row{ .model, .effort }) |field| for (std.enums.values(Failure)) |failure| for ([_]bool{ false, true }) |pointer| for ([_]u16{ 46, 140 }) |width| {
+        errdefer std.debug.print("Chat standalone field={s} failure={s} pointer={} width={d}\n", .{ @tagName(field), @tagName(failure), pointer, width });
+        var fixture: Fixture = .{ .fail_read = failure == .read };
+        fixture.init();
+        fixture.session.effort_override = false;
+        var page: Self = .{ .backend = fixture.backend() };
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} };
+        const click: vaxis.Mouse = .{ .col = 1, .row = 1, .button = .left, .type = .press, .mods = .{} };
+        const index: usize = if (field == .model) 4 else 0;
+        try page.openStandaloneChoice(&ctx, field);
+        if (failure != .read) {
+            fixture.fail_submit = failure == .publication;
+            try press(&page, &ctx, vaxis.Key.enter);
+            fixture.fail_submit = false;
+            if (failure == .save) {
+                try std.testing.expect(!page.standaloneOpen());
+                try std.testing.expectEqual(Phase.pending, page.standalone.?.phase);
+                const pending = try page.standaloneWidget().draw(draw_ctx);
+                try std.testing.expectEqual(@as(u16, 0), pending.size.height);
+                const reads = fixture.read_calls;
+                const saves = fixture.save_calls;
+                try @import("testing/app_events.zig").mouse(&ctx, pending, click);
+                try press(&page, &ctx, vaxis.Key.enter);
+                try std.testing.expectEqual(reads, fixture.read_calls);
+                try std.testing.expectEqual(saves, fixture.save_calls);
+                fixture.state_value = .failed;
+                try page.widget().handleEvent(&ctx, .tick);
+            }
+        }
+        try std.testing.expect(page.standaloneOpen() and !page.hasChoice());
+        try std.testing.expectEqual(Phase.failed, page.standalone.?.phase);
+        try std.testing.expectEqualStrings(if (failure == .read) " · couldn't read chat" else " · couldn't save", page.failures[index].?);
+        const retained = try page.standaloneWidget().draw(draw_ctx);
+        try std.testing.expectEqual(@as(u16, 2), retained.size.height);
+        try std.testing.expect(!std.mem.eql(u8, " ", retained.readCell(1, 1).char.grapheme));
+        fixture.fail_read = false;
+        const before_read = fixture.read_calls;
+        const before_save = fixture.save_calls;
+        if (pointer) try @import("testing/app_events.zig").mouse(&ctx, retained, click) else try press(&page, &ctx, vaxis.Key.enter);
+        try std.testing.expectEqual(before_read + 1, fixture.read_calls);
+        try std.testing.expectEqual(before_save, fixture.save_calls);
+        try std.testing.expect(page.standaloneOpen() and page.hasChoice());
+        try std.testing.expectEqual(field, page.standalone.?.row);
+        try std.testing.expect(page.failures[index] == null);
+        if (field == .model) {
+            try std.testing.expect(page.model_choice.active);
+            try std.testing.expectEqual(fixture.session.provider, page.model_choice.provider);
+            try std.testing.expectEqualStrings(fixture.session.model.slice(), page.model_choice.current);
+        } else {
+            const choice = page.panel.choice.?;
+            try std.testing.expectEqualStrings("high", choice.labels[choice.current.?]);
+        }
+        try press(&page, &ctx, vaxis.Key.enter);
+        try std.testing.expectEqual(before_save + 1, fixture.save_calls);
+        if (field == .model) try std.testing.expectEqualStrings(fixture.session.model.slice(), fixture.edit.?.model) else try std.testing.expectEqual(Edit{ .effort = .high }, fixture.edit.?);
+        fixture.state_value = .saved;
+        try page.widget().handleEvent(&ctx, .tick);
+        const saved = try page.standaloneWidget().draw(draw_ctx);
+        try std.testing.expectEqual(@as(u16, 0), saved.size.height);
+        const saves = fixture.save_calls;
+        try @import("testing/app_events.zig").mouse(&ctx, saved, click);
+        try std.testing.expectEqual(saves, fixture.save_calls);
+        try std.testing.expect(!page.standaloneOpen());
+    };
+}
+
+test "Chat info standalone lifetime domain closes every phase without cancelling admitted work or reopening late" {
+    const Cases = @import("session_chrome.zig").StandaloneCases;
+    const Outcome = enum { saved, failed, unread };
+    for (Cases.all) |case| {
+        if (case.screen != .chat) continue;
+        for (std.enums.values(Outcome)) |outcome| {
+            var fixture: Fixture = .{ .fail_read = case.phase == .read_failed };
+            fixture.init();
+            var page: Self = .{ .backend = fixture.backend() };
+            var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer arena.deinit();
+            var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+            const row: Row = if (case.field == .model) .model else .effort;
+            const index: usize = if (row == .model) 4 else 0;
+            try page.openStandaloneChoice(&ctx, row);
+            if (case.phase == .pending or case.phase == .save_failed) {
+                try press(&page, &ctx, vaxis.Key.enter);
+                if (case.phase == .save_failed) {
+                    fixture.state_value = .failed;
+                    try page.widget().handleEvent(&ctx, .tick);
+                }
+            }
+            const phase: Phase = switch (case.phase) {
+                .open => .open,
+                .pending => .pending,
+                .read_failed, .save_failed => .failed,
+            };
+            try std.testing.expectEqual(@as(?Row, row), page.standaloneField());
+            try std.testing.expectEqual(phase, page.standalone.?.phase);
+            try std.testing.expectEqual(case.phase != .pending, page.standaloneOpen());
+            const admitted = page.pending;
+            switch (case.ending) {
+                .refresh => page.refresh(),
+                .escape, .close_click, .navigate => page.closeStandaloneChoice(),
+            }
+            try std.testing.expect(!page.standaloneOpen());
+            try std.testing.expect(page.standaloneField() == null);
+            try std.testing.expect(page.standalone == null);
+            try std.testing.expectEqual(admitted, page.pending);
+            try std.testing.expect(!page.hasChoice());
+            if (admitted != null) {
+                fixture.fail_read = outcome == .unread;
+                fixture.state_value = if (outcome == .failed) .failed else .saved;
+                const reads = fixture.read_calls;
+                try page.standaloneWidget().handleEvent(&ctx, .tick);
+                try std.testing.expectEqual(reads + 1, fixture.read_calls);
+                try std.testing.expect(page.pending == null);
+                if (outcome != .saved) try std.testing.expect(page.failures[index] != null);
+            }
+            try std.testing.expect(page.standaloneField() == null);
+            try std.testing.expect(!page.standaloneOpen());
+            const surface = try page.standaloneWidget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 20 }, .cell_size = .{} });
+            try std.testing.expectEqual(@as(u16, 0), surface.size.height);
+            try std.testing.expectEqual(@as(usize, 0), surface.buffer.len);
+            try std.testing.expectEqual(@as(usize, 0), surface.children.len);
+            const reads = fixture.read_calls;
+            const saves = fixture.save_calls;
+            try page.standaloneWidget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
+            try page.standaloneWidget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = 'x', .text = "x" } });
+            try page.standaloneWidget().handleEvent(&ctx, .{ .mouse = .{ .col = 1, .row = 1, .button = .left, .type = .press, .mods = .{} } });
+            try std.testing.expectEqual(reads, fixture.read_calls);
+            try std.testing.expectEqual(saves, fixture.save_calls);
+            try std.testing.expect(page.standaloneField() == null);
+            page.bind();
+            try std.testing.expect(page.model_choice.show_more);
+        }
     }
 }

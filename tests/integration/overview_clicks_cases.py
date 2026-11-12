@@ -1,5 +1,5 @@
-"""Overview pointer behavior: Session rows open, New Session opens an empty chat,
-/sessions reaches archive views, and panels never open rows.
+"""Overview pointer behavior: Session rows and New Session open chats,
+and panels never open rows.
 The flat list exposes every Session without group headings or folds.
 """
 import json
@@ -76,8 +76,8 @@ def click_label(screen, frame, label):
 
 
 def is_overview(frame):
-    """Pinned Settings and the overview composer, never chat facts."""
-    return "Settings" in frame and not any(line.startswith(" ‹ ") for line in frame.split("\n"))
+    """Pinned actions and the list footer, never a chat editor or facts."""
+    return "+ New Session" in frame and "Settings" in frame and "enter open" in frame and "Type a task" not in frame and not any(line.startswith(" ‹ ") for line in frame.split("\n"))
 
 
 def conversation_of(label):
@@ -90,23 +90,6 @@ def back_to_overview(screen, *markers):
     screen.keys(b"\x1b")
     return screen.wait(lambda frame: is_overview(frame) and all(marker in frame for marker in markers),
                        ("Esc returns to the overview", markers))
-
-
-def assert_still_overview(screen, what, *markers):
-    """The click before this one opened nothing: a draft typed after it
-    shows in the overview's composer, beside `markers`. Esc closes any
-    panel, then clears the draft."""
-    screen.keys("zz")
-    frame = screen.wait(lambda frame: "› zz" in frame, (what, "the draft typed after the click"))
-    assert is_overview(frame), (what, "a click opened something", frame)
-    for marker in markers:
-        assert marker in frame, (what, marker, frame)
-    if "Esc returns" in frame:
-        screen.keys(b"\x1b")
-        screen.wait(lambda frame: "Esc returns" not in frame and "› zz" in frame, (what, "Esc closes the panel"))
-    screen.keys(b"\x1b")
-    screen.wait(lambda frame: "› Type a task" in frame and is_overview(frame), (what, "Esc clears the draft"))
-    return frame
 
 
 def opening_and_views():
@@ -122,7 +105,7 @@ def opening_and_views():
 
         with w.overview(columns=WIDTH, rows=30) as screen:
             screen.wait(lambda frame: " ✓ alpha" in frame and " ✓ bravo" in frame, "both answered rows")
-            # Enter on a blank draft opens the selected Session: that names it.
+            # Enter opens the selected Session: that names it.
             screen.keys(b"\r")
             opened = screen.wait(lambda frame: conversation_of("alpha")(frame) or conversation_of("bravo")(frame),
                                  "Enter opens the selected Session")
@@ -148,17 +131,6 @@ def opening_and_views():
 
         with w.overview(columns=WIDTH, rows=30) as screen:
             screen.wait(lambda frame: " ✓ alpha" in frame, "the default view")
-            assert not screen.rows()[0].rstrip().endswith(("Archived", "All")), screen.text
-            for command, name in (("archived", "Archived"), ("all", "All")):
-                screen.keys(f"/sessions {command}\r")
-                screen.wait(lambda frame: "[Archived] charlie" in frame and "/sessions" not in frame,
-                            f"the {name} view")
-                screen.keys(b"/sessions unarchived\r")
-                back = screen.wait(lambda frame: "✓ alpha" in frame and "charlie" not in frame and "/sessions" not in frame,
-                                   f"{name} returns to default by command")
-                assert is_overview(back), back
-            print("overview clicks: /sessions reaches every archive view without a counts-line click", flush=True)
-
             listed = screen.text
             alpha_row = row_of(listed, "alpha")
             screen.keys(b"\x1b[F\r")
@@ -197,13 +169,12 @@ def flat_list():
             assert lines[0] == "  + New Session" and lines[1] == "", listed
             assert not any(re.fullmatch(r" \S.* · \d+", line) for line in lines), listed
             assert " more" not in listed, listed
-            # New Session opens an empty chat; the existing rows remain.
+            # New Session opens an empty chat, then returns to this flat list.
             screen.click(4, 1)
-            screen.wait(lambda frame: not is_overview(frame) and " · workspace" in frame,
-                        "New Session opens an empty chat")
+            screen.wait(lambda frame: "Type a task" in frame and not is_overview(frame), "New Session opens chat")
             listed = back_to_overview(screen, *peers_by_label)
-            lines = listed.split("\n")
             # Every formerly hidden row is directly clickable.
+            lines = listed.split("\n")
             label = lines[max(row_of(listed, peer) for peer in peers_by_label) - 1].split()[1]
             click_label(screen, listed, label)
             screen.wait(lambda frame: conversation_of(label)(frame) and "peer done" in frame,
@@ -213,22 +184,47 @@ def flat_list():
 
 
 def empty_list():
-    with world("clicks-empty") as w, w.overview(columns=WIDTH, rows=30) as screen:
+    with world("clicks-empty", {"first task": answer("new", "first task answered")}) as w, w.overview(columns=WIDTH, rows=30) as screen:
         frame = screen.contains("+ New Session")
-        assert "No unarchived Sessions" not in frame, frame
-        screen.click(4, line_of(frame, lambda line: "+ New Session" in line, "New Session"))
-        screen.wait(lambda frame: not is_overview(frame) and " · workspace" in frame,
-                    "New Session opens its empty input and facts")
-        back_to_overview(screen, "+ New Session")
-        screen.keys(b"\x1b[H\r")
-        screen.wait(lambda frame: not is_overview(frame) and " · workspace" in frame,
-                    "Enter on New Session opens the same empty chat")
-    print("overview clicks: New Session click and Enter open empty chats", flush=True)
+        assert "No unarchived Sessions" not in frame and "Type a task" not in frame, frame
+        known = set()
+        for gesture in ("click", "Enter"):
+            before = set((w.home / ".config/rui/requests").glob("*.json"))
+            if gesture == "click":
+                screen.click(4, line_of(frame, lambda line: "+ New Session" in line, "New Session"))
+            else:
+                screen.keys(b"\x1b[H\r")
+            chat = screen.wait(lambda frame: "Type a task" in frame and not is_overview(frame), f"{gesture} opens an empty chat")
+            sessions = json.loads(w.run("session", "list", "--store", w.store, "--all"))["sessions"]
+            current = {row["reference"] for row in sessions}
+            created, = current - known
+            assert len(current) == len(known) + 1, sessions
+            known = current
+            report = w.inspect(created)
+            assert report["selected_message"] is None and report["recent_messages"] == [], report
+            assert report["session"]["model"] == MODEL, report
+            assert MODEL in chat and w.endpoint.requests == [], chat
+            captured, = set((w.home / ".config/rui/requests").glob("*.json")) - before
+            assert json.loads(captured.read_bytes())["kind"] == "configure", captured.read_text()
+            if gesture == "Enter":
+                screen.keys(b"first task")
+                screen.contains("› first task")
+                screen.keys(b"\r")
+                screen.contains("first task answered")
+                wait_for_host(w, [created], finished, "the chat Message finishes")
+                assert len(w.endpoint.requests) == 1, w.endpoint.requests
+                report = w.inspect(created)
+                sent, = report["recent_messages"]
+                assert sent["outcome"] == "completed", report
+            frame = back_to_overview(screen)
+    print("overview clicks: click and Enter each Configure one empty Session; only chat typing sends a Message", flush=True)
 
 
 def new_chat_aliases():
-    with world("new-chat-aliases") as w:
+    with world("new-chat-aliases", {"old task": answer("old", "Old answer retained")}) as w:
         old = w.session("--label", "Old unchanged", "--reasoning-effort", "high")
+        w.run("session", "send", "--store", w.store, "--to", old, input="old task")
+        wait_for_host(w, [old], finished, "the old chat has canonical history")
         before = w.inspect(old)
         with w.overview(columns=WIDTH, rows=30) as screen:
             for alias in ("/new", "/clear"):
@@ -239,7 +235,7 @@ def new_chat_aliases():
                 screen.contains("! Usage:")
                 assert w.inspect(old) == before
                 screen.keys(alias + "\r")
-                screen.wait(lambda frame: not is_overview(frame) and " · workspace" in frame
+                screen.wait(lambda frame: not is_overview(frame) and "Type a task" in frame
                             and "Old unchanged" not in frame, "alias opens a new empty chat")
                 assert w.inspect(old) == before
                 listed = back_to_overview(screen, "Old unchanged")

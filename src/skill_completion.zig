@@ -48,7 +48,7 @@ pub fn atCaret(draft: []const u8, caret: usize) ?Word {
 pub fn skillWordAt(draft: []const u8, caret: usize) ?Word {
     const word = atCaret(draft, caret) orelse return null;
     if (word.slash != 0 and draft.len != 0 and draft[0] == '/' and !std.mem.startsWith(u8, draft, "//")) {
-        if (slash_commands.conversation.parse(draft) != .unknown or slash_commands.overview.parse(draft) != .unknown) return null;
+        if (slash_commands.conversation.parse(draft) != .unknown) return null;
     }
     return word;
 }
@@ -72,7 +72,7 @@ const Prefix = struct {
 };
 
 /// A read for the shell's worker: the Host's `skill_suggestions` for
-/// `prefix`, in the screen's scope (its Session, or the overview's
+/// `prefix`, in the conversation's scope (its Session's
 /// workspace). Its page or failure comes back numbered `read`. `prefix`
 /// borrows the `Reads` that asked.
 pub const Ask = struct { read: u64, prefix: []const u8 };
@@ -337,68 +337,49 @@ test "skill completion replaces the caret's name, spacing only at the draft's en
     try expectReplacement(.{ .start = "use /".len, .end = last.len, .text = "review " }, complete(last, atCaret(last, last.len).?, entry));
 }
 
-test "skill rows give way to the command's own list where the caret is in no /word" {
+test "skills do not replace a command argument or invent an argument list" {
     var reads: Reads = .{};
     var rows: Rows = .{};
-    // After a command word, its next word's choices list as they always did.
-    const draft = "/configure ";
-    const listed = slash_commands.overview.suggest(draft, .{});
-    const shown = reads.shown(&rows, draft, draft.len, 5, listed, null).?;
-    const plain = slash_commands.Shown.next(null, 5, listed).?;
-    try std.testing.expectEqual(plain.list.count, shown.list.count);
-    try std.testing.expectEqual(plain.source, shown.source);
-    try std.testing.expectEqualStrings(plain.list.entries[0].word, shown.list.entries[0].word);
+    for ([_][]const u8{ "/reload-skills ", "/recover " }) |draft| {
+        try std.testing.expect(reads.shown(&rows, draft, draft.len, 5, slash_commands.conversation.suggest(draft, .{}), null) == null);
+    }
 }
 
-test "both screens list only their agent commands plus loaded skills and reject removed app names" {
+test "conversation lists exactly new clear reload and loaded skills with no overview command table" {
+    try std.testing.expect(!@hasDecl(slash_commands, "overview"));
     var names: [skill_suggestions.capacity][16]u8 = undefined;
     var entries: [skill_suggestions.capacity]skill_suggestions.Entry = undefined;
     for (&entries, &names, 0..) |*entry, *name, index| entry.* = .{
         .name = try std.fmt.bufPrint(name, "skill-{d:0>2}", .{index}),
         .description = "A loaded skill",
     };
+    const screen = slash_commands.conversation;
     for (0..entries.len + 1) |count| {
         var reads: Reads = .{};
         var rows: Rows = .{};
         _ = reads.ask("").?;
         _ = reads.answer(1, testPage(entries[0..count]), "");
-        inline for (.{ slash_commands.conversation, slash_commands.overview }, .{ 3, 1 }) |screen, command_count| {
-            const listed = reads.shown(&rows, "/", 1, 1, screen.suggest("/", .{}), null).?.list;
-            try std.testing.expectEqual(count + command_count, listed.count);
-            try std.testing.expectEqualStrings(if (command_count == 3) "/clear" else "/reload-skills", listed.entries[0].shown);
-            try std.testing.expect(listed.entries[0].runs);
-            if (comptime command_count == 3) {
-                try std.testing.expectEqualStrings("/new", listed.entries[1].shown);
-                try std.testing.expectEqualStrings("/reload-skills", listed.entries[2].shown);
-                inline for (.{ "/new", "/clear" }) |name| {
-                    try std.testing.expect(screen.parse(name) == .command);
-                    try std.testing.expect(screen.parse(name ++ " foo") == .misused);
-                }
-            } else inline for (.{ "/new", "/clear" }) |name| try std.testing.expect(screen.parse(name) == .unknown);
-
-            for (entries[0..count], listed.shown()[command_count..]) |skill, entry| {
-                try std.testing.expectEqualStrings(skill.name, std.mem.trimEnd(u8, entry.word, " "));
-                try std.testing.expect(!entry.runs);
-            }
-            inline for (.{ "archive", "copy", "effort", "setup", "result", "rename", "unarchive" }) |name| {
-                inline for (.{ "", " now" }) |tail| {
-                    try std.testing.expectEqual(std.meta.activeTag(screen.parse("/configurex")), std.meta.activeTag(screen.parse("/" ++ name ++ tail)));
-                }
-            }
+        const listed = reads.shown(&rows, "/", 1, 1, screen.suggest("/", .{}), null).?.list;
+        try std.testing.expectEqual(count + 3, listed.count);
+        for ([_][]const u8{ "/clear", "/new", "/reload-skills" }, listed.shown()[0..3]) |name, entry| {
+            try std.testing.expectEqualStrings(name, entry.shown);
+            try std.testing.expect(entry.runs);
+            try std.testing.expect(screen.parse(name) == .command);
+        }
+        inline for (.{ "/new", "/clear" }) |name| try std.testing.expect(screen.parse(name ++ " foo") == .misused);
+        for (entries[0..count], listed.shown()[3..]) |skill, entry| {
+            try std.testing.expectEqualStrings(skill.name, std.mem.trimEnd(u8, entry.word, " "));
+            try std.testing.expect(!entry.runs);
+        }
+        inline for (.{ "archive", "copy", "effort", "setup", "result", "rename", "unarchive", "configure", "sessions" }) |name| {
+            inline for (.{ "", " now" }) |tail| try std.testing.expectEqual(std.meta.activeTag(screen.parse("/configurex")), std.meta.activeTag(screen.parse("/" ++ name ++ tail)));
         }
         try std.testing.expectEqual(count != 0, reads.startsSkill("/skill-00 this chat"));
         try std.testing.expect(!reads.startsSkill("/configurex"));
         try std.testing.expect(!reads.startsSkill("//skill-00"));
     }
-    inline for (.{ "rename", "unarchive" }) |name| inline for (.{ "", " now" }) |tail| {
-        try std.testing.expect(slash_commands.conversation.parse("/" ++ name ++ tail) == .unknown);
-    };
-    // No-replacement exceptions stay usable, but never leak into either list.
-    try std.testing.expect(slash_commands.conversation.parse("/requests") == .command);
-    for ([_][]const u8{ "/configure --label next", "/sessions archived" }) |line| {
-        try std.testing.expect(slash_commands.overview.parse(line) == .command);
-    }
-    const line = "/configure --workspace /skill-00";
+    inline for (.{ "/discard", "/recover key", "/requests" }) |line| try std.testing.expect(screen.parse(line) == .command);
+    const line = "/recover /skill-00";
     try std.testing.expectEqual(@as(?Word, null), skillWordAt(line, line.len));
 }
 
@@ -430,9 +411,9 @@ test "Tab or Enter on a row replaces the caret's name, or adds a later word's re
     var shown = reads.shown(&rows, draft, "use /r".len, 1, null, null).?;
     shown.highlight = 1;
     try expectReplacement(.{ .start = "use /".len, .end = "use /re".len, .text = "review" }, edit(draft, "use /r".len, &shown));
-    const command = "/configure ";
-    const listed = reads.shown(&rows, command, command.len, 2, slash_commands.overview.suggest(command, .{}), null).?;
-    try expectReplacement(.{ .start = command.len, .end = command.len, .text = listed.completion() }, edit(command, command.len, &listed));
+    const command = "/rel";
+    const listed = reads.shown(&rows, command, command.len, 2, slash_commands.conversation.suggest(command, .{}), null).?;
+    try expectReplacement(.{ .start = 1, .end = command.len, .text = "reload-skills" }, edit(command, command.len, &listed));
 }
 
 fn testPage(entries: []const skill_suggestions.Entry) skill_suggestions.Page {

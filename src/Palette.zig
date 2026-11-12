@@ -142,7 +142,7 @@ test "Palette hover is transient and clicks activate only visible command rows" 
         }
     };
     var selected: Selected = .{};
-    var shown = commands.Shown.next(null, 7, commands.overview.suggest("/configure --", .{})).?;
+    var shown = commands.Shown.next(null, 7, commands.conversation.suggest("/", .{})).?;
     var palette: Self = .{ .shown = &shown, .userdata = &selected, .on_select = Selected.select, .style = .{ .fg = .{ .index = 3 } } };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -200,10 +200,9 @@ test "Palette hover is transient and clicks activate only visible command rows" 
     try std.testing.expect(selected.index == null);
 }
 
-test "Palette renders names-only slash lists on conversation and overview" {
+test "Palette renders the names-only conversation slash list" {
     const cases = .{
         .{ commands.conversation, &[_][]const u8{ "/clear", "/new", "/reload-skills" } },
-        .{ commands.overview, &[_][]const u8{"/reload-skills"} },
     };
     inline for (cases) |case| {
         var shown = commands.Shown.next(null, 1, case[0].suggest("/", .{})).?;
@@ -213,7 +212,7 @@ test "Palette renders names-only slash lists on conversation and overview" {
         const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 24 }, .cell_size = .{} };
         const surface = try palette.widget().draw(ctx);
         try std.testing.expectEqual(case[1].len, surface.size.height);
-        std.debug.print("\n{s} / list:\n", .{if (case[0] == commands.conversation) "Conversation" else "Overview"});
+        std.debug.print("\n{s} / list:\n", .{"Conversation"});
         for (case[1], 0..) |expected, row| {
             var text: [256]u8 = undefined;
             var used: usize = 0;
