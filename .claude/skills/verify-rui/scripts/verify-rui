@@ -199,7 +199,7 @@ def cmd_build(args):
                                 env=env, stdout=handle, stderr=subprocess.STDOUT)
         if result.returncode == 0 and not args.no_screen:
             # The committed-screen observer's terminal emulator, for the tap.
-            result = subprocess.run(["zig", "build", "screen-emulator", "--prefix", str(build / "screen"), "--summary", "all"],
+            result = subprocess.run(["zig", "build", "screen-emulator", "-j2", "--prefix", str(build / "screen"), "--summary", "all"],
                                     cwd=source, env=env, stdout=handle, stderr=subprocess.STDOUT)
     if result.returncode != 0:
         die(f"zig build failed (rc={result.returncode}); see {log}")
@@ -2081,6 +2081,14 @@ def validate_scenario(data, sizes=None):
         require(isinstance(env, dict) and all(isinstance(k, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", k)
                                              and isinstance(v, str) and "\0" not in v for k, v in env.items()), f"{name}: invalid env")
         require("note" not in state or isinstance(state["note"], str) and "\n" not in state["note"], f"{name}: note must be one line")
+        require(type(state.get("first_frame", False)) is bool, f"{name}: first_frame must be a boolean")
+        adjacent = state.get("expect_next", {})
+        require(isinstance(adjacent, dict) and all(isinstance(row, str) and row and "\n" not in row
+                and isinstance(detail, str) and detail and "\n" not in detail for row, detail in adjacent.items()),
+                f"{name}: expect_next maps row text to its following line")
+        last = state.get("expect_last")
+        require(last is None or isinstance(last, str) and bool(last) and "\n" not in last,
+                f"{name}: expect_last must be nonempty single-line text")
         require(type(state.get("first_run", False)) is bool, f"{name}: first_run must be a boolean")
         require(not state.get("first_run") or state.get("open") == "overview", f"{name}: first_run opens overview")
         state_sizes = parse_sizes(state["sizes"]) if "sizes" in state else default_sizes
@@ -2455,10 +2463,26 @@ def frame_initial_ready(terminal, first_wait=None, allow_exit=False):
                   allow_exit=allow_exit)
 
 
+def frame_row_failure(state, plain):
+    lines = plain.splitlines()
+    if (last := state.get("expect_last")) and (not lines or last not in lines[-1]):
+        return f"last physical row must contain {last!r}"
+    for row, detail in state.get("expect_next", {}).items():
+        at = next((i for i, line in enumerate(lines) if row in line), None)
+        if at is None or at + 1 >= len(lines) or detail not in lines[at + 1]:
+            return f"row {row!r} must be followed by {detail!r}"
+    return None
+
+
 def frame_ready(terminal, state, allow_exit=False, sessions=None):
+    # Transitions are asserted at the frame their last wait observed, not
+    # polled until a later frame happens to satisfy the regression oracle.
+    if state.get("first_frame", False):
+        return
     expected, absent = frame_expectations(state), frame_absences(state, sessions)
     terminal.wait(lambda c: all(text in c.completed for text in expected)
-                  and all(text not in c.completed for text in absent),
+                  and all(text not in c.completed for text in absent)
+                  and frame_row_failure(state, c.completed) is None,
                   "state expectations: " + repr({"expect": expected, "absent": absent}),
                   allow_exit=allow_exit)
 
@@ -2476,6 +2500,8 @@ def frame_capture(run, target, out, state, size, reason):
     unexpected = next((text for text in frame_absences(state, run.meta.get("sessions", {})) if text in plain), None)
     if unexpected is not None and reason is None:
         reason = f"unexpected on screen: {unexpected}"
+    if reason is None:
+        reason = frame_row_failure(state, plain)
     (out / files["txt"]).write_text(plain)
     (out / files["ansi"]).write_text(ansi)
     (out / files["html"]).write_text(page)

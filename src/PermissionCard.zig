@@ -10,7 +10,6 @@ const Hover = @import("widgets/Hover.zig");
 const Self = @This();
 
 consent: *Consent,
-pasting: *const bool,
 description: []const u8,
 body: vxfw.Widget,
 userdata: *anyopaque,
@@ -31,6 +30,8 @@ pub fn widget(self: *Self) vxfw.Widget {
     return .{ .userdata = self, .eventHandler = event, .drawFn = draw };
 }
 
+/// The card's own events: the pointer and the tick. Its keys come from
+/// the Session's core through `take`.
 fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     try self.hover.handleEvent(ctx, input);
@@ -42,31 +43,7 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
             }
             return;
         },
-        .paste_start, .paste_end => {
-            _ = self.consent.handle(.cancel, self.pasting.*);
-            return; // The screen gives paste boundaries to the draft editor.
-        },
         .mouse_leave => .cancel,
-        .invalid_key => {
-            _ = self.consent.handle(.invalid, self.pasting.*);
-            return;
-        },
-        .key_release => return ctx.consumeEvent(),
-        .key_press => |key| key: {
-            // Screen keys keep their meaning in either input row. Everything
-            // except choice keys bubbles to the screen's row policy.
-            if (!self.pasting.*) if (@import("TerminalEditor.zig").named(key)) |named| switch (named) {
-                .escape, .ctrl_c, .ctrl_d, .ctrl_x, .page_up, .page_down, .shift_up, .shift_down => return,
-                else => {},
-            };
-            // Pasted screen controls never escape into navigation or a decision.
-            if (self.pasting.* and @import("TerminalEditor.zig").named(key) != null) return ctx.consumeEvent();
-            if (self.consent.row != .selector or self.pasting.*) return;
-            if (key.matchExact(vaxis.Key.enter, .{})) break :key .enter;
-            if (key.matchExact(vaxis.Key.left, .{})) break :key .left;
-            if (key.matchExact(vaxis.Key.right, .{})) break :key .right;
-            return;
-        },
         .mouse => |mouse| mouse: {
             const choice: ?Policy.Choice = for (self.hover.targets, 0..) |rect, index| {
                 if (rect.contains(mouse.col, mouse.row)) break if (index == 0) .allow_once else .deny;
@@ -82,8 +59,15 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
         else => return,
     };
     ctx.consumeEvent();
+    // Root hands no click inside a paste to anything (`app_input`).
+    try self.take(ctx, action, false);
+}
+
+/// One input at the choice: a key the Session's core handed it, with
+/// whether it arrived inside a paste, or the pointer's.
+pub fn take(self: *Self, ctx: *vxfw.EventContext, input: Consent.Input, pasted: bool) !void {
     const before = self.consent.highlight;
-    if (self.consent.handle(action, self.pasting.*)) |decision| {
+    if (self.consent.handle(input, pasted)) |decision| {
         ctx.redraw = true;
         try self.on_decision(self.userdata, ctx, decision);
     } else if (self.consent.highlight != before) ctx.redraw = true;
@@ -148,7 +132,7 @@ pub fn drawInput(self: *Self, ctx: vxfw.DrawContext, composer: ?vxfw.Widget) std
     return surface;
 }
 
-test "PermissionCard decides the drawn request at tiny sizes and ignores text and paste" {
+test "PermissionCard decides the drawn request at tiny sizes and ignores pasted keys" {
     const Owner = struct {
         decision: ?Policy.Decision = null,
         fn decide(raw: *anyopaque, _: *vxfw.EventContext, decision: Policy.Decision) !void {
@@ -159,8 +143,7 @@ test "PermissionCard decides the drawn request at tiny sizes and ignores text an
     var owner: Owner = .{};
     var consent: Consent = .{};
     const body: vxfw.Text = .{ .text = "$ zig build test\nsecond line\nthird line" };
-    var root: @import("Root.zig") = .{ .overview = body.widget(), .list = body.widget(), .compose = body.widget() };
-    var card: Self = .{ .consent = &consent, .pasting = &root.input.pasting, .description = "Run the tests", .body = body.widget(), .userdata = &owner, .on_decision = Owner.decide };
+    var card: Self = .{ .consent = &consent, .description = "Run the tests", .body = body.widget(), .userdata = &owner, .on_decision = Owner.decide };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty, .redraw = false };
@@ -168,24 +151,26 @@ test "PermissionCard decides the drawn request at tiny sizes and ignores text an
     consent.adopt(41);
     _ = try card.widget().draw(ctx);
     consent.adopt(52);
-    try card.widget().handleEvent(&events, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
+    try card.take(&events, .enter, false);
     try std.testing.expectEqual(null, owner.decision);
     for ([_]vxfw.Size{ .{ .width = 0, .height = 1 }, .{ .width = 1, .height = 0 }, .{ .width = 1, .height = 1 }, .{ .width = 40, .height = 5 } }) |size| {
         const surface = try card.widget().draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = size.height }));
         try std.testing.expect(surface.size.width <= size.width and surface.size.height <= size.height);
         try std.testing.expectEqual(@as(?u64, 52), consent.request);
     }
-    for ([_]vxfw.Event{ .{ .key_press = .{ .codepoint = 'y' } }, .invalid_key, .paste_start, .{ .key_press = .{ .codepoint = vaxis.Key.enter } }, .paste_end, .{ .key_press = .{ .codepoint = 'j', .mods = .{ .ctrl = true } } } }) |input| {
-        events.consume_event = false;
-        try root.widget().captureEvent(&events, input);
-        try card.widget().handleEvent(&events, input);
-        // Text and paste now bubble to the screen, but never authorize.
-        try std.testing.expect(!events.consume_event);
+    // Keys go to the Session's core first; the card takes none from vxfw.
+    _ = try card.widget().draw(ctx);
+    events.consume_event = false;
+    try card.widget().handleEvent(&events, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
+    try std.testing.expect(!events.consume_event);
+    // A key handed inside a paste never authorizes.
+    for ([_]Consent.Input{ .enter, .left, .right, .other, .invalid, .cancel }) |input| {
+        try card.take(&events, input, true);
         try std.testing.expectEqual(null, owner.decision);
     }
     _ = try card.widget().draw(ctx.withConstraints(.{}, .{ .width = 1, .height = 1 }));
-    try card.widget().handleEvent(&events, .{ .key_press = .{ .codepoint = vaxis.Key.right } });
-    try card.widget().handleEvent(&events, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
+    try card.take(&events, .right, false);
+    try card.take(&events, .enter, false);
     try std.testing.expectEqual(Policy.Decision{ .action = 52, .choice = .deny }, owner.decision.?);
     owner.decision = null;
     consent.adopt(63);
@@ -222,15 +207,7 @@ test "PermissionCard decides the drawn request at tiny sizes and ignores text an
     try std.testing.expectEqual(Policy.Decision{ .action = 63, .choice = .deny }, owner.decision.?);
 }
 
-test "PermissionCard cannot authorize a paste that began before focus moved to it" {
-    try testPasteFocus(true);
-}
-
-test "PermissionCard accepts typed input after paste ended while it was absent" {
-    try testPasteFocus(false);
-}
-
-fn testPasteFocus(arrives_during_paste: bool) !void {
+test "PermissionCard takes no choice from a key handed inside a paste, across request replacement" {
     const Owner = struct {
         decision: ?Policy.Decision = null,
         fn decide(raw: *anyopaque, _: *vxfw.EventContext, decision: Policy.Decision) !void {
@@ -241,52 +218,22 @@ fn testPasteFocus(arrives_during_paste: bool) !void {
     var owner: Owner = .{};
     var consent: Consent = .{};
     const text: vxfw.Text = .{ .text = "Kept draft" };
-    var root: @import("Root.zig") = .{ .overview = text.widget(), .list = text.widget(), .compose = text.widget() };
-    var card: Self = .{ .consent = &consent, .pasting = &root.input.pasting, .description = "Run", .body = text.widget(), .userdata = &owner, .on_decision = Owner.decide };
+    var card: Self = .{ .consent = &consent, .description = "Run", .body = text.widget(), .userdata = &owner, .on_decision = Owner.decide };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
     const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 5 }, .cell_size = .{} };
-    try root.widget().captureEvent(&events, .paste_start);
-    if (!arrives_during_paste) {
-        consent.adopt(17);
-        _ = try card.widget().draw(ctx);
-        try card.widget().handleEvent(&events, .paste_start);
-        consent.withdraw();
-        try root.widget().captureEvent(&events, .paste_end);
-        try root.widget().handleEvent(&events, .paste_end);
-    }
+    consent.adopt(17);
+    _ = try card.widget().draw(ctx);
+    try card.take(&events, .enter, true);
+    consent.withdraw();
     consent.adopt(29);
     _ = try card.widget().draw(ctx);
-    const enter: vxfw.Event = .{ .key_press = .{ .codepoint = vaxis.Key.enter } };
-    try root.widget().captureEvent(&events, enter);
-    try card.widget().handleEvent(&events, enter);
-    if (arrives_during_paste) {
-        try std.testing.expectEqual(null, owner.decision);
-        try root.widget().captureEvent(&events, .paste_end);
-        try card.widget().handleEvent(&events, .paste_end);
-        try card.widget().handleEvent(&events, enter);
-    }
+    try card.take(&events, .enter, true);
+    try std.testing.expectEqual(null, owner.decision);
+    // Once the paste ends, Enter takes the highlighted choice.
+    try card.take(&events, .enter, false);
     try std.testing.expectEqual(@as(?Policy.Decision, .{ .action = 29, .choice = .allow_once }), owner.decision);
-    consent.adopt(41);
-    _ = try card.widget().draw(ctx);
-    owner.decision = null;
-    for ([_]vaxis.Key{
-        .{ .codepoint = vaxis.Key.escape },
-        .{ .codepoint = vaxis.Key.escape, .mods = .{ .alt = true } },
-        .{ .codepoint = 'c', .mods = .{ .ctrl = true } },
-        .{ .codepoint = 'x', .mods = .{ .ctrl = true } },
-    }) |key| {
-        events.consume_event = false;
-        try card.widget().handleEvent(&events, .{ .key_press = key });
-        try std.testing.expect(!events.consume_event);
-        try std.testing.expectEqual(null, owner.decision);
-        try root.widget().captureEvent(&events, .paste_start);
-        try card.widget().handleEvent(&events, .{ .key_press = key });
-        try std.testing.expect(events.consume_event);
-        try std.testing.expectEqual(null, owner.decision);
-        try root.widget().captureEvent(&events, .paste_end);
-    }
 }
 
 test "PermissionCard hover is quieter than the choice selection and changes neither consent nor focus" {
@@ -300,8 +247,7 @@ test "PermissionCard hover is quieter than the choice selection and changes neit
     var owner: Owner = .{};
     var consent: Consent = .{};
     const text: vxfw.Text = .{ .text = "Run tests" };
-    const pasting = false;
-    var card: Self = .{ .consent = &consent, .pasting = &pasting, .description = "Run", .body = text.widget(), .userdata = &owner, .on_decision = Owner.decide, .style = .{ .fg = .{ .index = 2 } } };
+    var card: Self = .{ .consent = &consent, .description = "Run", .body = text.widget(), .userdata = &owner, .on_decision = Owner.decide, .style = .{ .fg = .{ .index = 2 } } };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };

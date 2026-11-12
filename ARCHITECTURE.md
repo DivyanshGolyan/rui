@@ -327,6 +327,11 @@ If that covered history names no change to its Session, the token advances to th
 Otherwise the full observation carries the generation captured before its reads.
 Foreign, future, uncovered or pre-restart tokens get a full observation.
 Tokens are hints, not revisions or durable state, and the token's Session scopes the check; editing one can mislead only its caller.
+The shared change-ring recorder expands each written Session through saved `parent_ref` before publishing the generation and commit wakeup.
+This includes newly saved attachments, but never a standalone agent's starter.
+One bounded indexed read walks at most four upward edges from the at-most-four touched Sessions; a fifth distinct Session uses the ring's existing conservative all-changed fallback.
+Each ancestor keeps its own Workspace key. Failed expansion forgets coverage and applies ordinary Store fencing, never an unchanged answer.
+Activity, command observations and incremental Session listings consume this same record; Current remains uncached.
 Nothing is retained per reader and no Host thread is added.
 Each reply reserves its own shape's bound, not the global observation maximum.
 A retry becoming past due commits nothing: readers apply `WorkState.asOf`, as Session listing does.
@@ -968,7 +973,7 @@ Rui therefore holds no pending capture queue: in-flight response bytes are bound
 
 The HTTP/2 Client runs on its own transport thread, so streams, PING answers and flow control keep moving while the execution owner waits on a Store round, a remote MySQL included.
 The execution owner still makes every decision, each as a short call into the transport under its lock: it launches a stream only after that Attempt's admission commits, cancels it, and takes each finished stream to seal and settle; it never holds that lock across a Store call, and the transport thread never touches the Store.
-Writes are synchronous on the transport thread.
+Writes are synchronous on the transport thread, as is the first read of each root from the host's certificate directory during a handshake.
 A disk that stalls on a write pauses every stream, and any execution step waiting on the transport's lock, until it returns; this is the accepted trade for no writer thread and no queued capture bytes.
 A failed write, or scratch exhaustion, ends only that stream, and its Attempt settles with `response_write_failed` or `response_scratch_exhausted`.
 
@@ -2444,7 +2449,7 @@ A running Host that does not serve the chosen provider is reported, not restarte
 When all three selectors are explicit, unreadable future defaults cannot block the overview, even after login fails to save them; otherwise the post-login choice rereads future defaults.
 A ready existing Host retains its actual capacity/capabilities; no model capability prevents opening the overview without restarting it.
 When its Host goes away the overview stays open and says so on one Host line, `■ Host stopped · r start`; `r` on an empty draft, or a click on the line, starts it through the same launch owner.
-A Host that ended without being asked to stop (a crash or a kill) is started once by itself, the line reading `Host starting` meanwhile; a Host stopped by `host-stop` (pause, stop or an Upgrade's swap) or by its launcher closing stdin is not, nor while an Upgrade holds the Host.
+A Host that ended without being asked to stop (a crash or SIGKILL) is started once by itself, the line reading `Host starting` meanwhile; a Host stopped by `host-stop` (pause, stop or an Upgrade's swap), by its launcher closing stdin, or by SIGINT, SIGTERM or SIGHUP (Ctrl-C on a foreground `host serve`, closing its terminal, or `kill`) is not, nor while an Upgrade holds the Host.
 The stopping Host leaves a stop record beside its Store lease, which every Host start removes; an unreadable record counts as a stop someone asked for.
 At most one automatic start runs per overview: a failed start or a second crash leaves the line to `r`, with no retry or backoff.
 
@@ -2909,7 +2914,7 @@ Every page carries `queued`: the field came with wire version 3, and a frontend 
 Wire version 10 makes the refused-send target required and nullable under the [public activity contract](#public-session-activity); non-null peers keep their canonical ID grammar.
 
 Wire version 14 requires the `chatgpt` provider key, and supports the `chatgpt_plan` route, in `host_info`'s `capabilities.providers`; ordinary clients and Hosts on different wire versions refuse each other.
-A wire bump also appends a Store format step because the Store saves its wire label: format 70 moves the saved label from 13 to 14 on SQLite and MySQL, without changing ordinary rows.
+A wire bump also appends a Store format step because the Store saves its wire label: format 71 moves the saved label from 14 to 15 on SQLite and MySQL, without changing ordinary rows.
 The `model_call` Activity rows shipped in v0.69.x under wire version 13 without a bump, although 13 had already shipped in v0.67.x; a 0.69 client asking a 0.67 Host for those rows therefore failed with `InvalidCursor` instead of refusing the incompatible Host.
 `tests/ci/test_wire_version.py` requires a wire version greater than the newest release's whenever generated `openapi.json` changes, ignoring only `info.version` and documentation-only `description`, `summary`, `example` and `examples` annotations (never named schema entries or literal wire data); wire constraints such as `x-rui-*` bounds remain part of the comparison.
 Upgrade and restart-all control recognize wire 13 as a historical Host-info profile: v0.69.1 may omit `chatgpt`, while v0.69.2 reports it. Historical observation never grants ordinary client readiness; exact-instance shutdown uses the observed Host's own executable before the new build starts it.
@@ -3491,6 +3496,15 @@ Null end captures the current committed end; zero freezes empty history.
 Pages echo end/direction and return at most `limit` owned metadata rows with `more`, ordered by (position, ordinal).
 Only complete Tool Result groups share positions, using one-based call ordinals; a Session's own `approval_requested` row shares its call's position at ordinal 1; a revision's `session_changed` rows share its position, numbered from zero; other rows, including forwarded child facts, use zero.
 An `approval_requested` row (D115) follows each call whose Action was saved under an `ask` revision, whatever was decided since, and carries `session` (the Session whose Action it is), `action` (the id `permission_decision` names), `operation` and `call_ordinal`; it is dated by its Operation's settlement, which saved the Action.
+Both `call` and `approval_requested` rows carry inline `description`, `tool` and `server` (D240, wire 14).
+`description` is the saved D227 call line, at most 200 bytes, or null where no line was saved;
+`tool` is the saved name, at most the tool-name bound, or null for an oversized rejected name (its full name remains in `fields[0]`).
+`server` is the MCP server from the proposing Operation's frozen offer, null for built-ins or an unknown tool, never today's tool set.
+These fields read existing call content, settlement and frozen-offer facts; no arguments are re-parsed and no Store-format change is needed.
+The format 69 → 70 migration owns the saved wire-13 → wire-14 move on both engines. A current-format Store must already carry wire 14; opening never relabels it.
+Opening either row through `activity-content` returns the call's original arguments JSON, including original whitespace and the description field.
+A forwarded approval reads and certifies the child's canonical call and returns that same saved detail and arguments, not anything belonging to the receiving Session.
+Core built-ins do not request permission; Bash and MCP calls under `ask` do.
 That settlement stores the call's position on the Action as `approval_position` (Store format 51), and the feed seeks that column's partial index, so a page of approval requests costs the same however many calls ran without asking.
 Forwarded `approval_requested` and `turn_ended` rows have their own receiving-Session position and carry the originating child's `session`, while all remaining fields come from the child's own Action or Turn facts.
 A Session's own `turn_ended` row likewise carries its own `session`; forwarding does not alter the child's row or backfill a captured ancestor feed prefix.
@@ -3567,6 +3581,9 @@ A `turn_ended` row names how its Turn ended: `done`, `context_full`, `provider_r
 The ending is read from the saved outcome, so it is no Store format: `completed` is `done`; `cancelled` is `stopped` when a Session stop selected the Turn and otherwise `interrupted` (a Model Interruption); `retry_exhausted` and a provider that could not be reached are `provider_unavailable`; `ResourceExceeded` is `context_full`; a refusal resending meets again (policy, quota, plan, model, sign-in, API key or a permanent HTTP status, by `failure_class`) is `provider_refused`; any other failure is `failed`.
 An assistant row is `final` exactly when it is its done Turn's answer: the message the causing Operation selected by answer selection's rule (its last `final_answer` message, or with no phased message its last message), read from the saved items' phases rather than matched by text, so a repeated or blank answer still marks its own row, and only on a page whose end reaches the Turn's `turn_ended` row.
 Stop selection/cutoff and pending/completed status are likewise evaluated at end.
+The page's live work also carries `last_line`, the same bounded public last-line projection as a Session listing, read under that work's Store Access.
+Like live work, this preview may postdate a page's pinned historical end.
+A listing row and completed live-work read carry `read_version`, the actual Store opening identity and commit generation sampled under their read Access (not a traversal's frozen `since`). The overview settles both into one keyed presentation row: newer revisions replace work and last line together, equal revisions retain that value after retry-clock normalization, and older reads cannot regress its state, detail or age. Conversation departure changes focus, not the accepted row. Listing membership and listing-only terminal-status accounting remain separate. Only a Host handshake establishes the opening identity; foreign reads cannot rebase it or consume listing tokens. The served Host and its Store tokens share that incarnation. A row outside membership is retained only while its conversation owns a reader, then retired with that producer.
 This is a logical inventory prefix, not a historical transaction snapshot: immutable call classification remains attached to its item even at an interior end before the rejection-result position.
 Call fields are in `name`, `call_id`, `arguments` order.
 Content references carry exact decimal-string bytes and SHA-256; no preview truncation or private provider content enters activity.
@@ -3578,7 +3595,7 @@ A forward page's live call activity reads only the calls accepted after the page
 A Store test holds an opening page and a forward page to equal SQLite VM steps after 10 and 10,000 earlier rows.
 
 `POST /v1/activity-content` takes `kind:"activity_content"`, `session`, decimal-string `position` and `ordinal`, resolving the public row and provenance again.
-Admissions, applied input, assistant text, complete Tool Results and outcome content (a completed Turn's answer or a failed one's report) stream completely once under the whole-stream reader/framing/failure contract above; calls carry field references only, and stops and contentless outcomes have no byte value.
+Admissions, applied input, assistant text, complete Tool Results and outcome content (a completed Turn's answer or a failed one's report) stream completely once under the whole-stream reader/framing/failure contract above; calls and approval requests stream their original arguments JSON, and stops and contentless outcomes have no byte value.
 Client returns owned fixed-size typed facts/cursors and synchronous borrowed content windows.
 Invalid identities/cursors do not mutate work; contradictory canonical facts fence.
 Ordinary connection capacity bounds readers, fixed metadata/scanner storage and 4-KiB windows; no worker, payload stage/cache or per-Session traversal survives return.
@@ -3847,7 +3864,7 @@ Keep platform memory metrics and unavailable counters distinct.
 
 | Owner | Selected mechanism |
 | --- | --- |
-| Transport | Rui's own HTTP/2 client on pinned nghttp2 and OpenSSL, with name lookup on short-lived threads and addresses raced by family (Happy Eyeballs, RFC 8305: families alternate, the next attempt starts after 250 ms or as soon as one fails, and with two in flight the oldest gives way). `https://` origins tunnel through the `http://` proxy that `https_proxy`/`HTTPS_PROXY` names (a set lowercase name decides, even empty), read once when the transport starts, with `Proxy-Authorization: Basic` from the proxy URL's credentials; loopback and `no_proxy`/`NO_PROXY` hosts (`*`, names with their subdomains, IP addresses, CIDR ranges; no ports) connect directly; a proxy's 407 and 403 are distinct causes; an `https://` or other proxy scheme fails a provider-serving Host's startup before readiness, and only disables models.dev discovery on a provider-free Host; HTTP/1.1 and HTTP/3/QUIC are absent. Use Apple SecTrust on macOS; on Linux, OpenSSL's `SSL_CERT_FILE` / `SSL_CERT_DIR` when set (an unloadable path fails, never falls back), else the host's CA bundle; and explicit CA-file configuration (`--provider-ca-file`), which takes precedence, where needed. Missing trust/capabilities fail; never disable verification. Transport owns initialization, resolver lifetime and cleanup. |
+| Transport | Rui's own HTTP/2 client on pinned nghttp2 and OpenSSL, with name lookup on short-lived threads and addresses raced by family (Happy Eyeballs, RFC 8305: families alternate, the next attempt starts after 250 ms or as soon as one fails, and with two in flight the oldest gives way). `https://` origins tunnel through the `http://` proxy that `https_proxy`/`HTTPS_PROXY` names (a set lowercase name decides, even empty), read once when the transport starts, with `Proxy-Authorization: Basic` from the proxy URL's credentials; loopback and `no_proxy`/`NO_PROXY` hosts (`*`, names with their subdomains, IP addresses, CIDR ranges; no ports) connect directly; a proxy's 407 and 403 are distinct causes; an `https://` or other proxy scheme fails a provider-serving Host's startup before readiness, and only disables models.dev discovery on a provider-free Host; HTTP/1.1 and HTTP/3/QUIC are absent. Use Apple SecTrust on macOS; on Linux, OpenSSL's `SSL_CERT_FILE` / `SSL_CERT_DIR` when set (an unloadable path fails, never falls back), else the host's hashed certificate directory (`/etc/ssl/certs`, then `/etc/pki/tls/certs`) when it holds a readable subject-hash entry, else the host's CA bundle; a directory's roots are read only when a peer's chain names one, so a Host parses the few roots it uses rather than the whole bundle (about 0.7 MB on Linux), and a damaged root fails the first connection that needs it as `untrusted_peer` rather than startup, while a missing store still fails startup (Divyansh, 2026-11-12); and explicit CA-file configuration (`--provider-ca-file`), which takes precedence, where needed. Missing trust/capabilities fail; never disable verification. Transport owns initialization, resolver lifetime and cleanup. |
 | Storage | Bundle pinned thread-safe SQLite with single-owner access and native VFS. Use local filesystems; network/shared-mounted Stores are unsupported. Enable macOS fullfsync. |
 | Credentials | One Rui-owned file on Linux and macOS. Check ownership/access, preserve account binding and atomically persist refresh; do not fall back to Codex CLI state or another backend. The file is readable by same-user programs, including authorized Bash; credentials never enter semantic data, logs or child environments. |
 | Files/processes | Configurable disk-backed scratch and installed Bash with optional executable path. Report known memory-backed scratch as incompatible with disk-first guarantees; unknown backing is a deployment assumption. A target-header C shim supplies non-consuming child observation and queued-pipe-byte counts; lifecycle policy remains in Zig. Process-group cleanup promises neither detached-descendant containment nor rollback. |
@@ -3964,7 +3981,7 @@ A client first probes the existing `host.lock` with a nonblocking shared lock, w
 One absolute probe deadline covers connect, write, first byte, header and full body; ordinary commands retain their separate processing and transfer waits.
 The shared response parser accepts only valid bounded HTTP/1.1 headers with one decimal Content-Length, supported Content-Type and wire version; it rejects malformed field names/values, duplicates of consequential fields and unsupported transfer or content encodings rather than interpreting ambiguous framing.
 A complete compatible reply from that owner means ready and reports the canonical Store selector, wire version, actual allocated Active Capacity, slots in use, the Host's start time, whether it holds new Turns (`paused`), its Bash capability and each built-in provider's route (`unserved`, `endpoint`, `chatgpt_device`, `key_file` or `chatgpt_plan`). **Slots in use** (`custody_occupied`) counts held custody records, including detached cleanup; it is the value Current reports as `execution.custody_occupied`.
-Only the historical wire-13 Host-info profile accepts an absent `chatgpt` route as `unserved`, covering v0.69.1 alongside v0.69.2's complete provider facts. Current wire-14 facts require the provider; historical normalization serves upgrade/restart discovery and exact-instance activation, never ordinary status or client readiness.
+Only the historical wire-13 Host-info profile accepts an absent `chatgpt` route as `unserved`, covering v0.69.1 alongside v0.69.2's complete provider facts. Current wire-15 facts require the provider; the wire-14 profile freezes v0.70.0’s complete provider facts; historical normalization serves upgrade/restart discovery and exact-instance activation, never ordinary status or client readiness.
 Codex, OpenAI and the existing required identity/control fields remain required; unknown, duplicate and malformed fields still fail decoding.
 The start time (`started_at`) is the Host Unix second read once before execution starts; every reply of one Host reports the same value, and like every Host time it orders nothing across clock changes.
 Both are read from Host memory, so the reply still never touches SQLite.
@@ -4003,6 +4020,7 @@ A disconnected readiness pipe records startup failure instead of terminating on 
 
 Host startup establishes default SIGCHLD handling with `SA_NOCLDWAIT` cleared before Store ownership or child launch, including for direct `host serve`.
 This preserves waitable child identities until their signaling owners retire.
+It also catches SIGINT, SIGTERM and SIGHUP before Store ownership: each one is the same asked stop as `host-stop`, applied on the intake loop, which the handler only wakes; a second one while stopping changes nothing. Bash children start with every signal at its default.
 Host startup then owns lease acquisition, recovery and readiness.
 Competing launchers may create candidates, but one holds the lease.
 All probe the winning Host for up to ten seconds from readiness-check start, without killing an unconfirmed owner.
