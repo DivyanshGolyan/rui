@@ -26,6 +26,7 @@ const session_work = @import("../../session_work.zig");
 const codec_abi = @import("../../codec_abi.zig");
 const output_format = @import("../../output_format.zig");
 const model_capability = @import("../../model_capability.zig");
+const model_evidence = @import("../../model_evidence.zig");
 const store_core = @import("../Store.zig");
 const Store = store_core.Store;
 const configuration_domain = @import("configuration.zig");
@@ -149,6 +150,7 @@ pub const read_failures = .{
     .{ approval_request, error.ActivityReadFailed },
     .{ session_change, error.ActivityReadFailed },
     .{ compaction_row, error.ActivityReadFailed },
+    .{ model_call_row, error.ActivityReadFailed },
     .{ peer_label, error.SessionReadFailed },
     .{ proposal_row, error.StatementFailed },
     .{ call_activity, error.CallReadFailed },
@@ -193,7 +195,7 @@ fn toolGroupCompletesAtLast(comptime operation: []const u8) []const u8 {
 /// keeps, and a source whose kinds are off reads nothing. A person's
 /// Messages (kind 1) come from their own index while the page lists no
 /// received ones (kind 11), and otherwise share one source with them, as
-/// every unfiltered page reads Messages. The sources come in three groups,
+/// every unfiltered page reads Messages. The sources come in four groups,
 /// each within the Store's four-term compound limit.
 fn activitySources(comptime range: fn (comptime []const u8, comptime []const u8) []const u8, comptime kinds: []const u8, comptime order: []const u8) [4][]const u8 {
     const Kinds = struct {
@@ -241,12 +243,16 @@ fn activitySources(comptime range: fn (comptime []const u8, comptime []const u8)
             " UNION ALL SELECT session_position,0,14,operation_id FROM model_output_item @index(model_output_compaction_history) " ++
             "WHERE session_ref=?1 AND item_kind=4 AND " ++ on(14) ++ " AND " ++ range("session_position", "0") ++
             " UNION ALL SELECT position,0,CASE kind WHEN 1 THEN 12 ELSE 6 END,source_id FROM session_forward @index(session_forward_feed) " ++
-            "WHERE target_ref=?1 AND position IS NOT NULL AND (kind=1 AND " ++ on(12) ++ " OR kind=2 AND " ++ on(6) ++ ") AND " ++ range("position", "0") ++ order,
+            "WHERE target_ref=?1 AND position IS NOT NULL AND (kind=1 AND " ++ on(12) ++ " OR kind=2 AND " ++ on(6) ++ ") AND " ++ range("position", "0") ++
+            // D219 deliberately exposes resolution at the admission position,
+            // even when a page captured its end before resolution.
+            " UNION ALL SELECT admission_position,0,15,operation_id FROM model_operation @index(model_operation_admission) " ++
+            "WHERE session_ref=?1 AND resolution_code IS NOT NULL AND " ++ on(15) ++ " AND " ++ range("admission_position", "0") ++ order,
     };
 }
 
 /// Every kind, for a read of one known row.
-const all_activity_kinds = std.fmt.comptimePrint("{d}", .{(@as(u64, 1) << 15) - 2});
+const all_activity_kinds = std.fmt.comptimePrint("{d}", .{(@as(u64, 1) << 16) - 2});
 
 /// The kind codes the sources number, for each Activity kind.
 fn activityKindCode(kind: activity_facts.Item.Kind) u5 {
@@ -265,6 +271,7 @@ fn activityKindCode(kind: activity_facts.Item.Kind) u5 {
         .approval_requested => 12,
         .session_changed => 13,
         .compacted => 14,
+        .model_call => 15,
     };
 }
 
@@ -1436,10 +1443,10 @@ const approval_request = rsql.Read(.{
 
 /// The setting Session ?1 changed at position ?2, ordinal ?3.
 const session_change = rsql.Read(.{
-    .sql = "SELECT revision,field,changed_at FROM session_change WHERE session_ref=?1 AND position=?2 AND ordinal=?3",
+    .sql = "SELECT revision,field,changed_at,provider_text FROM session_change WHERE session_ref=?1 AND position=?2 AND ordinal=?3",
     .Args = struct { session: []const u8, position: u64, ordinal: u64 },
-    .Row = struct { revision: rsql.Positive, field: session_field.SessionField, changed_at: rsql.Positive },
-    .cardinality = .one,
+    .Row = struct { revision: rsql.Positive, field: session_field.SessionField, changed_at: rsql.Positive, provider_text: *?Bounded(outcome_code.max_report_bytes) },
+    .cardinality = .optional,
 });
 
 /// Compaction Operation ?1 of Session ?2, which succeeded: what its floor
@@ -1451,6 +1458,61 @@ const compaction_row = rsql.Read(.{
     .Row = struct { dropped: u64, resolved_at: rsql.Positive },
     .cardinality = .one,
 });
+
+/// The immutable revision names the requested model; the Operation owns
+/// resolution, usage, final-attempt timings and opaque served-model evidence.
+const model_call_row = rsql.Read(.{
+    .sql = "SELECT revision.model,o.model_evidence,o.usage_uncached_tokens AS uncached,o.usage_cache_read_tokens AS cached," ++
+        "o.usage_cache_write_tokens AS cache_write,o.usage_output_tokens AS output,o.latency_ms,o.first_event_ms," ++
+        "o.resolution_code AS status,o.attempt_ordinal AS attempts,o.resolved_at " ++
+        "FROM model_operation o JOIN session_revision revision ON revision.session_ref=o.session_ref AND revision.revision=o.settings_revision " ++
+        "WHERE o.operation_id=?1 AND o.session_ref=?2 AND o.resolution_code IS NOT NULL",
+    .Args = struct { operation: u64, session: []const u8 },
+    .Row = struct {
+        model: Bounded(model_capability.max_model_bytes),
+        model_evidence: ?rsql.Blob(model_evidence.max_bytes),
+        uncached: ?u64,
+        cached: ?u64,
+        cache_write: ?u64,
+        output: ?u64,
+        latency_ms: ?u64,
+        first_event_ms: ?u64,
+        status: Bounded(outcome_code.max_bytes),
+        attempts: rsql.Positive,
+        resolved_at: rsql.Positive,
+    },
+    .cardinality = .each,
+});
+
+/// Decode model evidence once in the Store's entry-owned scratch, not once
+/// per page slot. Each visitor writes its public item before the next row
+/// reuses the buffer; neither the read state nor the item borrows that row.
+const ModelCallRead = struct {
+    operation: u64,
+    item: *activity_facts.Item,
+    decoded: *model_call_row.Row = undefined,
+    count: RowCount = .{},
+
+    pub fn visit(read: *ModelCallRead, row: *const model_call_row.Row) bool {
+        return visitRow(read, row);
+    }
+
+    fn keep(read: *ModelCallRead, row: *const model_call_row.Row) error{CorruptStore}!void {
+        const item = read.item;
+        item.at = row.resolved_at.get();
+        item.value = .{ .model_call = .{
+            .model = row.model,
+            .served_model = model_evidence.servedModel(if (row.model_evidence) |*evidence| evidence.slice() else null) catch return error.CorruptStore,
+            .input_tokens = if (row.uncached) |uncached| uncached +| (row.cached orelse return error.CorruptStore) +| (row.cache_write orelse return error.CorruptStore) else null,
+            .output_tokens = row.output,
+            .cached_tokens = row.cached,
+            .latency_ms = row.latency_ms,
+            .first_event_ms = row.first_event_ms,
+            .status = row.status,
+            .attempts = row.attempts.get(),
+        } };
+    }
+};
 
 const call_resolved = rsql.Read(.{
     .sql = "SELECT resolved_at FROM model_operation WHERE operation_id=?1 AND session_ref=?2",
@@ -1720,8 +1782,11 @@ const ItemRead = struct {
         outcome: struct { read: OutcomeRead, metadata: content_metadata.Row = undefined },
         stop: StopRead,
         approval: approval_request.Result,
-        change: session_change.Row,
+        // Text has one address, in the item: keeping another bounded copy
+        // here would widen every slot of a page's read-state union.
+        change: struct { row: session_change.Row = undefined, found: store_access.Found = undefined },
         compaction: compaction_row.Row,
+        model_call: ModelCallRead,
     } = undefined,
 
     fn queue(read: *ItemRead, a: *ReadAccess, session: []const u8, end: u64) void {
@@ -1790,8 +1855,17 @@ const ItemRead = struct {
             },
             7 => read.state.stop.queue(a, session),
             12 => a.read(approval_request, .{ .action = item.value.approval_requested.action, .session = session }, &read.state.approval),
-            13 => a.read(session_change, .{ .session = session, .position = read.position, .ordinal = read.ordinal }, &read.state.change),
+            13 => {
+                const change = &read.state.change;
+                change.row.provider_text = &item.value.session_changed.provider_text;
+                a.readInto(session_change, .{ .session = session, .position = read.position, .ordinal = read.ordinal }, &change.row, &change.found);
+            },
             14 => a.read(compaction_row, .{ .operation = item.value.compacted.operation, .session = session }, &read.state.compaction),
+            15 => {
+                const call = &read.state.model_call;
+                call.decoded = a.store.reportScratch(model_call_row.Row);
+                readRow(a, model_call_row, .{ .operation = call.operation, .session = session }, call);
+            },
             else => unreachable,
         }
     }
@@ -1900,7 +1974,9 @@ const ItemRead = struct {
                 item.at = row.resolved_at.get();
             },
             13 => {
-                const row = &read.state.change;
+                const change = &read.state.change;
+                if (!change.found.get()) return error.CorruptStore;
+                const row = &change.row;
                 if (row.revision.get() != item.value.session_changed.revision) return error.CorruptStore;
                 item.value.session_changed.field = row.field;
                 item.at = row.changed_at.get();
@@ -1909,6 +1985,7 @@ const ItemRead = struct {
                 item.value.compacted.dropped = read.state.compaction.dropped;
                 item.at = read.state.compaction.resolved_at.get();
             },
+            15 => if (!try read.state.model_call.count.found()) return error.CorruptStore,
             else => unreachable,
         }
         read.done = true;
@@ -1976,6 +2053,7 @@ const ItemRead = struct {
                 item.value = .{ .compacted = .{ .operation = (row.id orelse return error.CorruptStore).get(), .dropped = undefined } };
                 read.state = .{ .compaction = undefined };
             },
+            15 => read.state = .{ .model_call = .{ .operation = (row.id orelse return error.CorruptStore).get(), .item = item } },
             else => return error.CorruptStore,
         }
     }

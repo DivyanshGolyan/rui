@@ -25,8 +25,8 @@ pub const Action = enum {
     /// On a recalled draft, the Message sent after it, or past the newest
     /// an empty draft.
     newer,
-    /// The latest view, which is the pending Action if there is one: a
-    /// click on the `↓` marker.
+    /// The latest view, which is the pending Action if there is one:
+    /// End without a draft, Ctrl-End, or a click on the `↓` marker.
     latest,
     /// Out of a Message page, else to the latest view, and from the settled
     /// latest view, once nothing would be lost, to the overview.
@@ -62,10 +62,9 @@ pub const keys: keymap.Keymap(Action) = .init(.{
     .page_up = .page_up,
     .page_down = .page_down,
     .home = null,
-    // Esc and the `↓` marker return to the latest; End and Ctrl-End are
-    // keys a MacBook lacks.
-    .end = null,
-    .ctrl_end = null,
+    // The editor takes End while a draft gives it a line to edit.
+    .end = .latest,
+    .ctrl_end = .latest,
 });
 
 /// One input as the conversation's table classifies it.
@@ -143,4 +142,6 @@ test "the conversation binds Ctrl-X to stop, Alt-A to archive and Esc and Ctrl-G
     try std.testing.expectEqual(@as(?Action, .close), keys.get(.escape));
     try std.testing.expectEqual(@as(?Action, .close), keys.get(.ctrl_g));
     try std.testing.expectEqual(@as(?Action, null), keys.get(.home));
+    try std.testing.expectEqual(@as(?Action, .latest), keys.get(.end));
+    try std.testing.expectEqual(@as(?Action, .latest), keys.get(.ctrl_end));
 }

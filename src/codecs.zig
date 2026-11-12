@@ -157,6 +157,14 @@ pub fn classify(codec: protocol.Codec, scratch: *ClassifyScratch, body: []const 
     }
 }
 
+/// The pinned codec owns whether status and error body refused an effort update.
+pub fn effortChangeRefused(codec: protocol.Codec, scratch: *const ClassifyScratch, status: u16, body: []const u8) bool {
+    return switch (codec) {
+        .@"openai-responses/1" => false,
+        .@"openai-responses/2" => responses.effortChangeRefused(&@field(scratch, "openai-responses/2"), status, body),
+    };
+}
+
 /// A pinned codec's response stream state between events, which its
 /// caller stores.
 pub const Stream = PerCodec("Stream");

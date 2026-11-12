@@ -72,7 +72,7 @@ from terminal_process import close_pty, answers_to, open_pty, spawn, terminal_pr
 import model_fixture as fixture
 import codex_fixture
 import os_semantics
-from human_cli_fixture import ALLOW, CAPTURE_NOTICE, CHOICE, highlighted, _captures, action_ready, admit, await_screen, command_frame, composer_ready, conversation_text, current_screen, draining, drop_spent_readiness, keyed_frame, next_frame, overview_frame, overview_title, pick_deny, read_terminal, return_to_live, run, settle_screen, shown, terminal_capture, terminal_exit, terminal_gate, terminal_step
+from human_cli_fixture import ALLOW, CAPTURE_NOTICE, CHOICE, highlighted, _captures, action_ready, admit, await_screen, chat_content_row, command_frame, composer_ready, conversation_text, current_screen, draining, drop_spent_readiness, keyed_frame, next_frame, overview_frame, overview_title, pick_deny, read_terminal, return_to_live, run, settle_screen, shown, terminal_capture, terminal_exit, terminal_gate, terminal_step
 
 
 def terminal_safe_json(text):
@@ -456,6 +456,20 @@ def preference_edits(home, store):
     assert defaults(home, "--notifications", "on")["notifications"] is True
     assert saved.read_text() == pinned
 
+    # Permissions-only edits publish through setup, and inspection reads them.
+    original = saved.read_bytes()
+    for mode in ("ask", "bypass"):
+        changed = defaults(home, "--permission-mode", mode)
+        assert changed["changed"] and changed["permission_mode"] == mode, changed
+        inspected = defaults(home)
+        assert not inspected["changed"] and inspected["permission_mode"] == mode, inspected
+        assert saved.read_text().startswith("version=4\n"), saved.read_text()
+        assert saved.read_text().endswith(f"reasoning_effort=\npermission_mode={mode}\n"), saved.read_text()
+    retained = saved.read_bytes()
+    defaults(home, "--permission-mode", "plan", success=False)
+    assert saved.read_bytes() == retained, "invalid permission mode changed preferences"
+    saved.write_bytes(original)
+
 
 def read_pipe_output(stream, *, count=None, timeout=10):
     """Read one complete line or an exact prefix without consuming later output.
@@ -502,10 +516,10 @@ def status_frame(master, session, command="/status", timeout=15):
     """The /status page for exactly `session` (escaped as /status shows it)."""
     escaped = session.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\t", "\\t")
     def page(frame):
-        rows = frame.split("\n")
-        # App draws the page from the first row, with no browsing heading.
+        rows = [chat_content_row(row) for row in frame.split("\n")]
+        # App draws the page from the first feed row, with no browsing heading.
         return (rows[0].startswith(" Status · ")
-            and (rows[0] == " Status · " + escaped or rows[0].endswith(" · " + escaped)) and "\n Work\n" in frame)
+            and (rows[0] == " Status · " + escaped or rows[0].endswith(" · " + escaped)) and " Work" in rows)
     return command_frame(master, command, page, timeout)
 
 
@@ -522,8 +536,8 @@ def configured_frame(master, command):
     notice; Esc then returns to the conversation, so a later /status page is
     the one that request reads, not the page already shown."""
     frame = command_frame(master, command, lambda frame: "Configured." in frame.split("\n"))
-    if frame.startswith(" Status · "):
-        command_frame(master, "\x1b", lambda frame: not frame.startswith(" Status · "), end="")
+    if frame.startswith("  Status · "):
+        command_frame(master, "\x1b", lambda frame: not frame.startswith("  Status · "), end="")
     return frame
 
 
@@ -555,7 +569,7 @@ def overview_store(notice):
 
 def permanent_tool_count(screen, heading):
     """Count a call heading's rows in one frame (not repeated frames)."""
-    return len(re.findall(r"(?m)^" + re.escape(heading) + r"$", screen))
+    return len(re.findall(r"(?m)^" + re.escape(heading) + r"$", "\n".join(chat_content_row(row) for row in screen.split("\n"))))
 
 
 def pipe_wait_oracles():
@@ -675,6 +689,7 @@ def shown_bash_command(master):
     """
     capture = terminal_capture(master)
     width = capture.screen.columns
+    # PermissionCard is an overlay with its own two-column inset, not feed content.
     rows = [line.rstrip() for line in capture.screen.display]
     start = next(index for index, line in enumerate(rows) if line.startswith("  $ "))
     command = rows[start][4:]
@@ -726,8 +741,8 @@ def raw_export(master, screen):
     Word wrap consumes the space at a soft break; a row filled to the edge
     broke inside a word instead (a long hex identity), so it joins directly.
     """
-    columns = terminal_capture(master).screen.columns
-    lines = screen.split("\n")
+    columns = terminal_capture(master).screen.columns - 1  # Feed width, without its gutter.
+    lines = [chat_content_row(line) for line in screen.split("\n")]
     start = next(index for index, line in enumerate(lines) if line.lstrip(" ").startswith("Raw export: "))
     command = lines[start].lstrip(" ").removeprefix("Raw export: ")
     previous = lines[start]
@@ -836,7 +851,7 @@ def persistent_copy_case():
             terminal_step(master, "/copy file", f"Saved to ./{name}", composer=True)
             saved = here / name
             assert saved.read_bytes() == answer.encode() and saved.stat().st_mode & 0o777 == 0o600, saved
-            terminal_step(master, "Large request", "Large done.", composer=True)
+            terminal_step(master, "Large request", "More — Ctrl-O for whole message", composer=True)
             before = len(capture.clipboard)
             terminal_step(master, "/copy", "Too large for the clipboard · /copy file", composer=True)
             assert len(capture.clipboard) == before, "an answer over the limit is never sent"
@@ -901,7 +916,7 @@ def provider_prompt(master, ready, command=None):
     return output
 
 
-def terminal_bulk(master, command, marker="› ", *, submit=True, draft=None, caret=None):
+def terminal_bulk(master, command, marker="› ", *, submit=True, draft=None, caret=None, timeout=15):
     """Write a large input in chunks while the screen is read.
 
     With `draft`, wait instead until the composer shows exactly that draft
@@ -920,9 +935,9 @@ def terminal_bulk(master, command, marker="› ", *, submit=True, draft=None, ca
     writer = threading.Thread(target=send, daemon=True)
     writer.start()
     if draft is None:
-        output = read_terminal(master, marker)
+        output = read_terminal(master, marker, timeout=timeout)
     else:
-        deadline = time.monotonic() + 15
+        deadline = time.monotonic() + timeout
         frames = []
         while not capture.draft(draft, caret):
             remaining = deadline - time.monotonic()
@@ -982,8 +997,10 @@ def saved_capture_cases(state, store, workspace):
     # Recovery must ignore a newly selected, nonexistent preference Store.
     defaults(home, "--store", store)
     preferences = home / ".config/rui/preferences"
+    saved_preferences = preferences.read_bytes()
     preferences.write_text(f"version=1\nstore={state / 'missing-capture-store'}\n")
     assert json.loads(run(home, "request", "recover", handle))["answer"]["replayed"] is True
+    preferences.write_bytes(saved_preferences)
 
     # Rejected creation has no allocated Session. It remains inspectable and
     # recoverable, without hiding another Session's valid recovery handles.
@@ -1736,39 +1753,38 @@ def renderer_cases():
             released[0].set()
             # The next read carries the /status request.
             fixture.wait_for(tty.draining(held[1].is_set), "/status Activity page", timeout=10)
-            os.write(tty.master, b"/history\r")
+            os.write(tty.master, b"/help\r")
             time.sleep(0.3)
             released[1].set()
-            tty.wait("Start of conversation", timeout=20)
+            tty.wait("shift+↑↓               scroll", timeout=20)
             time.sleep(1.5)
-            assert "Start of conversation" in tty.capture.completed, tty.capture.completed
+            assert "shift+↑↓               scroll" in tty.capture.completed, tty.capture.completed
             for frame in frames:
                 assert " Status · " not in frame, frame
             tty.caller.send_signal(signal.SIGINT)
             tty.finish()
         proxy.close()
         proxy = None
-        print("renderer: a later /history replaces a /status not yet shown", flush=True)
+        print("renderer: a later /help replaces a /status not yet shown", flush=True)
 
-        # A fresh Session's live page begins with an Admission row, which is
-        # no conversation cursor: its start is the start of the conversation.
+        # A short fresh feed clamps at its first saved row; scrolling does
+        # not add a start label or duplicate the admitted Message and reply.
         session = configure()
         marker = answer("fresh start")
         with terminal(session) as tty:
             tty.send("fresh start\r", marker)
             frames = tty.every_frame()
-            tty.send("/history\r", "Start of conversation")
-            for _ in range(3):
-                os.write(tty.master, b"\x1b[5~")
-                time.sleep(0.3)
-            time.sleep(1)
-            shown = tty.capture.completed
-            assert shown.index("Start of conversation") < shown.index("› fresh start") < shown.index(marker), shown
+            # Only the first PgUp moves a feed this short; the rest draw nothing.
+            shown = tty.send("\x1b[5~" * 3, predicate=lambda: "› fresh start" in tty.capture.completed
+                and marker in tty.capture.completed and "↓" in tty.capture.completed)
+            assert shown.count("› fresh start") == 1 and shown.count(marker) == 1, shown
+            assert shown.index("› fresh start") < shown.index(marker), shown
+            assert "Start of conversation" not in shown, shown
             for frame in frames:
-                assert "Earlier messages unavailable" not in frame, frame
+                assert "Earlier messages unavailable" not in frame and "Start of conversation" not in frame, frame
             tty.caller.send_signal(signal.SIGINT)
             tty.finish()
-        print("renderer: a fresh Session scrolls to its start", flush=True)
+        print("renderer: a fresh Session scrolls to its first row without labels or duplicate Messages", flush=True)
 
         completed = True
     finally:
@@ -2581,24 +2597,24 @@ def main(selected="all"):
         try:
             greeting = read_terminal(master, "› ")
             assert all(noise not in greeting for noise in ("Session:", "Workspace:", "Provider:", "Model:", "Permission:", "Store:", queued)), greeting
-            assert "\n› first input" in greeting and "\nfirst answer" in greeting, greeting
+            assert "\n› first input" in conversation_text(greeting) and "\nfirst answer" in conversation_text(greeting), greeting
             binding = terminal_step(master, "/status", " Status · ", composer=True)
             assert f" Status · {session}" in binding and shown(folder_row(preferences_home, workspace.resolve()), binding), binding
-            assert "gpt-6-sol · ChatGPT" in binding and " · gpt-6-sol" in binding and "asks before Bash/MCP" in binding and permission_row(binding, "ask"), binding
+            assert "gpt-6-sol · ChatGPT" in binding and " · gpt-6-sol" in binding and "asks before Bash/MCP" not in binding and permission_row(binding, "ask"), binding
             # The whole page fits this terminal's 50 rows, so one frame shows it from Marks to Login.
             help_text = terminal_step(master, "/help", "in your shell.", composer=True)
             assert help_text.lstrip().startswith("Marks\n"), help_text
-            for command in ("/status", "/inspect-action", "/history", "/requests", "/result KEY", "/setup", "/configure", "/exit", "ctrl+r"):
+            for command in ("/status", "/inspect-action", "/requests", "/result KEY", "/setup", "/configure", "/exit", "ctrl+r"):
                 assert command in help_text, help_text
-            assert "/wait" not in help_text and "/login" not in help_text and "rui auth login codex" in help_text, help_text
-            # This Session asks: help must not describe the bypass default as its mode (the facts row shows the mode).
+            assert "/history" not in help_text and "/wait" not in help_text and "/login" not in help_text and "rui auth login codex" in help_text, help_text
+            # This Session asks: help must not describe the bypass default as its mode (the status panel shows the mode).
             assert "without approval" not in help_text, help_text
             result = terminal_step(master, f"/result {queued}", "result: completed", composer=True)
-            assert "result: completed\nfirst answer" in result, result
+            assert "result: completed\nfirst answer" in conversation_text(result), result
             terminal_step(master, "/requests", "Local recovery handles", composer=True)
             assert not (fresh_home / ".config/rui/requests").exists(), "re-entry should not require saved records"
             before_unsupported = set(json.loads(run(preferences_home, "request", "list")))
-            for command, notice in (("/wait", "Work continues while you compose."),
+            for command, notice in (("/wait", "Work continues."),
                                     ("/login", "Login uses rui auth login codex in your shell.")):
                 terminal_step(master, command, notice, composer=True)
                 assert set(json.loads(run(preferences_home, "request", "list"))) == before_unsupported
@@ -2761,7 +2777,7 @@ def main(selected="all"):
             assert "result: failed" in failed, failed
             assert "code: provider_http_422" in failed and "successor done" not in failed, failed
             result = terminal_step(master, f"/result {queued_key}", "result: completed", composer=True)
-            assert "result: completed\nsuccessor done" in result, result
+            assert "result: completed\nsuccessor done" in conversation_text(result), result
             terminal_step(master, "/exit", "Detached.")
             assert entered.wait(timeout=5) == 0
 
@@ -3001,7 +3017,7 @@ def main(selected="all"):
             "--", unsafe_session], env={**os.environ, "HOME": str(home)},
         ) as (entered, master):
             greeting = read_terminal(master, "› ")
-            assert "Session:" not in greeting and "\nsafe result" in greeting, greeting
+            assert "Session:" not in greeting and "\nsafe result" in conversation_text(greeting), greeting
             status = terminal_step(master, "/status", " Status · ", composer=True)
             assert f" Status · {unsafe_session}" in status, status
             assert "\x1b[2J" not in status and "\u202e" not in status, status
@@ -3122,7 +3138,9 @@ def main(selected="all"):
             endpoint.responses.append(fixture.sse_answer("editor-limit-answer", "editor-limit-reason",
                 "editor-limit-message", "limit accepted")[0])
             at_limit = "a" * (64 * 1024 - 2) + "é"
-            accepted = terminal_bulk(master, at_limit, "limit accepted")
+            # 64 KiB typed a KiB at a time is a third of the default budget on
+            # an idle machine, and has run past it on a loaded runner.
+            accepted = terminal_bulk(master, at_limit, "limit accepted", timeout=60)
             assert "limit accepted" in accepted, accepted[-1000:]
             body = json.loads(endpoint.requests[-1])
             assert next(item["content"][0]["text"] for item in reversed(body["input"])
@@ -3198,7 +3216,7 @@ def main(selected="all"):
             def hold_observation(response):
                 observation_held.set()
                 assert observation_continue.wait(15), "accepted observation gate was not released"
-                return b""  # Lost read framing must be fatal, not partial success.
+                return b""  # Lost read framing is the Host's loss, not partial success.
 
             def after_admission(response):
                 assert json.loads(response.split(b"\r\n\r\n", 1)[1])["answer"]["status"] == "accepted"
@@ -3219,15 +3237,15 @@ def main(selected="all"):
                 "--key", saved_key)["observation"]["status"] == "accepted"
             fixture.crash_host(host, state, "accepted-before-observation-loss")
             observation_continue.set()
+            # The screen stays up and says so in one line; nothing is sent again.
+            stopped = read_terminal(master, "Host stopped · r start")
+            assert "TruncatedResponse" not in stopped and "Not confirmed" not in stopped and "rui host start" not in stopped, stopped
+            assert entered.poll() is None, "the Host's stop ended the TUI"
+            assert proxy.mutations == [("/v1/message", original)], "a lost observation retransmitted the Message"
+            os.write(master, b"\x03")
             lost, errors = terminal_exit(entered, master)
-            assert entered.returncode != 0, errors
-            stopped = b"rui: The Host stopped. Run rui host start --store $'" + bytes(store) + b"', then resume this Session.\n"
-            assert stopped in errors, errors
-            assert b"TruncatedResponse" not in errors and b"syntax and recovery" not in errors, errors
-            assert b"Message accepted; do not resubmit it" in errors, errors
-            assert f"rui request read-result {saved_key}".encode() in errors, errors
-            assert b"Detached." not in lost and b"Not confirmed" not in lost, lost
-            assert proxy.mutations == [("/v1/message", original)], "fatal observation retransmitted Message"
+            assert entered.returncode == 0, errors
+            assert b"The Host stopped" not in errors and b"TruncatedResponse" not in errors, errors
             actual = termios.tcgetattr(slave)
             assert os_semantics.user_termios(actual) == os_semantics.user_termios(original_terminal)
             assert set(json.loads(run(home, "request", "list"))) == after and record.read_bytes() == original

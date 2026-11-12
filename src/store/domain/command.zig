@@ -2,6 +2,7 @@
 //! interruptions, permission decisions), their replay, and their observed results.
 
 const std = @import("std");
+const model_attempt = @import("model_attempt.zig");
 const command_reply = @import("../../command_reply.zig");
 const skills_domain = @import("skills.zig");
 const turn_ending = @import("../../turn_ending.zig");
@@ -23,10 +24,8 @@ const command_input = @import("../../command_input.zig");
 const store_core = @import("../Store.zig");
 const Store = store_core.Store;
 const action_domain = @import("action.zig");
-const forward_domain = @import("forward.zig");
 const configuration_domain = @import("configuration.zig");
 const content_domain = @import("content.zig");
-const model_settlement_domain = @import("model_settlement.zig");
 const reads_domain = @import("reads.zig");
 const report_domain = @import("report.zig");
 const store_schema = @import("../schema.zig");
@@ -570,8 +569,8 @@ fn childEndingKey(buffer: *[idempotency_key.max_bytes]u8, turn_id: u64) []const 
 /// its Turn ended, with the answer's digest when done or its bounded report.
 const owed_ending_facts = rsql.Read(.{
     .sql = "SELECT child.session_ref,child.workspace_key,child.next_position,child.parent_ref AS parent,t.outcome_code,t.outcome_content_id,c.digest,CASE WHEN t.outcome_content_id IS NOT NULL AND t.outcome_code<>'completed' THEN @payload(c) ELSE NULL END AS report," ++
-        action_domain.ending_stop_sql ++ " FROM session_ending_owed e JOIN turn t ON t.turn_id=e.turn_id " ++
-        "JOIN session child ON child.session_ref=t.session_ref LEFT JOIN content c ON c.content_id=t.outcome_content_id WHERE e.turn_id=?1 AND e.delivered=0",
+        action_domain.ending_stop_sql ++ " FROM session_forward e JOIN turn t ON t.turn_id=e.source_id " ++
+        "JOIN session child ON child.session_ref=t.session_ref LEFT JOIN content c ON c.content_id=t.outcome_content_id WHERE e.source_id=?1 AND e.message_delivered=0",
     .Args = struct { turn_id: u64 },
     .Row = struct {
         child: rsql.SessionHead,
@@ -587,7 +586,7 @@ const owed_ending_facts = rsql.Read(.{
 });
 
 const settle_owed_ending = rsql.Write(.{
-    .sql = "UPDATE session_ending_owed SET delivered=1 WHERE turn_id=?1 AND delivered=0",
+    .sql = "UPDATE session_forward SET message_delivered=1 WHERE source_id=?1 AND message_delivered=0",
     .Args = struct { turn_id: u64 },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
@@ -621,9 +620,6 @@ pub fn deliverChildEnding(a: anytype, turn_id: u64, captured: ?*const skills_dom
         return false;
     };
     a.write(settle_owed_ending, .{ .turn_id = turn_id });
-    // The ending's feed row climbs the tree from here (D180): queued with
-    // the owed Message, so a root Session's Turn end writes nothing more.
-    try forward_domain.queue(a, &found.child.ref, &found.child.ref, .ending, turn_id);
     if (found.quiet) {
         if (faults.before_commit) return error.InjectedCommitFailure;
         try a.commit();
@@ -1074,7 +1070,7 @@ fn stopRounds(a: anytype, command: *const command_input.SessionStopCommand, owed
     var cancellation = unattempted_stop_content;
     if (turn) |open| {
         if (open.running) {
-            a.write(interrupt_operation, .{ .operation_id = open.operation_id.get(), .command_key = key, .session = head });
+            interrupt_operation.queue(a, .{ .operation_id = open.operation_id.get(), .command_key = key, .session = head });
             interrupted_operation_id = open.operation_id.get();
         }
         if (open.cancellable != 0) try cancelActions(a, positions, head, &open, &cancellation, faults);
@@ -1159,16 +1155,14 @@ fn cancelActions(
 }
 
 const archive_ending_count = rsql.Read(.{
-    .sql = "SELECT count(*) AS count FROM session_ending_owed ending JOIN turn t ON t.turn_id=ending.turn_id " ++
-        "JOIN session child ON child.session_ref=t.session_ref WHERE child.parent_ref=?1 AND ending.delivered=0 AND ending.suppress_message=0",
+    .sql = "SELECT count(*) AS count FROM session_forward ending WHERE ending.target_ref=?1 AND ending.message_delivered=0 AND ending.suppress_message=0",
     .Args = struct { parent: []const u8 },
     .Row = struct { count: u64 },
     .cardinality = .one,
 });
 
 const suppress_archive_endings = rsql.Write(.{
-    .sql = "UPDATE session_ending_owed SET suppress_message=1 WHERE delivered=0 AND suppress_message=0 AND turn_id IN(" ++
-        "SELECT t.turn_id FROM turn t JOIN session child ON child.session_ref=t.session_ref WHERE child.parent_ref=?1)",
+    .sql = "UPDATE session_forward SET suppress_message=1 WHERE message_delivered=0 AND suppress_message=0 AND target_ref=?1",
     .Args = struct { parent: []const u8 },
     .expect = .{ .counted = .{ .otherwise = error.StopSelectionChanged } },
 });
@@ -1334,9 +1328,10 @@ const save_interruption = rsql.Write(.{
 
 /// Interrupts the unresolved Operation `operation_id` of `session`'s
 /// Session, for the command `command_key`.
-const interrupt_operation = rsql.Write(.{
-    .sql = "UPDATE model_operation SET retry_due_at_ms=NULL," ++ store_schema.resolutionIs("resolution_code", .interrupted) ++ ",interrupted_by_command_key=?2," ++
-        model_settlement_domain.operation_resolved_now_sql ++ " WHERE operation_id=?1 AND session_ref=@session(?3) AND resolution_code IS NULL",
+const interrupt_operation = model_attempt.Write(.{
+    .end = .resolution,
+    .set = "retry_due_at_ms=NULL," ++ store_schema.resolutionIs("resolution_code", .interrupted) ++ ",interrupted_by_command_key=?2",
+    .where = "operation_id=?1 AND session_ref=@session(?3) AND resolution_code IS NULL",
     .Args = struct { operation_id: u64, command_key: []const u8, session: rsql.SessionHead },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.InterruptionTargetChanged } },
 });
@@ -1418,7 +1413,7 @@ pub fn interruptModel(a: anytype, command: *const command_input.ModelInterruptio
     });
     if (rejection == null) {
         const head = target.?.session;
-        a.write(interrupt_operation, .{ .operation_id = command.operation_id, .command_key = command.key.slice(), .session = head });
+        interrupt_operation.queue(a, .{ .operation_id = command.operation_id, .command_key = command.key.slice(), .session = head });
         if (!pending.pending) try turn_domain.queueCloseOr(a, try a.positions(head), command.turn_id, .cancelled, error.InterruptionTargetChanged);
     }
     if (faults.before_commit) return error.InjectedCommitFailure;

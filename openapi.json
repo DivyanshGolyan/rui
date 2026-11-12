@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Rui Host",
-    "version": "12",
+    "version": "13",
     "description": "The Rui Host's local protocol: HTTP/1.1 over the Unix socket of a running Host, one POST per request, generated from the Host's own wire types.\n\nRequest bodies list their fields in the order this document lists them; the Host refuses another order. Numbers that may exceed 2^53 travel as decimal strings. String bounds are in UTF-8 bytes (`x-rui-max-bytes`)."
   },
   "paths": {
@@ -1138,7 +1138,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "12"
+            "const": "13"
           },
           "kind": {
             "const": "activity_content"
@@ -2007,13 +2007,27 @@
                           "compaction_trigger",
                           "output_reservation",
                           "reasoning_effort",
-                          "label"
+                          "label",
+                          "reasoning_effort_refused"
+                        ]
+                      },
+                      "provider_text": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "maxLength": 520,
+                            "x-rui-max-bytes": 520
+                          },
+                          {
+                            "type": "null"
+                          }
                         ]
                       }
                     },
                     "required": [
                       "revision",
-                      "field"
+                      "field",
+                      "provider_text"
                     ],
                     "additionalProperties": false
                   }
@@ -2077,6 +2091,129 @@
               "value"
             ],
             "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "position": {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              "ordinal": {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              "at": {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              "value": {
+                "type": "object",
+                "properties": {
+                  "model_call": {
+                    "type": "object",
+                    "properties": {
+                      "model": {
+                        "type": "string",
+                        "maxLength": 256,
+                        "x-rui-max-bytes": 256
+                      },
+                      "served_model": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "maxLength": 256,
+                            "x-rui-max-bytes": 256
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "input_tokens": {
+                        "anyOf": [
+                          {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "output_tokens": {
+                        "anyOf": [
+                          {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "cached_tokens": {
+                        "anyOf": [
+                          {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "latency_ms": {
+                        "anyOf": [
+                          {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "first_event_ms": {
+                        "anyOf": [
+                          {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "status": {
+                        "type": "string",
+                        "maxLength": 96,
+                        "x-rui-max-bytes": 96
+                      },
+                      "attempts": {
+                        "$ref": "#/components/schemas/Decimal"
+                      }
+                    },
+                    "required": [
+                      "model",
+                      "served_model",
+                      "input_tokens",
+                      "output_tokens",
+                      "cached_tokens",
+                      "latency_ms",
+                      "first_event_ms",
+                      "status",
+                      "attempts"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "model_call"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "position",
+              "ordinal",
+              "at",
+              "value"
+            ],
+            "additionalProperties": false,
+            "description": "One resolved model Operation at its admission position. Timings describe the FINAL attempt only: latency_ms is request sent to resolution; first_event_ms is request sent to the first HTTP response event (including an interim head), not the first token. Missing evidence, usage or timings is null. A resolution may become visible within a previously captured end (D219)."
           }
         ]
       },
@@ -2103,7 +2240,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "12"
+                "const": "13"
               },
               "type": {
                 "const": "activity_page"
@@ -2171,7 +2308,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "12"
+                "const": "13"
               },
               "type": {
                 "const": "activity_page"
@@ -2199,7 +2336,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "12"
+            "const": "13"
           },
           "kind": {
             "const": "activity_page"
@@ -2262,7 +2399,8 @@
                 "received",
                 "approval_requested",
                 "session_changed",
-                "compacted"
+                "compacted",
+                "model_call"
               ]
             },
             "uniqueItems": true,
@@ -2361,7 +2499,8 @@
               "received",
               "approval_requested",
               "session_changed",
-              "compacted"
+              "compacted",
+              "model_call"
             ]
           },
           "hits": {
@@ -2383,7 +2522,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "12"
+            "const": "13"
           },
           "type": {
             "const": "activity_search"
@@ -2417,7 +2556,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "12"
+            "const": "13"
           },
           "kind": {
             "const": "activity_search"
@@ -2455,7 +2594,8 @@
                 "received",
                 "approval_requested",
                 "session_changed",
-                "compacted"
+                "compacted",
+                "model_call"
               ]
             },
             "uniqueItems": true,
@@ -2739,7 +2879,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "12"
+            "const": "13"
           },
           "type": {
             "const": "configuration_reply"
@@ -2801,7 +2941,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "12"
+                "const": "13"
               },
               "type": {
                 "const": "configuration_reply"
@@ -2865,7 +3005,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "12"
+                "const": "13"
               },
               "type": {
                 "const": "configuration_reply"
@@ -2937,7 +3077,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "12"
+                "const": "13"
               },
               "type": {
                 "const": "configuration_reply"
@@ -3045,7 +3185,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "12"
+            "const": "13"
           },
           "kind": {
             "const": "configure"
@@ -3094,7 +3234,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "12"
+            "const": "13"
           },
           "kind": {
             "const": "conversation_content"
@@ -3139,7 +3279,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "12"
+                "const": "13"
               },
               "type": {
                 "const": "conversation_page"
@@ -3448,7 +3588,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "12"
+                "const": "13"
               },
               "type": {
                 "const": "conversation_page"
@@ -3767,7 +3907,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "12"
+            "const": "13"
           },
           "kind": {
             "const": "conversation_page"
@@ -3812,7 +3952,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "12"
+            "const": "13"
           },
           "type": {
             "type": "string",
@@ -3881,7 +4021,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "12"
+            "const": "13"
           },
           "type": {
             "const": "host_info"
@@ -3980,7 +4120,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "12"
+            "const": "13"
           },
           "kind": {
             "const": "host_info"
@@ -4002,7 +4142,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "12"
+            "const": "13"
           },
           "type": {
             "const": "host_pause_reply"
@@ -4022,7 +4162,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "12"
+            "const": "13"
           },
           "kind": {
             "const": "host_pause"
@@ -4048,7 +4188,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "12"
+            "const": "13"
           },
           "type": {
             "const": "host_stop_reply"
@@ -4068,7 +4208,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "12"
+            "const": "13"
           },
           "kind": {
             "const": "host_stop"
@@ -4092,7 +4232,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "12"
+                "const": "13"
               },
               "type": {
                 "const": "session_report"
@@ -4195,7 +4335,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "12"
+                "const": "13"
               },
               "type": {
                 "const": "session_report"
@@ -4294,7 +4434,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "12"
+                "const": "13"
               },
               "type": {
                 "const": "session_report"
@@ -4347,7 +4487,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "12"
+                "const": "13"
               },
               "type": {
                 "const": "session_report"
@@ -4396,7 +4536,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "12"
+                "const": "13"
               },
               "kind": {
                 "const": "inspect_session"
@@ -4436,7 +4576,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "12"
+                "const": "13"
               },
               "kind": {
                 "const": "inspect_session"
@@ -4468,7 +4608,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "12"
+                "const": "13"
               },
               "kind": {
                 "const": "inspect_session"
@@ -4638,7 +4778,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "12"
+                "const": "13"
               },
               "type": {
                 "const": "session_list"
@@ -4692,7 +4832,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "12"
+                "const": "13"
               },
               "type": {
                 "const": "session_list"
@@ -4748,7 +4888,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "12"
+                "const": "13"
               },
               "type": {
                 "const": "session_list"
@@ -4791,7 +4931,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "12"
+            "const": "13"
           },
           "kind": {
             "const": "list_sessions"
@@ -4854,7 +4994,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "12"
+            "const": "13"
           },
           "type": {
             "const": "message_reply"
@@ -4966,7 +5106,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "12"
+                "const": "13"
               },
               "type": {
                 "const": "message_reply"
@@ -5061,7 +5201,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "12"
+                "const": "13"
               },
               "type": {
                 "const": "message_reply"
@@ -5192,7 +5332,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "12"
+            "const": "13"
           },
           "kind": {
             "const": "message"
@@ -5291,7 +5431,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "12"
+            "const": "13"
           },
           "type": {
             "const": "model_interruption_reply"
@@ -5353,7 +5493,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "12"
+                "const": "13"
               },
               "type": {
                 "const": "model_interruption_reply"
@@ -5409,7 +5549,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "12"
+                "const": "13"
               },
               "type": {
                 "const": "model_interruption_reply"
@@ -5479,7 +5619,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "12"
+            "const": "13"
           },
           "kind": {
             "const": "model_interruption"
@@ -5578,7 +5718,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "12"
+            "const": "13"
           },
           "type": {
             "const": "model_list"
@@ -5601,7 +5741,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "12"
+            "const": "13"
           },
           "kind": {
             "const": "model_list"
@@ -5652,7 +5792,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "12"
+                "const": "13"
               },
               "type": {
                 "const": "command_observation"
@@ -5695,7 +5835,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "12"
+                "const": "13"
               },
               "type": {
                 "const": "command_observation"
@@ -5875,7 +6015,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "12"
+                "const": "13"
               },
               "type": {
                 "const": "command_observation"
@@ -9153,7 +9293,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "12"
+                "const": "13"
               },
               "type": {
                 "const": "command_observation"
@@ -9399,7 +9539,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "12"
+                "const": "13"
               },
               "type": {
                 "const": "command_observation"
@@ -9605,7 +9745,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "12"
+                "const": "13"
               },
               "type": {
                 "const": "command_observation"
@@ -9815,7 +9955,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "12"
+                "const": "13"
               },
               "type": {
                 "const": "command_observation"
@@ -10021,7 +10161,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "12"
+                "const": "13"
               },
               "type": {
                 "const": "command_observation"
@@ -10055,7 +10195,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "12"
+            "const": "13"
           },
           "kind": {
             "const": "observe_command"
@@ -10183,7 +10323,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "12"
+            "const": "13"
           },
           "type": {
             "const": "permission_decision_reply"
@@ -10240,7 +10380,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "12"
+                "const": "13"
               },
               "type": {
                 "const": "permission_decision_reply"
@@ -10291,7 +10431,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "12"
+                "const": "13"
               },
               "type": {
                 "const": "permission_decision_reply"
@@ -10356,7 +10496,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "12"
+            "const": "13"
           },
           "kind": {
             "const": "permission_decision"
@@ -10426,7 +10566,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "12"
+            "const": "13"
           },
           "kind": {
             "const": "read_action_arguments"
@@ -10458,7 +10598,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "12"
+            "const": "13"
           },
           "kind": {
             "const": "read_action_call_id"
@@ -10490,7 +10630,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "12"
+            "const": "13"
           },
           "kind": {
             "const": "read_result"
@@ -10518,7 +10658,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "12"
+            "const": "13"
           },
           "type": {
             "const": "session_archive_reply"
@@ -10576,7 +10716,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "12"
+                "const": "13"
               },
               "type": {
                 "const": "session_archive_reply"
@@ -10636,7 +10776,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "12"
+                "const": "13"
               },
               "type": {
                 "const": "session_archive_reply"
@@ -10699,7 +10839,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "12"
+            "const": "13"
           },
           "kind": {
             "const": "session_archive"
@@ -10867,7 +11007,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "12"
+            "const": "13"
           },
           "type": {
             "const": "session_stop_reply"
@@ -10925,7 +11065,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "12"
+                "const": "13"
               },
               "type": {
                 "const": "session_stop_reply"
@@ -11005,7 +11145,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "12"
+                "const": "13"
               },
               "type": {
                 "const": "session_stop_reply"
@@ -11067,7 +11207,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "12"
+            "const": "13"
           },
           "kind": {
             "const": "session_stop"
@@ -11146,7 +11286,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "12"
+            "const": "13"
           },
           "type": {
             "const": "skill_suggestions"
@@ -11198,7 +11338,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "12"
+                "const": "13"
               },
               "kind": {
                 "const": "skill_suggestions"
@@ -11232,7 +11372,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "12"
+                "const": "13"
               },
               "kind": {
                 "const": "skill_suggestions"
@@ -13113,7 +13253,7 @@
         "description": "The wire version this document describes. Any other version is refused.",
         "schema": {
           "type": "string",
-          "const": "12"
+          "const": "13"
         }
       },
       "HostInstance": {

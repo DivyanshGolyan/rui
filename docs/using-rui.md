@@ -10,7 +10,6 @@ Enter these at the `›` prompt.
 | Command | What it does |
 | --- | --- |
 | `/help` | Lists available commands. |
-| `/history` | Shows older conversation. |
 | `/status` | Shows settings, including the Bash permission mode, and current work. |
 | `/requests` | Lists saved requests for recovery. |
 | `/configure` | Changes settings for the current Session only. |
@@ -64,7 +63,8 @@ The conversation uses the full terminal screen.
 When you exit, your shell's screen returns as it was, and conversation text does not stay in your terminal's scrollback.
 
 Scroll with PgUp, PgDn, the arrow keys or the mouse wheel.
-Keep scrolling up to read older conversation.
+Keep scrolling up to read older conversation in the same feed.
+While you are scrolled up, `↓ N new` counts arriving rows; click it to return to the end.
 Esc or Ctrl-G returns to the latest messages, and from there to the overview.
 Ctrl-End, or End on an empty draft, returns to the latest messages and stays in the conversation.
 
@@ -168,6 +168,20 @@ This preserves the Session and its attached agents, but costs one cache miss.
 
 To change the saved default from the shell, run `rui defaults configure --model ID`.
 To remove it, run `rui defaults configure --clear-model`.
+
+## Defaults for future Sessions
+
+App settings changes saved defaults without changing existing Sessions.
+The Permissions row, between Effort and Notifications, offers **run without asking** and **ask first**.
+Press Enter to open the choices, then Enter to save one.
+
+From the shell, use `rui defaults configure`; in the terminal composer, use `/setup`.
+Both accept `--store PATH`, `--provider PROVIDER`, `--model ID`, `--clear-model`,
+`--reasoning-effort LEVEL|default`, `--permission-mode ask|bypass`, and `--notifications on|off`.
+`--clear-model` cannot be combined with `--model`.
+For example, `/setup --permission-mode ask` makes new Sessions ask before running Bash.
+An explicit `--permission-mode` on a new Session wins over the saved choice; without either, Rui runs without asking.
+`rui defaults inspect` reads the saved defaults without changing them.
 
 ## Notifications
 

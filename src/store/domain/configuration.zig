@@ -2,6 +2,7 @@
 //! configuration update, and reading a Session's saved settings.
 
 const std = @import("std");
+const operation_effort = @import("operation_effort.zig");
 const session_settings = @import("../../session_settings.zig");
 const command_reply = @import("../../command_reply.zig");
 const command_input = @import("../../command_input.zig");
@@ -260,11 +261,7 @@ pub fn configurationBeforeWorkspace(
     };
     // The codec cannot encode a boundary back to unspecified effort.
     if (requested.reasoning_effort.state == .explicit_null and retained_effort != null) return .unsupported_reasoning_effort;
-    if (effort) |value| {
-        if (!model_capability.supportsReasoningEffort(selected_facts, model, value)) return .unsupported_reasoning_effort;
-    } else if (model_catalog.find(selected_facts, model)) |known| {
-        if (known.efforts.count() != 0) return .unsupported_reasoning_effort;
-    }
+    if (!model_capability.supportsReasoningEffort(selected_facts, model, effort)) return .unsupported_reasoning_effort;
     return null;
 }
 
@@ -275,12 +272,28 @@ pub fn effectiveReasoningEffort(current: anytype) ?model_capability.ReasoningEff
     return current.reasoning_effort orelse current.previous_reasoning_effort;
 }
 
-/// Both configuration reads and admission use the same durable legacy fact.
-/// The admission index bounds the lookup, including all-null Session histories.
-pub fn previousReasoningEffortSql(comptime session: []const u8) []const u8 {
-    return "CASE WHEN " ++ session ++ ".reasoning_effort IS NULL THEN " ++
-        "(SELECT o.reasoning_effort FROM model_operation o @index(model_operation_admission) WHERE o.session_ref=" ++
-        session ++ ".session_ref ORDER BY o.admission_position DESC LIMIT 1) END";
+/// Configure owns intent identity. The immutable revision freezes its source;
+/// admission copies it, and later refusals cannot reinterpret older choices.
+pub fn effortChoiceRevisionSql(comptime revision: []const u8) []const u8 {
+    return "(SELECT intent.effort_source_revision FROM session_revision intent WHERE intent.session_ref=" ++ revision ++ ".session_ref AND intent.revision=" ++ revision ++ ".revision)";
+}
+
+fn hasEffortRefusalSql(comptime revision: []const u8) []const u8 {
+    return "EXISTS(SELECT 1 FROM session_change refusal WHERE refusal.session_ref=" ++ revision ++ ".session_ref AND refusal.field='reasoning_effort_refused' AND refusal.revision<=" ++ revision ++ ".revision)";
+}
+
+/// A refused intent maps to the refusing Operation's own admitted fallback,
+/// including null. Never search intervening, possibly unadmitted choices.
+pub fn reasoningEffortOverrideSql(comptime revision: []const u8) []const u8 {
+    // Before any refusal, snapshots already carry the nullable override.
+    // Keep ordinary reports on their existing bounded-work path.
+    return "CASE WHEN " ++ hasEffortRefusalSql(revision) ++ " THEN " ++ operation_effort.sourceOverrideSql(revision ++ ".session_ref", effortChoiceRevisionSql(revision)) ++ " ELSE " ++ revision ++ ".reasoning_effort END";
+}
+
+/// Legacy null specs carry the latest Operation's effective admitted value.
+/// Its refusal is keyed to that Operation, not inferred from a later revision.
+pub fn previousReasoningEffortSql(comptime revision: []const u8) []const u8 {
+    return "CASE WHEN " ++ revision ++ ".reasoning_effort IS NULL OR " ++ hasEffortRefusalSql(revision) ++ " THEN (SELECT " ++ operation_effort.effectiveSql("legacy") ++ " FROM model_operation legacy @index(model_operation_admission) WHERE legacy.session_ref=" ++ revision ++ ".session_ref AND legacy.settings_revision<=" ++ revision ++ ".revision ORDER BY legacy.admission_position DESC LIMIT 1) END";
 }
 
 /// `next` holds the current configuration's values, or the defaults when
@@ -663,7 +676,7 @@ pub const ConfigurationReads = struct {
 const saved_session = rsql.Read(.{
     .sql = "SELECT workspace,provider,model,instructions_content_id AS instructions_id,tool_set_id,loaded_tool_set_id,permission_mode," ++
         "output_schema_content_id AS output_schema_id,revision,next_position,compaction_trigger,output_reservation," ++
-        "reasoning_effort,label,created_at,workspace_key,parent_ref," ++ previousReasoningEffortSql("session") ++ " AS previous_reasoning_effort FROM session WHERE session_ref=?1",
+        reasoningEffortOverrideSql("session") ++ " AS reasoning_effort,label,created_at,workspace_key,parent_ref," ++ previousReasoningEffortSql("session") ++ " AS previous_reasoning_effort FROM session WHERE session_ref=?1",
     .Args = struct { session: []const u8 },
     .Row = CurrentConfiguration,
     .cardinality = .optional,
@@ -769,10 +782,10 @@ pub const update_session_sql = update_session.sql;
 /// written under `command_key`, which an earlier write of the round saved.
 const insert_revision = rsql.Write(.{
     .sql = "INSERT INTO session_revision(session_ref,revision,command_key,workspace,model,instructions_content_id,instructions_updated,tool_set_id,loaded_tool_set_id," ++
-        "permission_mode,output_schema_content_id,provider,compaction_trigger,output_reservation,reasoning_effort,label) " ++
+        "permission_mode,output_schema_content_id,provider,compaction_trigger,output_reservation,reasoning_effort,label,effort_source_revision) " ++
         "SELECT session_ref,revision,?2,workspace,model,instructions_content_id,?3,tool_set_id,loaded_tool_set_id,permission_mode,output_schema_content_id,provider," ++
-        "compaction_trigger,output_reservation,reasoning_effort,label FROM session WHERE session_ref=@session(?1)",
-    .Args = struct { session: rsql.SessionHead, command_key: []const u8, instructions_updated: bool },
+        "compaction_trigger,output_reservation,reasoning_effort,label,CASE WHEN revision=1 OR ?4 THEN revision ELSE (SELECT prior.effort_source_revision FROM session_revision prior WHERE prior.session_ref=session.session_ref AND prior.revision=session.revision-1) END FROM session WHERE session_ref=@session(?1)",
+    .Args = struct { session: rsql.SessionHead, command_key: []const u8, instructions_updated: bool, effort_choice: bool },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
@@ -1180,7 +1193,7 @@ pub fn queueConfiguredCommand(
     answer: *const StoredAnswer,
 ) !void {
     try command_domain.queueCommand(a, key, kind, applied.session.slice(), digest, primary_content_id, secondary_content_id, answer);
-    a.write(insert_revision, .{ .session = applied.head, .command_key = key, .instructions_updated = applied.instructions_updated });
+    a.write(insert_revision, .{ .session = applied.head, .command_key = key, .instructions_updated = applied.instructions_updated, .effort_choice = applied.changes.contains(.model) or applied.changes.contains(.reasoning_effort) });
     if (applied.changes.count() == 0) return;
     const position = try (try a.positions(applied.head)).take(1);
     var fields = applied.changes.iterator();

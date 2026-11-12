@@ -91,7 +91,7 @@ pub const Command = enum {
             .host_status => .{ .resource = .host, .name = "status", .description = "Read protected Host readiness and capabilities without starting it.", .options = destination },
             .host_serve => serve_grammar.definition,
             .defaults_inspect => .{ .resource = .defaults, .name = "inspect", .description = "Read future-Session defaults without writing preferences or changing Sessions." },
-            .defaults_configure => .{ .resource = .defaults, .name = "configure", .description = "Save explicit future-Session defaults and the notification choice. Existing Sessions are unchanged. --store sets the global default Store for commands without --store (saved requests keep their recorded Store), and stderr names it. --clear-model removes only the saved model. --notifications on|off chooses whether an open overview or conversation sends a desktop notification, while its terminal is out of focus, when a Session finishes, fails or needs approval; on by default. --reasoning-effort sets the effort new Sessions start at when their model offers it, as /effort LEVEL in a conversation does; default uses the client product choice.", .options = destination ++ binding ++ &[_]Option{ flag("clear-model"), notifications, settingOption("reasoning_effort") }, .conflicts = &.{.{ .code = .model_excludes_clear_model, .a = "model", .b = "clear-model" }}, .requires = &.{&.{ "store", "store-hex", "provider", "model", "clear-model", "notifications", "reasoning-effort" }} },
+            .defaults_configure => .{ .resource = .defaults, .name = "configure", .description = "Save explicit future-Session defaults and the notification choice. Existing Sessions are unchanged. --store sets the global default Store for commands without --store (saved requests keep their recorded Store), and stderr names it. --clear-model removes only the saved model. --notifications on|off chooses whether an open overview or conversation sends a desktop notification, while its terminal is out of focus, when a Session finishes, fails or needs approval; on by default. --permission-mode ask|bypass saves how new Sessions approve Bash commands; an explicit Session flag wins. --reasoning-effort sets the effort new Sessions start at when their model offers it, as /effort LEVEL in a conversation does; default uses the client product choice.", .options = destination ++ binding ++ &[_]Option{ flag("clear-model"), notifications, settingOption("reasoning_effort"), settingOption("permission_mode") }, .conflicts = &.{.{ .code = .model_excludes_clear_model, .a = "model", .b = "clear-model" }}, .requires = &.{&.{ "store", "store-hex", "provider", "model", "clear-model", "notifications", "reasoning-effort", "permission-mode" }} },
             .store_schema => .{ .resource = .store, .name = "schema", .description = "Print this build's MySQL DDL for a new Store, or with --from N print every forward migration from format N to this build. The current format prints nothing. The Host never changes MySQL tables.", .options = &.{ value("engine", "mysql"), numeric("from", "N", 0, std.math.maxInt(u64), .count_malformed) }, .requires = &.{&.{"engine"}} },
             .auth_login => .{ .resource = .auth, .name = "login", .description = "Explicit operator sign-in: rui auth login codex signs in with ChatGPT; rui auth login openai saves an OpenAI API key read from stdin. Ordinary peer calls never sign in or prompt.", .positional = "PROVIDER", .requires = &.{&.{""}} },
         };
@@ -115,12 +115,13 @@ pub const label_help =
 ;
 
 pub const reasoning_help =
-    \\--reasoning-effort VALUE selects a model-supported effort; default selects the client default.
+    \\--reasoning-effort VALUE selects an effort; default selects the client default.
     \\Omission preserves an existing choice. New Sessions and resets prefer low, else the lowest listed effort.
     \\
 ++ "Efforts depend on the model: none, low, medium, high, xhigh and max" ++
     (if (model_capability.ids_without_max_effort.len == 0) "" else ". max is not listed for: " ++ model_capability.ids_without_max_effort) ++
-    ". The catalog lists which each model accepts.\n" ++
+    ". Listed models accept only their catalog efforts.\n" ++
+    \\Unlisted models pass any effort word through; the provider decides support.
     \\The setting applies to new model requests, including compaction; retries keep their frozen effort.
     \\
 ;
@@ -192,7 +193,7 @@ pub const fresh_session: Definition = .{ .resource = .session, .name = "", .desc
 /// The live Session's /configure: settings only; the Session is its address.
 pub const live_configure: Definition = .{ .resource = .session, .name = "/configure", .description = "", .options = binding ++ settings ++ &[_]Option{flag("reload-skills")}, .conflicts = settings_conflicts };
 /// The live Session's /setup: the defaults grammar, where none means inspect.
-pub const live_setup: Definition = .{ .resource = .defaults, .name = "/setup", .description = "", .options = &.{ value("store", "PATH"), settingOption("provider"), settingOption("model"), flag("clear-model"), notifications, settingOption("reasoning_effort") }, .conflicts = &.{.{ .code = .model_excludes_clear_model, .a = "model", .b = "clear-model" }} };
+pub const live_setup: Definition = .{ .resource = .defaults, .name = "/setup", .description = "", .options = &.{ value("store", "PATH"), settingOption("provider"), settingOption("model"), flag("clear-model"), notifications, settingOption("reasoning_effort"), settingOption("permission_mode") }, .conflicts = &.{.{ .code = .model_excludes_clear_model, .a = "model", .b = "clear-model" }} };
 
 /// Every grammar contributes its options, including hex spellings and hidden flags.
 const option_names = blk: {
@@ -413,6 +414,11 @@ test "live /configure and /setup share the one-shot grammar" {
         const one_shot = try testParse(Command.session_configure.definition(), &.{ "--reasoning-effort", effort }, &argument_storage);
         try std.testing.expectEqualStrings(effort, one_shot.get("reasoning-effort").?);
     }
+    for ([_][]const u8{ "ask", "bypass" }) |mode| {
+        var argument_storage: [256]u8 = undefined;
+        const parsed = try testParse(live_setup, &.{ "--permission-mode", mode }, &argument_storage);
+        try std.testing.expectEqualStrings(mode, parsed.get("permission-mode").?);
+    }
     for (live_setup.options) |option| try std.testing.expect(Command.defaults_configure.definition().optionNamed(option.name) != null);
     var storage: [256]u8 = undefined;
     try std.testing.expectError(error.UnknownArgument, testParse(live_configure, &.{ "--session", "other" }, &storage));
@@ -563,6 +569,7 @@ test "typed choices share enum names with help and refuse unknown values" {
     const Case = struct { command: Command, name: []const u8, choices: []const []const u8 };
     const cases = [_]Case{
         .{ .command = .session_start, .name = "permission-mode", .choices = &.{ "ask", "bypass" } },
+        .{ .command = .defaults_configure, .name = "permission-mode", .choices = &.{ "ask", "bypass" } },
         .{ .command = .session_start, .name = "provider", .choices = &.{ "codex", "openai" } },
         .{ .command = .session_configure, .name = "reasoning-effort", .choices = &.{ "none", "low", "medium", "high", "xhigh", "max", "default" } },
         .{ .command = .defaults_configure, .name = "notifications", .choices = &.{ "on", "off" } },

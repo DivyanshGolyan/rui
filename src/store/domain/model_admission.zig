@@ -18,10 +18,12 @@ const rsql = @import("../rsql.zig");
 const store_access = @import("../access.zig");
 const action_domain = @import("action.zig");
 const configuration_domain = @import("configuration.zig");
+const operation_effort = @import("operation_effort.zig");
 const historical_domain = @import("historical.zig");
 const history_floor_domain = @import("history_floor.zig");
 const model_settlement_domain = @import("model_settlement.zig");
 const model_facts_domain = @import("model_facts.zig");
+const model_attempt = @import("model_attempt.zig");
 const reads_domain = @import("reads.zig");
 const tool_offer = @import("tool_offer.zig");
 const store_schema = @import("../schema.zig");
@@ -460,7 +462,7 @@ fn pendingInstructionsSql(comptime session: []const u8, comptime revision: []con
 /// names, read with its selection under the same Entry lock: the columns
 /// after the Session head, then the joins on `session s`.
 fn factsColumnsSql(comptime session: []const u8) []const u8 {
-    return "s.revision,s.provider,s.model,s.compaction_trigger,s.output_reservation,s.reasoning_effort," ++
+    return "s.revision,s.provider,s.model,s.compaction_trigger,s.output_reservation," ++ configuration_domain.reasoningEffortOverrideSql("s") ++ " AS reasoning_effort," ++
         configuration_domain.previousReasoningEffortSql("s") ++ " AS previous_reasoning_effort," ++
         "s.tool_set_id,s.loaded_tool_set_id," ++ tool_offer.stale_sql ++ " AS offer_stale," ++
         "latest.turn_id AS latest_turn,latest.outcome_code IS NULL AS latest_active,latest.first_admission_id AS latest_first," ++
@@ -673,9 +675,12 @@ const project_instructions = rsql.Write(.{
 
 const insert_operation = rsql.Write(.{
     .sql = "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
-        "admission_position,purpose,compaction_trigger,output_reservation,reasoning_effort,history_floor,history_level,history_dropped,context_window,attempt_ordinal,retry_due_at_ms,attempt_at,tool_set_id) " ++
-        "VALUES(?1,?2,@session(?3),?4,?5,?6,?7,?8,?9,?10,?11,?12,?13," ++
-        model_facts_domain.contextWindowSql("?14", "?15", "?16") ++ ",1,0,@now,?17)",
+        "admission_position,purpose,compaction_trigger,output_reservation,reasoning_effort,history_floor,history_level,history_dropped,attempt_ordinal,retry_due_at_ms,attempt_at,tool_set_id,context_window,effort_source_revision,previous_reasoning_effort,effort_update,previous_effort_override) " ++
+        "SELECT ?1,?2,selected_revision.session_ref,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,1,0,@now,?17," ++
+        model_facts_domain.contextWindowSql("?14", "?15", "?16") ++ "," ++
+        configuration_domain.effortChoiceRevisionSql("selected_revision") ++ "," ++ operation_effort.previousSql("selected_revision.session_ref", "?6", "selected_revision.model") ++ "," ++
+        "selected_session.codec='openai-responses/2' AND ?10 IS NOT NULL AND NOT @same(?10," ++ historical_domain.effortBeforeSql("selected_revision.session_ref", "?6", "selected_revision.model", "?11", "?10") ++ ")," ++ operation_effort.previousOverrideSql("selected_revision.session_ref", "?6", "selected_revision.model") ++ " " ++
+        "FROM session_revision selected_revision JOIN session selected_session ON selected_session.session_ref=selected_revision.session_ref WHERE selected_revision.session_ref=@session(?3) AND selected_revision.revision=?4",
     .Args = struct {
         operation_id: u64,
         turn_id: u64,
@@ -1013,7 +1018,7 @@ const next_scheduled_retry = rsql.Read(.{
 pub const retry_admission_select_sql = due_retries.sql;
 
 const retry_attempt = rsql.Write(.{
-    .sql = "UPDATE model_operation SET attempt_ordinal=?2,retry_due_at_ms=0,attempt_at=@now,retry_scheduled_at=NULL " ++
+    .sql = "UPDATE model_operation SET " ++ model_attempt.replacement_sql ++ ",attempt_ordinal=?2,retry_due_at_ms=0,attempt_at=@now,retry_scheduled_at=NULL " ++
         "WHERE operation_id=?1 AND session_ref=@session(?6) AND turn_id=?3 AND resolution_code IS NULL " ++
         "AND attempt_ordinal=?4 AND " ++ retry_allowance_open_sql ++ " AND retry_due_at_ms<=?5",
     .Args = struct { operation_id: u64, replacement: u64, turn_id: u64, attempt_ordinal: u64, now_ms: u64, session: rsql.SessionHead },

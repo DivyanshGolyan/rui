@@ -36,7 +36,8 @@ HANDLE=$(printf '%s' "$RECEIPT" | jq -r .context.key)
 The JSON receipt confirms admission, not a finished answer.
 Its start-only `configuration` member reports the resolved provider, model and effective reasoning effort.
 `configuration.effort_source` is `flag` when `--reasoning-effort` was given, `saved` when a compatible saved override was selected, or `model_default` otherwise.
-The effective effort falls back to the catalog default, or null for an unlisted model.
+Without a compatible saved override, the client prefers its product effort, then the model's lowest catalog effort, or null when the listed model has no efforts.
+An unlisted model keeps a saved effort or the product effort; any explicit effort word is passed through for the provider to accept or refuse.
 An ID is exactly six random lowercase Crockford base32 characters (`0123456789abcdefghjkmnpqrstvwxyz`), such as `k7m2qx`.
 Creation settings you omit come from the current directory and your saved defaults.
 

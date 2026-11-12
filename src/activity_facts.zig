@@ -13,6 +13,7 @@ const session_work = @import("session_work.zig");
 const tool_presentation = @import("tool_presentation.zig");
 const turn_ending = @import("turn_ending.zig");
 const workspace_path = @import("workspace_path.zig");
+const model_capability = @import("model_capability.zig");
 
 const ToolPresentation = tool_presentation.ToolPresentation;
 
@@ -37,7 +38,7 @@ pub const Item = struct {
     value: Value,
     /// `admission` is a Message a person or script sent; `received` one
     /// another Session sent, which always names it as `sender`.
-    pub const Value = union(activity_read.Kind) { admission: Message, user: Message, assistant: Assistant, call: Call, tool_result: struct { content: Content, presentation: ToolPresentation }, hosted_call: ToolPresentation, turn_ended: TurnEnded, stop: Stop, sent: Sent, send_failed: SendFailed, received: Message, approval_requested: ApprovalRequested, session_changed: SessionChanged, compacted: Compacted };
+    pub const Value = union(activity_read.Kind) { admission: Message, user: Message, assistant: Assistant, call: Call, tool_result: struct { content: Content, presentation: ToolPresentation }, hosted_call: ToolPresentation, turn_ended: TurnEnded, stop: Stop, sent: Sent, send_failed: SendFailed, received: Message, approval_requested: ApprovalRequested, session_changed: SessionChanged, compacted: Compacted, model_call: ModelCall };
     pub const Kind = std.meta.Tag(Value);
     pub const Content = struct { length: u64, digest: [32]u8 };
     // `admitted_at` is the Host wall-clock second the Message was admitted.
@@ -64,12 +65,26 @@ pub const Item = struct {
     /// for approval when it was made: `action` is the id a
     /// `permission_decision` names. The row follows its call at ordinal 1.
     pub const ApprovalRequested = struct { session: Bounded(session_id.bytes), action: u64, operation: u64, call_ordinal: u64 };
-    /// One setting a revision changed, at the position the revision was
-    /// accepted; a revision's changes share it, one ordinal each.
-    pub const SessionChanged = struct { revision: u64, field: session_field.SessionField };
+    /// A setting a revision changed, or its later effort refusal. Ordinary
+    /// rows share the revision's position; a refusal has its settlement
+    /// position and the provider's bounded report, without a new revision.
+    pub const SessionChanged = struct { revision: u64, field: session_field.SessionField, provider_text: ?Bounded(outcome_code.max_report_bytes) = null };
     /// A compaction that succeeded, at its admission: `dropped` is how many
     /// conversation entries it left out to make room, zero for none (D217).
     pub const Compacted = struct { operation: u64, dropped: u64 };
+    /// A resolved model Operation at its admission position (D219).
+    /// Timings describe the FINAL attempt, not the entire retry sequence.
+    pub const ModelCall = struct {
+        model: Bounded(model_capability.max_model_bytes),
+        served_model: ?Bounded(model_capability.max_model_bytes),
+        input_tokens: ?u64,
+        output_tokens: ?u64,
+        cached_tokens: ?u64,
+        latency_ms: ?u64,
+        first_event_ms: ?u64,
+        status: Bounded(outcome_code.max_bytes),
+        attempts: u64,
+    };
 };
 
 pub const CallActivity = struct {

@@ -18,7 +18,8 @@ test {
     _ = @import("Palette.zig");
     _ = @import("skill_palette_tests.zig");
     _ = @import("Composer.zig");
-    _ = @import("Transcript.zig");
+    _ = @import("DocumentView.zig");
+    _ = @import("FeedView.zig");
     _ = @import("Root.zig");
     _ = @import("Chip.zig");
     _ = @import("StatusRow.zig");
@@ -86,6 +87,7 @@ test {
     _ = @import("activity_reply.zig");
     _ = @import("server.zig");
     _ = @import("server_execution.zig");
+    _ = @import("model_timing_owner_tests.zig");
     _ = @import("server_host.zig");
     _ = @import("server_mcp_tests.zig");
     _ = @import("SessionEnvironments.zig");
@@ -121,7 +123,6 @@ test {
     _ = @import("TerminalText.zig");
     _ = @import("SessionInput.zig");
     _ = @import("SessionSubmission.zig");
-    _ = @import("ToolFolds.zig");
     _ = @import("SessionFrontend.zig");
     _ = @import("Overview.zig");
     _ = @import("session_reads.zig");

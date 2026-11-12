@@ -1,7 +1,4 @@
-//! The overview's header: the counts line and any Host or provider band
-//! under it, as `overview_view.header` decides them each frame. A left
-//! press on the counts line's view name, which shows only off the default
-//! view, is the core's `.view` click.
+//! The overview provider header and pinned Settings tail.
 const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
@@ -11,36 +8,16 @@ const widget_style = @import("widget_style.zig");
 pub const Header = struct {
     state: *const overview_view.State,
     caps: overview_view.Caps = .{},
-    userdata: *anyopaque,
-    on_click: *const fn (*anyopaque, *vxfw.EventContext, overview_view.Click) anyerror!void,
-    /// Where the last frame drew the view name: plain data, kept for the
-    /// press that frame's hit test sends here.
-    view: ?struct { start: u16, end: u16 } = null,
-
     pub fn widget(self: *Header) vxfw.Widget {
-        return .{ .userdata = self, .eventHandler = event, .drawFn = draw };
-    }
-
-    fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) anyerror!void {
-        const self: *Header = @ptrCast(@alignCast(raw));
-        const mouse = switch (input) {
-            .mouse => |mouse| mouse,
-            else => return,
-        };
-        if (mouse.button != .left or mouse.type != .press or mouse.row != 0) return;
-        const view = self.view orelse return;
-        if (mouse.col < view.start or mouse.col >= view.end) return;
-        try self.on_click(self.userdata, ctx, .view);
-        ctx.consumeAndRedraw();
+        return .{ .userdata = self, .drawFn = draw };
     }
 
     fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
         const self: *Header = @ptrCast(@alignCast(raw));
         const width = ctx.max.width orelse 0;
-        const lines = try overview_view.header(ctx.arena, self.state, width, self.caps);
-        self.view = if (lines.view) |view| .{ .start = view.start, .end = view.end } else null;
-        const spans = try ctx.arena.alloc(vaxis.Segment, lines.segments.len);
-        for (lines.segments, spans) |segment, *span| span.* = .{ .text = segment.text, .style = widget_style.of(self.caps, segment.style) };
+        const lines = try overview_view.headerSegments(ctx.arena, self.state, width, self.caps);
+        const spans = try ctx.arena.alloc(vaxis.Segment, lines.len);
+        for (lines, spans) |segment, *span| span.* = .{ .text = segment.text, .style = widget_style.of(self.caps, segment.style) };
         const text: vxfw.RichText = .{ .text = spans, .softwrap = false, .width_basis = .parent };
         var surface = try text.draw(ctx.withConstraints(.{ .width = width }, ctx.max));
         surface.widget = self.widget();
@@ -62,44 +39,84 @@ const Clicks = struct {
     }
 };
 
-test "the header draws the counts line over its bands, and only a press on the view name is the view click" {
+test "overview header draws no counts view name or Host-stopped band" {
     var state: overview_view.State = undefined;
     try state.init(std.testing.allocator, .{ .cwd = "/w", .home = "/h" });
     defer state.deinit();
-    var clicks: Clicks = .{};
-    const caps: overview_view.Caps = .{ .unicode = false };
-    var header: Header = .{ .state = &state, .caps = caps, .userdata = &clicks, .on_click = Clicks.take };
+    var header: Header = .{ .state = &state };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 50, .height = 6 }, .cell_size = .{} };
-    var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
-    const press = struct {
-        fn at(column: i16, row: i16) vxfw.Event {
-            return .{ .mouse = .{ .col = column, .row = row, .button = .left, .type = .press, .mods = .{} } };
-        }
-    }.at;
-
-    // The default view names nothing, so no press is a click.
     const plain = try header.widget().draw(ctx);
-    try std.testing.expectEqual(vxfw.Size{ .width = 50, .height = 1 }, plain.size);
-    try std.testing.expect(std.mem.startsWith(u8, try cells(arena.allocator(), plain, 0), " rui"));
-    try std.testing.expect(plain.widget.eql(header.widget()));
-    try header.widget().handleEvent(&events, press(45, 0));
-    try std.testing.expectEqual(null, clicks.got);
-
-    // A stopped Host draws its band under the counts line.
+    try std.testing.expectEqual(@as(u16, 0), plain.size.height);
     state.archive = .archived;
-    state.unreachable_since_ms = state.now_ms;
-    const banded = try header.widget().draw(ctx);
-    try std.testing.expectEqual(@as(u16, 2), banded.size.height);
-    const text = try cells(arena.allocator(), banded, 0);
-    try std.testing.expectEqualStrings("Archived ", text[41..]);
-    try std.testing.expect(std.mem.indexOf(u8, try cells(arena.allocator(), banded, 1), "Host stopped") != null);
-    // Beside the name, after it, and on the band under it are not the name.
-    for ([_][2]i16{ .{ 40, 0 }, .{ 49, 0 }, .{ 44, 1 } }) |at| try header.widget().handleEvent(&events, press(at[0], at[1]));
+    state.list_stale = true;
+    const stopped = try header.widget().draw(ctx);
+    try std.testing.expectEqual(@as(u16, 0), stopped.size.height);
+}
+
+/// Pinned list tail, with a click target only on the Settings row.
+pub const Settings = struct {
+    selected: bool,
+    caps: overview_view.Caps,
+    userdata: *anyopaque,
+    on_click: *const fn (*anyopaque, *vxfw.EventContext, overview_view.Click) anyerror!void,
+
+    pub fn widget(self: *Settings) vxfw.Widget {
+        return .{ .userdata = self, .eventHandler = event, .drawFn = draw };
+    }
+
+    fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) anyerror!void {
+        const self: *Settings = @ptrCast(@alignCast(raw));
+        if (input != .mouse) return;
+        const mouse = input.mouse;
+        if (mouse.button != .left or mouse.type != .press or mouse.row != 1) return;
+        try self.on_click(self.userdata, ctx, .settings);
+        ctx.consumeAndRedraw();
+    }
+
+    fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
+        const self: *Settings = @ptrCast(@alignCast(raw));
+        const size = ctx.max.size();
+        const height = @min(2, size.height);
+        const surface = try vxfw.Surface.init(ctx.arena, self.widget(), .{ .width = size.width, .height = height });
+        @memset(surface.buffer, .{ .style = widget_style.of(self.caps, .{}) });
+        if (height == 0 or size.width == 0) return surface;
+        for (0..size.width) |x| surface.writeCell(@intCast(x), 0, .{ .char = .{ .grapheme = if (self.caps.unicode) "─" else "-", .width = 1 }, .style = widget_style.of(self.caps, .{ .colour = .quiet }) });
+        if (height < 2) return surface;
+        const style = widget_style.of(self.caps, .{ .colour = .quiet, .background = if (self.selected) .selection else .ground });
+        const footer: @import("widgets/Footer.zig") = .{ .left = "", .right = @import("transport_options").version ++ " ", .style = style };
+        const drawn = try footer.widget().draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = 1 }));
+        @memcpy(surface.buffer[size.width..], drawn.buffer);
+        const name: vxfw.RichText = .{ .text = &.{.{ .text = "  Settings", .style = widget_style.of(self.caps, .{ .colour = if (self.selected) .strong else .normal, .bold = self.selected, .background = if (self.selected) .selection else .ground }) }}, .softwrap = false };
+        const label = try name.widget().draw(ctx.withConstraints(.{}, .{ .width = size.width -| @as(u16, @intCast(@import("transport_options").version.len + 2)), .height = 1 }));
+        if (label.size.height > 0) @memcpy(surface.buffer[size.width..][0..label.size.width], label.buffer[0..label.size.width]);
+        return surface;
+    }
+};
+
+test "overview Settings row is pinned selected and opens only on its second line" {
+    var clicks: Clicks = .{};
+    var settings: Settings = .{ .selected = true, .caps = .{}, .userdata = &clicks, .on_click = Clicks.take };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    for ([_]u16{ 40, 140 }) |width| {
+        const surface = try settings.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 8 }, .cell_size = .{} });
+        try std.testing.expectEqual(@as(u16, 2), surface.size.height);
+        try std.testing.expectEqualStrings("─", surface.readCell(0, 0).char.grapheme);
+        const text = try cells(arena.allocator(), surface, 1);
+        try std.testing.expect(std.mem.startsWith(u8, text, "  Settings"));
+        try std.testing.expect(std.mem.endsWith(u8, text, @import("transport_options").version ++ " "));
+        for ([_]u16{ 0, 3, width - 1 }) |column| try std.testing.expectEqual(widget_style.of(settings.caps, .{ .background = .selection }).bg, surface.readCell(column, 1).style.bg);
+    }
+    var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    try settings.widget().handleEvent(&events, .{ .mouse = .{ .col = 3, .row = 0, .button = .left, .type = .press, .mods = .{} } });
     try std.testing.expectEqual(null, clicks.got);
-    try std.testing.expect(!events.consume_event);
-    try header.widget().handleEvent(&events, press(44, 0));
-    try std.testing.expectEqual(overview_view.Click.view, clicks.got.?);
+    try settings.widget().handleEvent(&events, .{ .mouse = .{ .col = 3, .row = 1, .button = .left, .type = .press, .mods = .{} } });
+    try std.testing.expectEqual(overview_view.Click.settings, clicks.got.?);
     try std.testing.expect(events.consume_event);
+    for (0..4) |height| for (0..12) |width| {
+        const tiny = try settings.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = @intCast(width), .height = @intCast(height) }, .cell_size = .{} });
+        try std.testing.expect(tiny.size.width <= width and tiny.size.height <= height);
+    };
 }

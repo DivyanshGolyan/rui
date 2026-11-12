@@ -109,6 +109,7 @@ pub noinline fn classify(decode: *Decode, codec: protocol.Codec, io: std.Io, bod
     }
     writeReport(&failure.report, &decode.code, &decode.message);
     failure.refusal = found.refusal;
+    if (codecs.effortChangeRefused(codec, &decode.classify, status, bytes)) return .effort_change_refused;
     if (status == 429) if (found.refusal) |refusal| if (transport_policy.Quota.admits(refusal)) {
         return .{ .quota = .{ .refusal = refusal, .resets_at = found.resets_at } };
     };
@@ -400,19 +401,7 @@ pub noinline fn interpret(
         };
         return;
     };
-    // Opaque certificate v1: body, OpenAI header, alternate header. Preserve
-    // each source independently, including absence and disagreement. Never
-    // substitute the requested model for reported evidence.
-    const certificate = &accepted.model_evidence;
-    certificate.bytes[0] = 1;
-    certificate.len = 1;
-    for ([_][]const u8{ accepted.output.evidence.served_model.slice(), models.openai, models.alternate }) |value| {
-        std.debug.assert(value.len <= protocol.max_model_bytes);
-        std.mem.writeInt(u16, certificate.bytes[certificate.len..][0..2], @intCast(value.len), .little);
-        certificate.len += 2;
-        @memcpy(certificate.bytes[certificate.len..][0..value.len], value);
-        certificate.len += value.len;
-    }
+    @import("model_evidence.zig").encode(&accepted.model_evidence, accepted.output.evidence.served_model.slice(), models.openai, models.alternate);
 }
 
 /// Frames the capture's events and gives each to the grammar, then fills

@@ -9,11 +9,15 @@
       "note": "01-overview-empty",
       "open": "overview",
       "steps": [],
-      "expect": "Type a task"
+      "expect": [
+        "Type a task",
+        "Settings",
+        "enter start"
+      ]
     },
     {
       "name": "settings",
-      "note": "App settings via End/Enter; does not require S5's drawn Settings row",
+      "note": "App settings by selecting the list's Settings row (End) and pressing Enter",
       "open": "overview",
       "steps": [
         {
@@ -42,7 +46,7 @@
       "open": "overview",
       "steps": [
         {
-          "wait": "Needs you"
+          "wait": "Schema migration"
         },
         {
           "wait": "Profile the Host under load"
@@ -117,13 +121,14 @@
         }
       ],
       "expect": [
-        "Needs you",
+        "Schema migration",
+        "Settings",
         "■"
       ]
     },
     {
       "name": "start-busy",
-      "note": "03-overview-busy: ⠹ counts active Sessions",
+      "note": "03-overview-busy: two-line working Sessions",
       "open": "overview",
       "steps": [
         {
@@ -141,7 +146,7 @@
           }
         },
         {
-          "wait": "Run the slow tests"
+          "wait": "Docs build"
         }
       ],
       "cast": [
@@ -166,7 +171,8 @@
       ],
       "expect": [
         "Docs build",
-        "Run the slow tests"
+        "Benchmark idle memory",
+        "Settings"
       ]
     },
     {
@@ -198,6 +204,11 @@
         "× Fail with an excerpt · exit 1",
         "The project has a README",
         "retry policy notes"
+      ],
+      "absent": [
+        "asks before Bash/MCP",
+        "Type a message",
+        "enter sends"
       ]
     },
     {
@@ -448,12 +459,11 @@
           ]
         },
         {
-          "wait": "What I changed"
+          "wait": "↓"
         }
       ],
       "expect": [
-        "What I changed",
-        "retry.zig"
+        "↓"
       ]
     },
     {
@@ -470,12 +480,45 @@
           ]
         },
         {
-          "wait": "Start of conversation"
+          "wait": "The retry loop waits"
         }
       ],
       "expect": [
-        "Start of conversation",
-        "What I changed"
+        "The retry loop waits",
+        "↓"
+      ]
+    },
+    {
+      "name": "chat-new-below",
+      "note": "12a-conversation-new-below: incoming answer preserves the scrolled anchor",
+      "open": "Fix retry deadline",
+      "steps": [
+        {
+          "keys": [
+            "PgUp",
+            "PgUp",
+            "PgUp",
+            "PgUp"
+          ]
+        },
+        {
+          "wait": "The retry loop waits"
+        },
+        {
+          "send": {
+            "to": "Fix retry deadline",
+            "text": "Summarise the deadline fix.",
+            "wait": true
+          }
+        },
+        {
+          "wait": "new"
+        }
+      ],
+      "expect": [
+        "The retry loop waits",
+        "↓",
+        "new"
       ]
     },
     {
@@ -703,13 +746,18 @@
       "open": "Flaky upload test",
       "steps": [
         {
-          "wait": "× Model reply unreadable"
+          "wait": "× Model reply unreadable · ctrl+r retries"
         }
+      ],
+      "absent": [
+        "asks before Bash/MCP",
+        "Type a message",
+        "enter sends"
       ]
     },
     {
       "name": "approval",
-      "note": "17-approval",
+      "note": "17-approval: clipped requests retain a quiet remaining-row count; no key hint",
       "open": "Schema migration",
       "steps": [
         {
@@ -718,11 +766,17 @@
         {
           "wait": "Deny"
         }
+      ],
+      "absent": [
+        "asks before Bash/MCP",
+        "Type a message",
+        "enter sends",
+        "more lines · shift+↓"
       ]
     },
     {
       "name": "approval-typing",
-      "note": "17c-approval-typing",
+      "note": "17c-approval-typing: the retained draft does not hide request overflow",
       "open": "Schema migration",
       "steps": [
         {
@@ -732,8 +786,15 @@
           "text": "I am checking the migration before approving it."
         },
         {
-          "wait": "I am checking the migration before approving it."
+          "wait": "approving it."
         }
+      ],
+      "expect": [
+        "I am checking the migration before",
+        "approving it."
+      ],
+      "absent": [
+        "more lines · shift+↓"
       ]
     },
     {
@@ -803,8 +864,7 @@
       "expect": [
         "/copy [code|file]",
         "/effort LEVEL",
-        "/help",
-        "/history"
+        "/help"
       ]
     },
     {
@@ -957,6 +1017,10 @@
         {
           "wait": "enter start"
         }
+      ],
+      "expect": [
+        "Settings",
+        "enter start"
       ]
     },
     {
@@ -979,7 +1043,10 @@
           ]
         }
       ],
-      "expect": "Migrate"
+      "expect": [
+        "Migrate the billing",
+        "Settings"
+      ]
     },
     {
       "name": "many-sessions",
@@ -1001,6 +1068,12 @@
           ],
           "count": 25
         }
+      ],
+      "expect": [
+        "Batch job",
+        "↓",
+        "more",
+        "Settings"
       ]
     },
     {
@@ -1053,14 +1126,17 @@
           ]
         },
         {
-          "wait": "Flaky upload"
+          "wait": "Settings"
         }
       ],
       "sizes": [
         "46x30",
         "140x40"
       ],
-      "expect": "Batch job"
+      "expect": [
+        "Settings",
+        "enter open"
+      ]
     },
     {
       "name": "day-start",
@@ -1068,7 +1144,10 @@
       "open": "overview",
       "steps": [],
       "theme": "day",
-      "expect": "Type a task"
+      "expect": [
+        "Type a task",
+        "Settings"
+      ]
     },
     {
       "name": "day-chat",
@@ -1099,14 +1178,17 @@
           ]
         },
         {
-          "wait": "What I changed"
+          "wait": "↓"
         }
       ],
-      "theme": "mist"
+      "theme": "mist",
+      "expect": [
+        "↓"
+      ]
     },
     {
       "name": "no-color",
-      "note": "72-no-color",
+      "note": "72-no-color: quiet two-line sidebar alongside the chat",
       "open": "Markdown retry",
       "steps": [
         {
@@ -1152,17 +1234,14 @@
           "host": "pause"
         },
         {
-          "wait": "The Host stopped."
-        },
-        {
-          "wait": "Pane is dead (status 6"
+          "wait": "Host stopped"
         }
       ],
       "sizes": [
         "46x30",
         "140x40"
       ],
-      "expect": "Pane is dead (status 6"
+      "expect": "Host stopped"
     },
     {
       "name": "host-back",

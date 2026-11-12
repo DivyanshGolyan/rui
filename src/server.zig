@@ -1127,6 +1127,8 @@ fn serveOpened(
         .custody = execution.CustodyPool.initialize(custody_records),
         .turns_paused = .init(if (launch) |value| value.paused else false),
     };
+    storage.modelTimingSource().* = host.custody.timingSource();
+    defer storage.modelTimingSource().* = .{};
     try host.mcp_servers.init(allocator, mcp_servers);
     defer host.mcp_servers.deinit(allocator);
     var observation: ?TestObservation = if (hooks.observation_fd) |fd|

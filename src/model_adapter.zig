@@ -969,7 +969,10 @@ pub const Preparation = struct {
             .current_operation => {
                 self.state.stage = .compaction_trigger;
                 if (codecs.declaresTools(self.settings.codec)) self.declare(self.view.currentDeclaration(), .compaction_trigger);
-                return self.loadItemHeader(.{ .operation = effortOf(self.settings.reasoning_effort) }, 0);
+                return self.loadItemHeader(if (self.settings.effort_update)
+                    .{ .effort_update = effortOf(self.settings.reasoning_effort) orelse return error.CorruptStore }
+                else
+                    .{ .operation = effortOf(self.settings.reasoning_effort) }, 0);
             },
             .declarations => {
                 const declaration = &self.state.declaration.?;
@@ -1107,6 +1110,9 @@ pub const Preparation = struct {
         const memo = memos.held(self.settings.session.slice()) orelse return .pending;
         const key = try self.memoKey();
         if (!memo.serves(&key, self.view.admissionPosition())) return .pending;
+        // A refusal invalidates the durable seal in its settlement. A memo
+        // encoded before it is not a prefix of the corrected history.
+        if (try self.view.prefixSeal() == null) return .pending;
         try self.writer.flush();
         const file = memos.open(self.writer.io, &memo) orelse return .pending;
         // A memo is the span's first bytes and records the codec's carry.
@@ -2555,12 +2561,19 @@ test "request preparation frozen selection excludes later messages" {
 }
 
 test "request preparation keeps the starting effort at the top and changes it at its Operation" {
-    for ([_]struct { model: []const u8, override: ?[]const u8 = null, expected: ?[]const u8 }{
+    const Case = struct { model: []const u8, override: ?[]const u8 = null, expected: ?[]const u8 };
+    const unlisted = comptime blk: {
+        const efforts = std.enums.values(protocol.ReasoningEffort);
+        var cases: [efforts.len]Case = undefined;
+        for (efforts, &cases) |effort, *case| case.* = .{ .model = "unlisted-effort-model", .expected = @tagName(effort) };
+        break :blk cases;
+    };
+    for ([_]Case{
         .{ .model = "gpt-6-luna", .expected = "medium" },
         .{ .model = "gpt-6-astra", .expected = "low" },
         .{ .model = "gpt-5.5", .override = "high", .expected = "high" },
         .{ .model = "model-a", .expected = null },
-    }) |case| {
+    } ++ unlisted) |case| {
         var setup: PreparationTestSetup = undefined;
         try setup.init();
         defer setup.close();
@@ -4176,6 +4189,253 @@ test "a legacy null Session continues with its earlier Operation effort" {
     defer std.testing.allocator.free(changed.bytes);
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, changed.bytes, "configuration_update"));
     try std.testing.expect(std.mem.indexOf(u8, changed.bytes, "{\"type\":\"configuration_update\",\"reasoning\":{\"effort\":\"low\"}}") != null);
+}
+
+test "an unadmitted effort cycle emits no update and cannot refuse an Operation choice" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    const session = try configureMemoSessionForTesting(&setup);
+    var change: wire_request.ConfigureCommand = .{};
+    change.session = session;
+    change.configuration.reasoning_effort.state = .value;
+    try change.key.set("wire-cycle-initial");
+    try change.configuration.reasoning_effort.value.set("low");
+    _ = (try setup.storage.configure(&change, .{})).accepted;
+    try setup.submit("wire-cycle-first", "wire-cycle-first", session.slice(), "first request");
+    const first = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try store.settleAnswerItemsForTesting(&setup.storage, &setup.tmp, first, &.{"{\"type\":\"message\",\"id\":\"wire-cycle-answer\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}"}, "ok");
+    for ([_][]const u8{ "high", "low" }) |effort| {
+        try change.key.set(effort);
+        try change.configuration.reasoning_effort.value.set(effort);
+        _ = (try setup.storage.configure(&change, .{})).accepted;
+    }
+    try setup.submit("wire-cycle-next", "wire-cycle-next", session.slice(), "second request");
+    const binding = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+    const request = try prepareMemoForTesting(&setup, binding, null, .{});
+    defer std.testing.allocator.free(request.bytes);
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, request.bytes, "configuration_update"));
+    try setup.storage.settleModelAttemptFailure(binding, .{ .correlated = .{ .code = "provider_http_400", .request_id = .{}, .report = "unsupported_value: reasoning.effort" } }, .effort_change_refused, .{});
+    try std.testing.expect(try setup.storage.tryAdmitNextModelRetry(.empty(), .{}, null) == null);
+    try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .low), (try setup.storage.inspectSessionForTesting(session.slice())).reasoning_effort);
+}
+
+test "Operation effort emission and refused restoration agree after a compaction base" {
+    // The first request after the base has no retained model boundary: its
+    // carry is the initial low, not the previous Operation's admitted high.
+    for ([_][]const u8{ "high", "low", "xhigh" }) |chosen| {
+        var setup: PreparationTestSetup = undefined;
+        try setup.init();
+        defer setup.close();
+        const session = try configureMemoSessionForTesting(&setup);
+        var change: wire_request.ConfigureCommand = .{};
+        change.session = session;
+        change.configuration.reasoning_effort.state = .value;
+        try change.key.set("base-effort-low");
+        try change.configuration.reasoning_effort.value.set("low");
+        _ = (try setup.storage.configure(&change, .{})).accepted;
+        try setup.submit("base-effort-first", "base-effort-first", session.slice(), "start low");
+        const first = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+        var memo_entries: [2]history_memo.Table.Entry = @splat(.{});
+        var memos: history_memo.Table = .{ .entries = &memo_entries, .scratch_path = setup.root };
+        defer memos.deinit(std.testing.io);
+        _ = try expectMemoRebuildEqual(&setup, first, &memos, .{});
+        try store.settleAnswerItemsForTesting(&setup.storage, &setup.tmp, first, &.{"{\"type\":\"message\",\"id\":\"base-low-answer\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}"}, "ok");
+        try change.key.set("base-effort-high");
+        try change.configuration.reasoning_effort.value.set("high");
+        _ = (try setup.storage.configure(&change, .{})).accepted;
+        try setup.submit("base-effort-second", "base-effort-second", session.slice(), "admit high");
+        const second = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+        _ = try expectMemoRebuildEqual(&setup, second, &memos, .{});
+        try setup.storage.settleModelAttemptFailure(second, .{ .uncorrelated = "provider_context_overflow" }, .context_overflow, .{});
+        const compact = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+        _ = try expectMemoRebuildEqual(&setup, compact, &memos, .{});
+        try store.settleCompactionForTesting(&setup.storage, &setup.tmp, compact, &.{.compaction});
+        try change.key.set("base-effort-choice");
+        try change.configuration.reasoning_effort.value.set(chosen);
+        _ = (try setup.storage.configure(&change, .{})).accepted;
+        const binding = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+        _ = try expectMemoRebuildEqual(&setup, binding, &memos, .{});
+        var previous: ?[]u8 = null;
+        defer if (previous) |bytes| std.testing.allocator.free(bytes);
+        {
+            const request = try prepareMemoForTesting(&setup, binding, null, .{});
+            defer std.testing.allocator.free(request.bytes);
+            const emitted: usize = if (std.mem.eql(u8, chosen, "low")) 0 else 1;
+            try std.testing.expectEqual(emitted, std.mem.count(u8, request.bytes, "configuration_update"));
+            const input_end = std.mem.indexOf(u8, request.bytes, "],\"tools\":[").?;
+            previous = try std.testing.allocator.dupe(u8, request.bytes[0..input_end]);
+        }
+        try setup.storage.settleModelAttemptFailure(binding, .{ .correlated = .{ .code = "provider_http_400", .request_id = .{}, .report = "unsupported_value: reasoning.effort" } }, .effort_change_refused, .{});
+        const genuine = std.mem.eql(u8, chosen, "xhigh");
+        const expected: protocol.ReasoningEffort = if (std.mem.eql(u8, chosen, "low")) .low else .high;
+        try std.testing.expectEqual(@as(?protocol.ReasoningEffort, expected), (try setup.storage.inspectSessionForTesting(session.slice())).reasoning_effort);
+        if (genuine) {
+            var retry = (try setup.storage.tryAdmitNextModelRetry(.empty(), .{}, null)).?;
+            const completed = try retry.permit.consume();
+            _ = try expectMemoRebuildEqual(&setup, completed, &memos, .{});
+            const request = try prepareMemoForTesting(&setup, completed, null, .{});
+            defer std.testing.allocator.free(request.bytes);
+            // Refusal restores the admitted high, not the top low. The
+            // rejected choice is gone, but a high restoration is necessary.
+            try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, request.bytes, "configuration_update"));
+            try std.testing.expect(std.mem.indexOf(u8, request.bytes, "\"effort\":\"xhigh\"") == null);
+            try std.testing.expect(std.mem.indexOf(u8, request.bytes, "{\"type\":\"configuration_update\",\"reasoning\":{\"effort\":\"high\"}}") != null);
+            const input_end = std.mem.indexOf(u8, request.bytes, "],\"tools\":[").?;
+            const replacement = try std.testing.allocator.dupe(u8, request.bytes[0..input_end]);
+            std.testing.allocator.free(previous.?);
+            previous = replacement;
+            try store.settleAnswerItemsForTesting(&setup.storage, &setup.tmp, completed, &.{"{\"type\":\"message\",\"id\":\"base-retry-answer\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}"}, "ok");
+        } else try std.testing.expect(try setup.storage.tryAdmitNextModelRetry(.empty(), .{}, null) == null);
+        try setup.submit("base-effort-next", "base-effort-next", session.slice(), "the current boundary becomes history");
+        const next = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+        _ = try expectMemoRebuildEqual(&setup, next, &memos, .{});
+        const request = try prepareMemoForTesting(&setup, next, null, .{});
+        defer std.testing.allocator.free(request.bytes);
+        try std.testing.expectStringStartsWith(request.bytes, previous.?);
+        try std.testing.expectEqual(@as(?protocol.ReasoningEffort, expected), (try setup.storage.inspectSessionForTesting(session.slice())).reasoning_effort);
+    }
+}
+
+test "a refused top-level effort remains an ordinary provider failure without a change retry" {
+    for (std.enums.values(protocol.ReasoningEffort)) |effort| {
+        var setup: PreparationTestSetup = undefined;
+        try setup.init();
+        defer setup.close();
+        const session = try configureMemoSessionForTesting(&setup);
+        var change: wire_request.ConfigureCommand = .{};
+        change.session = session;
+        try change.key.set("first-effort");
+        change.configuration.reasoning_effort.state = .value;
+        try change.configuration.reasoning_effort.value.set(@tagName(effort));
+        try std.testing.expect(try setup.storage.configure(&change, .{}) == .accepted);
+        try setup.submit("first-effort-message", "first-effort-message", session.slice(), "first request");
+        const binding = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+        const request = try prepareMemoForTesting(&setup, binding, null, .{});
+        defer std.testing.allocator.free(request.bytes);
+        const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, request.bytes, .{});
+        defer parsed.deinit();
+        try std.testing.expectEqualStrings("model-a", parsed.value.object.get("model").?.string);
+        try std.testing.expectEqualStrings(@tagName(effort), parsed.value.object.get("reasoning").?.object.get("effort").?.string);
+        try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, request.bytes, "configuration_update"));
+        try setup.storage.settleModelAttemptFailure(binding, .{ .correlated = .{ .code = "provider_http_400", .request_id = .{}, .report = "unsupported effort" } }, .effort_change_refused, .{});
+        try std.testing.expect(try setup.storage.tryAdmitNextModelRetry(.empty(), .{}, null) == null);
+        try std.testing.expectEqual(@as(?protocol.ReasoningEffort, effort), (try setup.storage.inspectSessionForTesting(session.slice())).reasoning_effort);
+        var page_request: protocol.ActivityPage = .{ .session = session, .kinds = .initOne(.session_changed) };
+        var page: @import("activity_facts.zig").Page = undefined;
+        try setup.storage.activityPage(&page_request, &page);
+        for (page.items[0..page.count]) |item| try std.testing.expect(item.value.session_changed.field != .reasoning_effort_refused);
+        // The caller sees the provider failure, not a catalog refusal or a
+        // silent omission of the effort. The report survives as ordinary content.
+        page_request.kinds = .initOne(.turn_ended);
+        try setup.storage.activityPage(&page_request, &page);
+        try std.testing.expectEqual(@as(usize, 1), page.count);
+        const ended = page.items[0].value.turn_ended;
+        try std.testing.expectEqualStrings("provider_http_400", ended.code.slice());
+        try std.testing.expectEqual(protocol.contentDigest("unsupported effort"), ended.content.?.digest);
+    }
+}
+
+test "a refused effort change retries without the update and later Operations keep the effective effort" {
+    // An unlisted model passes configure-time validation. The provider, not
+    // a catalog guess, decides whether its effort update is accepted.
+    for ([_]?protocol.ReasoningEffort{ null, .low }) |initial| for ([_]bool{ false, true }) |unrelated_revision| for ([_]bool{ false, true }) |after_refusal| {
+        var setup: PreparationTestSetup = undefined;
+        try setup.init();
+        defer setup.close();
+        const session = try configureMemoSessionForTesting(&setup);
+        var change: wire_request.ConfigureCommand = .{};
+        change.session = session;
+        try change.key.set("refusal-low");
+        change.configuration.reasoning_effort.state = if (initial != null) .value else .explicit_null;
+        if (initial) |effort| try change.configuration.reasoning_effort.value.set(@tagName(effort));
+
+        try std.testing.expect(try setup.storage.configure(&change, .{}) == .accepted);
+        try setup.submit("refusal-message", "refusal-message", session.slice(), "continue after a refused change");
+        const first = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+        var memo_entries: [1]history_memo.Table.Entry = @splat(.{});
+        var memos: history_memo.Table = .{ .entries = &memo_entries, .scratch_path = setup.root };
+        defer memos.deinit(std.testing.io);
+        _ = try expectMemoRebuildEqual(&setup, first, &memos, .{});
+        try change.key.set("refusal-high");
+        change.configuration.reasoning_effort.state = .value;
+        try change.configuration.reasoning_effort.value.set("high");
+        const changed = try setup.storage.configure(&change, .{});
+
+        try std.testing.expect(changed == .accepted);
+        if (unrelated_revision) {
+            var label: wire_request.ConfigureCommand = .{};
+            label.session = session;
+            try label.key.set("refusal-label");
+            label.configuration.label.state = .value;
+            try label.configuration.label.value.set("unchanged effort source");
+
+            try std.testing.expect(try setup.storage.configure(&label, .{}) == .accepted);
+        }
+        const second = try advanceMemoHistoryForTesting(&setup, session, first, 1);
+        const refused_request = try prepareMemoForTesting(&setup, second, &memos, .{});
+        defer std.testing.allocator.free(refused_request.bytes);
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, refused_request.bytes, "configuration_update"));
+        const body = "{\"error\":{\"code\":\"unsupported_value\",\"param\":\"reasoning.effort\",\"message\":\"high is not supported\"}}";
+        const error_body = try setup.tmp.dir.createFile(std.testing.io, "effort-refusal", .{ .read = true });
+        defer error_body.close(std.testing.io);
+        try error_body.writeStreamingAll(std.testing.io, body);
+        var provider_failure: output_decode.ProviderFailure = undefined;
+        const classified = interpretErrorResponse(&testing_decode, .@"openai-responses/2", std.testing.io, error_body, body.len, 400, &provider_failure);
+        const decision = execution.transferDecision(.{ .transport_finished = .{ .disposition = .permanent_http, .http_status = 400 } }, classified);
+        try std.testing.expectEqual(execution.FailureKind.effort_change_refused, decision.fail.kind);
+        const provider_text = "unsupported_value: high is not supported";
+        try std.testing.expectEqualStrings(provider_text, provider_failure.report.slice());
+        const failure: store.ModelFailure = .{ .correlated = .{ .code = "provider_http_400", .request_id = .{}, .report = provider_text } };
+        try setup.storage.settleModelAttemptFailure(second, failure, .effort_change_refused, .{});
+        const revision = (try setup.storage.inspectSessionForTesting(session.slice())).revision;
+        try std.testing.expectEqual(changed.accepted.revision + @intFromBool(unrelated_revision), revision);
+        var page_request: protocol.ActivityPage = .{ .session = session, .kinds = .initOne(.session_changed) };
+        var page: @import("activity_facts.zig").Page = undefined;
+        try setup.storage.activityPage(&page_request, &page);
+        var refusals: usize = 0;
+        for (page.items[0..page.count]) |item| if (item.value.session_changed.field == .reasoning_effort_refused) {
+            refusals += 1;
+            try std.testing.expectEqual(changed.accepted.revision, item.value.session_changed.revision);
+            try std.testing.expectEqualStrings(provider_text, item.value.session_changed.provider_text.?.slice());
+        };
+        try std.testing.expectEqual(@as(usize, 1), refusals);
+        if (after_refusal) {
+            var label: wire_request.ConfigureCommand = .{};
+            label.session = session;
+            try label.key.set("refusal-label-after");
+            label.configuration.label.state = .value;
+            try label.configuration.label.value.set("still no new effort choice");
+            try std.testing.expect(try setup.storage.configure(&label, .{}) == .accepted);
+        }
+        var retry = (try setup.storage.tryAdmitNextModelRetry(.empty(), .{}, null)).?;
+        const retried = try retry.permit.consume();
+        try std.testing.expectEqual(second.operation_id, retried.operation_id);
+        try std.testing.expectEqual(second.attempt_ordinal + 1, retried.attempt_ordinal);
+        const request = try prepareMemoForTesting(&setup, retried, &memos, .{});
+        defer std.testing.allocator.free(request.bytes);
+        try std.testing.expectEqual(@as(usize, 0), request.copied);
+        try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, request.bytes, "configuration_update"));
+        _ = try expectMemoRebuildEqual(&setup, retried, &memos, .{});
+        const third = try advanceMemoHistoryForTesting(&setup, session, retried, 2);
+        const next = try prepareMemoForTesting(&setup, third, &memos, .{});
+        defer std.testing.allocator.free(next.bytes);
+        try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, next.bytes, "configuration_update"));
+        const observed = try setup.storage.inspectSessionForTesting(session.slice());
+        try std.testing.expectEqual(initial, observed.reasoning_effort);
+        try std.testing.expectEqual(initial, observed.reasoning_effort_override);
+        try std.testing.expectEqual(revision + @intFromBool(after_refusal), observed.revision);
+        // The feed is append-only: later work did not edit the refusal row.
+        page_request.direction = .backward;
+        var after: @import("activity_facts.zig").Page = undefined;
+        try setup.storage.activityPage(&page_request, &after);
+        var retained_refusals: usize = 0;
+        for (after.items[0..after.count]) |item| if (item.value.session_changed.field == .reasoning_effort_refused) {
+            retained_refusals += 1;
+            try std.testing.expectEqualStrings(provider_text, item.value.session_changed.provider_text.?.slice());
+        };
+        try std.testing.expectEqual(@as(usize, 1), retained_refusals);
+    };
 }
 
 test "an effort change keeps each request's input a prefix of the next" {

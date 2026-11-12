@@ -58,10 +58,13 @@ pub const ItemKind = enum(u8) {
     output_close,
     /// Handle 0: the call_id; handle 1: the output.
     tool_result,
-    /// Where an Operation was admitted, with the effort it froze: a history
-    /// element at each earlier Operation's place, and once more after
-    /// `history_end` for the Operation being prepared. No handles.
+    /// Restore an admitted effective effort at a historical boundary, or
+    /// after `history_end` when the current request has no original update
+    /// (including a refused retry). The codec compares replay carry. No handles.
     operation,
+    /// The original current request's emitted boundary, frozen at admission.
+    /// Unlike replay/restoration it is not rediscovered from codec carry.
+    effort_update,
     /// After an Operation boundary, a declaration of the function tools
     /// that Operation offers and the last earlier one since the span's
     /// start did not: every one at the first. One `declared_tool` per
@@ -87,7 +90,7 @@ pub const ItemKind = enum(u8) {
     /// The items the Host resumes the codec from its carry before.
     pub fn resumes(self: ItemKind) bool {
         return switch (self) {
-            .message, .output_open, .tool_result, .operation, .declare_open, .history_end => true,
+            .message, .output_open, .tool_result, .operation, .effort_update, .declare_open, .history_end => true,
             else => false,
         };
     }
@@ -96,7 +99,7 @@ pub const ItemKind = enum(u8) {
     /// the codec's carry.
     pub fn endsElement(self: ItemKind) bool {
         return switch (self) {
-            .message, .output_close, .tool_result, .operation, .declare_close => true,
+            .message, .output_close, .tool_result, .operation, .effort_update, .declare_close => true,
             else => false,
         };
     }
@@ -125,6 +128,7 @@ pub const Item = union(ItemKind) {
     tool_result,
     /// The Operation's frozen effort; null when its binding has none.
     operation: ?Effort,
+    effort_update: Effort,
     declare_open,
     declared_tool,
     declare_close,

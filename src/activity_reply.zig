@@ -58,10 +58,13 @@ pub const ItemJson = struct {
         pub const send_failed = .{ "{\"key\":", H{ .string = protocol.max_key_bytes }, ",\"target\":", H{ .optional_json = NamedPeerJson }, ",\"code\":", H{ .string = protocol.max_code_bytes }, "}" };
         /// Holes: action, operation, call ordinal.
         pub const approval_requested = .{ "{\"session\":", H{ .string = protocol.session_id_bytes }, ",\"action\":\"", H.decimal, "\",\"operation\":\"", H.decimal, "\",\"call_ordinal\":\"", H.decimal, "\"}" };
-        /// Holes: revision, field.
-        pub const session_changed = .{ "{\"revision\":\"", H.decimal, "\",\"field\":\"", H{ .tag = protocol.SessionField }, "\"}" };
+        /// Holes: revision, field, provider text.
+        pub const session_changed = .{ "{\"revision\":\"", H.decimal, "\",\"field\":\"", H{ .tag = protocol.SessionField }, "\",\"provider_text\":", H{ .optional_string = protocol.max_report_bytes }, "}" };
         /// Holes: operation, dropped.
         pub const compacted = .{ "{\"operation\":\"", H.decimal, "\",\"dropped\":\"", H.decimal, "\"}" };
+        /// Holes: model, served model, input/output/cached tokens, final-attempt
+        /// latency and first event, status, attempts.
+        pub const model_call = .{ "{\"model\":", H{ .string = protocol.max_model_bytes }, ",\"served_model\":", H{ .optional_string = protocol.max_model_bytes }, ",\"input_tokens\":", H.optional_id, ",\"output_tokens\":", H.optional_id, ",\"cached_tokens\":", H.optional_id, ",\"latency_ms\":", H.optional_id, ",\"first_event_ms\":", H.optional_id, ",\"status\":", H{ .string = protocol.max_code_bytes }, ",\"attempts\":\"", H.decimal, "\"}" };
     };
     pub const max_json_bytes = blk: {
         @setEvalBranchQuota(10_000);
@@ -89,8 +92,9 @@ pub const ItemJson = struct {
             .sent => |sent| try writeShape(out, value_shapes.sent, .{ sent.admission, sent.admitted_at, NamedPeerJson{ .value = sent.target }, ContentJson{ .value = sent.content } }),
             .send_failed => |failed| try writeShape(out, value_shapes.send_failed, .{ failed.key.slice(), NamedPeerJson.optional(failed.target), failed.code.slice() }),
             .approval_requested => |request| try writeShape(out, value_shapes.approval_requested, .{ request.session.slice(), request.action, request.operation, request.call_ordinal }),
-            .session_changed => |change| try writeShape(out, value_shapes.session_changed, .{ change.revision, change.field }),
+            .session_changed => |change| try writeShape(out, value_shapes.session_changed, .{ change.revision, change.field, if (change.provider_text) |text| text.slice() else null }),
             .compacted => |compacted| try writeShape(out, value_shapes.compacted, .{ compacted.operation, compacted.dropped }),
+            .model_call => |call| try writeShape(out, value_shapes.model_call, .{ call.model.slice(), if (call.served_model) |model| model.slice() else null, call.input_tokens, call.output_tokens, call.cached_tokens, call.latency_ms, call.first_event_ms, call.status.slice(), call.attempts }),
             .assistant => |assistant| try writeShape(out, value_shapes.assistant, .{ ContentJson{ .value = assistant.content }, assistant.final }),
             .tool_result => |result| try writeShape(out, value_shapes.tool_result, .{ ContentJson{ .value = result.content }, ToolPresentationJson{ .value = result.presentation } }),
             .hosted_call => |presentation| try writeShape(out, value_shapes.hosted_call, .{ToolPresentationJson{ .value = presentation }}),

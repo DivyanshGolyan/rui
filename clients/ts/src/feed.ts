@@ -29,6 +29,7 @@ export const FEED_KINDS = [
 	"approval_requested",
 	"session_changed",
 	"compacted",
+	"model_call",
 ] as const satisfies readonly WireKind[];
 export type FeedKind = (typeof FEED_KINDS)[number];
 // A kind the wire gains fails to compile here until the list has it.
@@ -79,7 +80,9 @@ type EntryFromRow<R extends Row> = R extends Row ? {
 		& ("content" extends keyof R["value"][Kind] ? EntryText : {});
 }[keyof R["value"]] : never;
 
-/** A discriminated wire-row union with top-level camelCase fields and an opaque continuation `cursor`. */
+/** A discriminated wire-row union with top-level camelCase fields and an opaque continuation `cursor`.
+ * `session_changed` uses `reasoning_effort_refused` and inline `providerText` for a refused effort change.
+ */
 export type FeedEntry = EntryFromRow<Row>;
 
 /** An opaque cursor: after the row at this position and ordinal. */

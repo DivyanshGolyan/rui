@@ -2,6 +2,7 @@
 //! reports, and fencing Attempts superseded by a control.
 
 const std = @import("std");
+const model_attempt = @import("model_attempt.zig");
 const tool_proposal = @import("../../tool_proposal.zig");
 const content_string = @import("../../content_string.zig");
 const idempotency_key = @import("../../idempotency_key.zig");
@@ -21,6 +22,7 @@ const rsql = @import("../rsql.zig");
 const store_schema = @import("../schema.zig");
 const action_domain = @import("action.zig");
 const command_domain = @import("command.zig");
+const operation_effort = @import("operation_effort.zig");
 const configuration_domain = @import("configuration.zig");
 const content_domain = @import("content.zig");
 const historical_domain = @import("historical.zig");
@@ -43,12 +45,13 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 const context_changed = model_admission_domain.context_changed;
 
-/// Every model Operation resolution ends its Attempt or retry wait at
-/// once, dated by the Access.
-pub const operation_resolved_now_sql = "resolved_at=@now,attempt_at=NULL,retry_scheduled_at=NULL";
+/// Durations of the final Attempt only, measured on the awake monotonic clock.
+/// A missing send or response event remains NULL, never a fabricated zero.
+pub const ModelTimings = @import("../../model_timing.zig").Values;
 
 pub const ModelFailureClass = union(enum) {
     ordinary,
+    effort_change_refused,
     context_overflow,
     retryable: retry_policy.Input,
     /// A model 401 whose one forced credential refresh completed under this
@@ -326,21 +329,76 @@ pub fn claimModelAuthRefresh(a: anytype, binding: AttemptBinding) !bool {
 /// Resolves an unresolved Attempt with a failure: `ordinary`, a context
 /// overflow and an exhausted retry. `last_failure_code` null keeps the
 /// saved one.
-const resolve_failure = rsql.Write(.{
-    .sql = "UPDATE model_operation SET retry_due_at_ms=NULL,resolution_code=?2,resolution_content_id=?3,request_id=?4," ++
-        "last_failure_code=coalesce(?5,last_failure_code)," ++ operation_resolved_now_sql ++ " " ++
-        "WHERE operation_id=?1 AND session_ref=@session(?7) AND resolution_code IS NULL AND attempt_ordinal=?6",
+const resolve_failure = model_attempt.Write(.{
+    .end = .resolution,
+    .set = "retry_due_at_ms=NULL,resolution_code=?2,resolution_content_id=?3,request_id=?4," ++
+        "last_failure_code=coalesce(?5,last_failure_code)",
+    .where = "operation_id=?1 AND session_ref=@session(?7) AND resolution_code IS NULL AND attempt_ordinal=?6",
     .Args = struct { operation_id: u64, resolution: []const u8, content_id: ?u64, request_id: ?[]const u8, last_failure_code: ?[]const u8, attempt_ordinal: u64, session: rsql.SessionHead },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.StaleAttemptBinding } },
 });
 
 /// Ends a failed Attempt with a retry due at `due_at_ms`.
-const schedule_retry = rsql.Write(.{
-    .sql = "UPDATE model_operation SET retry_due_at_ms=?2,last_failure_code=?3,retry_scheduled_at=@now,attempt_at=NULL " ++
-        "WHERE operation_id=?1 AND session_ref=@session(?5) AND resolution_code IS NULL AND attempt_ordinal=?4",
+const schedule_retry = model_attempt.Write(.{
+    .end = .retry,
+    .set = "retry_due_at_ms=?2,last_failure_code=?3",
+    .where = "operation_id=?1 AND session_ref=@session(?5) AND resolution_code IS NULL AND attempt_ordinal=?4",
     .Args = struct { operation_id: u64, due_at_ms: u64, code: []const u8, attempt_ordinal: u64, session: rsql.SessionHead },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.StaleAttemptBinding } },
 });
+
+/// Admission, not revision history, owns whether this request emitted a
+/// refusable choice. A replay restoration or an unchanged effort is ordinary.
+const refused_effort_source = rsql.Read(.{
+    .sql = "SELECT o.effort_source_revision AS revision FROM model_operation o WHERE o.operation_id=?1 AND " ++ operation_effort.refusalEligibleSql("o"),
+    .Args = struct { operation: u64 },
+    .Row = struct { revision: rsql.Positive },
+    .cardinality = .optional,
+});
+
+const insert_effort_refusal = rsql.Write(.{
+    .sql = "INSERT INTO session_change(session_ref,position,ordinal,revision,field,changed_at,provider_text,refused_operation_id) VALUES(@session(?1),?2,0,?3,'reasoning_effort_refused',@now,?4,?5)",
+    .Args = struct { session: rsql.SessionHead, position: u64, revision: u64, provider_text: []const u8, operation: u64 },
+    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.StaleAttemptBinding } },
+});
+
+const invalidate_effort_prefix = rsql.Write(.{
+    .sql = "UPDATE session SET prefix_seal=NULL WHERE session_ref=@session(?1)",
+    .Args = struct { session: rsql.SessionHead },
+    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.StaleAttemptBinding } },
+});
+
+fn queueEffortRefusal(a: anytype, session: rsql.SessionHead, revision: u64, operation: u64, report: []const u8) !void {
+    const position = try (try a.positions(session)).take(1);
+    a.write(insert_effort_refusal, .{ .session = session, .position = position, .revision = revision, .provider_text = report, .operation = operation });
+    a.write(invalidate_effort_prefix, .{ .session = session });
+}
+
+const EffortRefusal = union(enum) { unmatched, retried, exhausted: u64 };
+
+/// The refusal and retry share a commit. Even an exhausted allowance must
+/// retain the refusal: later Operations must not reuse the rejected effort.
+fn settleEffortRefusal(a: anytype, io: std.Io, binding: AttemptBinding, failure: ModelFailure, faults: Faults) !EffortRefusal {
+    var facts: attempt_facts.Result = undefined;
+    var source: refused_effort_source.Result = undefined;
+    a.read(attempt_facts, .{ .operation_id = binding.operation_id, .closes = false }, &facts);
+    a.read(refused_effort_source, .{ .operation = binding.operation_id }, &source);
+    try runOperationRead(a);
+    const row = try currentAttempt(&facts, binding);
+    const revision = (source orelse return .unmatched).revision.get();
+    if (binding.attempt_ordinal >= retry_policy.maximum_attempts) return .{ .exhausted = revision };
+    try queueEffortRefusal(a, row.session, revision, binding.operation_id, failure.report());
+    schedule_retry.queue(a, .{
+        .operation_id = binding.operation_id,
+        .due_at_ms = @intCast(@max(1, try store_core.readUnixMilliseconds(io))),
+        .code = failure.code(),
+        .attempt_ordinal = binding.attempt_ordinal,
+        .session = row.session,
+    });
+    if (faults.before_commit) return error.InjectedCommitFailure;
+    try a.commit();
+    return .retried;
+}
 
 /// The content a failure settles with: its diagnostic and its report.
 const FailureContent = struct {
@@ -393,9 +451,20 @@ pub fn settleModelAttemptFailure(
     io: std.Io,
     binding: AttemptBinding,
     failure: ModelFailure,
-    disposition: ModelFailureClass,
+    requested_disposition: ModelFailureClass,
     faults: Faults,
 ) !void {
+    var exhausted_refusal: ?u64 = null;
+    const disposition: ModelFailureClass = if (requested_disposition == .effort_change_refused) refusal: {
+        switch (try settleEffortRefusal(a, io, binding, failure, faults)) {
+            .retried => return,
+            .unmatched => break :refusal .ordinary,
+            .exhausted => |revision| {
+                exhausted_refusal = revision;
+                break :refusal .{ .retryable = .{ .waits_ms = retry_policy.default_waits_ms } };
+            },
+        }
+    } else requested_disposition;
     const code = failure.code();
     var retry_random: u64 = 0;
     if (disposition == .retryable) io.random(std.mem.asBytes(&retry_random));
@@ -404,6 +473,7 @@ pub fn settleModelAttemptFailure(
     const resolves = switch (disposition) {
         .ordinary, .context_overflow => true,
         .refreshed => false,
+        .effort_change_refused => unreachable,
         .retryable => binding.attempt_ordinal == retry_policy.maximum_attempts,
     };
     var facts: attempt_facts.Result = undefined;
@@ -416,6 +486,7 @@ pub fn settleModelAttemptFailure(
     const row = try currentAttempt(&facts, binding);
     const session = row.session;
     switch (disposition) {
+        .effort_change_refused => unreachable,
         .ordinary, .context_overflow => {
             // An overflowing call compacts; an overflowing compaction makes
             // room with a deeper floor while one drops more (D217).
@@ -428,12 +499,13 @@ pub fn settleModelAttemptFailure(
             };
             if (content.diagnostic != null and faults.content_import) return error.InjectedContentImportFailure;
             const diagnostic_id = try content.importDiagnostic(a, &failure);
-            a.write(resolve_failure, .{
+            resolve_failure.queue(a, .{
                 .operation_id = binding.operation_id,
                 .resolution = if (disposition == .context_overflow) @tagName(turn_policy.Resolution.context_overflow) else code,
                 .content_id = diagnostic_id,
                 .request_id = optionalText(failure.requestId()),
                 .last_failure_code = if (disposition == .context_overflow) code else null,
+
                 .attempt_ordinal = binding.attempt_ordinal,
                 .session = session,
             });
@@ -454,7 +526,7 @@ pub fn settleModelAttemptFailure(
         },
         .refreshed => {
             if (!row.refresh_claimed or binding.attempt_ordinal >= retry_policy.maximum_attempts) return error.StaleAttemptBinding;
-            a.write(schedule_retry, .{
+            schedule_retry.queue(a, .{
                 .operation_id = binding.operation_id,
                 .due_at_ms = @intCast(@max(1, try store_core.readUnixMilliseconds(io))),
                 .code = code,
@@ -463,7 +535,7 @@ pub fn settleModelAttemptFailure(
             });
         },
         .retryable => |policy| switch (try retry_policy.decide(binding.attempt_ordinal, policy, try store_core.readUnixMilliseconds(io), retry_random)) {
-            .schedule_at_ms => |due_at_ms| a.write(schedule_retry, .{
+            .schedule_at_ms => |due_at_ms| schedule_retry.queue(a, .{
                 .operation_id = binding.operation_id,
                 .due_at_ms = std.math.cast(u64, due_at_ms) orelse return error.IntegerOutOfRange,
                 .code = code,
@@ -473,7 +545,7 @@ pub fn settleModelAttemptFailure(
             .exhausted => {
                 if (content.diagnostic != null and faults.content_import) return error.InjectedContentImportFailure;
                 const diagnostic_id = try content.importDiagnostic(a, &failure);
-                a.write(resolve_failure, .{
+                resolve_failure.queue(a, .{
                     .operation_id = binding.operation_id,
                     .resolution = "retry_exhausted",
                     .content_id = diagnostic_id,
@@ -490,6 +562,7 @@ pub fn settleModelAttemptFailure(
             },
         },
     }
+    if (exhausted_refusal) |revision| try queueEffortRefusal(a, session, revision, binding.operation_id, failure.report());
     if (faults.before_commit) return error.InjectedCommitFailure;
     try a.commit();
 }
@@ -516,9 +589,10 @@ const exhausted_attempts = rsql.Read(.{
     .cardinality = .each,
 });
 
-const resolve_exhausted = rsql.Write(.{
-    .sql = "UPDATE model_operation SET retry_due_at_ms=NULL,resolution_code='retry_exhausted'," ++ operation_resolved_now_sql ++ " " ++
-        "WHERE operation_id=?1 AND session_ref=@session(?2) AND " ++ retry_exhausted_sql,
+const resolve_exhausted = model_attempt.Write(.{
+    .end = .resolution,
+    .set = "retry_due_at_ms=NULL,resolution_code='retry_exhausted'",
+    .where = "operation_id=?1 AND session_ref=@session(?2) AND " ++ retry_exhausted_sql,
     .Args = struct { operation_id: u64, session: rsql.SessionHead },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.SelectionChanged } },
 });
@@ -547,7 +621,7 @@ pub fn recoverOneExhaustedModelAttempt(candidate: anytype, a: anytype, active: A
     try store_access.runAs(candidate, error.RetryRecoveryFailed);
     const chosen = choice.chosen orelse return false;
     if (!chosen.turn_open) return error.SelectionChanged;
-    a.write(resolve_exhausted, .{ .operation_id = chosen.operation_id.get(), .session = chosen.session });
+    resolve_exhausted.queue(a, .{ .operation_id = chosen.operation_id.get(), .session = chosen.session });
     try turn_domain.queueCloseOr(a, try a.positions(chosen.session), chosen.turn_id.get(), .{ .retry_exhausted = null }, error.SelectionChanged);
     try a.commit();
     return true;
@@ -798,10 +872,11 @@ const insert_action = rsql.Write(.{
 });
 
 /// Resolves the settling Attempt with its output.
-const resolve_success = rsql.Write(.{
-    .sql = "UPDATE model_operation SET retry_due_at_ms=NULL,resolution_code=?2,resolution_content_id=?3,response_id=?4,model_evidence=?5,request_id=?6,output_item_count=?7," ++
-        "usage_uncached_tokens=?8,usage_cache_read_tokens=?9,usage_cache_write_tokens=?10,usage_output_tokens=?11," ++ operation_resolved_now_sql ++ " " ++
-        "WHERE operation_id=?1 AND session_ref=@session(?13) AND resolution_code IS NULL AND attempt_ordinal=?12",
+const resolve_success = model_attempt.Write(.{
+    .end = .resolution,
+    .set = "retry_due_at_ms=NULL,resolution_code=?2,resolution_content_id=?3,response_id=?4,model_evidence=?5,request_id=?6,output_item_count=?7," ++
+        "usage_uncached_tokens=?8,usage_cache_read_tokens=?9,usage_cache_write_tokens=?10,usage_output_tokens=?11",
+    .where = "operation_id=?1 AND session_ref=@session(?13) AND resolution_code IS NULL AND attempt_ordinal=?12",
     .Args = struct {
         operation_id: u64,
         resolution: []const u8,
@@ -1336,7 +1411,7 @@ pub fn settleModelSuccess(a: anytype, io: std.Io, binding: AttemptBinding, outpu
 
     const output_fact = turn_policy.outputFact(purpose, output.call_count);
     const usage = settlement.usage;
-    a.write(resolve_success, .{
+    resolve_success.queue(a, .{
         .operation_id = binding.operation_id,
         .resolution = @tagName(turn_policy.Resolution.of(output_fact)),
         .content_id = settlement.answer_id,

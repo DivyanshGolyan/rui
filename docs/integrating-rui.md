@@ -4,22 +4,19 @@ Create a Session, send a request, and read its answer with the TypeScript client
 This example enables no tools, so the model can answer but cannot inspect your files or execute commands.
 Provider usage may incur charges.
 
-## Install matching client and binary packages
+## Install the client
 
 Use Node.js 22.6 or newer on a [supported platform](../README.md#install).
-Choose a [GitHub release](https://github.com/DivyanshGolyan/rui/releases) and download its `rui-VERSION.tgz` client tarball and your platform's package tarball.
-Replace `VERSION` below with that release's version.
-For x86-64 Linux, install both downloaded files in your application project:
+In your application project:
 
 ```sh
-npm install --omit=optional ./rui-VERSION.tgz ./rui-linux-x64-VERSION.tgz
+npm install ruicode
 ```
 
-For Apple Silicon macOS, use `rui-darwin-arm64-VERSION.tgz` as the platform package instead.
-The ARM64 Linux package is `rui-linux-arm64-VERSION.tgz`, with experimental platform support.
-The release workflow publishes tarballs, not packages to the npm registry.
+The `ruicode` package installs the matching `rui` executable for your platform as an optional dependency (`ruicode-linux-x64`, `ruicode-darwin-arm64`, or `ruicode-linux-arm64` with experimental platform support).
+Each [GitHub release](https://github.com/DivyanshGolyan/rui/releases) also attaches the same packages as `rui-VERSION.tgz` and `rui-PLATFORM-VERSION.tgz` tarballs for offline installs.
 
-Alternatively, install only the client tarball with `--omit=optional` and put a matching standalone `rui` binary on `PATH`.
+Alternatively, install the client with `--omit=optional` and put a matching standalone `rui` binary on `PATH`.
 The client looks for its platform package first, then `rui` on `PATH`.
 Pass `binary` to `Rui.connect` to choose an executable explicitly.
 Keep the client and binary versions matched.
@@ -44,7 +41,7 @@ Save this example as `example.mts` in your application project:
 
 ```ts
 import { randomUUID } from "node:crypto";
-import { Rui } from "rui";
+import { Rui } from "ruicode";
 
 function required(name: string): string {
 	const value = process.env[name];
@@ -93,6 +90,8 @@ You should see the assistant's checklist before the program closes the Host.
 `send` resolves after admission, not after the model answers.
 The example keeps the Host alive until its Session's `turn_ended` entry and reports non-success endings as errors.
 The feed yields saved activity entries, not token-by-token text.
+Its `model_call` entries summarize resolved model Operations at admission positions, with nullable usage and final-attempt timings (first HTTP response event, not first token).
+A late resolution can reveal such a row within an earlier captured end (D219); a follower already past it must reread that range to see it.
 `readContent` retrieves the whole entry rather than only its inline excerpt.
 
 The random keys create a fresh Session and Message each time this example runs.

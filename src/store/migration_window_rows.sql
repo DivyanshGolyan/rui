@@ -16,3 +16,6 @@ UPDATE turn SET operation_id=4 WHERE turn_id=2;
 INSERT INTO model_catalog_source(slot,etag,generation,fetched_at) VALUES(1,NULL,1,1);
 INSERT INTO model_fact(model_id,context_window,efforts,openai_listed,generation)
 VALUES('gpt-6.1-sol',NULL,0,1,1),('d238-unknown',7,0,1,1);
+-- The new window must not erase already frozen effort or final-attempt timing.
+UPDATE model_operation SET latency_ms=13,first_event_ms=4 WHERE operation_id=1;
+UPDATE model_operation SET reasoning_effort='high',effort_source_revision=1,previous_reasoning_effort='low',effort_update=1,previous_effort_override='medium',latency_ms=29,first_event_ms=7 WHERE operation_id=4;

@@ -9,7 +9,7 @@ import threading
 import codex_fixture
 import host_process
 import model_fixture as fixture
-from human_cli_fixture import keyed_frame, overview_frame, overview_title, terminal_exit
+from human_cli_fixture import overview_frame, overview_title, terminal_exit
 from terminal_process import close_pty, open_pty, spawn
 
 
@@ -65,9 +65,9 @@ def main():
             assert "/model gpt-6-luna" in shown, shown
             switched = overview_frame(master, lambda screen, target=target: row_has(screen, target), b"\t")
             assert "/model gpt-6-luna" in switched, switched
-            selected = keyed_frame(master, b"\r", lambda screen, x, y, target=target:
-                                   "gpt-6-luna" in screen and target in screen and "/model" not in screen)
-            assert target in selected, selected
+            selected = overview_frame(master, lambda screen:
+                                      "gpt-6-luna" in screen and "/model" not in screen, b"\r")
+            assert "enter start" in selected, selected
             host_process.wait_for(lambda provider=provider: saved(provider), f"{target} model default saved")
 
         os.write(master, b"\x03")

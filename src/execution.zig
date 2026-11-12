@@ -1,15 +1,16 @@
 const std = @import("std");
 const attempt = @import("attempt.zig");
+const model_timing = @import("model_timing.zig");
 const transport_policy = @import("transport_policy.zig");
 
 const CaptureFailure = transport_policy.CaptureFailure;
 const TransferOutcome = transport_policy.TransferOutcome;
 
 /// How a failed model Attempt settles: the Store owns the retry allowance.
-pub const FailureKind = enum { permanent, temporary, context_overflow };
+pub const FailureKind = enum { permanent, temporary, context_overflow, effort_change_refused };
 
 /// A sealed HTTP error answer, interpreted before settlement.
-pub const ErrorResponse = union(enum) { ordinary, context_overflow, quota: transport_policy.Quota, refusal: transport_policy.Refusal, unreadable: anyerror };
+pub const ErrorResponse = union(enum) { ordinary, context_overflow, effort_change_refused, quota: transport_policy.Quota, refusal: transport_policy.Refusal, unreadable: anyerror };
 
 pub const TransferFailure = struct {
     code: union(enum) { named: []const u8, http: u16, temporary_http: u16 },
@@ -52,6 +53,7 @@ pub fn transferDecision(
     if (evidence.disposition == .success) return .interpret_output;
     const answered = evidence.disposition.answered();
     if (answered) switch (error_response) {
+        .effort_change_refused => return .{ .fail = .{ .code = .{ .http = evidence.http_status }, .answered = true, .kind = .effort_change_refused } },
         .context_overflow => return .{ .fail = .{
             .code = .{ .named = "provider_context_overflow" },
             .answered = true,
@@ -110,7 +112,7 @@ test "only an answered model 401 can claim a forced credential refresh" {
     try std.testing.expect(!rejectsCredential(transferDecision(finished(.temporary_http, 503), .ordinary).fail));
 }
 
-const testing_error_responses = [_]ErrorResponse{ .ordinary, .context_overflow, .{ .refusal = .model_unavailable }, .{ .unreadable = error.TestUnreadable } };
+const testing_error_responses = [_]ErrorResponse{ .ordinary, .context_overflow, .effort_change_refused, .{ .refusal = .model_unavailable }, .{ .unreadable = error.TestUnreadable } };
 
 test "HTTP quota refusal overrides rate limit retry evidence and retains reset detail" {
     const refusals = [_]transport_policy.Refusal{ .quota, .plan };
@@ -179,13 +181,15 @@ test "transfer decisions exhaust transport dispositions and error response prece
             const overflow = case.answered and response == .context_overflow;
             const unreadable = case.answered and response == .unreadable;
             const refused = case.answered and response == .refusal;
-            const temporary = case.temporary and !overflow and !unreadable and !refused;
-            const expected_code = if (overflow) "provider_context_overflow" else if (unreadable) "response_read_failed" else if (refused) "provider_model_unavailable" else case.code;
+            const effort_refused = case.answered and response == .effort_change_refused;
+            const temporary = case.temporary and !overflow and !unreadable and !refused and !effort_refused;
+            const expected_code = if (overflow) "provider_context_overflow" else if (unreadable) "response_read_failed" else if (refused) "provider_model_unavailable" else if (effort_refused) if (case.status == 418) "provider_http_418" else "provider_http_503" else case.code;
             try std.testing.expectEqualStrings(expected_code, failure.codeText(&buffer));
             try std.testing.expectEqual(case.answered, failure.answered);
             try std.testing.expectEqual(overflow, failure.kind == .context_overflow);
             try std.testing.expectEqual(temporary, failure.kind == .temporary);
-            try std.testing.expectEqual(!overflow and !temporary, failure.kind == .permanent);
+            try std.testing.expectEqual(effort_refused, failure.kind == .effort_change_refused);
+            try std.testing.expectEqual(!overflow and !temporary and !effort_refused, failure.kind == .permanent);
             try std.testing.expectEqual(if (temporary) @as(?u64, 137) else null, failure.retry_after_ms);
             try std.testing.expectEqual(if (temporary) @as(?i64, 901) else null, failure.retry_after_deadline_ms);
         }
@@ -294,6 +298,8 @@ pub const CustodyRecord = struct {
     delivered: std.atomic.Value(bool) = .init(false),
     launch_available: std.atomic.Value(bool) = .init(false),
     binding: CustodyBinding = undefined,
+    timing_operation: std.atomic.Value(u64) = .init(0),
+    timing: model_timing.Attempt = .{},
 };
 
 pub const CustodyPool = struct {
@@ -310,6 +316,8 @@ pub const CustodyPool = struct {
         for (self.records, 0..) |*record, index| {
             if (record.state.cmpxchgStrong(.free, .reserved, .acq_rel, .acquire) != null) continue;
             const generation = record.generation.fetchAdd(1, .acq_rel) + 1;
+            record.timing_operation.store(0, .release);
+            record.timing.reset();
             record.delivered.store(false, .release);
             return .{ .index = index, .generation = generation };
         }
@@ -327,9 +335,33 @@ pub const CustodyPool = struct {
         if (record.state.load(.acquire) != .reserved) return error.InvalidCustodyTransition;
         const attempt_binding = try permit.consume();
         record.binding = .of(attempt_binding);
+        if (record.binding == .model) record.timing_operation.store(record.binding.model.operation_id, .release);
         record.launch_available.store(true, .release);
         record.state.store(.attached, .release);
         return attempt_binding;
+    }
+
+    /// Borrow until this custody retires; the Transfer is deinitialized first.
+    pub fn modelTiming(self: *CustodyPool, token: CustodyToken) !*model_timing.Attempt {
+        const record = try self.current(token);
+        if (record.state.load(.acquire) != .attached or record.binding != .model) return error.CustodyDetached;
+        return &record.timing;
+    }
+
+    pub fn timingSource(self: *CustodyPool) model_timing.Source {
+        return .{ .context = self, .read = readTiming };
+    }
+
+    fn readTiming(raw: *anyopaque, operation: u64, io: std.Io) model_timing.Values {
+        const self: *CustodyPool = @ptrCast(@alignCast(raw));
+        for (self.records) |*record| {
+            const generation = record.generation.load(.acquire);
+            if (record.state.load(.acquire) != .attached or record.timing_operation.load(.acquire) != operation) continue;
+            const value = record.timing.snapshot(io);
+            if (record.generation.load(.acquire) == generation and record.timing_operation.load(.acquire) == operation and record.state.load(.acquire) == .attached)
+                return value;
+        }
+        return .{};
     }
 
     pub fn consumeLaunchAuthority(
