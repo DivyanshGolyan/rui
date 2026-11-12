@@ -327,6 +327,11 @@ If that covered history names no change to its Session, the token advances to th
 Otherwise the full observation carries the generation captured before its reads.
 Foreign, future, uncovered or pre-restart tokens get a full observation.
 Tokens are hints, not revisions or durable state, and the token's Session scopes the check; editing one can mislead only its caller.
+The shared change-ring recorder expands each written Session through saved `parent_ref` before publishing the generation and commit wakeup.
+This includes newly saved attachments, but never a standalone agent's starter.
+One bounded indexed read walks at most four upward edges from the at-most-four touched Sessions; a fifth distinct Session uses the ring's existing conservative all-changed fallback.
+Each ancestor keeps its own Workspace key. Failed expansion forgets coverage and applies ordinary Store fencing, never an unchanged answer.
+Activity, command observations and incremental Session listings consume this same record; Current remains uncached.
 Nothing is retained per reader and no Host thread is added.
 Each reply reserves its own shape's bound, not the global observation maximum.
 A retry becoming past due commits nothing: readers apply `WorkState.asOf`, as Session listing does.

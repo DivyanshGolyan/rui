@@ -3747,7 +3747,7 @@ test "SQLite single commit keeps autocommit on success guard failure and abandon
     }
 }
 
-test "revoking a sender runs main's statements, with no transaction, and a missing Attempt changes nothing" {
+test "revoking a sender adds bounded ancestor invalidation without a transaction; a missing Attempt changes nothing" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
@@ -3758,12 +3758,12 @@ test "revoking a sender runs main's statements, with no transaction, and a missi
     const held = "SELECT count(*) FROM action_operation WHERE session_ref=?1 AND sender_handle IS NOT NULL";
     try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, held, .{session.slice()}));
 
-    // Main: its UPDATE, then its touch's Workspace read. Now: the read, then the UPDATE.
+    // The head read, UPDATE and shared ancestor invalidation read; no BEGIN.
     var statements: TestingStatements = .{};
     statements.begin(storage.sqliteDatabase());
     try storage.revokeActionSender(action);
     statements.end(storage.sqliteDatabase());
-    try std.testing.expectEqual(@as(u64, 2), statements.count);
+    try std.testing.expectEqual(@as(u64, 3), statements.count);
     try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, held, .{session.slice()}));
 
     var unknown = action;
@@ -6449,8 +6449,9 @@ test "a stop cancels its Actions in pages of one write each, in call order at de
         // interruption; with Actions the text's lookup and insert, then a
         // page read and a write per `cancel_chunk` (13) Actions.
         const pages = (count + 12) / 13;
-        // Closing the Turn also writes its owed ending.
-        const expected: u64 = if (count == 0) 11 else 12 + 2 * pages;
+        // Closing the Turn writes its owed ending; recording the change
+        // also performs one bounded ancestor read.
+        const expected: u64 = if (count == 0) 12 else 13 + 2 * pages;
         try std.testing.expectEqual(expected, statements.count);
         try std.testing.expectEqual(@as(u64, count), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE resolution_code='cancelled'", .{}));
         // Acceptance follows call order.
@@ -8390,7 +8391,7 @@ fn statementWorkSince(database: *c.sqlite3) [2]i64 {
     return work;
 }
 
-test "Attempt checks, prefix seals and content lookups do no more work than main" {
+test "Attempt checks and content lookups stay within main work; seals include bounded ancestor invalidation" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
@@ -8400,9 +8401,12 @@ test "Attempt checks, prefix seals and content lookups do no more work than main
     // Main's statements and VM steps at 72db6de9 and again at 2e8e8353,
     // each on its warm second call: opening a view, recording a seal, the
     // Operation's kind, a dispatch handoff and a content lookup.
-    const main_work = [_][2]i64{ .{ 2, 24 }, .{ 6, 125 }, .{ 3, 32 }, .{ 2, 24 }, .{ 1, 14 } };
+    // D239 invalidation adds one ancestor statement (69 VM steps on this
+    // root-only fixture) to the seal's existing 5 statements / 124 steps.
+    // Other operations retain the independent main limits above.
+    const work_limits = [_][2]i64{ .{ 2, 24 }, .{ 6, 194 }, .{ 3, 32 }, .{ 2, 24 }, .{ 1, 14 } };
     for (0..2) |call| {
-        var work: [main_work.len][2]i64 = undefined;
+        var work: [work_limits.len][2]i64 = undefined;
         _ = statementWorkSince(storage.sqliteDatabase());
         var view: HistoricalView = undefined;
         storage.openHistoricalView(attempt.binding, &view);
@@ -8417,7 +8421,7 @@ test "Attempt checks, prefix seals and content lookups do no more work than main
         _ = try storage.openContent(attempt.content);
         work[4] = statementWorkSince(storage.sqliteDatabase());
         if (call == 0) continue;
-        for (work, main_work) |measured, main| {
+        for (work, work_limits) |measured, main| {
             try std.testing.expect(measured[0] <= main[0]);
             try std.testing.expect(measured[1] <= main[1]);
         }
