@@ -73,6 +73,11 @@ pub fn takesKey(self: *const Self, key: vaxis.Key) bool {
     return (self.model_choice.active and ModelChoice.takesKey(key)) or Panel.takesKey(key);
 }
 
+/// Only the Model filter edits text; a paste must never choose or act.
+pub fn takesPaste(self: *const Self) bool {
+    return self.model_choice.active;
+}
+
 /// Esc is the Upgrade's while it can still change nothing, as on the
 /// overview and in a conversation.
 pub fn upgradeTakesEscape(self: *const Self) bool {
@@ -152,7 +157,7 @@ fn bind(self: *Self) void {
     _ = self.model_choice.validate();
     self.model_choice.userdata = self;
     self.model_choice.on_pick = pickModel;
-    self.panel.custom_choice = if (self.model_choice.active) .{ .field = @backingInt(Row.model), .widget = self.model_choice.widget() } else null;
+    self.panel.custom_choice = if (self.model_choice.active) self.model_choice.field(@backingInt(Row.model)) else null;
     for (std.enums.values(Row)) |row| self.fields[@backingInt(row)] = .{
         .label = switch (row) {
             .model => "Model",
@@ -307,7 +312,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         .style = self.panel.quiet,
     };
     children[1] = .{ .origin = .{ .row = size.height - 1, .col = 0 }, .surface = try footer.widget().draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = 1 })) };
-    return .{ .widget = self.widget(), .size = size, .buffer = &.{}, .children = children };
+    return .{ .widget = self.widget(), .size = size, .buffer = &.{}, .children = children, .cursor = children[0].surface.cursor };
 }
 
 const Fixture = struct {
@@ -663,15 +668,31 @@ test "App settings Model shares the provider list at full width and preserves ma
     try std.testing.expect(page.hasChoice());
     for ([_]u16{ 99, 46 }) |width| {
         const drawn = try page.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
-        const choice = drawn.children[0].surface.children[0];
+        const parts = drawn.children[0].surface.children;
+        const choice = parts[parts.len - 1];
         try std.testing.expectEqual(@as(i17, 0), choice.origin.col);
         try std.testing.expectEqual(width, choice.surface.size.width);
+        try std.testing.expectEqual(@as(u16, 1), choice.surface.size.height);
+        try std.testing.expectEqualStrings(" ", choice.surface.readCell(2, 0).char.grapheme);
         try std.testing.expectEqual(@as(usize, 1), page.model_choice.hits.len);
+        try std.testing.expectEqual(@as(u16, 19), drawn.cursor.?.col);
+        try std.testing.expectEqual(@as(u16, 2), drawn.cursor.?.row);
+        try std.testing.expectEqualStrings("E", drawn.children[0].surface.readCell(3, 4).char.grapheme);
+        try std.testing.expectEqualStrings(" ", drawn.children[0].surface.readCell(19, 2).char.grapheme);
     }
     try page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = 'f', .text = "future" } });
     try page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = 'z', .text = "zzzz" } });
     try std.testing.expect(page.model_choice.no_match);
     try std.testing.expectEqualStrings("future", page.model_choice.editor.buffer[0..page.model_choice.editor.length]);
+    for ([_]u16{ 99, 46 }) |width| {
+        const drawn = try page.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
+        var screen = try vaxis.Screen.init(arena.allocator(), .{ .cols = width, .rows = 20, .x_pixel = 0, .y_pixel = 0 });
+        drawn.render(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = 20, .screen = &screen }, page.widget());
+        try std.testing.expect(screen.cursor_vis);
+        try std.testing.expectEqual(@as(u16, 25), screen.cursor.col);
+        try std.testing.expectEqual(@as(u16, 2), screen.cursor.row);
+        try std.testing.expectEqualStrings("f", screen.readCell(19, 2).?.char.grapheme);
+    }
     page.cancelChoice();
     try std.testing.expectEqual(@as(?preferences.Edit, null), fixture.last_edit);
     try press(&page, &ctx, vaxis.Key.enter);

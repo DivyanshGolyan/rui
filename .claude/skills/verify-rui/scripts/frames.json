@@ -41,6 +41,90 @@
       ]
     },
     {
+      "name": "settings-model",
+      "note": "Open Settings from the overview, move to Model, and open the shared choice",
+      "open": "overview",
+      "steps": [
+        {
+          "keys": [
+            "End",
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Notifications"
+        },
+        {
+          "keys": [
+            "Up",
+            "Up",
+            "Up",
+            "Up",
+            "Up",
+            "Enter"
+          ]
+        },
+        {
+          "wait": "\u2713"
+        }
+      ],
+      "expect": [
+        "Rui",
+        "Model",
+        "\u2713",
+        "gpt-6.1-sol"
+      ],
+      "absent": [
+        "Filter:",
+        "\u2191 "
+      ]
+    },
+    {
+      "name": "settings-model-filter",
+      "note": "Filter the shared settings Model choice by typing sol",
+      "open": "overview",
+      "steps": [
+        {
+          "keys": [
+            "End",
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Notifications"
+        },
+        {
+          "keys": [
+            "Up",
+            "Up",
+            "Up",
+            "Up",
+            "Up",
+            "Enter"
+          ]
+        },
+        {
+          "wait": "\u2713"
+        },
+        {
+          "text": "sol"
+        },
+        {
+          "wait": "Model           sol"
+        }
+      ],
+      "expect": [
+        "Rui",
+        "Model           sol",
+        "gpt-6.1-sol"
+      ],
+      "absent": [
+        "Filter:",
+        "\u2191 ",
+        "gpt-5.5"
+      ]
+    },
+    {
       "name": "start",
       "note": "02-overview",
       "open": "overview",
@@ -986,7 +1070,7 @@
     },
     {
       "name": "chat-info-model",
-      "note": "Chat info Model choice open; null estimate omits Context; one substituted footer",
+      "note": "Chat info Model inline field and compact matches; null Context; one substituted footer",
       "open": "Fix retry deadline",
       "steps": [
         {
@@ -1006,25 +1090,27 @@
           ]
         },
         {
-          "wait": "gpt-6.1-sol"
+          "wait": "\u2713"
         }
       ],
       "expect": [
         "Model",
         "gpt-6.1-sol",
-        "Filter:",
         "Fix retry deadline \u00b7 info",
-        "esc close"
+        "esc close",
+        "\u2713"
       ],
       "absent": [
         "Context",
         "unknown of",
-        "alt+i info"
+        "alt+i info",
+        "Filter:",
+        "\u2191 "
       ]
     },
     {
       "name": "model-picker",
-      "note": "App settings Model field",
+      "note": "App settings inline Model value editor with compact matches",
       "open": "overview",
       "steps": [
         {
@@ -1038,22 +1124,31 @@
         },
         {
           "keys": [
+            "Up",
+            "Up",
+            "Up",
+            "Up",
+            "Up",
             "Enter"
           ]
         },
         {
-          "wait": "gpt-6.1-sol"
+          "wait": "\u2713"
         }
       ],
       "expect": [
         "Model",
         "gpt-6.1-sol",
-        "Filter:"
+        "\u2713"
+      ],
+      "absent": [
+        "Filter:",
+        "\u2191 "
       ]
     },
     {
       "name": "model-filter",
-      "note": "App settings Model field with a typed filter",
+      "note": "App settings Model inline value filtered by ter; no separate Filter row",
       "open": "overview",
       "steps": [
         {
@@ -1067,23 +1162,32 @@
         },
         {
           "keys": [
+            "Up",
+            "Up",
+            "Up",
+            "Up",
+            "Up",
             "Enter"
           ]
         },
         {
-          "wait": "gpt-6.1-sol"
+          "wait": "\u2713"
         },
         {
           "text": "ter"
         },
         {
-          "wait": "gpt-6.1-terra"
+          "wait": "Model           ter"
         }
       ],
       "expect": [
         "Model",
         "gpt-6.1-terra",
-        "Filter:"
+        "Model           ter"
+      ],
+      "absent": [
+        "Filter:",
+        "\u2191 "
       ]
     },
     {

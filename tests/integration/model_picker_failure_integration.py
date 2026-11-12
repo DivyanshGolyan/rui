@@ -9,7 +9,7 @@ import threading
 import codex_fixture
 import host_process
 import model_fixture as fixture
-from human_cli_fixture import AppModelCatalog, app_model_open, panel_frame, overview_frame, overview_title, read_terminal, terminal_exit
+from human_cli_fixture import AppModelCatalog, app_model_open, model_choice_frame, model_choice_shown, panel_frame, overview_frame, overview_title, read_terminal, terminal_exit
 from terminal_process import close_pty, open_pty, spawn
 
 
@@ -45,7 +45,7 @@ def main():
         overview_frame(master, overview_title)
         filtered = app_model_open(master, b"luna", catalog=catalog)
         assert "gpt-5.6-luna" in filtered and "gpt-6-luna" in filtered, filtered
-        moved = panel_frame(master, lambda screen: "Filter: luna" in screen, b"\x1b[B")
+        moved = model_choice_frame(master, b"\x1b[B", query="luna", more=False)
         assert len(moved.splitlines()) == 12, moved
         os.write(master, b"\x03")
         _, errors = terminal_exit(caller, master)
@@ -65,7 +65,7 @@ def main():
         preferences = config / "preferences"
         original = preferences.read_bytes()
         preferences.write_bytes(b"version=1\n")
-        panel_frame(master, lambda screen: "Filter: luna" in screen, b"\x1b[B")
+        model_choice_frame(master, b"\x1b[B", query="luna", more=False)
         failed = panel_frame(master, lambda screen: "couldn't save" in screen, b"\r")
         assert "Model" in failed, failed
         assert preferences.read_bytes() == b"version=1\n"

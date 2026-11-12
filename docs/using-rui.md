@@ -40,6 +40,8 @@ It prefers whole trailing directory components; if the basename itself is too wi
 Context is read-only and appears only when a context estimate is available; a missing estimate is not shown as unknown or zero, while a known zero is shown as zero.
 A blank row separates the fields from Rename, Archive and Copy last answer, including when those actions stack.
 Model changes stay within the Session's provider.
+Its filter is the Model field’s editable value, with indented matches below it and no separate `Filter:` row.
+The list shrinks as matches narrow; a quiet `↓ N more` only reports models below the viewport.
 Esc closes an open choice first, then the panel.
 The panel contains no Session IDs, Store paths or request-recovery records; use `/requests` for recovery handles.
 While an original submission is held unresolved or rejected, **Alt+D** or the footer’s **alt+d details** opens its separate repair and identity page, not chat info.

@@ -10,7 +10,7 @@ import codex_fixture
 import host_process
 import model_fixture as fixture
 from product_defaults import CATALOG
-from human_cli_fixture import (AppModelCatalog, app_model_open, assert_chat_info_layout, chat_info_open, panel_frame, overview_frame,
+from human_cli_fixture import (AppModelCatalog, app_model_open, assert_chat_info_layout, assert_model_choice, chat_info_open, model_choice_frame, model_choice_shown, panel_frame, overview_frame,
                                overview_title, read_terminal, terminal_exit)
 from terminal_process import close_pty, open_pty, spawn
 
@@ -43,19 +43,24 @@ def main():
         caller = spawn([str(fixture.RUI), "--store", str(store)], cwd=state,
                        env=env, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         overview_frame(master, overview_title)
-        app_model_open(master, catalog=catalog)
-        filtered = panel_frame(master, lambda screen: "Filter: luna" in screen, b"luna")
+        opened = app_model_open(master, catalog=catalog)
+        full = assert_model_choice(opened, query="", more=True)
+        filtered = model_choice_frame(master, b"luna", query="luna", more=False)
+        narrow = assert_model_choice(filtered, query="luna", more=False)
+        assert len(narrow["matches"]) == 2 < len(full["matches"]), filtered
+        effort_row = next(index for index, row in enumerate(narrow["rows"]) if row.startswith("   Effort"))
+        assert effort_row == narrow["matches"][-1][0] + 1, ("list shrinks without blank placeholders", filtered)
         rows = filtered.splitlines()
         first = next(row for row in rows if "gpt-5.6-luna" in row)
         second = next(row for row in rows if "gpt-6-luna" in row)
         assert rows.index(first) < rows.index(second), filtered
-        panel_frame(master, lambda screen: "Filter: luna" in screen, b"\x1b[B")
-        selected = panel_frame(master, lambda screen: "Filter:" not in screen and
+        model_choice_frame(master, b"\x1b[B", query="luna", more=False)
+        selected = panel_frame(master, lambda screen: not model_choice_shown(screen) and
                                "gpt-6-luna" in screen and "saving" not in screen, b"\r")
         assert "Model" in selected, selected
         # Effort is a separate setting, not a model-row keyboard submode.
         panel_frame(master, lambda screen: "model default" in screen, b"\x1b[B\r")
-        panel_frame(master, lambda screen: "Filter:" not in screen and "saving" not in screen
+        panel_frame(master, lambda screen: not model_choice_shown(screen) and "saving" not in screen
                     and any("Effort" in row and "medium" in row for row in screen.splitlines()),
                     b"\x1b[B" * (1 + CATALOG["gpt-6-luna"].efforts.index("medium")) + b"\r")
         def saved_model():
@@ -104,12 +109,11 @@ def main():
         session_model = chat_info_open(master)
         assert "gpt-5.5" in session_model and "Folder" in session_model, session_model
         assert_chat_info_layout(session_model, context=False)
-        choice = panel_frame(master, lambda screen: "Filter:" in screen,
-                             b"\x1b[B\x1b[B\x1b[B\r")
+        choice = model_choice_frame(master, b"\x1b[B\x1b[B\x1b[B\r", query="")
         assert "gpt-5.5" in choice and "Known to Rui" not in choice, choice
         assert_chat_info_layout(choice, context=False)
-        panel_frame(master, lambda screen: "Filter: luna" in screen, b"luna")
-        panel_frame(master, lambda screen: "Filter:" not in screen and "gpt-6-luna" in screen
+        model_choice_frame(master, b"luna", query="luna", more=False)
+        panel_frame(master, lambda screen: not model_choice_shown(screen) and "gpt-6-luna" in screen
                     and "saving" not in screen, b"\x1b[B\r")
         inspected = subprocess.run([str(fixture.RUI), "session", "inspect", "--store", str(store),
                                     "--session", session], env=env, capture_output=True, text=True, timeout=20)

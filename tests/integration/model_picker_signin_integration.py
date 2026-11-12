@@ -9,7 +9,7 @@ import threading
 import codex_fixture
 import host_process
 import model_fixture as fixture
-from human_cli_fixture import AppModelCatalog, app_model_open, panel_frame, overview_frame, overview_title, terminal_exit
+from human_cli_fixture import AppModelCatalog, app_model_open, model_choice_frame, model_choice_shown, panel_frame, overview_frame, overview_title, terminal_exit
 from terminal_process import close_pty, open_pty, spawn
 
 
@@ -66,7 +66,7 @@ def main():
                            env=env, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
             overview_frame(master, overview_title)
             app_model_open(master, b"gpt-6-luna", catalog=catalog)
-            selected = panel_frame(master, lambda screen: "Filter:" not in screen and "saving" not in screen
+            selected = panel_frame(master, lambda screen: not model_choice_shown(screen) and "saving" not in screen
                                    and any("Model" in row and "gpt-6-luna" in row for row in screen.splitlines()), b"\r")
             assert any("Sign-in" in row and sign_in in row for row in selected.splitlines()), selected
             host_process.wait_for(lambda provider=provider: saved(provider), f"{sign_in} model default saved")

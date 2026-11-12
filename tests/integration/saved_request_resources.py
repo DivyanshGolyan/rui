@@ -101,10 +101,9 @@ def retained(state, binary, label):
                     assert "Configured." in cli.terminal_step(master, "/configure --model gpt-6-sol", prompt)
                 else:
                     cli.chat_info_open(master)
-                    cli.panel_frame(master, lambda frame: "Filter:" in frame,
-                                    b"\x1b[B\x1b[B\x1b[B\r")
-                    cli.panel_frame(master, lambda frame: "Filter: gpt-6-sol" in frame, b"gpt-6-sol")
-                    cli.panel_frame(master, lambda frame: "Filter:" not in frame and "saving" not in frame, b"\r")
+                    cli.model_choice_frame(master, b"\x1b[B\x1b[B\x1b[B\r", query="")
+                    cli.model_choice_frame(master, b"gpt-6-sol", query="gpt-6-sol", more=False)
+                    cli.panel_frame(master, lambda frame: not cli.model_choice_shown(frame) and "saving" not in frame, b"\r")
                     cli.panel_frame(master, lambda frame: "Copy last answer" not in frame, b"\x1b")
                 listing = cli.terminal_step(master, "/requests",
                     prompt if label == "baseline" else "Local recovery handles", composer=label != "baseline")

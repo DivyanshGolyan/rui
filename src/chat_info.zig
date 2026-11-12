@@ -12,7 +12,7 @@ const client_defaults = @import("client_defaults.zig");
 const tools = @import("built_in_tool.zig");
 const ModelChoice = @import("model_choice.zig");
 const Editor = @import("TerminalEditor.zig");
-const keymap = @import("keymap.zig");
+const panel_editor = @import("panel_editor.zig");
 const TerminalText = @import("TerminalText.zig");
 const shortPath = @import("home_path.zig").shortPath;
 const view = @import("overview_view.zig");
@@ -151,7 +151,7 @@ fn bind(self: *Self) void {
     self.model_choice.selection = self.panel.selection;
     self.model_choice.quiet = self.panel.quiet;
     self.panel.title_widget = .{ .userdata = self, .drawFn = drawTitle };
-    self.panel.custom_choice = if (self.model_choice.active) .{ .field = 4, .widget = self.model_choice.widget() } else null;
+    self.panel.custom_choice = if (self.model_choice.active) self.model_choice.field(4) else null;
 }
 
 fn activate(raw: *anyopaque, ctx: *vxfw.EventContext, row: usize) !void {
@@ -292,7 +292,7 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
         return;
     }
     if (self.renaming) {
-        const outcome = self.rename_editor.appEvent(keymap.every, input, self.pasting);
+        const outcome = panel_editor.event(&self.rename_editor, input, self.pasting, &self.failures[6]);
         switch (outcome) {
             .submit => {
                 const text = self.rename_editor.buffer[0..self.rename_editor.length];
@@ -304,7 +304,6 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
                     if (self.pending != null or self.failures[6] == null) self.renaming = false;
                 }
             },
-            .refused => self.failures[6] = " · name couldn't be entered",
             else => {},
         }
         ctx.consumeAndRedraw();
@@ -345,7 +344,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const children = try ctx.arena.alloc(vxfw.SubSurface, 2);
     children[0] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = try self.bodyWidget().draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = size.height - 1 })) };
     children[1] = .{ .origin = .{ .row = size.height - 1, .col = 0 }, .surface = try self.footerWidget().draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = 1 })) };
-    return .{ .widget = self.widget(), .size = size, .buffer = &.{}, .children = children };
+    return .{ .widget = self.widget(), .size = size, .buffer = &.{}, .children = children, .cursor = children[0].surface.cursor };
 }
 
 fn drawBody(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
@@ -857,11 +856,28 @@ test "Chat info model choice is a full-width field and saves a typed model" {
     page.panel.selected = 4;
     try press(&page, &ctx, vaxis.Key.enter);
     try std.testing.expect(page.model_choice.active);
-    const surface = try page.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 99, .height = 20 }, .cell_size = .{} });
-    const child = surface.children[0].surface.children[1];
-    try std.testing.expectEqual(@as(i17, 0), child.origin.col);
-    try std.testing.expectEqual(@as(u16, 99), child.surface.size.width);
+    for ([_]u16{ 99, 46 }) |width| {
+        const surface = try page.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
+        const parts = surface.children[0].surface.children;
+        const child = parts[parts.len - 1];
+        try std.testing.expectEqual(@as(i17, 0), child.origin.col);
+        try std.testing.expectEqual(width, child.surface.size.width);
+        try std.testing.expectEqual(@as(u16, 19), surface.cursor.?.col);
+        try std.testing.expectEqual(@as(u16, 6), surface.cursor.?.row);
+        try std.testing.expectEqualStrings("C", surface.children[0].surface.readCell(3, 7 + page.panel.custom_height).char.grapheme);
+        try std.testing.expect(std.mem.indexOf(u8, try dump(&page, arena.allocator(), width, 20), "Filter:") == null);
+    }
     try typeText(&page, &ctx, "5.5");
+    for ([_]u16{ 99, 46 }) |width| {
+        const surface = try page.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
+        var screen = try vaxis.Screen.init(arena.allocator(), .{ .cols = width, .rows = 20, .x_pixel = 0, .y_pixel = 0 });
+        surface.render(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = 20, .screen = &screen }, page.widget());
+        try std.testing.expect(screen.cursor_vis);
+        try std.testing.expectEqual(@as(u16, 22), screen.cursor.col);
+        try std.testing.expectEqual(@as(u16, 6), screen.cursor.row);
+        try std.testing.expectEqualStrings("5", screen.readCell(19, 6).?.char.grapheme);
+        try std.testing.expectEqualStrings("C", screen.readCell(3, 7 + page.panel.custom_height).?.char.grapheme);
+    }
     const id = page.model_choice.menu.entries[page.model_choice.selected.?].id;
     try press(&page, &ctx, vaxis.Key.enter);
     try std.testing.expectEqualStrings(id, fixture.edit.?.model);
@@ -919,7 +935,7 @@ test "Chat info rename failure words remain visible beside long editable names" 
         try std.testing.expect(page.renaming);
         const words = switch (failure) {
             0 => "couldn't save",
-            1 => "name couldn't be entered",
+            1 => "text couldn't be entered",
             2 => "name must be one line",
             else => unreachable,
         };
@@ -1020,7 +1036,10 @@ test "Chat info shared ASCII capability reaches tools model rename failures and 
             try std.testing.expect(!page.panel.unicode and !page.model_choice.unicode);
             try std.testing.expect(std.mem.indexOf(u8, text, if (page.narrow) " < Fix retry deadline . info" else " Fix retry deadline . info") != null);
             if (state == 2) try std.testing.expect(std.mem.indexOf(u8, text, "+ bash") != null);
-            if (state >= 3) try std.testing.expect(std.mem.indexOf(u8, text, "Filter:") != null);
+            if (state >= 3) {
+                try std.testing.expect(std.mem.indexOf(u8, text, "Filter:") == null);
+                if (state == 4) try std.testing.expect(std.mem.indexOf(u8, text, ". no matches") != null);
+            }
         }
     }
 }
@@ -1226,4 +1245,66 @@ test "Chat info hosted parts and standalone wrapper respect finite zero and smal
             _ = arena.reset(.retain_capacity);
         }
     };
+}
+
+test "Chat info Rename recovers refused input without reopening its field" {
+    const Fault = enum { typed_overflow, invalid_utf8, invalid_key, invalid_scalar, paste_overflow, invalid_paste, edit_rejected, paste_edit_rejected, unbound };
+    for (std.enums.values(Fault)) |fault| {
+        errdefer std.debug.print("Rename recovery fault={s}\n", .{@tagName(fault)});
+        var fixture: Fixture = .{};
+        fixture.init();
+        var page: Self = .{ .backend = fixture.backend() };
+        page.refresh();
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        page.panel.selected = 6;
+        try press(&page, &ctx, vaxis.Key.enter);
+        try press(&page, &ctx, vaxis.Key.left);
+        const spaces = @as([status.max_label_bytes + 1]u8, @splat(' '));
+        switch (fault) {
+            .typed_overflow => try typeText(&page, &ctx, &spaces),
+            .invalid_utf8 => try typeText(&page, &ctx, "\xff"),
+            .invalid_key => try page.widget().handleEvent(&ctx, .invalid_key),
+            .invalid_scalar => try typeText(&page, &ctx, "z\x01"),
+            .edit_rejected => {
+                page.rename_editor.cursor = 0;
+                try typeText(&page, &ctx, "\u{301}");
+            },
+            .unbound => try page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = 'u', .mods = .{ .alt = true } } }),
+            .paste_overflow, .invalid_paste, .paste_edit_rejected => {
+                try page.widget().handleEvent(&ctx, .paste_start);
+                try typeText(&page, &ctx, switch (fault) {
+                    .paste_overflow => &spaces,
+                    .invalid_paste => "\xff",
+                    .paste_edit_rejected => "ok\n\u{301}",
+                    else => unreachable,
+                });
+                try page.widget().handleEvent(&ctx, .paste_end);
+                if (fault == .paste_overflow) try std.testing.expectEqualStrings(page.title(), page.rename_editor.buffer[0..page.rename_editor.length]);
+            },
+        }
+        const retained = try arena.allocator().dupe(u8, page.rename_editor.buffer[0..page.rename_editor.length]);
+        const caret = page.rename_editor.cursor;
+        if (page.rename_editor.rejected != null) try press(&page, &ctx, vaxis.Key.enter);
+        try std.testing.expect(page.renaming);
+        try std.testing.expectEqual(@as(?Edit, null), fixture.edit);
+        try std.testing.expectEqualStrings(retained, page.rename_editor.buffer[0..page.rename_editor.length]);
+        try std.testing.expectEqual(caret, page.rename_editor.cursor);
+        try std.testing.expect(page.rename_editor.rejected == null);
+        try std.testing.expectEqual(@as(u3, 0), page.rename_editor.partial_length);
+        try std.testing.expect(!page.rename_editor.pasting);
+        for ([_]u16{ 99, 46 }) |width| {
+            try std.testing.expect(std.mem.indexOf(u8, try dump(&page, arena.allocator(), width, 12), "couldn't be entered") != null);
+        }
+        if (caret == 0) try press(&page, &ctx, vaxis.Key.right);
+        try press(&page, &ctx, vaxis.Key.backspace);
+        try std.testing.expectEqual(retained.len - 1, page.rename_editor.length);
+        try typeText(&page, &ctx, "X");
+        const corrected = try arena.allocator().dupe(u8, page.rename_editor.buffer[0..page.rename_editor.length]);
+        try press(&page, &ctx, vaxis.Key.enter);
+        try std.testing.expect(!page.renaming);
+        try std.testing.expectEqualStrings(corrected, fixture.edit.?.label);
+        try std.testing.expectEqual(@as(?[]const u8, null), page.failures[6]);
+    }
 }

@@ -72,7 +72,7 @@ from terminal_process import close_pty, answers_to, open_pty, spawn, terminal_pr
 import model_fixture as fixture
 import codex_fixture
 import os_semantics
-from human_cli_fixture import chat_info_frame, chat_info_open, panel_frame, ALLOW, CAPTURE_NOTICE, CHOICE, highlighted, _captures, action_ready, admit, await_screen, chat_content_row, command_frame, composer_ready, conversation_text, current_screen, draining, drop_spent_readiness, keyed_frame, next_frame, overview_frame, overview_title, pick_deny, read_terminal, return_to_live, run, settle_screen, shown, terminal_capture, terminal_exit, terminal_gate, terminal_step
+from human_cli_fixture import model_choice_frame, model_choice_shown, chat_info_frame, chat_info_open, panel_frame, ALLOW, CAPTURE_NOTICE, CHOICE, highlighted, _captures, action_ready, admit, await_screen, chat_content_row, command_frame, composer_ready, conversation_text, current_screen, draining, drop_spent_readiness, keyed_frame, next_frame, overview_frame, overview_title, pick_deny, read_terminal, return_to_live, run, settle_screen, shown, terminal_capture, terminal_exit, terminal_gate, terminal_step
 
 
 def terminal_safe_json(text):
@@ -2646,10 +2646,9 @@ def main(selected="all"):
                 terminal_step(master, command, "Unknown command", composer=True)
             assert fixture.command("session", "inspect", "--store", store, "--session", session)["session"] == before_configure
             chat_info_open(master)
-            panel_frame(master, lambda frame: "Filter:" in frame,
-                        b"\x1b[B\x1b[B\x1b[B\r")
-            panel_frame(master, lambda frame: "Filter: gpt-6-sol" in frame, b"gpt-6-sol")
-            configured = panel_frame(master, lambda frame: "Filter:" not in frame and "saving" not in frame, b"\r")
+            model_choice_frame(master, b"\x1b[B\x1b[B\x1b[B\r", query="")
+            model_choice_frame(master, b"gpt-6-sol", query="gpt-6-sol", more=False)
+            configured = panel_frame(master, lambda frame: not model_choice_shown(frame) and "saving" not in frame, b"\r")
             assert "gpt-6-sol" in configured and "request:" not in configured, configured
             for receipt in ("Store:", "Session:", "key:", "admitted:", "replayed:"):
                 assert receipt not in configured, configured

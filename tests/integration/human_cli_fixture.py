@@ -296,6 +296,56 @@ def app_settings_open(master):
                        for row in screen.splitlines()), b"\r")
 
 
+
+def model_choice_details(screen):
+    """Read the inline Model field and its indented, bounded visible matches."""
+    rows = [row.rpartition("│")[2] if "│" in row else row for row in screen.split("\n")]
+    field = next((index for index, row in enumerate(rows) if row.startswith("   Model")), None)
+    matches = []
+    more = None
+    if field is not None:
+        for index, row in enumerate(rows[field + 1:], field + 1):
+            hit = re.match(r"^   [✓+ ] ([A-Za-z0-9][^ ]*)", row)
+            remaining = re.fullmatch(r"   [↓v] ([1-9][0-9]*) more", row)
+            if hit:
+                matches.append((index, hit[1], row))
+            elif remaining:
+                more = int(remaining[1])
+                break
+            else:
+                break
+    value = rows[field][19:].strip() if field is not None else None
+    return {"rows": rows, "field": field, "value": value, "matches": matches, "more": more}
+
+
+def model_choice_shown(screen, query=None):
+    choice = model_choice_details(screen)
+    return bool(choice["matches"]) and (query is None or choice["value"] == query)
+
+
+def assert_model_choice(screen, *, query=None, more=None):
+    """No separate Filter row; matches follow Model at the shared indent."""
+    choice = model_choice_details(screen)
+    assert "Filter:" not in screen, screen
+    assert not any(re.match(r"^   ↑(?: |$)", row) for row in choice["rows"]), screen
+    assert model_choice_shown(screen, query), screen
+    hits = choice["matches"]
+    assert hits[0][0] == choice["field"] + 1, ("matches immediately follow inline input", screen)
+    assert [hit[0] for hit in hits] == list(range(hits[0][0], hits[0][0] + len(hits))), screen
+    assert len(hits) <= 8, ("bounded Model match list", screen)
+    if more is not None:
+        assert (choice["more"] is not None) == more, screen
+    if choice["more"] is not None:
+        assert len(hits) < 8, ("overflow count has its own bounded row", screen)
+    return choice
+
+
+def model_choice_frame(master, keys=b"", *, query=None, more=None):
+    shown = panel_frame(master, lambda screen: model_choice_shown(screen, query), keys)
+    assert_model_choice(shown, query=query, more=more)
+    return shown
+
+
 class AppModelCatalog:
     """Hold the first catalog reply so initial-choice invalidation is ordered."""
 
@@ -321,15 +371,15 @@ class AppModelCatalog:
 def app_model_open(master, query=b"", *, catalog=None):
     """Open settings Model; an ordered initial catalog replaces its fallback."""
     app_settings_open(master)
-    shown = panel_frame(master, lambda screen: "Filter:" in screen, b"\r")
+    shown = model_choice_frame(master, b"\r", query="")
     if catalog is not None:
         fixture.wait_for(catalog.entered.is_set, "initial Model catalog requested")
         catalog.release.set()
-        panel_frame(master, lambda screen: "Filter:" not in screen)
+        panel_frame(master, lambda screen: not model_choice_shown(screen))
         catalog.close()
-        shown = panel_frame(master, lambda screen: "Filter:" in screen, b"\r")
+        shown = model_choice_frame(master, b"\r", query="")
     if query:
-        shown = panel_frame(master, lambda screen: "Filter: " + query.decode() in screen, query)
+        shown = model_choice_frame(master, query, query=query.decode())
     return shown
 
 

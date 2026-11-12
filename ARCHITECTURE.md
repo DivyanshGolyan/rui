@@ -2429,7 +2429,12 @@ Bare `rui` accepts no initial Message operand.
 Terminal input goes through the overview composer, which is a conversation's line editor: it edits, rejects and ends lines as a draft does.
 The overview keeps Esc, Ctrl-C and Ctrl-X, and the arrows, Home and End select rows while the composer is empty; Up and Down past a draft's lines select rows too.
 Before Enter, its `/configure` edits only the start settings of the Session that Enter will start.
-The Model field of app settings opens the shared full-width `model_choice.zig` choice, also used by chat info.
+The Model field of app settings opens the shared `model_choice.zig` inline field editor and match list, also used by chat info.
+The filter replaces the field’s value at the normal value column; there is no separate `Filter:` row.
+Matches start under the field at the shared panel indent (current mark, one-cell gap, then the model name), shrinking to the number of matches within the viewport.
+Only models below the viewport get a quiet final `↓ N more` row (`v` in ASCII), never an upward overflow hint.
+The compact context-size column follows the longest model name actually shown, not hidden matches or the terminal’s right edge.
+`panel_editor.zig` is the sole shared refusal/recovery transition for the model filter and Rename: refused text remains editable, failures stay on the field, and correction or submission clears the failure through that owner.
 The overview's worker reads the Host's [`/v1/model-list`](#public-session-activity), so the screen never blocks on a model list.
 The choice uses a revisioned snapshot and validates it before drawing or handling an event; replacing or releasing a list closes the old choice before it can use retired storage.
 It falls back to the compiled model catalog when no live list is available.
@@ -2913,7 +2918,7 @@ A blank row separates the fields from Rename, Archive and Copy last answer, even
 Up and Down visit selectable fields and actions, and Enter opens a choice or runs the action.
 The panel contributes no internal footer: its one footer substitutes for the normal chat footer after the input’s lower divider on the physical last row, leaving the draft between panel and footer and no blank notice row below it.
 Permissions names `run without asking` and `ask first`; Tools selects from the built-in tool set.
-Model opens the shared full-width choice for this Session's provider, with type-to-filter, Up/Down and Enter to save.
+Model opens that shared inline editor and compact match list for this Session’s provider, with type-to-filter, Up/Down and Enter to save.
 A change applies to subsequent model requests through the existing typed Session configure request; it does not send composer text or change the Session's provider.
 Esc closes only the topmost edit or choice first, then the panel.
 

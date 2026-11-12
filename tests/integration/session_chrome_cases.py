@@ -24,6 +24,8 @@ from human_cli_fixture import (
     chat_content_row,
     chat_info_open,
     keyed_frame,
+    model_choice_frame,
+    model_choice_shown,
     run,
     settle_screen,
     terminal_capture,
@@ -350,15 +352,30 @@ def pages_case():
             assert "Folder" in status and "Model" in status, status
             assert not any(row.startswith("Browsing") for row in transcript_rows(status)), status
             # Folder is read-only: three Downs reach Model, not Folder.
-            choice = chrome.frame(master, b"\x1b[B\x1b[B\x1b[B\r", lambda screen: "Filter:" in screen)
+            choice = model_choice_frame(master, b"\x1b[B\x1b[B\x1b[B\r", query="")
             assert "kept draft" in choice, choice
             assert_chat_info_layout(choice, context=True)
-            chrome.frame(master, b"\x1b", lambda screen: "Filter:" not in screen and "Copy last answer" in screen)
+            chrome.frame(master, b"\x1b", lambda screen: not model_choice_shown(screen) and "Copy last answer" in screen)
             # Context, when present, is read-only: the next selectable row is Rename.
             chrome.frame(master, b"\x1b[B\rCANCELLED-NAME", lambda screen: "CANCELLED-NAME" in screen)
             chrome.frame(master, b"\x1b", lambda screen: "CANCELLED-NAME" not in screen and "Copy last answer" in screen)
+            # Refused paste retains usable name bytes, then the same editor
+            # recovers and submits without closing/reopening the Rename field.
+            before_name = json.loads(run(chrome.home, "session", "inspect", "--store", chrome.store,
+                                         "--session", session))["session"]["label"]
+            chrome.frame(master, b"\rkept-name", lambda screen: "kept-name" in screen)
+            refused = chrome.frame(master, b"\x1b[200~\xff\x1b[201~\r",
+                                   lambda screen: "text couldn't be entered" in screen)
+            assert "kept-name" in refused and "kept draft" in refused, refused
+            assert json.loads(run(chrome.home, "session", "inspect", "--store", chrome.store,
+                                  "--session", session))["session"]["label"] == before_name
+            chrome.frame(master, b"\x01\x0bRecovered rename\r", lambda screen:
+                         "Recovered rename" in screen and "saving" not in screen
+                         and "text couldn't be entered" not in screen)
+            assert json.loads(run(chrome.home, "session", "inspect", "--store", chrome.store,
+                                  "--session", session))["session"]["label"] == "Recovered rename"
             returned = chrome.frame(master, b"\x1b", lambda screen: latest(screen, "SEED-ANSWER") and composing(screen, "kept draft"))
-            assert "Copy last answer" not in returned and "Filter:" not in returned, returned
+            assert "Copy last answer" not in returned and not model_choice_shown(returned), returned
             assert len(chrome.endpoint.requests) == 1, chrome.endpoint.requests
             chrome.frame(master, b"\x15", lambda screen: composing(screen, ""))
             help_page = chrome.frame(master, b"/help\r", lambda screen: transcript_rows(screen)[0] == "Marks")
