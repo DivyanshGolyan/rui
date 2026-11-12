@@ -21,6 +21,7 @@ const cores = .{
     .{ "caller_error.zig", @import("caller_error.zig") },
     .{ "caller_exit.zig", @import("caller_exit.zig") },
     .{ "change_ring.zig", @import("change_ring.zig") },
+    .{ "chatgpt_plan_wire.zig", @import("chatgpt_plan_wire.zig") },
     .{ "cli_args.zig", @import("cli_args.zig") },
     .{ "cli_grammar.zig", @import("cli_grammar.zig") },
     .{ "cli_option_names.zig", @import("cli_option_names.zig") },
