@@ -65,7 +65,8 @@
       "absent": [
         "[Archived]",
         "/unarchive",
-        "{session:Archive audit}"
+        "{session:Archive audit}",
+        "· archived"
       ]
     },
     {
@@ -262,6 +263,34 @@
       "absent": [
         "› /effort",
         "enter pick"
+      ]
+    },
+    {
+      "name": "all-sessions",
+      "note": "Mixed archive states retain a quiet archived suffix; the archived-only list does not",
+      "open": "overview",
+      "steps": [
+        {
+          "text": "/sessions all"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Archive audit · archived"
+        }
+      ],
+      "expect": [
+        "Archive audit · archived",
+        "Draft lifecycle"
+      ],
+      "absent": [
+        "[Archived]",
+        "Draft lifecycle · archived",
+        "{session:Archive audit}",
+        "{session:Draft lifecycle}"
       ]
     },
     {

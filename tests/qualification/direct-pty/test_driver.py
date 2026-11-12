@@ -16,44 +16,63 @@ import host_process
 
 class NavigationTests(unittest.TestCase):
     @staticmethod
-    def check(screen, first, browsing):
+    def check(screen, first, browsing, feed_rows):
         # Model fixtures read the binary argument at import; these pure screen
         # checks do not start a fixture or require a terminal emulator.
         with patch.object(sys, "argv", [sys.argv[0], sys.executable]):
             from scenarios import assert_navigation_history
-        assert_navigation_history(screen, first, browsing)
+        assert_navigation_history(screen, first, browsing, feed_rows)
 
     @staticmethod
     def screen(first, count, chip="↓"):
-        return "\n".join([f"History line {n:03d}" for n in range(first, first + count)] + [chip])
+        return "\n".join([f"History line {n:03d}" for n in range(first, first + count)]
+                         + [chip, "─" * 80, " › ", "─" * 80, " ‹ fixture"])
 
     def test_continuous_feed_ranges_and_reserved_chip(self):
-        self.check(self.screen(83, 17, "TD4 history end\n"), 83, False)
-        for first in (65, 74, 80, 81, 82):
-            with self.subTest(first=first):
-                self.check(self.screen(first, 18), first, True)
-                # Reject the old live-sized screen and any one-row
-                # distance/direction error, not merely marker presence.
-                for actual, count in ((first, 19), (first - 1, 18), (first + 1, 18)):
-                    with self.assertRaisesRegex(AssertionError, "navigation history anchor/distance"):
-                        self.check(self.screen(actual, count), first, True)
-        for chip in ("", "↓ 1 new"):
-            with self.assertRaisesRegex(AssertionError, "navigation marker"):
-                self.check(self.screen(74, 18, chip), 74, True)
+        # Cover both the old and reclaimed-row layouts, plus other pane sizes.
+        # Only the composer boundary supplies capacity; exact content and
+        # anchor/distance checks still reject missing/extra rows and keys.
+        for feed_rows in (8, 18, 19, 27):
+            live_first = 101 - feed_rows
+            self.check(self.screen(live_first, feed_rows - 1, "TD4 history end\n"), live_first, False, feed_rows)
+            for back in (1, 3, feed_rows // 2, 2 * (feed_rows // 2)):
+                first = live_first - back
+                with self.subTest(feed_rows=feed_rows, first=first):
+                    self.check(self.screen(first, feed_rows), first, True, feed_rows)
+                    for actual, count in ((first, feed_rows + 1), (first, feed_rows - 1),
+                                          (first - 1, feed_rows), (first + 1, feed_rows)):
+                        with self.assertRaisesRegex(AssertionError, "navigation (history anchor/distance|feed capacity changed)"):
+                            self.check(self.screen(actual, count), first, True, feed_rows)
+            for chip in ("", "↓ 1 new"):
+                with self.assertRaisesRegex(AssertionError, "navigation marker"):
+                    self.check(self.screen(live_first - 1, feed_rows, chip), live_first - 1, True, feed_rows)
+
+    def test_capacity_comes_from_composer_not_history_count(self):
+        with patch.object(sys, "argv", [sys.argv[0], sys.executable]):
+            from scenarios import navigation_rows, navigation_first
+        for rows in (8, 18, 19, 27):
+            screen = self.screen(0, rows)
+            self.assertEqual(navigation_rows(screen.replace("History line", "Other output")), rows)
+            live_first = 101 - rows
+            self.assertEqual(navigation_first(live_first, rows, {"pages": 2, "lines": 1}),
+                             live_first - 2 * (rows // 2) - 1)
+            with self.assertRaisesRegex(AssertionError, "navigation composer rule"):
+                navigation_rows(screen.replace("─", " "))
 
     def test_status_work_below_long_path_viewport(self):
         with patch.object(sys, "argv", [sys.argv[0], sys.executable]):
             from scenarios import status_work
 
         class Terminal:
-            def __init__(self, lines):
+            def __init__(self, lines, feed_rows):
                 self.lines, self.top, self.generation = lines, 0, 1
+                self.feed_rows = feed_rows
                 self.screen = self
                 self.markers, self.sent = [], []
 
             @property
             def completed(self):
-                return "\n".join(self.lines[self.top:self.top + 18])
+                return "\n".join(self.lines[self.top:self.top + self.feed_rows])
 
             def reached(self, text):
                 return text in self.completed
@@ -64,23 +83,27 @@ class NavigationTests(unittest.TestCase):
 
             def send(self, data):
                 self.sent.append(data)
-                self.top += 9
+                self.top += max(1, self.feed_rows // 2)
                 self.generation += 1
 
             def wait(self, predicate, *, label, after):
                 assert self.generation > after and predicate(), label
 
         lines = [" Status · aaaaaa", "Permissions     bypass"] + ["long path continuation"] * 27 + [" Work"]
-        tty = Terminal(lines)
-        status_work(tty, "aaaaaa", 1024)
-        self.assertEqual(tty.markers, [" Status · ", " · aaaaaa", "Permissions     "])
-        self.assertEqual(tty.sent, [b"\x1b[6~"] * 2)
-        self.assertTrue(tty.reached(" Work"))
-        # Missing Work must fail within a document-derived key budget.
-        missing = Terminal(lines[:-1] + ["missing heading"])
-        with self.assertRaisesRegex(AssertionError, "status Work within bounded page"):
-            status_work(missing, "aaaaaa", 1024)
-        self.assertLessEqual(len(missing.sent), (14 * 2 + 4 + 2 * 26 + 8) // 9)
+        for feed_rows in (8, 18, 19, 27):
+            with self.subTest(feed_rows=feed_rows):
+                page_rows = feed_rows // 2
+                tty = Terminal(lines, feed_rows)
+                status_work(tty, "aaaaaa", 1024, feed_rows)
+                self.assertEqual(tty.markers, [" Status · ", " · aaaaaa", "Permissions     "])
+                pages = (len(lines) - feed_rows + page_rows - 1) // page_rows
+                self.assertEqual(tty.sent, [b"\x1b[6~"] * pages)
+                self.assertTrue(tty.reached(" Work"))
+                # Missing Work must fail within a document-derived key budget.
+                missing = Terminal(lines[:-1] + ["missing heading"], feed_rows)
+                with self.assertRaisesRegex(AssertionError, "status Work within bounded page"):
+                    status_work(missing, "aaaaaa", 1024, feed_rows)
+                self.assertLessEqual(len(missing.sent), (14 * 2 + 4 + 2 * 26 + page_rows - 1) // page_rows)
 
     def test_all_navigation_vectors_keep_their_input_intent(self):
         rows = inventory()
@@ -94,8 +117,9 @@ class NavigationTests(unittest.TestCase):
                               ("key-end-ss3-f", b"\x1bOF"),
                               ("key-end-csi-4", b"\x1b[4~")):
             self.assertEqual(navigation[name]["return_chunks"][0]["hex"], encoded.hex())
-        self.assertEqual([step["first_history"] for step in navigation["key-pgdn"]["middle"]], [74])
-        self.assertEqual([step["first_history"] for step in navigation["wheel-alt-scroll"]["middle"]], [81, 82])
+        self.assertEqual([step["back"] for step in navigation["key-pgdn"]["middle"]], [{"pages": 1, "lines": 0}])
+        self.assertEqual([step["back"] for step in navigation["wheel-alt-scroll"]["middle"]],
+                         [{"pages": 0, "lines": 2}, {"pages": 0, "lines": 1}])
 
 
 class ExitTests(unittest.TestCase):

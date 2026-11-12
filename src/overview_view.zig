@@ -3589,7 +3589,14 @@ pub fn rowSegments(arena: Allocator, state: *const State, at: usize, width: u16,
     const age_cells = @min(built.measure(age), end -| 3);
     const name_end = end -| age_cells -| @intFromBool(age_cells != 0);
     const selected = if (state.conversing) |reference| std.mem.eql(u8, &reference, &row.reference) else state.selected == .session and std.mem.eql(u8, &state.selected.session, &row.reference);
-    _ = try built.put(3, name, name_end -| 3, .{ .colour = if (selected) .strong else .normal, .bold = selected });
+    // The archived-only list already supplies this fact; mixed lists do not.
+    const archived = if (row.archive_state == .archived and state.archive != .archived)
+        if (caps.unicode) " · archived" else " . archived"
+    else
+        "";
+    const name_room: usize = name_end -| 3;
+    const name_cells = try built.put(3, name, name_room -| built.measure(archived), .{ .colour = if (selected) .strong else .normal, .bold = selected });
+    _ = try built.put(3 + name_cells, archived, name_room -| name_cells, .{ .colour = .quiet });
     _ = try built.put(end -| age_cells, age, age_cells, .{ .colour = .quiet });
     return segmentsOf(arena, try built.finish(), width, .{});
 }
@@ -6951,6 +6958,43 @@ test "archive views remove changed rows outside the server filter and select the
     _ = try refresh(&state, .changed, testToken(4), &.{b});
     try std.testing.expectEqual(@as(usize, 0), state.rows.items.len);
     try std.testing.expect(state.selected == .new_session);
+}
+
+test "archive row marker follows the whole filter and row-state domain" {
+    for ([_]ArchiveFilter{ .active, .archived, .all }) |filter| for ([_]ArchiveState{ .active, .archived }) |archive| for ([_]bool{ false, true }) |selected| for ([_]u16{ 40, 46, 140 }) |width| for ([_]bool{ false, true }) |unicode_marks| {
+        var state = try opened(&.{session("aaaaaa", .{ .finished = ago(1) }, .{ .label = "Archive audit" })});
+        defer state.deinit();
+        // Exercise the draw owner even for pairs that a filtered listing omits.
+        state.archive = filter;
+        state.rows.items[0].archive_state = archive;
+        state.selected = if (selected) .{ .session = "aaaaaa".* } else .new_session;
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const segments = try rowSegments(arena.allocator(), &state, 0, width, .{ .unicode = unicode_marks }, 0);
+        const text = try segmentText(arena.allocator(), segments);
+        const expected = archive == .archived and filter != .archived;
+        const marker = if (unicode_marks) " · archived" else " . archived";
+        try std.testing.expectEqual(@as(usize, @intFromBool(expected)), std.mem.count(u8, text, marker));
+        try std.testing.expect(std.mem.indexOf(u8, text, "[Archived]") == null);
+        try std.testing.expect(std.mem.startsWith(u8, std.mem.trimStart(u8, text, " "), if (unicode_marks) "✓ Archive audit" else "+ Archive audit"));
+        try std.testing.expectEqual(selected, (try styleOf(segments, "Archive audit")).bold);
+        if (expected) {
+            try std.testing.expect(std.mem.indexOf(u8, text, if (unicode_marks) "Archive audit · archived" else "Archive audit . archived") != null);
+            const style = try styleOf(segments, "archived");
+            try std.testing.expectEqual(Colour.quiet, style.colour);
+            try std.testing.expect(!style.bold);
+        }
+    };
+}
+
+test "archive row marker survives a clipped name without overlapping the age" {
+    var state = try opened(&.{session("aaaaaa", .{ .finished = ago(1) }, .{ .label = "A long archived Session name that needs clipping" })});
+    defer state.deinit();
+    state.archive = .all;
+    state.rows.items[0].archive_state = .archived;
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    try expectRow(try rowSegments(arena.allocator(), &state, 0, 40, .{}, 0), 40, &.{ .{ "✓", .mark }, .{ "A long archived Sessi…", .strong }, .{ "· archived", .quiet }, .{ "1s", .quiet } });
 }
 
 test "archive filter switch clears hidden data and discards every stale traversal page" {
