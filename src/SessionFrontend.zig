@@ -685,16 +685,13 @@ fn hostFailure(self: *Self) bool {
 
 /// A palette click chooses the drawn row, then uses the input's Enter path:
 /// command choices run, incomplete words and skills replace the draft.
-fn appSelectCommand(raw: *anyopaque, ctx: *vxfw.EventContext, index: usize) !void {
+fn appSelectCommand(raw: *anyopaque, ctx: *vxfw.EventContext, pressed: slash_commands_shared.Shown.Pick) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     if (self.app_consent.request != null or self.app_hooks.root.pasting) return;
-    const drawn = self.screen.commands orelse return;
-    const current = self.nextCommands(drawn) orelse return;
-    // A pointer names the last frame's row, not a newly edited draft's row.
-    if (drawn.revision != current.revision or drawn.source != current.source) return;
-    const shown = self.shownCommands() orelse return;
-    if (index >= shown.list.count) return;
-    shown.highlight = index;
+    // A pointer names the row in the list the last frame drew, not the
+    // list a key has stored since for a newly edited draft.
+    const stored = &self.screen.commands;
+    _ = slash_commands_shared.Shown.pickedNow(stored, self.nextCommands(stored.*), pressed) orelse return;
     try appEvent(raw, ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
 }
 
@@ -8268,6 +8265,12 @@ test "App Session palette refuses clicks on stale drafts closed lists and during
     try held.keys("o"); // The drawn /configure row is not the new /copy row.
     try widget_.handleEvent(&events, click);
     try std.testing.expectEqualStrings("/co", held.self.input.composition().bytes);
+    // A key that acts on `/co`'s list before a frame draws it does not make
+    // the drawn `/c` row its row.
+    try held.keys("\x1b[B\x1b[A");
+    try widget_.handleEvent(&events, click);
+    try std.testing.expectEqualStrings("/co", held.self.input.composition().bytes);
+    try std.testing.expectEqual(null, held.self.input.queuedCommand());
     _ = try held.draw();
     held.root.pasting = true;
     try widget_.handleEvent(&events, click);

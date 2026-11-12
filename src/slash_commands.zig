@@ -550,6 +550,29 @@ pub const Shown = struct {
         return if (kept.seen == .drawn) kept else null;
     }
 
+    /// A pointer press on a row a frame drew: the row's index and the
+    /// identity of the list that frame drew it in, captured at draw time.
+    pub const Pick = struct { index: usize, revision: u64, source: u64 };
+
+    /// The pick of the row at `index` in this list, as a frame draws it.
+    pub fn pick(self: *const Shown, index: usize) Pick {
+        return .{ .index = index, .revision = self.revision, .source = self.source };
+    }
+
+    /// The list a pointer press acts on: `drawnNow`'s, with the pressed row
+    /// highlighted as the arrows would leave it, only while it is still the
+    /// list `pressed` names (the same draft revision and row source the
+    /// frame drew). Null, changing nothing, for an edited draft, replaced
+    /// rows, a closed or undrawn list, or a row the list no longer has.
+    pub fn pickedNow(stored: *?Shown, current: ?Shown, pressed: Pick) ?*Shown {
+        const now = current orelse return null;
+        if (now.revision != pressed.revision or now.source != pressed.source) return null;
+        const shown = drawnNow(stored, now) orelse return null;
+        if (pressed.index >= shown.list.count) return null;
+        shown.highlight = pressed.index;
+        return shown;
+    }
+
     /// The rows the list asks of the frame: none once Esc closed it.
     pub fn rows(self: *const Shown) usize {
         return if (self.seen == .closed) 0 else self.list.count;

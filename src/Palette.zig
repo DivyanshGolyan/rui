@@ -12,10 +12,14 @@ method: vaxis.gwidth.Method = .unicode,
 style: vaxis.Style = .{},
 quiet: vaxis.Style = .{ .dim = true },
 userdata: ?*anyopaque = null,
-/// Receives the absolute entry index, exactly as the screen selects with Enter.
-on_select: ?*const fn (*anyopaque, *vxfw.EventContext, usize) anyerror!void = null,
+/// Receives the pressed row as the latest frame drew it: its absolute entry
+/// index and that frame's list identity. The screen's owner decides what it
+/// does; the list may have changed since.
+on_select: ?*const fn (*anyopaque, *vxfw.EventContext, commands.Shown.Pick) anyerror!void = null,
 hover: Hover = .{},
 first: usize = 0,
+/// The list identity the latest frame drew, which a press names.
+drawn: commands.Shown.Pick = .{ .index = 0, .revision = 0, .source = 0 },
 
 pub fn widget(self: *Self) vxfw.Widget {
     return .{ .userdata = self, .eventHandler = event, .drawFn = draw };
@@ -33,7 +37,9 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
             const callback = self.on_select orelse return;
             for (self.hover.targets, 0..) |rect, index| {
                 if (rect.contains(input.mouse.col, input.mouse.row)) {
-                    return callback(self.userdata.?, ctx, self.first + index);
+                    var pressed = self.drawn;
+                    pressed.index = self.first + index;
+                    return callback(self.userdata.?, ctx, pressed);
                 }
             }
         },
@@ -60,6 +66,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const count = commands.named(list.count, height);
     const first = list.firstShown(self.shown.highlight, height);
     self.first = first;
+    self.drawn = self.shown.pick(first);
     const targets = try ctx.arena.alloc(Hover.Rect, if (self.on_select != null) count else 0);
     for (targets, 0..) |*rect, index| rect.* = .{ .row = @intCast(index), .width = width };
     self.hover.targets = targets;
@@ -115,9 +122,11 @@ test "Palette keeps the selected command visible at one row and hides closed or 
 test "Palette hover is transient and clicks activate only visible command rows" {
     const Selected = struct {
         index: ?usize = null,
-        fn select(raw: *anyopaque, _: *vxfw.EventContext, index: usize) !void {
+        revision: ?u64 = null,
+        fn select(raw: *anyopaque, _: *vxfw.EventContext, pressed: commands.Shown.Pick) !void {
             const self: *@This() = @ptrCast(@alignCast(raw));
-            self.index = index;
+            self.index = pressed.index;
+            self.revision = pressed.revision;
         }
     };
     var selected: Selected = .{};
@@ -143,6 +152,11 @@ test "Palette hover is transient and clicks activate only visible command rows" 
     press.type = .press;
     try palette.widget().handleEvent(&ctx, .{ .mouse = press });
     try std.testing.expectEqual(@as(?usize, 1), selected.index);
+    // A press names the list the frame drew, not one stored since.
+    shown.revision = 8;
+    try palette.widget().handleEvent(&ctx, .{ .mouse = press });
+    try std.testing.expectEqual(@as(?u64, 7), selected.revision);
+    shown.revision = 7;
     try palette.widget().handleEvent(&ctx, .mouse_leave);
     const left = try palette.widget().draw(draw_ctx);
     try std.testing.expect(!left.readCell(0, 1).style.reverse);

@@ -734,15 +734,10 @@ fn appClick(raw: *anyopaque, ctx: *vxfw.EventContext, click: view.Click) anyerro
     ctx.redraw = true;
 }
 
-fn appPaletteSelect(raw: *anyopaque, ctx: *vxfw.EventContext, index: usize) anyerror!void {
-    const self: *Self = @ptrCast(@alignCast(raw));
-    if (self.root.pasting) return;
-    const draft = self.composerDraft();
-    const shown = slash_commands.Shown.drawnNow(&self.state.commands, view.nextCommands(&self.state, draft)) orelse return;
-    if (index >= shown.list.count) return;
-    shown.highlight = index;
-    try self.appNext(ctx, try self.event(.{ .composed = .{ .input = .{ .composer = .submit }, .draft = draft } }));
-    ctx.redraw = true;
+/// A press on a command list row names the row as the frame drew it; the
+/// core decides what it does, as for every other click.
+fn appPaletteSelect(raw: *anyopaque, ctx: *vxfw.EventContext, pressed: slash_commands.Shown.Pick) anyerror!void {
+    try appClick(raw, ctx, .{ .command = pressed });
 }
 
 fn appNext(self: *Self, ctx: *vxfw.EventContext, next: ?Next) !void {
@@ -7064,6 +7059,31 @@ test "Overview mouse Palette hover survives redraw and a click follows Enter exc
     try std.testing.expect(try rig.click(4, row, 80, 24) == null);
     try std.testing.expect(rig.overview.state.picker != null);
     try std.testing.expect(std.mem.startsWith(u8, rig.overview.composerDraft().bytes, "/model"));
+}
+
+test "Overview mouse Palette click on a row drawn before the draft changed runs nothing" {
+    const rig = try openListed();
+    defer rig.close();
+    try std.testing.expect(try rig.press("/") == null);
+    var shown = try rig.shown(80, 24);
+    defer shown.deinit();
+    const row: u16 = for (0..24) |y| {
+        if (std.mem.startsWith(u8, try shown.line(@intCast(y)), "/archive")) break @intCast(y);
+    } else return error.TestExpectedArchiveRow;
+    // The same frame, as the widgets a press lands on hold it.
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const frame = try rig.overview.root.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 24 }, .cell_size = .{} });
+    // `e` arrives before the next frame: `/e` lists /exit where /archive was.
+    try std.testing.expect(try rig.press("e") == null);
+    try std.testing.expectEqualStrings("/e", rig.overview.composerDraft().bytes);
+    var ctx = rig.context();
+    defer ctx.cmds.deinit(std.testing.allocator);
+    try app_events.mouse(&ctx, frame, .{ .col = 1, .row = @intCast(row), .button = .left, .type = .press, .mods = .{} });
+    try std.testing.expect(!ctx.quit);
+    try std.testing.expectEqualStrings("/e", rig.overview.composerDraft().bytes);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqual(@as(usize, 0), Seen.now.archives);
 }
 
 test "Overview mouse New Session forwards blank whitespace task command and paste drafts" {
