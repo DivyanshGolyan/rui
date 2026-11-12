@@ -3501,7 +3501,7 @@ Both `call` and `approval_requested` rows carry inline `description`, `tool` and
 `tool` is the saved name, at most the tool-name bound, or null for an oversized rejected name (its full name remains in `fields[0]`).
 `server` is the MCP server from the proposing Operation's frozen offer, null for built-ins or an unknown tool, never today's tool set.
 These fields read existing call content, settlement and frozen-offer facts; no arguments are re-parsed and no Store-format change is needed.
-A current-format Store with the last released wire-13 metadata is validated and relabelled to wire 14 without a format step: SQLite uses the existing backed-up migration transaction with no DDL steps; MySQL does the metadata-only update in its validated ownership transaction. Unknown labels remain refused. Historical SQLite migrations also finalize their known wire-13 output.
+The format 69 → 70 migration owns the saved wire-13 → wire-14 move on both engines. A current-format Store must already carry wire 14; opening never relabels it.
 Opening either row through `activity-content` returns the call's original arguments JSON, including original whitespace and the description field.
 A forwarded approval reads and certifies the child's canonical call and returns that same saved detail and arguments, not anything belonging to the receiving Session.
 Core built-ins do not request permission; Bash and MCP calls under `ask` do.

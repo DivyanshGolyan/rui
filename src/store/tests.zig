@@ -15352,26 +15352,47 @@ test "MCP settlement saves one decoded presentation line or the tool name" {
     }.run);
 }
 
-test "wire-only upgrade preserves the current Store format and saved Session facts" {
-    try store_testing.forEachEngine(struct {
-        fn run(case: *store_testing.Case) !void {
-            var tmp = std.testing.tmpDir(.{});
-            defer tmp.cleanup();
-            var storage: Store = undefined;
-            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
-            const session = try configureTestSession(&storage, "wire-only-session");
-            const answer = [_]TestingAnswerPart{.{ .encoded = "saved answer", .decoded = "saved answer" }};
-            try answerTestTurn(&storage, &tmp, session.slice(), "wire-only-answer", &answer);
-            try store_testing.exec(&storage, "UPDATE store_meta SET meta_value='13' WHERE meta_key='wire_version'", .{});
-            try storage.close();
-            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
-            defer storage.close() catch unreachable;
-            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM store_meta WHERE meta_key='wire_version' AND meta_value=?1", .{protocol.wire_version}));
-            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM store_meta WHERE meta_key='format' AND meta_value=?1", .{std.fmt.comptimePrint("{d}", .{store_schema.schema_version})}));
-            _ = try expectOneWork(&storage, &tmp, session.slice(), "finished");
-            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM turn WHERE session_ref=?1 AND outcome_code='completed'", .{session.slice()}));
-        }
-    }.run);
+/// Both real format-69 fixtures call this after the owning 69 -> 70 step.
+/// The fixed historical rows contain a finished root and two Bash calls in
+/// its attached child's open Turn, one authorized and one awaiting approval.
+pub fn expectWireMigrationFacts(storage: *Store, tmp: *std.testing.TmpDir) !void {
+    _ = try expectOneWork(storage, tmp, "d8mv7p", "working");
+    _ = try expectOneWork(storage, tmp, "brhkcj", "pending");
+    var row = try testingListRow(storage, tmp, "brhkcj");
+    defer row.deinit();
+    try std.testing.expectEqualStrings("d8mv7p", row.get(&.{"parent"}).string);
+    var child: protocol.Bounded(protocol.max_session_bytes) = .{};
+    try child.set("brhkcj");
+    const page = try store_core.activityPageForTesting(storage, .{ .session = child, .kinds = .initMany(&.{ .call, .approval_requested }) });
+    try std.testing.expectEqual(@as(usize, 4), page.count);
+    var calls: usize = 0;
+    var approvals: usize = 0;
+    for (page.items[0..page.count]) |item| {
+        const ordinal = switch (item.value) {
+            .call => |call| ordinal: {
+                calls += 1;
+                try std.testing.expectEqualStrings("bash", call.tool.?.slice());
+                try std.testing.expectEqualStrings(if (call.call_ordinal == 0) "Run first command" else "Run second command", call.description.?.slice());
+                try std.testing.expect(call.server == null);
+                break :ordinal call.call_ordinal;
+            },
+            .approval_requested => |approval| ordinal: {
+                approvals += 1;
+                try std.testing.expectEqualStrings("brhkcj", approval.session.slice());
+                try std.testing.expectEqualStrings("bash", approval.tool.?.slice());
+                try std.testing.expectEqualStrings(if (approval.call_ordinal == 0) "Run first command" else "Run second command", approval.description.?.slice());
+                try std.testing.expect(approval.server == null);
+                break :ordinal approval.call_ordinal;
+            },
+            else => return error.UnexpectedActivity,
+        };
+        try expectActivityArguments(storage, child, item, if (ordinal == 0)
+            "{\"description\":\"Run first command\",\"cmd\":\"one\",\"timeout_ms\":null}"
+        else
+            "{\"description\":\"Run second command\",\"cmd\":\"two\",\"timeout_ms\":null}");
+    }
+    try std.testing.expectEqual(@as(usize, 2), calls);
+    try std.testing.expectEqual(@as(usize, 2), approvals);
 }
 
 test "call and forwarded approval rows expose saved identity description and original arguments" {

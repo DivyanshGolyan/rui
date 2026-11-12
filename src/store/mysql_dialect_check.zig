@@ -848,31 +848,51 @@ test "frozen context window schema 69 MySQL migration pins legacy policy and pre
 
 test "schema 70 MySQL migration updates the saved wire label and preserves ordinary rows" {
     const io = std.testing.io;
-    mutex.lockUncancelable(io);
-    defer mutex.unlock(io);
-    _ = connection() orelse return if (state == .absent) error.SkipZigTest else error.MysqlUnavailable;
-    defer restore("USE " ++ database);
-    try setup("DROP DATABASE IF EXISTS " ++ migrated_database ++ ";CREATE DATABASE " ++ migrated_database);
-    try load(migrated_database, store_testing.baseline_mysql_ddl, false);
-    try load(migrated_database, store_testing.baseline_rows, true);
-    inline for (schema.migrations) |step| {
-        if (step.from < 69) try load(migrated_database, schema.mysqlMigration(step.from), false);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    {
+        mutex.lockUncancelable(io);
+        defer mutex.unlock(io);
+        _ = connection() orelse return if (state == .absent) error.SkipZigTest else error.MysqlUnavailable;
+        defer restore("USE " ++ database);
+        try setup("DROP DATABASE IF EXISTS " ++ migrated_database ++ ";CREATE DATABASE " ++ migrated_database);
+        try load(migrated_database, store_testing.baseline_mysql_ddl, false);
+        try load(migrated_database, store_testing.baseline_rows, true);
+        inline for (schema.migrations) |step| {
+            if (step.from < 69) try load(migrated_database, schema.mysqlMigration(step.from), false);
+        }
+        try load(migrated_database, "UPDATE session SET parent_ref='d8mv7p' WHERE session_ref='brhkcj'", false);
+        try load(migrated_database, "INSERT INTO store_meta(meta_key,meta_value) VALUES('format','69'),('wire_version','13'),('store_selector','/mysql-wire-migration')", false);
+        try load(migrated_database, schema.mysqlMigration(69), false);
+        try expectSameResults(&.{
+            "SELECT meta_value FROM store_meta WHERE meta_key='wire_version'",
+            "SELECT meta_value FROM store_meta WHERE meta_key='format'",
+            "SELECT count(*) FROM session WHERE session_ref='d8mv7p'",
+        }, &.{
+            "SELECT '14'",
+            "SELECT '69'",
+            "SELECT 1",
+        });
+        try load(migrated_database, schema.mysqlMigrationFrom(69).?, false);
+        try expectCatalog(migrated_database);
+        // Native Store readback uses the same touch oracle as other live Stores.
+        try setup("DROP DATABASE IF EXISTS " ++ migrated_database ++ "_oracle;CREATE DATABASE " ++ migrated_database ++ "_oracle;CREATE TABLE " ++ migrated_database ++ "_oracle.touched_oracle(session_ref TEXT)");
+        for (comptime sqlite.touchOracleTriggers(.mysql, migrated_database ++ "_oracle.touched_oracle")) |text| try setup(text);
+        done.migrations += 1;
+        writeRecord();
     }
-    try load(migrated_database, "INSERT INTO store_meta(meta_key,meta_value) VALUES('format','69'),('wire_version','13')", false);
-    try load(migrated_database, schema.mysqlMigration(69), false);
-    try expectSameResults(&.{
-        "SELECT meta_value FROM store_meta WHERE meta_key='wire_version'",
-        "SELECT meta_value FROM store_meta WHERE meta_key='format'",
-        "SELECT count(*) FROM session WHERE session_ref='d8mv7p'",
-    }, &.{
-        "SELECT '14'",
-        "SELECT '69'",
-        "SELECT 1",
-    });
-    try load(migrated_database, schema.mysqlMigrationFrom(69).?, false);
-    try expectCatalog(migrated_database);
-    done.migrations += 1;
-    writeRecord();
+    const config = (try rootConfig()).?;
+    for (0..2) |_| {
+        var storage: @import("Store.zig").Store = undefined;
+        try storage.openTarget(io, .{ .mysql = .{
+            .address = .{ .unix_socket = config.socket },
+            .user = "root",
+            .password = config.password,
+            .database = migrated_database,
+        } }, "/mysql-wire-migration", .{});
+        defer storage.close() catch unreachable;
+        try @import("tests.zig").expectWireMigrationFacts(&storage, &tmp);
+    }
 }
 
 test "schema 65 MySQL migration freezes each Operation offer and preserves Session intent" {
