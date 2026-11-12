@@ -73,6 +73,11 @@ pub fn takesKey(self: *const Self, key: vaxis.Key) bool {
     return (self.model_choice.active and ModelChoice.takesKey(key)) or Panel.takesKey(key);
 }
 
+/// Only the Model filter edits text; a paste must never choose or act.
+pub fn takesPaste(self: *const Self) bool {
+    return self.model_choice.active;
+}
+
 /// Esc is the Upgrade's while it can still change nothing, as on the
 /// overview and in a conversation.
 pub fn upgradeTakesEscape(self: *const Self) bool {
