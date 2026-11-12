@@ -2917,6 +2917,44 @@ test "descendant changes invalidate ancestor tokens without invalidating standal
     }.run);
 }
 
+test "descendant queue seeds preserve eligible admission times when clocks step backward" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const root = try configureTestSession(&storage, "seed-root");
+            const child = try configureTestSession(&storage, "seed-child");
+            try store_testing.exec(&storage, "UPDATE session SET parent_ref=?1 WHERE session_ref=?2", .{ root.slice(), child.slice() });
+            try submitTestMessage(&storage, &tmp, "seed-first-file", "seed-first", child.slice(), "first");
+            try submitTestMessage(&storage, &tmp, "seed-later-file", "seed-later", child.slice(), "later");
+            try store_testing.exec(&storage, "UPDATE message_admission SET admitted_at=17 WHERE command_key='seed-first'", .{});
+            try store_testing.exec(&storage, "UPDATE message_admission SET admitted_at=9 WHERE command_key='seed-later'", .{});
+            try expectSeed(&storage, root.slice(), 9);
+            var stop = try completeSessionStop("seed-stop", child.slice());
+            try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+            try expectSeed(&storage, root.slice(), null);
+            try submitTestMessage(&storage, &tmp, "seed-after-file", "seed-after", child.slice(), "after stop");
+            try store_testing.exec(&storage, "UPDATE message_admission SET admitted_at=23 WHERE command_key='seed-after'", .{});
+            try expectSeed(&storage, root.slice(), 23);
+            try std.testing.expect(try storage.admitNextModelAttempt(.{}) != null);
+            try expectSeed(&storage, root.slice(), 23);
+        }
+
+        fn expectSeed(storage: *Store, root: []const u8, expected: ?u64) !void {
+            const entry = try store_core.enter(storage, .none);
+            defer entry.release();
+            var a: reads_domain.ReadAccess = .open(&entry);
+            defer a.deinit();
+            var works = [_]report_domain.WorkRead{.{ .session = root }};
+            try report_domain.readWorks(&a, &works);
+            try std.testing.expectEqual(expected, works[0].inputs.descendant_since);
+        }
+    }.run);
+}
+
 test "new attachments invalidate saved ancestors and deep trees forget ring coverage" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {

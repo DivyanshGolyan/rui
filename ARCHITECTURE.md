@@ -3655,9 +3655,13 @@ Each state carries `since`, the Host Unix second the Session entered it, read fr
   Standalone agents do not count. Current, Session listing and Activity pages share
   `session_work.derive` and the Store-owned inputs under the same read lock.
   The descendant read returns one aggregate fact per requested Session, seeded from
-  the indexed live Turns and pending admissions, following saved parent keys upward.
-  It never walks finished descendant history downward; cost follows live work and
-  its ancestor edges, not the number of past Turns or finished descendants.
+  indexed live Turns and eligible queued admissions, following saved parent keys upward.
+  The queue seed walks attached Session keys and uses the existing
+  `(session_ref,turn_id,admission_id)` index to range-seek only unbound admissions
+  beyond each Session's indexed stop cutoff. It aggregates the earliest eligible
+  admission time, including when clocks stepped backward. It never scans stop-excluded
+  Message history or walks finished Turn history downward; queue-seed cost follows
+  attached Session keys and eligible queue size, followed by live ancestor edges.
   A stopped, excluded admission is not live work. The existing TypeScript follow
   loop keeps busy-polling for `working`, including after the root's own Turn ended.
 - **Latest** and **before** follow the Session's order, never the clock, which can step back.

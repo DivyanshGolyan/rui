@@ -628,17 +628,24 @@ fn runReport(a: *ReadAccess) !void {
 /// work here. Each stage reads one row, stepped once, as main did.
 /// Live work walks upward through the saved parent key, never downward through
 /// finished Session history. The result is one fact per requested Session.
+/// Queue seeds range-seek unbound admissions past each attached Session's
+/// indexed stop cutoff, using (session_ref,turn_id,admission_id). Excluded
+/// admissions remain unbound forever: scanning the global pending index would
+/// cost their entire history. Aggregate the earliest eligible admission time
+/// per Session (not its first ID: the clock may step back). A missing seed
+/// never walks upward.
 /// UNION deduplicates shared ancestors (and terminates even a corrupt cycle).
 const work_descendants = rsql.Read(.{
     .sql = "WITH RECURSIVE live_work(session_ref,admitted_at) AS (" ++
         "SELECT t.session_ref,m.admitted_at FROM turn t @index(turn_one_active_per_session) " ++
         "JOIN message_admission m ON m.admission_id=t.first_admission_id " ++
         "WHERE t.outcome_code IS NULL AND (CASE WHEN t.outcome_code IS NULL THEN t.session_ref END) IS NOT NULL " ++
-        "UNION SELECT m.session_ref,m.admitted_at FROM message_admission m @index(message_admission_pending) " ++
-        "WHERE m.turn_id IS NULL AND (CASE WHEN m.turn_id IS NULL THEN m.admission_id END) IS NOT NULL AND m.admission_id>coalesce((SELECT admission_cutoff FROM session_stop " ++
-        "WHERE session_ref=m.session_ref ORDER BY admission_cutoff DESC LIMIT 1),0))," ++
+        "UNION SELECT s.session_ref,(SELECT min(m.admitted_at) FROM message_admission m @index(message_admission_session_order) " ++
+        "WHERE m.session_ref=s.session_ref AND m.turn_id IS NULL AND m.admission_id>coalesce((SELECT admission_cutoff FROM session_stop " ++
+        "WHERE session_ref=s.session_ref ORDER BY admission_cutoff DESC LIMIT 1),0)) " ++
+        "FROM session s @index(session_parent) WHERE s.parent_ref IS NOT NULL)," ++
         "live_ancestors(session_ref,admitted_at) AS (" ++
-        "SELECT s.parent_ref,w.admitted_at FROM live_work w JOIN session s ON s.session_ref=w.session_ref WHERE s.parent_ref IS NOT NULL " ++
+        "SELECT s.parent_ref,w.admitted_at FROM live_work w JOIN session s ON s.session_ref=w.session_ref WHERE s.parent_ref IS NOT NULL AND w.admitted_at IS NOT NULL " ++
         "UNION SELECT s.parent_ref,w.admitted_at FROM live_ancestors w JOIN session s ON s.session_ref=w.session_ref WHERE s.parent_ref IS NOT NULL) " ++
         "SELECT min(admitted_at) AS descendant_since FROM live_ancestors WHERE session_ref=?1",
     .Args = struct { session: []const u8 },

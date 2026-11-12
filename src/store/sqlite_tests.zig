@@ -2518,6 +2518,88 @@ test "Current report work is independent of terminal tool history" {
     try std.testing.expectEqual(sixteen_groups, sixty_four_groups);
 }
 
+const DescendantHistory = enum { settled, queued, active };
+
+fn expectDescendantHistoryCost(kind: DescendantHistory) !void {
+    var costs: [2]i32 = undefined;
+    for ([_]usize{ 10, 10_000 }, &costs) |history, *cost| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        const root = try configureTestSession(&storage, "descendant-cost-root");
+        const child = try configureTestSession(&storage, "descendant-cost-child");
+        try store_testing.exec(&storage, "UPDATE session SET parent_ref=?1 WHERE session_ref=?2", .{ root.slice(), child.slice() });
+        // Excluded admissions deliberately remain unbound, just as model
+        // admission leaves them. A later eligible admission must seek past
+        // this history, rather than visit each row and reject it by cutoff.
+        try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=OFF");
+        const seed = try std.testing.allocator.printSentinel(
+            "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
+                "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at) " ++
+                "SELECT value,'{1s}',printf('excluded-%d',value),1,value+1,1 FROM sequence; " ++
+                "INSERT INTO session_stop(command_key,session_ref,admission_cutoff,position,stopped_at) VALUES('history-stop','{1s}',{0},{0}+2,1); " ++
+                "UPDATE session SET next_position={0}+3 WHERE session_ref='{1s}'",
+            .{ history, child.slice() },
+            0,
+        );
+        defer std.testing.allocator.free(seed);
+        try sqlite.exec(storage.sqliteDatabase(), seed);
+        // Reopen before canonical admission: its identity survey must see
+        // the fixture's historical IDs and the normal foreign-key setting.
+        try storage.close();
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        var expected_since: ?u64 = null;
+        if (kind != .settled) {
+            try submitTestMessage(&storage, &tmp, "descendant-eligible-file", "descendant-eligible", child.slice(), "live work");
+            try submitTestMessage(&storage, &tmp, "descendant-later-file", "descendant-later", child.slice(), "later input");
+            // ID order is not time order. Preserve the original minimum over
+            // eligible admissions even when a later admission's clock went back.
+            try store_testing.exec(&storage, "UPDATE message_admission SET admitted_at=17 WHERE command_key='descendant-eligible'", .{});
+            try store_testing.exec(&storage, "UPDATE message_admission SET admitted_at=9 WHERE command_key='descendant-later'", .{});
+            expected_since = if (kind == .active) 17 else 9;
+            if (kind == .active) try std.testing.expect(try storage.admitNextModelAttempt(.{}) != null);
+        }
+        for (0..2) |pass| {
+            _ = statementWorkSince(storage.sqliteDatabase());
+            const entry = try store_core.enter(&storage, .none);
+            defer entry.release();
+            var a: reads_domain.ReadAccess = .open(&entry);
+            defer a.deinit();
+            var works = [_]report_domain.WorkRead{.{ .session = root.slice() }};
+            try report_domain.readWorks(&a, &works);
+            try std.testing.expectEqual(expected_since, works[0].inputs.descendant_since);
+            const work = try works[0].work(1, 1);
+            try std.testing.expectEqualStrings(if (kind == .settled) "idle" else "working", @tagName(work.state));
+            if (pass == 0) continue;
+            var statement = c.sqlite3_next_stmt(storage.sqliteDatabase(), null);
+            var measured = false;
+            while (statement) |each| : (statement = c.sqlite3_next_stmt(storage.sqliteDatabase(), each)) {
+                if (std.mem.indexOf(u8, std.mem.span(c.sqlite3_sql(each)), "live_ancestors(session_ref") == null) continue;
+                try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_stmt_status(each, c.SQLITE_STMTSTATUS_RUN, 0));
+                cost.* = c.sqlite3_stmt_status(each, c.SQLITE_STMTSTATUS_VM_STEP, 0);
+                measured = true;
+            }
+            try std.testing.expect(measured);
+        }
+    }
+    std.debug.print("descendant {s}: excluded=10 {d} VM steps; excluded=10000 {d} VM steps\n", .{ @tagName(kind), costs[0], costs[1] });
+    try std.testing.expectEqual(costs[0], costs[1]);
+}
+
+test "descendant work cost is flat in excluded history with no live work" {
+    try expectDescendantHistoryCost(.settled);
+}
+
+test "descendant work cost is flat in excluded history with eligible queued Messages" {
+    try expectDescendantHistoryCost(.queued);
+}
+
+test "descendant work cost is flat in excluded history with active Turns" {
+    try expectDescendantHistoryCost(.active);
+}
+
 test "Current pending count skips excluded Message history by indexed cutoff" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
