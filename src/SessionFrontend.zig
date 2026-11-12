@@ -438,6 +438,8 @@ pub const HostAccess = struct {
     /// Unreachable, not the reachable Host's new-Turn admission hold.
     held: *const fn (*anyopaque) bool,
     lost: *const fn (*anyopaque) void,
+    /// The Host is stopped and a start can mend it now.
+    startable: *const fn (*anyopaque) bool,
     start: *const fn (*anyopaque, *vxfw.EventContext) anyerror!bool,
     notice: *const fn (*anyopaque) ?vxfw.Widget,
 };
@@ -465,7 +467,7 @@ pub fn attach(self: *Self, hooks: AppHooks, caps: overview_view.Caps) vxfw.Widge
     self.app_caps = caps;
     self.screen.setWidth(caps.width);
     self.app_preview = .{ .document = &self.screen.browsing, .colour = self.colour, .more = true, .handler = .{ .userdata = self, .on_notice = appNotice, .on_scroll = appDragScroll, .on_click = appPreviewClick } };
-    self.app_card = .{ .consent = &self.app_consent, .pasting = &hooks.root.input.pasting, .description = "", .body = self.app_preview.widget(), .userdata = self, .on_decision = appDecision };
+    self.app_card = .{ .consent = &self.app_consent, .description = "", .body = self.app_preview.widget(), .userdata = self, .on_decision = appDecision };
     self.chrome = .init(.{ .userdata = self, .key = chromeClick(.needs), .stop = chromeClick(.{ .action = .stop }), .back = chromeClick(.{ .action = .close }), .latest = chromeClick(.{ .action = .latest }), .status_page = chromeClick(.status), .details = chromeClick(.details), .pick = chromeClick(.footer_pick), .close = chromeClick(.footer_close), .model = chromeClick(.{ .footer = .model }), .effort = chromeClick(.{ .footer = .effort }) });
     return self.widget();
 }
@@ -481,21 +483,27 @@ fn openInfo(self: *Self, _: *vxfw.EventContext) !void {
     self.dirty = true;
 }
 
-/// One reducer decides both drawn clicks and keyboard navigation.
-fn footerEvent(self: *Self, ctx: *vxfw.EventContext, input: session_chrome.FooterInput) !bool {
-    const facts = self.line.facts(&self.hint, self.session);
-    const decision = self.footer.step(if (facts) |value| value.effort != null else false, input);
-    if (decision.open_choice != null) {
-        if (!self.info_open and !self.app_hooks.root.input.pasting and self.app_info.pending == null) {
-            self.app_info.closeStandaloneChoice();
-            if (self.inspection.status != null) self.app_info.refresh();
-            self.inspection.status_requested = true;
-            self.poll_at = 0;
-            try self.openFooterChoice(ctx);
-        } else self.footer.pending = null;
-    }
+/// A drawn footer click steps the footer as its key does (`session_keys.footer`).
+fn footerClick(self: *Self, ctx: *vxfw.EventContext, field: ?session_chrome.FooterField) !void {
+    if (session_keys.footer(&self.footer, self.footerKeyFacts(), .{ .click = field }) == .open_choice) try self.startFooterChoice(ctx);
     self.dirty = true;
-    return decision.forward;
+}
+
+fn footerKeyFacts(self: *const Self) session_keys.FooterFacts {
+    return .{ .has_effort = self.hasEffort(), .opens = !self.info_open and self.app_info.pending == null };
+}
+
+fn hasEffort(self: *const Self) bool {
+    return if (self.footerFacts()) |value| value.effort != null else false;
+}
+
+/// Opens the choice footer focus chose, once its read is ready.
+fn startFooterChoice(self: *Self, ctx: *vxfw.EventContext) !void {
+    self.app_info.closeStandaloneChoice();
+    if (self.inspection.status != null) self.app_info.refresh();
+    self.inspection.status_requested = true;
+    self.poll_at = 0;
+    try self.openFooterChoice(ctx);
 }
 
 /// Navigation ends the presentation, never the admitted backend effect.
@@ -507,7 +515,7 @@ pub fn closePresentation(self: *Self) void {
 }
 
 fn closeStandaloneChoice(self: *Self, ctx: *vxfw.EventContext) !void {
-    if (self.app_info.standaloneField() == null or self.app_hooks.root.input.pasting) return;
+    if (self.app_info.standaloneField() == null) return;
     self.closePresentation();
     try ctx.requestFocus(self.app_input.composer.widget());
 }
@@ -653,11 +661,9 @@ fn chromeClick(comptime click: Click) *const fn (*anyopaque, *vxfw.EventContext)
             switch (click) {
                 .action => |action| try self.perform(action),
                 .status => try self.openInfo(ctx),
-                .footer => |field| {
-                    _ = try self.footerEvent(ctx, .{ .click = field });
-                },
+                .footer => |field| try self.footerClick(ctx, field),
                 .footer_close => try self.closeStandaloneChoice(ctx),
-                .footer_pick => if (self.app_info.standaloneOpen() and !self.app_hooks.root.input.pasting) {
+                .footer_pick => if (self.app_info.standaloneOpen()) {
                     try self.app_info.standaloneWidget().handleEvent(ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
                 },
                 .details => try self.showSubmissionFailure(),
@@ -816,21 +822,12 @@ fn hostFailure(self: *Self) bool {
     return true;
 }
 
-/// A modal panel takes keys before a permission card or feed child can act.
+/// A press anywhere off the footer's words moves its focus back to the
+/// input before the pressed widget acts.
 fn appCapture(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     if (event == .mouse and event.mouse.button == .left and event.mouse.type == .press and !self.info_open and !self.app_info.standaloneOpen()) {
-        _ = try self.footerEvent(ctx, .{ .click = null });
-    }
-    const tabs = event == .key_press and !self.app_hooks.root.input.pasting and (event.key_press.matchExact(vaxis.Key.tab, .{}) or event.key_press.matchExact(vaxis.Key.tab, .{ .shift = true }));
-    const opens = event == .key_press and !self.app_hooks.root.input.pasting and (event.key_press.matches('i', .{ .alt = true }) or (self.submission.view() != null and event.key_press.matches('d', .{ .alt = true })));
-    const input = switch (event) {
-        .key_press, .paste_start, .paste_end, .invalid_key => true,
-        else => false,
-    };
-    if (tabs or opens or ((self.info_open or self.footer.pending != null or self.app_info.standaloneField() != null or self.footer.focus != .input) and input)) {
-        try appEvent(raw, ctx, event);
-        ctx.consumeEvent();
+        try self.footerClick(ctx, null);
     }
 }
 
@@ -838,12 +835,127 @@ fn appCapture(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void
 /// command choices run, incomplete words and skills replace the draft.
 fn appSelectCommand(raw: *anyopaque, ctx: *vxfw.EventContext, pressed: slash_commands_shared.Shown.Pick) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
-    if (self.app_consent.request != null or self.app_hooks.root.input.pasting) return;
+    if (self.app_consent.request != null) return;
     // A pointer names the row in the list the last frame drew, not the
     // list a key has stored since for a newly edited draft.
     const stored = &self.screen.commands;
     _ = slash_commands_shared.Shown.pickedNow(stored, self.nextCommands(stored.*), pressed) orelse return;
-    try appEvent(raw, ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
+    try appKey(raw, ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } }, .{ .under = .main, .pasted = false });
+}
+
+/// The Session's key owner, which Root hands each key, paste mark and
+/// malformed key while the Session is the main pane.
+pub fn keyOwner(self: *Self) Root.Keys {
+    return .{ .context = self, .take = appKey };
+}
+
+/// Root hands the Session each key, paste mark and malformed key with
+/// whether it is pasted. `session_keys.step` decides what it means; this
+/// reads the facts other owners hold and applies the answer.
+fn appKey(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event, delivery: @import("app_input.zig").Effects.Delivery) anyerror!void {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    if (self.leaving != null) return;
+    self.shown_notice.dismiss();
+    const input: session_keys.Input = .{ .key = sessionKey(event), .pasted = delivery.pasted };
+    // Only Enter takes a row, so only Enter reads the list.
+    const shown = if (input.key == .enter and !input.pasted) self.shownRow() else null;
+    const previous = self.app_consent.row;
+    const consent: ?*ActionConsent = if (self.app_consent.request != null) &self.app_consent else null;
+    const take = session_keys.step(.{ .footer = &self.footer, .consent = consent }, .{
+        .info_open = self.info_open,
+        .info_choice = self.app_info.hasChoice(),
+        .choice = if (self.app_info.standaloneField() == null) .closed else if (self.app_info.standaloneOpen()) .shown else .pending,
+        .has_effort = self.hasEffort(),
+        .saving = self.app_info.pending != null,
+        .details = self.submission.view() != null,
+        .draft_empty = self.input.composition().bytes.len == 0,
+        .host_startable = if (self.app_hooks.host) |host| host.startable(host.context) else false,
+        .shown_row = shown != null,
+        .send = .{ .host_held = self.hostHeld(), .opening = self.reading.opening, .preparing = self.reading.phase == .permission, .command_active = self.commandActive(), .submitting = self.submission.intent != null },
+    }, input);
+    switch (take) {
+        .taken => {},
+        .close_choice => try self.closeStandaloneChoice(ctx),
+        .panel => try self.app_info.widget().handleEvent(ctx, event),
+        .cancel_panel_choice => self.app_info.cancelChoice(),
+        .close_info => {
+            self.closePresentation();
+            try ctx.requestFocus(self.app_input.composer.widget());
+        },
+        .panel_details => {
+            self.closePresentation();
+            try ctx.requestFocus(self.app_input.composer.widget());
+            try self.showSubmissionFailure();
+        },
+        .perform => |action| try self.perform(action),
+        .open_choice => try self.startFooterChoice(ctx),
+        .start_host => {
+            const host = self.app_hooks.host.?;
+            _ = try host.start(host.context, ctx);
+            ctx.consumeEvent();
+            return;
+        },
+        .open_info => try self.openInfo(ctx),
+        .details => try self.showSubmissionFailure(),
+        .card => |choice| try self.app_card.take(ctx, choice, delivery.pasted),
+        .needs_decision => self.notice = "Not sent: this Action needs a decision",
+        .consent_draft => switch (self.input.appEvent(conversation_keys, event, delivery.pasted, false)) {
+            .busy => self.notice = "Not sent: this Action needs a decision",
+            .editor => |outcome| switch (outcome) {
+                .action => |action| try self.perform(action),
+                .refused => |why| if (why != .unbound) {
+                    self.notice = refusedNotice(why);
+                },
+                .none, .append, .redraw, .submit => {},
+            },
+            .message, .command => unreachable, // Sending is disabled while consent waits.
+        },
+        .take_row => {
+            self.notice = null;
+            self.takeRow(shown.?);
+        },
+        .edit => |edit| {
+            self.notice = null;
+            switch (self.input.appEvent(conversation_keys, event, delivery.pasted, edit.send)) {
+                .message => |ticket| try self.beginMessage(.{ .message = ticket }),
+                .command => try self.commandLine(),
+                .busy => self.sayBusy(null, false),
+                .editor => |outcome| switch (outcome) {
+                    .action => |action| try self.perform(action),
+                    .refused => |why| if (why != .unbound) {
+                        self.notice = refusedNotice(why);
+                    },
+                    .submit => if (self.shownCommands() != null) try self.commandLine(),
+                    .none, .append, .redraw => {},
+                },
+            }
+        },
+    }
+    if (self.app_consent.request != null and previous != self.app_consent.row) {
+        try ctx.requestFocus(if (self.app_consent.row == .selector) self.app_card.widget() else self.app_input.composer.widget());
+    }
+    ctx.consumeEvent();
+    ctx.redraw = true;
+    try self.afterInput(ctx);
+}
+
+/// The Session core's name for one terminal input. Bindings match exact
+/// modifiers, as the line editor's do; Alt-I and Alt-D match as the
+/// chat's own keys.
+fn sessionKey(event: vxfw.Event) session_keys.Key {
+    return switch (event) {
+        .paste_start => .paste_start,
+        .paste_end => .paste_end,
+        .invalid_key => .invalid,
+        .key_press => |key| if (Editor.named(key)) |name| .{ .named = name } else if (Editor.isEnter(key)) .enter else if (key.matchExact(vaxis.Key.tab, .{})) .tab else if (key.matchExact(vaxis.Key.tab, .{ .shift = true })) .shift_tab else if (key.matches('i', .{ .alt = true })) .info else if (key.matches('d', .{ .alt = true })) .details else if (hostStartKey(key)) .host_start else switch (Editor.selectKey(conversation_keys, key)) {
+            .left => .left,
+            .right => .right,
+            .text => .text,
+            else => .other,
+        },
+        // Root routes only these to the Session.
+        else => unreachable,
+    };
 }
 
 fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
@@ -888,131 +1000,10 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
             if (self.shown_notice.expire(self.nowMs())) self.dirty = true;
             ctx.redraw = ctx.redraw or self.dirty;
         },
-        .key_press, .paste_start, .paste_end, .invalid_key => {
-            const pasting = self.app_hooks.root.input.pasting;
-            self.shown_notice.dismiss();
-            if (!self.info_open and self.app_info.standaloneField() != null and event == .key_press and !pasting and (Editor.named(event.key_press) == .escape or Editor.named(event.key_press) == .ctrl_g)) {
-                try self.closeStandaloneChoice(ctx);
-                ctx.consumeAndRedraw();
-                try self.afterInput(ctx);
-                return;
-            }
-            if (self.info_open or self.app_info.standaloneOpen()) {
-                if (self.info_open and event == .key_press and !pasting and self.submission.view() != null and event.key_press.matches('d', .{ .alt = true })) {
-                    self.closePresentation();
-                    try ctx.requestFocus(self.app_input.composer.widget());
-                    try self.showSubmissionFailure();
-                } else if (session_keys.panelAction(Editor.selectEvent(conversation_keys, event, pasting))) |action| {
-                    // The same modal policy leaves Session custody and work
-                    // with their owner for full pages and standalone choices.
-                    try self.perform(action);
-                } else if (event == .key_press and !pasting and (Editor.named(event.key_press) == .escape or Editor.named(event.key_press) == .ctrl_g)) {
-                    if (!self.info_open) {
-                        try self.closeStandaloneChoice(ctx);
-                    } else if (self.app_info.hasChoice()) self.app_info.cancelChoice() else {
-                        self.closePresentation();
-                        try ctx.requestFocus(self.app_input.composer.widget());
-                    }
-                } else try self.app_info.widget().handleEvent(ctx, event);
-                ctx.consumeAndRedraw();
-                try self.afterInput(ctx);
-                return;
-            }
-            var footer_input: session_chrome.FooterInput = .other;
-            if (event == .paste_start) footer_input = .text else if (event == .key_press and !pasting) {
-                const key = event.key_press;
-                if (key.matchExact(vaxis.Key.tab, .{})) footer_input = .{ .tab = false } else if (key.matchExact(vaxis.Key.tab, .{ .shift = true })) footer_input = .{ .tab = true } else if (Editor.isEnter(key)) footer_input = .enter else if (Editor.named(key) == .escape or Editor.named(key) == .ctrl_g) footer_input = .escape else if (Editor.selectEvent(conversation_keys, event, false) == .text) footer_input = .text;
-            }
-            if (!try self.footerEvent(ctx, footer_input)) {
-                ctx.consumeAndRedraw();
-                try self.afterInput(ctx);
-                return;
-            }
-            // The empty-composer restart shortcut has no authority over a
-            // panel's input, including its Rename and Model editors.
-            if (event == .key_press and !pasting and self.input.composition().bytes.len == 0 and hostStartKey(event.key_press)) if (self.app_hooks.host) |host| {
-                if (try host.start(host.context, ctx)) {
-                    ctx.consumeEvent();
-                    return;
-                }
-            };
-            if (event == .key_press and !pasting and event.key_press.matches('i', .{ .alt = true })) {
-                try self.openInfo(ctx);
-                ctx.consumeAndRedraw();
-                try self.afterInput(ctx);
-                return;
-            }
-            if (event == .key_press and !pasting and self.submission.view() != null and event.key_press.matches('d', .{ .alt = true })) {
-                try self.showSubmissionFailure();
-                ctx.consumeAndRedraw();
-                try self.afterInput(ctx);
-                return;
-            }
-            if (self.app_consent.request != null) {
-                // Choice classification has no authority over draft editing.
-                // Only Esc and Enter bypass the normal editor on that row.
-                const selected = if (self.app_consent.row == .selector) Editor.selectEvent(conversation_keys, event, pasting) else .none;
-                const row_key: ActionConsent.RowKey = if (self.app_consent.row == .draft)
-                    if (event == .key_press and !pasting) key: {
-                        if (Editor.isEnter(event.key_press)) break :key .enter;
-                        if (Editor.named(event.key_press)) |named| if (named == .escape or named == .ctrl_g) break :key .escape;
-                        break :key .other;
-                    } else .other
-                else switch (selected) {
-                    .text => if (event == .paste_start or pasting) .paste else if (event == .invalid_key) .other else .printable,
-                    .enter => .enter,
-                    .left, .right => .arrows,
-                    .action => |action| if (action == .close) .escape else .screen,
-                    else => .other,
-                };
-                const previous = self.app_consent.row;
-                switch (self.app_consent.route(row_key)) {
-                    .screen => if (selected == .action) {
-                        try self.perform(selected.action);
-                    },
-                    .selector => try self.app_card.widget().handleEvent(ctx, event),
-                    .blocked => if (row_key == .enter) {
-                        self.notice = "Not sent: this Action needs a decision";
-                    },
-                    .draft => switch (self.input.appEvent(conversation_keys, event, pasting, false)) {
-                        .busy => self.notice = "Not sent: this Action needs a decision",
-                        .editor => |outcome| switch (outcome) {
-                            .action => |action| try self.perform(action),
-                            .refused => |why| if (why != .unbound) {
-                                self.notice = refusedNotice(why);
-                            },
-                            .none, .append, .redraw, .submit => {},
-                        },
-                        .message, .command => unreachable, // Sending is disabled while consent waits.
-                    },
-                }
-                if (self.app_consent.request != null and previous != self.app_consent.row) {
-                    try ctx.requestFocus(if (self.app_consent.row == .selector) self.app_card.widget() else self.app_input.composer.widget());
-                }
-            } else {
-                self.notice = null;
-                // One submission at a time: a decision or Message in flight,
-                // or an original still held, makes Enter say so and keep the draft.
-                const allowed = !self.hostHeld() and !self.reading.opening and self.reading.phase != .permission and !self.commandActive() and self.submission.intent == null;
-                if (!(event == .key_press and !pasting and Editor.isEnter(event.key_press) and self.takeShownRow())) {
-                    switch (self.input.appEvent(conversation_keys, event, pasting, allowed)) {
-                        .message => |ticket| try self.beginMessage(.{ .message = ticket }),
-                        .command => try self.commandLine(),
-                        .busy => self.sayBusy(null, false),
-                        .editor => |outcome| switch (outcome) {
-                            .action => |action| try self.perform(action),
-                            .refused => |why| if (why != .unbound) {
-                                self.notice = refusedNotice(why);
-                            },
-                            .submit => if (self.shownCommands() != null) try self.commandLine(),
-                            .none, .append, .redraw => {},
-                        },
-                    }
-                }
-            }
-            ctx.consumeEvent();
-            ctx.redraw = true;
-        },
+        // Root hands the Session its keys through `appKey`. A key that
+        // reaches the widget is the overlay's close action, which the
+        // screen sends as Esc, or a Root without the Session's key owner.
+        .key_press, .paste_start, .paste_end, .invalid_key => return appKey(raw, ctx, event, .{ .under = .main, .pasted = false }),
         .mouse => |mouse| switch (mouse.button) {
             .wheel_up, .wheel_down => {
                 try self.scroll(mouse.button == .wheel_down, 1);
@@ -1249,33 +1240,32 @@ test "App Session retains the draft across a permission card arriving during pas
     self.app_caps = .{ .depth = .none };
     _ = self.input.append("headTAIL");
     self.input.editors[self.input.active].cursor = 4;
+    // Root hands the Session's core its keys with the paste they arrive in.
+    const pasted: @import("app_input.zig").Effects.Delivery = .{ .under = .main, .pasted = true };
+    const typed: @import("app_input.zig").Effects.Delivery = .{ .under = .main, .pasted = false };
     root.input.pasting = true;
-    try widget_.handleEvent(&ctx, .paste_start);
-    try widget_.handleEvent(&ctx, .{ .key_press = .{ .codepoint = 0, .text = "12" } });
+    try appKey(self, &ctx, .paste_start, pasted);
+    try appKey(self, &ctx, .{ .key_press = .{ .codepoint = 0, .text = "12" } }, pasted);
     self.reading.prepared_action = 17;
     self.live.work.first_action = 17;
     try widget_.handleEvent(&ctx, .tick);
     _ = try widget_.draw(draw_context);
     try std.testing.expectEqual(@as(?u64, 17), self.app_consent.drawn);
-    try self.app_card.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
+    try self.app_card.take(&ctx, .enter, true);
     try std.testing.expectEqual(@as(?u64, 17), self.app_consent.request);
     root.input.pasting = false;
     const before_scroll = self.app_preview.first;
     try std.testing.expect(screen.height > 0);
-    const page_down: vxfw.Event = .{ .key_press = .{ .codepoint = vaxis.Key.page_down } };
-    ctx.consume_event = false;
-    try self.app_card.widget().handleEvent(&ctx, page_down);
-    try std.testing.expect(!ctx.consume_event);
-    try widget_.handleEvent(&ctx, page_down);
+    try appKey(self, &ctx, .{ .key_press = .{ .codepoint = vaxis.Key.page_down } }, typed);
     _ = try widget_.draw(draw_context);
     try std.testing.expect(self.app_preview.first.order(before_scroll) == .gt);
     try std.testing.expectEqualStrings("head12TAIL", self.input.composition().bytes);
     root.input.pasting = true;
     self.live.work.first_action = null;
     try widget_.handleEvent(&ctx, .tick);
-    try widget_.handleEvent(&ctx, .{ .key_press = .{ .codepoint = 0, .text = "discarded" } });
+    try appKey(self, &ctx, .{ .key_press = .{ .codepoint = 0, .text = "discarded" } }, pasted);
     root.input.pasting = false;
-    try widget_.handleEvent(&ctx, .paste_end);
+    try appKey(self, &ctx, .paste_end, typed);
     try std.testing.expectEqualStrings("head12TAIL", self.input.composition().bytes);
     try std.testing.expectEqual(@as(usize, 6), self.input.composition().cursor);
     _ = try widget_.draw(draw_context);
@@ -2811,16 +2801,14 @@ fn runLine(self: *Self) !void {
     try self.slashCommand(text);
 }
 
-/// Enter on a Message draft whose list the latest frame drew: takes its
-/// highlighted row. A command line's Enter goes to `commandLine`.
-fn takeShownRow(self: *Self) bool {
+/// The list whose highlighted row Enter takes: one the latest frame drew
+/// for a Message draft. A command line's Enter goes to `commandLine`.
+fn shownRow(self: *Self) ?*slash_commands_shared.Shown {
     // A rejected line is the editor's to refuse and clear.
-    if (self.input.editors[self.input.active].rejected != null) return false;
+    if (self.input.editors[self.input.active].rejected != null) return null;
     const draft = self.input.composition().bytes;
-    if (draft.len == 0 or (draft[0] == '/' and !std.mem.startsWith(u8, draft, "//"))) return false;
-    const shown = self.shownCommands() orelse return false;
-    self.takeRow(shown);
-    return true;
+    if (draft.len == 0 or (draft[0] == '/' and !std.mem.startsWith(u8, draft, "//"))) return null;
+    return self.shownCommands();
 }
 
 /// Enter on a row that runs nothing: its word in place of the caret's
@@ -3437,6 +3425,17 @@ fn statusShown(self: *const Self) bool {
 /// A frontend attached to App as `rui` attaches it: Root before it, a
 /// permission card that holds focus while it shows, and hooks that record
 /// leaving and an Upgrade instead of acting on them.
+/// Test Hosts' answer to whether a start can mend them now: a Host that
+/// fails a test when started says it can, so a wrongful start is caught.
+const TestHost = struct {
+    fn always(_: *anyopaque) bool {
+        return true;
+    }
+    fn never(_: *anyopaque) bool {
+        return false;
+    }
+};
+
 const HeldFrontend = struct {
     self: Self,
     screen: *Screen,
@@ -3478,8 +3477,9 @@ const HeldFrontend = struct {
         held.self.poll_at = std.math.maxInt(i96);
         held.self.submission.environment = .empty;
         const child = held.self.attach(.{ .drafts = drafts, .root = &held.root, .context = held, .leave = onLeave, .copy = onCopy, .on_open = onOpen }, .{ .depth = .none });
-        // The Session is the main pane, so Root leaves its keys to it.
+        // The Session is the main pane, so Root hands its keys to its core.
         held.root.session = child;
+        held.root.session_keys = held.self.keyOwner();
         return held;
     }
 
@@ -3521,9 +3521,9 @@ const HeldFrontend = struct {
         return .{ .io = std.testing.io, .alloc = held.arena.allocator(), .cmds = .empty };
     }
 
-    /// One event as App delivers it: Root's capture first, then the
-    /// focused permission card when one shows, then the Session, which
-    /// takes what the card leaves.
+    /// One event as App delivers it: Root's capture first, which hands
+    /// the Session's core its keys, then the focused permission card when
+    /// one shows, then the Session, which takes what the card leaves.
     fn deliver(held: *HeldFrontend, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
         ctx.consume_event = false;
         ctx.phase = .capturing;
@@ -4696,7 +4696,7 @@ test "chat info owns typed keys before Host restart across every modal editor an
         try captureInfo(held, "Before");
         if (draft) try held.keys("kept draft");
         var host: Host = .{ .stopped = stopped };
-        held.self.app_hooks.host = .{ .context = &host, .held = Host.held, .lost = Host.lost, .start = Host.start, .notice = Host.notice };
+        held.self.app_hooks.host = .{ .context = &host, .held = Host.held, .lost = Host.lost, .startable = Host.held, .start = Host.start, .notice = Host.notice };
         defer held.self.app_hooks.host = null;
         try held.keys("\x1bi");
         const page = &held.self.app_info;
@@ -4732,11 +4732,12 @@ test "chat info owns typed keys before Host restart across every modal editor an
             .rows => try std.testing.expect(!page.hasChoice()),
             .effort, .permissions, .tools => try std.testing.expect(page.panel.choice != null),
         }
-        // Once the panel is closed, only an empty composer delegates r to Host.
+        // Once the panel is closed, only an empty composer delegates r to
+        // a Host a start can mend.
         page.cancelChoice();
         try held.keys("\x1b");
         try held.keys("r");
-        try std.testing.expectEqual(@as(usize, @intFromBool(!draft)), host.starts);
+        try std.testing.expectEqual(@as(usize, @intFromBool(!draft and stopped)), host.starts);
         try std.testing.expectEqualStrings(if (draft) "kept draftr" else if (stopped) "" else "r", held.self.input.composition().bytes);
     };
 }
@@ -5554,7 +5555,7 @@ test "reader failure provenance keeps transport loss separate from local copy fa
         self.reading.opening = mode == .read_disconnect;
         _ = self.input.replace(.{ .start = 0, .end = 0, .text = "kept draft" });
         var discovery: Discovery = .{};
-        self.app_hooks.host = .{ .context = &discovery, .held = Discovery.held, .lost = Discovery.lost, .start = Discovery.start, .notice = Discovery.notice };
+        self.app_hooks.host = .{ .context = &discovery, .held = Discovery.held, .lost = Discovery.lost, .startable = TestHost.always, .start = Discovery.start, .notice = Discovery.notice };
         self.command = Probe.command;
         self.inspection.kind = if (mode == .command_disconnect) .command else .{ .copy = if (mode == .temporary or mode == .rename) .file else .answer };
         const job = self.freeze(if (mode == .read_disconnect) .activity else .inspection);
@@ -5677,7 +5678,7 @@ test "skills transport recovery retains the held page and retries the same prefi
     try lease.prepareForServing(false);
     self.store = root;
     var discovery: Discovery = .{};
-    self.app_hooks.host = .{ .context = &discovery, .held = Discovery.held, .lost = Discovery.lost, .start = Discovery.start, .notice = Discovery.notice };
+    self.app_hooks.host = .{ .context = &discovery, .held = Discovery.held, .lost = Discovery.lost, .startable = TestHost.never, .start = Discovery.start, .notice = Discovery.notice };
     const old = self.skills.ask("old").?;
     try std.testing.expect(self.skills.answer(old.read, .{}, "old") == null);
     _ = self.input.replace(.{ .start = 0, .end = 0, .text = "please /re" });
@@ -5760,7 +5761,7 @@ test "Host recovery joins unavailable reads in every phase without losing the Se
     for (std.enums.values(ReadPhase)) |phase| {
         for ([_]anyerror{ error.FileNotFound, error.ConnectionRefused, error.UnixConnectFailed, error.ConnectionResetByPeer, error.BrokenPipe, error.TruncatedResponse, error.ResponseInactive, error.HostNotServing, error.HostStopping }) |failure| {
             var fault: Fault = .{ .failure = failure, .origin = .host_transport };
-            self.app_hooks.host = .{ .context = &fault, .held = Fault.held, .lost = Fault.lose, .start = Fault.start, .notice = Fault.notice };
+            self.app_hooks.host = .{ .context = &fault, .held = Fault.held, .lost = Fault.lose, .startable = TestHost.never, .start = Fault.start, .notice = Fault.notice };
             self.reading.phase = phase;
             self.reading.opening = true;
             self.inspection.command_running = phase == .inspection;
@@ -5779,7 +5780,7 @@ test "Host recovery joins unavailable reads in every phase without losing the Se
         // request: the same row opens again once the Host is back.
         const key: feed_window.Key = .{ .position = 41, .ordinal = 1 };
         var fault: Fault = .{ .failure = error.ConnectionRefused, .origin = .host_transport };
-        self.app_hooks.host = .{ .context = &fault, .held = Fault.held, .lost = Fault.lose, .start = Fault.start, .notice = Fault.notice };
+        self.app_hooks.host = .{ .context = &fault, .held = Fault.held, .lost = Fault.lose, .startable = TestHost.never, .start = Fault.start, .notice = Fault.notice };
         self.reading.opening = false;
         for (0..2) |round| {
             self.expansion.reading = .{ .target = .{ .tool = .{ .key = key, .open = true } }, .asked = self.pageAsked() };
@@ -5792,7 +5793,7 @@ test "Host recovery joins unavailable reads in every phase without losing the Se
         }
     }
     var fenced: Fault = .{ .failure = error.HostInvocationFailed, .fenced = true };
-    self.app_hooks.host = .{ .context = &fenced, .held = Fault.held, .lost = Fault.lose, .start = Fault.start, .notice = Fault.notice };
+    self.app_hooks.host = .{ .context = &fenced, .held = Fault.held, .lost = Fault.lose, .startable = TestHost.never, .start = Fault.start, .notice = Fault.notice };
     self.reading.phase = .activity;
     try self.reader.start(std.testing.io, &fenced, Fault.run);
     try self.settleReader();
@@ -5800,7 +5801,7 @@ test "Host recovery joins unavailable reads in every phase without losing the Se
     try std.testing.expect(self.reading.pending_diagnostic == null);
     // Cancellation wins even if earlier work on this invocation touched transport.
     var cancelled: Fault = .{ .failure = error.Cancelled, .origin = .host_transport };
-    self.app_hooks.host = .{ .context = &cancelled, .held = Fault.held, .lost = Fault.lose, .start = Fault.start, .notice = Fault.notice };
+    self.app_hooks.host = .{ .context = &cancelled, .held = Fault.held, .lost = Fault.lose, .startable = TestHost.never, .start = Fault.start, .notice = Fault.notice };
     self.reading.phase = .activity;
     try self.reader.start(std.testing.io, &cancelled, Fault.run);
     try std.testing.expectError(error.Cancelled, self.settleReader());
@@ -5808,7 +5809,7 @@ test "Host recovery joins unavailable reads in every phase without losing the Se
     // A canonical or unrelated failure still has its original fatal boundary.
     for ([_]anyerror{ error.CanonicalStoreFailure, error.AccessDenied }) |failure| {
         var fault: Fault = .{ .failure = failure };
-        self.app_hooks.host = .{ .context = &fault, .held = Fault.held, .lost = Fault.lose, .start = Fault.start, .notice = Fault.notice };
+        self.app_hooks.host = .{ .context = &fault, .held = Fault.held, .lost = Fault.lose, .startable = TestHost.never, .start = Fault.start, .notice = Fault.notice };
         self.reading.phase = .activity;
         try self.reader.start(std.testing.io, &fault, Fault.run);
         try std.testing.expectError(failure, self.settleReader());
@@ -5888,7 +5889,19 @@ const ChromeFixture = struct {
     }
 
     fn press(fixture: *ChromeFixture, key: vaxis.Key) !void {
-        try fixture.widget.handleEvent(&fixture.ctx, .{ .key_press = key });
+        // Mount the real key owner for App's captured path, including paste
+        // state. Tests that explicitly open Root do so before the first key.
+        fixture.root.session = fixture.widget;
+        fixture.root.session_keys = fixture.self.keyOwner();
+        fixture.ctx.consume_event = false;
+        const phase = fixture.ctx.phase;
+        defer fixture.ctx.phase = phase;
+        fixture.ctx.phase = .capturing;
+        try fixture.root.widget().captureEvent(&fixture.ctx, .{ .key_press = key });
+        if (!fixture.ctx.consume_event) {
+            fixture.ctx.phase = .at_target;
+            try fixture.widget.handleEvent(&fixture.ctx, .{ .key_press = key });
+        }
     }
 
     fn now() u64 {
@@ -5950,7 +5963,7 @@ test "App Session shell gutter and back control follow list visibility through r
     _ = self.input.replace(.{ .start = 0, .end = 0, .text = "kept draft" });
     try seedFeed(fixture.screen, "› Build the docs…\n✓ Build the docs\n");
     const anchor = fixture.screen.anchor;
-    try fixture.root.openSession(&fixture.ctx, fixture.widget);
+    try fixture.root.openSession(&fixture.ctx, fixture.widget, fixture.self.keyOwner());
     const arena = fixture.arena.allocator();
     for ([_]u16{ 140, 46, 100, 99, 140, 46 }) |width| {
         const frame = try fixture.root.widget().draw(.{ .arena = arena, .min = .{}, .max = .{ .width = width, .height = 26 }, .cell_size = .{} });
@@ -6359,7 +6372,7 @@ test "App Session keeps its real draft browsing anchor and focused composer acro
     var fixture: ChromeFixture = undefined;
     try fixture.init();
     defer fixture.deinit();
-    try fixture.root.openSession(&fixture.ctx, fixture.widget);
+    try fixture.root.openSession(&fixture.ctx, fixture.widget, fixture.self.keyOwner());
     const draw: vxfw.DrawContext = .{ .arena = fixture.arena.allocator(), .min = .{}, .max = .{ .width = 140, .height = 26 }, .cell_size = .{} };
     _ = try fixture.root.widget().draw(draw);
     try fixture.press(.{ .codepoint = vaxis.Key.up, .mods = .{ .shift = true } });
@@ -6394,6 +6407,7 @@ test "App Session footer takes list visibility from Root across desktop and phon
     try fixture.init();
     defer fixture.deinit();
     fixture.root.session = fixture.widget;
+    fixture.root.session_keys = fixture.self.keyOwner();
     for ([_]struct { width: u16, list: bool }{
         .{ .width = 140, .list = true },
         .{ .width = 46, .list = false },
@@ -7225,7 +7239,7 @@ test "failed reply retry completion revalidates every submission hold" {
             .upgrade => held.upgrade = .{ .after = .blocked },
             .working => self.live.work.state = .{ .working = .{ .since = 2 } },
             .queued => self.live.queued.count = 1,
-            .host => self.app_hooks.host = .{ .context = self, .held = Host.held, .lost = Host.lost, .start = Host.start, .notice = Host.notice },
+            .host => self.app_hooks.host = .{ .context = self, .held = Host.held, .lost = Host.lost, .startable = TestHost.never, .start = Host.start, .notice = Host.notice },
         }
         try self.settleReader();
         try std.testing.expect(self.retryable() == null);
@@ -7979,7 +7993,7 @@ test "failed reply retry reader keeps every read failure at the shared settlemen
             self.failedRetryForTest();
             self.live.latest_ending.?.key = .{ .position = 3 };
             var host: Host = .{ .frontend = self, .listener = &listener, .fault = fault, .target = target };
-            if (app) self.app_hooks.host = .{ .context = &host, .held = Host.held, .lost = Host.lost, .start = Host.start, .notice = Host.notice };
+            if (app) self.app_hooks.host = .{ .context = &host, .held = Host.held, .lost = Host.lost, .startable = TestHost.always, .start = Host.start, .notice = Host.notice };
             defer self.app_hooks.host = null;
             defer {
                 self.reader.cancel();
@@ -8635,7 +8649,7 @@ test "chat info Configure and Copy admission either owns work or refuses before 
         try captureInfo(held, "Fix retry deadline");
         switch (hold) {
             .none => {},
-            .host => self.app_hooks.host = .{ .context = held, .held = Host.held, .lost = Host.lost, .start = Host.start, .notice = Host.notice },
+            .host => self.app_hooks.host = .{ .context = held, .held = Host.held, .lost = Host.lost, .startable = TestHost.always, .start = Host.start, .notice = Host.notice },
             .upgrade_running => held.upgrade = .{ .run = .checking },
             .upgrade_blocked => held.upgrade = .{ .after = .blocked },
             .upgrade_reobserving => held.upgrade = .{ .after = .reobserving },
@@ -8732,7 +8746,7 @@ test "chat info retains Session detach keys with full-page and standalone choice
         try held.keys("kept draft");
         if (choice >= 4) {
             var ctx = held.context();
-            _ = try held.self.footerEvent(&ctx, .{ .click = if (choice == 4) .effort else .model });
+            try held.self.footerClick(&ctx, if (choice == 4) .effort else .model);
             try std.testing.expect(held.self.app_info.standaloneOpen());
         } else try held.keys("\x1bi");
         _ = try held.draw();
@@ -8765,7 +8779,7 @@ test "chat info retains Session stop and archive bindings in full-page and stand
         try held.keys("kept draft");
         if (standalone) {
             var ctx = held.context();
-            _ = try held.self.footerEvent(&ctx, .{ .click = .effort });
+            try held.self.footerClick(&ctx, .effort);
             // Text and marked paste belong to this modal owner, not the draft.
             try held.keys("ignored\x1b[200~paste\t\r\x1b[201~");
         } else {
@@ -9029,6 +9043,7 @@ test "chat info supplies the one bottom footer after the input and both dividers
         held.size = .{ .width = size.width, .height = size.height };
         held.root.size = size;
         held.root.session = held.self.widget();
+        held.root.session_keys = held.self.keyOwner();
         try captureInfo(held, "Fix retry deadline");
         try held.keys("kept draft\x1bi");
         _ = try held.draw();
@@ -9145,8 +9160,11 @@ test "App Session palette refuses clicks on stale drafts closed lists and during
     try std.testing.expectEqualStrings("/ren", held.self.input.composition().bytes);
     try std.testing.expectEqual(null, held.self.input.queuedCommand());
     _ = try held.draw();
+    // Inside a paste Root takes the click before the palette sees it.
     held.root.input.pasting = true;
-    try widget_.handleEvent(&events, click);
+    events.consume_event = false;
+    try held.root.widget().captureEvent(&events, click);
+    try std.testing.expect(events.consume_event);
     try std.testing.expectEqualStrings("/ren", held.self.input.composition().bytes);
     held.root.input.pasting = false;
     held.self.app_consent.adopt(41);
@@ -9469,7 +9487,7 @@ test "chat footer deferred model choice is cancelled by text paste tab or backgr
         self.lender.context = &source;
         self.lender.models = Source.snapshot;
         var ctx = held.context();
-        _ = try self.footerEvent(&ctx, .{ .click = .model });
+        try self.footerClick(&ctx, .model);
         try std.testing.expectEqual(@as(?session_chrome.FooterField, .model), self.footer.pending);
         switch (interaction) {
             0 => try held.keys("!"),
@@ -9539,12 +9557,12 @@ test "chat footer permission transitions follow the current line with absent cur
         var ctx = held.context();
         defer ctx.cmds.deinit(std.testing.allocator);
         self.footer.focus = .model;
-        _ = try self.footerEvent(&ctx, .{ .tab = false });
+        try held.keys("\t");
         try std.testing.expectEqual(session_chrome.FooterFocus.input, self.footer.focus);
         self.line.read = .{ .revision = 4, .end = 1 };
         if (self.inspection.status) |index| self.inspection.sessions[index].effort = null;
         self.footer.focus = .model;
-        _ = try self.footerEvent(&ctx, .{ .tab = false });
+        try held.keys("\t");
         try std.testing.expectEqual(session_chrome.FooterFocus.effort, self.footer.focus);
     };
 }
@@ -9582,8 +9600,13 @@ test "chat standalone footer close clicks match Escape preserve paste and preser
             var text: std.Io.Writer.Allocating = .init(held.arena.allocator());
             for (footer.buffer) |cell| try text.writer.writeAll(cell.char.grapheme);
             try std.testing.expect(std.mem.endsWith(u8, text.written(), if (failed) "enter retry · esc close" else "enter pick · esc close"));
+            // Inside a paste Root takes the click before the footer sees it.
             self.app_hooks.root.input.pasting = true;
-            for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| try @import("testing/app_events.zig").mouse(&ctx, footer, .{ .row = 0, .col = @intCast(close.origin.col), .button = .left, .mods = .{}, .type = kind });
+            for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| {
+                ctx.consume_event = false;
+                try held.root.widget().captureEvent(&ctx, .{ .mouse = .{ .row = 0, .col = @intCast(close.origin.col), .button = .left, .mods = .{}, .type = kind } });
+                try std.testing.expect(ctx.consume_event);
+            }
             try std.testing.expect(self.app_info.standaloneOpen());
             self.app_hooks.root.input.pasting = false;
             for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| try @import("testing/app_events.zig").mouse(&ctx, footer, .{ .row = 0, .col = @intCast(close.origin.col), .button = .left, .mods = .{}, .type = kind });

@@ -714,13 +714,13 @@ fn openSession(self: *Self, ctx: *vxfw.EventContext) !void {
     const frontend = try self.init.gpa.create(SessionFrontend);
     const lender: SessionFrontend.Lender = .{ .context = self, .step = conversed, .service = service, .line = conversationLine, .observed = observed, .upgrade = upgradeValue, .archive_state = archiveState, .models = modelsSnapshot };
     frontend.begin(self.init, self.options.store, &self.opened, self.options.directory, files, self.hooks.command, self.hooks.requests, self.hooks.status, screen, self.interrupted, lender);
-    const child = frontend.attach(.{ .configure = self.hooks.configure, .drafts = &self.session_drafts, .root = &self.root, .context = self, .leave = appSessionLeft, .copy = appCopy, .on_open = appSessionFollow, .host = .{ .context = self, .held = hostHeld, .lost = hostLost, .start = requestHostStart, .notice = hostNotice } }, self.caps);
+    const child = frontend.attach(.{ .configure = self.hooks.configure, .drafts = &self.session_drafts, .root = &self.root, .context = self, .leave = appSessionLeft, .copy = appCopy, .on_open = appSessionFollow, .host = .{ .context = self, .held = hostHeld, .lost = hostLost, .startable = hostStartable, .start = requestHostStart, .notice = hostNotice } }, self.caps);
     // Custody transfers before focus delivery: on failure the exit
     // path cancels and joins the same frontend before freeing it.
     self.app_session = .{ .session = reference, .frontend = frontend, .files = files, .ended = .detached };
     count = 0;
     _ = try self.event(.{ .conversation = reference });
-    try self.root.openSession(ctx, child);
+    try self.root.openSession(ctx, child, frontend.keyOwner());
 }
 
 fn appSessionLeft(raw: *anyopaque, ctx: *vxfw.EventContext, outcome: SessionFrontend.Outcome) !void {
@@ -1882,6 +1882,12 @@ fn launchNext(self: *const Self) ?HostLaunch.Next {
 fn queueHostStart(self: *Self) void {
     self.host_launch = null;
     self.queue(.start_host);
+}
+
+/// The Host is stopped and a start can mend it now.
+fn hostStartable(raw: *anyopaque) bool {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    return self.hostNext() != null;
 }
 
 fn requestHostStart(raw: *anyopaque, ctx: *vxfw.EventContext) !bool {
@@ -4918,7 +4924,7 @@ test "App overview schedules spinning rows only while Root shows the list" {
             // Closing at phone width makes the same list eligible again.
             .{ .width = 46, .open = false, .visible = true },
         }) |layout| {
-            if (layout.open and overview.root.session == null) try overview.root.openSession(&ctx, session.widget());
+            if (layout.open and overview.root.session == null) try overview.root.openSession(&ctx, session.widget(), null);
             if (!layout.open and overview.root.session != null) try overview.root.closeSession(&ctx);
             _ = try overview.root.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = layout.width, .height = 24 }, .cell_size = .{} });
             try std.testing.expectEqual(spinning, overview.listSpins());
@@ -4970,7 +4976,7 @@ test "App overview prepares full-width list rows and splits only beside a Sessio
     const chat: vxfw.Text = .{ .text = "Chat", .width_basis = .parent };
     var ctx = rig.context();
     defer ctx.cmds.deinit(std.testing.allocator);
-    try overview.root.openSession(&ctx, chat.widget());
+    try overview.root.openSession(&ctx, chat.widget(), null);
     const wide = try overview.root.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 140, .height = 40 }, .cell_size = .{} });
     const panes = wide.children[0].surface.children;
     try std.testing.expectEqual(@as(u16, 40), overview.state.size.width);
@@ -5079,7 +5085,7 @@ test "App overview list press follows only after the open child settles and open
             try std.testing.expectEqualStrings("b4n8wd", &overview.opened);
             Seen.now.conversations += 1;
             Seen.now.conversed = overview.opened;
-            try overview.root.openSession(ctx, overview.app_sessions.widget());
+            try overview.root.openSession(ctx, overview.app_sessions.widget(), null);
         }
     };
     var tmp = std.testing.tmpDir(.{});
@@ -5147,7 +5153,7 @@ test "App shell divider follows overview locale across layouts and screen select
         for (0..2) |paint| {
             if (paint != 0) try overview.paintCursor();
             for ([_]bool{ false, true }) |open| {
-                if (open) try overview.root.openSession(&events, session.widget()) else try overview.root.closeSession(&events);
+                if (open) try overview.root.openSession(&events, session.widget(), null) else try overview.root.closeSession(&events);
                 for ([_]u16{ 46, 99, 100, 140 }) |width| {
                     const surface = try overview.root.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 24 }, .cell_size = .{} });
                     const layout = surface.children[0].surface;
@@ -5195,7 +5201,7 @@ test "App list clicks validate present and removed targets with open and closed 
             try std.testing.expect(overview.root.session == null);
             Seen.now.conversations += 1;
             Seen.now.conversed = overview.opened;
-            try overview.root.openSession(ctx, overview.app_sessions.widget());
+            try overview.root.openSession(ctx, overview.app_sessions.widget(), null);
         }
     };
     var tmp = std.testing.tmpDir(.{});
@@ -5277,7 +5283,7 @@ test "App root navigation shows and focuses the main pane before every Session s
             try std.testing.expect((try focus(ctx)).eql(overview.widget()));
             Seen.now.conversations += 1;
             Seen.now.conversed = overview.opened;
-            try overview.root.openSession(ctx, @This().widget(overview));
+            try overview.root.openSession(ctx, @This().widget(overview), null);
         }
         fn widget(overview: *Self) vxfw.Widget {
             return .{ .userdata = overview, .eventHandler = @This().event, .drawFn = @This().draw };
@@ -5735,8 +5741,8 @@ test "chat omits New Session at every width and overview restores its pinned con
     const Chat = struct {
         const child: vxfw.Text = .{ .text = "Chat transcript" };
         fn open(overview: *Self, ctx: *vxfw.EventContext) !void {
-            overview.state.conversing = overview.opened;
-            try overview.root.openSession(ctx, child.widget());
+            _ = try overview.event(.{ .conversation = overview.opened });
+            try overview.root.openSession(ctx, child.widget(), null);
         }
     };
     const rig = try openListed();
@@ -5764,7 +5770,7 @@ test "chat omits New Session at every width and overview restores its pinned con
     }
     var ctx = rig.context();
     defer ctx.cmds.deinit(std.testing.allocator);
-    rig.overview.state.conversing = null;
+    _ = try rig.overview.event(.{ .conversation = null });
     try rig.overview.root.closeSession(&ctx);
     for ([_]u16{ 46, 140 }) |width| {
         var shown = try rig.shown(width, 20);
@@ -5930,7 +5936,7 @@ test "relaunch departure matrix preserves every screen and all unsent drafts" {
                         frontend.begin(rig.init, "/store", &overview.opened, "/requests", undefined, undefined, undefined, undefined, rig.screen, &cancellation, undefined);
                         if (drafted) frontend.input.restore(.{ .bytes = "open α", .cursor = 2, .anchor = .{ .position = 11, .end = 13 } });
                         overview.app_session = .{ .session = overview.opened, .frontend = frontend, .files = null, .ended = .detached };
-                        overview.state.conversing = overview.opened;
+                        _ = try overview.event(.{ .conversation = overview.opened });
                     }
                     var ctx = rig.context();
                     defer ctx.cmds.deinit(gpa);
