@@ -29,7 +29,7 @@ PLATFORM = os_semantics.native_release_target()
 KEPT = "Saved work and sign-in were kept."
 HOST = "Rui's background Host (the process that runs your Sessions)"
 NEXT = "Next: run rui in your project directory. It signs you in first (setup steps: https://github.com/DivyanshGolyan/rui#start-a-conversation)."
-ADDED = "Added ~/.local/bin to your PATH in ~/.zshrc. Open a new terminal to use it."
+ADDED = "Added ~/.local/bin to your PATH in ~/.zshrc. Open a new terminal, or run exec \"/bin/zsh\", to use it."
 PATH_LINE = 'export PATH="$HOME/.local/bin:$PATH"'
 
 
@@ -127,7 +127,7 @@ done
 cp "{self.served}/${{url##*/download/}}" "$output"
 ''')
         (self.tools / "curl").chmod(0o755)
-        self.environment = {**os.environ, "HOME": str(self.home), "SHELL": "/bin/zsh", "ZDOTDIR": "",
+        self.environment = {**os.environ, "HOME": str(self.home), "SHELL": "/bin/zsh", "ZDOTDIR": "", "GITHUB_PATH": "",
                             "PATH": f"{self.tools}:{self.bin}:/usr/bin:/bin:/usr/sbin:/sbin",
                             "RUI_TEST_PUBLISH_HELPER": str(self.publisher)}
 
@@ -215,8 +215,8 @@ cp "{self.served}/${{url##*/download/}}" "$output"
         missing = f"{self.bin} is not on your PATH. Add the installation directory to your shell profile, then open a new terminal:"
         advice = [installed, NEXT, missing, f"  export PATH=$'{self.bin}':\"$PATH\""]
         added = "# Added by the Rui installer\n" + PATH_LINE + "\n"
-        def into(name):
-            return [installed, NEXT, f"Added ~/.local/bin to your PATH in ~/{name}. Open a new terminal to use it."]
+        def into(name, shell="/bin/zsh"):
+            return [installed, NEXT, f"Added ~/.local/bin to your PATH in ~/{name}. Open a new terminal, or run exec \"{shell}\", to use it."]
         bash = {"SHELL": "/bin/bash"}
         darwin = sys.platform == "darwin"
         cases = {
@@ -229,17 +229,17 @@ cp "{self.served}/${{url##*/download/}}" "$output"
             "no trailing newline": ({}, {".zshrc": "alias ll=ls"}, into(".zshrc"),
                                     {".zshrc": "alias ll=ls\n\n" + added}),
             "ZDOTDIR": ({"ZDOTDIR": str(self.home / "zdot")}, {}, into("zdot/.zshrc"), {"zdot/.zshrc": added}),
-            "unknown shell uses .profile": ({"SHELL": "/bin/ksh"}, {}, into(".profile"), {".profile": added}),
-            "bash, no startup file": (bash, {}, into(".bash_profile" if darwin else ".bashrc"),
+            "unknown shell uses .profile": ({"SHELL": "/bin/ksh"}, {}, into(".profile", "/bin/ksh"), {".profile": added}),
+            "bash, no startup file": (bash, {}, into(".bash_profile" if darwin else ".bashrc", "/bin/bash"),
                                       {".bash_profile" if darwin else ".bashrc": added}),
-            "bash with .bash_login": (bash, {".bash_login": "x\n"}, into(".bash_login" if darwin else ".bashrc"),
+            "bash with .bash_login": (bash, {".bash_login": "x\n"}, into(".bash_login" if darwin else ".bashrc", "/bin/bash"),
                                       {".bash_login": "x\n\n" + added, ".bash_profile": None} if darwin
                                       else {".bash_login": "x\n", ".bashrc": added}),
-            "bash with .profile": (bash, {".profile": "x\n"}, into(".profile" if darwin else ".bashrc"),
+            "bash with .profile": (bash, {".profile": "x\n"}, into(".profile" if darwin else ".bashrc", "/bin/bash"),
                                    {".profile": "x\n\n" + added, ".bash_profile": None} if darwin
                                    else {".profile": "x\n", ".bashrc": added}),
             "bash with all three": (bash, {".bash_profile": "a\n", ".bash_login": "b\n", ".profile": "c\n"},
-                                    into(".bash_profile" if darwin else ".bashrc"),
+                                    into(".bash_profile" if darwin else ".bashrc", "/bin/bash"),
                                     {".bash_profile": "a\n\n" + added, ".bash_login": "b\n", ".profile": "c\n"} if darwin
                                     else {".bash_profile": "a\n", ".bashrc": added}),
         }
@@ -259,6 +259,12 @@ cp "{self.served}/${{url##*/download/}}" "$output"
                         self.assertFalse(path.exists(), name)
                     else:
                         self.assertEqual(path.read_text(), want, name)
+
+    def test_github_actions_path_gets_the_directory(self):
+        github_path = self.root / "github_path"
+        github_path.write_text("/earlier\n")
+        self.report(self.install("0.40.0", GITHUB_PATH=str(github_path)))
+        self.assertEqual(github_path.read_text(), f"/earlier\n{self.home}/.local/bin\n")
 
     def test_advice_text_never_decides_a_profile_change(self):
         """A shadowing rui whose directory name repeats the advice text stays shadowed."""

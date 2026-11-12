@@ -35,10 +35,14 @@ rui_publish() {
 # startup file instead, so a new terminal finds rui; RUI_NO_MODIFY_PATH=1 keeps
 # the advice. The decision reads BUILD's state, never its advice text.
 _rui_path() {
+    # A GitHub Actions step that installs Rui hands later steps the directory.
+    if [ "$3" = released-install ] && [ -n "${GITHUB_PATH:-}" ]; then
+        printf '%s\n' "$1/bin" >>"$GITHUB_PATH" 2>/dev/null || :
+    fi
     _rui_state=$("$2/bin/rui" --installation-path-state </dev/null 2>/dev/null) || _rui_state=
     if [ "$_rui_state" = missing ] && [ "$3" = released-install ] && [ "$1" = "$HOME/.local" ] \
         && [ -z "${RUI_NO_MODIFY_PATH:-}" ] && _rui_rc=$(_rui_profile) && _rui_add_path "$_rui_rc"; then
-        printf 'Added ~/.local/bin to your PATH in %s. Open a new terminal to use it.\n' "$(_rui_show "$_rui_rc")"
+        printf 'Added ~/.local/bin to your PATH in %s. Open a new terminal, or run exec "$SHELL", to use it.\n' "$(_rui_show "$_rui_rc")"
         return 0
     fi
     "$2/bin/rui" --installation-path </dev/null || :
