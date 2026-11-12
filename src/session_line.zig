@@ -72,7 +72,6 @@ pub fn left(trigger: u64, pressure: u64) u8 {
 
 pub const Facts = struct {
     name: []const u8,
-    folder: ?[]const u8 = null,
     model: []const u8,
     /// Present only before the first Message, from the current Session read.
     folder: ?[]const u8 = null,
