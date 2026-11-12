@@ -1199,7 +1199,7 @@ fn drawPart(self: *Self, ctx: vxfw.DrawContext, part: AppScreen.Overview.Part) s
         list = prepared;
         self.app_header.caps = self.caps;
         if (view.showsNewSession(&self.state)) {
-            self.app_new_session = .{ .state = &self.state, .caps = self.caps, .userdata = self, .on_click = appClick };
+            self.app_new_session.caps = self.caps;
             const header = try ctx.arena.create(@import("widgets/Stack.zig"));
             header.* = .{ .priority = .top, .children = try ctx.arena.dupe(@import("widgets/Stack.zig").Child, &.{
                 .{ .widget = self.app_new_session.widget() },
@@ -1304,6 +1304,7 @@ fn create(init: std.process.Init, options: Options, hooks: Hooks, ops: Operation
     self.app_input = .{ .composer = .{ .editor = &self.composer, .placeholder = "Type a task" }, .facts_at = .bottom };
     self.app_screen = .{ .content = &self.app_sessions, .input = &self.app_input, .userdata = self, .on_event = appEvent };
     self.app_header = .{ .state = &self.state };
+    self.app_new_session = .{ .state = &self.state, .caps = self.caps, .userdata = self, .on_click = appClick };
     self.app_settings_line = .{ .selected = false, .caps = self.caps, .userdata = self, .on_click = appClick };
     self.app_sessions.on_press = .{ .userdata = self, .pressed = appClick };
     self.app_picker.on_press = .{ .userdata = self, .pressed = appClick };
@@ -8345,5 +8346,43 @@ test "Overview mouse Host line without a start or retry has no hover or click ac
         try host_widget.handleEvent(&events, .{ .mouse = .{ .col = 2, .row = 0, .button = .left, .type = .press, .mods = .{} } });
         try std.testing.expectEqual(@as(usize, 0), HostRecovery.starts);
         for (events.cmds.items) |cmd| try std.testing.expect(cmd != .request_focus);
+    }
+}
+
+test "Overview pinned New Session hover survives unchanged frames without selecting or focusing" {
+    for ([_]u16{ 46, 140 }) |width| {
+        const rig = try openListed();
+        defer rig.close();
+        _ = try rig.press("\x1b[B");
+        const selected = rig.overview.state.selected;
+        try std.testing.expect(selected == .session);
+        var plain = try rig.shown(width, 30);
+        defer plain.deinit();
+        var ctx = rig.context();
+        defer ctx.cmds.deinit(std.testing.allocator);
+        const pinned = rig.overview.app_new_session.widget();
+        const motion: vxfw.Event = .{ .mouse = .{ .col = 4, .row = 0, .button = .none, .type = .motion, .mods = .{} } };
+        try pinned.handleEvent(&ctx, .mouse_enter);
+        try pinned.handleEvent(&ctx, motion);
+        for (0..2) |_| {
+            var hovered = try rig.shown(width, 30);
+            defer hovered.deinit();
+            const style = @import("widget_style.zig").of(rig.overview.caps, .{ .background = .hover });
+            try std.testing.expectEqual(style.bg, hovered.screen.readCell(4, 0).?.style.bg);
+            try std.testing.expectEqual(style.reverse, hovered.screen.readCell(4, 0).?.style.reverse);
+            try std.testing.expect(rig.overview.app_new_session.row.inner.hover.pointing);
+            try std.testing.expectEqual(selected, rig.overview.state.selected);
+            for (ctx.cmds.items) |cmd| try std.testing.expect(cmd != .request_focus);
+            ctx.cmds.clearRetainingCapacity();
+            ctx.redraw = false;
+            try pinned.handleEvent(&ctx, motion);
+            try std.testing.expect(!ctx.redraw);
+            try std.testing.expectEqual(@as(usize, 0), ctx.cmds.items.len);
+        }
+        try pinned.handleEvent(&ctx, .mouse_leave);
+        var left = try rig.shown(width, 30);
+        defer left.deinit();
+        try std.testing.expectEqual(plain.screen.readCell(4, 0).?.style, left.screen.readCell(4, 0).?.style);
+        try std.testing.expect(!rig.overview.app_new_session.row.inner.hover.pointing);
     }
 }

@@ -1732,6 +1732,9 @@
       "open": "overview",
       "steps": [
         {
+          "wait": "Batch job"
+        },
+        {
           "keys": [
             "Down",
             "Down",
@@ -1785,46 +1788,8 @@
         },
         {
           "keys": [
-            "Down",
-            "Down",
-            "Down",
-            "Down",
-            "Down",
-            "Down",
-            "Down",
-            "Down",
-            "Down",
-            "Down",
-            "Down",
-            "Down",
-            "Down",
-            "Down",
-            "Down",
-            "Down",
-            "Down",
-            "Down",
-            "Down",
-            "Down",
-            "Down",
-            "Down",
-            "Down",
-            "Down",
-            "Down",
-            "Down",
-            "Down",
-            "Down",
-            "Down",
-            "Down",
-            "Down",
-            "Down",
-            "Down",
-            "Down",
-            "Down",
-            "Down",
-            "Down",
-            "Down",
-            "Down",
-            "Down"
+            "End",
+            "Up"
           ]
         },
         {
@@ -1852,6 +1817,9 @@
       "note": "51c-many-sessions-pinned-end",
       "open": "overview",
       "steps": [
+        {
+          "wait": "Batch job"
+        },
         {
           "keys": [
             "End",
