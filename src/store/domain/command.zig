@@ -712,8 +712,7 @@ pub fn startAgent(
     const refusal: ?[]const u8 = refusal: {
         if (saved != null) break :refusal "Rui could not start the agent: its command key is already taken. Nothing was started.";
         if (try configuration_domain.inheritParent(a.store.hostTools().host_tool_set, configuration, creation)) |code| {
-            if (code == .unknown_tool or code == .mcp_server_unavailable) {
-                const detail = configuration_domain.missingToolMessage(a.store.hostTools().host_tool_set, &configuration.tools).?;
+            if (configuration_domain.missingToolMessage(a.store.hostTools().host_tool_set, code, &configuration.tools)) |detail| {
                 var writer = std.Io.Writer.fixed(&result_buffer);
                 try detail.write(&writer);
                 try writer.print(" ({s}). Nothing was started.", .{@tagName(code)});

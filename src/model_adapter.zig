@@ -1298,7 +1298,10 @@ pub const Preparation = struct {
             .sender => switch (index) {
                 0 => .{ .source = .{ .bytes = peer_parts[0] } },
                 1 => .{ .source = .{ .bytes = self.sender.slice() }, .quoted = true },
-                2 => .{ .source = .{ .bytes = peer_parts[1] } },
+                2 => .{ .source = .{ .bytes = if (self.settings.parent) |parent|
+                    if (parent.eql(self.sender.slice())) @embedFile("peer_message_attached.txt") else peer_parts[1]
+                else
+                    peer_parts[1] } },
                 else => null,
             },
         };
