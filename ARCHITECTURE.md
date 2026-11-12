@@ -2449,7 +2449,7 @@ A running Host that does not serve the chosen provider is reported, not restarte
 When all three selectors are explicit, unreadable future defaults cannot block the overview, even after login fails to save them; otherwise the post-login choice rereads future defaults.
 A ready existing Host retains its actual capacity/capabilities; no model capability prevents opening the overview without restarting it.
 When its Host goes away the overview stays open and says so on one Host line, `■ Host stopped · r start`; `r` on an empty draft, or a click on the line, starts it through the same launch owner.
-A Host that ended without being asked to stop (a crash or a kill) is started once by itself, the line reading `Host starting` meanwhile; a Host stopped by `host-stop` (pause, stop or an Upgrade's swap) or by its launcher closing stdin is not, nor while an Upgrade holds the Host.
+A Host that ended without being asked to stop (a crash or SIGKILL) is started once by itself, the line reading `Host starting` meanwhile; a Host stopped by `host-stop` (pause, stop or an Upgrade's swap), by its launcher closing stdin, or by SIGINT, SIGTERM or SIGHUP (Ctrl-C on a foreground `host serve`, closing its terminal, or `kill`) is not, nor while an Upgrade holds the Host.
 The stopping Host leaves a stop record beside its Store lease, which every Host start removes; an unreadable record counts as a stop someone asked for.
 At most one automatic start runs per overview: a failed start or a second crash leaves the line to `r`, with no retry or backoff.
 
@@ -2914,7 +2914,7 @@ Every page carries `queued`: the field came with wire version 3, and a frontend 
 Wire version 10 makes the refused-send target required and nullable under the [public activity contract](#public-session-activity); non-null peers keep their canonical ID grammar.
 
 Wire version 14 requires the `chatgpt` provider key, and supports the `chatgpt_plan` route, in `host_info`'s `capabilities.providers`; ordinary clients and Hosts on different wire versions refuse each other.
-A wire bump also appends a Store format step because the Store saves its wire label: format 70 moves the saved label from 13 to 14 on SQLite and MySQL, without changing ordinary rows.
+A wire bump also appends a Store format step because the Store saves its wire label: format 71 moves the saved label from 14 to 15 on SQLite and MySQL, without changing ordinary rows.
 The `model_call` Activity rows shipped in v0.69.x under wire version 13 without a bump, although 13 had already shipped in v0.67.x; a 0.69 client asking a 0.67 Host for those rows therefore failed with `InvalidCursor` instead of refusing the incompatible Host.
 `tests/ci/test_wire_version.py` requires a wire version greater than the newest release's whenever generated `openapi.json` changes, ignoring only `info.version` and documentation-only `description`, `summary`, `example` and `examples` annotations (never named schema entries or literal wire data); wire constraints such as `x-rui-*` bounds remain part of the comparison.
 Upgrade and restart-all control recognize wire 13 as a historical Host-info profile: v0.69.1 may omit `chatgpt`, while v0.69.2 reports it. Historical observation never grants ordinary client readiness; exact-instance shutdown uses the observed Host's own executable before the new build starts it.
@@ -4005,7 +4005,7 @@ A client first probes the existing `host.lock` with a nonblocking shared lock, w
 One absolute probe deadline covers connect, write, first byte, header and full body; ordinary commands retain their separate processing and transfer waits.
 The shared response parser accepts only valid bounded HTTP/1.1 headers with one decimal Content-Length, supported Content-Type and wire version; it rejects malformed field names/values, duplicates of consequential fields and unsupported transfer or content encodings rather than interpreting ambiguous framing.
 A complete compatible reply from that owner means ready and reports the canonical Store selector, wire version, actual allocated Active Capacity, slots in use, the Host's start time, whether it holds new Turns (`paused`), its Bash capability and each built-in provider's route (`unserved`, `endpoint`, `chatgpt_device`, `key_file` or `chatgpt_plan`). **Slots in use** (`custody_occupied`) counts held custody records, including detached cleanup; it is the value Current reports as `execution.custody_occupied`.
-Only the historical wire-13 Host-info profile accepts an absent `chatgpt` route as `unserved`, covering v0.69.1 alongside v0.69.2's complete provider facts. Current wire-14 facts require the provider; historical normalization serves upgrade/restart discovery and exact-instance activation, never ordinary status or client readiness.
+Only the historical wire-13 Host-info profile accepts an absent `chatgpt` route as `unserved`, covering v0.69.1 alongside v0.69.2's complete provider facts. Current wire-15 facts require the provider; the wire-14 profile freezes v0.70.0’s complete provider facts; historical normalization serves upgrade/restart discovery and exact-instance activation, never ordinary status or client readiness.
 Codex, OpenAI and the existing required identity/control fields remain required; unknown, duplicate and malformed fields still fail decoding.
 The start time (`started_at`) is the Host Unix second read once before execution starts; every reply of one Host reports the same value, and like every Host time it orders nothing across clock changes.
 Both are read from Host memory, so the reply still never touches SQLite.
@@ -4044,6 +4044,7 @@ A disconnected readiness pipe records startup failure instead of terminating on 
 
 Host startup establishes default SIGCHLD handling with `SA_NOCLDWAIT` cleared before Store ownership or child launch, including for direct `host serve`.
 This preserves waitable child identities until their signaling owners retire.
+It also catches SIGINT, SIGTERM and SIGHUP before Store ownership: each one is the same asked stop as `host-stop`, applied on the intake loop, which the handler only wakes; a second one while stopping changes nothing. Bash children start with every signal at its default.
 Host startup then owns lease acquisition, recovery and readiness.
 Competing launchers may create candidates, but one holds the lease.
 All probe the winning Host for up to ten seconds from readiness-check start, without killing an unconfirmed owner.

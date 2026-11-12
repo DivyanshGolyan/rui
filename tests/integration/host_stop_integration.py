@@ -7,6 +7,7 @@ import os
 import pathlib
 import re
 import shlex
+import signal
 import socket
 import subprocess
 import sys
@@ -209,6 +210,38 @@ def mixed_effect_drain(provider_first):
                 incoming_error.add_note("Host-stop cleanup failed: " + ", ".join(type(error).__name__ for error in errors))
 
 
+def signal_stop():
+    """SIGINT, SIGTERM and SIGHUP stop the Host as host-stop does; SIGKILL is a crash."""
+    with tempfile.TemporaryDirectory(prefix="rui-host-signal-") as root:
+        state = canonical_fixture_root(root)
+        endings = {}
+        for ending in ("host-stop", signal.SIGTERM, signal.SIGINT, signal.SIGHUP, signal.SIGKILL):
+            name = ending if isinstance(ending, str) else ending.name
+            store = state / name
+            host = fixture.start_host(store, None)
+            try:
+                if isinstance(ending, str):
+                    paused = subprocess.run([RUI, "host", "pause", "--store", store],
+                                            capture_output=True, text=True, timeout=20)
+                    assert paused.returncode == 0, paused
+                else:
+                    host.send_signal(ending)
+                    if ending != signal.SIGKILL:
+                        # A second ask while stopping changes nothing.
+                        host.send_signal(ending)
+                endings[name] = host.wait(timeout=10)
+            finally:
+                stop_process(host)
+            assert status(store) == "unavailable", (name, status(store))
+            # The stop record a client reads to tell an asked stop from a crash.
+            endings[name] = endings[name], (store / "host.stopped").exists()
+        asked = endings["host-stop"]
+        assert asked[1], endings
+        assert all(endings[name] == asked for name in ("SIGTERM", "SIGINT", "SIGHUP")), endings
+        assert endings["SIGKILL"] == (-signal.SIGKILL, False), endings
+        print(f"host signal stop passed: SIGTERM, SIGINT and SIGHUP end as host-stop {asked}; SIGKILL {endings['SIGKILL']}")
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix="rui-host-stop-") as root:
         state = canonical_fixture_root(root)
@@ -404,4 +437,5 @@ if __name__ == "__main__":
     check_missing_classification(actor_after_classification)
     mixed_effect_drain(True)
     mixed_effect_drain(False)
+    signal_stop()
     main()
