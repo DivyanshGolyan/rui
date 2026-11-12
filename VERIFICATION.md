@@ -544,6 +544,7 @@ Extend existing owners and their gates; replace obsolete wait wrappers and fixed
 | [Codex request envelope](ARCHITECTURE.md#codex-wire-binding) and supported-model compaction defaults | `codex-integration`, `codex-h2-integration`, `'supported model compaction'`, `'request preparation'`, `'only the pinned table'` | Synthetic outgoing HTTP bodies and revision header, all nine exact IDs and both parallel policies. Unknown IDs retain no inferred trigger and no parallel calls. No live backend qualification |
 | Live Codex journey | `python3 tests/integration/codex_live.py /absolute/path/to/rui --live --model EXACT_MODEL` | Opt-in with authorized credentials. Never a gate |
 | Compaction on context overflow | `'compaction overflow'`, `dispatch-integration`, `human_cli_integration.py` | Synthetic. Live compaction: none located |
+| [Superseded compaction prefix](ARCHITECTURE.md#response-owned-compaction) | `output_decode.zig` `'a compaction keeps its last compaction item and what follows it, and nothing before'` | One table over one item; compaction, message, compaction with an empty and a full terminal list; reasoning before it; two compaction items; a message after the last; no compaction item; a call before, between and after. Kept items, base, answer and released metadata charge. Synthetic stream; the live shape is from the plan-route probe, not a gate |
 
 ## Execution, retries and permission
 
