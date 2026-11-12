@@ -144,8 +144,9 @@ fn drawHover(self: *Self, arena: std.mem.Allocator, surface: vxfw.Surface) !void
         }
     };
     if (handler.on_click != null) if (handler.action_at) |action_at| {
+        var rows = self.document.rowsFrom(self.layout(), self.laidFirst());
         for (0..self.drawn.height) |row| {
-            const position = self.rowPosition(self.laidFirst(), @intCast(row)) orelse continue;
+            const position = rows.next() orelse break;
             if (!action_at(handler.userdata, position)) continue;
             const rect: Hover.Rect = .{ .row = @intCast(row), .width = surface.size.width };
             try targets.append(arena, rect);
@@ -325,9 +326,11 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         selection.view = self.first;
         const range: selecting.Range = .of(selection.anchor, selection.head);
         const columns = try ctx.arena.alloc(bool, width);
+        var rows = self.document.rowsFrom(self.layout(), self.first);
         for (0..height) |index| {
             const cells = surface.buffer[index * width ..][0..width];
-            self.rowAt(cells, self.first, @intCast(index)).covered(range, columns);
+            const line = if (rows.next()) |position| position.offset else null;
+            (selecting.Row{ .document = self.document, .cells = cells, .line = line }).covered(range, columns);
             for (cells, columns) |*cell, selected| {
                 if (selected) cell.style.reverse = true;
             }
@@ -839,4 +842,31 @@ test "DocumentView wide peer glyph continuation cells share hover and click geom
     try std.testing.expectEqualStrings("k7m2qx", h.opened.items);
     try h.transcript.widget().handleEvent(&h.ctx, .mouse_leave);
     try std.testing.expectEqual(vaxis.Mouse.Shape.default, h.ctx.cmds.items[h.ctx.cmds.items.len - 1].set_mouse_shape);
+}
+
+test "DocumentView hover and drag highlight measure each visible line a bounded number of times" {
+    const Eligible = struct {
+        fn none(_: *anyopaque, _: viewport.Position) bool {
+            return false;
+        }
+    };
+    var measured: [2]usize = undefined;
+    const heights = [_]u16{ 64, 2048 };
+    for (heights, &measured) |height, *count| {
+        const text = try std.testing.allocator.alloc(u8, 2 * @as(usize, height));
+        defer std.testing.allocator.free(text);
+        for (0..height) |line| @memcpy(text[2 * line ..][0..2], "x\n");
+        const h = try Harness.init(text, .{ .width = 8, .height = height });
+        defer h.deinit();
+        h.transcript.handler.?.action_at = Eligible.none;
+        try h.send(.press, 0, 0);
+        try h.send(.drag, 1, 0);
+        viewport.measured_lines = 0;
+        const frame = try h.frame();
+        try std.testing.expect(frame.buffer[0].style.reverse);
+        count.* = viewport.measured_lines;
+    }
+    // Every line is one row, so a linear frame costs at most 32 times as
+    // much for 32 times the rows; the quadratic walk cost about 1000 times.
+    try std.testing.expect(measured[1] <= 32 * measured[0]);
 }

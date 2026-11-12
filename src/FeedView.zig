@@ -100,10 +100,14 @@ pub fn openable(self: *Self, gpa: std.mem.Allocator) !?Openable {
     if (self.drawn.width == 0 or self.drawn.height == 0) return null;
     const cells = try gpa.alloc(vaxis.Cell, self.drawn.width);
     defer gpa.free(cells);
+    const positions = try gpa.alloc(?viewport.Position, self.drawn.height);
+    defer gpa.free(positions);
+    var rows = self.laidRows();
+    for (positions) |*position| position.* = rows.next() orelse null;
     var row: u16 = self.drawn.height;
     while (row > 0) {
         row -= 1;
-        const position = self.rowPosition(row) orelse continue;
+        const position = positions[row] orelse continue;
         if (self.window.document.toolHeading(position.offset)) return .{ .tool = self.window.pointAt(position.offset).?.key };
         self.paintRow(cells, position);
         var column: usize = cells.len;
@@ -153,6 +157,11 @@ fn laidVisible(self: *const Self) Feed.Visible {
 
 fn rowPosition(self: *const Self, row: u16) ?viewport.Position {
     return self.window.positionAtWith(self.laidVisible(), row, self.layout(), self.presentation());
+}
+
+/// Every row `rowPosition` answers, in order, laying the frame out once.
+fn laidRows(self: *const Self) resident.Window.Rows {
+    return self.window.rowsWith(self.laidVisible(), self.layout(), self.presentation());
 }
 
 fn paintRow(self: *const Self, cells: []vaxis.Cell, position: viewport.Position) void {
@@ -366,8 +375,9 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
             held.row = visible.row;
             const range: selecting.Range = .of(anchor, self.resolved(held.head).?);
             const columns = try ctx.arena.alloc(bool, self.size.width);
+            var rows = self.laidRows();
             for (0..self.size.height) |row| {
-                const position = self.rowPosition(@intCast(row)) orelse continue;
+                const position = (rows.next() orelse break) orelse continue;
                 const cells = surface.buffer[row * self.size.width ..][0..self.size.width];
                 (Row{ .document = &self.window.document, .cells = cells, .line = position.offset }).covered(range, columns);
                 for (cells, columns) |*cell, selected| if (selected) {
@@ -387,8 +397,9 @@ fn drawHover(self: *Self, arena: std.mem.Allocator, surface: vxfw.Surface) !void
     if (surface.size.width == 0) return;
     var targets: std.ArrayList(Hover.Rect) = .empty;
     const scratch = try arena.alloc(vaxis.Cell, surface.size.width);
+    var rows = self.laidRows();
     for (0..surface.size.height) |row| {
-        const position = self.rowPosition(@intCast(row)) orelse continue;
+        const position = (rows.next() orelse break) orelse continue;
         const point = self.window.pointAt(position.offset);
         const open_row = handler.on_click != null and (self.window.document.toolHeading(position.offset) or (if (point) |p| self.messageAt(p) != null else false));
         const retry = if (handler.on_retry != null) self.window.retryColumns(position, scratch, self.presentation()) else null;
@@ -882,4 +893,36 @@ test "FeedView Message summaries and wrapped peer links hover without making agg
         try std.testing.expect(summaries > 0 and links > 0);
         if (width == 14) try std.testing.expect(links > 1);
     }
+}
+
+test "FeedView hover and drag highlight measure each visible line a bounded number of times" {
+    const Actions = struct {
+        fn click(_: *anyopaque, _: *vxfw.EventContext, _: resident.Point) !void {}
+        fn open(_: *anyopaque, _: *vxfw.EventContext, _: []const u8) !void {}
+    };
+    var unused: u8 = 0;
+    var measured: [2]usize = undefined;
+    const heights = [_]u16{ 64, 2048 };
+    for (heights, &measured) |height, *count| {
+        const window = try testWindow();
+        defer std.testing.allocator.destroy(window);
+        const text = try std.testing.allocator.alloc(u8, 2 * @as(usize, height));
+        defer std.testing.allocator.free(text);
+        for (0..height) |line| @memcpy(text[2 * line ..][0..2], "x\n");
+        try window.append(&.{.{ .key = .{ .position = 10 }, .text = .{ .bytes = text } }});
+        var anchor: Feed = .{};
+        var view: Self = .{ .window = window, .anchor = &anchor, .handler = .{ .userdata = &unused, .on_click = Actions.click, .on_open = Actions.open, .on_retry = RetryClicks.retry, .on_notice = RetryClicks.notice, .on_scroll = RetryClicks.scroll } };
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        _ = try testFrame(&view, arena.allocator(), 8, height);
+        const start = (try view.spotAt(arena.allocator(), .{ .row = 0, .col = 0 })).?;
+        view.selection = .{ .press = .{ .row = 0, .col = 0 }, .anchor = start, .head = start, .dragging = true };
+        viewport.measured_lines = 0;
+        const frame = try testFrame(&view, arena.allocator(), 8, height);
+        try std.testing.expect(frame.buffer[0].style.reverse);
+        count.* = viewport.measured_lines;
+    }
+    // Every line is one row, so a linear frame costs at most 32 times as
+    // much for 32 times the rows; the quadratic walk cost about 1000 times.
+    try std.testing.expect(measured[1] <= 32 * measured[0]);
 }
