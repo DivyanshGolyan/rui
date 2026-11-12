@@ -1102,12 +1102,14 @@ pub const AdmitRetry = struct {
         .next_page = .{ .paged, error.RetrySelectionFailed },
     });
     pub const round_budget = 2;
-    pub const writes = true;
+    pub const commit: transition.Commit = .transaction;
+    pub const begin: ?rounds.At = null;
     pub const Input = struct { io: std.Io, active: ActiveOperationFilter, scheduled: ?*?u64 };
     pub const Result = ?AttemptAdmission;
     pub const Ordinary = store_core.Ordinary.none;
     /// The retry changed since the scan read it: the admission answers null.
     pub const Declined = error{RetryNoLongerDue};
+    pub const Guards = Declined;
 
     input: Input,
     limit: u64 = 0,

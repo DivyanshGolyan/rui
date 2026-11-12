@@ -177,6 +177,8 @@ fn bind(self: *Self) void {
     };
     self.panel.fields = &self.fields;
     const caps = if (self.backend) |b| b.caps(b.context) else view.Caps{};
+    self.panel.unicode = caps.unicode;
+    self.model_choice.unicode = caps.unicode;
     self.panel.ground = widget_style.of(caps, .{ .background = .bar });
     self.panel.selection = widget_style.of(caps, .{ .background = .selection });
     self.panel.hover_style = widget_style.of(caps, .{ .background = .hover });
@@ -331,8 +333,8 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     children[0] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = try self.panel.widget().draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = size.height - 1 })) };
     const footer = try ctx.arena.create(Footer);
     footer.* = .{
-        .left = if (self.narrow) " ‹ Rui · settings" else " Rui · settings",
-        .right = if (self.narrow) "esc close" else "↑↓ · enter change · esc close",
+        .left = try Panel.displayText(ctx.arena, if (self.narrow) " ‹ Rui · settings" else " Rui · settings", self.panel.unicode),
+        .right = try Panel.displayText(ctx.arena, if (self.narrow) "esc close" else "↑↓ · enter change · esc close", self.panel.unicode),
         .style = self.panel.quiet,
     };
     children[1] = .{ .origin = .{ .row = size.height - 1, .col = 0 }, .surface = try footer.widget().draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = 1 })) };
@@ -340,6 +342,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
 }
 
 const Fixture = struct {
+    unicode: bool = true,
     values: preferences.Values = .{},
     save_status: SaveState = .idle,
     fail_read: bool = false,
@@ -379,8 +382,9 @@ const Fixture = struct {
         const self: *Fixture = @ptrCast(@alignCast(raw));
         return self.status;
     }
-    fn caps(_: *anyopaque) view.Caps {
-        return .{};
+    fn caps(raw: *anyopaque) view.Caps {
+        const self: *Fixture = @ptrCast(@alignCast(raw));
+        return .{ .unicode = self.unicode };
     }
 };
 
@@ -562,7 +566,7 @@ test "App settings page text and ground at 99x20 and 46x20" {
         try std.testing.expect(std.mem.indexOf(u8, text, "   Effort          low") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, "   Permissions     run without asking") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, "   Notifications   on") != null);
-        try std.testing.expect(std.mem.indexOf(u8, text, "   Sign-in         ChatGPT") != null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "   Sign-in         Codex") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, "   Version         0.60.0 · up to date") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, if (page.narrow) " ‹ Rui · settings" else " Rui · settings") != null);
         const ground = widget_style.of(.{}, .{ .background = .bar });
@@ -720,6 +724,42 @@ test "App settings Model shares the provider list at full width and preserves ma
     try press(&page, &ctx, vaxis.Key.enter);
     try press(&page, &ctx, vaxis.Key.enter);
     try std.testing.expectEqualStrings("future-chat", fixture.last_edit.?.model.set);
+}
+
+test "App settings shared ASCII capability reaches the panel model choice tails and footer" {
+    const Check = struct {
+        fn ascii(surface: vxfw.Surface) !void {
+            for (surface.buffer) |cell| for (cell.char.grapheme) |byte| try std.testing.expect(byte < 0x80);
+            for (surface.children) |child| try ascii(child.surface);
+        }
+    };
+    var fixture: Fixture = .{ .unicode = false };
+    var page: Self = .{ .backend = fixture.backend(), .version = "unreleased" };
+    try page.refresh();
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    for ([_]u16{ 46, 99 }) |width| {
+        page.narrow = width == 46;
+        for (0..4) |state| {
+            page.cancelChoice();
+            if (state == 1) {
+                page.select(.permissions);
+                try press(&page, &ctx, vaxis.Key.enter);
+            } else if (state >= 2) {
+                page.select(.model);
+                try press(&page, &ctx, vaxis.Key.enter);
+                page.model_choice.no_match = state == 3;
+            }
+            fixture.status = .checking;
+            page.failures.set(.notifications, " · couldn't save");
+            const surface = try page.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
+            try Check.ascii(surface);
+            try std.testing.expect(!page.panel.unicode and !page.model_choice.unicode);
+            try std.testing.expectEqualStrings("-", surface.children[0].surface.readCell(0, 0).char.grapheme);
+            if (page.narrow) try std.testing.expectEqualStrings("<", surface.children[1].surface.readCell(1, 0).char.grapheme);
+        }
+    }
 }
 
 test "App settings Sign-in row opens the shared sign-in screen on Enter" {

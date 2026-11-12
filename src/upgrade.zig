@@ -62,6 +62,8 @@ pub const CleanupReceipts = struct {
     }
 };
 
+pub const DownloadDiagnostic = process.DownloadDiagnostic;
+
 pub const Check = struct {
     candidate: release.ReleaseCandidate,
     selected: Installation.Selection,
@@ -94,12 +96,13 @@ pub const Result = struct {
     }
 };
 
-pub fn check(init: std.process.Init, allocator: std.mem.Allocator, store: []const u8, cancellation: ?*client.Cancellation) !Check {
+pub fn check(init: std.process.Init, allocator: std.mem.Allocator, store: []const u8, cancellation: ?*client.Cancellation, diagnostic: *DownloadDiagnostic) !Check {
     const home = init.environ_map.get("HOME") orelse return error.HomeUnavailable;
-    const endpoint = init.environ_map.get("RUI_TEST_UPGRADE_API_URL") orelse release.default_endpoint;
+    const endpoint = if (init.environ_map.get("RUI_TEST_UPGRADE_RELEASES_URL")) |base| try std.fmt.allocPrint(allocator, "{s}/latest", .{base}) else null;
+    defer if (endpoint) |url| allocator.free(url);
     var selected = try Installation.inspectCancellable(allocator, init.io, home, cancellation);
     errdefer selected.deinit(allocator);
-    var candidate = try release.discover(allocator, init.io, endpoint, cancellation);
+    var candidate = try release.discover(allocator, init.io, endpoint orelse release.default_endpoint, cancellation, diagnostic);
     errdefer candidate.deinit(allocator);
     var host = try HostLifecycle.observe(allocator, init.io, home, store, cancellation);
     errdefer host.deinit(allocator);
@@ -137,7 +140,7 @@ const ActivationProgress = struct {
     }
 };
 
-pub fn install(init: std.process.Init, allocator: std.mem.Allocator, checked: *const Check, cancellation: ?*client.Cancellation, progress: ?Progress, cleanup: *CleanupReceipts) !Result {
+pub fn install(init: std.process.Init, allocator: std.mem.Allocator, checked: *const Check, cancellation: ?*client.Cancellation, progress: ?Progress, cleanup: *CleanupReceipts, diagnostic: *DownloadDiagnostic) !Result {
     try process.check(cancellation);
     if (!canInstall(checked)) return error.UpgradeIneligible;
     const store = try allocator.dupe(u8, checked.store);
@@ -151,7 +154,7 @@ pub fn install(init: std.process.Init, allocator: std.mem.Allocator, checked: *c
         installation = try Installation.publishExistingWithReporter(allocator, init.io, checked.home, selected.build, .released_upgrade, cancellation, cleanup.reporter(.publication));
     } else {
         Progress.send(progress, .preparing);
-        var prepared = try Installation.prepareWithReporter(allocator, init.io, checked.home, &checked.candidate, cancellation, cleanup.reporter(.preparation));
+        var prepared = try Installation.prepareWithReporter(allocator, init.io, checked.home, &checked.candidate, cancellation, cleanup.reporter(.preparation), diagnostic);
         defer prepared.disposeWithReporter(allocator, init.io, cleanup.reporter(.disposal)) catch {};
         Progress.send(progress, .publishing);
         try process.check(cancellation);
@@ -185,7 +188,7 @@ fn activateSelected(init: std.process.Init, allocator: std.mem.Allocator, checke
     defer allocator.free(reported);
     const version = HostLifecycle.releaseVersion(reported) orelse return .{ .unconfirmed = .verifying };
     if (version.order(checked.candidate.version) != .eq) return .superseded;
-    return HostLifecycle.activate(init, allocator, &checked.host, selected, checked.candidate.version, cancellation, .{ .context = progress, .report = ActivationProgress.report }) catch .{ .unconfirmed = .starting };
+    return @import("host_coordinator.zig").activate(init, allocator, &checked.host, selected, checked.candidate.version, cancellation, .{ .context = progress, .report = ActivationProgress.report }) catch .{ .unconfirmed = .starting };
 }
 
 pub fn compatible(result: *const Result) bool {
