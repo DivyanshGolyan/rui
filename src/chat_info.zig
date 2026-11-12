@@ -91,12 +91,12 @@ pub fn footerWidget(self: *Self) vxfw.Widget {
 pub fn openStandaloneChoice(self: *Self, ctx: *vxfw.EventContext, row: Row) !void {
     if (self.pending != null) return;
     self.closeStandaloneChoice();
-    self.bind();
+    self.standalone_row = row;
     const index: usize = if (row == .model) 4 else 0;
+    self.panel.choice_only = index;
+    self.bind();
     self.panel.selected = index;
     try activate(self, ctx, index);
-    self.standalone_row = row;
-    self.panel.choice_only = index;
 }
 
 pub fn standaloneOpen(self: *const Self) bool {
@@ -143,8 +143,12 @@ pub fn cancelChoice(self: *Self) void {
 }
 
 pub fn refresh(self: *Self) void {
-    self.standalone_row = null;
-    self.panel.choice_only = null;
+    self.closeStandaloneChoice();
+    self.readSession();
+}
+
+/// Read the same Session without discarding a standalone retry's field.
+fn readSession(self: *Self) void {
     self.cancelChoice();
     self.backend.read(self.backend.context, &self.session) catch {
         self.read_failed = true;
@@ -207,7 +211,7 @@ fn bind(self: *Self) void {
 fn activate(raw: *anyopaque, ctx: *vxfw.EventContext, row: usize) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     if (self.pending != null) return;
-    self.refresh();
+    self.readSession();
     if (self.read_failed) {
         self.failures[row] = " · couldn't read chat";
         ctx.redraw = true;
@@ -218,10 +222,11 @@ fn activate(raw: *anyopaque, ctx: *vxfw.EventContext, row: usize) !void {
         0 => {
             self.effort_labels[0] = "model default";
             self.effort_count = 1;
-            var current: ?usize = if (!self.session.effort_override or self.session.effort == null) 0 else null;
+            const shown = if (self.standalone_row != null or self.session.effort_override) self.session.effort else null;
+            var current: ?usize = if (shown == null) 0 else null;
             for (std.enums.values(catalog.ReasoningEffort)) |effort| {
                 if (!capability.supportsReasoningEffort(catalog.shipped, self.session.model.slice(), effort)) continue;
-                if (self.session.effort_override and self.session.effort == effort) current = self.effort_count;
+                if (shown == effort) current = self.effort_count;
                 self.effort_labels[self.effort_count] = @tagName(effort);
                 self.effort_count += 1;
             }
@@ -1540,4 +1545,61 @@ test "Chat info standalone draw invalidation never falls through to enclosing pa
     try page.widget().handleEvent(&events, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
     const pending = try page.standaloneWidget().draw(ctx);
     try std.testing.expectEqual(@as(u16, 0), pending.size.height);
+}
+
+test "Chat info standalone effort checks the actual Session effort without changing full-page override semantics" {
+    for ([_]bool{ false, true }) |explicit| for ([_]?catalog.ReasoningEffort{ .high, .low, null }) |effort| {
+        var fixture: Fixture = .{};
+        fixture.init();
+        try fixture.session.model.set("azure/gpt-5-pro");
+        fixture.session.effort = effort;
+        fixture.session.effort_override = explicit;
+        var page: Self = .{ .backend = fixture.backend() };
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        page.refresh();
+        try press(&page, &ctx, vaxis.Key.enter);
+        const actual: ?usize = if (effort == null) 0 else if (effort == .high) 1 else null;
+        try std.testing.expectEqual(if (!explicit) @as(?usize, 0) else actual, page.panel.choice.?.current);
+        page.cancelChoice();
+        try page.openStandaloneChoice(&ctx, .effort);
+        try std.testing.expectEqual(@as(usize, 2), page.effort_count);
+        try std.testing.expectEqualStrings("model default", page.effort_labels[0]);
+        try std.testing.expectEqualStrings("high", page.effort_labels[1]);
+        try std.testing.expectEqual(actual, page.panel.choice.?.current);
+        for ([_]u16{ 46, 140 }) |width| {
+            const drawn = try page.standaloneWidget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
+            for (0..page.effort_count) |row| try std.testing.expectEqualStrings(if (actual == row) "✓" else " ", drawn.readCell(1, @intCast(row + 1)).char.grapheme);
+        }
+    };
+}
+
+test "Chat info standalone failure retry preserves field-only presentation and the actual effort check" {
+    var fixture: Fixture = .{};
+    fixture.init();
+    try fixture.session.model.set("azure/gpt-5-pro");
+    fixture.session.effort = .high;
+    fixture.session.effort_override = false;
+    var page: Self = .{ .backend = fixture.backend() };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    try page.openStandaloneChoice(&ctx, .effort);
+    try press(&page, &ctx, vaxis.Key.enter);
+    try std.testing.expectEqual(Edit{ .effort = .high }, fixture.edit.?);
+    fixture.state_value = .failed;
+    try page.widget().handleEvent(&ctx, .tick);
+    try std.testing.expect(page.standaloneOpen());
+    try press(&page, &ctx, vaxis.Key.enter);
+    try std.testing.expectEqual(@as(?Row, .effort), page.standalone_row);
+    try std.testing.expectEqual(@as(?usize, 0), page.panel.choice_only);
+    try std.testing.expectEqual(@as(?usize, 1), page.panel.choice.?.current);
+    try press(&page, &ctx, vaxis.Key.enter);
+    fixture.state_value = .saved;
+    try page.widget().handleEvent(&ctx, .tick);
+    try std.testing.expect(!page.standaloneOpen() and page.panel.choice_only == null);
+    try page.openStandaloneChoice(&ctx, .effort);
+    page.refresh();
+    try std.testing.expect(!page.standaloneOpen());
 }

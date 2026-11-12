@@ -747,7 +747,7 @@ fn appNext(self: *Self, ctx: *vxfw.EventContext, next: ?Next) !void {
             try self.root.settings_page.openStandaloneChoice(ctx, switch (field) {
                 .model => .model,
                 .effort => .effort,
-            });
+            }, self.state.nextStart());
             try ctx.requestFocus(self.app_input.composer.widget());
             ctx.redraw = true;
         },
@@ -1769,7 +1769,7 @@ fn startInput(self: *const Self, start: *const view.OwnedStart, compaction_buffe
     const start_effort: view.StartEffort = .{ .held = held_effort, .model = start.binding().model };
     // An unsaved pick takes precedence. Once saved, read at each start so
     // a later /effort applies, unless explicit selectors bypass preferences.
-    const saved_effort = start_effort.applied(if (start_effort.readsSaved()) try self.savedEffort() else null);
+    const saved_effort = if (start_effort.readsSaved()) try self.savedEffort() else null;
     var configuration: configure_input.ConfigureInput = .{
         .store = self.options.store,
         .session = .create,
@@ -7640,7 +7640,7 @@ test "Overview footer drawn model and effort cells click and underline at both w
             for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| try app_events.mouse(&ctx, footer, .{ .row = 0, .col = @intCast(child.origin.col), .button = .left, .mods = .{}, .type = kind });
             try std.testing.expect(try rig.settle() == null);
             try std.testing.expect(overview.root.settings_page.standaloneOpen());
-            try std.testing.expectEqual(if (field == .model) AppSettings.Row.model else AppSettings.Row.effort, overview.root.settings_page.standalone_row.?);
+            try std.testing.expectEqual(if (field == .model) AppSettings.Row.model else AppSettings.Row.effort, overview.root.settings_page.standalone.?.row);
             overview.root.settings_page.closeStandaloneChoice();
         }
         overview.state.footer.focus = .model;
@@ -7820,4 +7820,77 @@ test "Overview saved defaults projection covers unpinned picks selectors and hel
         try std.testing.expectEqual(case.intent.provider, snapshot.intent.provider);
         try std.testing.expectEqualStrings(case.provider orelse "", snapshot.defaults.provider.slice());
     };
+}
+
+test "Overview footer effort matches submitted creation for catalog saved and held policies" {
+    const Effort = model_capability.ReasoningEffort;
+    const Case = struct { model: []const u8, supported: ?Effort, unsupported: Effort };
+    const cases = [_]Case{
+        .{ .model = "openai/whisper-1", .supported = null, .unsupported = .high },
+        .{ .model = "gpt-5.5", .supported = .high, .unsupported = .max },
+        .{ .model = "azure/gpt-5-pro", .supported = .high, .unsupported = .low },
+    };
+    for (cases) |case| for ([_]?Effort{ null, case.supported, case.unsupported }) |saved| for ([_]?[]const u8{ null, "high", "max", "default" }) |held| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const home = path[0..try tmp.dir.realPath(std.testing.io, &path)];
+        _ = try preferences.update(home, .{
+            .provider = .{ .set = "openai" },
+            .model = .{ .set = case.model },
+            .reasoning_effort = if (saved) |value| .{ .set = value } else .clear,
+        }, &.initFill(.configured));
+        var cancellation: client.Cancellation = .{};
+        const rig = try Rig.open(.{ .store = home, .workspace = "/work", .home = home, .directory = home, .provider = "openai", .model = case.model }, fake_operations, &cancellation);
+        defer rig.close();
+        if (held) |value| {
+            var command: [80]u8 = undefined;
+            try std.testing.expect(try rig.press(try std.fmt.bufPrint(&command, "/configure --reasoning-effort {s}\r", .{value})) == null);
+        }
+        const shown = rig.overview.state.nextEffort();
+        try std.testing.expect(try rig.press("same effort\r") == null);
+        try std.testing.expect(try rig.settle() == null);
+        try std.testing.expectEqual(@as(usize, 1), Seen.now.starts);
+        try std.testing.expectEqualStrings(if (shown) |value| @tagName(value) else "", Seen.now.start.reasoning_effort.?.slice());
+        try std.testing.expectEqualStrings(case.model, Seen.now.start.model.?.slice());
+        try std.testing.expectEqualStrings("openai", Seen.now.start.provider.?.slice());
+    };
+}
+
+test "Overview footer standalone choices receive the held creation binding and effort" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const home = path[0..try tmp.dir.realPath(std.testing.io, &path)];
+    _ = try preferences.update(home, .{ .provider = .{ .set = "codex" }, .model = .{ .set = "gpt-5.5" }, .reasoning_effort = .{ .set = .low } }, &.initFill(.configured));
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = home, .workspace = "/work", .home = home, .directory = home, .provider = "codex", .model = "gpt-5.5" }, fake_operations, &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+    const page = &overview.root.settings_page;
+    try std.testing.expect(try rig.press("/configure --provider openai --model azure/gpt-5-pro --reasoning-effort default\r") == null);
+    try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, .high), overview.state.nextEffort());
+    var ctx = rig.context();
+    defer ctx.cmds.deinit(std.testing.allocator);
+    try appClick(overview, &ctx, .{ .footer = .effort });
+    try std.testing.expect(page.standaloneOpen());
+    try std.testing.expectEqual(@as(usize, 2), page.effort_count);
+    try std.testing.expectEqualStrings("model default", page.effort_choices[0]);
+    try std.testing.expectEqualStrings("high", page.effort_choices[1]);
+    try std.testing.expectEqual(@as(?usize, 1), page.panel.choice.?.current);
+    try std.testing.expect(try rig.press("\x1b") == null);
+    try appClick(overview, &ctx, .{ .footer = .model });
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expect(page.standaloneOpen());
+    try std.testing.expectEqual(protocol.Provider.openai, page.model_choice.provider);
+    try std.testing.expectEqualStrings("azure/gpt-5-pro", page.model_choice.current);
+    try std.testing.expect(try rig.press("gpt-5.5\r") == null);
+    try std.testing.expect(try rig.settle() == null);
+    try page.widget().handleEvent(&ctx, .tick);
+    const saved = try preferences.load(home);
+    try std.testing.expectEqualStrings("openai", saved.provider.slice());
+    try std.testing.expectEqualStrings("gpt-5.5", saved.model.slice());
+    // Saving defaults never overwrites an independently held binding.
+    try std.testing.expectEqualStrings("azure/gpt-5-pro", overview.state.nextBinding().model.?);
+    try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, .high), overview.state.nextEffort());
 }

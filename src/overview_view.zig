@@ -12,6 +12,7 @@
 //! overview state.
 const std = @import("std");
 const model_catalog = @import("model_catalog.zig");
+const configure_input = @import("configure_input.zig");
 const session_archive = @import("session_archive.zig");
 const Bounded = @import("bounded.zig").Bounded;
 const session_line = @import("session_line.zig");
@@ -615,36 +616,22 @@ pub const ModelsRead = union(enum) {
 
 const ReasoningEffort = model_capability.ReasoningEffort;
 
-/// Which effort from the saved defaults a start applies: none when the
-/// start holds an effort of its own, `default` included, or names no model;
-/// else the saved one when the model offers it.
+/// The effort input a start holds, projected through creation's owner.
 pub const StartEffort = struct {
     /// What `/configure --reasoning-effort` holds for the start.
     held: ?[]const u8,
     model: ?[]const u8,
 
-    /// Whether the saved effort can reach the start, so the shell reads it.
+    /// Whether the shell needs to read saved effort. Creation alone
+    /// decides whether the read value applies to the chosen model.
     pub fn readsSaved(self: StartEffort) bool {
         return self.held == null and self.model != null;
     }
 
-    /// The effort the start applies from `saved`, which is null when the
-    /// launch reads no saved defaults.
-    pub fn applied(self: StartEffort, saved: ?ReasoningEffort) ?ReasoningEffort {
-        if (!self.readsSaved()) return null;
-        return model_capability.startEffort(model_catalog.shipped, saved, self.model.?);
-    }
-
-    /// The effort a start will show, including the product default applied
-    /// by the configure owner when neither held nor saved effort applies.
     pub fn shown(self: StartEffort, saved: ?ReasoningEffort) ?ReasoningEffort {
         const model = self.model orelse return null;
-        const fallback = std.meta.stringToEnum(ReasoningEffort, @import("product_defaults.zig").reasoning_effort).?;
-        const wanted = if (self.held) |held|
-            if (std.mem.eql(u8, held, "default")) fallback else std.meta.stringToEnum(ReasoningEffort, held) orelse return null
-        else
-            self.applied(saved) orelse fallback;
-        return model_capability.startEffort(model_catalog.shipped, wanted, model);
+        const effort = configure_input.creationEffort(model, if (self.held) |held| configure_input.policy(held) else .{}, saved);
+        return if (effort.value) |value| std.meta.stringToEnum(ReasoningEffort, value) else null;
     }
 };
 
@@ -1161,6 +1148,20 @@ pub const State = struct {
             .provider = self.settings.get(startOption("provider").?) orelse if (default) |binding| @tagName(binding.provider) else null,
             .model = self.settings.get(startOption("model").?) orelse if (default) |binding| binding.model.slice() else null,
         };
+    }
+
+    /// The same completed effort the creation owner will submit.
+    pub fn nextEffort(self: *const State) ?ReasoningEffort {
+        return (StartEffort{ .held = self.heldEffort(), .model = self.nextBinding().model }).shown(if (self.default) |binding| binding.effort else null);
+    }
+
+    /// An owned presentation value for the existing standalone choice.
+    /// Binding precedence stays with nextBinding; effort stays with creation.
+    pub fn nextStart(self: *const State) ?Default {
+        const binding = self.nextBinding();
+        var current = Default.of(binding.provider, binding.model) orelse return null;
+        current.effort = self.nextEffort();
+        return current;
     }
 
     fn releaseModels(self: *State) void {
@@ -1785,9 +1786,7 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
 
 /// Both the facts and Tab stops derive effort from the next start's owner.
 fn footerEffort(state: *const State) ?[]const u8 {
-    const held = state.heldEffort();
-    const saved = if (state.default) |binding| binding.effort else null;
-    const shown = (StartEffort{ .held = held, .model = state.nextBinding().model }).shown(saved);
+    const shown = state.nextEffort();
     return if (shown) |value| @tagName(value) else null;
 }
 
@@ -7360,5 +7359,74 @@ test "new chat saved provider and defaults outcomes preserve unpinned authority"
             try std.testing.expectEqualStrings(if (held) "gpt-6-sol" else model, state.nextBinding().model.?);
             try std.testing.expectEqualStrings(if (held) "medium" else if (effort) |value| @tagName(value) else "low", footerEffort(&state).?);
         };
+    };
+}
+
+test "new chat footer effort and stops match creation across catalog saved and held policies" {
+    const SavedKind = enum { absent, supported, unsupported };
+    const HeldKind = enum { absent, explicit, unsupported_explicit, default };
+    const Case = struct { model: []const u8, supported: ?ReasoningEffort, unsupported: ReasoningEffort, fallback: ?ReasoningEffort };
+    const cases = [_]Case{
+        .{ .model = "openai/whisper-1", .supported = null, .unsupported = .high, .fallback = null },
+        .{ .model = "gpt-5.5", .supported = .high, .unsupported = .max, .fallback = .low },
+        .{ .model = "azure/gpt-5-pro", .supported = .high, .unsupported = .low, .fallback = .high },
+    };
+    for (cases) |case| for (std.enums.values(SavedKind)) |saved_kind| for (std.enums.values(HeldKind)) |held_kind| {
+        const saved: ?ReasoningEffort = switch (saved_kind) {
+            .absent => null,
+            .supported => case.supported,
+            .unsupported => case.unsupported,
+        };
+        const held: ?[]const u8 = switch (held_kind) {
+            .absent => null,
+            .explicit => "high",
+            .unsupported_explicit => "max",
+            .default => "default",
+        };
+        const expected: ?ReasoningEffort = switch (held_kind) {
+            .explicit => .high,
+            .unsupported_explicit => .max,
+            .default => case.fallback,
+            .absent => if (saved_kind == .supported) case.supported else case.fallback,
+        };
+        // These independent expected outcomes prevent shared bad fallback
+        // logic from making the footer and creation agree incorrectly.
+        var creation: configure_input.ConfigureInput = .{
+            .store = "/store",
+            .session = .create,
+            .reasoning_effort = if (held) |value| configure_input.policy(value) else .{},
+        };
+        var compaction: [20]u8 = undefined;
+        creation.completeCreation(.openai, case.model, saved, null, &compaction);
+        try std.testing.expect(creation.reasoning_effort.present);
+        try std.testing.expectEqualStrings(if (expected) |value| @tagName(value) else "", creation.reasoning_effort.value orelse "");
+        var state = try opened(&.{});
+        defer state.deinit();
+        state.default = Default.of("openai", case.model);
+        state.default.?.effort = saved;
+        if (held) |value| {
+            var arguments: [64]u8 = undefined;
+            try std.testing.expect(configure(&state, try std.fmt.bufPrint(&arguments, "--reasoning-effort {s}", .{value})));
+        }
+        try std.testing.expectEqual(expected, state.nextEffort());
+        try std.testing.expectEqual(expected, state.nextStart().?.effort);
+        try std.testing.expectEqualStrings(case.model, state.nextStart().?.model.slice());
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        for ([_]u16{ 140, 46 }) |width| {
+            const spans = try footerSpans(arena.allocator(), &state, width, .{});
+            var word: ?[]const u8 = null;
+            for (spans) |span| if (span.button == .effort) {
+                try std.testing.expect(word == null);
+                word = span.span.text;
+            };
+            try std.testing.expectEqual(expected != null, word != null);
+            if (word) |text| try std.testing.expectEqualStrings(creation.reasoning_effort.value.?, text);
+        }
+        state.footer.focus = .input;
+        try expectEffects(&.{}, try step(&state, .{ .footer_input = .{ .tab = false } }));
+        try std.testing.expectEqual(FooterFocus.model, state.footer.focus);
+        try expectEffects(&.{}, try step(&state, .{ .footer_input = .{ .tab = false } }));
+        try std.testing.expectEqual(if (expected != null) FooterFocus.effort else .input, state.footer.focus);
     };
 }

@@ -9207,7 +9207,15 @@ test "chat footer enter pick hint clicks the existing choice without opening Cha
     const cursor = self.input.composition().cursor;
     var ctx = held.context();
     try chromeClick(.{ .footer = .effort })(self, &ctx);
-    try held.keys("\x1b[B\x1b[B");
+    const low = for (self.app_info.panel.choice.?.labels, 0..) |label, index| {
+        if (std.mem.eql(u8, label, "low")) break index;
+    } else return error.TestExpectedLowChoice;
+    for (0..self.app_info.panel.choice.?.labels.len) |_| {
+        const selected = self.app_info.panel.choice.?.selected;
+        if (selected == low) break;
+        try held.keys(if (selected < low) "\x1b[B" else "\x1b[A");
+    }
+    try std.testing.expectEqual(low, self.app_info.panel.choice.?.selected);
     try chromeClick(.footer_pick)(self, &ctx);
     try std.testing.expectEqual(ChatInfo.Edit{ .effort = .low }, self.info_edit.?);
     try std.testing.expectEqual(.configure, self.info_effect);
