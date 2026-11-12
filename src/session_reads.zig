@@ -257,6 +257,9 @@ pub const Job = struct {
     // needs the unlabelled Session's name.
     line_read: ?Moment = null,
     hint_wanted: bool = false,
+    // The Session's provider as the UI's Session line holds it, null until
+    // that line is first read. A Session never changes provider.
+    provider: ?protocol.Provider = null,
     result: struct {
         // The work the page's own Store read saw: its history, footer and
         // consent describe one moment.
@@ -300,6 +303,12 @@ pub const Job = struct {
         recall_passed: bool = false,
         retry: ?Retry = null,
     } = .{},
+
+    /// The Session's provider: this read's own Session line once it took
+    /// one, else the UI's.
+    fn sessionProvider(self: *const Job) ?protocol.Provider {
+        return if (self.result.line) |line| line.provider else self.provider;
+    }
 
     /// Call only after a successful reader join. Scratch is borrowed until the
     /// next reader starts; consume/copy the exact range before reusing it.
@@ -582,11 +591,6 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
         .failure => |failure| return requests.failRead(failure),
     };
     if (plan.kinds == .all) {
-        job.result.latest_ending = if (job.opening) null else job.latest_ending;
-        for (page.facts.items[0..page.facts.count]) |item| observeEnding(&job.result.latest_ending, item, job.session);
-        if (job.opening and job.result.latest_ending == null and page.facts.more) {
-            try latestEnding(requests, job, page.facts.end);
-        }
         job.result.work = page.facts.work;
         const line_stale = Line.stale(job.line_read, &page.facts);
         if (job.open_status or job.watch_status or line_stale) {
@@ -595,6 +599,11 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
             if (job.open_status or job.watch_status) {
                 job.result.status = try job.status(task.io, &current, job.files.scratch, job.status_taken, if (job.open_status) null else job.status_shown, job.status_actions);
             }
+        }
+        job.result.latest_ending = if (job.opening) null else job.latest_ending;
+        for (page.facts.items[0..page.facts.count]) |item| observeEnding(&job.result.latest_ending, item, job.session, job.sessionProvider());
+        if (job.opening and job.result.latest_ending == null and page.facts.more) {
+            try latestEnding(requests, job, page.facts.end);
         }
         if (job.result.line) |*line| if (job.hint_wanted and line.label == null) if (line.first_position) |position| {
             job.result.hint = try readHint(requests, job, position);
@@ -628,7 +637,7 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
             .assistant => |answer| .{ .source = .activity, .position = item.position, .ordinal = item.ordinal, .row = false, .content = answer.content },
             else => null,
         } };
-        row.provisional = try View.render(requests, job.store, job.session, item, page.facts.queued, page.facts.work.work.state.holdsQueue(), &capture, job.colour, job.home, .{ .viewport = job.width_method }, if (open) .{ .open = output.? } else .closed) or pending;
+        row.provisional = try View.render(requests, job.store, job.session, job.sessionProvider(), item, page.facts.queued, page.facts.work.work.state.holdsQueue(), &capture, job.colour, job.home, .{ .viewport = job.width_method }, if (open) .{ .open = output.? } else .closed) or pending;
         row.tight = View.tight(item.value);
         try capture.finish();
         row.length = capture.length;
@@ -649,13 +658,13 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
 
 /// Forward scans can replay older provisional rows; only a newer own ending
 /// advances this fact. Child endings never grant retry authority for a parent.
-fn observeEnding(latest: *?LatestEnding, item: protocol.ActivityItem, session: []const u8) void {
+fn observeEnding(latest: *?LatestEnding, item: protocol.ActivityItem, session: []const u8, provider: ?protocol.Provider) void {
     const key: Key = .{ .position = item.position, .ordinal = item.ordinal };
     if (latest.*) |old| if (key.order(old.key) != .gt) return;
     const marks = @import("marks.zig");
     const cause: marks.Cause = switch (item.value) {
-        .turn_ended => |ended| if (!std.mem.eql(u8, ended.session.slice(), session)) return else if (ended.ending == .done) .{ .words = "Finished" } else marks.cause(ended.code.slice()),
-        .stop => |stop| if (stop.turn == null) marks.cause("cancelled") else return,
+        .turn_ended => |ended| if (!std.mem.eql(u8, ended.session.slice(), session)) return else if (ended.ending == .done) .{ .words = "Finished" } else marks.cause(ended.code.slice(), provider),
+        .stop => |stop| if (stop.turn == null) marks.cause("cancelled", provider) else return,
         else => return,
     };
     latest.* = .{ .key = key, .cause = cause };
@@ -670,7 +679,7 @@ fn latestEnding(requests: client.Requests, job: *Job, end: u64) !void {
             .page => |page| page,
             .failure => |failure| return requests.failRead(failure),
         };
-        for (page.facts.items[0..page.facts.count]) |item| observeEnding(&job.result.latest_ending, item, job.session);
+        for (page.facts.items[0..page.facts.count]) |item| observeEnding(&job.result.latest_ending, item, job.session, job.sessionProvider());
         if (job.result.latest_ending != null) return;
         cursor = page.continuation() orelse return;
     }
@@ -1453,7 +1462,7 @@ test "session_view Message placement is identical in either direction at every p
                             var buffer: [8192]u8 = undefined;
                             var out = std.Io.Writer.fixed(&buffer);
                             var sink: Sink = .{ .out = &out };
-                            const provisional = try View.render(requests, root, "k7m2qx", rows[index], queued, held, &sink, false, "", .{ .viewport = .wcwidth }, .none);
+                            const provisional = try View.render(requests, root, "k7m2qx", null, rows[index], queued, held, &sink, false, "", .{ .viewport = .wcwidth }, .none);
                             try std.testing.expectEqualStrings(expected[index].text, out.buffered());
                             try std.testing.expectEqual(expected[index].provisional, provisional);
                             try std.testing.expectEqual(expected[index].lowest, sink.lowest);
@@ -1627,14 +1636,14 @@ test "activity golden stop with interrupted ending draws one line across pages" 
                 if (!split) page.facts.items[1] = if (historical) stop else ended;
                 for (0..page.facts.count) |index| {
                     const item = page.facts.items[if (historical) page.facts.count - index - 1 else index];
-                    _ = try View.render(undefined, "unused", session.slice(), item, .{}, false, &sink, colour, "", .{ .viewport = .wcwidth }, .none);
+                    _ = try View.render(undefined, "unused", session.slice(), null, item, .{}, false, &sink, colour, "", .{ .viewport = .wcwidth }, .none);
                 }
                 if (split) {
                     try std.testing.expectEqualStrings("", out.buffered());
                     page.facts.items[0] = ended;
                     for (0..page.facts.count) |index| {
                         const item = page.facts.items[if (historical) page.facts.count - index - 1 else index];
-                        _ = try View.render(undefined, "unused", session.slice(), item, .{}, false, &sink, colour, "", .{ .viewport = .wcwidth }, .none);
+                        _ = try View.render(undefined, "unused", session.slice(), null, item, .{}, false, &sink, colour, "", .{ .viewport = .wcwidth }, .none);
                     }
                 }
                 try std.testing.expectEqualStrings(if (colour) "\x1b[39m■\x1b[39m Stopped\n" else "■ Stopped\n", out.buffered());
@@ -1648,7 +1657,7 @@ test "activity golden stop with interrupted ending draws one line across pages" 
     var buffer: [256]u8 = undefined;
     var out = std.Io.Writer.fixed(&buffer);
     var sink: Sink = .{ .out = &out };
-    _ = try View.render(undefined, "unused", session.slice(), page.facts.items[0], .{}, false, &sink, true, "", .{ .viewport = .wcwidth }, .none);
+    _ = try View.render(undefined, "unused", session.slice(), null, page.facts.items[0], .{}, false, &sink, true, "", .{ .viewport = .wcwidth }, .none);
     try std.testing.expectEqualStrings("\x1b[39m■\x1b[39m Stopped\n", out.buffered());
 }
 
@@ -1691,7 +1700,7 @@ test "session_reads rendered row kinds keep their own text and feed_window draws
         document.* = .{};
         var sink: Sink = .{ .document = document };
         const item: protocol.ActivityItem = .{ .position = index + 1, .at = 1, .value = kind.value };
-        try testing.expect(!try View.render(undefined, "unused", "k7m2qx", item, .{}, false, &sink, false, "", .{ .viewport = .wcwidth }, .none));
+        try testing.expect(!try View.render(undefined, "unused", "k7m2qx", null, item, .{}, false, &sink, false, "", .{ .viewport = .wcwidth }, .none));
         try document.prepare();
         text_.* = Text.fromDocument(document);
         // Row text is the row's line alone: no blank line on either side.
@@ -2124,7 +2133,7 @@ test "session_reads retry stages exact multi-window bytes before its ending and 
             var task: Task = .{};
             try task.start(io, action.job, retry);
             try task.join();
-            const latest: LatestEnding = .{ .key = .{ .position = 3 }, .cause = @import("marks.zig").cause("provider_http_500") };
+            const latest: LatestEnding = .{ .key = .{ .position = 3 }, .cause = @import("marks.zig").cause("provider_http_500", null) };
             const completion = action.job.retryCompletion(latest);
             try std.testing.expectEqual(@as(u64, 2), completion.message.position);
             try std.testing.expectEqualDeep(latest.key, completion.message.ending);
@@ -2158,7 +2167,7 @@ test "session_reads retry reports only Message state without falling back" {
         var host: FakeHost = .{ .history = 0, .tail = &tail, .end = if (case == .absent) 1 else tail.len };
         var job: Job = .{ .retry = .{ .position = if (case == .absent) 1 else 3 } };
         try host.readWith(&job, retry);
-        const latest: LatestEnding = .{ .key = job.retry.?, .cause = @import("marks.zig").cause("provider_http_500") };
+        const latest: LatestEnding = .{ .key = job.retry.?, .cause = @import("marks.zig").cause("provider_http_500", null) };
         const expected: RetryFailure = switch (case) {
             .absent => .no_message,
             .too_large => .too_large,
@@ -2191,7 +2200,7 @@ test "session_reads retry rejects newer Host activity before reading any Message
         var host: FakeHost = .{ .history = 0, .tail = &tail, .end = tail.len };
         var job: Job = .{ .retry = .{ .position = 3 } };
         try host.readWith(&job, retry);
-        const latest: LatestEnding = .{ .key = job.retry.?, .cause = @import("marks.zig").cause("provider_http_500") };
+        const latest: LatestEnding = .{ .key = job.retry.?, .cause = @import("marks.zig").cause("provider_http_500", null) };
         try std.testing.expect(job.retryCompletion(latest) == .stale);
         try std.testing.expectEqual(@as(usize, 1), host.pages);
         try std.testing.expectEqual(@as(usize, 0), host.contents);
@@ -2202,7 +2211,7 @@ test "session_reads retry rejects newer Host activity before reading any Message
         var host: FakeHost = .{ .history = 0, .tail = &tail, .end = end };
         var job: Job = .{ .retry = .{ .position = 1, .ordinal = 1 } };
         try host.readWith(&job, retry);
-        const latest: LatestEnding = .{ .key = job.retry.?, .cause = @import("marks.zig").cause("provider_http_500") };
+        const latest: LatestEnding = .{ .key = job.retry.?, .cause = @import("marks.zig").cause("provider_http_500", null) };
         try std.testing.expect(job.retryCompletion(latest) == .stale);
         try std.testing.expectEqual(@as(usize, 0), host.contents);
     }

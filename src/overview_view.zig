@@ -3481,10 +3481,19 @@ fn providerBand(built: *Spans, trouble: Band, now_ms: u64) error{OutOfMemory}![]
             try std.fmt.allocPrint(built.arena, "{s} API key rejected. Run {s}, then rui host pause.", .{ trouble.provider.?.shown(), command })
         else
             try std.fmt.allocPrint(built.arena, "{s} API key rejected. Save a new key, then rui host pause.", .{trouble.provider.?.shown()}),
-        .quota => if (trouble.resets_at) |at|
-            try std.fmt.allocPrint(built.arena, "Quota used up. Resets in {s}.", .{ageText(&buffer, at -| now_ms / 1000)})
-        else
-            "Quota used up.",
+        .quota => quota: {
+            const used = if (trouble.resets_at) |at|
+                try std.fmt.allocPrint(built.arena, "Quota used up. Resets in {s}.", .{ageText(&buffer, at -| now_ms / 1000)})
+            else
+                "Quota used up.";
+            if (trouble.provider.?.usage()) |usage| {
+                const managed = try std.fmt.allocPrint(built.arena, "{s} {s}", .{ used, usage });
+                if (managed.len <= built.width -| 2) break :quota managed;
+            }
+            // No place to raise the limit, or the narrow list pane cannot
+            // hold it whole: the limit alone, which fits.
+            break :quota used;
+        },
         .rate_limit => try std.fmt.allocPrint(built.arena, "Rate limited. {d} Session{s} will retry.", .{ trouble.sessions, if (trouble.sessions == 1) "" else "s" }),
     });
 }
@@ -3794,9 +3803,10 @@ pub fn folderOf(state: *const State, row: *const Row) []const u8 {
     return path[start..];
 }
 
-/// The shared cause words only: destinations remain chat-only.
+/// The shared cause words only: destinations remain chat-only, so the
+/// provider, which picks only a destination, is not asked.
 fn causeOf(code: []const u8) []const u8 {
-    return state_marks.cause(code).words;
+    return state_marks.cause(code, null).words;
 }
 
 test "overview failure causes share plain words without chat destinations" {
@@ -5816,6 +5826,33 @@ test "a quota reset far in the future still draws its band" {
     var state = try opened(&.{failedRow("q1q1q1", 60, "provider_quota", 100_000_000_000_000_000)});
     defer state.deinit();
     try expectScreenLine(&state, 0, " Quota used up. Resets in 999d.");
+}
+
+test "a quota band adds where its provider raises the limit only when the line holds it whole" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const usage = "Manage usage: https://chatgpt.com/settings/usage";
+    const managed = "Quota used up. " ++ usage;
+    const Case = struct { provider: Provider, resets_at: ?u64 = null, width: u16, shown: []const u8 };
+    for ([_]Case{
+        .{ .provider = .chatgpt, .width = 200, .shown = managed },
+        // The band keeps one cell each side: the exact fit holds it, a cell
+        // less does not.
+        .{ .provider = .chatgpt, .width = managed.len + 2, .shown = managed },
+        .{ .provider = .chatgpt, .width = managed.len + 1, .shown = "Quota used up." },
+        .{ .provider = .chatgpt, .width = 60, .shown = "Quota used up." },
+        .{ .provider = .chatgpt, .width = 40, .shown = "Quota used up." },
+        .{ .provider = .chatgpt, .resets_at = test_now_s + 1200, .width = 200, .shown = "Quota used up. Resets in 20m. " ++ usage },
+        .{ .provider = .chatgpt, .resets_at = test_now_s + 1200, .width = 60, .shown = "Quota used up. Resets in 20m." },
+        // A provider with no such place keeps the limit alone at any width.
+        .{ .provider = .codex, .width = 200, .shown = "Quota used up." },
+        .{ .provider = .openai, .resets_at = test_now_s + 1200, .width = 200, .shown = "Quota used up. Resets in 20m." },
+    }) |case| {
+        var state = try opened(&.{session("q1q1q1", .{ .failed = .{ .since = test_now_s - 60, .code = bounded(session_work.max_code_bytes, "provider_quota"), .resets_at = case.resets_at } }, .{ .provider = case.provider })});
+        defer state.deinit();
+        const text = try segmentText(arena.allocator(), try headerSegments(arena.allocator(), &state, case.width, .{}));
+        try std.testing.expectEqualStrings(case.shown, std.mem.trim(u8, text, " "));
+    }
 }
 
 test "the overview's rows draw each band" {

@@ -567,11 +567,11 @@ test "FeedView retry tail is frame-local, latest-key-only and gated by cause and
     // cross keyed/unkeyed, every entry identity (including ordinal) and bool.
     for ([_]?resident.LatestEnding{
         null,
-        .{ .key = .{ .position = 10 }, .cause = marks.cause("provider_http_500") },
-        .{ .key = .{ .position = 20 }, .cause = marks.cause("provider_http_500") },
-        .{ .key = .{ .position = 20, .ordinal = 1 }, .cause = marks.cause("provider_http_500") },
-        .{ .key = .{ .position = 30 }, .cause = marks.cause("provider_http_500") },
-        .{ .key = .{ .position = 20 }, .cause = marks.cause("provider_quota") },
+        .{ .key = .{ .position = 10 }, .cause = marks.cause("provider_http_500", null) },
+        .{ .key = .{ .position = 20 }, .cause = marks.cause("provider_http_500", null) },
+        .{ .key = .{ .position = 20, .ordinal = 1 }, .cause = marks.cause("provider_http_500", null) },
+        .{ .key = .{ .position = 30 }, .cause = marks.cause("provider_http_500", null) },
+        .{ .key = .{ .position = 20 }, .cause = marks.cause("provider_quota", null) },
     }) |latest| for ([_]bool{ false, true }) |actionable| {
         view.latest_ending = latest;
         view.retry_actionable = actionable;
@@ -637,7 +637,7 @@ test "FeedView retry click hits only painted suffix cells including wrapped tail
     });
     var anchor: Feed = .{};
     var clicks: RetryClicks = .{};
-    var view: Self = .{ .window = window, .anchor = &anchor, .handler = clicks.handler(), .retry_actionable = true, .latest_ending = .{ .key = .{ .position = 20 }, .cause = @import("marks.zig").cause("malformed_provider_output") } };
+    var view: Self = .{ .window = window, .anchor = &anchor, .handler = clicks.handler(), .retry_actionable = true, .latest_ending = .{ .key = .{ .position = 20 }, .cause = @import("marks.zig").cause("malformed_provider_output", null) } };
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = gpa, .cmds = .empty };
@@ -686,7 +686,7 @@ test "FeedView retry click cancels drag departure and lost eligibility or ending
     try window.append(&.{.{ .key = .{ .position = 20 }, .text = .{ .bytes = "× Model reply unreadable\n" } }});
     var anchor: Feed = .{};
     var clicks: RetryClicks = .{};
-    const latest: resident.LatestEnding = .{ .key = .{ .position = 20 }, .cause = @import("marks.zig").cause("malformed_provider_output") };
+    const latest: resident.LatestEnding = .{ .key = .{ .position = 20 }, .cause = @import("marks.zig").cause("malformed_provider_output", null) };
     var view: Self = .{ .window = window, .anchor = &anchor, .handler = clicks.handler(), .retry_actionable = true, .latest_ending = latest };
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
@@ -710,7 +710,7 @@ test "FeedView retry click cancels drag departure and lost eligibility or ending
             },
             .leave => try view.widget().handleEvent(&ctx, .mouse_leave),
             .held => view.retry_actionable = false,
-            .unkeyed => view.latest_ending.?.cause = @import("marks.zig").cause("provider_quota"),
+            .unkeyed => view.latest_ending.?.cause = @import("marks.zig").cause("provider_quota", null),
             .other_ending => view.latest_ending.?.key.ordinal += 1,
             .release_elsewhere, .hidden_press, .disabled, .no_press => {},
         }
@@ -728,7 +728,7 @@ test "FeedView retry click accepts left and legacy no-button release only" {
     try window.append(&.{.{ .key = .{ .position = 20 }, .text = .{ .bytes = "× Model reply unreadable\n" } }});
     var anchor: Feed = .{};
     var clicks: RetryClicks = .{};
-    var view: Self = .{ .window = window, .anchor = &anchor, .handler = clicks.handler(), .retry_actionable = true, .latest_ending = .{ .key = .{ .position = 20 }, .cause = @import("marks.zig").cause("malformed_provider_output") } };
+    var view: Self = .{ .window = window, .anchor = &anchor, .handler = clicks.handler(), .retry_actionable = true, .latest_ending = .{ .key = .{ .position = 20 }, .cause = @import("marks.zig").cause("malformed_provider_output", null) } };
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = gpa, .cmds = .empty };
@@ -799,7 +799,7 @@ test "FeedView tool rows and retry chips hover only their painted targets withou
         .anchor = &anchor,
         .handler = .{ .userdata = &actions, .on_click = Actions.tool, .on_retry = Actions.retry, .on_notice = RetryClicks.notice, .on_scroll = RetryClicks.scroll },
         .retry_actionable = true,
-        .latest_ending = .{ .key = .{ .position = 20 }, .cause = @import("marks.zig").cause("malformed_provider_output") },
+        .latest_ending = .{ .key = .{ .position = 20 }, .cause = @import("marks.zig").cause("malformed_provider_output", null) },
         .hover_style = .{ .bg = .{ .index = 2 } },
     };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
