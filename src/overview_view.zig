@@ -974,7 +974,7 @@ pub const State = struct {
     fn selectedRow(self: *const State) ?*const Row {
         if (self.selected != .session) return null;
         const row = self.find(self.selected.session) orelse return null;
-        return if (row.listed) row else null;
+        return if (visible(self, row)) row else null;
     }
 
     /// Pending or uncertain creation blocks duplicate submissions.
@@ -1485,9 +1485,11 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
         .resized => |size| state.size = size,
         .observed => |read| try state.observe(read),
         .conversation => |ref| {
+            const selected_at = if (state.selected == .session) position(state, state.selected.session) else null;
             state.conversing = ref;
             try retainRows(state);
             try arrange(state);
+            reconcileSelection(state, selected_at, false);
         },
         .open => |ref| {
             state.selected = .{ .session = ref };
@@ -1746,6 +1748,11 @@ fn commit(state: *State, answer: Answer) error{OutOfMemory}!void {
     state.listed_at_ms = state.now_ms;
     state.list_stale = false;
     try arrange(state);
+    reconcileSelection(state, selected_at, opening);
+}
+
+/// Keep the same screen position when its selected row leaves the projection.
+fn reconcileSelection(state: *State, selected_at: ?usize, opening: bool) void {
     if (state.selected == .session and state.selectedRow() == null) {
         state.selected = if (selected_at) |at| if (at < state.order.items.len) .{ .session = state.rows.items[state.order.items[at]].reference } else .new_session else .new_session;
     } else if (opening and state.selected == .new_session and state.order.items.len != 0) {
@@ -1834,6 +1841,12 @@ fn reindex(state: *State) error{OutOfMemory}!void {
     state.by_reference.items.len = kept;
 }
 
+/// List membership and observed facts survive independently of presentation.
+/// An empty Session appears only while its conversation is open.
+fn visible(state: *const State, row: *const Row) bool {
+    return row.listed and (row.first != null or if (state.conversing) |open| std.mem.eql(u8, &open, &row.reference) else false);
+}
+
 /// Rebuilds the flat screen order and the summary.
 fn arrange(state: *State) error{OutOfMemory}!void {
     const rows = state.rows.items;
@@ -1843,7 +1856,7 @@ fn arrange(state: *State) error{OutOfMemory}!void {
     state.summary = .{};
     const latest = std.math.maxInt(u34);
     for (rows, 0..) |*row, at| {
-        if (!row.listed) continue;
+        if (!visible(state, row)) continue;
         const queued = shownKind(state, row) == .pending;
         // Priority class first, then newest; queued rows keep longest wait first.
         const since = @min(shownSince(state, row), latest);
@@ -1863,7 +1876,7 @@ fn arrange(state: *State) error{OutOfMemory}!void {
 /// How many rows show each mark the counts line counts.
 fn counts(state: *const State) Counts {
     var result: Counts = .{};
-    for (state.rows.items) |*row| if (row.listed) switch (rules.get(shownKind(state, row)).mark) {
+    for (state.rows.items) |*row| if (visible(state, row)) switch (rules.get(shownKind(state, row)).mark) {
         .needs_you => result.needs_you += 1,
         .active => result.working += 1,
         .queued => result.queued += 1,
@@ -2259,7 +2272,7 @@ pub fn band(state: *const State) ?Band {
     var newest: [band_rules.len]?struct { failed: WorkState.Failed, provider: Provider } = @splat(null);
     var retrying: [band_rules.len]u32 = @splat(0);
     for (state.rows.items) |*row| {
-        if (!row.listed) continue;
+        if (!visible(state, row)) continue;
         const work = (&row.state).asOf(state.now_ms);
         switch (work) {
             .finished => |value| finished = @max(finished, value.since),
@@ -3256,7 +3269,7 @@ const mixed = [_]Listed{
     session("d4e5f6", .{ .pending = ago(5) }, .{ .label = "Trace Host shutdown order" }),
     session("e5f6g7", .{ .stopping = ago(8) }, .{ .label = "List unused build steps" }),
     session("f6g7h8", .{ .working = ago(90) }, .{ .workspace = "/home/d/code/other", .first = .{ .position = 1, .admission = 9, .sender = "k7m2qx".* } }),
-    session("g7h8j9", .{ .idle = ago(2 * 3600) }, .{ .label = "Check macOS socket cleanup", .first = null }),
+    session("g7h8j9", .{ .idle = ago(2 * 3600) }, .{ .label = "Check macOS socket cleanup" }),
     session("m1n2p3", .{ .finished = ago(20 * 60) }, .{ .label = "Explain provider output parsing" }),
     session("n2p3q4", .{ .finished = ago(45 * 60) }, .{ .label = "Find the commit that broke WAL" }),
     session("p3q4r5", .{ .finished = ago(3600) }, .{}),
@@ -5880,4 +5893,139 @@ test "empty overview rows state only the empty archive filter without removed in
         try std.testing.expect(std.mem.indexOf(u8, text, "Type a task") == null);
         try std.testing.expect(std.mem.indexOf(u8, text, "/sessions") == null);
     }
+}
+
+test "empty Session projection retains full and delta metadata until any sender's first admission" {
+    for ([_]?Reference{ null, "sender".* }) |sender| {
+        var empty = session("empty1", .{ .idle = ago(10) }, .{ .first = null, .label = "Configured" });
+        var state = try opened(&.{empty});
+        defer state.deinit();
+        try std.testing.expectEqual(@as(usize, 1), state.rows.items.len);
+        try std.testing.expectEqual(@as(usize, 0), state.order.items.len);
+        try std.testing.expect(state.selected == .new_session);
+        // A Label, workspace or provider choice alone does not admit a Message.
+        empty.label = "Renamed";
+        empty.workspace = "/another/workspace";
+        empty.provider = .openai;
+        _ = try refresh(&state, .changed, testToken(2), &.{empty});
+        const row = state.find(empty.reference).?;
+        try std.testing.expectEqualStrings("Renamed", row.label.?.slice());
+        try std.testing.expectEqualStrings("/another/workspace", state.workspaces.items[row.workspace]);
+        try std.testing.expectEqual(@as(usize, 0), state.order.items.len);
+        _ = try refresh(&state, .not_modified, testToken(2), &.{});
+        try std.testing.expectEqual(@as(usize, 1), state.rows.items.len);
+        empty.first = .{ .position = 8, .admission = 9, .sender = sender };
+        _ = try refresh(&state, .changed, testToken(3), &.{empty});
+        try std.testing.expectEqual(@as(usize, 1), state.rows.items.len);
+        try expectOrder(&state, &.{"Renamed"});
+        try std.testing.expectEqual(empty.first, state.find(empty.reference).?.first);
+        // A full read applies the same visibility, without dropping empty rows.
+        empty.first = null;
+        _ = try refresh(&state, .full, testToken(4), &.{empty});
+        try std.testing.expectEqual(@as(usize, 1), state.rows.items.len);
+        try std.testing.expectEqual(@as(usize, 0), state.order.items.len);
+    }
+}
+
+test "empty Session projection shows only the current open empty and reconciles selection on leave" {
+    var state = try opened(&.{
+        session("empty1", .{ .idle = ago(1) }, .{ .first = null, .label = "First empty" }),
+        session("empty2", .{ .idle = ago(2) }, .{ .first = null, .label = "Second empty" }),
+        session("filled", .{ .idle = ago(3) }, .{ .label = "Admitted" }),
+    });
+    defer state.deinit();
+    try expectOrder(&state, &.{"Admitted"});
+    _ = try step(&state, .{ .conversation = "empty1".* });
+    try expectOrder(&state, &.{ "First empty", "Admitted" });
+    state.selected = .{ .session = "empty1".* };
+    _ = try step(&state, .{ .conversation = "empty2".* });
+    try expectOrder(&state, &.{ "Second empty", "Admitted" });
+    try expectSelected(&state, "empty2");
+    _ = try step(&state, .{ .conversation = null });
+    try expectOrder(&state, &.{"Admitted"});
+    try expectSelected(&state, "filled");
+    try std.testing.expectEqual(@as(usize, 3), state.rows.items.len);
+    // An explicit stale selection cannot authorize hidden-row operations.
+    state.selected = .{ .session = "empty1".* };
+    try std.testing.expect(state.selectedRow() == null);
+    try expectEffects(&.{}, try step(&state, .{ .input = .enter }));
+}
+
+test "empty Session projection leaving the last visible empty selects New Session" {
+    var state = try opened(&.{
+        session("empty1", .{ .idle = ago(1) }, .{ .first = null }),
+        session("empty2", .{ .idle = ago(2) }, .{ .first = null }),
+    });
+    defer state.deinit();
+    _ = try step(&state, .{ .conversation = "empty1".* });
+    state.selected = .{ .session = "empty1".* };
+    _ = try step(&state, .{ .conversation = null });
+    try std.testing.expect(state.selected == .new_session);
+    try std.testing.expectEqual(@as(usize, 0), state.order.items.len);
+    try std.testing.expectEqual(@as(usize, 2), state.rows.items.len);
+}
+
+test "empty Session projection keeps archive membership independent of the open exception" {
+    for ([_]ArchiveFilter{ .active, .archived, .all }) |filter| {
+        var state = try opened(&.{});
+        defer state.deinit();
+        state.archive = filter;
+        _ = try step(&state, .{ .conversation = "empty1".* });
+        _ = try refresh(&state, .full, testToken(2), &.{
+            session("empty1", .{ .idle = ago(1) }, .{ .first = null, .label = "Active empty" }),
+            session("empty2", .{ .idle = ago(2) }, .{ .first = null, .label = "Archived empty", .archive_state = .archived }),
+            session("filled", .{ .idle = ago(3) }, .{ .label = "Archived admitted", .archive_state = .archived }),
+        });
+        switch (filter) {
+            .active => try expectOrder(&state, &.{"Active empty"}),
+            .archived => try expectOrder(&state, &.{"Archived admitted"}),
+            .all => try expectOrder(&state, &.{ "Active empty", "Archived admitted" }),
+        }
+        _ = try step(&state, .{ .conversation = "empty2".* });
+        switch (filter) {
+            .active => try expectOrder(&state, &.{}),
+            .archived, .all => try expectOrder(&state, &.{ "Archived empty", "Archived admitted" }),
+        }
+    }
+}
+
+test "empty Session projection promotes listing metadata without rolling newer observed work back" {
+    var empty = session("empty1", .{ .idle = ago(5) }, .{ .first = null, .label = "Promotion" });
+    var state = try opened(&.{empty});
+    defer state.deinit();
+    _ = try step(&state, .{ .conversation = empty.reference });
+    const newest: session_work.Work = .{ .state = .{ .working = ago(1) }, .turn = 7 };
+    _ = try step(&state, .{ .observed = .{ .reference = empty.reference, .read_version = testToken(4), .work = newest, .opening = false } });
+    _ = try step(&state, .{ .conversation = null });
+    try std.testing.expectEqual(@as(usize, 0), state.order.items.len);
+    empty.first = .{ .position = 8, .admission = 9, .sender = null };
+    _ = try refresh(&state, .changed, testToken(3), &.{empty});
+    try expectOrder(&state, &.{"Promotion"});
+    const row = state.find(empty.reference).?;
+    try std.testing.expectEqual(testToken(4), row.read_version.?);
+    try std.testing.expectEqual(newest, row.work());
+    try std.testing.expectEqual(empty.first, row.first);
+}
+
+test "empty Session projection counts and provider bands share visible rows" {
+    var failed = failedRow("empty1", 1, "provider_http_401", null);
+    failed.first = null;
+    var state = try opened(&.{
+        failed,
+        session("empty2", .{ .working = ago(2) }, .{ .first = null }),
+        session("empty3", .{ .pending = ago(3) }, .{ .first = null }),
+        session("empty4", .{ .approval = ago(4) }, .{ .first = null }),
+        session("filled", .{ .working = ago(5) }, .{ .label = "Admitted" }),
+    });
+    defer state.deinit();
+    try std.testing.expectEqual(Counts{ .working = 1 }, state.summary.counts);
+    try std.testing.expect(band(&state) == null);
+    _ = try step(&state, .{ .conversation = "empty1".* });
+    try std.testing.expectEqual(Counts{ .working = 1, .failed = 1 }, state.summary.counts);
+    try std.testing.expect(band(&state) != null);
+    _ = try step(&state, .{ .conversation = "empty4".* });
+    try std.testing.expectEqual(Counts{ .working = 1, .needs_you = 1 }, state.summary.counts);
+    try std.testing.expect(band(&state) == null);
+    _ = try step(&state, .{ .conversation = null });
+    try std.testing.expectEqual(Counts{ .working = 1 }, state.summary.counts);
 }

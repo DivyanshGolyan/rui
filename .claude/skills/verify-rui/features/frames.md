@@ -6,7 +6,7 @@ Output defaults to `RUN/evidence/frames/`: `.txt`, `.ansi`, `.html`, `.png`, ord
 
 ## Scenario
 
-A scenario has `sizes` and ordered `states`. Each state has `name`, `open` (`overview` or an earlier cast label), `steps`, optional `cast`, `sizes`, `first_frame`, `expect_next`, `theme` (`night`, `day`, `mist`), `env`, `expect`, `absent`, `record` and one-line `note`. Themes configure the terminal's real background, foreground and dark/light query response. Cast entries have `label`, HOME-relative `workspace`, `mode`, `messages`, optional `model`, `effort`, `settle` (`answered`, `pending`, `stop`), and `count` with `{n}` labels. `run.json` maps labels to Session IDs.
+A scenario has `sizes` and ordered `states`. Each state has `name`, `open` (`overview` or an earlier cast label), `steps`, optional `cast`, `sizes`, `first_frame`, `expect_next`, `theme` (`night`, `day`, `mist`), `env`, `expect`, `absent`, `absent_regex`, `record` and one-line `note`. Themes configure the terminal's real background, foreground and dark/light query response. Cast entries have `label`, HOME-relative `workspace`, `mode`, `messages`, optional `model`, `effort`, `settle` (`answered`, `pending`, `stop`), and `count` with `{n}` labels. `run.json` maps labels to Session IDs.
 
 Steps:
 - `{"text": "draft"}` or `{"keys": ["Enter", "PgUp"]}`: exact PTY input using the helper's key names. Lone Esc still needs Rui's decoder deadline; no tmux settle sleeps.
@@ -17,7 +17,7 @@ Steps:
 
 Only the first size runs steps; later sizes set the PTY window size and wait for a committed repaint, not a sleep. An exited terminal instead reflows its final screen. Sizes accept `140x40,46x30` or `["140x40", "46x30"]`; `--sizes` overrides all state sizes. `--only` captures chosen states while executing their predecessors through the last selection, preserving cumulative side effects.
 
-Each size waits for the combined `expect`/`absent` predicate, then verifies the actual saved snapshot again.
+Each size waits for the combined `expect`/`absent`/`absent_regex` predicate, then verifies the actual saved snapshot again.
 `expect_next: {"row text": "detail text"}` additionally requires the line containing that row to be followed by its expected detail.
 `expect_last: "footer text"` requires that text on the physical last row, including when the other pane has a nonempty tail.
 For a transition regression, `first_frame: true` skips readiness polling after the steps and asserts their last committed frame directly, so a later refresh cannot hide a wrong first frame. `expect` defaults to the last `wait`, or none when there is no wait. An action after the last wait requires explicit `expect` (text/list, or `[]` deliberately); `absent` is a list. Use content waits before acting on asynchronously loaded transcripts or Session lists. The tool-fold states wait for stored results before navigating; `many-sessions-end` waits for list population before Down. The Host-stopped chat starts the fixture-owned Host before pausing its live connection.
@@ -33,3 +33,7 @@ For chat-info layout changes, capture `chat-info,chat-info-model` at 140×40 and
 The `first-run`, `first-run-codex` and `first-run-key` states open a separate terminal without local credentials. Its explicit `RUI_TEST_LOGIN=waiting` fixture supplies only the device code and waits for cancellation; no token or credential exchange occurs. The key state checks masking, and the terminal is closed without saving the key.
 
 An `absent` marker of the form `{session:CAST LABEL}` resolves to that seeded Session's actual raw ID at capture time; validation rejects unknown labels. Literal absence markers are unchanged.
+
+`absent_regex` is an optional list of nonempty Python regular expressions, validated before launch and matched with multiline anchors against committed text. A match fails both readiness and the saved capture through the same row-check owner; the failure names the pattern and matched text. Literal `absent` markers keep their existing meaning.
+
+The empty-chat leave states use whole-row patterns for nameless `○ ID` rows followed only by their compact age. `empty-chat-model-left` picks a different model and waits for its saved footer facts before leaving; `empty-chat-two-left` leaves two empty chats while existing conversations remain visible. The overview top/end/pinned states share the row check. The open `chat-empty`, `start-model`, `start-effort` and `start-picked` states deliberately allow the current empty chat’s sidebar row; their after-leave companions reject abandoned rows instead.

@@ -82,5 +82,38 @@ class UpgradeEmptyChatTest(unittest.TestCase):
                     self.observe(footer, notice=notice, listing={"sessions": sessions})
 
 
+    def hidden(self, frame, *, report=None, listing=None):
+        self.case.json.side_effect = [copy.deepcopy(self.report if report is None else report),
+                                      copy.deepcopy(self.listing if listing is None else listing)]
+        self.screen.observe = lambda: frame
+        return self.screen.empty_overview(self.case, self.session)
+
+    def test_hidden_empty_overview_requires_real_list_and_no_editor_or_chat(self):
+        frame = "+ New Session\nSettings\nenter open"
+        self.assertEqual(frame, self.hidden(frame))
+        for extra in (self.session, "Type a task", "› hidden draft", "alt+i info"):
+            with self.subTest(extra=extra), self.assertRaises(AssertionError):
+                self.hidden(frame + "\n" + extra)
+        for wrong in ("Settings\nenter open", "+ New Session\nenter open", "Notifications"):
+            with self.subTest(wrong=wrong), self.assertRaises(NotReady):
+                self.hidden(wrong)
+
+    def test_hidden_projection_does_not_weaken_stored_identity_or_zero_messages(self):
+        frame = "+ New Session\nSettings\nenter open"
+        self.case.json.reset_mock()
+        self.hidden(frame)
+        self.assertEqual(self.case.json.call_args_list, [
+            call("session", "inspect", "--store", self.case.store, "--session", self.session),
+            call("session", "list", "--store", self.case.store, "--all")])
+        for field, value in (("session", {"reference": "wrong1", "model": "gpt-6-luna"}),
+                             ("selected_message", "message1"), ("recent_messages", [{"message": "message1"}])):
+            with self.subTest(field=field), self.assertRaises(AssertionError):
+                self.hidden(frame, report={**self.report, field: value})
+        for sessions in ([], [{"reference": "wrong1"}],
+                         [{"reference": self.session}, {"reference": "wrong1"}]):
+            with self.subTest(sessions=sessions), self.assertRaises(AssertionError):
+                self.hidden(frame, listing={"sessions": sessions})
+
+
 if __name__ == "__main__":
     unittest.main()

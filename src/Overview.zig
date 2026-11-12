@@ -7016,3 +7016,389 @@ test "empty creation keeps admitted binding effort when saved defaults change be
     try std.testing.expectEqualStrings("n3w5es", &Seen.now.conversed);
     try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, .high), (try preferences.load(home)).reasoning_effort);
 }
+
+/// Real Overview/SessionFrontend owners over canonical read-boundary fixtures.
+/// Configure-empty rows remain in this backend even when the list hides them;
+/// this is not a Store integration fixture. Native CLI/PTY tests own persistence.
+const EmptySessionOwner = struct {
+    rig: *Rig = undefined,
+    tmp: std.testing.TmpDir,
+    path: [std.Io.Dir.max_path_bytes]u8 = undefined,
+    path_len: usize = 0,
+    cancellation: client.Cancellation = .{},
+
+    const references = [_]view.Reference{ "e2m4pt".*, "f3n5qw".* };
+    const message = "Name the admitted empty chat";
+    var rows: [references.len]protocol.SessionRow = undefined;
+    var count: usize = 0;
+    var generation: u64 = 0;
+    var configurations: usize = 0;
+    var scratch_dir: std.Io.Dir = undefined;
+    var scratch_count: usize = 0;
+
+    fn create() !*EmptySessionOwner {
+        const fixture = try std.testing.allocator.create(EmptySessionOwner);
+        errdefer std.testing.allocator.destroy(fixture);
+        fixture.* = .{ .tmp = std.testing.tmpDir(.{ .iterate = true }) };
+        errdefer fixture.tmp.cleanup();
+        try fixture.tmp.dir.setPermissions(std.testing.io, .fromMode(0o700));
+        fixture.path_len = try fixture.tmp.dir.realPath(std.testing.io, &fixture.path);
+        try pin(fixture.home(), "codex", "gpt-6-luna");
+        count = 0;
+        generation = 0;
+        configurations = 0;
+        scratch_count = 0;
+        scratch_dir = fixture.tmp.dir;
+        try fixture.mount(null);
+        errdefer fixture.closeRig();
+        _ = try fixture.rig.overview.event(.{ .tick = test_now_s * 1000 });
+        try std.testing.expect(try fixture.rig.settle() == null);
+        return fixture;
+    }
+
+    fn home(self: *EmptySessionOwner) []const u8 {
+        return self.path[0..self.path_len];
+    }
+
+    fn mount(self: *EmptySessionOwner, restoration: ?*const handoff.Payload) !void {
+        var ops = fake_operations;
+        ops.create = configureEmpty;
+        ops.list = list;
+        ops.first_line = firstMessageLine;
+        ops.open = openSession;
+        self.rig = try Rig.open(.{ .store = self.home(), .workspace = "/work", .home = self.home(), .directory = self.home(), .provider = "codex", .model = "gpt-6-luna", .restoration = restoration }, ops, &self.cancellation);
+        self.rig.overview.hooks.scratch = scratch;
+        self.rig.overview.hooks.configure = configure;
+        try self.rig.overview.restoreRelaunch();
+    }
+
+    fn closeRig(self: *EmptySessionOwner) void {
+        const overview = self.rig.overview;
+        if (overview.app_session) |left| {
+            left.frontend.?.stop();
+            _ = left.frontend.?.settleDeparture(.detached, {});
+            overview.disposeSession(left);
+            overview.app_session = null;
+        }
+        for (overview.retired.items) |retired| overview.disposeSession(retired.left);
+        overview.retired.deinit(std.testing.allocator);
+        overview.retired = .empty;
+        self.rig.close();
+    }
+
+    fn destroy(self: *EmptySessionOwner) void {
+        self.closeRig();
+        self.tmp.cleanup();
+        std.testing.allocator.destroy(self);
+    }
+
+    fn scratch(init: std.process.Init) !std.Io.File {
+        scratch_count += 1;
+        var buffer: [32]u8 = undefined;
+        return scratch_dir.createFile(init.io, try std.fmt.bufPrint(&buffer, "chat-scratch-{d}", .{scratch_count}), .{ .read = true });
+    }
+
+    fn configureEmpty(overview: *Self, requests: client.Requests, settings: configure_input.ConfigureInput, reply: *Reply) !void {
+        try fake_operations.create(overview, requests, settings, reply);
+        try std.testing.expect(count < rows.len);
+        const row = &rows[count];
+        row.* = .{ .created_at = test_now_s, .revision = 1, .work = .{ .state = .{ .idle = .{ .since = test_now_s } } } };
+        try row.reference.set(&references[count]);
+        try row.workspace.set(settings.workspace.value);
+        try row.model.set(settings.model.value);
+        reply.session = references[count];
+        count += 1;
+    }
+
+    fn list(_: *Self, _: client.Requests, _: protocol_reply.SessionListCursor, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
+        generation += 1;
+        page.* = .{ .count = count, .delta = .full, .since = .{ .instance = @splat(1), .generation = generation } };
+        for (rows[0..count], page.rows[0..count]) |row, *listed| {
+            listed.* = row;
+            listed.read_version = page.since;
+        }
+        return null;
+    }
+
+    fn firstMessageLine(_: *Self, _: client.Requests, reference: []const u8, position: u64, buffer: []u8) !protocol_reply.ActivityPrefixReply {
+        const row = canonical(reference);
+        try std.testing.expectEqual(row.first_message.?.position, position);
+        @memcpy(buffer[0..message.len], message);
+        return .{ .line = buffer[0..message.len] };
+    }
+
+    fn canonical(reference: []const u8) *protocol.SessionRow {
+        for (rows[0..count]) |*row| if (row.reference.eql(reference)) return row;
+        unreachable;
+    }
+
+    fn configure(_: std.process.Init, _: client.ReadContext, _: []const u8, reference: []const u8, edit: @import("chat_info.zig").Edit) !bool {
+        try std.testing.expect(edit == .model);
+        const row = canonical(reference);
+        try row.model.set(edit.model);
+        row.revision += 1;
+        configurations += 1;
+        return true;
+    }
+
+    fn frontend(self: *EmptySessionOwner) *SessionFrontend {
+        return self.rig.overview.app_session.?.frontend.?;
+    }
+
+    fn tick(self: *EmptySessionOwner) !void {
+        var ctx = self.rig.context();
+        defer ctx.cmds.deinit(std.testing.allocator);
+        try self.frontend().widget().handleEvent(&ctx, .tick);
+    }
+
+    fn completed(task: *ClientTask) bool {
+        return task.completed();
+    }
+
+    fn wait(task: *ClientTask) !void {
+        try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), task, completed);
+    }
+
+    fn answer(_: *anyopaque, _: *ClientTask) !void {}
+
+    /// Join a typed reader boundary through the real frontend, holding further
+    /// transport reads while the fixture supplies the following canonical one.
+    fn joinRead(self: *EmptySessionOwner) !void {
+        try wait(&self.frontend().reader);
+        const overview = self.rig.overview;
+        const observation = overview.host_observation;
+        overview.host_observation = .unavailable;
+        defer overview.host_observation = observation;
+        try self.tick();
+        try std.testing.expect(self.frontend().reader.thread == null);
+        self.frontend().poll_at = std.math.maxInt(i96);
+    }
+
+    /// A canonical Current/activity read, not a guessed footer label. The
+    /// accepted configure hook changes `rows`; this read projects those facts.
+    fn readCurrent(self: *EmptySessionOwner) !void {
+        const chat = self.frontend();
+        const row = canonical(chat.session);
+        try std.testing.expect(chat.reader.thread == null);
+        const session = &chat.inspection.sessions[if (chat.inspection.status) |shown| ~shown else 0];
+        @import("status_page.zig").sample(session);
+        try session.session.set(row.reference.slice());
+        try session.label.set("");
+        try session.workspace.set(row.workspace.slice());
+        try session.model.set(row.model.slice());
+        session.instructions = false;
+        session.archive_state = row.archive_state;
+        const FeedPolicy = @import("feed_reads.zig").Policy(@import("feed_window.zig").Key);
+        chat.job = .{
+            .phase = .activity,
+            .feed_page = FeedPolicy.request(.scan, .{ .opening = false, .now_ns = 0, .scan_due_ns = std.math.maxInt(i96), .at_end = true }),
+            .open_status = true,
+            .status_taken = session,
+            .result = .{
+                .status = true,
+                .work = .{ .read_version = .{ .instance = @splat(1), .generation = generation }, .work = row.work.core() },
+                .line = .{ .read = .{ .revision = row.revision, .end = row.end }, .model = row.model, .provider = .codex, .folder = row.workspace, .effort = .high },
+                .hint = .absent,
+                .cursor = .{ .position = row.end },
+                .at_start = true,
+                .at_end = true,
+            },
+        };
+        chat.reading.phase = .activity;
+        chat.reading.feed_read = .scan;
+        chat.reading.opening = false;
+        chat.screen.feed.at_start = true;
+        chat.screen.feed.at_end = true;
+        try chat.reader.start(std.testing.io, &chat.job, answer);
+        try self.joinRead();
+        chat.app_info.refresh();
+    }
+
+    fn refresh(self: *EmptySessionOwner) !void {
+        const state = &self.rig.overview.state;
+        _ = try self.rig.overview.event(.{ .tick = @max(state.now_ms + 1, state.next_list_ms) });
+        try std.testing.expect(try self.rig.settle() == null);
+    }
+
+    fn openNew(self: *EmptySessionOwner) !view.Reference {
+        try std.testing.expect(try self.rig.press("\x1b[H\r") == null);
+        try std.testing.expect(try self.rig.settle() == null);
+        const reference = self.rig.overview.app_session.?.session;
+        try std.testing.expect(canonical(&reference).first_message == null);
+        try self.readCurrent();
+        try self.refresh();
+        try std.testing.expect(self.rig.overview.root.session.?.eql(self.frontend().widget()));
+        try std.testing.expectEqualStrings("", self.frontend().input.composition().bytes);
+        try std.testing.expect(self.frontend().submission.intent == null);
+        return reference;
+    }
+
+    fn chooseModel(self: *EmptySessionOwner) !void {
+        try std.testing.expect(try self.rig.press("\t\r") == null);
+        try std.testing.expect(self.frontend().app_info.model_choice.active);
+        try std.testing.expect(try self.rig.press("gpt-5.5\r") == null);
+        try std.testing.expect(self.frontend().info_edit != null);
+        self.frontend().poll_at = std.math.maxInt(i96);
+        try self.tick();
+        try self.joinRead();
+        try self.readCurrent();
+        try std.testing.expectEqualStrings("gpt-5.5", self.frontend().line.model.slice());
+        try std.testing.expectEqualStrings("gpt-5.5", canonical(self.frontend().session).model.slice());
+    }
+
+    fn leave(self: *EmptySessionOwner) !void {
+        try std.testing.expect(try self.rig.press("\x1b") == null);
+        try std.testing.expect(self.rig.overview.app_session == null);
+        try std.testing.expect(self.rig.overview.root.session == null);
+        try std.testing.expect(self.rig.overview.state.conversing == null);
+    }
+
+    fn expectVisible(self: *EmptySessionOwner, expected: []const view.Reference) !void {
+        const state = &self.rig.overview.state;
+        try std.testing.expectEqual(expected.len, state.order.items.len);
+        for (expected) |reference| {
+            var found: usize = 0;
+            for (state.order.items) |at| if (std.mem.eql(u8, &reference, &state.rows.items[at].reference)) {
+                found += 1;
+            };
+            try std.testing.expectEqual(@as(usize, 1), found);
+        }
+    }
+};
+
+test "empty New Session owner opens blank then hides on leave without deleting its canonical row" {
+    const fixture = try EmptySessionOwner.create();
+    defer fixture.destroy();
+    const reference = try fixture.openNew();
+    try fixture.expectVisible(&.{reference});
+    try fixture.leave();
+    try fixture.expectVisible(&.{});
+    try fixture.refresh();
+    try fixture.expectVisible(&.{});
+    try std.testing.expectEqual(@as(usize, 1), EmptySessionOwner.count);
+    try std.testing.expect(EmptySessionOwner.canonical(&reference).first_message == null);
+    try std.testing.expectEqual(@as(usize, 1), fixture.rig.overview.state.rows.items.len);
+    for ([_]u16{ 46, 140 }) |width| {
+        var shown = try fixture.rig.shown(width, 24);
+        defer shown.deinit();
+        try std.testing.expect(std.mem.indexOf(u8, try shown.text(), &reference) == null);
+    }
+}
+
+test "empty New Session owner saves a real model choice then still hides on leave" {
+    const fixture = try EmptySessionOwner.create();
+    defer fixture.destroy();
+    const reference = try fixture.openNew();
+    try fixture.chooseModel();
+    try std.testing.expectEqual(@as(usize, 1), EmptySessionOwner.configurations);
+    try std.testing.expect(EmptySessionOwner.canonical(&reference).first_message == null);
+    try fixture.leave();
+    try fixture.refresh();
+    try fixture.expectVisible(&.{});
+    try std.testing.expectEqual(@as(usize, 1), EmptySessionOwner.count);
+    try std.testing.expectEqualStrings("gpt-5.5", EmptySessionOwner.canonical(&reference).model.slice());
+}
+
+test "empty New Session owner promotes the same row only after a canonical first Message admission" {
+    const fixture = try EmptySessionOwner.create();
+    defer fixture.destroy();
+    const reference = try fixture.openNew();
+    try std.testing.expect(try fixture.rig.press(EmptySessionOwner.message ++ "\r") == null);
+    const chat = fixture.frontend();
+    try std.testing.expect(chat.submission.intent != null);
+    try std.testing.expectEqualStrings(EmptySessionOwner.message, try chat.input.message(chat.submission.intent.?.message));
+    try std.testing.expect(EmptySessionOwner.canonical(&reference).first_message == null);
+    // The frontend really sealed and captured the Message. This unit fixture
+    // has no Host; replace its joined transport failure with a typed admitted
+    // reply, as the native request boundary does, rather than faking a send key.
+    try EmptySessionOwner.wait(&chat.submission.task);
+    try std.testing.expect(chat.submission.join() == .failed);
+    try std.testing.expect(chat.submission.captured != null);
+    chat.submission.reply = .{
+        .status = 200,
+        .context = .{ .kind = .message },
+        .target = .{ .message = .{ .bytes = EmptySessionOwner.message.len, .digest = protocol.contentDigest(EmptySessionOwner.message) } },
+        .answer = .{ .replayed = false, .result = .{ .accepted = .{ .message = .{ .admission = 37 } } } },
+    };
+    try chat.submission.task.start(std.testing.io, &chat.submission, EmptySessionOwner.answer);
+    try EmptySessionOwner.wait(&chat.submission.task);
+    const observation = fixture.rig.overview.host_observation;
+    fixture.rig.overview.host_observation = .unavailable;
+    try fixture.tick();
+    fixture.rig.overview.host_observation = observation;
+    chat.poll_at = std.math.maxInt(i96);
+    try std.testing.expect(chat.submission.intent == null);
+    // Acceptance alone is not the overview's listing authority.
+    try fixture.refresh();
+    try std.testing.expect(fixture.rig.overview.state.rows.items[0].first == null);
+    const row = EmptySessionOwner.canonical(&reference);
+    row.first_message = .{ .position = 2, .admission = 37, .admitted_at = test_now_s, .sender = null, .content = .{ .length = EmptySessionOwner.message.len, .digest = protocol.contentDigest(EmptySessionOwner.message) } };
+    row.end = 2;
+    row.revision += 1;
+    row.peers.from_person_at = test_now_s;
+    try fixture.refresh();
+    try fixture.leave();
+    try fixture.expectVisible(&.{reference});
+    try std.testing.expectEqual(@as(usize, 1), EmptySessionOwner.count);
+    try std.testing.expectEqual(@as(u64, 37), fixture.rig.overview.state.rows.items[0].first.?.admission);
+    for ([_]u16{ 46, 140 }) |width| {
+        var shown = try fixture.rig.shown(width, 24);
+        defer shown.deinit();
+        try std.testing.expect(std.mem.indexOf(u8, try shown.text(), EmptySessionOwner.message) != null);
+    }
+}
+
+test "empty New Session owner keeps two distinct configured rows but neither abandoned row in overview" {
+    const fixture = try EmptySessionOwner.create();
+    defer fixture.destroy();
+    const first = try fixture.openNew();
+    try fixture.leave();
+    try fixture.expectVisible(&.{});
+    const second = try fixture.openNew();
+    try std.testing.expect(!std.mem.eql(u8, &first, &second));
+    try fixture.expectVisible(&.{second});
+    try fixture.leave();
+    try fixture.refresh();
+    try fixture.expectVisible(&.{});
+    try std.testing.expectEqual(@as(usize, 2), EmptySessionOwner.count);
+    try std.testing.expectEqual(@as(usize, 2), fixture.rig.overview.state.rows.items.len);
+    try std.testing.expectEqual(@as(usize, 2), Seen.now.creates);
+    try std.testing.expect(EmptySessionOwner.canonical(&first).first_message == null);
+    try std.testing.expect(EmptySessionOwner.canonical(&second).first_message == null);
+}
+
+test "empty New Session owner upgrade handoff preserves model draft and caret then hides on leave" {
+    const fixture = try EmptySessionOwner.create();
+    defer fixture.destroy();
+    const reference = try fixture.openNew();
+    try fixture.chooseModel();
+    try std.testing.expect(try fixture.rig.press("Unsent café\x1b[D\x1b[D") == null);
+    const cursor = fixture.frontend().input.composition().cursor;
+    fixture.rig.overview.relaunch_build = try std.testing.allocator.dupe(u8, "/published/build");
+    const request = try fixture.rig.overview.makeRelaunch(fixture.rig.overview.app_session);
+    defer request.deinit(std.testing.allocator);
+    var parsed = try handoff.decode(std.testing.allocator, request.handoff, fixture.home());
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings(&reference, parsed.value.open.?);
+    try std.testing.expectEqual(@as(usize, 1), parsed.value.drafts.len);
+    try std.testing.expectEqualStrings("Unsent café", parsed.value.drafts[0].snapshot.bytes);
+    try std.testing.expectEqual(cursor, parsed.value.drafts[0].snapshot.cursor);
+    fixture.closeRig();
+    try fixture.mount(&parsed.value);
+    try std.testing.expect(try fixture.rig.next(.{ .open = fixture.rig.overview.options.open.? }) == null);
+    try fixture.readCurrent();
+    try fixture.refresh();
+    try fixture.expectVisible(&.{reference});
+    try std.testing.expectEqualStrings("gpt-5.5", fixture.frontend().line.model.slice());
+    try std.testing.expectEqualStrings("Unsent café", fixture.frontend().input.composition().bytes);
+    try std.testing.expectEqual(cursor, fixture.frontend().input.composition().cursor);
+    try std.testing.expect(fixture.frontend().submission.intent == null);
+    try std.testing.expect(EmptySessionOwner.canonical(&reference).first_message == null);
+    // Clear via the real chat editor before its ordinary empty-draft Esc.
+    try std.testing.expect(try fixture.rig.press("\x05\x15") == null);
+    try std.testing.expectEqualStrings("", fixture.frontend().input.composition().bytes);
+    try fixture.leave();
+    try fixture.refresh();
+    try fixture.expectVisible(&.{});
+    try std.testing.expectEqual(@as(usize, 1), EmptySessionOwner.count);
+}

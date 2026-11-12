@@ -2508,6 +2508,9 @@ Each frame clears every line to the skin's ground, draws its spans in 24-bit col
 Enter on the pinned `+ New Session` row (Home then Enter), or one click on it, captures Configure only, creates an empty Session with zero Messages and opens that reference through the existing `SessionFrontend`, with its chat input focused.
 `configure_input.ConfigureInput.completeCreation` completes the copied prospective binding with the Workspace, provider/model, saved effort and permission mode; captured Configure and `Requests.sendCaptured` use the existing request ledger.
 No Message or Turn receipt is synthesized. Only sending text from the chat admits a Message.
+The single pure list projection in `overview_view.visible` omits a listed row whose `first_message` is null, except when it names the currently open Session.
+Changing model or effort without admitting a Message does not make that row visible after leaving the chat.
+This is presentation only: Configure-created Sessions and their observed metadata stay stored and remain available through CLI list, inspect and resume; leaving does not delete, archive or reconfigure them.
 While that creation is pending, Enter and clicks cannot duplicate it; pending state is derived from the ledger entry.
 One creation settlement handles accepted, rejected and uncertain Configure outcomes: acceptance retains the known reference before opening, rejection reports the failure, and uncertainty retains the capture key for recovery without creating a new intent.
 Successful Host startup and request receipts stay out of normal output; chat info exposes chat settings, `/requests` exposes recovery records, and `rui session inspect` retains full machine-readable inspection.
