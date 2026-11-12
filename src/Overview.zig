@@ -5921,7 +5921,8 @@ test "typing / lists the overview's commands over the Sessions, and a short scre
         "/archive",
         "/configure",
         "/rename",
-        "+3 more · type to narrow",
+        "/sessions   unarchived · archived · all",
+        "+2 more · type to narrow",
         "────────────────────────────────────────────────────────────────────────────────",
     });
     // Typing narrows it; Esc closes it and consumes the command draft.
