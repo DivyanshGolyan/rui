@@ -510,12 +510,10 @@ fn openFooterChoice(self: *Self, ctx: *vxfw.EventContext) !void {
     self.footer.pending = null;
 }
 
-/// The permission is the same inspected value exposed by Chat Info. Before
-/// inspection is available the regular current read already carries it.
+/// Only the current Session read owns footer facts; an unread line must
+/// not borrow a permission from the independently refreshed info panel.
 fn footerFacts(self: *const Self) ?@import("session_line.zig").Facts {
-    var facts = self.line.facts(&self.hint, self.session) orelse return null;
-    if (self.inspection.status) |index| facts.asks = self.inspection.sessions[index].permission == .ask;
-    return facts;
+    return self.line.facts(&self.hint, self.session);
 }
 
 fn infoBackend(self: *Self) ChatInfo.Backend {
@@ -9083,7 +9081,7 @@ test "chat footer drawn model and effort clicks configure only this Session afte
     }
 }
 
-test "chat footer facts use Chat Info permission and applied default or explicit effort at both widths" {
+test "chat footer facts use current Session permission and applied default or explicit effort at both widths" {
     for ([_]u16{ 140, 46 }) |width| for ([_]bool{ false, true }) |explicit| for ([_]bool{ false, true }) |ask| {
         const held = try HeldFrontend.create();
         defer held.destroy();
@@ -9092,14 +9090,14 @@ test "chat footer facts use Chat Info permission and applied default or explicit
         const inspected = &self.inspection.sessions[self.inspection.status.?];
         inspected.effort = if (explicit) .low else .high;
         inspected.effort_override = explicit;
-        inspected.permission = if (ask) .ask else .bypass;
+        inspected.permission = if (ask) .bypass else .ask;
         self.line.read = .{ .revision = 1, .end = 1 };
         try self.line.model.set("model");
         self.line.label = .{ .len = 0 };
         try self.line.label.?.set("Chat");
         self.line.effort = inspected.effort;
         self.line.left = 62;
-        self.line.asks = !ask; // The footer uses exactly the Chat Info inspection.
+        self.line.asks = ask; // An older info inspection cannot override the current read.
         var buffer: [session_chrome.facts_bytes]u8 = undefined;
         const text = session_chrome.factsRow(&buffer, self.footerFacts(), "ref", null, width, .unicode);
         const want = if (explicit) (if (ask) "Chat · model · low · 62% left · ask" else "Chat · model · low · 62% left") else (if (ask) "Chat · model · high · 62% left · ask" else "Chat · model · high · 62% left");
@@ -9259,4 +9257,63 @@ test "chat footer deferred model choice is cancelled by text paste tab or backgr
         }, self.input.composition().bytes);
         try std.testing.expectEqual(if (interaction == 2) session_chrome.FooterFocus.model else .input, self.footer.focus);
     }
+}
+
+test "chat footer permission transitions follow the current line with absent current or stale inspection" {
+    const InspectionState = enum { absent, current, stale };
+    for ([_]bool{ true, false }) |before| for (std.enums.values(InspectionState)) |inspection| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const self = &held.self;
+        if (inspection != .absent) {
+            try captureInfo(held, "Cached name");
+            const cached = &self.inspection.sessions[self.inspection.status.?];
+            cached.permission = if (before) .ask else .bypass;
+            try cached.model.set("cached-model");
+            cached.effort = .high;
+        }
+        self.line.read = .{ .revision = 1, .end = 1 };
+        self.line.label = .{ .len = 0 };
+        try self.line.label.?.set("Chat");
+        try self.line.model.set("model");
+        self.line.effort = .low;
+        self.line.left = 62;
+        for ([_]bool{ before, !before }) |ask| {
+            self.line.read.?.revision += 1;
+            self.line.asks = ask;
+            if (inspection == .current) self.inspection.sessions[self.inspection.status.?].permission = if (ask) .ask else .bypass;
+            const facts = self.footerFacts().?;
+            try std.testing.expectEqual(ask, facts.asks);
+            // Other identity facts also stay with the current line, even
+            // when the info panel keeps visibly different cached values.
+            try std.testing.expectEqualStrings("Chat", facts.name);
+            try std.testing.expectEqualStrings("model", facts.model);
+            try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, .low), facts.effort);
+            try std.testing.expectEqual(@as(?u8, 62), facts.left);
+            for ([_]u16{ 140, 46 }) |width| {
+                var buffer: [session_chrome.facts_bytes]u8 = undefined;
+                const text = session_chrome.factsRow(&buffer, facts, "ref", null, width, .unicode);
+                try std.testing.expectEqualStrings(if (ask) "Chat · model · low · 62% left · ask" else "Chat · model · low · 62% left", text);
+            }
+        }
+        // Missing current facts must not resurrect a cached ask value.
+        self.line.read = null;
+        if (self.inspection.status) |index| self.inspection.sessions[index].permission = .ask;
+        try std.testing.expect(self.footerFacts() == null);
+        for ([_]u16{ 140, 46 }) |width| {
+            var buffer: [session_chrome.facts_bytes]u8 = undefined;
+            try std.testing.expectEqualStrings("ref", session_chrome.factsRow(&buffer, self.footerFacts(), "ref", null, width, .unicode));
+        }
+        // Focus stops use the same current effort, not the cached choice's.
+        var ctx = held.context();
+        defer ctx.cmds.deinit(std.testing.allocator);
+        self.footer.focus = .model;
+        _ = try self.footerEvent(&ctx, .{ .tab = false });
+        try std.testing.expectEqual(session_chrome.FooterFocus.input, self.footer.focus);
+        self.line.read = .{ .revision = 4, .end = 1 };
+        if (self.inspection.status) |index| self.inspection.sessions[index].effort = null;
+        self.footer.focus = .model;
+        _ = try self.footerEvent(&ctx, .{ .tab = false });
+        try std.testing.expectEqual(session_chrome.FooterFocus.effort, self.footer.focus);
+    };
 }
