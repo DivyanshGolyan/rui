@@ -231,6 +231,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const self: *Self = @ptrCast(@alignCast(raw));
     if (self.selected) |selected| std.debug.assert(selected < self.rows.count);
     const size = ctx.max.size();
+    const previously_shown = self.shown;
     self.shown = .{};
     self.shown_at = &.{};
     self.hover.targets = &.{};
@@ -248,11 +249,15 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     self.list.cursor = cursor;
     var building: Building = .{ .owner = self, .arena = ctx.arena };
     var first = @min(self.list.scroll.top, self.rows.count - 1);
-    if (changed and (cursor < first or cursor - first > size.height)) first = cursor;
+    var offset: i32 = @as(i32, self.list.scroll.offset) + self.list.scroll.pending_lines;
+    // Wheel intent owns this draw. Otherwise follow a changed selection or
+    // preserve one that was actually visible in the last normalized window.
+    // A marker-free probe must never pull a wheel-scrolled window back.
+    const keep_selected = if (self.selected) |selected| self.list.scroll.pending_lines == 0 and (changed or (previously_shown.first <= selected and selected < previously_shown.end)) else false;
+    if (keep_selected and (cursor < first or cursor - first > size.height)) first = cursor;
     // ListView only collects wheel intent. This owner consumes it in whole
     // rows, snapping in the direction of travel so even a one-line upward
     // scroll progresses through rows taller than the wheel step.
-    var offset: i32 = @as(i32, self.list.scroll.offset) + self.list.scroll.pending_lines;
     if (offset < 0) {
         while (offset < 0 and first > 0) {
             first -= 1;
@@ -264,8 +269,6 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
             first += 1;
         }
     }
-    const probe = try building.fit(first, size.height);
-    const keep_selected = if (self.selected) |selected| changed or (first <= selected and selected < probe.end) else false;
     if (keep_selected and self.selected.? < first) first = self.selected.?;
     var window = try self.measure(&building, first, size.height, keep_selected);
     if (keep_selected) {
@@ -872,6 +875,69 @@ test "List mixed-height rows scroll in both directions and reach EOF without par
             } else return error.WheelDidNotReachEdge;
         }
         try std.testing.expectEqual(@as(u32, 0), list.shown.first);
+    };
+}
+
+test "List wheel reaches every Session from either end regardless of selection markers or spacer" {
+    // A pinned control contributes a one-line spacer, not a Session. Sessions
+    // have two lines; wheel steps straddle their boundaries, including step 1.
+    var data: [9]Row = @splat(.{ .lines = &.{ &.{.{ .text = "Session" }}, &.{.{ .text = "detail" }} } });
+    for (data[1..], 0..) |*row, index| row.target = @intCast(index);
+    data[0] = .{ .lines = &.{&.{}} };
+    for ([_]bool{ false, true }) |spacer| for (0..4) |markers| for ([_]u16{ 6, 7, 8, 11, 24 }) |height| for ([_]u8{ 1, 2, 3 }) |step| for (0..9) |choice| for ([_]bool{ false, true }) |up| {
+        const rows: []const Row = if (spacer) &data else data[1..];
+        const selected: ?u32 = if (choice == 0) null else @intCast(choice - 1 + @intFromBool(spacer));
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const ctx = Testing.context(arena.allocator(), height);
+        var list: Self = .{
+            .rows = .of(&rows),
+            .selected = selected,
+            .aboveFn = if (markers & 1 != 0) Testing.below else null,
+            .belowFn = if (markers & 2 != 0) Testing.below else null,
+        };
+        // Establish an unchanged selection at either end, as after scrolling
+        // there: initial focus-following is tested separately from wheel intent.
+        list.last_size = ctx.max.size();
+        list.list.item_count = @intCast(rows.len);
+        list.list.cursor = selected orelse 0;
+        list.list.scroll.top = if (up) @intCast(rows.len - 1) else 0;
+        list.list.wheel_scroll = step;
+        var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        var reached: [8]bool = @splat(false);
+        for (0..rows.len + 1) |_| {
+            const surface = try list.widget().draw(ctx);
+            const content = Testing.content(surface);
+            try std.testing.expectEqual(@as(i17, 0), list.list.scroll.offset);
+            try std.testing.expectEqual(@as(i17, 0), list.list.scroll.pending_lines);
+            try std.testing.expectEqual(list.shown.first, list.list.scroll.top);
+            try std.testing.expectEqual(list.shown.end - list.shown.first, content.children.len);
+            var y: u16 = 0;
+            for (content.children, list.shown_at, list.shown.first..) |child, span, index| {
+                try std.testing.expectEqual(y, child.origin.row);
+                try std.testing.expectEqual(rows[index].lines.len, child.surface.size.height);
+                try std.testing.expectEqual(rows[index].lines.len, span.height);
+                y += child.surface.size.height;
+                try std.testing.expect(y <= content.size.height);
+                if (rows[index].target) |session| {
+                    reached[session] = true;
+                    try std.testing.expectEqualStrings("S", child.surface.readCell(0, 0).char.grapheme);
+                    try std.testing.expectEqualStrings("d", child.surface.readCell(0, 1).char.grapheme);
+                }
+            }
+            const shown = list.shown;
+            // A redraw with no new intent must not undo the wheel either.
+            _ = try list.widget().draw(ctx);
+            try std.testing.expectEqualDeep(shown, list.shown);
+            try std.testing.expectEqual(selected, list.selected);
+            if ((up and shown.first == 0) or (!up and shown.end == rows.len)) break;
+            events.consume_event = false;
+            try list.widget().handleEvent(&events, .{ .mouse = .{ .col = 0, .row = 0, .button = if (up) .wheel_up else .wheel_down, .type = .press, .mods = .{} } });
+            try std.testing.expect(events.consume_event);
+            _ = try list.widget().draw(ctx);
+            try std.testing.expect(if (up) list.shown.first < shown.first else list.shown.first > shown.first);
+        } else return error.WheelDidNotReachEdge;
+        for (reached) |visible| try std.testing.expect(visible);
     };
 }
 
