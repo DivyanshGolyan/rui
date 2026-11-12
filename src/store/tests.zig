@@ -252,6 +252,108 @@ test "Store distinguishes noncanonical Session references from canonical unknown
     }.run);
 }
 
+test "a control marks its durable acceptance while it holds the Store, only when it commits an acceptance" {
+    try store_testing.forEachEngine(struct {
+        const Phases = struct {
+            marks: [8]store_core.ControlTracePhase = undefined,
+            len: usize = 0,
+
+            fn mark(context: *anyopaque, phase: store_core.ControlTracePhase) void {
+                const phases: *Phases = @ptrCast(@alignCast(context));
+                phases.marks[phases.len] = phase;
+                phases.len += 1;
+            }
+
+            fn faults(phases: *Phases) store_core.Faults {
+                phases.len = 0;
+                return .{ .control_trace = .{ .context = phases, .mark_fn = mark } };
+            }
+
+            /// The last run of the entry point; a run before it, which a
+            /// network Store may repeat, marks no acceptance.
+            fn expect(phases: *const Phases, durable: bool) !void {
+                const accepted = [_]store_core.ControlTracePhase{ .lock_acquired, .durable_acceptance, .store_complete };
+                const other = [_]store_core.ControlTracePhase{ .lock_acquired, .store_complete };
+                const last: []const store_core.ControlTracePhase = if (durable) &accepted else &other;
+                const marks = phases.marks[0..phases.len];
+                try std.testing.expectEqual(store_core.ControlTracePhase.lock_requested, marks[0]);
+                try std.testing.expect(marks.len >= last.len + 1);
+                try std.testing.expectEqualSlices(store_core.ControlTracePhase, last, marks[marks.len - last.len ..]);
+                try std.testing.expectEqual(@intFromBool(durable), std.mem.count(store_core.ControlTracePhase, marks, &.{.durable_acceptance}));
+            }
+        };
+
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var phases: Phases = .{};
+            const session = try configureTestSessionAsk(&storage, "durable-config");
+            try submitTestMessage(&storage, &tmp, "durable-input", "durable-message", session.slice(), "propose");
+            const proposing = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            const calls = [_]TestingCall{
+                .{ .item_id = "durable", .name = "bash", .encoded_call_id = "durable", .decoded_call_id = "durable", .encoded_arguments = "{\\\"description\\\":\\\"Durable\\\",\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"description\":\"Durable\",\"cmd\":\"true\",\"timeout_ms\":null}" },
+            };
+            try settleCallsForTesting(&storage, &tmp, proposing, "durable-calls", &calls);
+            const action = try store_testing.queryU64(&storage, "SELECT action_id FROM action_operation WHERE session_ref=?1", .{session.slice()});
+
+            var allow: protocol.PermissionDecisionCommand = .{ .action_id = action, .decision = .allow_once };
+            try allow.key.set("durable-allow");
+            try allow.session.set(session.slice());
+            try std.testing.expect(storage.decidePermission(&allow, phases.faults()) == .accepted);
+            try phases.expect(true);
+            try std.testing.expect(storage.decidePermission(&allow, phases.faults()).accepted.replayed);
+            try phases.expect(false);
+
+            var interrupt: protocol.ModelInterruptionCommand = .{ .turn_id = proposing.turn_id, .operation_id = proposing.operation_id };
+            try interrupt.key.set("durable-interrupt");
+            try interrupt.session.set(session.slice());
+            try std.testing.expect(storage.interruptModel(&interrupt, phases.faults()) == .rejected);
+            try phases.expect(false);
+
+            var stop = try completeSessionStop("durable-stop", session.slice());
+            try std.testing.expect(storage.stopSession(&stop, phases.faults()) == .accepted);
+            try phases.expect(true);
+            try std.testing.expect(storage.stopSession(&stop, phases.faults()).accepted.replayed);
+            try phases.expect(false);
+
+            var archive: protocol.SessionArchiveCommand = .{ .archived = true };
+            try archive.key.set("durable-archive");
+            try archive.session.set(session.slice());
+            try std.testing.expect(storage.archiveSession(&archive, phases.faults()).accepted.archived);
+            try phases.expect(true);
+            var restore: protocol.SessionArchiveCommand = .{ .archived = false };
+            try restore.key.set("durable-restore");
+            try restore.session.set(session.slice());
+            try std.testing.expect(!storage.archiveSession(&restore, phases.faults()).accepted.archived);
+            try phases.expect(false);
+            try std.testing.expect(!storage.isFenced());
+        }
+    }.run);
+}
+
+test "a model interruption's replay names the target it saved, or the Store is corrupt" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var interrupt: protocol.ModelInterruptionCommand = .{ .turn_id = 1, .operation_id = 1 };
+            try interrupt.key.set("saved-target-interrupt");
+            try interrupt.session.set("k7m2qx");
+            try std.testing.expectEqual(protocol.ModelInterruptionRejection.unknown_session, storage.interruptModel(&interrupt, .{}).rejected.code);
+            try std.testing.expect(storage.interruptModel(&interrupt, .{}).rejected.replayed);
+            try store_testing.exec(&storage, "UPDATE model_interruption_command SET operation_id='2' WHERE command_key='saved-target-interrupt'", .{});
+            try std.testing.expectEqual(ModelInterruptionReply.infrastructure_failure, storage.interruptModel(&interrupt, .{}));
+            try std.testing.expect(storage.isFenced());
+        }
+    }.run);
+}
+
 pub fn testingContent(tmp: *std.testing.TmpDir, name: []const u8, fill: u8, length: usize) !wire_request.ContentField {
     const file = try tmp.dir.createFile(std.testing.io, name, .{ .read = true });
     errdefer file.close(std.testing.io);
