@@ -6950,7 +6950,7 @@ test "archive admission reports only a new ledger request across every surface c
             if (hold != .active) {
                 try std.testing.expectEqualStrings(upgrade_recovery, state.notice.?.text());
             } else if (!case.restore and archive != .active) {
-                try std.testing.expect(std.mem.indexOf(u8, state.notice.?.text(), if (archive == .archiving) "Stopping and archiving" else "already archived") != null);
+                try std.testing.expect(state.notice == null); // The durable archive badge is the feedback.
             } else if (held != .none) {
                 try std.testing.expect(std.mem.indexOf(u8, state.notice.?.text(), if (held == .pending) "request pending" else "request unsure") != null);
             } else if (full) {

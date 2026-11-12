@@ -322,8 +322,8 @@ test "SessionChrome puts notices in Footer without a state row and preserves nee
         try std.testing.expectEqual(idle.size.height, noticed.size.height);
         const footer = try input.facts.draw(ctx);
         for ("Copied 3 lines", width - "Copied 3 lines".len..) |byte, col| try std.testing.expectEqual(byte, footer.readCell(col, 0).char.grapheme[0]);
-        // Only the back target remains: no invisible stop or restore hint.
-        try std.testing.expectEqual(@as(usize, 1), footer.children.len);
+        // Back and the visible identity remain: no invisible key targets.
+        try std.testing.expectEqual(@as(usize, 2), footer.children.len);
     }
 
     self.place(&screen, .{ .width = 80 });
@@ -393,7 +393,7 @@ test "SessionChrome archive confirmation is one durable badge at both widths, wi
         var text: std.Io.Writer.Allocating = .init(arena.allocator());
         for (footer.buffer) |cell| if (cell.char.width != 0) try text.writer.writeAll(cell.char.grapheme);
         try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text.written(), "Archived"));
-        try std.testing.expect(std.mem.endsWith(u8, std.mem.trimEnd(u8, text.written(), " "), " · Archived"));
+        try std.testing.expect(std.mem.endsWith(u8, self.facts.open.label, " · Archived"));
         try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text.written(), "Archive audit"));
         try std.testing.expectEqualStrings("", self.state.text);
         try std.testing.expect(self.status.bar.notice == null);
@@ -498,13 +498,13 @@ test "Session chrome back control exists only while the shell hides the list" {
 }
 
 test "SessionChrome makes every visible identity cell the same info action as its hint" {
-    for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |list_visible| {
+    for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |list_visible| for ([_]@import("protocol.zig").SessionArchiveState{ .active, .archiving, .archived }) |archive| {
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         var recorder: Recorder = .{};
         var self: Self = .init(recorder.actions());
         self.list_visible = list_visible;
-        self.facts.identity = .{ .current = .{ .name = "Chat", .model = "gpt-6-luna", .effort = .low, .left = 62 } };
+        self.facts.identity = .{ .current = .{ .name = "Chat", .model = "gpt-6-luna", .effort = .low, .left = 62 }, .archive = archive };
         const footer = try drawFooter(&self, .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 1 }, .cell_size = .{} });
         var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
         defer ctx.cmds.deinit(arena.allocator());

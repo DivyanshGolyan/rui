@@ -59,6 +59,31 @@ class NavigationTests(unittest.TestCase):
             with self.assertRaisesRegex(AssertionError, "navigation composer rule"):
                 navigation_rows(screen.replace("─", " "))
 
+    def test_chrome_geometry_comes_from_input_rules_with_one_footer(self):
+        with patch.object(sys, "argv", [sys.argv[0], sys.executable]):
+            from human_cli_fixture import composer_bounds, footer_click
+            from session_chrome_cases import composing, feed_bottom, status, transcript_rows
+        for persistent in ([], ["Sending…"], ["held line 1", "held line 2", "held line 3"]):
+            for draft in ("", "kept draft"):
+                for split in (False, True):
+                    for right in ("alt+i info", "! Unknown command /nosuch"):
+                        with self.subTest(persistent=persistent, draft=draft, split=split, right=right):
+                            feed = 24 - 1 - len(persistent) - 3 - 1
+                            lines = (["history"] * feed + ["", "─" * 46, " › " + draft, "─" * 46]
+                                     + [" ‹ Chat · Archived    " + right] + persistent)
+                            if split:
+                                lines = [" " * 40 + "│" + line for line in lines]
+                            screen = "\n".join(lines)
+                            self.assertEqual(composer_bounds(screen), (feed + 1, feed + 3))
+                            self.assertTrue(composing(screen, draft))
+                            self.assertFalse(composing(screen, draft + "x"))
+                            self.assertEqual(feed_bottom(screen), feed)
+                            self.assertEqual(len(transcript_rows(screen)), feed + 1)
+                            self.assertEqual(status(screen), "\n".join(persistent))
+                            self.assertIn(f";{24 - len(persistent)}M".encode(), footer_click(screen, column=1))
+                            self.assertIn(f";{24 - len(persistent)}M".encode(), footer_click(screen, marker="Chat"))
+                            self.assertFalse(composing(screen.replace("─", " "), draft))
+
     def test_chat_info_observes_fields_footer_and_fitted_folder(self):
         with patch.object(sys, "argv", [sys.argv[0], sys.executable]):
             from scenarios import chat_info_ready
