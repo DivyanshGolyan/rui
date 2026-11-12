@@ -877,6 +877,17 @@ while True:
         entries = list(self.helper["cast_entries"](data["states"][1]["cast"]))
         self.assertEqual([c["label"] for c in entries], ["Fix it", "Batch 1", "Batch 2", "Batch 3"])
 
+    def test_cast_skills_are_safe_unique_fixture_names(self):
+        for value in ([], ["review"], ["review", "check-project"]):
+            data = self.scenario()
+            data["states"][1]["cast"][0]["skills"] = value
+            self.helper["validate_scenario"](data)
+        for value in (None, "review", ["../escape"], ["/absolute"], ["review", "review"], [42], [""]):
+            data = self.scenario()
+            data["states"][1]["cast"][0]["skills"] = value
+            with self.subTest(skills=value), self.assertRaisesRegex(ValueError, "invalid cast skills"):
+                self.helper["validate_scenario"](data)
+
     def test_invalid_scenarios(self):
         mutations = [
             lambda d: d.update(states=[]),

@@ -202,7 +202,7 @@ test "Palette hover is transient and clicks activate only visible command rows" 
 
 test "Palette renders names-only slash lists on conversation and overview" {
     const cases = .{
-        .{ commands.conversation, &[_][]const u8{"/reload-skills"} },
+        .{ commands.conversation, &[_][]const u8{ "/clear", "/new", "/reload-skills" } },
         .{ commands.overview, &[_][]const u8{"/reload-skills"} },
     };
     inline for (cases) |case| {

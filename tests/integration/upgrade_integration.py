@@ -1010,8 +1010,8 @@ def conversation_case(root, binary, releases, artifacts):
             screen.contains(session)
             screen.send("\r")
             # The wide shell keeps the list alongside the conversation; its
-            # footer identifies the opened Session in the right pane.
-            screen.contains(f"│ {session} · gpt-6-luna")
+            # empty-chat footer identifies its saved model, effort and Folder.
+            screen.contains("│ gpt-6-luna · low · terminal-conversation")
             screen.start_upgrade()
             screen.until(gate.entered.is_set, "conversation installation archive gate")
             screen.contains(f"upgrading to {releases.version}")
@@ -1030,7 +1030,7 @@ def conversation_case(root, binary, releases, artifacts):
             screen = TerminalScreen(master, process)
             screen.contains(session)
             screen.send("\r")
-            screen.contains(f"│ {session} · gpt-6-luna")
+            screen.contains("│ gpt-6-luna · low · terminal-conversation")
             screen.start_upgrade()
             screen.contains(" · publishing")
             screen.close_settings()
@@ -1039,7 +1039,7 @@ def conversation_case(root, binary, releases, artifacts):
             screen.draft("conversation β draft", 5)
             published.unlink()
             proof_relaunched(c, screen, process)
-            screen.contains(f"│ {session} · gpt-6-luna")
+            screen.contains("│ gpt-6-luna · low · terminal-conversation")
             screen.draft("conversation β draft", 5)
             screen.save(artifacts, "conversation-installed")
             proof_ready(c, previous, old_host)
@@ -1211,7 +1211,7 @@ def startup_cases(root, binary, releases, artifacts):
             try:
                 with terminal_process(arguments, env=c.env, cwd=c.root) as (process, master):
                     screen = TerminalScreen(master, process)
-                    screen.contains(f"│ {session} · gpt-6-luna" if screen_kind == "resume" else session)
+                    screen.contains(f"│ gpt-6-luna · low · {name}" if screen_kind == "resume" else session)
                     screen.start_upgrade()
                     screen.contains(" · publishing")
                     screen.close_settings()
@@ -1232,9 +1232,9 @@ def startup_cases(root, binary, releases, artifacts):
                     published.unlink()
                     proof_relaunched(c, screen, process)
                     proof_ready(c, previous, old_host)
-                    screen.contains(f"│ {session} · gpt-6-luna" if screen_kind == "resume" else session)
+                    screen.contains(f"│ gpt-6-luna · low · {name}" if screen_kind == "resume" else session)
                     if screen_kind == "overview":
-                        assert not shown(f"│ {session} · gpt-6-luna", screen.observe()), "overview opened a conversation"
+                        assert not shown(f"│ gpt-6-luna · low · {name}", screen.observe()), "overview opened a conversation"
                     screen.draft("startup α draft", 5)
                     screen.send("X")
                     screen.draft("staXrtup α draft", 6)

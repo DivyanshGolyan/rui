@@ -27,6 +27,8 @@
         }
       ],
       "expect": [
+        "/clear",
+        "/new",
         "/reload-skills"
       ],
       "absent": [
@@ -67,7 +69,9 @@
         "/requests",
         "/result",
         "/configure",
-        "/sessions"
+        "/sessions",
+        "/new",
+        "/clear"
       ]
     },
     {
@@ -76,12 +80,18 @@
       "open": "App command replacements",
       "steps": [
         {
+          "wait": " \u00b7 low"
+        },
+        {
           "keys": [
             "M-i"
           ]
         },
         {
           "wait": "Copy last answer"
+        },
+        {
+          "wait": "run without asking"
         }
       ],
       "expect": [
@@ -90,12 +100,112 @@
         "Copy last answer",
         "Effort",
         "Permissions",
-        "esc close"
+        "esc close",
+        "run without asking"
       ],
       "absent": [
         "/copy",
         "/rename",
         "/archive"
+      ]
+    },
+    {
+      "name": "appcmds-agent-commands",
+      "note": "Chat aliases are listed beside reload and loaded skills",
+      "open": "New chat navigation",
+      "cast": [
+        {
+          "label": "New chat navigation",
+          "workspace": "code/rui",
+          "messages": [
+            "Old chat remains."
+          ],
+          "mode": "bypass",
+          "model": "gpt-5.5",
+          "effort": "low",
+          "skills": [
+            "review"
+          ]
+        }
+      ],
+      "steps": [
+        {
+          "text": "/"
+        },
+        {
+          "wait": "/review"
+        }
+      ],
+      "expect": [
+        "/clear",
+        "/new",
+        "/reload-skills",
+        "/review"
+      ],
+      "absent": [
+        "/copy",
+        "/rename",
+        "/archive"
+      ]
+    },
+    {
+      "name": "appcmds-new",
+      "note": "Alias opens an empty chat, not a first Message",
+      "open": "New chat navigation",
+      "steps": [
+        {
+          "text": "/new"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": " \u00b7 rui"
+        },
+        {
+          "gone": "Old chat remains."
+        }
+      ],
+      "expect": [
+        " \u00b7 rui",
+        "alt+i info"
+      ],
+      "absent": [
+        "Old chat remains.",
+        "/new",
+        "/clear"
+      ]
+    },
+    {
+      "name": "appcmds-clear",
+      "note": "Alias opens an empty chat, not a first Message",
+      "open": "New chat navigation",
+      "steps": [
+        {
+          "text": "/clear"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": " \u00b7 rui"
+        },
+        {
+          "gone": "Old chat remains."
+        }
+      ],
+      "expect": [
+        " \u00b7 rui",
+        "alt+i info"
+      ],
+      "absent": [
+        "Old chat remains.",
+        "/new",
+        "/clear"
       ]
     },
     {

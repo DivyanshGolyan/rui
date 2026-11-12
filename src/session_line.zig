@@ -72,6 +72,7 @@ pub fn left(trigger: u64, pressure: u64) u8 {
 
 pub const Facts = struct {
     name: []const u8,
+    folder: ?[]const u8 = null,
     model: []const u8,
     effort: ?ReasoningEffort = null,
     /// Percent left before automatic compaction; null when no estimate

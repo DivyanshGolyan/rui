@@ -414,9 +414,9 @@ pub const Lender = struct {
 };
 
 /// How the frontend stopped. Either way it stopped only its own client waits;
-/// Host work it started continues. `returned` goes back to the overview that
-/// lent the terminal, which stays begun.
-pub const Outcome = enum { detached, interrupted, returned };
+/// Host work it started continues. Navigation returns to the overview that
+/// lent the terminal, which stays begun; new_session then creates an empty chat.
+pub const Outcome = enum { detached, interrupted, returned, new_session };
 
 pub fn begin(self: *Self, init: std.process.Init, store: []const u8, session: []const u8, directory: []const u8, files: Files, command: Command, requests: Requests, status: Status, screen: *Screen, interrupted: *client.Cancellation, lender: Lender) void {
     self.* = .{ .init = init, .home = init.environ_map.get("HOME") orelse "", .store = store, .session = session, .directory = directory, .files = files, .command = command, .requests = requests, .status = status, .screen = screen, .interrupted = interrupted, .lender = lender, .colour = screen.colour };
@@ -623,6 +623,17 @@ fn sayBusy(self: *Self, action: ?session_notice.Action, letter: bool) void {
     const phase = self.upgradePhase();
     const command = self.input.queuedCommand() != null or self.inspection.command_running;
     self.notice = if (phase != .active and !command) session_upgrade.refusal(phase) else session_notice.busy(.{ .command = self.commandActive(), .held = self.heldOriginal(), .preparing = self.reading.phase == .permission, .action = action, .letter = letter });
+}
+
+/// A captured empty chat has no Message-derived identity yet. Its footer
+/// shows its saved model, effort and Folder; the title/info owners stay intact.
+fn footerFacts(self: *const Self) ?session_line.Facts {
+    var facts = self.line.facts(&self.hint, self.session) orelse return null;
+    if (self.line.first_position == null and self.line.folder.len != 0 and self.line.label == null) {
+        facts.name = "";
+        facts.folder = self.line.folder.slice();
+    }
+    return facts;
 }
 
 /// The Session's name as the terminal title leads with it.
@@ -1060,7 +1071,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
         .progress = if (self.upgradePhase() == .reobserving) session_upgrade.rereading else send.progress,
         .stoppable = said.stoppable,
         .details = held != null and held.?.state != .submitting,
-        .facts = .{ .current = self.line.facts(&self.hint, self.session), .name = self.session, .archive = self.line.archive_state },
+        .facts = .{ .current = self.footerFacts(), .name = self.session, .archive = self.line.archive_state },
         .notice = self.shown_notice.current(now_ms),
         .overview = said.text,
 
@@ -1498,14 +1509,14 @@ pub const Back = union(enum) {
     ended: anyerror!Outcome,
 };
 
-/// After the Session left with `returned`, which Esc only asks for: settles the
+/// After the Session left for navigation, which Esc or a new-chat alias asks for: settles the
 /// stopped borrowers as `leave` does, while the terminal stays lent. Esc
 /// needs no running command or submission, so they observe their stop
 /// within one transport poll. A rejected original is released as /discard
 /// does. An unconfirmed one goes to the overview while it has `room` for
 /// it; otherwise, or on a failure, the frontend leaves as `leave` would.
 pub fn back(self: *Self, room: bool) Back {
-    std.debug.assert(self.leaving == .returned);
+    std.debug.assert(self.leaving == .returned or self.leaving == .new_session);
     const plan = departure.exit(self.settle({}), null, false);
     if (plan.failure) |err| return .{ .ended = err };
     if (self.reading.pending_diagnostic != null) return .{ .ended = .detached };
@@ -1675,6 +1686,7 @@ test "frontend exit guidance preserves accepted identity and never substitutes i
 
 /// What each slash command does here.
 const Slash = union(enum) {
+    new_session,
     inspection: Inspection,
     discard,
     recover: []const u8,
@@ -1689,6 +1701,7 @@ fn parse(text: []const u8) Slash {
         .command => |command| command,
     };
     return switch (command.name) {
+        .new, .clear => .new_session,
         .requests => .{ .inspection = .requests },
         .@"reload-skills" => .{ .inspection = .command },
         .recover => .{ .recover = command.argument },
@@ -1718,6 +1731,7 @@ fn slashCommand(self: *Self, text: []const u8) !void {
         return;
     }
     switch (parse(text)) {
+        .new_session => self.newChat(),
         .inspection => self.input.queueCommand(text),
         .discard => {
             self.submission.discardRejected() catch {
@@ -1736,6 +1750,18 @@ fn slashCommand(self: *Self, text: []const u8) !void {
             self.notice = writer.buffered();
         },
         .unknown => self.unknownCommand(text),
+    }
+}
+
+/// A new chat is navigation, never a Message or a mutation of this Session.
+/// Reuse peer navigation's guards and the settled return/retirement boundary.
+fn newChat(self: *Self) void {
+    if (self.leaving != null) return;
+    const action = self.screen.action_view != null or self.live.work.first_action != null or self.reading.prepared_action != null;
+    const original: ?Submission.State = if (self.submission.view()) |submission| submission.state else null;
+    switch (session_notice.follow(original, self.submission.published(), self.draftSafeToLeave(), action, self.commandActive())) {
+        .stay => |why| self.notice = why,
+        .leave => self.leaving = .new_session,
     }
 }
 
@@ -1815,10 +1841,10 @@ test "a Session lists the skills it saved for the caret's /word, and Tab or Ente
     defer held.destroy();
     held.self.session = "k7m2qx";
     held.self.skill_read = Fake.read;
-    // A leading slash shares the loaded skills with the one listed command.
+    // A leading slash shares the loaded skills with the listed commands.
     try held.keys("/");
     try Fake.answered(held);
-    try std.testing.expectEqual(@as(usize, 3), held.screen.commands.?.list.count);
+    try std.testing.expectEqual(@as(usize, 5), held.screen.commands.?.list.count);
     try held.keys("re\x1b[B\r");
     try std.testing.expectEqualStrings("/recap ", held.self.input.composition().bytes);
     try std.testing.expect(held.self.submission.view() == null);
@@ -8887,4 +8913,42 @@ test "App Session palette clicks replace the caret skill without sending or movi
     try std.testing.expectEqual("please /review".len, held.self.input.composition().cursor);
     try std.testing.expectEqual(null, held.self.input.queuedCommand());
     try std.testing.expectEqual(null, held.self.submission.view());
+}
+
+test "new and clear navigate without sending or changing the old chat and reject arguments" {
+    for ([_][]const u8{ "/new", "/clear" }) |name| {
+        var drafts: session_drafts.Drafts = .{};
+        const held = try HeldFrontend.createWithDrafts("k7m2qx", &drafts);
+        defer held.destroy();
+        held.self.line = .{ .read = .{ .revision = 7, .end = 10 }, .effort = .high, .first_position = 1 };
+        try held.self.line.model.set("gpt-5.5");
+        try seedFeed(held.screen, "OLD ANSWER\n");
+        const work = held.self.live.work;
+        const line = held.self.line;
+        try held.keys(name);
+        try held.keys(" foo\r");
+        try std.testing.expect(held.left == null and held.self.submission.intent == null);
+        try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "! Usage:") != null);
+        try held.keys(name);
+        try held.keys("\r");
+        try std.testing.expectEqual(@as(?Outcome, .new_session), held.left);
+        try std.testing.expect(held.self.submission.intent == null and held.self.input.queuedCommand() == null);
+        try std.testing.expectEqual(work, held.self.live.work);
+        try std.testing.expectEqual(line, held.self.line);
+        try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "OLD ANSWER") != null);
+    }
+}
+
+test "empty chat footer derives model effort and Folder from Current at both widths" {
+    const held = try HeldFrontend.createWithDrafts("n3w5es", null);
+    defer held.destroy();
+    held.self.line = .{ .read = .{ .revision = 1, .end = 0 }, .effort = .low };
+    try held.self.line.model.set("gpt-5.5");
+    try held.self.line.folder.set("project");
+    for ([_]u16{ 46, 140 }) |width| {
+        held.size = .{ .width = width, .height = 30 };
+        const text = try held.shown();
+        try std.testing.expect(std.mem.indexOf(u8, text, "gpt-5.5 · low · project") != null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "n3w5es") == null);
+    }
 }

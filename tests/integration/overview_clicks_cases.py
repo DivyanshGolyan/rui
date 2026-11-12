@@ -1,4 +1,4 @@
-"""Overview pointer behavior: Session rows open, New Session composes,
+"""Overview pointer behavior: Session rows open, New Session opens an empty chat,
 /sessions reaches archive views, and panels never open rows.
 The flat list exposes every Session without group headings or folds.
 """
@@ -197,9 +197,12 @@ def flat_list():
             assert lines[0] == "  + New Session" and lines[1] == "", listed
             assert not any(re.fullmatch(r" \S.* · \d+", line) for line in lines), listed
             assert " more" not in listed, listed
-            # New Session selects the composer, not a conversation.
+            # New Session opens an empty chat; the existing rows remain.
             screen.click(4, 1)
-            assert_still_overview(screen, "New Session", *peers_by_label)
+            screen.wait(lambda frame: not is_overview(frame) and " · workspace" in frame,
+                        "New Session opens an empty chat")
+            listed = back_to_overview(screen, *peers_by_label)
+            lines = listed.split("\n")
             # Every formerly hidden row is directly clickable.
             label = lines[max(row_of(listed, peer) for peer in peers_by_label) - 1].split()[1]
             click_label(screen, listed, label)
@@ -214,13 +217,45 @@ def empty_list():
         frame = screen.contains("+ New Session")
         assert "No unarchived Sessions" not in frame, frame
         screen.click(4, line_of(frame, lambda line: "+ New Session" in line, "New Session"))
-        assert_still_overview(screen, "New Session in an empty Store", "+ New Session")
-        screen.keys(b"\r")
-        assert_still_overview(screen, "Enter on New Session", "+ New Session")
-    print("overview clicks: New Session in an empty Store keeps the composer focused", flush=True)
+        screen.wait(lambda frame: not is_overview(frame) and " · workspace" in frame,
+                    "New Session opens its empty input and facts")
+        back_to_overview(screen, "+ New Session")
+        screen.keys(b"\x1b[H\r")
+        screen.wait(lambda frame: not is_overview(frame) and " · workspace" in frame,
+                    "Enter on New Session opens the same empty chat")
+    print("overview clicks: New Session click and Enter open empty chats", flush=True)
+
+
+def new_chat_aliases():
+    with world("new-chat-aliases") as w:
+        old = w.session("--label", "Old unchanged", "--reasoning-effort", "high")
+        before = w.inspect(old)
+        with w.overview(columns=WIDTH, rows=30) as screen:
+            for alias in ("/new", "/clear"):
+                listed = screen.contains("Old unchanged")
+                click_label(screen, listed, "Old unchanged")
+                screen.wait(conversation_of("Old unchanged"), "open the old chat")
+                screen.keys(alias + " foo\r")
+                screen.contains("! Usage:")
+                assert w.inspect(old) == before
+                screen.keys(alias + "\r")
+                screen.wait(lambda frame: not is_overview(frame) and " · workspace" in frame
+                            and "Old unchanged" not in frame, "alias opens a new empty chat")
+                assert w.inspect(old) == before
+                listed = back_to_overview(screen, "Old unchanged")
+                assert "Old unchanged" in listed
+        # Only the old Session and two Configure-created empty Sessions exist.
+        rows = json.loads(w.run("session", "list", "--store", w.store))["sessions"]
+        assert len(rows) == 3, rows
+        for row in rows:
+            if row["reference"] != old:
+                report = w.inspect(row["reference"])
+                assert report["work"]["state"]["kind"] == "idle", report
+    print("overview aliases: no Message and old Current unchanged", flush=True)
 
 
 def cases():
     opening_and_views()
     flat_list()
     empty_list()
+    new_chat_aliases()

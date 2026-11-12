@@ -100,7 +100,7 @@ test "a send is progress while in flight, needs the person once unresolved, and 
 }
 
 /// Bytes `factsRow` writes at most.
-pub const facts_bytes = session_line.capacity + " · ".len + "Stopping and archiving".len;
+pub const facts_bytes = session_line.capacity + session_line.max_line_bytes + " · ".len + " · ".len + "Stopping and archiving".len;
 
 /// The facts row after `‹ `: the Session's facts in the plan's priority
 /// order (name · model · effort · context, then `asks` in ask mode), else
@@ -114,13 +114,14 @@ pub fn factsRow(buffer: *[facts_bytes]u8, facts: ?session_line.Facts, name: []co
     const room = width -| tail;
     var out = std.Io.Writer.fixed(buffer);
     var percent: [session_line.left_text.len]u8 = undefined;
-    var parts: [5][]const u8 = undefined;
+    var parts: [6][]const u8 = undefined;
     var count: usize = 0;
     if (facts) |value| {
         for ([_]?[]const u8{
-            value.name,
+            if (value.name.len != 0) value.name else null,
             value.model,
             if (value.effort) |effort| @tagName(effort) else null,
+            value.folder,
             if (value.left) |left| std.fmt.bufPrint(&percent, "{d}% left", .{left}) catch unreachable else null,
             if (value.asks) session_line.asks_text else null,
         }) |part| if (part) |text| {

@@ -343,7 +343,20 @@ pub const StartResult = union(enum) {
     unconfirmed: []const u8,
 };
 
+pub const CreateResult = union(enum) {
+    /// Configure accepted creation; retain the known reference before opening.
+    created: struct { reference: Reference, handle: []const u8 },
+
+    /// Creation was rejected or never captured, so another attempt is safe.
+    failed: []const u8,
+
+    /// The capture may have reached the Host; recover it instead of duplicating.
+    unconfirmed: []const u8,
+};
+
 pub const Event = union(enum) {
+    new_session,
+    created: CreateResult,
     composed: Composed,
     /// The size of the screen the shell draws next; keys read until the
     /// next one act on that screen.
@@ -618,6 +631,7 @@ pub const Effect = union(enum) {
     /// answer each with `command`.
     read_commands: Commands,
     start: StartRequest,
+    create: StartRequest,
     open: Reference,
     open_settings,
     stop: Reference,
@@ -822,7 +836,7 @@ fn statusSaid(state: *const State, caps: Caps, buffer: *[upgrade_status.max_line
 /// a conversation's original left unconfirmed, held for its departure line.
 /// Nothing is evicted: a full ledger refuses new requests.
 pub const Request = struct {
-    kind: enum { start, stop, archive, unarchive, send },
+    kind: enum { start, create, stop, archive, unarchive, send },
     /// The Session a stop names, or the one an accepted start made.
     session: ?Reference = null,
     status: enum { pending, done, failed, unknown } = .pending,
@@ -1007,7 +1021,7 @@ pub const State = struct {
 
     /// Where the next input goes.
     pub fn inputMode(self: *const State) InputMode {
-        if (self.starting()) return .frozen;
+        if (self.starting() or self.creating()) return .frozen;
         return .compose;
     }
 
@@ -1098,6 +1112,15 @@ pub const State = struct {
     /// a failed start leaves its text to retry.
     pub fn starting(self: *const State) bool {
         return self.pendingAt(.start, null) != null;
+    }
+
+    pub fn creating(self: *const State) bool {
+        return blk: {
+            for (self.requests[0..self.request_count]) |held| {
+                if (held.kind == .create and (held.status == .pending or held.status == .unknown)) break :blk true;
+            }
+            break :blk false;
+        };
     }
 
     /// A stop of `ref` still in flight, or one that may have reached the
@@ -1479,7 +1502,7 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
             },
             .new_session => {
                 state.selected = .new_session;
-                if (!input.pasting) try compose(state, .{ .input = .{ .composer = .submit }, .draft = input.draft }, &effects);
+                if (!input.pasting) createEmpty(state, &effects);
             },
             .settings => {
                 state.selected = .settings;
@@ -1545,6 +1568,38 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
             }
             state.next_list_ms = 0;
         },
+        .created => |result| {
+            const at = state.pendingAt(.create, null).?;
+            switch (result) {
+                .created => |created| {
+                    state.requests[at].session = created.reference;
+                    state.answer(at, .done, created.handle);
+                    state.settings = .{};
+                    if (state.left) return effects;
+                    state.selected = .{ .session = created.reference };
+                    state.next_list_ms = 0;
+                    effects.add(.{ .open = created.reference });
+                },
+                .failed => |code| {
+                    state.answer(at, .failed, code);
+                    // Name the configured provider when creation lacks its sign-in.
+                    const next = state.nextBinding().provider;
+                    const missing = if (std.mem.eql(u8, code, "model_capability_unavailable")) std.meta.stringToEnum(Provider, next orelse "") else null;
+                    if (missing) |provider| {
+                        if (provider.login()) |command|
+                            state.say(.attention, "! {s} sign-in missing · {s}", .{ provider.shown(), command })
+                        else
+                            state.say(.attention, "! {s} sign-in missing · this terminal cannot sign in to it yet", .{provider.shown()});
+                    } else state.say(.attention, "! Not created: {s}", .{code});
+                },
+                .unconfirmed => |handle| {
+                    // Recovery, never a duplicate creation, settles the capture.
+                    state.answer(at, .unknown, handle);
+                    state.next_list_ms = 0;
+                    state.say(.attention, "! Creation unsure; details on exit", .{});
+                },
+            }
+        },
         .start => |result| {
             const at = state.pendingAt(.start, null).?;
             switch (result) {
@@ -1582,6 +1637,7 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
                 },
             }
         },
+        .new_session => createEmpty(state, &effects),
         .leave => {
             state.left = true;
             state.releaseModels();
@@ -1654,6 +1710,12 @@ pub fn writeDeparture(state: *const State, _: ?ReasoningEffort, writer: *std.Io.
     for (state.requests[0..state.request_count]) |*request| {
         const text = request.text.slice();
         switch (request.kind) {
+            .create => switch (request.status) {
+                .pending => try writer.writeAll("rui: The new Session was not created.\n"),
+                .failed => try writer.print("rui: The new Session was not created ({s}).\n", .{text}),
+                .unknown => try writer.print("rui: Not sure the new Session was created. Check with: rui request recover {s}\n", .{text}),
+                .done => try writer.print("rui: Created {s}.\n", .{&request.session.?}),
+            },
             .start => switch (request.status) {
                 .pending => try writer.writeAll("rui: The new Session did not start.\n"),
                 .failed => try writer.print("rui: The new Session was not started ({s}); start it again from the overview.\n", .{text}),
@@ -2243,10 +2305,18 @@ fn enterWords(action: EnterAction) []const u8 {
     };
 }
 
+/// The New Session control and chat commands converge before admission.
+fn createEmpty(state: *State, effects: *Effects) void {
+    if (state.starting() or state.creating() or !admitHostRequest(state)) return;
+    if (!state.request(.create, null)) return;
+    effects.add(.{ .create = .{ .settings = &state.settings, .text = "", .binding = state.nextBinding() } });
+}
+
 fn enter(state: *State, text: []const u8, effects: *Effects) error{OutOfMemory}!void {
     switch (textAction(state, text)) {
         .pick_command => unreachable, // Decided over the draft, never its text.
-        .none, .await_task => if (text.len != 0) effects.add(.clear_draft),
+        .none => if (text.len != 0) effects.add(.clear_draft),
+        .await_task => createEmpty(state, effects),
         .open_settings => {
             if (text.len != 0) effects.add(.clear_draft);
             effects.add(.open_settings);
@@ -3505,6 +3575,11 @@ fn expectEffects(expected: []const Effect, actual: Effects) !void {
                 const b = got.start.settings.args(&got_args);
                 try std.testing.expectEqual(a.len, b.len);
                 for (a, b) |x, y| try std.testing.expectEqualStrings(x, y);
+            },
+            .create => |creation| {
+                try std.testing.expectEqualStrings("", creation.text);
+                try std.testing.expectEqualStrings("", got.create.text);
+                try std.testing.expectEqual(creation.binding, got.create.binding);
             },
             .open => |ref| try std.testing.expectEqualStrings(&ref, &got.open),
             .stop => |ref| try std.testing.expectEqualStrings(&ref, &got.stop),
@@ -4963,9 +5038,11 @@ test "overview settings and New Session clicks follow Enter and draft rules" {
     try expectEffects(&.{ .open_settings, .list_models }, try step(&state, .{ .clicked = .{ .target = .settings } }));
     try std.testing.expectEqual(Selection.settings, state.selected);
     try expectEffects(&.{.open_settings}, try submit(&state, .{}));
-    try expectEffects(&.{}, try step(&state, .{ .clicked = .{ .target = .new_session } }));
+    try expectEffects(&.{.{ .create = .{ .settings = &state.settings, .text = "", .binding = state.nextBinding() } }}, try step(&state, .{ .clicked = .{ .target = .new_session } }));
     try std.testing.expectEqual(Selection.new_session, state.selected);
     try expectEffects(&.{}, try submit(&state, .{}));
+    _ = try step(&state, .{ .created = .{ .failed = "refused" } });
+    state.notice = null;
     for ([_]Selection{ .new_session, .settings }) |selection| {
         state.selected = selection;
         try expectEffects(&.{}, try press(&state, .{}, .stop));
@@ -6284,7 +6361,7 @@ test "the Footer names the Enter action submission takes, over every composer st
     const k7: Selection = .{ .session = "k7m2qx".* };
     const cases = [_]struct { setup: Setup, selection: Selection = .new_session, draft: []const u8, action: EnterAction, right: []const u8, effects: []const Tag }{
         // Ordinary and blank drafts on each selection.
-        .{ .setup = .typed, .draft = "", .action = .await_task, .right = "enter start", .effects = &.{} },
+        .{ .setup = .typed, .draft = "", .action = .await_task, .right = "enter start", .effects = &.{.create} },
         .{ .setup = .typed, .draft = "a task", .action = .start, .right = "enter start", .effects = &.{.start} },
         .{ .setup = .typed, .draft = "//not a command", .action = .start, .right = "enter start", .effects = &.{.start} },
         .{ .setup = .typed, .selection = k7, .draft = "", .action = .open_session, .right = "enter open", .effects = &.{ .open, .list_models } },
@@ -6507,28 +6584,20 @@ test "archive admission reports only a new ledger request across every surface c
     try std.testing.expectEqual(@as(usize, 0), empty.request_count);
 }
 
-test "overview mouse New Session owns Enter policy for every draft frozen and paste state" {
-    const Case = struct { text: []const u8, tags: []const std.meta.Tag(Effect) };
-    for ([_]Case{
-        .{ .text = "", .tags = &.{} },
-        .{ .text = " \n", .tags = &.{.clear_draft} },
-        .{ .text = "a mouse task", .tags = &.{.start} },
-        .{ .text = "/configure --reasoning-effort high", .tags = &.{.clear_draft} },
-    }) |case| for ([_]bool{ false, true }) |frozen| for ([_]bool{ false, true }) |pasting| {
+test "overview mouse New Session creates empty regardless of draft and obeys frozen paste and Host guards" {
+    for ([_][]const u8{ "", " \n", "a mouse task", "/configure --reasoning-effort high" }) |text| for ([_]bool{ false, true }) |frozen| for ([_]bool{ false, true }) |pasting| {
         var state = try opened(&mixed);
         defer state.deinit();
-        _ = try step(&state, .{ .resized = .{ .width = 100, .height = 60 } });
-        const draft = try typeText(&state, case.text);
+        const draft = try typeText(&state, text);
         if (frozen) _ = try submit(&state, .{ .bytes = "already starting" });
         state.selected = .{ .session = "b2c3d4".* };
         const before = state.selected;
         const effects = try step(&state, .{ .clicked = .{ .target = .new_session, .draft = draft, .pasting = pasting } });
         try std.testing.expectEqual(if (frozen) before else Selection.new_session, state.selected);
-        const tags = if (frozen or pasting) &.{} else case.tags;
-        try std.testing.expectEqual(tags.len, effects.len);
-        for (tags, effects.slice()) |tag, effect| try std.testing.expectEqual(tag, std.meta.activeTag(effect));
-        if (!frozen and !pasting) {
-            if (std.mem.eql(u8, case.text, "a mouse task")) try std.testing.expectEqualStrings(case.text, effects.items[0].start.text);
+        if (frozen or pasting) try expectEffects(&.{}, effects) else {
+            try expectEffects(&.{.{ .create = .{ .settings = &state.settings, .text = "", .binding = state.nextBinding() } }}, effects);
+            try std.testing.expect(state.creating());
+            try expectEffects(&.{}, try step(&state, .new_session));
         }
     };
 }
@@ -6650,4 +6719,58 @@ test "overview command list click takes the drawn row only from the list the fra
             }
         }
     };
+}
+
+test "empty creation keeps the old Session unchanged and settles every Configure outcome once" {
+    const Result = enum { accepted, failed, unknown, left };
+    for (std.enums.values(Result)) |result| {
+        var state = try opened(&mixed);
+        defer state.deinit();
+        const old_ref = state.selected.session;
+        const old = state.find(old_ref).?.*;
+        const count = state.rows.items.len;
+        configure(&state, "--workspace /next-only --label once");
+        const effects = try step(&state, .new_session);
+        try std.testing.expectEqual(@as(usize, 1), effects.len);
+        try std.testing.expectEqualStrings("", effects.items[0].create.text);
+        // The worker owns the one-shot values before any completion clears them.
+        const captured = try effects.items[0].create.own(std.testing.allocator);
+        defer captured.deinit(std.testing.allocator);
+        try std.testing.expectEqualStrings("/next-only", captured.get(startOption("workspace").?).?);
+        try std.testing.expectEqualStrings("once", captured.get(startOption("label").?).?);
+        try std.testing.expect(state.creating());
+        try expectEffects(&.{}, try step(&state, .new_session));
+        if (result == .left) _ = try step(&state, .leave);
+        const settled = try step(&state, .{ .created = switch (result) {
+            .accepted, .left => .{ .created = .{ .reference = "n3w5es".*, .handle = "create-key" } },
+            .failed => .{ .failed = "refused" },
+            .unknown => .{ .unconfirmed = "create-key" },
+        } });
+        if (result == .accepted) try expectEffects(&.{ .{ .open = "n3w5es".* }, .list_models }, settled) else try expectEffects(&.{}, settled);
+        if (result == .accepted or result == .left) {
+            try std.testing.expectEqual(@as(?[]const u8, null), state.settings.get(startOption("workspace").?));
+            try std.testing.expectEqual(@as(?[]const u8, null), state.settings.get(startOption("label").?));
+        } else {
+            try std.testing.expectEqualStrings("/next-only", state.settings.get(startOption("workspace").?).?);
+        }
+        try std.testing.expectEqualStrings("/next-only", captured.get(startOption("workspace").?).?);
+        try std.testing.expectEqual(old, state.find(old_ref).?.*);
+        try std.testing.expectEqual(count, state.rows.items.len);
+        try std.testing.expectEqual(result == .unknown, state.creating());
+        if (result == .unknown or result == .left) {
+            var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+            defer out.deinit();
+            try writeDeparture(&state, null, &out.writer);
+            try std.testing.expect(std.mem.indexOf(u8, out.written(), if (result == .unknown) "rui request recover create-key" else "Created n3w5es") != null);
+        }
+    }
+    for ([_]bool{ false, true }) |full| {
+        var state = try opened(&mixed);
+        defer state.deinit();
+        if (full) {
+            while (state.request_count < max_requests) try std.testing.expect(state.request(.stop, "other0".*));
+        } else state.upgrade.after = .blocked;
+        try expectEffects(&.{}, try step(&state, .new_session));
+        try std.testing.expect(!state.creating());
+    }
 }

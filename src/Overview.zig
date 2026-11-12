@@ -193,6 +193,7 @@ pub const Operations = struct {
     /// Write the request's fate into the Reply, and return the error that
     /// ends the overview after a canonical Store failure.
     start: *const fn (*Self, client.Requests, client.MessageInput, *Reply) anyerror!void,
+    create: *const fn (*Self, client.Requests, configure_input.ConfigureInput, *Reply) anyerror!void = createSession,
     stop: *const fn (*Self, client.Requests, client.SessionStopInput, *Reply) anyerror!void,
     archive: *const fn (*Self, client.Requests, client.SessionArchiveInput, *Reply) anyerror!void,
     /// The Host's `model_list` reply, owned by the allocator.
@@ -287,6 +288,14 @@ pub const Reply = struct {
         return reply;
     }
 
+    fn created(self: *const Reply) view.CreateResult {
+        return switch (self.outcome) {
+            .accepted => .{ .created = .{ .reference = self.session, .handle = self.handle.slice() } },
+            .failed => .{ .failed = self.text.slice() },
+            .unconfirmed => .{ .unconfirmed = self.text.slice() },
+        };
+    }
+
     fn start(self: *const Reply) view.StartResult {
         return switch (self.outcome) {
             .accepted => .{ .started = .{ .reference = self.session, .handle = self.handle.slice() } },
@@ -356,6 +365,7 @@ const Job = union(enum) {
     /// Owns what Enter captured: nothing the core or the composer holds is
     /// read on the worker's thread.
     start: view.OwnedStart,
+    create: view.OwnedStart,
     stop: view.Reference,
     archive: view.ArchiveRequest,
     models,
@@ -371,7 +381,7 @@ const Job = union(enum) {
     fn quiescence(self: Job) Quiescence {
         return switch (self) {
             .host, .list, .lines, .commands, .models, .skills => .cancel_read,
-            .start_host, .start, .stop, .archive, .defaults => .settle_effect,
+            .start_host, .start, .create, .stop, .archive, .defaults => .settle_effect,
         };
     }
 
@@ -379,7 +389,7 @@ const Job = union(enum) {
     /// whether or not it ran.
     fn deinit(self: Job, gpa: std.mem.Allocator) void {
         switch (self) {
-            .start => |start| start.deinit(gpa),
+            .start, .create => |start| start.deinit(gpa),
             .defaults => |edit| edit.deinit(gpa),
             else => {},
         }
@@ -755,7 +765,7 @@ fn appSessionLeft(raw: *anyopaque, ctx: *vxfw.EventContext, outcome: SessionFron
     const left = &self.app_session.?;
     const from = left.session;
     left.ended = outcome;
-    if (outcome == .returned) switch (left.frontend.?.back(view.canHoldSend(&self.state))) {
+    if (outcome == .returned or outcome == .new_session) switch (left.frontend.?.back(view.canHoldSend(&self.state))) {
         .ended => |ended| left.ended = ended,
         .overview => |recovery| {
             if (recovery != .none) _ = try self.event(.{ .unconfirmed = .{ .reference = left.session, .recovery = recovery } });
@@ -770,6 +780,10 @@ fn appSessionLeft(raw: *anyopaque, ctx: *vxfw.EventContext, outcome: SessionFron
             try self.root.closeSession(ctx);
             // App's last frame can still point at the old widgets. Dispose
             // only after the next frame replaces that focus/hit-test tree.
+            if (outcome == .new_session) {
+                self.follow = .{};
+                return self.appNext(ctx, try self.event(.new_session));
+            }
             return self.followNext(ctx, from);
         },
     };
@@ -1379,6 +1393,7 @@ fn eventResult(self: *Self, value: view.Event) !EventResult {
         .read_first_lines => |reads| self.queue(.{ .lines = reads }),
         .read_commands => |reads| self.queue(.{ .commands = reads }),
         .start => |request| self.queue(.{ .start = try request.own(self.init.gpa) }),
+        .create => |request| self.queue(.{ .create = try request.own(self.init.gpa) }),
         .stop => |reference| self.queue(.{ .stop = reference }),
         .cancel_upgrade => self.upgrade_job.cancel(),
         .archive => |request| self.queue(.{ .archive = request }),
@@ -1535,6 +1550,16 @@ fn runJob(self: *Self, context: client.ReadContext) !void {
             self.answer = .{ .reply = .refused("start_request_failed") };
             try self.ops.start(self, requests, input, &self.answer.reply);
         },
+        .create => |*start| {
+            // An unreadable saved effort sends nothing, as a failed capture does.
+            var compaction_buffer: [20]u8 = undefined;
+            const input = self.startInput(start, &compaction_buffer) catch |err| {
+                self.answer = .{ .reply = .refused(@errorName(err)) };
+                return;
+            };
+            self.answer = .{ .reply = .refused("create_request_failed") };
+            try self.ops.create(self, requests, input.configuration.?, &self.answer.reply);
+        },
         .stop => |*reference| {
             self.answer = .{ .reply = .refused("stop_request_failed") };
             try self.ops.stop(self, requests, .{ .store = self.options.store, .session = reference }, &self.answer.reply);
@@ -1633,6 +1658,10 @@ fn deliver(self: *Self, outcome: anyerror!void) !?Next {
             if (answer.reply.outcome == .accepted) self.started = answer.reply.session;
             return self.event(.{ .start = answer.reply.start() });
         },
+        .create => {
+            if (answer.reply.outcome == .accepted) self.started = answer.reply.session;
+            return self.event(.{ .created = answer.reply.created() });
+        },
         .stop => |reference| return self.event(.{ .stop = .{ .reference = reference, .outcome = answer.reply.stop() } }),
         .archive => |request| {
             const result = answer.reply.archive(request);
@@ -1658,7 +1687,7 @@ fn deliver(self: *Self, outcome: anyerror!void) !?Next {
         },
         .defaults => {
             const written = if (outcome) |_| true else |err| preferences.failure(err).saved;
-            // As setup does, respect launch selectors and leave any local
+            // Respect launch selectors and leave any local
             // Configure override to nextBinding's existing precedence. The
             // core decides whether a newer pick stands instead.
             const next = if (written) try self.event(.{ .defaults_saved = self.savedDefault() }) else null;
@@ -1717,7 +1746,7 @@ fn startInput(self: *const Self, start: *const view.OwnedStart, compaction_buffe
     const held_effort = held.at(start, "reasoning-effort");
     const start_effort: view.StartEffort = .{ .held = held_effort, .model = start.binding().model };
     // An unsaved pick takes precedence. Once saved, read at each start so
-    // a later /effort applies, unless explicit selectors bypass preferences.
+    // a later saved-effort edit applies, unless explicit selectors bypass preferences.
     const saved_effort = start_effort.applied(if (start_effort.readsSaved()) try self.savedEffort() else null);
     var configuration: configure_input.ConfigureInput = .{
         .store = self.options.store,
@@ -1905,7 +1934,7 @@ fn leaveFinished(self: *Self, left: Left, settled: ?SessionFrontend.Departure) !
         };
         switch (end) {
             .detached, .interrupted => TerminalApp.detached(store, session, departure.action),
-            .returned => unreachable,
+            .returned, .new_session => unreachable,
         }
     };
     return outcome catch |err| {
@@ -2194,6 +2223,21 @@ fn startSession(self: *Self, requests: client.Requests, input: client.MessageInp
     return reply.record(sent, captured.identity().key.slice());
 }
 
+fn createSession(self: *Self, requests: client.Requests, input: configure_input.ConfigureInput, reply: *Reply) !void {
+    const io = self.init.io;
+    var captured = client.captureConfigure(io, input, .{ .generated = self.options.directory }).get() catch |err| {
+        reply.* = .refused(@errorName(err));
+        return;
+    };
+    defer captured.close(io);
+    self.hooks.captured(io) catch |err| {
+        reply.* = .refused(@errorName(err));
+        return;
+    };
+    var buffer: client.ReplyBuffer = .{};
+    return reply.record(requests.sendCaptured(&captured, .empty, &buffer), captured.identity().key.slice());
+}
+
 fn stopSession(self: *Self, requests: client.Requests, input: client.SessionStopInput, reply: *Reply) !void {
     const io = self.init.io;
     var captured = client.captureSessionStop(io, input, .{ .generated = self.options.directory }) catch |err| {
@@ -2228,6 +2272,7 @@ const Seen = struct {
     since: ?protocol.SinceToken = null,
     line: struct { session: view.Reference = @splat(0), position: u64 = 0 } = .{},
     starts: usize = 0,
+    creates: usize = 0,
     start: struct {
         text: protocol.Bounded(64) = .{},
         require_model: bool = false,
@@ -2340,6 +2385,14 @@ const fake_operations: Operations = .{
             return buffer[0..text.len];
         }
     }.actionCommand,
+    .create = struct {
+        fn create(_: *Self, _: client.Requests, input: configure_input.ConfigureInput, reply: *Reply) !void {
+            try std.testing.expect(input.session == .create and input.require_model);
+            Seen.now.creates += 1;
+            reply.* = .{ .outcome = .accepted, .session = "n3w5es".* };
+            reply.handle.set("create-handle") catch unreachable;
+        }
+    }.create,
     .start = struct {
         fn start(_: *Self, _: client.Requests, input: client.MessageInput, reply: *Reply) !void {
             const settings = input.configuration.?;
@@ -6608,7 +6661,7 @@ test "App settings Model filters live choices and saves the next Session at both
         try std.testing.expectEqual(@as(usize, 1), overview.job_count);
         try std.testing.expect(try rig.settle() == null);
         try std.testing.expectEqual(@as(usize, 1), Seen.now.model_lists);
-        try std.testing.expect(try overview.event(.{ .clicked = .{ .target = .new_session } }) == null);
+        overview.state.selected = .new_session;
         try std.testing.expect(try overview.event(.{ .models = .{ .menu = try model_picker.testMenu(&.{
             .{ .provider = .codex, .list = .{ .live = .{ .bytes = "gpt-5.5\ngpt-6-luna\nfuture-chat\n" } } },
             .{ .provider = .openai, .list = .{ .live = .{ .bytes = "gpt-5.5\ngpt-6-luna\nfuture-chat\n" } } },
@@ -6901,18 +6954,10 @@ test "Overview mouse New Session forwards blank whitespace task command and past
         rig.overview.root.pasting = pasting;
         try std.testing.expect(try rig.click(4, row, 80, 24) == null);
         try std.testing.expect(try rig.settle() == null);
-        const starts = !pasting and std.mem.eql(u8, draft, "a mouse task");
-        try std.testing.expectEqual(@as(usize, if (starts) 1 else 0), Seen.now.starts);
-        try std.testing.expectEqual(@as(usize, if (starts) 1 else 0), Seen.now.conversations);
-        if (starts) try std.testing.expectEqualStrings(draft, Seen.now.start.text.slice());
-        if (!pasting and std.mem.startsWith(u8, draft, "/configure")) {
-            try std.testing.expectEqualStrings("", rig.overview.composerDraft().bytes);
-            var args: [2 * view.start_options.len][]const u8 = undefined;
-            const held = rig.overview.state.settings.args(&args);
-            try std.testing.expectEqual(@as(usize, 2), held.len);
-            try std.testing.expectEqualStrings("--reasoning-effort", held[0]);
-            try std.testing.expectEqualStrings("high", held[1]);
-        }
+        try std.testing.expectEqual(@as(usize, 0), Seen.now.starts);
+        try std.testing.expectEqual(@as(usize, @intFromBool(!pasting)), Seen.now.creates);
+        try std.testing.expectEqual(@as(usize, @intFromBool(!pasting)), Seen.now.conversations);
+        try std.testing.expectEqualStrings(draft, rig.overview.composerDraft().bytes);
     };
 }
 
@@ -7386,4 +7431,53 @@ test "Sign-in Esc at the choice leaves unless the first-run screen has no defaul
         try std.testing.expect(Nav.focus(&ctx).?.eql(back));
         try std.testing.expectEqual(retained, overview.root.session != null);
     };
+}
+
+test "new and clear retire the old chat through the real lender and open empty Configure creations" {
+    const Files = struct {
+        var dir: std.Io.Dir = undefined;
+        var count: u8 = 0;
+        fn scratch(init: std.process.Init) !std.Io.File {
+            count += 1;
+            return dir.createFile(init.io, &.{'a' + count}, .{ .read = true });
+        }
+    };
+    for ([_][]const u8{ "/new\r", "/clear\r" }) |keys| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const home = path[0..try tmp.dir.realPath(std.testing.io, &path)];
+        Files.dir = tmp.dir;
+        Files.count = 0;
+        var ops = fake_operations;
+        ops.open = openSession;
+        var cancellation: client.Cancellation = .{};
+        const rig = try Rig.open(.{ .store = home, .workspace = "/work", .home = home, .directory = home, .provider = "codex", .model = "gpt-5.5" }, ops, &cancellation);
+        defer rig.close();
+        const overview = rig.overview;
+        overview.hooks.scratch = Files.scratch;
+        try std.testing.expect(try rig.next(.{ .open = "k7m2qx".* }) == null);
+        defer {
+            if (overview.app_session) |left| {
+                left.frontend.?.stop();
+                overview.disposeSession(left);
+                overview.app_session = null;
+            }
+            for (overview.retired.items) |retired| overview.disposeSession(retired.left);
+            overview.retired.deinit(std.testing.allocator);
+        }
+        try std.testing.expect(try rig.settle() == null);
+        const frontend = overview.app_session.?.frontend.?;
+        frontend.reading.opening = false;
+        frontend.poll_at = std.math.maxInt(i96);
+        var ctx = rig.context();
+        defer ctx.cmds.deinit(std.testing.allocator);
+        try app_events.send(&ctx, keys, overview.root.widget(), frontend.widget());
+        try std.testing.expect(!ctx.quit);
+        try std.testing.expect(try rig.settle() == null);
+        try std.testing.expectEqualStrings("n3w5es", &overview.opened);
+        try std.testing.expectEqualStrings("n3w5es", overview.app_session.?.frontend.?.session);
+        try std.testing.expectEqual(@as(usize, 1), Seen.now.creates);
+        try std.testing.expectEqual(@as(usize, 0), Seen.now.starts);
+    }
 }

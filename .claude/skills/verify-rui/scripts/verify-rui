@@ -2094,6 +2094,9 @@ def validate_scenario(data, sizes=None):
             require(type(entry.get("count", 1)) is int and entry.get("count", 1) > 0, f"{name}: count must be positive")
             require("count" not in entry or "{n}" in label, f"{name}: counted label must contain {{n}}")
             require(all(isinstance(entry.get(k, ""), str) for k in ("model", "effort")), f"{name}: invalid model/effort")
+            skills = entry.get("skills", [])
+            require(isinstance(skills, list) and all(isinstance(skill, str) and re.fullmatch(r"[a-z][a-z0-9-]{0,63}", skill) for skill in skills)
+                    and len(set(skills)) == len(skills), f"{name}: invalid cast skills")
             messages = entry.get("messages")
             require(isinstance(messages, list) and bool(messages) and all(isinstance(m, str) and m for m in messages), f"{name}: messages must be nonempty strings")
         for entry in cast_entries(cast):
@@ -2196,6 +2199,10 @@ def seed_cast(run, entries):
         workspace.mkdir(parents=True, exist_ok=True)
         (workspace / "README.md").write_text("verify-rui project\n")
         (workspace / "src").mkdir(exist_ok=True)
+        for skill in entry.get("skills", []):
+            folder = workspace / ".agents" / "skills" / skill
+            folder.mkdir(parents=True, exist_ok=True)
+            (folder / "SKILL.md").write_text(f"---\nname: {skill}\ndescription: Verify the project\n---\nReview the project.\n")
         sid = None
         for i, text in enumerate(entry["messages"]):
             if sid is None:

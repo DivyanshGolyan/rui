@@ -2973,7 +2973,7 @@ An open row is marked by its heading's selection background alone; the footer na
 Display eviction does not delete saved work.
 App enables mouse reporting, and wheel events scroll the visible widget.
 Every visible chooseable row or control has a click action matching its keyboard activation, including Session and Settings rows, editable status fields, command and skill choices, model controls and transcript links.
-New Session starts an existing task draft as Enter does; with a blank draft it selects the composer without creating a Session.
+New Session creates and opens an empty Session through captured Configure creation, without admitting a Message. Its request ledger prevents duplicate or uncertain creation; the overview task draft remains unchanged. Chat `/new` and `/clear` settle the old frontend through the normal return boundary, then enter this same creation transition. The old Session is never cleared or reconfigured. An empty chat footer derives model, effort and Folder from Current.
 Hover never changes keyboard selection or focus.
 Under the pointer, rows and fields take the hover background, the per-channel midpoint of the selvedge and selection colours, or a monochrome underline, while preserving their foreground; reverse stays the keyboard selection's mark.
 A row that is both selected and hovered keeps the selection look; chips and peer links underline and show the pointer shape.
@@ -3048,7 +3048,7 @@ A preview over 256 KiB cannot authorize an Action in this UI; exact one-shot ins
 Marked paste never grants permission.
 Typed chat info edits, clipboard reads and saved-answer reads run on the existing joined reader worker; editing continues, but sending waits for that work. Drawn actions carry their semantic inspection kind and copied payload into that worker. They do not pass through the typed slash parser.
 
-**Slash list.** On both screens, `/` lists loaded skills plus `/reload-skills` only. A leading loaded skill is Message text, preserved byte for byte; a skill row fills its name and a trailing space rather than sending it. The shared `skill_completion.Reads` merges the command table with the scope's loaded skill page, giving the command priority over a same-named skill. Inline references use the same skills owner and Host binding rule.
+**Slash list.** On both screens, `/` lists loaded skills plus `/reload-skills`; a chat also lists the no-argument navigation aliases `/new` and `/clear`, which share New Session’s empty creation owner. A leading loaded skill is Message text, preserved byte for byte; a skill row fills its name and a trailing space rather than sending it. The shared `skill_completion.Reads` merges the command table with the scope's loaded skill page, giving the command priority over a same-named skill. Inline references use the same skills owner and Host binding rule.
 The list has room for the bounded 24-skill preview plus reload. Rows sit immediately above the input; when more match than fit, the last row counts the rest. Up and Down move the highlight. Tab completes its word; Enter completes a skill or runs reload. Drawn-list identity fences stale clicks and keys. Esc closes suggestions or cancels a drawn command without leaving the chat.
 Submitting a command consumes its draft whether unknown, successful or failed; a hold retains it. `command_input.zig` owns this rule on both screens. Unknown typed names say `! Unknown command /NAME`; malformed retained commands show their usage.
 

@@ -350,7 +350,7 @@ test "skill rows give way to the command's own list where the caret is in no /wo
     try std.testing.expectEqualStrings(plain.list.entries[0].word, shown.list.entries[0].word);
 }
 
-test "both screens list only reload-skills plus loaded skills and reject removed app names" {
+test "both screens list only their agent commands plus loaded skills and reject removed app names" {
     var names: [skill_suggestions.capacity][16]u8 = undefined;
     var entries: [skill_suggestions.capacity]skill_suggestions.Entry = undefined;
     for (&entries, &names, 0..) |*entry, *name, index| entry.* = .{
@@ -362,12 +362,21 @@ test "both screens list only reload-skills plus loaded skills and reject removed
         var rows: Rows = .{};
         _ = reads.ask("").?;
         _ = reads.answer(1, testPage(entries[0..count]), "");
-        inline for (.{ slash_commands.conversation, slash_commands.overview }) |screen| {
+        inline for (.{ slash_commands.conversation, slash_commands.overview }, .{ 3, 1 }) |screen, command_count| {
             const listed = reads.shown(&rows, "/", 1, 1, screen.suggest("/", .{}), null).?.list;
-            try std.testing.expectEqual(count + 1, listed.count);
-            try std.testing.expectEqualStrings("/reload-skills", listed.entries[0].shown);
+            try std.testing.expectEqual(count + command_count, listed.count);
+            try std.testing.expectEqualStrings(if (command_count == 3) "/clear" else "/reload-skills", listed.entries[0].shown);
             try std.testing.expect(listed.entries[0].runs);
-            for (entries[0..count], listed.shown()[1..]) |skill, entry| {
+            if (comptime command_count == 3) {
+                try std.testing.expectEqualStrings("/new", listed.entries[1].shown);
+                try std.testing.expectEqualStrings("/reload-skills", listed.entries[2].shown);
+                inline for (.{ "/new", "/clear" }) |name| {
+                    try std.testing.expect(screen.parse(name) == .command);
+                    try std.testing.expect(screen.parse(name ++ " foo") == .misused);
+                }
+            } else inline for (.{ "/new", "/clear" }) |name| try std.testing.expect(screen.parse(name) == .unknown);
+
+            for (entries[0..count], listed.shown()[command_count..]) |skill, entry| {
                 try std.testing.expectEqualStrings(skill.name, std.mem.trimEnd(u8, entry.word, " "));
                 try std.testing.expect(!entry.runs);
             }

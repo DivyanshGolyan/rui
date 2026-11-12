@@ -105,11 +105,13 @@ fn completionRank(comptime field: []const u8) usize {
 
 /// Typed conversation commands. Recovery remains unlisted; saved requests
 /// have no drawn entry point yet and retain their unlisted name.
-const ConversationName = enum { discard, recover, @"reload-skills", requests };
+const ConversationName = enum { clear, discard, new, recover, @"reload-skills", requests };
 pub const conversation = Commands(ConversationName, .{
     .discard = .{ .listed = false },
     .recover = .{ .argument = .{ .required = "KEY" }, .listed = false },
     .@"reload-skills" = .{},
+    .new = .{},
+    .clear = .{},
     .requests = .{ .listed = false },
 });
 
@@ -355,7 +357,7 @@ pub const List = struct {
     column: ?usize = null,
 
     /// More than any screen's commands or options.
-    pub const capacity = 25;
+    pub const capacity = 27;
 
     fn add(self: *List, entry: Entry) void {
         std.debug.assert(std.mem.startsWith(u8, entry.word, self.typed));
@@ -693,8 +695,8 @@ test "a /requests list takes only keys the parser reads back as one word the lis
 test "the list names the listed commands a command word starts, and Tab puts the highlighted one in" {
     const Case = struct { draft: []const u8, shown: ?[]const []const u8, first: ?[]const u8 = null };
     const cases = [_]Case{
-        .{ .draft = "/", .shown = &.{"reload-skills"} },
-        .{ .draft = "/c", .shown = &.{} },
+        .{ .draft = "/", .shown = &.{ "clear", "new", "reload-skills" } },
+        .{ .draft = "/c", .shown = &.{"clear"} },
         .{ .draft = "/cop", .shown = &.{} },
         .{ .draft = "/st", .shown = &.{} },
         .{ .draft = "/re", .shown = &.{"reload-skills"} },

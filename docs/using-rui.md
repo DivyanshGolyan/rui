@@ -13,7 +13,9 @@ There is no `/help` command.
 
 ## Commands
 
-Typing `/` lists loaded skills and `/reload-skills` only. A skill row fills its name into the Message; `/reload-skills` refreshes skills. App actions are clicks and keys on the screen: chat info contains Rename, Archive and Copy last answer, and Settings contains defaults and Version.
+Typing `/` in a chat lists loaded skills, `/reload-skills`, `/new` and `/clear`. The overview lists skills and `/reload-skills` only. A skill row fills its name into the Message; `/reload-skills` refreshes skills. App actions are clicks and keys on the screen: chat info contains Rename, Archive and Copy last answer, and Settings contains defaults and Version.
+
+`/new` and `/clear` both open a new empty chat, just like **+ New Session**. The old chat stays unchanged in the list. The cursor starts in the new input, and its footer shows model · effort · folder. These commands accept no arguments; `/new foo` is misuse, not a Message.
 
 Unlisted fallbacks remain until those screens have equivalent controls: `/requests` in a conversation; `/configure` and `/sessions` in the overview. They are not offered by `/`. Failed-send retry and discard remain on the failed-send line.
 
