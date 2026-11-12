@@ -873,6 +873,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     self.app_card.method = self.app_caps.width;
     self.app_preview.style = normal;
     self.app_preview.colours = colours;
+    self.app_preview.hover_style = hover;
     self.app_preview.method = self.app_caps.width;
     self.app_content.style = normal;
     self.app_content.hover_style = hover;
@@ -3466,6 +3467,25 @@ test "App Session request overflow opens in place with Ctrl-O or a continuation 
                     var ctx = held.context();
                     const preview = &held.self.app_preview;
                     const row: i16 = @intCast(preview.drawn.height);
+                    // The continuation row hovers in the hover role at every depth.
+                    for ([_]overview_view.Caps.Depth{ .direct, .indexed, .none }) |depth| {
+                        errdefer std.debug.print("depth={s}\n", .{@tagName(depth)});
+                        held.self.app_caps = .{ .depth = depth };
+                        _ = try held.draw();
+                        try preview.widget().handleEvent(&ctx, .mouse_enter);
+                        try preview.widget().handleEvent(&ctx, .{ .mouse = .{ .col = 2, .row = row, .button = .none, .type = .motion, .mods = .{} } });
+                        const hovered = try preview.widget().draw(.{ .arena = held.arena.allocator(), .min = .{}, .max = .{ .width = preview.size.width, .height = preview.size.height }, .cell_size = .{} });
+                        const role = style.of(held.self.app_caps, .{ .background = .hover });
+                        for (0..hovered.size.width) |col| {
+                            const cell = hovered.readCell(@intCast(col), @intCast(row)).style;
+                            try std.testing.expectEqual(role.bg, cell.bg);
+                            try std.testing.expectEqual(role.ul_style, cell.ul_style);
+                            try std.testing.expectEqual(role.reverse, cell.reverse);
+                        }
+                        try preview.widget().handleEvent(&ctx, .mouse_leave);
+                    }
+                    held.self.app_caps = .{ .depth = .none };
+                    _ = try held.draw();
                     for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| {
                         try preview.widget().handleEvent(&ctx, .{ .mouse = .{ .col = 2, .row = row, .button = .left, .mods = .{}, .type = kind } });
                     }
@@ -3485,6 +3505,31 @@ test "App Session request overflow opens in place with Ctrl-O or a continuation 
                 try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "row 000") != null);
             }
         }
+    }
+}
+
+test "App Session binds the hover role to every widget it owns with a hover style at every depth" {
+    for ([_]overview_view.Caps.Depth{ .direct, .indexed, .none }) |depth| {
+        errdefer std.debug.print("depth={s}\n", .{@tagName(depth)});
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        held.self.app_caps = .{ .depth = depth };
+        // A shown palette binds too; it draws only without a request.
+        try held.keys("/c");
+        _ = try held.draw();
+        try std.testing.expect(held.screen.commands != null);
+        const role = style.of(held.self.app_caps, .{ .background = .hover });
+        var bound: usize = 0;
+        const info = @typeInfo(Self).@"struct";
+        inline for (info.field_names, info.field_types) |name, Field| {
+            if (@typeInfo(Field) == .@"struct" and @hasField(Field, "hover_style")) {
+                errdefer std.debug.print("field={s}\n", .{name});
+                try std.testing.expectEqualDeep(role, @field(held.self, name).hover_style);
+                bound += 1;
+            }
+        }
+        // app_card, app_preview, app_content, app_document and app_palette.
+        try std.testing.expectEqual(5, bound);
     }
 }
 
