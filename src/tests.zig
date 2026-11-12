@@ -1,6 +1,12 @@
 test {
     _ = @import("widgets/Panel.zig");
     _ = @import("app_settings.zig");
+    _ = @import("chat_info.zig");
+    _ = @import("model_choice.zig");
+    _ = @import("panel_editor.zig");
+    _ = @import("SignIn.zig");
+    _ = @import("choice_row.zig");
+    _ = @import("sign_in.zig");
     _ = @import("widgets/Split.zig");
     _ = @import("widgets/Stack.zig");
     _ = @import("widgets/Layer.zig");

@@ -231,6 +231,17 @@ class PrepushTest(unittest.TestCase):
         self.git("commit", "-qam", "reverted")
         self.assertEqual(prepush.fix_whitespace(base), 0)
 
+    def test_a_hook_run_leaves_the_pushing_repository_before_its_checks_start_git(self):
+        self.git("init", "-q")
+        pushing = self.root / "pushing"
+        subprocess.run(["git", "init", "-q", str(pushing)], check=True)
+        hook = {"GIT_DIR": str(pushing / ".git"), "GIT_WORK_TREE": str(pushing), "GIT_INDEX_FILE": str(pushing / ".git/index")}
+        with patch.dict(os.environ, hook):
+            self.assertEqual(Path(self.git("rev-parse", "--absolute-git-dir")), (pushing / ".git").resolve(),
+                             "git -C does not outrank a hook's repository")
+            prepush.leave_hook_repository()
+            self.assertEqual(Path(self.git("rev-parse", "--absolute-git-dir")), (self.root / ".git").resolve())
+
     def test_installed_hook_runs_quick_checks_for_each_push_but_not_a_deletion(self):
         self.git("init", "-q")
         self.file("tests/ci/prepush.py", "import pathlib, sys\n"
