@@ -157,7 +157,7 @@ fn stateText(text: []const u8, key: []const u8) []const u8 {
 /// those same cells, using the same actions as the keyboard.
 fn drawFooter(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const self: *Self = @ptrCast(@alignCast(raw));
-    self.unarchive.label = if (self.facts.identity.archive == .archived) "/unarchive" else "";
+    self.unarchive.label = if (self.facts.identity.archive == .archived) "Restore" else "";
     self.status.stop.label = if (self.stoppable) chrome.stop_key else "";
     self.info.label = "alt+i info";
     const primary_width = self.info.width() + self.status.key.width() + self.unarchive.width() + self.status.stop.width() + 9;

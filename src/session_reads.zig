@@ -45,7 +45,8 @@ pub const RenderedRow = struct {
 };
 
 pub const Configure = *const fn (std.process.Init, client.ReadContext, []const u8, []const u8, ChatInfo.Edit) anyerror!bool;
-pub const Command = *const fn (std.process.Init, client.ReadContext, []const u8, []const u8, []u8) anyerror!void;
+pub const CommandInput = union(enum) { line: []u8, saved_result: []const u8 };
+pub const Command = *const fn (std.process.Init, client.ReadContext, []const u8, []const u8, CommandInput) anyerror!void;
 /// Writes /requests' recovery handles, and offers each saved Message among
 /// them to the page's list.
 pub const Requests = *const fn (std.process.Init, client.ReadContext, []const u8, []const u8, *std.Io.Writer, *SavedRequests) anyerror!void;
@@ -58,22 +59,10 @@ pub const SavedRequests = slash_commands.Requests(protocol.max_key_bytes);
 /// lists its Actions awaiting approval, as the page shows them.
 pub const Status = *const fn (std.Io, *const protocol_reply.Current, std.Io.File, *status_page.Session, ?*const status_page.Session, std.Io.File) anyerror!bool;
 
-pub const Inspection = union(enum) { requests, command, copy: Copy };
+pub const Inspection = enum { requests, command, copy, result };
 
-/// What a /copy sends: the last answer or its last code block to the
-/// clipboard, or the last answer to a file.
-pub const Copy = slash_commands.Copy;
-
-/// What a /copy read found. The clipboard takes its range of the scratch
-/// file after the UI joins the read.
-pub const Copied = union(enum) { no_answer, no_code, too_large, clipboard: AnswerRenderer.LastCode.Range, saved };
-
-pub const copy_name_bytes = "rui--answer.md".len + protocol.session_id_bytes;
-
-/// The file /copy file writes, in the directory Rui runs in.
-pub fn copyName(buffer: *[copy_name_bytes]u8, session: []const u8) []const u8 {
-    return std.fmt.bufPrint(buffer, "rui-{s}-answer.md", .{session}) catch unreachable;
-}
+/// What the chat info clipboard read found. Bytes leave after join.
+pub const Copied = union(enum) { no_answer, too_large, clipboard: struct { start: u64, length: u64 } };
 
 /// One read. Inputs are frozen at launch; the worker writes only `result`,
 /// which the UI reads after join. No worker reads or writes the controller.
@@ -497,7 +486,7 @@ pub fn runCommand(raw: *anyopaque, task: *Task) !void {
     const job: *Job = @ptrCast(@alignCast(raw));
     var read = task.readContext();
     read.cancellation = job.interrupted;
-    const run: CommandRun = .{ .command = job.command, .init = job.init, .requests = read, .store = job.store, .session = job.session, .line = job.command_text[0..job.command_text_length], .configure = job.configure, .edit = job.info_edit, .saved = &job.result.info_saved };
+    const run: CommandRun = .{ .command = job.command, .init = job.init, .requests = read, .store = job.store, .session = job.session, .line = job.command_text[0..job.command_text_length], .saved_result = job.inspection_kind == .result, .configure = job.configure, .edit = job.info_edit, .saved = &job.result.info_saved };
     const ended = run.into(job.files.inspection);
     job.result.rendering = ended.rendering;
     job.result.command_stderr_restored = ended.stderr_restored;
@@ -508,6 +497,7 @@ pub fn runCommand(raw: *anyopaque, task: *Task) !void {
 /// `session` when it names one.
 pub const CommandRun = struct {
     command: Command,
+    saved_result: bool = false,
     init: std.process.Init,
     requests: client.ReadContext,
     store: []const u8,
@@ -522,7 +512,7 @@ pub const CommandRun = struct {
         if (self.edit) |edit| {
             const configure = self.configure orelse return error.ConfigureUnavailable;
             self.saved.?.* = try configure(self.init, self.requests, self.store, self.session, edit);
-        } else try self.command(self.init, self.requests, self.store, self.session, self.line);
+        } else try self.command(self.init, self.requests, self.store, self.session, if (self.saved_result) .{ .saved_result = self.line } else .{ .line = self.line });
     }
 
     /// How a run ended.
@@ -1017,55 +1007,20 @@ pub fn copyAnswer(raw: *anyopaque, task: *Task) !void {
         io: std.Io,
         file: std.Io.File,
         offset: u64 = 0,
-        code: ?AnswerRenderer.LastCode,
         pub fn feed(self: *@This(), bytes: []const u8) !void {
             try self.file.writePositionalAll(self.io, bytes, self.offset);
             self.offset += bytes.len;
-            if (self.code) |*code| code.feed(bytes);
         }
     };
-    const copy = job.inspection_kind.copy;
-    if (copy == .file) {
-        var name: [copy_name_bytes]u8 = undefined;
-        const path = copyName(&name, job.session);
-        const directory = std.Io.Dir.cwd();
-        var random: [8]u8 = undefined;
-        try std.Io.randomSecure(task.io, &random);
-        var temporary_name: [copy_name_bytes + 22]u8 = undefined;
-        const temporary = std.fmt.bufPrint(&temporary_name, ".{s}.{s}.tmp", .{ path, std.fmt.bytesToHex(random, .lower) }) catch unreachable;
-        // Exclusive creation never follows a link planted at either name, and
-        // the rename replaces whatever sits at the export name, never its
-        // target.
-        const file = try directory.createFile(task.io, temporary, .{ .exclusive = true, .permissions = .fromMode(0o600) });
-        var published = false;
-        defer if (!published) directory.deleteFile(task.io, temporary) catch {};
-        {
-            defer file.close(task.io);
-            var sink: Sink = .{ .io = task.io, .file = file, .code = null };
-            if (try requests.readConversationContent(job.store, job.session, answer.position, answer.ordinal, answer.content, &sink)) |failure| return requests.failRead(failure);
-            if (sink.offset != answer.content.bytes) return error.ContentLengthMismatch;
-        }
-        try directory.rename(temporary, directory, path, task.io);
-        published = true;
-        job.result.copied = .saved;
-        return;
-    }
-    if (copy == .answer and answer.content.bytes > TerminalText.clipboard_limit) {
+    if (answer.content.bytes > TerminalText.clipboard_limit) {
         job.result.copied = .too_large;
         return;
     }
     try job.files.scratch.setLength(task.io, 0);
-    var sink: Sink = .{ .io = task.io, .file = job.files.scratch, .code = if (copy == .code) .{} else null };
+    var sink: Sink = .{ .io = task.io, .file = job.files.scratch };
     if (try requests.readConversationContent(job.store, job.session, answer.position, answer.ordinal, answer.content, &sink)) |failure| return requests.failRead(failure);
     if (sink.offset != answer.content.bytes) return error.ContentLengthMismatch;
-    const range: AnswerRenderer.LastCode.Range = if (sink.code) |*code|
-        code.finish() orelse {
-            job.result.copied = .no_code;
-            return;
-        }
-    else
-        .{ .start = 0, .length = sink.offset };
-    job.result.copied = if (range.length > TerminalText.clipboard_limit) .too_large else .{ .clipboard = range };
+    job.result.copied = .{ .clipboard = .{ .start = 0, .length = sink.offset } };
 }
 
 /// The Conversation's newest assistant answer, or null before the first.
@@ -1107,7 +1062,7 @@ test "session_reads a Host command writes its page and inherits no saved termina
             return open;
         }
 
-        fn command(_: std.process.Init, _: client.ReadContext, _: []const u8, _: []const u8, _: []u8) anyerror!void {
+        fn command(_: std.process.Init, _: client.ReadContext, _: []const u8, _: []const u8, _: CommandInput) anyerror!void {
             for (inheritable(), before, 0..) |now, was, fd| if (now and !was) {
                 leaked = @intCast(fd);
             };

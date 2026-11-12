@@ -806,7 +806,7 @@ while True:
             ("fold-hover", "× Fail with exit 127 · 127", " · exit 127"),
             ("fold-hover", "× Fail with an excerpt · 1", " · exit 1"),
             ("chat-working", "Thinking", "Waiting"),
-            ("copy-no-code", "No code block", "No code block in the last answer."),
+            ("copy-last-answer", "Sent to clipboard", "No code block in the last answer."),
         ):
             with self.subTest(state=name):
                 self.assertIn(wanted, states[name]["expect"])

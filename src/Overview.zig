@@ -202,12 +202,11 @@ pub const Operations = struct {
     skills: *const fn (*Self, client.Requests, std.mem.Allocator, []const u8, []const u8) anyerror!skill_suggestions.Page,
     /// Runs a command line for a Session, or for none when it is empty,
     /// keeping what it printed in `output`.
-    command: *const fn (*Self, client.ReadContext, []const u8, []u8) anyerror!void,
     /// Opens `opened` as a Session widget under Root.
     open: *const fn (*Self, *vxfw.EventContext) anyerror!void,
 };
 
-pub const client_operations: Operations = .{ .host = hostFacts, .start_host = startHost, .list = listPage, .first_line = firstLine, .action_command = actionCommand, .start = startSession, .stop = stopSession, .archive = archiveSession, .models = listModels, .skills = skillSuggestions, .command = runCommand, .open = openSession };
+pub const client_operations: Operations = .{ .host = hostFacts, .start_host = startHost, .list = listPage, .first_line = firstLine, .action_command = actionCommand, .start = startSession, .stop = stopSession, .archive = archiveSession, .models = listModels, .skills = skillSuggestions, .open = openSession };
 
 /// A conversation the person left from. Until the terminal is restored it
 /// holds its borrowers; `frontend` is null when it never started.
@@ -364,8 +363,6 @@ const Job = union(enum) {
     /// the Workspace and the name.
     skills: struct { read: u64, workspace: protocol.Bounded(protocol.max_workspace_bytes), prefix: protocol.Bounded(skill_completion.max_prefix_bytes) },
     defaults: DefaultsEdit,
-    /// Owns its line, as a start owns its text.
-    command: struct { name: view.commands.Name, session: ?view.Reference, line: []u8 },
 
     const Quiescence = enum { cancel_read, settle_effect };
 
@@ -374,7 +371,7 @@ const Job = union(enum) {
     fn quiescence(self: Job) Quiescence {
         return switch (self) {
             .host, .list, .lines, .commands, .models, .skills => .cancel_read,
-            .start_host, .start, .stop, .archive, .defaults, .command => .settle_effect,
+            .start_host, .start, .stop, .archive, .defaults => .settle_effect,
         };
     }
 
@@ -384,7 +381,6 @@ const Job = union(enum) {
         switch (self) {
             .start => |start| start.deinit(gpa),
             .defaults => |edit| edit.deinit(gpa),
-            .command => |command| gpa.free(command.line),
             else => {},
         }
     }
@@ -408,8 +404,6 @@ const Answer = union(enum) {
     reply: Reply,
     menu: model_picker.Menu,
     skills: skill_suggestions.Page,
-    /// What a command printed, as far as the core takes it.
-    output: Output,
 
     /// Frees an answer no one took.
     fn deinit(self: *Answer, gpa: std.mem.Allocator) void {
@@ -434,15 +428,6 @@ const background_wait_ms = 200;
 const Line = struct { bytes: [view.max_line_read_bytes]u8 = undefined, result: enum { line, refused, unanswered } = .unanswered, len: usize = 0 };
 
 const Command = struct { bytes: [view.max_line_read_bytes]u8 = undefined, text: ?[]const u8 = null, answered: bool = false };
-
-/// A command's output: one byte past what the core takes tells it was cut.
-const Output = struct {
-    bytes: [view.max_output_bytes + 1]u8 = undefined,
-    len: usize = 0,
-    /// Its stdout and stderr went to the page, so a failure is a failure
-    /// while it ran.
-    kept: bool = false,
-};
 
 /// Stops a running command when App ends on a signal.
 const Signals = struct {
@@ -470,7 +455,6 @@ app_input: InputArea = undefined,
 /// the one the core names. Only the Sessions hear a press.
 app_sessions: GroupedList = .{},
 session_drafts: @import("session_drafts.zig").Drafts = .{},
-app_panel: GroupedList = .{},
 app_settings_line: OverviewLines.Settings = undefined,
 /// The counts line and its bands, which take the view-name click.
 app_header: OverviewLines.Header = undefined,
@@ -523,8 +507,6 @@ traversal_archive: protocol.SessionArchiveFilter = .active,
 /// Unlinked scratch for list pages.
 scratch: ?std.Io.File = null,
 /// Unlinked scratch a command's output goes to, made for the first command.
-command_page: ?std.Io.File = null,
-
 /// The Session a conversation borrows, in stable storage.
 opened: view.Reference = undefined,
 /// The overview's own step or job failed while a conversation held the
@@ -851,7 +833,7 @@ fn leaveForUpgrade(self: *Self, ctx: *vxfw.EventContext, outcome: session_upgrad
 /// Do not leave the screen automatically when guidance is already known.
 /// The settled departure is still authoritative for failures found on leave.
 noinline fn pendingDepartureGuidance(self: *const Self) bool {
-    var bytes: [view.max_requests * 512 + view.max_late_command_bytes]u8 = undefined;
+    var bytes: [view.max_requests * 512]u8 = undefined;
     var text = std.Io.Writer.fixed(&bytes);
     self.departureText(&text);
     if (text.buffered().len != 0) return true;
@@ -936,7 +918,7 @@ fn finishApp(self: *Self, ended: anyerror!void) !?Relaunch {
 /// One rendered departure supplies both the pure decision and fallback output.
 /// Keep its bounded scratch off the ordinary finish frame.
 noinline fn finishDeparture(self: *Self, ended: anyerror!void, answered: anyerror!?Next, saved: anyerror!void, kept: anyerror!void, sign_in_ended: anyerror!void, left: ?Left, departure: ?SessionFrontend.Departure) !?Relaunch {
-    var bytes: [view.max_requests * 512 + view.max_late_command_bytes]u8 = undefined;
+    var bytes: [view.max_requests * 512]u8 = undefined;
     var text = std.Io.Writer.fixed(&bytes);
     self.departureText(&text);
     const has_failure = std.meta.isError(ended) or std.meta.isError(answered) or std.meta.isError(saved) or std.meta.isError(kept) or std.meta.isError(sign_in_ended);
@@ -1036,16 +1018,6 @@ const SessionRows = struct {
     }
 };
 
-/// A panel's lines for one frame.
-const PanelRows = struct {
-    items: []const view.ListRow,
-
-    fn row(raw: *const anyopaque, index: usize, _: std.mem.Allocator) std.mem.Allocator.Error!GroupedList.Row {
-        const self: *const PanelRows = @ptrCast(@alignCast(raw));
-        return .{ .segments = self.items[index].segments, .heading = self.items[index].heading };
-    }
-};
-
 fn rich(ctx: vxfw.DrawContext, caps: view.Caps, segments: []const view.Segment) !vxfw.Widget {
     const spans = try ctx.arena.alloc(vaxis.Segment, segments.len);
     for (segments, spans) |segment, *span| span.* = .{ .text = segment.text, .style = @import("widget_style.zig").of(caps, segment.style) };
@@ -1066,7 +1038,6 @@ fn wantsFrameAt(self: *const Self, frame: u64) bool {
 /// The drawn viewport is history; which current rows spin is derived. No
 /// animation-eligibility flag survives a row, capability or list-area change.
 fn listSpins(self: *const Self) bool {
-    if (self.state.listArea() != .sessions) return false;
     for (self.app_sessions.shown.first..self.app_sessions.shown.end) |at| {
         const item = view.listItem(&self.state, at) orelse break;
         if (view.markSpins(&self.state, item, self.caps)) return true;
@@ -1126,22 +1097,12 @@ fn drawPart(self: *Self, ctx: vxfw.DrawContext, part: AppScreen.Overview.Part) s
         const frame = self.animationFrame();
         self.app_frame = frame;
         // The core says what fills the list; this frame draws that widget.
-        const prepared: *GroupedList = switch (self.state.listArea()) {
-            .panel => panel: {
-                const rows = try ctx.arena.create(PanelRows);
-                rows.* = .{ .items = (try view.panelItems(ctx.arena, &self.state, size.width, self.caps)).? };
-                self.app_panel.rows = .{ .userdata = rows, .count = @intCast(rows.items.len), .rowFn = PanelRows.row };
-                break :panel &self.app_panel;
-            },
-            .sessions => sessions: {
-                const rows = try ctx.arena.create(SessionRows);
-                rows.* = .{ .state = &self.state, .width = size.width, .caps = self.caps, .frame = frame };
-                self.app_sessions.selected = self.selectedListLine();
-                self.app_sessions.rows = .{ .userdata = rows, .count = @intCast(view.listLength(&self.state)), .rowFn = SessionRows.row, .countFromFn = SessionRows.count };
-                self.app_sessions.belowFn = SessionRows.below;
-                break :sessions &self.app_sessions;
-            },
-        };
+        const rows = try ctx.arena.create(SessionRows);
+        rows.* = .{ .state = &self.state, .width = size.width, .caps = self.caps, .frame = frame };
+        self.app_sessions.selected = self.selectedListLine();
+        self.app_sessions.rows = .{ .userdata = rows, .count = @intCast(view.listLength(&self.state)), .rowFn = SessionRows.row, .countFromFn = SessionRows.count };
+        self.app_sessions.belowFn = SessionRows.below;
+        const prepared = &self.app_sessions;
         self.app_settings_line.selected = self.state.selected == .settings;
         self.app_settings_line.caps = self.caps;
         prepared.tail = .{ .widget = self.app_settings_line.widget(), .rows = view.layout(&self.state).settings.len() };
@@ -1377,7 +1338,6 @@ fn destroy(self: *Self) void {
     self.job.deinit(self.init.gpa);
     for (self.jobs[0..self.job_count]) |job| job.deinit(self.init.gpa);
     if (self.scratch) |file| file.close(self.init.io);
-    if (self.command_page) |file| file.close(self.init.io);
     self.state.deinit();
     self.answer.deinit(self.init.gpa);
     self.init.gpa.destroy(self);
@@ -1423,7 +1383,6 @@ fn eventResult(self: *Self, value: view.Event) !EventResult {
         .cancel_upgrade => self.upgrade_job.cancel(),
         .archive => |request| self.queue(.{ .archive = request }),
         .list_models => self.queue(.models),
-        .command => |command| self.queue(.{ .command = .{ .name = command.name, .session = command.session, .line = try self.init.gpa.dupe(u8, command.text) } }),
         .open => |reference| next = .{ .open = reference },
         .clear_draft => self.composer = self.emptyComposer(self.composer.edits +% 1),
         // A refused addition says so as a refused key does.
@@ -1597,10 +1556,6 @@ fn runJob(self: *Self, context: client.ReadContext) !void {
             const readiness: preferences.Readinesses = .initFill(.configured);
             _ = try preferences.update(self.options.home, edit.edit, &readiness);
         },
-        .command => |*command| {
-            self.answer = .{ .output = .{} };
-            try self.ops.command(self, context, if (command.session) |*session| session else "", command.line);
-        },
     }
 }
 
@@ -1716,20 +1671,6 @@ fn deliver(self: *Self, outcome: anyerror!void) !?Next {
                 if (self.state.left) return err;
             }
         },
-        .command => |command| {
-            const output = &answer.output;
-            // As a conversation drops an inspection that could not start,
-            // the overview says only that it did not run.
-            var ran: view.Ran = .of(&output.bytes, output.len, if (outcome) |_| true else |_| false, output.kept);
-            if (ran.readsDefault(command.name)) ran.default = self.savedDefault();
-            const next = self.event(.{ .ran = ran });
-            // As in a conversation, a command that failed while it ran ends
-            // the overview, and its failure is the one reported, not one
-            // from taking the answer; the core keeps its output for the way
-            // out.
-            if (ran.outcome == .failed) try outcome;
-            return next;
-        },
     }
     return null;
 }
@@ -1804,29 +1745,6 @@ fn skillSuggestions(self: *Self, requests: client.Requests, gpa: std.mem.Allocat
 
 fn listModels(self: *Self, requests: client.Requests, gpa: std.mem.Allocator) ![]u8 {
     return requests.modelList(self.options.store, gpa);
-}
-
-/// Runs a command line through the CLI's hook, as a conversation runs it,
-/// and keeps what it printed.
-fn runCommand(self: *Self, requests: client.ReadContext, session: []const u8, line: []u8) !void {
-    const page = self.command_page orelse page: {
-        const file = try self.hooks.scratch(self.init);
-        self.command_page = file;
-        break :page file;
-    };
-    const command: session_reads.CommandRun = .{ .command = self.hooks.command, .init = self.init, .requests = requests, .store = self.options.store, .session = session, .line = line };
-    const ended = command.into(page);
-    const output = &self.answer.output;
-    output.kept = ended.rendering;
-    // Failed restoration may leave fd 2 on the page, so, as a conversation
-    // does, keep nothing for the way out to write there.
-    if (!ended.rendering or !ended.stderr_restored) return ended.outcome;
-    // What it printed shows whether it ran to the end or not.
-    output.len = page.readPositionalAll(self.init.io, &output.bytes, 0) catch |err| {
-        try ended.outcome;
-        return err;
-    };
-    return ended.outcome;
 }
 
 /// The wall clock in Unix milliseconds, as the core's times are.
@@ -2472,7 +2390,6 @@ const fake_operations: Operations = .{
             return reply.toOwnedSlice();
         }
     }.models,
-    .command = runCommand,
     .open = struct {
         fn open(self: *Self, _: *vxfw.EventContext) !void {
             Seen.now.conversations += 1;
@@ -2903,20 +2820,19 @@ test "a /word reads the Workspace's skills on the worker, lists them over the dr
     const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .provider = "codex", .model = "gpt-5.5" }, fake_operations, &cancellation);
     defer rig.close();
     const overview = rig.overview;
-    // The draft's first word makes it a command line, which Enter runs:
-    // no skill is read or listed there.
+    // A leading /word lists loaded skills beside the retained agent command.
     try std.testing.expect(try rig.press("/re") == null);
     try std.testing.expect(try rig.settle() == null);
-    try std.testing.expectEqual(@as(usize, 0), Seen.now.skill_reads);
+    try std.testing.expectEqual(@as(usize, 1), Seen.now.skill_reads);
     {
         var shown = try rig.shown(60, 24);
         defer shown.deinit();
-        try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "/recap") == null);
+        try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "/recap") != null);
     }
     // So are its arguments: Enter runs the whole line as the command.
     try std.testing.expect(try rig.press("\x15/configure --workspace /re") == null);
     try std.testing.expect(try rig.settle() == null);
-    try std.testing.expectEqual(@as(usize, 0), Seen.now.skill_reads);
+    try std.testing.expectEqual(@as(usize, 1), Seen.now.skill_reads);
     {
         var shown = try rig.shown(60, 24);
         defer shown.deinit();
@@ -2957,6 +2873,7 @@ test "a /word reads the Workspace's skills on the worker, lists them over the dr
     try std.testing.expect(try rig.press("\r") == null);
     try std.testing.expectEqualStrings("use /review it /triage ", overview.composerDraft().bytes);
     try std.testing.expectEqual(@as(usize, 0), Seen.now.starts);
+    try expectStarted(rig, "\x15/review this change\r", "/review this change");
 }
 
 test "the composer's /word reads skills in the Workspace the next Session starts in" {
@@ -3178,6 +3095,13 @@ test "only your working Session's mark spins, at the frame's step, and without c
     while (view.listItem(&overview.state, line)) |item| : (line += 1) try std.testing.expect(!view.markSpins(&overview.state, item, overview.caps));
 }
 
+/// The Reply a send leaves, whatever else it returns.
+fn recorded(sent: anytype, handle: []const u8) Reply {
+    var reply: Reply = .{};
+    reply.record(sent, handle) catch {};
+    return reply;
+}
+
 test "the overview asks for frames only while a spinning mark is on screen" {
     const rig = try openComposer();
     defer rig.close();
@@ -3205,16 +3129,6 @@ test "the overview asks for frames only while a spinning mark is on screen" {
     _ = try rig.press("\x1b[F\x1b[A");
     try std.testing.expect(!try Frames.after(rig, 9));
     try std.testing.expect(try Frames.after(rig, 24));
-    // A panel over the list shows no marks.
-    try showOutputPanel(rig);
-    try std.testing.expect(!try Frames.after(rig, 24));
-}
-
-/// The Reply a send leaves, whatever else it returns.
-fn recorded(sent: anytype, handle: []const u8) Reply {
-    var reply: Reply = .{};
-    reply.record(sent, handle) catch {};
-    return reply;
 }
 
 test "a captured request is unconfirmed until the Host answers it" {
@@ -4857,12 +4771,12 @@ fn shownRow(rig: *const Rig, at: usize) view.Reference {
 test "Tab completes from the draft's own list, however many keys arrive before a frame" {
     const rig = try openComposer();
     defer rig.close();
-    try std.testing.expect(try rig.press("/set\t") == null);
-    try std.testing.expectEqualStrings("/setup ", rig.overview.composerDraft().bytes);
+    try std.testing.expect(try rig.press("/rel\t") == null);
+    try std.testing.expectEqualStrings("/reload-skills", rig.overview.composerDraft().bytes);
     // Two Tabs in one batch: the second completes from the list the first
     // one's word calls for.
     rig.overview.composer = rig.overview.emptyComposer(rig.overview.composer.edits +% 1);
-    try std.testing.expect(try rig.press("/conf\t\t") == null);
+    try std.testing.expect(try rig.press("/configure \t") == null);
     try std.testing.expectEqualStrings("/configure --permission-mode ", rig.overview.composerDraft().bytes);
 }
 
@@ -5004,73 +4918,6 @@ test "keys the editor declines say so and leave the draft" {
     try expectStarted(rig, "c\r", "abc");
 }
 
-/// The CLI's command hook as a test gives it: it records what it ran and
-/// prints what the test says to stdout and stderr, as `sessionCommand` does.
-const Printing = struct {
-    var stdout: []const u8 = "";
-    var stderr_text: []const u8 = "";
-    var failure: ?anyerror = null;
-    var line: protocol.Bounded(64) = .{};
-    var session: protocol.Bounded(64) = .{};
-    var store: protocol.Bounded(64) = .{};
-    var runs: usize = 0;
-    var dir: std.Io.Dir = undefined;
-
-    /// Lends `rig` these hooks, with pages in `pages`.
-    fn use(rig: *Rig, pages: std.Io.Dir) void {
-        stdout = "";
-        stderr_text = "";
-        failure = null;
-        runs = 0;
-        dir = pages;
-        rig.overview.hooks.command = command;
-        rig.overview.hooks.scratch = scratch;
-    }
-
-    fn command(_: std.process.Init, _: client.ReadContext, to: []const u8, reference: []const u8, text: []u8) anyerror!void {
-        runs += 1;
-        line = Seen.bounded(text);
-        session = Seen.bounded(reference);
-        store = Seen.bounded(to);
-        for ([_]c_int{ 1, 2 }, [_][]const u8{ stdout, stderr_text }) |fd, bytes| {
-            if (std.c.write(fd, bytes.ptr, bytes.len) != @as(isize, @intCast(bytes.len))) return error.TestUnexpectedResult;
-        }
-        if (failure) |err| return err;
-    }
-
-    fn scratch(_: std.process.Init) !std.Io.File {
-        return dir.createFile(std.testing.io, "page", .{ .read = true });
-    }
-};
-
-/// An overview whose first listing selected k7m2qx, running commands
-/// through `Printing`.
-fn commandRig(pages: std.Io.Dir, cancellation: *client.Cancellation) !*Rig {
-    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, cancellation);
-    errdefer rig.close();
-    Printing.use(rig, pages);
-    try std.testing.expect(try rig.overview.event(.{ .tick = test_now_s * 1000 }) == null);
-    try std.testing.expect(try rig.settle() == null);
-    return rig;
-}
-
-test "both lines of a two-line command result show under the input" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var cancellation: client.Cancellation = .{};
-    const rig = try commandRig(tmp.dir, &cancellation);
-    defer rig.close();
-    Printing.stdout = "Rui: Configured.\nrui: label saved locally only\n";
-    try std.testing.expect(try rig.press("/rename lane four\r") == null);
-    try std.testing.expect(try rig.settle() == null);
-    var shown = try rig.shown(80, 24);
-    defer shown.deinit();
-    try shown.expectLines(19, &.{ " › Type a task", "────────────────────────────────────────────────────────────────────────────────", " Configured.", " ! label saved locally only" });
-    const footer = try shown.line(23);
-    try std.testing.expect(std.mem.startsWith(u8, footer, " no model"));
-    try std.testing.expect(std.mem.endsWith(u8, footer, "enter open"));
-}
-
 /// The rows between the composer's bottom rule and the Footer, which ends
 /// a screen `height` rows tall, in the composer's pane: right of the list
 /// pane's divider on a wide screen.
@@ -5086,10 +4933,22 @@ fn statusRowsShown(shown: *Shown, height: u16) ![]const []const u8 {
     return rows;
 }
 
+test "both lines of a two-line command result show under the input" {
+    const rig = try openListed();
+    defer rig.close();
+    const text = "Configured.\n! label saved locally only";
+    var notice: view.Notice = .{ .len = text.len, .colour = .quiet };
+    @memcpy(notice.bytes[0..notice.len], text);
+    rig.overview.state.notice = notice;
+    var shown = try rig.shown(80, 24);
+    defer shown.deinit();
+    try shown.expectLines(19, &.{ " › Type a task", "────────────────────────────────────────────────────────────────────────────────", " Configured.", " ! label saved locally only" });
+    const footer = try shown.line(23);
+    try std.testing.expect(std.mem.startsWith(u8, footer, " no model"));
+    try std.testing.expect(std.mem.endsWith(u8, footer, "enter open"));
+}
+
 test "a notice keeps its own rows above the one Footer: every result line and a whole recover handle, at any width" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var cancellation: client.Cancellation = .{};
     const key: [36]u8 = "01234567-89ab-4cde-8012-0123456789ab".*;
     const cases = [_]struct { printed: ?[]const u8, notice: []const u8 }{
         .{ .printed = "Rui: Configured.\n", .notice = "Configured." },
@@ -5097,12 +4956,13 @@ test "a notice keeps its own rows above the one Footer: every result line and a 
         .{ .printed = null, .notice = "! Not confirmed · rui request recover " ++ key },
     };
     for (cases) |case| {
-        const rig = try commandRig(tmp.dir, &cancellation);
+        const rig = try openListed();
         defer rig.close();
         if (case.printed) |printed| {
-            Printing.stdout = printed;
-            try std.testing.expect(try rig.press("/rename lane four\r") == null);
-            try std.testing.expect(try rig.settle() == null);
+            _ = printed;
+            var notice: view.Notice = .{ .len = case.notice.len, .colour = .quiet };
+            @memcpy(notice.bytes[0..notice.len], case.notice);
+            rig.overview.state.notice = notice;
         } else {
             const reference = rig.overview.state.selected.session;
             _ = try view.step(&rig.overview.state, .{ .unconfirmed = .{ .reference = reference, .recovery = .{ .saved = .{ .original = .{ .kind = .message, .key = key }, .rejected = false } } } });
@@ -5154,175 +5014,6 @@ test "Settings Keys opens from the overview and Esc returns to settings" {
     }
 }
 
-/// Owned command output for tests of the surrounding overview surface.
-fn showOutputPanel(rig: *Rig) !void {
-    const state = &rig.overview.state;
-    try std.testing.expect(state.panel == null);
-    state.panel = .{ .output = .{ .name = .setup, .text = try state.gpa.dupe(u8, "Defaults\nStore: /s\nNotifications: off\nModel: test") } };
-}
-
-test "a command output panel stays above the pinned Settings row, with or without a provider band" {
-    for ([_]bool{ false, true }) |banded| {
-        const rig = try openListed();
-        defer rig.close();
-        const state = &rig.overview.state;
-        if (banded) {
-            const row = &state.rows.items[state.order.items[0]];
-            row.state = .{ .failed = .{ .since = test_now_s, .code = .{}, .resets_at = null } };
-            try row.state.failed.code.set("provider_http_401");
-            try std.testing.expect(view.band(state.rows.items, state.now_ms, state.login_at) != null);
-        }
-        var clipped = false;
-        var whole = false;
-        var height: u16 = 8;
-        while (height <= 40) : (height += 1) {
-            // Esc closes a panel or a notice the last height left.
-            _ = try rig.press("\x1b");
-            _ = try rig.press("\x1b");
-            var sized = try rig.shown(80, height);
-            sized.deinit();
-            try showOutputPanel(rig);
-            var shown = try rig.shown(80, height);
-            defer shown.deinit();
-            const at = view.layout(state);
-            try std.testing.expectEqual(@as(u16, @intFromBool(banded)), at.top);
-            try std.testing.expectEqual(@as(u16, 2), at.settings.len());
-            const items = (try view.panelItems(shown.arena.allocator(), state, 80, rig.overview.caps)).?;
-            try std.testing.expect(items.len <= at.list.len());
-            whole = whole or items.len == 5;
-            // Each line the panel built shows in its row, none under the
-            // Settings tail. A short panel counts the lines it hides.
-            for (items, at.top..) |item, row| {
-                var text: std.ArrayList(u8) = .empty;
-                for (item.segments) |segment| try text.appendSlice(shown.arena.allocator(), segment.text);
-                try std.testing.expectEqualStrings(std.mem.trimEnd(u8, text.items, " "), try shown.line(@intCast(row)));
-                clipped = clipped or std.mem.indexOf(u8, text.items, "more lines") != null;
-            }
-            try std.testing.expect(std.mem.startsWith(u8, try shown.line(at.settings.start), "─"));
-            try std.testing.expect(std.mem.startsWith(u8, try shown.line(at.settings.start + 1), "  Settings"));
-        }
-        try std.testing.expect(clipped and whole);
-    }
-}
-
-test "/rename and /setup run through the conversation's command hook on the worker, and what they print reaches the overview" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var cancellation: client.Cancellation = .{};
-    const rig = try commandRig(tmp.dir, &cancellation);
-    defer rig.close();
-    const overview = rig.overview;
-    const lists = Seen.now.lists;
-    Printing.stdout = "Rui: Configured.\n";
-    try std.testing.expect(try rig.press("/rename lane four\r") == null);
-    try std.testing.expect(try rig.settle() == null);
-    try std.testing.expectEqualStrings("/rename lane four", Printing.line.slice());
-    try std.testing.expectEqualStrings("k7m2qx", Printing.session.slice());
-    try std.testing.expectEqualStrings("/store", Printing.store.slice());
-    try std.testing.expectEqualStrings("Configured.", overview.state.notice.?.text());
-    // The next listing, which shows the new label, goes at once.
-    try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
-    try std.testing.expect(try rig.settle() == null);
-    try std.testing.expectEqual(lists + 1, Seen.now.lists);
-
-    // /setup names no Session; both its streams reach the overview, in
-    // the order it wrote them.
-    Printing.stdout = "Defaults (read only):\nNotifications: on\n";
-    Printing.stderr_text = "rui: Host unavailable\n";
-    try std.testing.expect(try rig.press("/setup\r") == null);
-    try std.testing.expect(try rig.settle() == null);
-    try std.testing.expectEqualStrings("/setup", Printing.line.slice());
-    try std.testing.expectEqualStrings("", Printing.session.slice());
-    try std.testing.expectEqualStrings("Defaults (read only):\nNotifications: on\nrui: Host unavailable", overview.state.panel.?.output.text);
-    try std.testing.expectEqual(@as(usize, 2), Printing.runs);
-}
-
-test "a /setup that saves another model starts the next Session on it, unless the launch named it or /configure holds one" {
-    const Case = struct { selectors: new_session_selection.Intent = .{}, setup: []const u8 = "/setup --model gpt-5.5\r", edit: preferences.Edit, configure: ?[]const u8 = null, model: []const u8 };
-    for ([_]Case{
-        .{ .edit = .{ .model = .{ .set = "gpt-5.5" } }, .model = "gpt-5.5" },
-        .{ .setup = "/setup --clear-model\r", .edit = .{ .model = .clear }, .model = product_defaults.recommended_model },
-        .{ .selectors = .{ .model = "gpt-6-luna" }, .edit = .{ .model = .{ .set = "gpt-5.5" } }, .model = "gpt-6-luna" },
-        .{ .selectors = explicit_selectors, .edit = .{ .model = .{ .set = "gpt-5.5" } }, .model = "gpt-6-luna" },
-        .{ .edit = .{ .model = .{ .set = "gpt-5.5" } }, .configure = "/configure --model gpt-6-sol\r", .model = "gpt-6-sol" },
-    }) |case| {
-        var tmp = std.testing.tmpDir(.{});
-        defer tmp.cleanup();
-        var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const home = home_buffer[0..try tmp.dir.realPath(std.testing.io, &home_buffer)];
-        try pin(home, "codex", "gpt-6-luna");
-        var cancellation: client.Cancellation = .{};
-        const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = home, .directory = "/requests", .provider = "codex", .model = "gpt-6-luna", .selectors = case.selectors }, fake_operations, &cancellation);
-        defer rig.close();
-        Printing.use(rig, tmp.dir);
-        // The CLI's /setup saves as `rui defaults configure` does.
-        const Setup = struct {
-            var at: []const u8 = "";
-            var edit: preferences.Edit = .{};
-            fn command(_: std.process.Init, _: client.ReadContext, _: []const u8, _: []const u8, _: []u8) anyerror!void {
-                _ = try preferences.update(at, edit, &.initFill(.configured));
-                const said = "Rui: Saved.\n";
-                if (std.c.write(1, said.ptr, said.len) != said.len) return error.TestUnexpectedResult;
-            }
-        };
-        Setup.at = home;
-        Setup.edit = case.edit;
-        rig.overview.hooks.command = Setup.command;
-        if (case.configure) |line| try std.testing.expect(try rig.press(line) == null);
-        try std.testing.expect(try rig.press(case.setup) == null);
-        try std.testing.expect(try rig.settle() == null);
-        try std.testing.expect(try rig.press("hello\r") == null);
-        try std.testing.expect(try rig.settle() == null);
-        try std.testing.expectEqualStrings("codex", Seen.now.start.provider.?.slice());
-        try std.testing.expectEqualStrings(case.model, Seen.now.start.model.?.slice());
-    }
-}
-
-test "a command that cannot start says why, and one that fails while it runs ends the overview, whose way out prints its output" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var cancellation: client.Cancellation = .{};
-    const rig = try commandRig(tmp.dir, &cancellation);
-    defer rig.close();
-    rig.overview.hooks.scratch = struct {
-        fn scratch(_: std.process.Init) !std.Io.File {
-            return error.FileNotFound;
-        }
-    }.scratch;
-    try std.testing.expect(try rig.press("/setup\r") == null);
-    try std.testing.expect(try rig.settle() == null);
-    try std.testing.expectEqual(@as(usize, 0), Printing.runs);
-    try std.testing.expectEqualStrings("! /setup unavailable.", rig.overview.state.notice.?.text());
-
-    rig.overview.hooks.scratch = Printing.scratch;
-    const said = "rui: configure: CanonicalStoreFailure; check saved requests before retrying\n";
-    Printing.stderr_text = said;
-    Printing.failure = error.CanonicalStoreFailure;
-    try std.testing.expect(try rig.press("/rename x\r") == null);
-    try std.testing.expectError(error.CanonicalStoreFailure, rig.settle());
-    var buffer: [1024]u8 = undefined;
-    const written = try finishedGuidance(rig, &buffer);
-    try std.testing.expect(std.mem.indexOf(u8, written, "rui: /rename output:\n" ++ said) != null);
-}
-
-test "a command that fails while it runs is the failure reported, even when taking its answer runs out of memory" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var cancellation: client.Cancellation = .{};
-    const rig = try commandRig(tmp.dir, &cancellation);
-    defer rig.close();
-    Printing.stderr_text = "rui: configure: CanonicalStoreFailure\n";
-    Printing.failure = error.CanonicalStoreFailure;
-    try std.testing.expect(try rig.press("/rename x\r") == null);
-    // The core keeps the output for the way out with memory it cannot get.
-    var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = 0 });
-    const gpa = rig.overview.state.gpa;
-    rig.overview.state.gpa = failing.allocator();
-    defer rig.overview.state.gpa = gpa;
-    try std.testing.expectError(error.CanonicalStoreFailure, rig.settle());
-    try std.testing.expect(failing.has_induced_failure);
-}
-
 test "overview archive effects preserve server filter, pending visibility, and restore intent" {
     const Listing = struct {
         var archive_state: protocol.SessionArchiveState = .active;
@@ -5349,7 +5040,7 @@ test "overview archive effects preserve server filter, pending visibility, and r
     try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expectEqual(protocol.SessionArchiveFilter.active, Seen.now.archive_filter);
-    try std.testing.expect(try rig.press("/archive\r") == null);
+    try std.testing.expect(try rig.press("\x1ba") == null);
     try std.testing.expectEqual(@as(usize, 0), Seen.now.archives);
     try std.testing.expect(try rig.press("\r") == null);
     try std.testing.expect(try rig.settle() == null);
@@ -5371,7 +5062,7 @@ test "overview archive effects preserve server filter, pending visibility, and r
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expectEqual(protocol.SessionArchiveFilter.archived, Seen.now.archive_filter);
     try std.testing.expectEqual(@as(usize, 1), overview.state.rows.items.len);
-    try std.testing.expect(try rig.press("/unarchive\r") == null);
+    try std.testing.expect(try overview.event(.{ .conversed = .{ .reference = overview.state.selected.session, .work = .idle, .input = .unarchive } }) == null);
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expectEqual(@as(usize, 2), Seen.now.archives);
     try std.testing.expect(!Seen.now.archive_requested);
@@ -5711,13 +5402,8 @@ test "typing / lists the overview's commands over the Sessions, and a short scre
     _ = try rig.press("/");
     var all = try rig.shown(80, 24);
     defer all.deinit();
-    try all.expectLines(14, &.{
-        "/archive",
-        "/configure",
-        "/rename",
-        "/sessions   unarchived · archived · all",
-        "/setup",
-        "/unarchive",
+    try all.expectLines(19, &.{
+        "/reload-skills",
         "────────────────────────────────────────────────────────────────────────────────",
         " › /",
     });
@@ -5725,19 +5411,15 @@ test "typing / lists the overview's commands over the Sessions, and a short scre
     // Nine rows leave four commands and a count of the rest.
     var short = try rig.shown(80, 9);
     defer short.deinit();
-    try short.expectLines(0, &.{
-        "/archive",
-        "/configure",
-        "/rename",
-        "/sessions   unarchived · archived · all",
-        "+2 more · type to narrow",
+    try short.expectLines(4, &.{
+        "/reload-skills",
         "────────────────────────────────────────────────────────────────────────────────",
     });
     // Typing narrows it; Esc closes it and consumes the command draft.
     _ = try rig.press("r");
     var narrowed = try rig.shown(80, 24);
     defer narrowed.deinit();
-    try narrowed.expectLines(19, &.{ "/rename", "────────────────────────────────────────────────────────────────────────────────", " › /r" });
+    try narrowed.expectLines(19, &.{ "/reload-skills", "────────────────────────────────────────────────────────────────────────────────", " › /r" });
     _ = try rig.press("\x1b");
     var closed = try rig.shown(80, 24);
     defer closed.deinit();
@@ -5820,18 +5502,6 @@ test "a click on New Session, as a terminal sends it, selects the composer" {
     try std.testing.expect(try rig.click(3, row, 60, 16) == null);
     try std.testing.expectEqual(@as(usize, 0), Seen.now.conversations);
     try std.testing.expectEqual(view.Selection.new_session, rig.overview.state.selected);
-}
-
-test "a click on an output panel opens no Session because only the Sessions hear a press" {
-    const rig = try openListed();
-    defer rig.close();
-    try showOutputPanel(rig);
-    try std.testing.expect(rig.overview.state.listArea() != .sessions);
-    const selected = rig.overview.state.selected.session;
-    for (0..18) |row| try std.testing.expect(try rig.click(10, @intCast(row), 80, 24) == null);
-    try std.testing.expectEqual(@as(usize, 0), Seen.now.conversations);
-    try std.testing.expectEqualStrings(&selected, &rig.overview.state.selected.session);
-    try std.testing.expect(rig.overview.state.listArea() != .sessions);
 }
 
 test "a followed Session link opens the peer, Esc reopens the Session it left, then the overview" {
@@ -6556,7 +6226,6 @@ test "App settings typed saves own their strings and settle through the Overview
     try std.testing.expectEqual(AppSettings.SaveState.saved, backend.save_state(backend.context));
     try std.testing.expectEqualStrings("gpt-5.5", overview.state.default.?.model.slice());
     try std.testing.expectEqualStrings("kept draft", overview.composerDraft().bytes);
-    try std.testing.expect(overview.state.command == null and overview.state.panel == null);
 
     // Exercise the wired page, not a manually installed adapter. Its Enter
     // queues the same typed job and its tick reads the completed saved value.
@@ -6572,7 +6241,7 @@ test "App settings typed saves own their strings and settle through the Overview
     try page.widget().handleEvent(&ctx, .tick);
     try std.testing.expect(page.values.notifications);
     try std.testing.expect(page.failures.get(.notifications) == null);
-    try std.testing.expect(overview.state.command == null and overview.state.panel == null);
+
     try std.testing.expectEqualStrings("kept draft", overview.composerDraft().bytes);
 
     page.select(.permissions);
@@ -7155,13 +6824,14 @@ test "Overview mouse Palette hover survives redraw and a click follows Enter exc
     const rig = try openListed();
     defer rig.close();
     try std.testing.expect(try rig.press("/") == null);
+    try std.testing.expect(try rig.settle() == null);
     var plain = try rig.shown(80, 24);
     defer plain.deinit();
     const row: u16 = for (0..24) |y| {
-        if (std.mem.startsWith(u8, try plain.line(@intCast(y)), "/rename")) break @intCast(y);
+        if (std.mem.startsWith(u8, try plain.line(@intCast(y)), "/review")) break @intCast(y);
     } else return error.TestExpectedPaletteRow;
     const index = for (rig.overview.state.commands.?.list.shown(), 0..) |entry, i| {
-        if (std.mem.startsWith(u8, entry.shown, "/rename")) break i;
+        if (std.mem.startsWith(u8, entry.shown, "/review")) break i;
     } else return error.TestExpectedRenameCommand;
     const highlight = rig.overview.state.commands.?.highlight;
     const selection = rig.overview.state.selected;
@@ -7176,7 +6846,7 @@ test "Overview mouse Palette hover survives redraw and a click follows Enter exc
     try std.testing.expect(!hovered.screen.readCell(4, row).?.style.reverse);
     try std.testing.expectEqual(@import("widget_style.zig").of(rig.overview.caps, .{ .background = .hover }).bg, hovered.screen.readCell(4, row).?.style.bg);
     try std.testing.expect(hovered.screen.readCell(4, row - @as(u16, @intCast(local_row)) + @as(u16, @intCast(highlight - rig.overview.app_palette.first))).?.style.reverse);
-    try std.testing.expectEqual(highlight, rig.overview.state.commands.?.highlight);
+
     try std.testing.expectEqual(selection, rig.overview.state.selected);
     for (ctx.cmds.items) |cmd| try std.testing.expect(cmd != .request_focus);
     try rig.overview.app_palette.widget().handleEvent(&ctx, .mouse_leave);
@@ -7190,7 +6860,7 @@ test "Overview mouse Palette hover survives redraw and a click follows Enter exc
     rig.overview.root.pasting = false;
     try std.testing.expect(try rig.click(4, row, 80, 24) == null);
     try std.testing.expectEqual(@as(usize, 0), rig.overview.job_count);
-    try std.testing.expect(std.mem.startsWith(u8, rig.overview.composerDraft().bytes, "/rename"));
+    try std.testing.expect(std.mem.startsWith(u8, rig.overview.composerDraft().bytes, "/review"));
 }
 
 test "Overview mouse Palette click on a row drawn before the draft changed runs nothing" {
@@ -7200,13 +6870,13 @@ test "Overview mouse Palette click on a row drawn before the draft changed runs 
     var shown = try rig.shown(80, 24);
     defer shown.deinit();
     const row: u16 = for (0..24) |y| {
-        if (std.mem.startsWith(u8, try shown.line(@intCast(y)), "/archive")) break @intCast(y);
+        if (std.mem.startsWith(u8, try shown.line(@intCast(y)), "/reload-skills")) break @intCast(y);
     } else return error.TestExpectedArchiveRow;
     // The same frame, as the widgets a press lands on hold it.
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const frame = try rig.overview.root.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 24 }, .cell_size = .{} });
-    // `s` arrives before the next frame: `/s` lists /sessions where /archive was.
+    // `s` arrives before the next frame: `/s` lists /sessions where /reload-skills was.
     try std.testing.expect(try rig.press("s") == null);
     try std.testing.expectEqualStrings("/s", rig.overview.composerDraft().bytes);
     var ctx = rig.context();
@@ -7254,7 +6924,7 @@ test "Overview mouse Palette activates fixed choices and skills through the same
         try std.testing.expect(try keyed.settle() == null);
         var key_frame = try keyed.shown(80, 24);
         defer key_frame.deinit();
-        try std.testing.expect(keyed.overview.state.commands != null);
+
         const index = keyed.overview.state.commands.?.list.count - 1;
         for (0..index) |_| try std.testing.expect(try keyed.press("\x1b[B") == null);
         try std.testing.expect(try keyed.press("\r") == null);

@@ -166,12 +166,12 @@ fn words(out: *std.Io.Writer, text: []const u8, room: usize, method: Method) voi
 test "the facts row ends with the archive badge, which stays when the row is short" {
     var buffer: [facts_bytes]u8 = undefined;
     try std.testing.expectEqualStrings("k7m2qx", factsRow(&buffer, null, "k7m2qx", null, 78, .unicode));
-    try std.testing.expectEqualStrings("k7m2qx · Archived · /unarchive", factsRow(&buffer, null, "k7m2qx", "Archived · /unarchive", 78, .unicode));
+    try std.testing.expectEqualStrings("k7m2qx · Archived · Restore", factsRow(&buffer, null, "k7m2qx", "Archived · Restore", 78, .unicode));
     const facts: session_line.Facts = .{ .name = "Fix flaky store test", .model = "gpt-6.1-sol" };
-    const wide = factsRow(&buffer, facts, "k7m2qx", "Archived · /unarchive", 78, .unicode);
-    try std.testing.expectEqualStrings("Fix flaky store test · gpt-6.1-sol · Archived · /unarchive", wide);
-    const short = factsRow(&buffer, facts, "k7m2qx", "Archived · /unarchive", 40, .unicode);
-    try std.testing.expect(std.mem.endsWith(u8, short, " · Archived · /unarchive"));
+    const wide = factsRow(&buffer, facts, "k7m2qx", "Archived · Restore", 78, .unicode);
+    try std.testing.expectEqualStrings("Fix flaky store test · gpt-6.1-sol · Archived · Restore", wide);
+    const short = factsRow(&buffer, facts, "k7m2qx", "Archived · Restore", 40, .unicode);
+    try std.testing.expect(std.mem.endsWith(u8, short, " · Archived · Restore"));
     try std.testing.expect(session_line.cells(short, .unicode) <= 40);
 }
 
@@ -189,7 +189,7 @@ test "a short facts row drops whole facts from the low-priority end, marks it wi
     // A name that fits alone is never cut, even with no room to mark the rest.
     try std.testing.expectEqualStrings("Fix flaky store test that fails on CI under heavy load", factsRow(&buffer, facts, "k7m2qx", null, 55, .unicode));
     // The badge stays whole; the facts give way before it.
-    try std.testing.expectEqualStrings("Fix flaky store test · … · Archived · /unarchive", factsRow(&buffer, .{ .name = "Fix flaky store test", .model = "gpt-6-sol" }, "k7m2qx", "Archived · /unarchive", 50, .unicode));
+    try std.testing.expectEqualStrings("Fix flaky store test · … · Archived · Restore", factsRow(&buffer, .{ .name = "Fix flaky store test", .model = "gpt-6-sol" }, "k7m2qx", "Archived · Restore", 50, .unicode));
     // One word wider than the row can only be cut inside itself.
     const xs: [100]u8 = @splat('X');
     const cut = factsRow(&buffer, .{ .name = &xs, .model = "gpt-6-sol", .effort = .low, .left = 100 }, "k7m2qx", null, 30, .unicode);

@@ -194,13 +194,10 @@ const settings_conflicts = &[_]Conflict{.{ .code = .output_schema_excludes_text_
 pub const fresh_session: Definition = .{ .resource = .session, .name = "", .description = "", .options = &.{ value("store", "PATH"), settingOption("provider"), settingOption("model") } };
 /// The live Session's /configure: settings only; the Session is its address.
 pub const live_configure: Definition = .{ .resource = .session, .name = "/configure", .description = "", .options = binding ++ settings ++ &[_]Option{flag("reload-skills")}, .conflicts = settings_conflicts };
-/// The live Session's /setup: the defaults grammar, where none means inspect.
-pub const live_setup: Definition = .{ .resource = .defaults, .name = "/setup", .description = "", .options = &.{ value("store", "PATH"), settingOption("provider"), settingOption("model"), flag("clear-model"), notifications, settingOption("reasoning_effort"), settingOption("permission_mode") }, .conflicts = &.{.{ .code = .model_excludes_clear_model, .a = "model", .b = "clear-model" }} };
-
 /// Every grammar contributes its options, including hex spellings and hidden flags.
 const option_names = blk: {
     @setEvalBranchQuota(100_000);
-    var grammars: []const Definition = &.{ fresh_session, live_configure, live_setup };
+    var grammars: []const Definition = &.{ fresh_session, live_configure };
     for (std.enums.values(Command)) |command| grammars = grammars ++ .{command.definition()};
     var names: []const []const u8 = &.{};
     for (grammars) |grammar| {
@@ -292,7 +289,7 @@ test "option name set covers every grammar and rejects unknown names" {
     for (std.enums.values(Command)) |command| {
         for (command.definition().options) |option| try std.testing.expect(hasOptionName(option.name));
     }
-    for ([_]Definition{ fresh_session, live_configure, live_setup }) |grammar| {
+    for ([_]Definition{ fresh_session, live_configure }) |grammar| {
         for (grammar.options) |option| try std.testing.expect(hasOptionName(option.name));
     }
     try std.testing.expect(!hasOptionName("made-up-option-name"));
@@ -345,7 +342,7 @@ test "every advertised operation is reachable through its own resource" {
 }
 
 test "every grammar's conflict and spelling data names its own options" {
-    const live = [_]Definition{ fresh_session, live_configure, live_setup };
+    const live = [_]Definition{ fresh_session, live_configure };
     inline for (comptime std.meta.tags(Command)) |command| try expectCoherent(command.definition());
     for (live) |definition| try expectCoherent(definition);
 }
@@ -403,7 +400,7 @@ test "hidden test options belong to their operation and stay out of help" {
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "--test-") == null and std.mem.indexOf(u8, writer.buffered(), "--fault") == null);
 }
 
-test "live /configure and /setup share the one-shot grammar" {
+test "live /configure shares the one-shot settings grammar" {
     // Every live setting is the same option, with the same value shape.
     for (live_configure.options) |option| {
         const shared = Command.session_configure.definition().optionNamed(option.name).?;
@@ -418,14 +415,13 @@ test "live /configure and /setup share the one-shot grammar" {
     }
     for ([_][]const u8{ "ask", "bypass" }) |mode| {
         var argument_storage: [256]u8 = undefined;
-        const parsed = try testParse(live_setup, &.{ "--permission-mode", mode }, &argument_storage);
+        const parsed = try testParse(Command.defaults_configure.definition(), &.{ "--permission-mode", mode }, &argument_storage);
         try std.testing.expectEqualStrings(mode, parsed.get("permission-mode").?);
     }
-    for (live_setup.options) |option| try std.testing.expect(Command.defaults_configure.definition().optionNamed(option.name) != null);
     var storage: [256]u8 = undefined;
     try std.testing.expectError(error.UnknownArgument, testParse(live_configure, &.{ "--session", "other" }, &storage));
     try std.testing.expectError(error.ConflictingArguments, testParse(live_configure, &.{ "--text-output", "--output-schema", "f" }, &storage));
-    try std.testing.expectError(error.ConflictingArguments, testParse(live_setup, &.{ "--clear-model", "--model", "m" }, &storage));
+    try std.testing.expectError(error.ConflictingArguments, testParse(Command.defaults_configure.definition(), &.{ "--clear-model", "--model", "m" }, &storage));
     try std.testing.expectError(error.InvalidArguments, testParse(fresh_session, &.{ "--model", "m", "--", "--store" }, &storage));
     try std.testing.expectError(error.DuplicateArgument, testParse(fresh_session, &.{ "--model", "m", "--model", "n" }, &storage));
 }

@@ -194,12 +194,12 @@ pub fn takeCommand(self: *Self) ?[]const u8 {
     return text;
 }
 
-/// Command-line text was validated before Session creation. It is literal,
-/// including leading slashes, and uses the same retained submission bank.
+/// Literal text, including a loaded leading skill or validated command-line
+/// input, uses the same retained submission bank. May borrow the active draft.
 pub fn submitText(self: *Self, text: []const u8) Ticket {
     std.debug.assert(self.submitted == null and text.len <= capacity);
     const editor = &self.editors[self.active];
-    @memcpy(editor.buffer[0..text.len], text);
+    @memmove(editor.buffer[0..text.len], text);
     editor.length = text.len;
     editor.cursor = text.len;
     return self.seal(true);
@@ -509,13 +509,11 @@ test "Tab puts in the list's first word at the draft's end and adds a tab anywhe
         }
     };
     const cases = [_]struct { typed: []const u8, shown: []const u8 }{
-        .{ .typed = "/ef\t", .shown = "/effort " },
-        .{ .typed = "/ef\x1b[D\x1b[D\t", .shown = "/effort " },
-        .{ .typed = "/cop\t", .shown = "/copy " },
-        .{ .typed = "/s\t", .shown = "/setup " },
-        .{ .typed = "/s\t\t", .shown = "/setup --model " },
+        .{ .typed = "/rel\t", .shown = "/reload-skills" },
+        .{ .typed = "/rel\x1b[D\x1b[D\t", .shown = "/reload-skills" },
+        .{ .typed = "/rel\t\t", .shown = "/reload-skills" },
         .{ .typed = "/zz\t", .shown = "/zz" },
-        .{ .typed = "/copy \t", .shown = "/copy code" },
+        .{ .typed = "/unknown \t", .shown = "/unknown \t" },
         .{ .typed = "/rename \t", .shown = "/rename \t" },
         .{ .typed = "//c\t", .shown = "//c\t" },
         .{ .typed = "hi\t", .shown = "hi\t" },

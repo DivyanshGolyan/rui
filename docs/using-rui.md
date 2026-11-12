@@ -13,12 +13,9 @@ There is no `/help` command.
 
 ## Commands
 
-Enter these at the `›` prompt. Typing `/` lists names only; fixed choices appear quietly beside the name, separated by ` · `. Choice and option rows also show names only.
+Typing `/` lists loaded skills and `/reload-skills` only. A skill row fills its name into the Message; `/reload-skills` refreshes skills. App actions are clicks and keys on the screen: chat info contains Rename, Archive and Copy last answer, and Settings contains defaults and Version.
 
-| Command | What it does |
-| --- | --- |
-| `/requests` | Lists saved requests for recovery. |
-| `/setup` | Changes defaults for future Sessions, not the current one. |
+Unlisted fallbacks remain until those screens have equivalent controls: `/requests` in a conversation; `/configure` and `/sessions` in the overview. They are not offered by `/`. Failed-send retry and discard remain on the failed-send line.
 
 While the model works on a reply, the work line says `Thinking` with elapsed time.
 Rate-limited retries keep their countdown, and running tools show their descriptions.
@@ -148,16 +145,10 @@ Existing Sessions keep their saved settings, including approval mode and model.
 
 ### Archive Sessions
 
-Select a Session in the overview and press **Alt+A** or enter `/archive`.
-If it has work, confirm **Stop and archive**.
-The Session stays visible until the stop completes.
-You can also press **Alt+A** or enter `/archive` inside its conversation.
-Alt+A keeps your draft intact.
-For **Stop and archive**, press Enter to confirm or Esc to cancel; neither sends or clears your draft.
+Select a Session in the overview and press **Alt+A**, or use **Archive** in its chat info panel. Alt+A also works inside a conversation and keeps your draft intact. A busy Session stops and archives immediately, without confirmation; it stays visible until the stop completes.
 
 Use `/sessions archived` to show archived Sessions, `/sessions all` to show both views, or `/sessions unarchived` to return.
-Enter `/unarchive` to restore the selected Session without starting work.
-After an archive hides a row, `/undo` restores that last archived Session.
+Open the archived Session, then click **Restore** in its footer.
 
 Archive keeps history, saved results, settings, and files.
 Opening an archived Session does not restore it.
@@ -201,11 +192,10 @@ App settings changes saved defaults without changing existing Sessions.
 The Permissions row, between Effort and Notifications, offers **run without asking** and **ask first**.
 Press Enter to open the choices, then Enter to save one.
 
-From the shell, use `rui defaults configure`; in the terminal composer, use `/setup`.
-Both accept `--store PATH`, `--provider PROVIDER`, `--model ID`, `--clear-model`,
+From the shell, `rui defaults configure` accepts `--store PATH`, `--provider PROVIDER`, `--model ID`, `--clear-model`,
 `--reasoning-effort LEVEL|default`, `--permission-mode ask|bypass`, and `--notifications on|off`.
 `--clear-model` cannot be combined with `--model`.
-For example, `/setup --permission-mode ask` makes new Sessions ask before running Bash.
+For example, `rui defaults configure --permission-mode ask` makes new Sessions ask before running Bash.
 An explicit `--permission-mode` on a new Session wins over the saved choice; without either, Rui runs without asking.
 `rui defaults inspect` reads the saved defaults without changing them.
 
@@ -215,7 +205,7 @@ When the terminal running Rui is out of focus, the overview or an open conversat
 Other terminals, and tmux, get a bell.
 Rui learns about focus only from the terminal's focus reports, so a terminal or multiplexer that sends none gets no notifications.
 In tmux, set `focus-events on` to get them.
-To turn them off, run `rui defaults configure --notifications off`, or enter `/setup --notifications off`.
+To turn them off, run `rui defaults configure --notifications off`, or select **Notifications** in Settings.
 
 ## Context compaction
 

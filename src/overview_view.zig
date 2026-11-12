@@ -377,8 +377,6 @@ pub const Event = union(enum) {
     start_upgrade,
     /// A read the open conversation applied.
     observed: Observed,
-    /// The command `step` asked the shell to run ended.
-    ran: Ran,
     /// A pointer press on something a click acts on.
     clicked: struct { target: Click, draft: Draft = .{}, pasting: bool = false },
     /// Esc left a conversation whose original is unconfirmed. The shell
@@ -431,9 +429,6 @@ pub fn unconfirmedLine(state: *const State, buffer: *[max_unconfirmed_line_bytes
 }
 
 pub const StatusBuffer = [@max(upgrade_status.max_line_bytes, max_unconfirmed_line_bytes)]u8;
-
-/// What fills the list's lines; `State.listArea` says which.
-pub const ListArea = enum { sessions, panel };
 
 pub const StatusLine = struct { text: []const u8, colour: Colour };
 
@@ -517,77 +512,6 @@ pub fn noticeSegments(arena: Allocator, state: *const State, width: u16, caps: C
 pub fn canHoldSend(state: *const State) bool {
     return state.request_count < max_requests;
 }
-
-/// How the command `step` asked for ended, and what it printed, cut at
-/// `max_output_bytes`, borrowed until the next `step`.
-pub const Ran = struct {
-    output: []const u8,
-    /// It printed more than `output` holds.
-    cut: bool = false,
-    outcome: enum {
-        done,
-        /// It never started.
-        not_run,
-        /// It failed once its output was being kept, which ends the
-        /// overview, as a conversation ends.
-        failed,
-    } = .done,
-    /// The default saved defaults now give the next Session, after a
-    /// `/setup` that ran; null leaves the one in force.
-    default: ?Default = null,
-
-    /// A command that printed `printed` bytes, the first of which `kept`
-    /// holds, and ran to the end if `ok`. Its failure counts as one while
-    /// it ran only once its output went to the page (`rendering`); before
-    /// that it never started.
-    pub fn of(kept: []const u8, printed: usize, ok: bool, rendering: bool) Ran {
-        return .{
-            .output = kept[0..@min(printed, max_output_bytes)],
-            .cut = printed > max_output_bytes,
-            .outcome = if (ok) .done else if (rendering) .failed else .not_run,
-        };
-    }
-
-    /// The shell reads the default saved defaults now give only after a
-    /// `/setup` that ran.
-    pub fn readsDefault(self: Ran, name: commands.Name) bool {
-        return self.outcome == .done and name == .setup;
-    }
-};
-
-/// The most a command's output the overview keeps.
-pub const max_output_bytes = 8192;
-
-/// A command line the shell runs as a conversation runs it, from Enter to
-/// its answer. One runs at a time.
-pub const Command = struct {
-    name: commands.Name,
-    /// The Session /rename names.
-    session: ?Reference = null,
-    /// Owned: the line as typed until the answer; then, for an answer the
-    /// overview could not show, what the command printed, for
-    /// `writeDeparture`.
-    text: []u8,
-    answered: bool = false,
-};
-
-/// What takes the Sessions' rows until Esc or a key that acts on a
-/// Session: a command's output of more than one line.
-pub const Panel = union(enum) {
-    /// The text is owned.
-    output: struct { name: commands.Name, text: []u8 },
-
-    fn text(self: *const Panel) []const u8 {
-        return switch (self.*) {
-            .output => |output| output.text,
-        };
-    }
-
-    /// Rows it takes whole: its heading and its lines.
-    fn rows(self: *const Panel) usize {
-        return 2 + std.mem.count(u8, self.text(), "\n");
-    }
-};
 
 /// How a model-list read ended.
 pub const ModelsRead = union(enum) {
@@ -706,9 +630,6 @@ pub const Effect = union(enum) {
     clear_draft,
     /// Put this in place of part of the draft, as Tab does.
     replace: skill_completion.Replacement,
-    /// Run the command's line as a conversation runs it, and answer with
-    /// `ran`. It borrows the state until that answer.
-    command: Command,
     exit,
 };
 
@@ -1045,11 +966,6 @@ pub const State = struct {
     /// A model-list read is in flight.
     asking_models: bool = false,
     /// Shown in the Sessions' rows while open.
-    panel: ?Panel = null,
-    /// The command the shell runs, until its answer; one the overview
-    /// could not show, until the way out.
-    command: ?Command = null,
-
     /// The token of the last completed listing.
     token: ?Token = null,
     /// Each Session's record, by reference key: the outcome the person
@@ -1103,13 +1019,6 @@ pub const State = struct {
         };
     }
 
-    /// What fills the list's lines: a panel over the Sessions. The frame draws this and a click lands on it, so
-    /// neither decides it again.
-    pub fn listArea(self: *const State) ListArea {
-        if (self.panel != null) return .panel;
-        return .sessions;
-    }
-
     /// What the next Session starts on: what `/configure` holds, else the
     /// default.
     /// What `/configure --reasoning-effort` holds for the next start.
@@ -1131,26 +1040,13 @@ pub const State = struct {
         self.menu_read = .unread;
     }
 
-    fn showPanel(self: *State, panel: Panel) void {
-        self.closePanel();
-        self.panel = panel;
-    }
-
-    /// The Sessions show again.
-    fn closePanel(self: *State) void {
-        const panel = self.panel orelse return;
-        self.gpa.free(panel.output.text);
-        self.panel = null;
-    }
-
     pub fn deinit(self: *State) void {
         if (self.skills.reset()) |page| {
             var held = page;
             held.deinit(self.gpa);
         }
         self.menu.deinit(self.gpa);
-        self.closePanel();
-        if (self.command) |command| self.gpa.free(command.text);
+
         for (self.workspaces.items) |bytes| self.gpa.free(bytes);
         inline for (.{ &self.rows, &self.by_reference, &self.order, &self.workspaces, &self.workspace_order, &self.lines, &self.pending, &self.sort_keys, &self.seen, &self.arrivals }) |vec| vec.deinit(self.gpa);
     }
@@ -1713,7 +1609,6 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
             }
         },
         .models => |read| readModels(state, read),
-        .ran => |ran| try ranCommand(state, ran),
         .defaults_saved => |saved| {
             if (saved) |binding| state.default = binding;
         },
@@ -1753,21 +1648,9 @@ fn readModels(state: *State, read: ModelsRead) void {
     }
 }
 
-/// The most bytes `writeDeparture` writes for a command the person did not
-/// see end: its name, its output and a line that says it was cut.
-pub const max_late_command_bytes = max_output_bytes + 96;
-
 /// What the shell prints once the terminal is restored: one line for each
 /// request left in the ledger and any command the person did not see end.
 pub fn writeDeparture(state: *const State, _: ?ReasoningEffort, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-    if (state.command) |*command| {
-        const name = @tagName(command.name);
-        if (!command.answered) {
-            try writer.print("rui: /{s} did not run.\n", .{name});
-        } else if (command.text.len != 0) {
-            try writer.print("rui: /{s} output:\n{s}\n", .{ name, command.text });
-        }
-    }
     for (state.requests[0..state.request_count]) |*request| {
         const text = request.text.slice();
         switch (request.kind) {
@@ -2132,7 +2015,7 @@ fn firstLine(state: *State, result: FirstLine) error{OutOfMemory}!void {
     retitle(state, row, was);
 }
 
-/// A key that acts on a Session closes a panel so it acts where Sessions show.
+/// Takes the composer action through the selected Session or command list.
 fn compose(state: *State, value: Composed, effects: *Effects) error{OutOfMemory}!void {
     // Session mutations enter their semantic owner before the generic
     // notice clearing below.
@@ -2164,13 +2047,13 @@ fn compose(state: *State, value: Composed, effects: *Effects) error{OutOfMemory}
             // Esc cancels an Upgrade that can
             // still change nothing, as the status row offers, even while the
             // draft still lists `Upgrade`; else a shown command list closes,
-            // restoring the empty composition; then it closes a panel.
+            // restoring the empty composition.
             .clear => if (state.upgrade.takesEscape()) {
                 effects.add(.cancel_upgrade);
             } else if (shownCommands(state, value.draft)) |shown| {
                 shown.close();
                 if (command_input.consumesDraft(value.draft.bytes, .cancelled)) effects.add(.clear_draft);
-            } else if (state.panel != null) state.closePanel() else if (value.draft.bytes.len != 0) effects.add(.clear_draft) else {
+            } else if (value.draft.bytes.len != 0) effects.add(.clear_draft) else {
                 state.settings = .{};
             },
             .exit => effects.add(.exit),
@@ -2227,7 +2110,6 @@ fn stopKey(state: *State, exact: ?StopTarget, effects: *Effects) void {
     if (!admitHostRequest(state)) return;
     state.notice = null;
     const target = exact orelse selected: {
-        state.closePanel();
         const row = state.selectedRow() orelse return state.say(.attention, no_selection, .{});
         break :selected StopTarget{ .reference = row.reference, .work = row.state.asOf(state.now_ms) };
     };
@@ -2286,7 +2168,6 @@ fn clickOpen(state: *State, reference: Reference, effects: *Effects) error{OutOf
 
 /// Moves the selection where the Sessions show.
 fn select(state: *State, action: Action) void {
-    state.closePanel();
     move(state, action);
 }
 
@@ -2340,7 +2221,7 @@ fn textAction(state: *const State, text: []const u8) EnterAction {
     const blank = std.mem.trim(u8, text, " \t\r\n").len == 0;
     // As in a conversation, `//` starts text with one slash.
     if (!blank and text[0] == '/' and !std.mem.startsWith(u8, text, "//")) {
-        return if (state.holdsHost()) .held else .run;
+        return if (state.holdsHost()) .held else if (commands.parse(text) == .unknown and state.skills.startsSkill(text)) .start else .run;
     }
     if (blank) switch (state.selected) {
         .new_session => return if (state.holdsHost()) .none else .await_task,
@@ -2377,13 +2258,12 @@ fn enter(state: *State, text: []const u8, effects: *Effects) error{OutOfMemory}!
             if (text.len != 0) effects.add(.clear_draft);
             const row = state.selectedRow() orelse return;
             // The conversation's own commands write where this one does.
-            if (waitForCommand(state)) return;
-            state.closePanel();
+
             effects.add(.{ .open = row.reference });
         },
         .start => {
             if (!state.request(.start, null)) return;
-            effects.add(.{ .start = .{ .settings = &state.settings, .text = if (text[0] == '/') text[1..] else text, .binding = state.nextBinding() } });
+            effects.add(.{ .start = .{ .settings = &state.settings, .text = if (std.mem.startsWith(u8, text, "//")) text[1..] else text, .binding = state.nextBinding() } });
         },
         .run => try runCommand(state, text, effects),
     }
@@ -2392,14 +2272,7 @@ fn enter(state: *State, text: []const u8, effects: *Effects) error{OutOfMemory}!
 /// Runs the slash command `text`.
 fn runCommand(state: *State, text: []const u8, effects: *Effects) error{OutOfMemory}!void {
     const parsed = commands.parse(text);
-    const held = switch (parsed) {
-        .command => |command| switch (command.name) {
-            .rename, .setup => waitForCommand(state),
-            else => false,
-        },
-        else => false,
-    };
-    if (!command_input.consumesDraft(text, if (held) .held else .submitted)) return;
+    if (!command_input.consumesDraft(text, .submitted)) return;
     effects.add(.clear_draft);
     const command = switch (parsed) {
         .unknown => {
@@ -2410,8 +2283,13 @@ fn runCommand(state: *State, text: []const u8, effects: *Effects) error{OutOfMem
         .command => |command| command,
     };
     switch (command.name) {
-        .archive => archiveIntent(state, .selected_archive, effects),
-        .unarchive => archiveIntent(state, .selected_restore, effects),
+        .@"reload-skills" => {
+            if (state.skills.reset()) |page| {
+                var old = page;
+                old.deinit(state.gpa);
+            }
+            state.say(.quiet, "Skills reloaded.", .{});
+        },
         .sessions => {
             const filter: ArchiveFilter = if (std.mem.eql(u8, command.argument, "archived")) .archived else if (std.mem.eql(u8, command.argument, "all")) .all else if (std.mem.eql(u8, command.argument, "unarchived")) .active else {
                 state.say(.quiet, "Sessions: {s}. /sessions unarchived|archived|all", .{archiveViewName(state.archive)});
@@ -2420,20 +2298,11 @@ fn runCommand(state: *State, text: []const u8, effects: *Effects) error{OutOfMem
             try changeArchiveView(state, filter, effects);
         },
         .configure => configure(state, command.argument),
-        .rename => {
-            // As a key that acts on a Session, it acts where the Sessions
-            // show, so the list shows the row it names.
-            state.closePanel();
-            const row = state.selectedRow() orelse return state.say(.attention, no_selection, .{});
-            try requestCommand(state, .rename, row.reference, text, effects);
-        },
-        .setup => try requestCommand(state, .setup, null, text, effects),
     }
 }
 
 const ArchiveIntent = union(enum) {
     selected_archive,
-    selected_restore,
     ask: struct { reference: Reference, work: Kind, archive: ArchiveState },
     restore: Reference,
 };
@@ -2445,21 +2314,13 @@ fn archiveIntent(state: *State, intent: ArchiveIntent, effects: *Effects) void {
     state.notice = null;
     effects.archive_admission = switch (intent) {
         .selected_archive => blk: {
-            state.closePanel();
             const row = state.selectedRow() orelse {
                 state.say(.attention, no_selection, .{});
                 break :blk .refused;
             };
             break :blk askArchive(state, row.reference, row.state.asOf(state.now_ms), row.archive_state, effects);
         },
-        .selected_restore => blk: {
-            state.closePanel();
-            const row = state.selectedRow() orelse {
-                state.say(.attention, no_selection, .{});
-                break :blk .refused;
-            };
-            break :blk archiveSession(state, .{ .reference = row.reference, .archived = false }, effects);
-        },
+
         .ask => |target| askArchive(state, target.reference, target.work, target.archive, effects),
         .restore => |ref| archiveSession(state, .{ .reference = ref, .archived = false }, effects),
     };
@@ -2475,7 +2336,7 @@ fn askArchive(state: *State, ref: Reference, work: Kind, archive: ArchiveState, 
         return .refused;
     }
     if (archive == .archived) {
-        state.say(.quiet, "{s} is already archived. /unarchive restores it.", .{&ref});
+        state.say(.quiet, "{s} is already archived.", .{&ref});
         return .refused;
     }
     return archiveSession(state, .{ .reference = ref }, effects);
@@ -2499,7 +2360,6 @@ fn archiveSession(state: *State, request: ArchiveRequest, effects: *Effects) Arc
 }
 
 fn changeArchiveView(state: *State, filter: ArchiveFilter, effects: *Effects) error{OutOfMemory}!void {
-    state.closePanel();
     if (state.archive == filter) return;
     state.archive = filter;
     if (state.listing) state.listing_archive = null;
@@ -2519,64 +2379,8 @@ fn changeArchiveView(state: *State, filter: ArchiveFilter, effects: *Effects) er
     if (!state.listing) try tick(state, state.now_ms, effects);
 }
 
-/// Asks the shell to run `text`, the line of command `name`, once no other
-/// command runs.
-fn requestCommand(state: *State, name: commands.Name, ref: ?Reference, text: []const u8, effects: *Effects) error{OutOfMemory}!void {
-    state.command = .{ .name = name, .session = ref, .text = try state.gpa.dupe(u8, text) };
-    effects.add(.{ .command = state.command.? });
-}
-
-/// True, and says so, while a command runs: one runs at a time.
-fn waitForCommand(state: *State) bool {
-    const running = state.command orelse return false;
-    state.say(.attention, "! Wait for /{s} to finish.", .{@tagName(running.name)});
-    return true;
-}
-
 /// What a key or command that needs a selected Session says without one.
 const no_selection = "! Select a Session first.";
-
-/// Takes a command's answer: short output is a notice, as a conversation
-/// shows it, and more opens a panel. What the overview cannot show (an
-/// answer after the person left, a failure that ends it) waits for the way
-/// out.
-fn ranCommand(state: *State, ran: Ran) error{OutOfMemory}!void {
-    const command = &state.command.?;
-    std.debug.assert(!command.answered);
-    const name = command.name;
-    const text = std.mem.trimEnd(u8, ran.output, "\n");
-    if (state.left or ran.outcome == .failed) {
-        const kept = try keptOutput(state.gpa, text, ran.cut);
-        state.gpa.free(command.text);
-        command.text = kept;
-        command.answered = true;
-        return;
-    }
-    state.gpa.free(command.text);
-    state.command = null;
-    // What /configure holds still leads, as `nextBinding` says.
-    if (ran.default) |binding| state.default = binding;
-    // The next listing shows the new label.
-    if (name == .rename) state.next_list_ms = 0;
-    switch (ran.outcome) {
-        .done => {},
-        // As a conversation says of an inspection that could not start.
-        .not_run => return state.say(.attention, "! /{s} unavailable.", .{@tagName(name)}),
-        .failed => unreachable,
-    }
-    var said: [slash_commands.result_notice_bytes]u8 = undefined;
-    if (!ran.cut) if (slash_commands.resultNotice(&said, ran.output)) |notice| {
-        return state.say(if (std.mem.startsWith(u8, notice, "!")) .attention else .quiet, "{s}", .{notice});
-    };
-    state.showPanel(.{ .output = .{ .name = name, .text = try keptOutput(state.gpa, text, ran.cut) } });
-}
-
-/// A command's output as the overview keeps it: a final line says when it
-/// was cut.
-fn keptOutput(gpa: Allocator, text: []const u8, cut: bool) error{OutOfMemory}![]u8 {
-    if (!cut) return gpa.dupe(u8, text);
-    return std.fmt.allocPrint(gpa, "{s}\nOutput cut at {d} KiB.", .{ text, max_output_bytes / 1024 });
-}
 
 const configure_usage = blk: {
     var text: []const u8 = "! /configure takes start settings:";
@@ -2890,7 +2694,7 @@ const unicode_glyphs: Glyphs = .{ .prompt = "›", .dot = work_line.glyphs.get(.
 const ascii_glyphs: Glyphs = .{ .prompt = ">", .dot = work_line.glyphs.get(.ascii).dot, .rule = "-", .ellipsis = work_line.glyphs.get(.ascii).ellipsis, .arrows = "^v", .sides = "<>", .up = "^", .down = "v", .newline = "|" };
 
 /// Where App's rows go: any provider band from row 0, the list (or the
-/// panel in its place), the pinned Settings tail, any Host line,
+/// the pinned Settings tail, any Host line,
 /// then the input area. The core reads it to know what shows, and the
 /// overview's widgets draw by it.
 pub const Layout = struct {
@@ -3326,32 +3130,6 @@ pub fn listItem(state: *const State, line: usize) ?Item {
     return if (line - first_row_line < state.order.items.len) .{ .row = line - first_row_line } else null;
 }
 
-/// The panel in the Sessions' rows: its heading, with the way back at the
-/// right, then its lines. When more lines come than rows, the last row
-/// counts the rest.
-fn panelLines(built: *Spans, panel: *const Panel, lines: [][]const Span) error{OutOfMemory}!void {
-    built.begin();
-    const name = switch (panel.*) {
-        .output => |output| try std.fmt.allocPrint(built.arena, "/{s}", .{@tagName(output.name)}),
-    };
-    _ = try built.put(1, name, built.width -| 2, .{ .colour = .ink, .bold = true });
-    try built.putRight(built.width -| 1, "Esc returns", .{ .colour = .quiet });
-    lines[0] = try built.finish();
-    const total = panel.rows() - 1;
-    const room = lines.len - 1;
-    const shown = if (total <= room) total else room -| 1;
-    var texts = std.mem.splitScalar(u8, panel.text(), '\n');
-    for (lines[1..][0..shown]) |*line| {
-        built.begin();
-        _ = try built.put(1, texts.next().?, built.width -| 2, .{});
-        line.* = try built.finish();
-    }
-    if (shown == total or room == 0) return;
-    built.begin();
-    _ = try built.put(1, try std.fmt.allocPrint(built.arena, "+{d} more lines", .{total - shown}), built.width -| 2, .{ .colour = .quiet });
-    lines[1 + shown] = try built.finish();
-}
-
 /// First line: a mark, the whole available name, and an age at the edge.
 pub fn rowSegments(arena: Allocator, state: *const State, at: usize, width: u16, caps: Caps, frame: u64) error{OutOfMemory}![]const Segment {
     var built: Spans = .of(arena, caps, width);
@@ -3471,17 +3249,6 @@ pub fn factsSegments(arena: Allocator, state: *const State, width: u16, caps: Ca
     const facts_style: Style = .{ .colour = .quiet, .background = .bar };
     _ = try built.put(1, text, width -| 2, facts_style);
     return segmentsOf(arena, try built.finish(), width, plain(caps, facts_style));
-}
-
-/// A panel supplies its own rows instead of Session groups.
-/// A panel's rows in the list's place, as many as `layout` gives the
-/// list; null while no panel shows.
-pub fn panelItems(arena: Allocator, state: *const State, width: u16, caps: Caps) error{OutOfMemory}!?[]const ListRow {
-    const panel = if (state.panel) |*shown| shown else return null;
-    var built: Spans = .of(arena, caps, width);
-    const spans = try arena.alloc([]const Span, @min(panel.rows(), layout(state).list.len()));
-    if (spans.len != 0) try panelLines(&built, panel, spans);
-    return try rowsOf(arena, spans, width);
 }
 
 fn rowsOf(arena: Allocator, spans: []const []const Span, width: u16) error{OutOfMemory}![]const ListRow {
@@ -3750,11 +3517,7 @@ fn expectEffects(expected: []const Effect, actual: Effects) !void {
                 try std.testing.expectEqual(change.end, got.replace.end);
                 try std.testing.expectEqualStrings(change.text, got.replace.text);
             },
-            .command => |command| {
-                try std.testing.expectEqual(command.name, got.command.name);
-                try std.testing.expectEqualStrings(command.text, got.command.text);
-                try std.testing.expectEqual(command.session, got.command.session);
-            },
+
             .read_commands => |reads| {
                 try std.testing.expectEqual(reads.len, got.read_commands.len);
                 for (reads.slice(), got.read_commands.slice()) |x, y| {
@@ -3805,14 +3568,14 @@ fn screenText(state: *State, width: u16, height: u16, caps: Caps) ![]u8 {
 }
 
 /// What the App overview's rows show at a size, from the segments each of
-/// its widgets draws: the provider header, two-line list or panel rows,
+/// its widgets draws: the provider header, two-line list rows,
 /// the status's rows and one Footer under `draft`. Settings has its own widget tests. This keeps
-/// only their order, with the panel given the rows the core's layout gives
+/// only their order, using the rows the core's layout gives
 /// it.
 const Frame = struct {
     arena: std.heap.ArenaAllocator,
     lines: []const []const Segment,
-    /// The list's or panel's lines.
+    /// The list's lines.
     list: []const []const Segment,
     caps: Caps,
     width: u16,
@@ -3827,13 +3590,8 @@ const Frame = struct {
         errdefer self.arena.deinit();
         const gpa = self.arena.allocator();
         const top = try headerSegments(gpa, state, width, caps);
-        const panel = try panelItems(gpa, state, width, caps);
         var list_count: usize = 0;
-        if (panel) |items| {
-            list_count = items.len;
-        } else {
-            while (listItem(state, list_count) != null) : (list_count += 1) {}
-        }
+        while (listItem(state, list_count) != null) : (list_count += 1) {}
         const lines = try gpa.alloc([]const Segment, top.len + list_count * 2 + max_notice_rows + 1);
         var count: usize = 0;
         var start: usize = 0;
@@ -3847,20 +3605,13 @@ const Frame = struct {
             count += 1;
         }
         const first = count;
-        if (panel) |items| {
-            for (items) |item| {
-                lines[count] = item.segments;
-                count += 1;
-            }
-        } else {
-            var at: usize = 0;
-            while (listItem(state, at)) |item| : (at += 1) {
-                lines[count] = (try listSegments(gpa, state, item, width, caps, frame)).segments;
-                count += 1;
-                if (item != .row) continue;
-                lines[count] = try rowSecondSegments(gpa, state, item.row, width, caps);
-                count += 1;
-            }
+        var item_at: usize = 0;
+        while (listItem(state, item_at)) |item| : (item_at += 1) {
+            lines[count] = (try listSegments(gpa, state, item, width, caps, frame)).segments;
+            count += 1;
+            if (item != .row) continue;
+            lines[count] = try rowSecondSegments(gpa, state, item.row, width, caps);
+            count += 1;
         }
         const last = count;
         if (try noticeSegments(gpa, state, width, caps)) |notice| {
@@ -4645,101 +4396,16 @@ test "typing / lists the overview's commands between the rule and the draft, as 
     defer state.deinit();
     // App's palette draws the list (Overview's tests); the core keeps it.
     _ = try typeText(&state, "/");
-    try std.testing.expectEqual(@as(usize, 6), state.commands.?.list.shown().len);
+
     // Typing narrows the list; Tab completes the one left.
     _ = try typeText(&state, "/r");
-    try std.testing.expectEqualStrings("ename ", state.commands.?.list.completion(0));
-    _ = try typeText(&state, "/c");
-    try std.testing.expectEqualStrings("onfigure ", state.commands.?.list.completion(0));
+    try std.testing.expectEqualStrings("eload-skills", state.commands.?.list.completion(0));
     // No list for text, `//`, a word past its command, or a name no command
     // starts.
     for ([_][]const u8{ "fix it", "//home", "/status" }) |text| {
         errdefer std.debug.print("draft={s}\n", .{text});
         _ = try typeText(&state, text);
-        try std.testing.expect(state.commands == null);
     }
-}
-
-test "Enter takes a row only from a list the latest frame drew, and a long line still runs" {
-    var setup_line = "/setup".*;
-    var state = try opened(&mixed);
-    defer state.deinit();
-    _ = try step(&state, .{ .resized = .{ .width = 80, .height = 24 } });
-    // A screen too short for the list drew none: Enter runs `/set` as typed.
-    var draft = try typeText(&state, "/set");
-    state.commands.?.drew(false);
-    const unlisted = try submit(&state, draft);
-    try expectEffects(&.{.clear_draft}, unlisted);
-    draft = try typeText(&state, "/set");
-    try expectEffects(&.{ .clear_draft, .{ .command = .{ .name = .setup, .text = &setup_line } } }, try submit(&state, draft));
-    // A value that completes a line longer than any scratch line runs it.
-    const long: [600]u8 = @splat('w');
-    draft = try typeText(&state, "/configure --workspace /" ++ long ++ " --permission-mode a");
-    try std.testing.expect(draft.bytes.len > 512);
-    try expectEffects(&.{.clear_draft}, try submit(&state, draft));
-    try std.testing.expectEqualStrings("ask", state.settings.get(startOption("permission-mode").?).?);
-}
-
-test "a key on a draft changed since the latest frame acts on that draft's list when the frame drew one" {
-    var setup_line = "/setup".*;
-    var state = try opened(&mixed);
-    defer state.deinit();
-    _ = try step(&state, .{ .resized = .{ .width = 80, .height = 24 } });
-    // The frame drew `/se`'s list; `t` changes the draft before a frame
-    // lists it, and Enter takes /setup from `/set`'s list.
-    const drawn = try typeText(&state, "/se");
-    try std.testing.expectEqual(.drawn, state.commands.?.seen);
-    const typed: Draft = .{ .bytes = "/set", .cursor = 4, .edits = drawn.edits +% 1 };
-    try expectEffects(&.{}, try step(&state, .{ .composed = .{ .input = .{ .composer = .append }, .draft = typed } }));
-    try expectEffects(&.{ .clear_draft, .{ .command = .{ .name = .setup, .text = &setup_line } } }, try submit(&state, typed));
-    // The frame drew `/r`'s list; Backspace leaves `/`, whose list Down
-    // moves through, the selected Session kept.
-    const model = try typeText(&state, "/r");
-    const erased: Draft = .{ .bytes = "/", .cursor = 1, .edits = model.edits +% 1 };
-    try expectEffects(&.{}, try step(&state, .{ .composed = .{ .input = .{ .composer = .redraw }, .draft = erased } }));
-    const selected = state.selected;
-    try expectEffects(&.{}, try press(&state, erased, .next));
-    try std.testing.expectEqual(selected, state.selected);
-    try std.testing.expectEqual(@as(usize, 1), state.commands.?.highlight);
-    // Esc ends that command and restores the empty composition.
-    try expectEffects(&.{.clear_draft}, try press(&state, erased, .clear));
-    try std.testing.expectEqual(.closed, state.commands.?.seen);
-}
-
-test "arrows move the command list's highlight, and Enter takes it: a word another follows, or the command it completes" {
-    var setup_line = "/setup".*;
-    var state = try opened(&mixed);
-    defer state.deinit();
-    _ = try step(&state, .{ .resized = .{ .width = 80, .height = 24 } });
-    var draft = try typeText(&state, "/s");
-    // The selected Session's row stays put while the list takes the arrows.
-    const selected = state.selected;
-    _ = try step(&state, .{ .composed = .{ .input = .{ .composer = .{ .action = .next } }, .draft = draft } });
-    try std.testing.expectEqual(@as(usize, 1), state.commands.?.highlight);
-    try std.testing.expectEqual(selected, state.selected);
-    // Enter on /setup, highlighted, runs it.
-    try expectEffects(&.{ .clear_draft, .{ .command = .{ .name = .setup, .text = &setup_line } } }, try submit(&state, draft));
-    // /configure alone only says its usage: Enter adds its word and a
-    // space, for an option.
-    draft = try typeText(&state, "/");
-    state.commands.?.highlight = 1;
-    try expectEffects(&.{.{ .replace = .{ .start = 1, .end = 1, .text = "configure " } }}, try submit(&state, draft));
-    // An option that takes a value is added for it, and the next list
-    // starts at its top, however far down the highlight was.
-    draft = try typeText(&state, "/configure ");
-    state.commands.?.highlight = 4;
-    try expectEffects(&.{.{ .replace = .{ .start = "/configure ".len, .end = "/configure ".len, .text = "--label " } }}, try submit(&state, draft));
-    // A draft too full for the word refuses it and stays as it was; its
-    // next frame lists it from the top too.
-    drawWithRoom(&state, draft);
-    try std.testing.expectEqual(@as(usize, 0), state.commands.?.highlight);
-    draft = try typeText(&state, "/configure --permission-mode ");
-    const modes = state.commands.?.list;
-    try std.testing.expectEqualStrings("ask", modes.shown()[0].word);
-    // A value is whole: Enter holds the setting.
-    state.commands.?.highlight = 1;
-    try expectEffects(&.{.clear_draft}, try submit(&state, draft));
-    try std.testing.expectEqualStrings("bypass", state.settings.get(startOption("permission-mode").?).?);
 }
 
 test "Enter runs a command by the overview's table and names its usage when misused" {
@@ -4757,18 +4423,18 @@ test "Esc closes a shown command list and consumes its command draft" {
     var draft: Draft = .{ .bytes = "/r", .cursor = 2, .edits = 2 };
     try expectEffects(&.{}, try step(&state, .{ .composed = .{ .input = .{ .composer = .redraw }, .draft = draft } }));
     drawWithRoom(&state, draft);
-    try std.testing.expectEqual(.drawn, state.commands.?.seen);
+
     try expectEffects(&.{.clear_draft}, try press(&state, draft, .clear));
-    try std.testing.expectEqual(.closed, state.commands.?.seen);
+
     try expectLastLine(&state, draft, "enter run");
     // The shell applies clear_draft. A subsequent command gets a fresh list.
     drawWithRoom(&state, draft);
-    try std.testing.expectEqual(.closed, state.commands.?.seen);
+
     try expectEffects(&.{.clear_draft}, try press(&state, draft, .clear));
     // An edit opens it again.
     draft = .{ .bytes = "/re", .cursor = 3, .edits = 3 };
     drawWithRoom(&state, draft);
-    try std.testing.expectEqual(.drawn, state.commands.?.seen);
+
     // The hint says what Enter does to each slash draft.
     try expectLastLine(&state, try typeText(&state, "/configure --label lane"), "enter run");
 }
@@ -4831,7 +4497,8 @@ test "/configure holds start settings for the Session the next Enter starts" {
     // Alone, /configure waits for an option: Enter on it in the list adds
     // the space that shows them.
     draft = try typeText(&state, "/configure");
-    try expectEffects(&.{.{ .replace = .{ .start = "/configure".len, .end = "/configure".len, .text = " " } }}, try submit(&state, draft));
+    try expectEffects(&.{.clear_draft}, try submit(&state, draft));
+    try expectNoticeWithData(&state, configure_usage);
     // A model Rui does not list is held, with a quiet word on its limits.
     draft = try typeText(&state, "/configure --model unlisted-model");
     try expectEffects(&.{.clear_draft}, try submit(&state, draft));
@@ -5337,14 +5004,6 @@ test "a click that names a Session gone from the list since it was drawn changes
     try expectSelected(&state, &selected);
 }
 
-test "a click on a Session while a panel shows opens it and closes the panel, as Enter does" {
-    var state = try opened(&mixed);
-    defer state.deinit();
-    try showOutputPanel(&state);
-    try expectEffects(&.{ .{ .open = "b2c3d4".* }, .list_models }, try step(&state, .{ .clicked = .{ .target = .{ .open = "b2c3d4".* } } }));
-    try std.testing.expectEqual(null, state.panel);
-}
-
 test "every click obeys the input mode: a frozen screen takes none, whatever it names" {
     const ref = "b2c3d4";
     for ([_]bool{ false, true }) |frozen| for ([_]Click{ .{ .open = ref.* }, .new_session, .settings, .{ .command = .{ .index = 0, .revision = 0, .source = 0 } } }) |clicked| {
@@ -5771,7 +5430,7 @@ test "a start the Host refuses for want of its sign-in names the sign-in and its
     }
 }
 
-/// The rows the Sessions' list or a panel takes on an 80 by 24 screen.
+/// The rows the Sessions' list takes on an 80 by 24 screen.
 fn listRows(state: *State, draft: Draft) ![]u8 {
     var shown: Frame = try .drafted(state, draft, 80, 24, .{}, 0);
     defer shown.deinit();
@@ -5782,140 +5441,6 @@ fn listRows(state: *State, draft: Draft) ![]u8 {
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |line| try trimmed.writer.print("{s}\n", .{std.mem.trimEnd(u8, line, " ")});
     return trimmed.toOwnedSlice();
-}
-
-test "a key that acts on a Session brings the Sessions back first, so it acts where they show" {
-    var state = try opened(&mixed);
-    defer state.deinit();
-    const first = state.selected.session;
-    try expectEffects(&.{}, try step(&state, .{ .resized = .{ .width = 80, .height = 24 } }));
-    for ([_]Action{ .next, .select_next, .last, .stop }) |action| {
-        errdefer std.debug.print("action={t}\n", .{action});
-        try showOutputPanel(&state);
-        try std.testing.expect(state.panel != null);
-        state.selected = .{ .session = first };
-        _ = try press(&state, .{}, action);
-        try std.testing.expect(state.panel == null);
-        if (action == .last) {
-            try std.testing.expectEqual(Selection.settings, state.selected);
-        } else if (action != .stop) try std.testing.expect(!std.mem.eql(u8, &first, &state.selected.session));
-    }
-    // Enter on an empty draft opens the selected Session from under it.
-    try showOutputPanel(&state);
-    try expectEffects(&.{ .{ .open = state.selected.session }, .list_models }, try submit(&state, .{}));
-    try std.testing.expect(state.panel == null);
-}
-
-/// An owned command-output panel for tests of the surrounding screen.
-fn showOutputPanel(state: *State) !void {
-    state.showPanel(.{ .output = .{ .name = .setup, .text = try state.gpa.dupe(u8, "Defaults\nStore: /s") } });
-}
-
-/// The answer to the command in flight.
-fn ranWith(state: *State, ran: Ran) !void {
-    try expectEffects(&.{}, try step(state, .{ .ran = ran }));
-}
-
-test "/rename names the selected Session through the shell, as a conversation does, one command at a time" {
-    var empty = try opened(&.{});
-    defer empty.deinit();
-    try expectEffects(&.{.clear_draft}, try submit(&empty, try typeText(&empty, "/rename lane four")));
-    try expectNotice(&empty, "! Select a Session first.");
-    try std.testing.expectEqual(Colour.attention, empty.notice.?.colour);
-    try expectEffects(&.{}, try press(&empty, .{}, .stop));
-    try expectNotice(&empty, "! Select a Session first.");
-
-    var state = try opened(&mixed);
-    defer state.deinit();
-    const selected = state.selected.session;
-    var line = "/rename lane four".*;
-    try expectEffects(&.{ .clear_draft, .{ .command = .{ .name = .rename, .session = selected, .text = &line } } }, try submit(&state, try typeText(&state, &line)));
-    try expectEffects(&.{.clear_draft}, try submit(&state, try typeText(&state, "/rename ")));
-    try expectNotice(&state, "! Usage: /rename NAME");
-    // One runs at a time, and the Session it names does not open under it.
-    try expectEffects(&.{}, try submit(&state, try typeText(&state, "/setup")));
-    try expectNotice(&state, "! Wait for /rename to finish.");
-    try expectEffects(&.{}, try submit(&state, .{}));
-    try expectNotice(&state, "! Wait for /rename to finish.");
-    // Its line is a notice, as in a conversation, and the next listing,
-    // which shows the new label, goes at once.
-    try ranWith(&state, .{ .output = "Rui: Configured.\n" });
-    try expectNotice(&state, "Configured.");
-    try std.testing.expectEqual(Colour.quiet, state.notice.?.colour);
-    try expectEffects(&.{.{ .list = testToken(1) }}, try step(&state, .{ .tick = state.now_ms }));
-    _ = try respond(&state, .full, testToken(2), &mixed);
-    for ([_]struct { Ran, []const u8, Colour }{
-        .{ .{ .output = "rui: no session k7m2qx in this Store\n" }, "! no session k7m2qx in this Store", .attention },
-        .{ .{ .output = "" }, slash_commands.no_output, .quiet },
-        .{ .{ .output = "", .outcome = .not_run }, "! /rename unavailable.", .attention },
-        // Two lines are a notice too, as in a conversation.
-        .{ .{ .output = "Rui: Configured.\nrui: label saved locally only\n" }, "Configured.\n! label saved locally only", .quiet },
-    }) |case| {
-        _ = try submit(&state, try typeText(&state, "/rename x"));
-        try ranWith(&state, case[0]);
-        try expectNotice(&state, case[1]);
-        try std.testing.expectEqual(case[2], state.notice.?.colour);
-    }
-    // Both lines show under the input.
-    try expectStatusLines(&state, &.{ " Configured.", " ! label saved locally only" });
-}
-
-test "/rename under a panel brings the Sessions back, so the list shows the row it names" {
-    var state = try opened(&mixed);
-    defer state.deinit();
-    try expectEffects(&.{}, try step(&state, .{ .resized = .{ .width = 80, .height = 24 } }));
-    try showOutputPanel(&state);
-    try std.testing.expect(state.panel != null);
-    var line = "/rename lane four".*;
-    try expectEffects(&.{ .clear_draft, .{ .command = .{ .name = .rename, .session = state.selected.session, .text = &line } } }, try submit(&state, try typeText(&state, &line)));
-    try std.testing.expect(state.panel == null);
-}
-
-test "/setup needs no Session, and output of more than a line takes the Sessions' rows until Esc" {
-    var state = try opened(&.{});
-    defer state.deinit();
-    var line = "/setup --notifications off".*;
-    try expectEffects(&.{ .clear_draft, .{ .command = .{ .name = .setup, .text = &line } } }, try submit(&state, try typeText(&state, &line)));
-    try ranWith(&state, .{ .output = "Saved defaults for future Sessions.\nStore: /s (saved)\nNotifications: off\n" });
-    try expectNotice(&state, null);
-    const shown = try listRows(&state, .{});
-    defer std.testing.allocator.free(shown);
-    try expectLines(shown, 1, &.{ " Saved defaults for future Sessions.", " Store: /s (saved)", " Notifications: off", "" });
-    try std.testing.expect(std.mem.startsWith(u8, shown, " /setup "));
-    try expectEffects(&.{}, try press(&state, .{}, .clear));
-    try std.testing.expect(state.panel == null);
-    // Output past what the overview keeps says it was cut.
-    _ = try submit(&state, try typeText(&state, "/setup"));
-    try ranWith(&state, .{ .output = "Defaults (read only):", .cut = true });
-    const cut = try listRows(&state, .{});
-    defer std.testing.allocator.free(cut);
-    try expectLines(cut, 1, &.{ " Defaults (read only):", " Output cut at 8 KiB." });
-    // Typing "/" lists /setup's options as a conversation does.
-    _ = try typeText(&state, "/setup ");
-    try std.testing.expectEqualStrings("--model ", state.commands.?.list.shown()[0].word);
-}
-
-test "a command the person did not see end is named on the way out" {
-    const Case = struct { ran: ?Ran, leave_first: bool, expected: []const u8 };
-    for ([_]Case{
-        .{ .ran = null, .leave_first = true, .expected = "rui: /setup did not run.\n" },
-        .{ .ran = .{ .output = "Saved defaults.\nStore: /s" }, .leave_first = true, .expected = "rui: /setup output:\nSaved defaults.\nStore: /s\n" },
-        // A failure while it ran ends the overview before it can show.
-        .{ .ran = .{ .output = "rui: setup save failed\n", .outcome = .failed }, .leave_first = false, .expected = "rui: /setup output:\nrui: setup save failed\n" },
-        .{ .ran = .{ .output = "" }, .leave_first = true, .expected = "" },
-        .{ .ran = .{ .output = "Store: /s\n", .cut = true }, .leave_first = true, .expected = "rui: /setup output:\nStore: /s\nOutput cut at 8 KiB.\n" },
-    }) |case| {
-        var state = try opened(&.{});
-        defer state.deinit();
-        _ = try submit(&state, try typeText(&state, "/setup"));
-        if (case.leave_first) _ = try step(&state, .leave);
-        if (case.ran) |ran| try ranWith(&state, ran);
-        if (!case.leave_first) _ = try step(&state, .leave);
-        var bytes: [max_late_command_bytes]u8 = undefined;
-        var departure = std.Io.Writer.fixed(&bytes);
-        try writeDeparture(&state, null, &departure);
-        try std.testing.expectEqualStrings(case.expected, departure.buffered());
-    }
 }
 
 test "upgrade emits only its local effect and preserves selection settings and unresolved handles" {
@@ -5937,7 +5462,6 @@ test "upgrade emits only its local effect and preserves selection settings and u
     try std.testing.expectEqual(@as(usize, 1), state.request_count);
     try std.testing.expect(std.meta.eql(request, state.requests[0]));
     try std.testing.expectEqualStrings("keep upgrade draft", draft.bytes);
-    try std.testing.expect(state.command == null);
 }
 
 test "Upgrade runs inline: Esc cancels it before the draft, checking or preparing, and its end sets the Host hold" {
@@ -5949,7 +5473,7 @@ test "Upgrade runs inline: Esc cancels it before the draft, checking or preparin
     // Esc cancels the check too, keeping the draft, even while the draft
     // is still `Upgrade` and lists its command: the status row says esc
     // cancels.
-    const typed = try typeText(&state, "/configure");
+    const typed = try typeText(&state, "/reload-skills");
     try std.testing.expect(shownCommands(&state, typed) != null);
     try expectEffects(&.{.cancel_upgrade}, try press(&state, typed, .clear));
     const draft = try typeText(&state, "keep me");
@@ -6134,7 +5658,7 @@ test "upgrade protocol hold refuses starts opens stops and Host commands but per
     try expectEffects(&.{}, try step(&state, .{ .resized = .{ .width = 60, .height = 24 } }));
     state.upgrade.after = .blocked;
     const selected = state.selected;
-    for ([_][]const u8{ "new model work", "", "/rename new name", "/setup --model gpt-5.5" }) |text| {
+    for ([_][]const u8{ "new model work", "", "/rename new name", "/rename --model gpt-5.5" }) |text| {
         try expectEffects(&.{}, try submit(&state, try typeText(&state, text)));
         try std.testing.expectEqual(selected, state.selected);
         try std.testing.expectEqual(@as(usize, 0), state.request_count);
@@ -6206,8 +5730,8 @@ test "a busy Session archives at once, asking nothing, and never hides before se
     var state = try opened(&.{row});
     defer state.deinit();
     var effects: Effects = .{};
-    try enter(&state, "/archive", &effects);
-    try expectEffects(&.{ .clear_draft, .{ .archive = .{ .reference = row.reference } } }, effects);
+    effects = try press(&state, .{}, .archive);
+    try expectEffects(&.{.{ .archive = .{ .reference = row.reference } }}, effects);
     const asked = try screenText(&state, 100, 24, .{});
     defer std.testing.allocator.free(asked);
     try std.testing.expect(std.mem.indexOf(u8, asked, "Stop and archive") == null);
@@ -6237,18 +5761,18 @@ test "archive failure and unconfirmed requests stay visible and surface recovera
     var state = try opened(&.{row});
     defer state.deinit();
     var effects: Effects = .{};
-    try enter(&state, "/archive", &effects);
+    effects = try press(&state, .{}, .archive);
     try std.testing.expectEqual(@as(usize, 1), state.rows.items.len);
     _ = try step(&state, .{ .archive = .{ .request = .{ .reference = row.reference }, .outcome = .{ .failed = "archive_pending" } } });
     try std.testing.expect(std.mem.indexOf(u8, state.notice.?.text(), "not archived: archive_pending") != null);
     try std.testing.expectEqual(@as(usize, 1), state.rows.items.len);
     effects = .{};
-    try enter(&state, "/archive", &effects);
+    effects = try press(&state, .{}, .archive);
     _ = try step(&state, .{ .archive = .{ .request = .{ .reference = row.reference }, .outcome = .{ .unconfirmed = "saved-handle" } } });
     try std.testing.expect(std.mem.indexOf(u8, state.notice.?.text(), "recover saved-handle") != null);
     try std.testing.expectEqual(@as(usize, 1), state.rows.items.len);
     effects = .{};
-    try enter(&state, "/archive", &effects);
+    effects = try press(&state, .{}, .archive);
     for (effects.slice()) |effect| try std.testing.expect(effect != .archive);
     var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer output.deinit();
@@ -6343,8 +5867,6 @@ test "upgrade holds admit no archive surface before draft or ledger mutation" {
                 row.archive_state = archive;
                 const cases = [_]struct { event: Event }{
                     .{ .event = .{ .composed = .{ .draft = draft, .input = .{ .composer = .{ .action = .archive } } } } },
-                    .{ .event = .{ .composed = .{ .draft = .{ .bytes = "/archive", .cursor = 3, .edits = 18 }, .input = .{ .composer = .submit } } } },
-                    .{ .event = .{ .composed = .{ .draft = .{ .bytes = "/unarchive", .cursor = 3, .edits = 19 }, .input = .{ .composer = .submit } } } },
                     .{ .event = .{ .conversed = .{ .reference = "k7m2qx".*, .work = work, .input = .{ .archive = archive } } } },
                     .{ .event = .{ .conversed = .{ .reference = "k7m2qx".*, .work = work, .input = .unarchive } } },
                 };
@@ -6359,7 +5881,7 @@ test "upgrade holds admit no archive surface before draft or ledger mutation" {
                     try std.testing.expectEqual(Selection{ .session = ref }, state.selected);
                     state.upgrade.after = if (blocked) .blocked else .reobserving;
                     state.last_archived = "bbbbbb".*;
-                    try showOutputPanel(&state);
+
                     // Preserve both an unknown handle and accepted in-flight work.
                     try std.testing.expect(state.request(.stop, "zzzzzz".*));
                     state.answer(0, .unknown, "01234567-89ab-4cde-8012-0123456789ab");
@@ -6377,8 +5899,7 @@ test "upgrade holds admit no archive surface before draft or ledger mutation" {
                     try std.testing.expectEqualStrings("bbbbbb", &state.last_archived.?);
                     try std.testing.expectEqualStrings(&ref, &state.selected.session);
                     try std.testing.expectEqual(archive, state.find(ref).?.archive_state);
-                    try std.testing.expect(state.panel != null and state.panel.? == .output);
-                    try std.testing.expect(state.command == null);
+
                     try std.testing.expectEqualStrings(upgrade_recovery, state.notice.?.text());
                 }
             }
@@ -6398,10 +5919,10 @@ test "upgrade holds share stop admission for both screens, and the stop goes onc
             var state = try opened(&.{session(&ref, .{ .working = ago(1) }, .{})});
             defer state.deinit();
             state.upgrade.after = if (blocked) .blocked else .reobserving;
-            try showOutputPanel(&state);
+
             try expectEffects(&.{}, try step(&state, event));
             try std.testing.expectEqual(@as(usize, 0), state.request_count);
-            try std.testing.expect(state.panel != null and state.panel.? == .output);
+
             try std.testing.expectEqualStrings(upgrade_recovery, state.notice.?.text());
             state.upgrade.after = .open;
             try expectEffects(&.{.{ .stop = ref }}, try step(&state, event));
@@ -6512,24 +6033,6 @@ test "while a start waits the composer is frozen" {
     try std.testing.expectEqual(Route.frozen, state.route(.{ .action = .previous }));
     try std.testing.expectEqual(Route.frozen, state.route(.text));
     try std.testing.expectEqual(Route.frozen, state.route(.enter));
-}
-
-test "a command's output is cut at what the overview keeps, and its failure ends the overview only once its output was kept" {
-    var kept: [max_output_bytes + 1]u8 = @splat('x');
-    const whole = Ran.of(&kept, 5, true, true);
-    try std.testing.expectEqual(@as(usize, 5), whole.output.len);
-    try std.testing.expect(!whole.cut and whole.outcome == .done and whole.default == null);
-    const full = Ran.of(&kept, max_output_bytes, true, false);
-    try std.testing.expect(full.output.len == max_output_bytes and !full.cut);
-    const cut = Ran.of(&kept, max_output_bytes + 1, true, true);
-    try std.testing.expect(cut.output.len == max_output_bytes and cut.cut);
-    try std.testing.expectEqual(.failed, Ran.of(&kept, 0, false, true).outcome);
-    try std.testing.expectEqual(.not_run, Ran.of(&kept, 0, false, false).outcome);
-    // Only a /setup that ran reads the saved defaults again.
-    try std.testing.expect(whole.readsDefault(.setup));
-    try std.testing.expect(!whole.readsDefault(.rename));
-    try std.testing.expect(!Ran.of(&kept, 0, false, true).readsDefault(.setup));
-    try std.testing.expect(!Ran.of(&kept, 0, false, false).readsDefault(.setup));
 }
 
 test "a saved MCP running line fits overview rows without narrowing its saved bound" {
@@ -6790,13 +6293,13 @@ test "the Footer names the Enter action submission takes, over every composer st
         .{ .setup = .typed, .selection = .settings, .draft = "", .action = .open_settings, .right = "enter open", .effects = &.{ .open_settings, .list_models } },
         .{ .setup = .typed, .selection = .settings, .draft = "a task", .action = .start, .right = "enter start", .effects = &.{.start} },
         // Command completion open: Enter takes the highlighted entry.
-        .{ .setup = .typed, .draft = "/conf", .action = .pick_command, .right = "enter pick / esc close", .effects = &.{.replace} },
-        .{ .setup = .typed, .draft = "/configure", .action = .pick_command, .right = "enter pick / esc close", .effects = &.{.replace} },
+        .{ .setup = .typed, .draft = "/rel", .action = .pick_command, .right = "enter pick / esc close", .effects = &.{.clear_draft} },
+        .{ .setup = .typed, .draft = "/reload-skills", .action = .pick_command, .right = "enter pick / esc close", .effects = &.{.clear_draft} },
         // Completion not drawn, or none for a command with its argument:
         // Enter runs the draft as written.
-        .{ .setup = .unlisted, .draft = "/conf", .action = .run, .right = "enter run", .effects = &.{.clear_draft} },
-        .{ .setup = .unlisted, .draft = "/setup", .action = .run, .right = "enter run", .effects = &.{ .clear_draft, .command } },
-        .{ .setup = .typed, .selection = k7, .draft = "/rename NAME", .action = .run, .right = "enter run", .effects = &.{ .clear_draft, .command } },
+        .{ .setup = .unlisted, .draft = "/rel", .action = .run, .right = "enter run", .effects = &.{.clear_draft} },
+        .{ .setup = .typed, .draft = "/rename", .action = .run, .right = "enter run", .effects = &.{.clear_draft} },
+        .{ .setup = .typed, .selection = k7, .draft = "/rename NAME", .action = .run, .right = "enter run", .effects = &.{.clear_draft} },
         // A frozen composer takes no Enter.
         .{ .setup = .frozen, .draft = "a task", .action = .none, .right = "", .effects = &.{} },
         .{ .setup = .frozen, .selection = k7, .draft = "", .action = .none, .right = "", .effects = &.{} },
@@ -6821,7 +6324,6 @@ test "the Footer names the Enter action submission takes, over every composer st
         }
         const draft: Draft = if (case.setup == .frozen) .{ .bytes = case.draft } else try typeText(&state, case.draft);
         if (case.setup == .unlisted or (case.setup == .held and state.commands != null)) {
-            try std.testing.expectEqual(.drawn, state.commands.?.seen);
             state.commands = null;
         }
         const listed = if (state.commands) |shown| shown.seen == .drawn else false;
@@ -6951,9 +6453,7 @@ test "archive admission reports only a new ledger request across every surface c
         const cases = [_]struct { event: Event, restore: bool = false }{
             .{ .event = .{ .conversed = .{ .reference = ref, .work = .working, .input = .{ .archive = archive } } } },
             .{ .event = .{ .composed = .{ .draft = .{}, .input = .{ .composer = .{ .action = .archive } } } } },
-            .{ .event = .{ .composed = .{ .draft = .{ .bytes = "/archive", .cursor = 8 }, .input = .{ .composer = .submit } } } },
             .{ .event = .{ .conversed = .{ .reference = ref, .work = .working, .input = .unarchive } }, .restore = true },
-            .{ .event = .{ .composed = .{ .draft = .{ .bytes = "/unarchive", .cursor = 10 }, .input = .{ .composer = .submit } } }, .restore = true },
         };
         for (cases) |case| {
             var state = try testState();
@@ -7053,15 +6553,14 @@ test "overview command list click takes the drawn row only from the list the fra
     const Case = enum { unchanged, unchanged_skill, choice, run, edited, replaced, closed, closed_skill };
     const Mode = enum { editable, frozen, pasting };
     const first_page = [_][]const u8{ "refactor", "review" };
-    var setup_line = "/setup".*;
     for (std.enums.values(Case)) |case| for (std.enums.values(Mode)) |mode| {
         errdefer std.debug.print("case={s} mode={s}\n", .{ @tagName(case), @tagName(mode) });
         const skill = case == .unchanged_skill or case == .replaced or case == .closed_skill;
         const identity = if (skill) "/review" else switch (case) {
             .choice => "bypass",
-            .run => "/setup",
-            .edited => "/configure",
-            else => "/sessions",
+            .run => "/reload-skills",
+            .edited => "/reload-skills",
+            else => "/reload-skills",
         };
         var index: usize = undefined;
         var clicked = try opened(&mixed);
@@ -7134,10 +6633,10 @@ test "overview command list click takes the drawn row only from the list the fra
                 try expectEffects(&.{.clear_draft}, effects);
                 try std.testing.expectEqualStrings("bypass", clicked.settings.get(startOption("permission-mode").?).?);
             } else if (case == .run) {
-                try expectEffects(&.{ .clear_draft, .{ .command = .{ .name = .setup, .text = &setup_line } } }, effects);
+                try expectEffects(&.{.clear_draft}, effects);
             }
             try std.testing.expectEqual(keyed.selected, clicked.selected);
-            try std.testing.expectEqual(keyed.panel, clicked.panel);
+
             try std.testing.expectEqual(keyed.commands != null, clicked.commands != null);
             if (keyed.commands) |shown| try std.testing.expectEqual(shown.highlight, clicked.commands.?.highlight);
         } else {

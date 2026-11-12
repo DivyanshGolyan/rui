@@ -142,7 +142,7 @@ test "Palette hover is transient and clicks activate only visible command rows" 
         }
     };
     var selected: Selected = .{};
-    var shown = commands.Shown.next(null, 7, commands.conversation.suggest("/", .{})).?;
+    var shown = commands.Shown.next(null, 7, commands.overview.suggest("/configure --", .{})).?;
     var palette: Self = .{ .shown = &shown, .userdata = &selected, .on_select = Selected.select, .style = .{ .fg = .{ .index = 3 } } };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -202,8 +202,8 @@ test "Palette hover is transient and clicks activate only visible command rows" 
 
 test "Palette renders names-only slash lists on conversation and overview" {
     const cases = .{
-        .{ commands.conversation, &[_][]const u8{ "/archive", "/copy           code · file", "/effort", "/reload-skills", "/rename", "/setup", "/unarchive" } },
-        .{ commands.overview, &[_][]const u8{ "/archive", "/configure", "/rename", "/sessions   unarchived · archived · all", "/setup", "/unarchive" } },
+        .{ commands.conversation, &[_][]const u8{"/reload-skills"} },
+        .{ commands.overview, &[_][]const u8{"/reload-skills"} },
     };
     inline for (cases) |case| {
         var shown = commands.Shown.next(null, 1, case[0].suggest("/", .{})).?;

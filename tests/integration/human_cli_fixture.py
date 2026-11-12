@@ -628,6 +628,17 @@ def terminal_step(master, command, marker, *, composer=False):
     return read_terminal(master, marker, fresh=True)
 
 
+def saved_result(master, key, marker):
+    """Read a saved answer by choosing its drawn recovery-page row."""
+    listing = terminal_step(master, "/requests", "Local recovery handles", composer=True)
+    rows = [line.strip() for line in listing.splitlines()
+            if "read this Message's saved answer" in line or "retry this unconfirmed original" in line]
+    index = next((i for i, row in enumerate(rows) if row.split()[0] == key), None)
+    assert index is not None, ("saved answer row missing", key, listing)
+    return keyed_frame(master, b"\x1b[B" * index + b"\r",
+                       lambda screen, x, y: marker in conversation_text(screen) and composer_ready(screen, x, y))
+
+
 def drop_spent_readiness(descriptor):
     """Discard notifications already queued, so the next wait reads one made
     after the input sent next: the card notifies once per request it draws,

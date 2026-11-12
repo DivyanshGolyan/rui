@@ -338,7 +338,7 @@ noinline fn clientCommand(init: std.process.Init, command: cli_args.Command, par
         .host_serve => unreachable,
         // Inspection has its own read-only operation; configure's grammar
         // requires an edit.
-        .defaults_inspect, .defaults_configure => try setup(init, parsed, .command_line),
+        .defaults_inspect, .defaults_configure => try setup(init, parsed),
         .auth_login => try login(init, &.{parsed.positional.?}, codex_auth.login),
     }
 }
@@ -376,9 +376,7 @@ fn credentialPath(init: std.process.Init, comptime provider: protocol.Provider, 
 
 /// Who reads what `setup` prints: a command line, which gets JSON, or a
 /// screen's /setup, a conversation's naming the Session it leaves alone.
-const SetupReader = enum { command_line, conversation, overview };
-
-fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, reader: SetupReader) !void {
+fn setup(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     const home = init.environ_map.get("HOME") orelse {
         stderr.diagnostic("rui: setup needs an absolute HOME; no preferences saved.\n", .{});
         return error.HomeUnavailable;
@@ -406,7 +404,7 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, reader: SetupRe
     const prospective_store: ?[]const u8 = if (values.store.len != 0) values.store.slice() else preferences.defaultStore(home, &fallback_buffer) catch null;
     const available_store: ?platform.Paths = if (prospective_store) |path| platform.resolveClientPaths(init.io, path) catch null else null;
     // Preferences live in HOME, so a saved Store redirects every Workspace.
-    if (reader == .command_line and edit.store != .keep) notice: {
+    if (edit.store != .keep) notice: {
         var bytes: [4 * std.Io.Dir.max_path_bytes + 256]u8 = undefined;
         var notice = std.Io.Writer.fixed(&bytes);
         notice.writeAll("rui: saved ") catch break :notice;
@@ -414,7 +412,7 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, reader: SetupRe
         notice.writeAll(" as the global default Store; commands without --store now use it from any directory, and saved requests keep their recorded Store.\n") catch break :notice;
         stderr.diagnostic("{s}", .{notice.buffered()});
     }
-    if (reader == .command_line) return writeDefaultsJson(init.io, .{
+    return writeDefaultsJson(init.io, .{
         .changed = changed,
         .store = prospective_store,
         .saved_store = values.store.len != 0,
@@ -426,76 +424,6 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, reader: SetupRe
         .permission_mode = values.permission_mode,
         .readiness = &readiness,
     });
-    // Preferences are local hints, not Session settings or Host facts.
-    try std.Io.File.stdout().writeStreamingAll(init.io, if (!changed) "Defaults (read only):\n" else if (reader == .conversation) "Saved defaults for future Sessions. Active Session unchanged.\n" else "Saved defaults for future Sessions.\n");
-    // A conversation's /status page shows the defaults: after a change
-    // there, the report follows only when the next Session cannot start as
-    // saved.
-    if (reader == .conversation and changed and available_store != null and nextSessionReady(&values, &readiness)) return;
-    try std.Io.File.stdout().writeStreamingAll(init.io, "Store: ");
-    try writeSafeText(init.io, prospective_store orelse "unavailable");
-    try std.Io.File.stdout().writeStreamingAll(init.io, if (values.store.len != 0) " (saved)\n" else " (HOME fallback)\n");
-    if (available_store == null) try std.Io.File.stdout().writeStreamingAll(init.io, "Store unavailable: destination cannot be selected; no alternate Store selected.\n");
-    try writeSafeField(init.io, "Provider: ", if (values.provider.len != 0) values.provider.slice() else "not selected");
-    try writeSafeField(init.io, "Model: ", if (values.model.len != 0) values.model.slice() else "not selected");
-    try std.Io.File.stdout().writeStreamingAll(init.io, if (values.notifications) "Notifications: on\n" else "Notifications: off\n");
-    try writeSafeField(init.io, "Reasoning effort: ", if (values.reasoning_effort) |effort| @tagName(effort) else "each model's default");
-    try writeSafeField(init.io, "Permissions: ", if (values.permission_mode) |mode| @tagName(mode) else @import("product_defaults.zig").permission_mode);
-    var output: [std.Io.Dir.max_path_bytes + 512]u8 = undefined;
-    try std.Io.File.stdout().writeStreamingAll(init.io, switch (readiness.get(.codex)) {
-        .configured => "Codex credential: configured locally (remote acceptance not checked).\n",
-        .renewal_due => "Codex credential: usable locally; renewal due at dispatch (remote acceptance not checked).\n",
-        .missing => "Codex credential: missing.\n",
-        .refresh_required => "Codex credential: refresh required; a pending refresh may require login.\n",
-        .credential_error => "Codex credential: error reading private Rui credential; inspect it before use.\n",
-    });
-    try std.Io.File.stdout().writeStreamingAll(init.io, switch (readiness.get(.openai)) {
-        .configured, .renewal_due => "OpenAI API key: saved locally (remote acceptance not checked).\n",
-        .missing => "OpenAI API key: missing.\n",
-        .refresh_required, .credential_error => "OpenAI API key: unreadable, not owner-only or not one key; save it again with `" ++ comptime protocol.Provider.openai.login().? ++ "`.\n",
-    });
-    const selectable = model_capability.capabilities(&readiness);
-    const selection: ?provider_selection.Selection = provider_selection.resolve(&selectable, null, null, if (values.provider.len != 0) values.provider.slice() else null, if (values.model.len != 0) values.model.slice() else null) catch |err| blk: {
-        const advice: []const u8 = switch (err) {
-            error.UnsupportedSelectionProvider => "Next Session: saved provider is unsupported; no fallback. Repair with `rui defaults configure --provider " ++ provider_choices ++ " --model " ++ product_defaults.recommended_model ++ "`.\n",
-            error.UnsupportedSelectionModel => "Next Session: saved model is unsupported; no fallback. Repair with `rui defaults configure --provider " ++ provider_choices ++ " --model " ++ product_defaults.recommended_model ++ "`.\n",
-        };
-        try std.Io.File.stdout().writeStreamingAll(init.io, advice);
-        break :blk null;
-    };
-    if (selection) |choice| switch (choice) {
-        .chooser => try std.Io.File.stdout().writeStreamingAll(init.io, "Next Session: choose a provider with `rui defaults configure --provider " ++ provider_choices ++ "`; Codex login: `" ++ comptime protocol.Provider.codex.login().? ++ "`; OpenAI key: `" ++ protocol.Provider.openai.login().? ++ "`.\n"),
-        .selected => |selected| {
-            const note: []const u8 = switch (selected.readiness) {
-                .configured => "local credential configured; remote acceptance not checked",
-                .renewal_due => "local credential usable; renewal due at dispatch; remote acceptance not checked",
-                .missing => "credential missing; run `rui auth login <provider>`. No fallback",
-                .refresh_required => "credential refresh required; login may be required. No fallback",
-                .credential_error => "credential error; inspect private Rui credential or log in. No fallback",
-            };
-            const line = try std.fmt.bufPrint(&output, "Next Session: {s} / {s} ({s}).\n", .{ selected.provider, selected.model, note });
-            try std.Io.File.stdout().writeStreamingAll(init.io, line);
-        },
-    };
-    // Host capabilities are startup facts, not credential or Session state.
-    var host_line: [512]u8 = undefined;
-    const host_details: []const u8 = if (available_store) |paths| switch (client.hostStatus(init.io, paths.store.slice())) {
-        .ready => |current| hostProvidersLine(current.capabilities.providers, &host_line),
-        .unavailable => "Host: unavailable; setup does not start it.\n",
-        .owned_unavailable => "Host: owned but unavailable; inspect before submitting work.\n",
-        .incompatible => "Host: incompatible; inspect before submitting work.\n",
-        .access_failure => "Host: access failure; inspect Store permissions.\n",
-    } else "Host: unavailable; selected Store unavailable.\n";
-    try std.Io.File.stdout().writeStreamingAll(init.io, host_details);
-}
-
-/// The saved defaults select a provider and model whose sign-in is usable.
-fn nextSessionReady(values: *const preferences.Values, readiness: *const preferences.Readinesses) bool {
-    const selectable = model_capability.capabilities(readiness);
-    // A saved provider or model Rui cannot select is not ready either: the
-    // full report that follows says which.
-    const selection = provider_selection.resolve(&selectable, null, null, if (values.provider.len != 0) values.provider.slice() else null, if (values.model.len != 0) values.model.slice() else null) catch return false;
-    return selection == .selected and selection.selected.readiness.usable();
 }
 
 const DefaultsFacts = struct {
@@ -2540,40 +2468,11 @@ fn infoConfiguration(store: []const u8, session: []const u8, edit: ChatInfo.Edit
     return input;
 }
 
-pub fn sessionCommand(init: std.process.Init, read: client.ReadContext, destination: []const u8, reference: []const u8, input_buffer: []u8) !void {
+pub fn sessionCommand(init: std.process.Init, read: client.ReadContext, destination: []const u8, reference: []const u8, input: session_reads.CommandInput) !void {
     const requests_context = read.requests();
-    const command = switch (slash_commands.parse(input_buffer)) {
-        .command => |command| command,
-        // The Session frontend queues only commands the table admits.
-        .unknown, .misused => return error.UnknownArgument,
-    };
-    // Decoding rewrites the argument's own bytes in the editor's line.
-    const argument = input_buffer[@intFromPtr(command.argument.ptr) - @intFromPtr(input_buffer.ptr) ..][0..command.argument.len];
-    const live: LiveAddress = .{ .store = destination, .session = reference };
-    switch (command.name) {
-        .setup => {
-            const setup_usage = "Usage: /setup [--store PATH] [--provider codex] [--model ID | --clear-model] [--notifications on|off] [--reasoning-effort LEVEL|default]; no changes saved. See rui session configure --help for model IDs.\n";
-            var setup_args: [setup_capacity][]const u8 = undefined;
-            const count = interactiveTokens(argument, &setup_args) catch
-                return std.Io.File.stdout().writeStreamingAll(init.io, setup_usage);
-            var nothing = std.heap.FixedBufferAllocator.init(&.{});
-            // The overview runs /setup for no Session, so no Session is
-            // there to leave alone.
-            const reader: SetupReader = if (reference.len == 0) .overview else .conversation;
-            const unchanged = if (reader == .conversation) "; active Session unchanged" else "";
-            var problem: cli_args.Refusal = undefined;
-            const parsed = cli_args.live_setup.parse(setup_args[0..count], nothing.allocator(), &problem) catch {
-                reportParseProblem(problem, null, "/setup", unchanged);
-                return;
-            };
-            if (parsed.help) return std.Io.File.stdout().writeStreamingAll(init.io, setup_usage);
-            setup(init, &parsed, reader) catch |err| {
-                // Saved defaults never touch the active Session, so no "unchanged" note.
-                if (err != error.InvalidModel) stderr.diagnostic("rui: /setup: {s}\n", .{@tagName(caller_error.of(preferenceFailure(err)))});
-            };
-        },
-        .result => {
-            const saved = protocol_reply.MessageAddress.init(destination, reference, command.argument) catch |err| {
+    const input_buffer = switch (input) {
+        .saved_result => |key| {
+            const saved = protocol_reply.MessageAddress.init(destination, reference, key) catch |err| {
                 stderr.diagnostic("rui: result key: {s}\n", .{@tagName(caller_error.of(err))});
                 return;
             };
@@ -2581,231 +2480,40 @@ pub fn sessionCommand(init: std.process.Init, read: client.ReadContext, destinat
                 if (err == error.CanonicalStoreFailure) return err;
                 stderr.diagnostic("rui: result: {s}\n", .{@tagName(caller_error.of(err))});
             };
+            return;
         },
-        .@"reload-skills" => {
-            _ = try liveConfigure(init, requests_context, live, &.{"--reload-skills"}, "Usage: /reload-skills\n");
-        },
-        .effort, .rename => {
-            const typed_usage = liveUsage(command.name);
-            var arguments: [live_capacity][]const u8 = undefined;
-            const spelled = liveArguments(command.name, argument, &arguments) catch
-                return std.Io.File.stdout().writeStreamingAll(init.io, typed_usage);
-            const accepted = try liveConfigure(init, requests_context, live, spelled, typed_usage);
-            // The effort a person chooses for this Session is also the one
-            // they want next time; /configure stays this Session's alone.
-            if (accepted and command.name == .effort and spelled.len == 2) try saveEffortDefault(init, spelled[1]);
-        },
-        // The Session frontend runs every other command itself.
+        .line => |line| line,
+    };
+    const live: LiveAddress = .{ .store = destination, .session = reference };
+    const command = switch (slash_commands.parse(input_buffer)) {
+        .command => |command| command,
+        .unknown, .misused => return error.UnknownArgument,
+    };
+    switch (command.name) {
+        .@"reload-skills" => try reloadSkills(init, requests_context, live),
         else => return error.UnknownArgument,
     }
 }
 
-/// The /configure arguments a command spells. /effort LEVEL is
-/// `--reasoning-effort LEVEL`; /rename NAME is `--label` with the whole
-/// name as one value, decoded as /configure decodes a quoted one.
-fn liveArguments(name: slash_commands.Name, argument: []u8, arguments: *[live_capacity][]const u8) ![]const []const u8 {
-    switch (name) {
-        .effort => {
-            arguments[0] = "--reasoning-effort";
-            return arguments[0 .. 1 + try interactiveTokens(argument, arguments[1..])];
-        },
-        .rename => {
-            arguments[0..2].* = .{ "--label", try interactiveText(argument) };
-            return arguments[0..2];
-        },
-        else => unreachable,
-    }
-}
-
-/// What a live /configure spelling prints when its arguments do not parse:
-/// the usage of the command typed.
-fn liveUsage(name: slash_commands.Name) []const u8 {
-    return switch (name) {
-        inline .effort, .rename => |short| "Rui: Usage: " ++ comptime slash_commands.usage.get(short) ++ "\n",
-        else => unreachable,
-    };
-}
-
-test "/effort and /rename decode to typed configuration arguments" {
-    const cases = [_]struct { text: []const u8, option: []const u8, value: []const u8 }{
-        .{ .text = "/rename \"lane four\"", .option = "label", .value = "lane four" },
-        .{ .text = "/rename lane four", .option = "label", .value = "lane four" },
-        .{ .text = "/effort high", .option = "reasoning-effort", .value = "high" },
-        .{ .text = "/effort \"high\"", .option = "reasoning-effort", .value = "high" },
-    };
-    inline for (cases) |case| {
-        var line: [64]u8 = undefined;
-        @memcpy(line[0..case.text.len], case.text);
-        const command = slash_commands.parse(line[0..case.text.len]).command;
-        const argument = line[case.text.len - command.argument.len .. case.text.len];
-        var arguments: [live_capacity][]const u8 = undefined;
-        var nothing = std.heap.FixedBufferAllocator.init(&.{});
-        var problem: cli_args.Refusal = undefined;
-        const parsed = try cli_args.live_configure.parse(try liveArguments(command.name, argument, &arguments), nothing.allocator(), &problem);
-        try std.testing.expectEqualStrings(case.value, parsed.getNamed(case.option).?);
-    }
-    // A line that does not decode names the command typed.
-    for ([_][]const u8{ "/effort \"high", "/rename \"lane" }) |text| {
-        var line: [64]u8 = undefined;
+test "the CLI refuses app names the conversation frontend never queues" {
+    for ([_][]const u8{ "/nope", "/status now", "/rename", "/copy all", "/effort high", "/setup" }) |text| {
+        var line: [32]u8 = undefined;
         @memcpy(line[0..text.len], text);
-        const command = slash_commands.parse(line[0..text.len]).command;
-        var arguments: [live_capacity][]const u8 = undefined;
-        try std.testing.expectError(error.InvalidInteractiveArguments, liveArguments(command.name, line[text.len - command.argument.len .. text.len], &arguments));
-        try std.testing.expect(std.mem.indexOf(u8, liveUsage(command.name), text[0..7]) != null);
+        try std.testing.expectError(error.UnknownArgument, sessionCommand(undefined, undefined, "", "", .{ .line = line[0..text.len] }));
     }
 }
 
-test "a conversation's /setup says it left the active Session alone, and the overview's, which has none, does not" {
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const home = home_buffer[0..try tmp.dir.realPath(io, &home_buffer)];
-    var environment = std.process.Environ.Map.init(std.testing.allocator);
-    defer environment.deinit();
-    try environment.put("HOME", home);
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const argv = [_][*:0]const u8{"rui"};
-    const init: std.process.Init = .{ .minimal = .{ .args = .{ .vector = &argv }, .environ = .empty }, .arena = &arena, .gpa = std.testing.allocator, .io = io, .environ_map = &environment, .preopens = .empty };
-    const page = try tmp.dir.createFile(io, "page", .{ .read = true });
-    defer page.close(io);
-    var token: client.Cancellation = .{};
-    var origin: client.FailureOrigin = .local;
-    for ([_][]const u8{ "k7m2qx", "" }, [_][]const u8{ "Saved defaults for future Sessions. Active Session unchanged.\n", "Saved defaults for future Sessions.\n" }) |session, said| {
-        var line = "/setup --notifications off".*;
-        const command: session_reads.CommandRun = .{ .command = sessionCommand, .init = init, .requests = .{ .io = io, .cancellation = &token, .origin = &origin }, .store = home, .session = session, .line = &line };
-        try command.into(page).outcome;
-        var bytes: [4096]u8 = undefined;
-        const printed = bytes[0..try page.readPositionalAll(io, &bytes, 0)];
-        errdefer std.debug.print("session={s} printed={s}\n", .{ session, printed });
-        try std.testing.expect(std.mem.startsWith(u8, printed, said));
-    }
-}
-
-test "the CLI refuses a line the table does not admit, which the frontend never queues" {
-    for ([_][]const u8{ "/nope", "/status now", "/rename", "/copy all" }) |text| {
-        var line: [16]u8 = undefined;
-        @memcpy(line[0..text.len], text);
-        try std.testing.expectError(error.UnknownArgument, sessionCommand(undefined, undefined, "", "", line[0..text.len]));
-    }
-}
-
-/// The live /configure: its checks and its messages, whichever command
-/// spelled the arguments, and the usage of the one typed. True when the
-/// Host accepted it.
-fn liveConfigure(init: std.process.Init, requests_context: client.Requests, live: LiveAddress, arguments: []const []const u8, typed_usage: []const u8) !bool {
+/// Reloads skills through the existing configuration owner.
+fn reloadSkills(init: std.process.Init, requests_context: client.Requests, live: LiveAddress) !void {
     var nothing = std.heap.FixedBufferAllocator.init(&.{});
     var problem: cli_args.Refusal = undefined;
-    const parsed = cli_args.live_configure.parse(arguments, nothing.allocator(), &problem) catch {
-        reportParseProblem(problem, null, "/configure", null);
-        try std.Io.File.stdout().writeStreamingAll(init.io, typed_usage);
-        return false;
-    };
-    if (parsed.help or parsed.seen == 0) {
-        try std.Io.File.stdout().writeStreamingAll(init.io, typed_usage);
-        return false;
-    }
-    inline for ([_][]const u8{ "instructions", "output-schema" }) |content| if (std.mem.eql(u8, parsed.get(content) orelse "", "-")) {
-        try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Terminal stdin belongs to this Session. Set instructions separately with rui session configure --instructions -; redirect schema input from a file.\n");
-        return false;
-    };
-    return configure(init, requests_context, &parsed, live, false) catch |err| {
-        if (err == error.InvalidModel or err == error.InvalidLabel) return false; // The pre-capture diagnostic already gives the repair.
+    const parsed = try cli_args.live_configure.parse(&.{"--reload-skills"}, nothing.allocator(), &problem);
+    _ = configure(init, requests_context, &parsed, live, false) catch |err| {
+        if (err == error.InvalidModel or err == error.InvalidLabel) return; // The pre-capture diagnostic already gives the repair.
         stderr.diagnostic("rui: configure: {s}; check saved requests before retrying\n", .{@tagName(caller_error.of(err))});
         if (err == error.CanonicalStoreFailure) return err;
-        return false;
-    };
-}
-
-/// After this Session took `/effort LEVEL`, saves LEVEL as the effort new
-/// Sessions start at, as `rui defaults configure --reasoning-effort` does.
-fn saveEffortDefault(init: std.process.Init, level: []const u8) !void {
-    const edit: preferences.Edit = .{ .reasoning_effort = if (std.mem.eql(u8, level, "default")) .clear else .{
-        .set = std.meta.stringToEnum(model_capability.ReasoningEffort, level) orelse return,
-    } };
-    const home = init.environ_map.get("HOME") orelse {
-        stderr.diagnostic("rui: /effort changed this Session only; saving it for new Sessions needs an absolute HOME.\n", .{});
         return;
     };
-    // An effort names no sign-in, so no readiness decides anything.
-    const readiness: preferences.Readinesses = .initFill(.configured);
-    _ = preferences.update(home, edit, &readiness) catch |err| {
-        const said = preferences.failure(err);
-        if (said.saved) {
-            stderr.diagnostic("rui: /effort saved for new Sessions; {s}.\n", .{said.reason.?});
-        } else stderr.diagnostic("rui: /effort changed this Session only; not saved for new Sessions ({s}).\n", .{said.reason orelse @tagName(caller_error.of(preferenceFailure(err)))});
-        return;
-    };
-    try std.Io.File.stdout().writeStreamingAll(init.io, if (edit.reasoning_effort == .clear)
-        "Rui: New Sessions start at their model's default effort.\n"
-    else
-        "Rui: New Sessions start at this effort when their model offers it.\n");
-}
-
-// Decode command arguments into the editor's borrowed line. Removing quotes
-// and escapes only shrinks it, so each returned slice remains valid until the
-// next prompt reuses the input buffer. This is not shell expansion.
-/// Room for every /setup option at once, so a valid line never reads as
-/// too long.
-const setup_capacity = cli_args.live_setup.tokenCapacity();
-/// Room for every /configure option at once, plus the option /effort and
-/// /rename spell in front of their value.
-const live_capacity = 1 + cli_args.live_configure.tokenCapacity();
-
-test "/setup takes every option in one line" {
-    var line = "--store /path/to/store --provider codex --model gpt-6-luna --notifications off --reasoning-effort high".*;
-    var tokens: [setup_capacity][]const u8 = undefined;
-    const count = try interactiveTokens(&line, &tokens);
-    try std.testing.expectEqual(@as(usize, 10), count);
-    var nothing = std.heap.FixedBufferAllocator.init(&.{});
-    var problem: cli_args.Refusal = undefined;
-    const parsed = try cli_args.live_setup.parse(tokens[0..count], nothing.allocator(), &problem);
-    try std.testing.expectEqualStrings("high", parsed.get("reasoning-effort").?);
-    try std.testing.expectEqualStrings("/path/to/store", parsed.get("store").?);
-}
-
-fn interactiveTokens(input: []u8, tokens: [][]const u8) !usize {
-    return decodeInteractive(input, tokens, true);
-}
-
-/// The whole line as one value: a space outside quotes stays, as inside them.
-fn interactiveText(input: []u8) ![]const u8 {
-    var text: [1][]const u8 = .{""};
-    _ = try decodeInteractive(input, &text, false);
-    return text[0];
-}
-
-fn decodeInteractive(input: []u8, tokens: [][]const u8, split: bool) !usize {
-    var read: usize = 0;
-    var write: usize = 0;
-    var count: usize = 0;
-    while (read < input.len) {
-        while (read < input.len and input[read] == ' ') : (read += 1) {}
-        if (read == input.len) break;
-        if (count == tokens.len) return error.TooManyInteractiveArguments;
-        const start = write;
-        var quoted = false;
-        while (read < input.len) {
-            const byte = input[read];
-            if (split and !quoted and byte == ' ') break;
-            if (byte == '"') {
-                quoted = !quoted;
-                read += 1;
-                continue;
-            }
-            if (byte == '\\' and read + 1 < input.len and
-                (input[read + 1] == '"' or input[read + 1] == '\\' or input[read + 1] == ' ')) read += 1;
-            if (input[read] < 0x20 or input[read] == 0x7f) return error.InvalidInteractiveArguments;
-            input[write] = input[read];
-            write += 1;
-            read += 1;
-        }
-        if (quoted) return error.InvalidInteractiveArguments;
-        tokens[count] = input[start..write];
-        count += 1;
-    }
-    return count;
 }
 
 pub fn sessionRequests(init: std.process.Init, read: client.ReadContext, store: []const u8, session_ref: []const u8, out: *std.Io.Writer, picks: *session_reads.SavedRequests) anyerror!void {

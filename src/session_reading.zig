@@ -76,15 +76,7 @@ pub fn unavailable(phase: ReadPhase, inspection: Inspection) Unavailable {
     };
 }
 
-/// /copy's failure: a file it could not write says so; anything else is
-/// unavailable.
-pub fn copyFailure(to_file: bool, err: anyerror) []const u8 {
-    if (to_file) switch (err) {
-        error.AccessDenied, error.PermissionDenied, error.ReadOnlyFileSystem => return "! This directory is not writable; draft retained.",
-        else => {},
-    };
-    return "! Copy unavailable; draft retained.";
-}
+pub const copy_unavailable = "! Copy unavailable; draft retained.";
 
 /// Where a page is asked from: live output or one transcript. No page is
 /// asked from elsewhere.
@@ -158,7 +150,4 @@ test "a read that failed while preparing says which page is unavailable" {
     try std.testing.expectEqualStrings("! Inspection unavailable; draft retained.", unavailable(.inspection, .command).say);
     try std.testing.expect(unavailable(.inspection, .copy) == .copy);
     try std.testing.expectEqualStrings("! Messages unavailable; scroll to retry.", unavailable(.fill, .copy).say);
-    try std.testing.expectEqualStrings("! This directory is not writable; draft retained.", copyFailure(true, error.ReadOnlyFileSystem));
-    try std.testing.expectEqualStrings("! Copy unavailable; draft retained.", copyFailure(false, error.AccessDenied));
-    try std.testing.expectEqualStrings("! Copy unavailable; draft retained.", copyFailure(true, error.BrokenPipe));
 }
