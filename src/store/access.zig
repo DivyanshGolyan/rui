@@ -192,8 +192,15 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         const transacts = mode == .write or mode == .settlement;
         /// The statements one engine pass steps at most. Accesses sit on
         /// the deepest stack chains, so only a survey's and a settlement's
-        /// queue is wide.
-        const max_queued = if (mode == .survey or mode == .settlement) 16 else 8;
+        /// queue is wide. A survey's holds the reads a commit carries: an
+        /// admitted request's settings and first history round (12) and
+        /// the dispatch survey (12).
+        const max_queued = switch (mode) {
+            .survey => 24,
+            .settlement => 16,
+            else => 8,
+        };
+        const Guarded = if (max_queued > 16) u32 else u16;
 
         store: *Store,
         /// `opened` once `ensureOpen` tried to begin, whether or not the
@@ -212,7 +219,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         queued: u8 = 0,
         /// The queued writes a guard's answer follows (`Engine.guard`), a
         /// bit for each queue slot.
-        guarded: u16 = 0,
+        guarded: Guarded = 0,
         /// This survey only binds reads after a writer's COMMIT (`Tail`):
         /// it never sends, so a statement that would need a pass of its
         /// own fails it instead.
@@ -775,7 +782,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
                     .at_most => |rows| e.guard(true, rows),
                     .counted => e.guard(false, target.counted),
                 };
-                if (bound) a.guarded |= @as(u16, 1) << @intCast(a.queued);
+                if (bound) a.guarded |= @as(Guarded, 1) << @intCast(a.queued);
             }
             a.queued += 1;
             return true;
@@ -936,8 +943,10 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
 /// over 1 KiB needs a visitor field named `decoded`, and a visitor's
 /// `decoded` field, whatever the Row's size, is `Row` or `*Row`.
 pub fn eachVisitorError(comptime Row: type, comptime Visitor: type) ?[]const u8 {
-    if (!@hasField(Visitor, "decoded"))
+    if (!@hasField(Visitor, "decoded")) {
+        if (rsql.fillsInPlace(Row)) return "rsql: an .each Row that points into its caller's memory decodes into its visitor's own decoded field";
         return if (@sizeOf(Row) > 1024) "rsql: an .each Row over 1 KiB decodes into its visitor's own decoded field" else null;
+    }
     if (@FieldType(Visitor, "decoded") != Row and @FieldType(Visitor, "decoded") != *Row) return "rsql: a visitor's decoded field is the Row or *Row its .each read decodes, " ++ @typeName(Row);
     return null;
 }

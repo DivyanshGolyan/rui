@@ -133,6 +133,32 @@ pub fn opens(document: anytype, spot: Spot) ?[]const u8 {
     return document.sessionAt(relative(document, spot.start) orelse return null);
 }
 
+/// Contiguous cells naming one peer; shared source-cell geometry for hover.
+pub const PeerSpan = struct { start: u16, end: u16 };
+pub fn peers(document: anytype, cells: []const vaxis.Cell, arena: std.mem.Allocator) ![]const PeerSpan {
+    var spans: std.ArrayList(PeerSpan) = .empty;
+    var col: usize = 0;
+    while (col < cells.len) {
+        const id = peerAt(document, cells[col]) orelse {
+            col += 1;
+            continue;
+        };
+        const start = col;
+        col = @min(cells.len, col + @max(cells[col].char.width, 1));
+        while (col < cells.len) {
+            const next = peerAt(document, cells[col]) orelse break;
+            if (!std.mem.eql(u8, id, next)) break;
+            col = @min(cells.len, col + @max(cells[col].char.width, 1));
+        }
+        try spans.append(arena, .{ .start = @intCast(start), .end = @intCast(col) });
+    }
+    return spans.items;
+}
+
+fn peerAt(document: anytype, cell: vaxis.Cell) ?[]const u8 {
+    return document.sessionAt(document.cellOffset(cell) orelse return null);
+}
+
 pub const Copy = union(enum) {
     /// The range shows no text.
     nothing,

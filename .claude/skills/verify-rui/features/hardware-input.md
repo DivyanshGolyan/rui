@@ -50,7 +50,7 @@ Preconditions:
 
 - Without a human this feature is BLOCKED. Synthetic CGEvent keystrokes need Accessibility. Even with it, they are synthetic and not physical.
 - At byte level a wheel notch and an arrow key are identical (`ESC[A`/`ESC OA`). The wheel rows rest on the coach's instruction plus the bytes and their timing. Ask the human to use only the wheel during wheel steps.
-- Terminal.app sends no DECRPM replies, so Rui does not enable `?1007` there. Wheel scrolling then depends on Terminal.app's own alternate-screen scrolling, which the wheel steps test.
+- App enables mouse reporting, not alternate scroll `?1007`. The physical wheel steps test the reports the attached terminal actually delivers.
 - On a laptop, PgUp is fn+↑. If Terminal.app consumes it for its own scrollback, the step shows `pgup_sequences: 0`. That is a real finding for that terminal, not something to retry until it passes.
 - Input capture covers only this owned tmux window. Never record other windows or the user's own typing elsewhere.
 - A click that activates a mouse-tracking window can send a mouse report. Check `input.jsonl` for `ESC[M` before blaming the editor for a stray prefix.

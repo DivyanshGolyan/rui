@@ -161,12 +161,19 @@ def opening_and_views():
 
             listed = screen.text
             alpha_row = row_of(listed, "alpha")
-            screen.keys("/help\r")
-            panel = screen.wait(lambda frame: "Esc returns" in frame and "/sessions [VIEW]" in frame, "the help panel")
+            screen.keys(b"\x1b[F\r")
+            screen.wait(lambda frame: "Notifications" in frame and "Version" in frame, "app settings")
+            screen.keys(b"\x1b[B" * 6 + b"\r")
+            panel = screen.wait(lambda frame: "earlier message" in frame and "tool output" in frame, "the keys panel")
+            assert all(stale not in panel for stale in ("/help", "Commands", "Marks", "Esc returns", "Ctrl-X twice")), panel
             under = panel.split("\n")[alpha_row - 1]
             assert under.strip() and "alpha" not in under, (under, panel)
             screen.click(under.index(under.strip()[0]) + 1, alpha_row)
-            assert_still_overview(screen, "a panel line over alpha's row", "Esc returns", "/sessions [VIEW]")
+            screen.keys(b"\x1b")
+            settings = screen.wait(lambda frame: "Notifications" in frame and "Version" in frame, "Esc closes only Keys after an inert click")
+            assert "earlier message" not in settings, settings
+            screen.keys(b"\x1b")
+            screen.wait(lambda frame: is_overview(frame) and "✓ alpha" in frame, "Esc returns from Settings to the overview")
         print("overview clicks: a line of an open panel over a Session's row opens nothing", flush=True)
 
 

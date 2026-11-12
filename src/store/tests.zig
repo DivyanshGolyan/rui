@@ -32,6 +32,7 @@ const retry_policy = @import("../retry_policy.zig");
 const change_ring = @import("../change_ring.zig");
 const store_core = @import("Store.zig");
 const store_access = @import("access.zig");
+const transition = @import("transition.zig");
 const rsql = @import("rsql.zig");
 const Store = store_core.Store;
 const action_domain = @import("domain/action.zig");
@@ -1517,6 +1518,209 @@ test "a counted write commits only when it changes the rows its caller states" {
     }.run);
 }
 
+/// Reads a Session's head in its one round, then takes two positions and
+/// a content id, inserts that content row and dates the Session where its
+/// revision is `revision`, and commits or, with `.done`, ends without.
+const TestingDating = struct {
+    pub const rounds = transition.rounds(.{ .head = .{ .always, error.TestingRead } });
+    pub const round_budget = 2;
+    pub const writes = true;
+    pub const Input = struct { session: []const u8, revision: u64, finish: enum { commit, done } };
+    pub const Result = union(enum) { committed: u64, declined, done };
+    pub const Ordinary = error{};
+    pub const Declined = error{TestingGuard};
+
+    input: Input,
+    loaded: TestingRound.head.Result = undefined,
+    first: u64 = 0,
+
+    pub fn step(t: *TestingDating, r: *transition.Round(TestingDating), ran: ?rounds.At) !transition.Next(TestingDating) {
+        if (ran == null) {
+            r.read(TestingRound.head, .{ .session_ref = t.input.session }, &t.loaded);
+            return .{ .round = .head };
+        }
+        const positions = try r.positions(t.loaded.head);
+        t.first = try positions.take(2);
+        const content_id = try r.identity(.content_id);
+        r.write(TestingRound.insert_content, .{ .content_id = content_id, .digest = protocol.contentDigest("dated"), .length = 5 });
+        r.write(TestingRound.date_session, .{ .session = t.loaded.head, .revision = t.input.revision });
+        return switch (t.input.finish) {
+            .commit => .commit,
+            .done => .{ .done = .done },
+        };
+    }
+
+    pub fn committed(t: *const TestingDating) Result {
+        return .{ .committed = t.first };
+    }
+
+    pub fn declined(_: *const TestingDating, _: Declined) Result {
+        return .declined;
+    }
+};
+
+/// What a `TestingDating` changes, to compare before and after.
+const TestingDatingState = struct {
+    next_position: u64,
+    contents: u64,
+    content_id: u64,
+    created_at: u64,
+
+    fn of(storage: *Store) !TestingDatingState {
+        return .{
+            .next_position = try store_testing.queryU64(storage, "SELECT next_position FROM session", .{}),
+            .contents = try store_testing.queryU64(storage, "SELECT count(*) FROM content", .{}),
+            .content_id = storage.identities().next.get(.content_id),
+            .created_at = try store_testing.queryU64(storage, "SELECT created_at FROM session", .{}),
+        };
+    }
+};
+
+test "a transition's commit lands its writes, positions and identities and answers committed" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try configureTestSession(&storage, "transition-commit");
+            const before: TestingDatingState = try .of(&storage);
+            const rounds = storage.testing_content_work.rounds;
+            const result = try transition.apply(&storage, TestingDating, .{ .session = session.slice(), .revision = 1, .finish = .commit }, .{});
+            try std.testing.expectEqual(TestingDating.Result{ .committed = before.next_position }, result);
+            // The head's round, then the commit; a rerun runs them again.
+            if (!case.rerun) try std.testing.expectEqual(rounds + 2, storage.testing_content_work.rounds);
+            const after: TestingDatingState = try .of(&storage);
+            try std.testing.expectEqual(before.next_position + 2, after.next_position);
+            try std.testing.expectEqual(before.content_id, try store_testing.queryU64(&storage, "SELECT content_id FROM content WHERE byte_length=5 AND digest=?1", .{store_testing.Blob{ .bytes = &protocol.contentDigest("dated") }}));
+            try std.testing.expect(!storage.isFenced());
+        }
+    }.run);
+}
+
+test "a transition that ends done leaves nothing it queued" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try configureTestSession(&storage, "transition-done");
+            const before: TestingDatingState = try .of(&storage);
+            const result = try transition.apply(&storage, TestingDating, .{ .session = session.slice(), .revision = 1, .finish = .done }, .{});
+            try std.testing.expectEqual(TestingDating.Result.done, result);
+            try std.testing.expectEqual(before, try TestingDatingState.of(&storage));
+            try std.testing.expect(!storage.isFenced());
+        }
+    }.run);
+}
+
+test "a transition's declined guard answers declined and leaves nothing it queued" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try configureTestSession(&storage, "transition-declined");
+            const before: TestingDatingState = try .of(&storage);
+            // No revision 99: the dating write's guard stops the commit.
+            const result = try transition.apply(&storage, TestingDating, .{ .session = session.slice(), .revision = 99, .finish = .commit }, .{});
+            try std.testing.expectEqual(TestingDating.Result.declined, result);
+            try std.testing.expectEqual(before, try TestingDatingState.of(&storage));
+            try std.testing.expect(!storage.isFenced());
+        }
+    }.run);
+}
+
+/// Counts Sessions a page of one at a time, in a `.paged` round that runs
+/// again until a page finds none.
+const TestingSessionPages = struct {
+    pub const rounds = transition.rounds(.{
+        .first = .{ .always, error.TestingRead },
+        .next = .{ .paged, error.TestingRead },
+    });
+    pub const round_budget = 1;
+    pub const writes = false;
+    pub const Input = struct {};
+    pub const Result = u64;
+    pub const Ordinary = error{};
+    pub const Declined = error{};
+    const after_ref = rsql.Read(.{
+        .sql = "SELECT session_ref,workspace_key,next_position FROM session WHERE session_ref>?1 ORDER BY session_ref",
+        .Args = struct { after: []const u8 },
+        .Row = struct { head: rsql.SessionHead },
+        .cardinality = .each,
+    });
+
+    input: Input,
+    counted: u64 = 0,
+    page_rows: u64 = 0,
+    /// The page's argument, which its statement reads in place.
+    after: change_ring.Id = @splat(0),
+    after_len: usize = 0,
+    /// The last row a page stepped.
+    last: change_ring.Id = undefined,
+
+    pub fn step(t: *TestingSessionPages, r: *transition.Round(TestingSessionPages), ran: ?rounds.At) !transition.Next(TestingSessionPages) {
+        if (ran != null) {
+            if (t.page_rows == 0) return .{ .done = t.counted };
+            t.after = t.last;
+            t.after_len = t.after.len;
+        }
+        t.page_rows = 0;
+        r.readEach(after_ref, .{ .after = t.after[0..t.after_len] }, 1, t);
+        return .{ .round = if (ran == null) .first else .next };
+    }
+
+    pub fn visit(t: *TestingSessionPages, row: *const after_ref.Row) bool {
+        t.counted += 1;
+        t.page_rows += 1;
+        t.last = row.head.ref;
+        return true;
+    }
+};
+
+test "a transition's paged round runs again for each page" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            for ([_][]const u8{ "pages-a", "pages-b", "pages-c" }) |key| _ = try configureTestSession(&storage, key);
+            const sessions = try store_testing.queryU64(&storage, "SELECT count(*) FROM session", .{});
+            const rounds = storage.testing_content_work.rounds;
+            try std.testing.expectEqual(sessions, try transition.apply(&storage, TestingSessionPages, .{}, .{}));
+            // A page per Session, then the empty one.
+            try std.testing.expectEqual(rounds + sessions + 1, storage.testing_content_work.rounds);
+        }
+    }.run);
+}
+
+test "a transition's rounds run in declared order and only a paged round repeats" {
+    const R = transition.rounds(.{
+        .a = .{ .always, error.TestingRead },
+        .b = .{ .paged, error.TestingRead },
+        .c = .{ .branch, error.TestingRead },
+    });
+    const At = R.At;
+    // Rows: the round that ran (none first); columns: a, b, c next.
+    const cases = [_]struct { last: ?At, allowed: [3]bool }{
+        .{ .last = null, .allowed = .{ true, true, true } },
+        .{ .last = .a, .allowed = .{ false, true, true } },
+        .{ .last = .b, .allowed = .{ false, true, true } },
+        .{ .last = .c, .allowed = .{ false, false, false } },
+    };
+    for (cases) |row| for ([_]At{ .a, .b, .c }, row.allowed) |next, allowed| {
+        try std.testing.expectEqual(allowed, R.follows(row.last, next));
+    };
+}
+
 test "the touch oracle names a Session whose rows changed without a touch" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
@@ -2805,6 +3009,7 @@ test "Store entry points queue and fence only through canonical access" {
         @embedFile("sqlite.zig"),
         @embedFile("testing.zig"),
         @embedFile("queue.zig"),
+        @embedFile("transition.zig"),
     };
     var locks: usize = 0;
     var fence_stores: usize = 0;
@@ -8768,6 +8973,117 @@ test "an admission's commit reads the request's settings where its message carri
     }.run);
 }
 
+test "an admission's commit reads the first history round from where its caller remembers the Session resuming, and a stale memory costs only that round" {
+    try store_testing.forEachEngine(struct {
+        const Variant = enum { right, no_memory, other_position, other_cursor, other_base, other_tools };
+
+        /// What a caller remembers of the one Session these cases drive.
+        const Memory = struct {
+            session: []const u8,
+            resume_from: ?historical_domain.Resume,
+
+            fn of(context: *anyopaque, session: []const u8) ?historical_domain.Resume {
+                const memory: *const Memory = @ptrCast(@alignCast(context));
+                return if (std.mem.eql(u8, memory.session, session)) memory.resume_from else null;
+            }
+        };
+
+        /// The entries after `after` and every tool of the set, as a
+        /// request that resumes its tool groups at `cursor` reads them.
+        fn walk(view: *HistoricalView, after: u64, cursor: u64, buffer: []u8) ![]const u8 {
+            while (!try view.validateOutputsStep()) {}
+            _ = try view.coverage();
+            view.expectTools(.all);
+            if (after != 0) view.resumeToolGroups(cursor);
+            var out = std.Io.Writer.fixed(buffer);
+            var rendered: [16 * 1024]u8 = undefined;
+            var position: TestingHistoryCursor = .{ .position = after };
+            while (try position.next(view)) |entry| try out.print("{d}:{s};", .{ entry.position, try renderTestingEntry(view, entry, &rendered) });
+            var tool: historical_domain.HistoricalTool = .{};
+            while (try view.nextTool(&tool)) try out.print("tool {s};", .{tool.name.slice()});
+            return out.buffered();
+        }
+
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try configureTestSession(&storage, "ahead-config");
+            try submitTestMessage(&storage, &tmp, "ahead-0", "ahead-0", session.slice(), "question");
+            var binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            const items = [_][]const u8{"{\"type\":\"message\",\"id\":\"m0\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"answer\"}]}"};
+            var names: [std.enums.values(Variant).len][32]u8 = undefined;
+            for (std.enums.values(Variant), &names) |variant, *name| {
+                // What the last request's view ended with, as a caller keeps it.
+                var last: HistoricalView = undefined;
+                var last_settings: HistoricalSettings = undefined;
+                storage.openHistoricalView(binding, &last);
+                try last.settings(&last_settings);
+                var scratch: [8 * 1024]u8 = undefined;
+                _ = try walk(&last, 0, 0, &scratch);
+                var end: u64 = 0;
+                while (try last.nextEntry(end)) |entry| end = entry.position;
+                const right: historical_domain.Resume = .{
+                    .after_position = end,
+                    .group_cursor = last.toolGroupCursor(),
+                    .keys = last.resumeKeys(),
+                    .tool_set = last.currentDeclaration().tool_set_id,
+                    .tools = .all,
+                };
+                last.close();
+                try std.testing.expect(end != 0);
+
+                try settleItemsForTesting(&storage, &tmp, binding, &items, "answer");
+                const key = try std.fmt.bufPrint(name, "ahead-{t}", .{variant});
+                try submitTestMessage(&storage, &tmp, key, key, session.slice(), "follow-up");
+                var remembered = right;
+                switch (variant) {
+                    .right, .no_memory, .other_position => {},
+                    .other_cursor => remembered.group_cursor += 1,
+                    .other_base => remembered.keys.base += 1,
+                    .other_tools => remembered.tool_set += 1,
+                }
+                var memory: Memory = .{ .session = session.slice(), .resume_from = if (variant == .no_memory) null else remembered };
+                var view: HistoricalView = undefined;
+                var settings: HistoricalSettings = undefined;
+                const admitted = (try storage.admitModelAttemptInto(.message, .{}, .{
+                    .view = &view,
+                    .settings = &settings,
+                    .remembered = .{ .context = &memory, .of = Memory.of },
+                })).?;
+                binding = admitted.permit.binding;
+                if (!case.rerun) try std.testing.expectEqual(case.engine == .mysql, admitted.request_started);
+                if (!admitted.request_started) storage.openHistoricalView(binding, &view);
+                defer view.close();
+                // The request reads on from where its caller's memo ended,
+                // or, its memo lost, from the start.
+                const after = if (variant == .other_position) 0 else right.after_position;
+                const rounds = ViewRounds.start(&storage);
+                try view.settings(&settings);
+                var buffer: [8 * 1024]u8 = undefined;
+                const read = try walk(&view, after, right.group_cursor, &buffer);
+                // Only the round read from where the request does read, by
+                // the keys its own boundary gives, is its own.
+                const ahead: u16 = if (!admitted.request_started) 2 else if (variant == .right) 0 else 1;
+                try std.testing.expectEqual(ahead, rounds.taken().rounds);
+
+                var plain_view: HistoricalView = undefined;
+                var plain_settings: HistoricalSettings = undefined;
+                storage.openHistoricalView(binding, &plain_view);
+                defer plain_view.close();
+                try plain_view.settings(&plain_settings);
+                var plain_buffer: [8 * 1024]u8 = undefined;
+                try std.testing.expectEqualStrings(try walk(&plain_view, after, right.group_cursor, &plain_buffer), read);
+                try std.testing.expect(std.mem.indexOf(u8, read, "follow-up") != null);
+                try std.testing.expect(std.mem.indexOf(u8, read, "tool ") != null);
+                try std.testing.expectEqual(plain_view.toolGroupCursor(), view.toolGroupCursor());
+            }
+        }
+    }.run);
+}
+
 test "an admission weighs uncovered bytes in its write, and admits the compaction they call for" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
@@ -10616,23 +10932,30 @@ test "every function that enters the Store has a round budget" {
         @embedFile("sqlite.zig"),
         @embedFile("testing.zig"),
         @embedFile("queue.zig"),
+        @embedFile("transition.zig"),
     };
     var found: std.EnumSet(EntryPoint) = .empty;
     var fixtures: [entering_fixtures.len]bool = @splat(false);
-    inline for (sources) |source| {
+    // `transition.apply` enters for the entry point that calls it, so a
+    // call to it enters as `enter` does, and its own `enter` is its callers'.
+    // transition.zig, listed last.
+    const runner = sources[sources.len - 1];
+    try std.testing.expect(std.mem.indexOf(u8, runner, "pub fn apply" ++ "(self: *Store") != null);
+    inline for (sources) |source| inline for (.{ "enter", "transition.apply" }) |callee| {
         var at: usize = 0;
-        while (std.mem.indexOfPos(u8, source, at, "enter" ++ "(")) |index| : (at = index + 1) {
+        while (std.mem.indexOfPos(u8, source, at, callee ++ "(")) |index| : (at = index + 1) {
             if (index > 0 and (std.ascii.isAlphanumeric(source[index - 1]) or source[index - 1] == '_')) continue;
             if (std.mem.endsWith(u8, source[0..index], "fn ")) continue;
             // Every call enters with the Store it is a method of.
-            if (!std.mem.startsWith(u8, source[index..], "enter" ++ "(self, ")) {
-                std.debug.print("an enter call takes another first argument: {s}\n", .{source[index..][0..@min(40, source.len - index)]});
+            if (!std.mem.startsWith(u8, source[index..], callee ++ "(self, ")) {
+                std.debug.print("an {s} call takes another first argument: {s}\n", .{ callee, source[index..][0..@min(40, source.len - index)] });
                 return error.EnterWithoutSelf;
             }
             const before = source[0..index];
             const fn_at = @max(std.mem.lastIndexOf(u8, before, " fn ") orelse 0, std.mem.lastIndexOf(u8, before, "\nfn ") orelse 0) + " fn ".len;
             var end = fn_at;
             while (std.ascii.isAlphanumeric(source[end]) or source[end] == '_') end += 1;
+            if (source.ptr == runner.ptr and std.mem.eql(u8, source[fn_at..end], "apply")) continue;
             // The body a public entry point queues; only a test fixture
             // enters outside one, holding the Store for itself.
             const held = std.mem.endsWith(u8, source[fn_at..end], "Held");
@@ -10659,7 +10982,7 @@ test "every function that enters the Store has a round budget" {
             try std.testing.expect(!found.contains(point));
             found.insert(point);
         }
-    }
+    };
     try std.testing.expectEqual(std.enums.values(EntryPoint).len, found.count());
     for (fixtures) |seen| try std.testing.expect(seen);
 }
@@ -11579,17 +11902,17 @@ test "complete historical tool-result traversal scales with groups and calls, in
 /// A bound fixture statement that adds `?1` failed Operations after
 /// Operation `?2`, in its Turn.
 const failed_operations_sql = "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position," ++
-    "attempt_ordinal,output_reservation,resolution_code,resolved_at,tool_set_id) " ++
+    "attempt_ordinal,output_reservation,resolution_code,resolved_at,tool_set_id,context_window) " ++
     "WITH RECURSIVE sequence(value) AS (SELECT 1 UNION ALL SELECT value+1 FROM sequence WHERE value<?1) " ++
     "SELECT 100+value,current.turn_id,current.session_ref,current.settings_revision,current.input_cutoff,100+value," ++
-    "1,0,'failed',1,current.tool_set_id FROM sequence CROSS JOIN model_operation current WHERE current.operation_id=?2";
+    "1,0,'failed',1,current.tool_set_id,current.context_window FROM sequence CROSS JOIN model_operation current WHERE current.operation_id=?2";
 
 /// `failed_operations_sql`, the Operations alternating in purpose.
 const failed_purpose_operations_sql = "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,purpose," ++
-    "output_reservation,attempt_ordinal,resolution_code,resolved_at,tool_set_id) " ++
+    "output_reservation,attempt_ordinal,resolution_code,resolved_at,tool_set_id,context_window) " ++
     "WITH RECURSIVE sequence(value) AS (SELECT 1 UNION ALL SELECT value+1 FROM sequence WHERE value<?1) " ++
     "SELECT 100+value,current.turn_id,current.session_ref,current.settings_revision,current.input_cutoff,100+value,value%2," ++
-    "0,1,'failed',1,current.tool_set_id FROM sequence CROSS JOIN model_operation current WHERE current.operation_id=?2";
+    "0,1,'failed',1,current.tool_set_id,current.context_window FROM sequence CROSS JOIN model_operation current WHERE current.operation_id=?2";
 
 test "historical accepted output selection work excludes failed Operation population, in rounds" {
     try store_testing.forEachEngine(struct {
@@ -11774,9 +12097,9 @@ test "an Activity page costs the same steps after 10 or 10,000 earlier rows, in 
             try store_testing.withoutForeignKeys(&storage, "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at) " ++
                 sequence_to_first_argument ++
                 "SELECT value,?2,value+1000000,?4,?3+4*(value-1),value,1 FROM sequence", .{ history, session.slice(), start, content });
-            try store_testing.withoutForeignKeys(&storage, "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,attempt_ordinal,resolution_code,resolved_at,tool_set_id) " ++
+            try store_testing.withoutForeignKeys(&storage, "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,attempt_ordinal,resolution_code,resolved_at,tool_set_id,context_window) " ++
                 sequence_to_first_argument ++
-                "SELECT value,value,?2,1,value,?3+4*(value-1),0,1,'tool_proposals',1,(SELECT coalesce(loaded_tool_set_id,tool_set_id) FROM session WHERE session_ref=?2) FROM sequence", .{ history, session.slice(), start });
+                "SELECT value,value,?2,1,value,?3+4*(value-1),0,1,'tool_proposals',1,(SELECT coalesce(loaded_tool_set_id,tool_set_id) FROM session WHERE session_ref=?2),?4 FROM sequence", .{ history, session.slice(), start, @import("../product_defaults.zig").unlisted_context_window });
             try store_testing.withoutForeignKeys(&storage, "INSERT INTO model_output_item(operation_id,item_ordinal,session_ref,session_position,item_kind,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,extras_content_id,part_count) " ++
                 sequence_to_first_argument ++
                 "SELECT value,0,?2,?3+4*(value-1)+1,3,1,zeroblob(32),0,?4,0 FROM sequence", .{ history, session.slice(), start, content });
@@ -11874,9 +12197,9 @@ test "a forward one-row page of a person's Messages costs the same steps past 10
             const content = try store_testing.queryU64(&storage, "SELECT instructions_content_id FROM session WHERE session_ref=?1", .{session.slice()});
             // Each tool group names its Turn before the Turn row exists. A
             // cancelled Turn needs no answer content.
-            try store_testing.withoutForeignKeys(&storage, "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,attempt_ordinal,resolution_code,resolved_at,tool_set_id) " ++
+            try store_testing.withoutForeignKeys(&storage, "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,attempt_ordinal,resolution_code,resolved_at,tool_set_id,context_window) " ++
                 sequence_to_first_argument ++
-                "SELECT 1000+value,1000+value,?2,1,1000+value,?3+3*(value-1),0,1,'tool_proposals',1,(SELECT coalesce(loaded_tool_set_id,tool_set_id) FROM session WHERE session_ref=?2) FROM sequence", .{ history, session.slice(), start });
+                "SELECT 1000+value,1000+value,?2,1,1000+value,?3+3*(value-1),0,1,'tool_proposals',1,(SELECT coalesce(loaded_tool_set_id,tool_set_id) FROM session WHERE session_ref=?2),?4 FROM sequence", .{ history, session.slice(), start, @import("../product_defaults.zig").unlisted_context_window });
             try store_testing.withoutForeignKeys(&storage, "INSERT INTO model_output_item(operation_id,item_ordinal,session_ref,session_position,item_kind,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,extras_content_id,part_count) " ++
                 sequence_to_first_argument ++
                 "SELECT 1000+value,0,?2,?3+3*(value-1),3,1,zeroblob(32),0,?4,0 FROM sequence", .{ history, session.slice(), start, content });
@@ -15914,6 +16237,251 @@ test "configure parent refuses every widening field, missing or ended parents an
     }.run);
 }
 
+/// One model's selected facts; the caller controls chronology, not a live provider.
+fn saveFrozenContextWindow(storage: *Store, model: []const u8, window: ?u32) !void {
+    try storage.saveModelFacts(&.{.{ .id = model, .context_window = window, .efforts = .{}, .openai_listed = true }}, null);
+}
+
+fn expectFrozenContextWindow(storage: *Store, binding: AttemptBinding, expected: u64) !void {
+    try std.testing.expectEqual(expected, try store_testing.queryU64(storage, "SELECT context_window FROM model_operation WHERE operation_id=?1", .{binding.operation_id}));
+}
+
+test "frozen context window selects the whole saved-or-shipped domain and survives retry reopen" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            const Variant = enum { shipped, unknown, saved, only, missing, empty, null_window, zero, maximum };
+            inline for (std.enums.values(Variant)) |variant| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                const model = if (variant == .unknown or variant == .only) "d238-only" else "gpt-6.1-sol";
+                var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+                const create = try completeConfiguration("window-config", "", try canonicalCwd(std.testing.io, &workspace_buffer), model);
+                const session = (try storage.configure(&create, .{})).accepted.session;
+                const expected: u64 = switch (variant) {
+                    .shipped, .unknown => model_capability.contextWindow(@import("../model_catalog.zig").shipped, model),
+                    .saved, .only => 321,
+                    .missing, .empty, .null_window => product_defaults.unlisted_context_window,
+                    .zero => 0,
+                    .maximum => std.math.maxInt(u32),
+                };
+                switch (variant) {
+                    .shipped, .unknown => {},
+                    .missing => try saveFrozenContextWindow(&storage, "unrelated", 321),
+                    .empty => try storage.saveModelFacts(&.{}, null),
+                    .null_window => try saveFrozenContextWindow(&storage, model, null),
+                    else => try saveFrozenContextWindow(&storage, model, @intCast(expected)),
+                }
+                try submitTestMessage(&storage, &tmp, "window-one", "window-one", session.slice(), "first");
+                const first = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
+                try expectFrozenContextWindow(&storage, first, expected);
+                try saveFrozenContextWindow(&storage, model, 500);
+                try storage.close();
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                const retry = (try admitRetryForTesting(&storage)).?.permit.binding;
+                try std.testing.expectEqual(first.operation_id, retry.operation_id);
+                try expectFrozenContextWindow(&storage, retry, expected);
+                try settleMessagesForTesting(&storage, &tmp, retry, 1, false, null);
+                try submitTestMessage(&storage, &tmp, "window-next", "window-next", session.slice(), "next");
+                const next = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
+                try expectFrozenContextWindow(&storage, next, 500);
+            }
+        }
+    }.run);
+}
+
+test "frozen context window rides every model admission kind without another round" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try configureTestSession(&storage, "window-kinds");
+            try saveFrozenContextWindow(&storage, "model-a", 1000);
+            try submitTestMessage(&storage, &tmp, "window-first", "window-first", session.slice(), "first");
+            const first = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
+            try expectFrozenContextWindow(&storage, first, 1000);
+            try submitTestMessage(&storage, &tmp, "window-second", "window-second", session.slice(), "second");
+            try settleMessagesForTesting(&storage, &tmp, first, 1, false, null);
+            try saveFrozenContextWindow(&storage, "model-a", 2000);
+            const joined = (try storage.admitModelAttempt(.open_turn_message, .{})).?.permit.binding;
+            try expectFrozenContextWindow(&storage, joined, 2000);
+            try settleCallsForTesting(&storage, &tmp, joined, "window-call", &.{.{
+                .item_id = "unknown-item",
+                .name = "unknown_tool",
+                .encoded_call_id = "unknown-call",
+                .decoded_call_id = "unknown-call",
+                .encoded_arguments = "{}",
+                .decoded_arguments = "{}",
+            }});
+            try saveFrozenContextWindow(&storage, "model-b", 3000);
+            var patch: wire_request.ConfigureCommand = .{};
+            try patch.key.set("window-model-switch");
+            patch.session = session;
+            patch.configuration.model.state = .value;
+            try patch.configuration.model.value.set("model-b");
+            patch.configuration.compaction_trigger.state = .value;
+            try patch.configuration.compaction_trigger.value.set("1000");
+            try std.testing.expect(try storage.configure(&patch, .{}) == .accepted);
+            const continuation = (try storage.admitModelAttempt(.tool_continuation, .{})).?.permit.binding;
+            try expectFrozenContextWindow(&storage, continuation, 3000);
+            try expectFrozenContextWindow(&storage, first, 1000);
+            try expectFrozenContextWindow(&storage, joined, 2000);
+        }
+    }.run);
+}
+
+/// A compact history with independently chosen byte sizes: at window=100 the
+/// three targets (400,100,25) retain first+[120,30,10], first+[30,10], first+[10].
+fn frozenWindowHistory(storage: *Store, tmp: *std.testing.TmpDir, session: []const u8) !void {
+    try submitTestMessage(storage, tmp, "window-first", "window-first", session, "first");
+    inline for (.{ .{ "window-big", 600, 'b' }, .{ "window-middle", 120, 'm' }, .{ "window-small", 30, 's' }, .{ "window-last", 10, 'n' } }) |item| {
+        const text: [item[1]]u8 = @splat(item[2]);
+        try submitTestMessage(storage, tmp, item[0], item[0], session, &text);
+    }
+}
+
+fn expectFrozenFloor(storage: *Store, binding: AttemptBinding, level: u64, oldest: []const u8, dropped: u64) !void {
+    const position = try store_testing.queryU64(storage, "SELECT entry.session_position FROM conversation_entry entry JOIN message_admission msg ON msg.admission_id=entry.source_admission_id WHERE msg.command_key=?1 AND entry.entry_kind=1", .{oldest});
+    try std.testing.expectEqual(position - 1, try store_testing.queryU64(storage, "SELECT history_floor FROM model_operation WHERE operation_id=?1", .{binding.operation_id}));
+    try std.testing.expectEqual(level, try store_testing.queryU64(storage, "SELECT history_level FROM model_operation WHERE operation_id=?1", .{binding.operation_id}));
+    try std.testing.expectEqual(dropped, try store_testing.queryU64(storage, "SELECT history_dropped FROM model_operation WHERE operation_id=?1", .{binding.operation_id}));
+    var view: HistoricalView = undefined;
+    try openCheckedView(storage, binding, &view);
+    defer view.close();
+    var cursor: TestingHistoryCursor = .{};
+    const first = (try cursor.next(&view)).?;
+    var bytes: [1024]u8 = undefined;
+    try std.testing.expectEqualStrings("first", try renderTestingEntry(&view, first, &bytes));
+    const sizes = [_]usize{ 120, 30, 10 };
+    const letters = [_]u8{ 'm', 's', 'n' };
+    const start: usize = if (std.mem.eql(u8, oldest, "window-middle")) 0 else if (std.mem.eql(u8, oldest, "window-small")) 1 else 2;
+    for (sizes[start..], letters[start..]) |size, letter| {
+        const entry = (try cursor.next(&view)).?;
+        const text = try renderTestingEntry(&view, entry, &bytes);
+        try std.testing.expectEqual(size, text.len);
+        for (text) |byte| try std.testing.expectEqual(letter, byte);
+    }
+    try std.testing.expect((try cursor.next(&view)) == null);
+}
+
+test "frozen context window refresh before settlement and successor admission cannot change escalation" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            // Both directions, plus a frozen exhausted walk that a live read
+            // would incorrectly turn into another compaction.
+            for ([_]u32{ 100, 1000, 100000 }) |original| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                const session = try configureTestSession(&storage, "window-refresh");
+                try frozenWindowHistory(&storage, &tmp, session.slice());
+                const assistant = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                try storage.settleModelAttemptFailure(assistant, .{ .uncorrelated = "context_overflow" }, .context_overflow, .{});
+                try saveFrozenContextWindow(&storage, "model-a", original);
+                const full = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                try expectFrozenContextWindow(&storage, full, original);
+                try saveFrozenContextWindow(&storage, "model-a", if (original == 100) 100000 else 100);
+                try storage.settleModelAttemptFailure(full, .{ .uncorrelated = "context_overflow" }, .context_overflow, .{});
+                try saveFrozenContextWindow(&storage, "model-a", if (original == 100) 200000 else 200);
+                // Restart with a settled overflow and a different catalog.
+                try storage.close();
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                const next = try storage.admitNextModelAttempt(.{});
+                try std.testing.expectEqual(original != 100000, next != null);
+                if (original == 100000) {
+                    try expectActivityOutcome(&storage, session.slice(), full, .context_full, "ResourceExceeded");
+                } else {
+                    const deeper = next.?.permit.binding;
+                    try expectFrozenFloor(&storage, deeper, if (original == 100) 1 else 3, "window-middle", 1);
+                    try expectFrozenContextWindow(&storage, deeper, if (original == 100) 200000 else 200);
+                    try expectFrozenContextWindow(&storage, full, original);
+                }
+            }
+        }
+    }.run);
+}
+
+test "frozen context window covers all levels reservation exhaustion and inherited floors" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            for ([_]u64{ 0, 100, 200 }) |reservation| {
+                for ([_]bool{ false, true }) |accept_base| {
+                    var tmp = std.testing.tmpDir(.{});
+                    defer tmp.cleanup();
+                    var storage: Store = undefined;
+                    try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                    defer storage.close() catch unreachable;
+                    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+                    var create = try completeConfiguration("window-levels", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
+                    create.configuration.output_reservation.state = .value;
+                    var count: [20]u8 = undefined;
+                    try create.configuration.output_reservation.value.set(try std.fmt.bufPrint(&count, "{d}", .{reservation}));
+                    const session = (try storage.configure(&create, .{})).accepted.session;
+                    try frozenWindowHistory(&storage, &tmp, session.slice());
+                    var previous = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                    try storage.settleModelAttemptFailure(previous, .{ .uncorrelated = "context_overflow" }, .context_overflow, .{});
+                    try saveFrozenContextWindow(&storage, "model-a", 100);
+                    previous = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                    const count_levels: usize = if (reservation == 0) 3 else 1;
+                    for (0..count_levels) |index| {
+                        try storage.settleModelAttemptFailure(previous, .{ .uncorrelated = "context_overflow" }, .context_overflow, .{});
+                        const deeper = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                        const oldest = if (reservation != 0 or index == 2) "window-last" else if (index == 1) "window-small" else "window-middle";
+                        try expectFrozenFloor(&storage, deeper, index + 1, oldest, if (reservation != 0) 3 else 1);
+                        previous = deeper;
+                    }
+                    if (!accept_base) {
+                        try storage.settleModelAttemptFailure(previous, .{ .uncorrelated = "context_overflow" }, .context_overflow, .{});
+                        try std.testing.expect((try storage.admitNextModelAttempt(.{})) == null);
+                        try expectActivityOutcome(&storage, session.slice(), previous, .context_full, "ResourceExceeded");
+                        continue;
+                    }
+                    // A successful base transfers its floor to the assistant's recipe.
+                    try settleCompactionForTesting(&storage, &tmp, previous, &.{.compaction});
+                    const successor = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                    try expectFrozenContextWindow(&storage, successor, 100);
+                    {
+                        var view: HistoricalView = undefined;
+                        try openCheckedView(&storage, successor, &view);
+                        defer view.close();
+                        const coverage = try view.coverage();
+                        try std.testing.expectEqual(try store_testing.queryU64(&storage, "SELECT history_floor FROM model_operation WHERE operation_id=?1", .{previous.operation_id}), coverage.floor.position);
+                        try std.testing.expect(!coverage.floor.own);
+                    }
+                    try storage.settleModelAttemptFailure(successor, .{ .uncorrelated = "context_overflow" }, .context_overflow, .{});
+                    try std.testing.expect((try storage.admitNextModelAttempt(.{})) == null);
+                    // A new model must not inherit the old model's base or floor.
+                    try saveFrozenContextWindow(&storage, "model-b", 700);
+                    var patch: wire_request.ConfigureCommand = .{};
+                    try patch.key.set("window-base-switch");
+                    patch.session = session;
+                    patch.configuration.model.state = .value;
+                    try patch.configuration.model.value.set("model-b");
+                    patch.configuration.compaction_trigger.state = .value;
+                    try patch.configuration.compaction_trigger.value.set("700");
+                    try std.testing.expect(try storage.configure(&patch, .{}) == .accepted);
+                    try submitTestMessage(&storage, &tmp, "window-new-model", "window-new-model", session.slice(), "new");
+                    const switched = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                    try expectFrozenContextWindow(&storage, switched, 700);
+                    var view: HistoricalView = undefined;
+                    try openCheckedView(&storage, switched, &view);
+                    defer view.close();
+                    const coverage = try view.coverage();
+                    try std.testing.expectEqual(@as(u64, 0), coverage.floor.position);
+                    try std.testing.expect(coverage.anchor == null);
+                }
+            }
+        }
+    }.run);
+}
+
 /// Calls the admission owner's SQL, rather than duplicating it in a fixture.
 const EffortCarryRead = struct {
     const query = rsql.Read(.{
@@ -15982,10 +16550,10 @@ test "admitted effort carry agrees with replay recipe across the owner domain" {
                 // Closed fixture includes NULL boundaries. The codec declines
                 // a concrete-to-NULL transition; compare only encodable folds.
                 try store_testing.exec(&storage, "UPDATE model_operation SET admission_position=2 WHERE session_ref=?1", .{session.slice()});
-                try store_testing.exec(&storage, "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,purpose,output_reservation,reasoning_effort,attempt_ordinal,resolution_code,resolved_at,tool_set_id,history_floor) SELECT 90,turn_id,session_ref,1,input_cutoff,10,1,0,'high',1,'failed',1,tool_set_id,10 FROM model_operation WHERE session_ref=?1 AND admission_position=2", .{session.slice()});
-                try store_testing.exec(&storage, "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,purpose,output_reservation,reasoning_effort,attempt_ordinal,resolution_code,resolved_at,tool_set_id,history_floor) SELECT 91,turn_id,session_ref,2,input_cutoff,20,1,0,'xhigh',1,'failed',1,tool_set_id,20 FROM model_operation WHERE session_ref=?1 AND admission_position=2", .{session.slice()});
-                try store_testing.exec(&storage, "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,reasoning_effort,attempt_ordinal,resolution_code,resolved_at,tool_set_id) SELECT 92,turn_id,session_ref,1,input_cutoff,22,0,'none',1,'failed',1,tool_set_id FROM model_operation WHERE session_ref=?1 AND admission_position=2", .{session.slice()});
-                try store_testing.exec(&storage, "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,reasoning_effort,attempt_ordinal,resolution_code,resolved_at,tool_set_id) SELECT 93,turn_id,session_ref,1,input_cutoff,25,0,NULL,1,'failed',1,tool_set_id FROM model_operation WHERE session_ref=?1 AND admission_position=2", .{session.slice()});
+                try store_testing.exec(&storage, "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,purpose,output_reservation,reasoning_effort,attempt_ordinal,resolution_code,resolved_at,tool_set_id,history_floor,context_window) SELECT 90,turn_id,session_ref,1,input_cutoff,10,1,0,'high',1,'failed',1,tool_set_id,10,context_window FROM model_operation WHERE session_ref=?1 AND admission_position=2", .{session.slice()});
+                try store_testing.exec(&storage, "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,purpose,output_reservation,reasoning_effort,attempt_ordinal,resolution_code,resolved_at,tool_set_id,history_floor,context_window) SELECT 91,turn_id,session_ref,2,input_cutoff,20,1,0,'xhigh',1,'failed',1,tool_set_id,20,context_window FROM model_operation WHERE session_ref=?1 AND admission_position=2", .{session.slice()});
+                try store_testing.exec(&storage, "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,reasoning_effort,attempt_ordinal,resolution_code,resolved_at,tool_set_id,context_window) SELECT 92,turn_id,session_ref,1,input_cutoff,22,0,'none',1,'failed',1,tool_set_id,context_window FROM model_operation WHERE session_ref=?1 AND admission_position=2", .{session.slice()});
+                try store_testing.exec(&storage, "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,reasoning_effort,attempt_ordinal,resolution_code,resolved_at,tool_set_id,context_window) SELECT 93,turn_id,session_ref,1,input_cutoff,25,0,NULL,1,'failed',1,tool_set_id,context_window FROM model_operation WHERE session_ref=?1 AND admission_position=2", .{session.slice()});
                 try store_testing.exec(&storage, "INSERT INTO model_output_item(operation_id,item_ordinal,session_ref,session_position,item_kind,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,phase,extras_content_id,part_count) SELECT 90,0,session_ref,11,4,1,item_id_digest,0,0,extras_content_id,0 FROM model_output_item WHERE session_ref=?1 AND item_ordinal=0 LIMIT 1", .{session.slice()});
                 try store_testing.exec(&storage, "INSERT INTO model_output_item(operation_id,item_ordinal,session_ref,session_position,item_kind,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,phase,extras_content_id,part_count) SELECT 91,0,session_ref,21,4,1,item_id_digest,0,0,extras_content_id,0 FROM model_output_item WHERE operation_id=90 AND session_ref=?1", .{session.slice()});
                 const entries = [_]Entry{ .{ .position = 2, .model = "unlisted-A", .effort = top }, .{ .position = 10, .model = "unlisted-A", .effort = .high }, .{ .position = 20, .model = "unlisted-B", .effort = .xhigh }, .{ .position = 22, .model = "unlisted-A", .effort = .none }, .{ .position = 25, .model = "unlisted-A", .effort = null } };
@@ -16046,7 +16614,7 @@ test "effort refusal eligibility excludes a source refused by any Operation" {
             const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             // A second snapshot sharing the source isolates the source's
             // immutable refusal fact from the exact refusing Operation.
-            try store_testing.exec(&storage, "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,reasoning_effort,attempt_ordinal,resolution_code,resolved_at,tool_set_id,effort_source_revision,previous_reasoning_effort,effort_update,previous_effort_override) SELECT 999,turn_id,session_ref,settings_revision,input_cutoff,999,0,reasoning_effort,1,'failed',1,tool_set_id,effort_source_revision,previous_reasoning_effort,effort_update,previous_effort_override FROM model_operation WHERE operation_id=?1", .{binding.operation_id});
+            try store_testing.exec(&storage, "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,reasoning_effort,attempt_ordinal,resolution_code,resolved_at,tool_set_id,effort_source_revision,previous_reasoning_effort,effort_update,previous_effort_override,context_window) SELECT 999,turn_id,session_ref,settings_revision,input_cutoff,999,0,reasoning_effort,1,'failed',1,tool_set_id,effort_source_revision,previous_reasoning_effort,effort_update,previous_effort_override,context_window FROM model_operation WHERE operation_id=?1", .{binding.operation_id});
             try std.testing.expect(try EffortCarryRead.refusalEligible(&storage, binding.operation_id));
             try std.testing.expect(try EffortCarryRead.refusalEligible(&storage, 999));
             try storage.settleModelAttemptFailure(binding, .{ .correlated = .{ .code = "provider_http_400", .request_id = .{}, .report = "unsupported_value: reasoning.effort" } }, .effort_change_refused, .{});

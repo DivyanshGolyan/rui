@@ -1,6 +1,12 @@
 test {
     _ = @import("widgets/Panel.zig");
     _ = @import("app_settings.zig");
+    _ = @import("chat_info.zig");
+    _ = @import("model_choice.zig");
+    _ = @import("panel_editor.zig");
+    _ = @import("SignIn.zig");
+    _ = @import("choice_row.zig");
+    _ = @import("sign_in.zig");
     _ = @import("widgets/Split.zig");
     _ = @import("widgets/Stack.zig");
     _ = @import("widgets/Layer.zig");
@@ -25,7 +31,7 @@ test {
     _ = @import("StatusRow.zig");
     _ = @import("FactsRow.zig");
     _ = @import("ActivityBlock.zig");
-    _ = @import("Shortcuts.zig");
+    _ = @import("keys_panel.zig");
     _ = @import("SessionChrome.zig");
     _ = @import("TerminalApp.zig");
     _ = @import("Installation.zig");
