@@ -9,8 +9,10 @@ const Faults = @import("../Store.zig").Faults;
 pub const Kind = enum(u8) { approval = 1, ending = 2 };
 
 const insert = rsql.Write(.{
-    .sql = "INSERT INTO session_forward(forward_id,target_ref,child_ref,kind,source_id,position,ordinal,delivered_at) " ++
-        "SELECT ?1,s.parent_ref,?2,?3,?4,NULL,0,NULL FROM session s WHERE s.session_ref=?5 AND s.parent_ref IS NOT NULL " ++
+    .sql = "INSERT INTO session_forward(forward_id,target_ref,child_ref,kind,source_id,position,ordinal,delivered_at,message_delivered,suppress_message) " ++
+        "SELECT ?1,s.parent_ref,?2,?3,?4,NULL,0,NULL," ++
+        "CASE WHEN ?3=2 AND s.session_ref=?2 AND NOT EXISTS(SELECT 1 FROM session_stop_owed WHERE child_ref=?2 AND settled=0) THEN 0 ELSE NULL END," ++
+        "CASE WHEN ?3=2 AND s.session_ref=?2 AND EXISTS(SELECT 1 FROM session_archive archived WHERE archived.session_ref=s.parent_ref AND archived.command_key IS NOT NULL) THEN 1 ELSE 0 END FROM session s WHERE s.session_ref=?5 AND s.parent_ref IS NOT NULL " ++
         "AND NOT EXISTS(SELECT 1 FROM session_forward f WHERE f.target_ref=s.parent_ref AND f.kind=?3 AND f.source_id=?4)",
     // rsql binds enum tags as text; the Store format saves numeric kinds.
     .Args = struct { forward_id: u64, child: []const u8, kind: u8, source_id: u64, from: []const u8 },
@@ -18,7 +20,8 @@ const insert = rsql.Write(.{
 });
 
 /// Queues `child`'s fact for `from`'s parent, if attached. Forward rows are
-/// owed work, like session_ending_owed, not positioned Session facts yet.
+/// owed work, not positioned Session facts yet. Only the first ending hop
+/// also owes a Message; later hops and approvals have no Message duty.
 pub fn queue(a: anytype, from: []const u8, child: []const u8, kind: Kind, source_id: u64) !void {
     a.write(insert, .{ .forward_id = try a.identity(.forward_id), .child = child, .kind = @backingInt(kind), .source_id = source_id, .from = from });
 }

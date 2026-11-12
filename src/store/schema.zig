@@ -20,7 +20,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 65;
+pub const schema_version: u32 = 67;
 
 pub const IdentityMismatch = struct {
     saved_selector: Bounded(store_path.max_bytes) = .{},
@@ -52,6 +52,8 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 63, .digest = 0x7a09d94b6ba24eea },
     .{ .schema_version = 64, .digest = 0xba89834313d6181f },
     .{ .schema_version = 65, .digest = 0x78987c40a911dee5 },
+    .{ .schema_version = 66, .digest = 0x7eb536169708902e },
+    .{ .schema_version = 67, .digest = 0xfe425e8cc64247f5 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -438,6 +440,81 @@ pub const migrations = [_]Migration{
             "ALTER TABLE model_operation ADD COLUMN tool_set_id BIGINT AFTER history_dropped",
             "UPDATE model_operation o JOIN session_revision r ON r.session_ref=o.session_ref AND r.revision=o.settings_revision SET o.tool_set_id=coalesce(r.loaded_tool_set_id,r.tool_set_id)",
             "ALTER TABLE model_operation MODIFY tool_set_id BIGINT NOT NULL,ADD CHECK(tool_set_id>0),ADD FOREIGN KEY(tool_set_id) REFERENCES tool_set(tool_set_id)",
+        },
+    },
+    // Schema 66 (base 65 + 1): Operation-owned effort emissions/refusals and wire 13.
+    .{
+        .from = 65,
+        .sqlite = &.{
+            "CREATE TABLE revision_effort_before_66 AS SELECT r.session_ref,r.revision,(SELECT choice.revision FROM session_revision choice LEFT JOIN session_revision before_choice ON before_choice.session_ref=choice.session_ref AND before_choice.revision=choice.revision-1 WHERE choice.session_ref=r.session_ref AND choice.revision<=r.revision AND (choice.revision=1 OR choice.model<>before_choice.model OR NOT (choice.reasoning_effort IS before_choice.reasoning_effort) OR EXISTS(SELECT 1 FROM session_change changed WHERE changed.session_ref=choice.session_ref AND changed.revision=choice.revision AND changed.field IN ('reasoning_effort','model'))) ORDER BY choice.revision DESC LIMIT 1) AS effort_source_revision FROM session_revision r",
+            "ALTER TABLE session_revision RENAME TO session_revision_before_66",
+            "CREATE TABLE session_revision(\n session_ref TEXT NOT NULL REFERENCES session(session_ref),\n revision INTEGER NOT NULL CHECK(revision>0),\n command_key TEXT NOT NULL UNIQUE REFERENCES core_command(command_key),\n workspace TEXT NOT NULL,\n provider TEXT NOT NULL CHECK(length(CAST(provider AS BLOB)) BETWEEN 1 AND 16 AND provider GLOB '[a-z]*' AND (provider NOT GLOB '*[^a-z0-9_-]*' AND length(provider)=length(CAST(provider AS BLOB)))),\n model TEXT NOT NULL,\n instructions_content_id INTEGER NOT NULL REFERENCES content(content_id),\n instructions_updated INTEGER NOT NULL CHECK(instructions_updated IN (0,1)),\n tool_set_id INTEGER NOT NULL REFERENCES tool_set(tool_set_id) CHECK(tool_set_id>0),\n loaded_tool_set_id INTEGER REFERENCES tool_set(tool_set_id),\n permission_mode INTEGER NOT NULL CHECK(permission_mode BETWEEN 0 AND 1),\n output_schema_content_id INTEGER REFERENCES content(content_id),\n compaction_trigger INTEGER CHECK(compaction_trigger IS NULL OR compaction_trigger>0),\n output_reservation INTEGER CHECK(output_reservation IS NULL OR output_reservation>=0),\n reasoning_effort TEXT CHECK(reasoning_effort IS NULL OR (reasoning_effort='none' OR reasoning_effort='low' OR reasoning_effort='medium' OR reasoning_effort='high' OR reasoning_effort='xhigh' OR reasoning_effort='max')),\n label TEXT CHECK(label IS NULL OR length(CAST(label AS BLOB)) BETWEEN 1 AND 100),\n effort_source_revision INTEGER NOT NULL DEFAULT 1 CHECK(effort_source_revision>0 AND effort_source_revision<=revision),\n PRIMARY KEY(session_ref,revision),\n FOREIGN KEY(session_ref,effort_source_revision) REFERENCES session_revision(session_ref,revision)\n) STRICT, WITHOUT ROWID",
+            "INSERT INTO session_revision(session_ref,revision,command_key,workspace,provider,model,instructions_content_id,instructions_updated,tool_set_id,loaded_tool_set_id,permission_mode,output_schema_content_id,compaction_trigger,output_reservation,reasoning_effort,label,effort_source_revision) SELECT r.session_ref,r.revision,r.command_key,r.workspace,r.provider,r.model,r.instructions_content_id,r.instructions_updated,r.tool_set_id,r.loaded_tool_set_id,r.permission_mode,r.output_schema_content_id,r.compaction_trigger,r.output_reservation,r.reasoning_effort,r.label,frozen.effort_source_revision FROM session_revision_before_66 r JOIN revision_effort_before_66 frozen ON frozen.session_ref=r.session_ref AND frozen.revision=r.revision",
+            "DROP TABLE session_revision_before_66",
+            "CREATE INDEX session_revision_instructions ON session_revision(session_ref,instructions_content_id)",
+            "CREATE INDEX session_revision_output_schema ON session_revision(session_ref,output_schema_content_id)",
+            "DROP TABLE revision_effort_before_66",
+            "CREATE TABLE model_effort_before_66 AS SELECT o.operation_id,r.effort_source_revision AS effort_source_revision,(SELECT prior_effort.reasoning_effort FROM model_operation prior_effort JOIN session_revision prior_model ON prior_model.session_ref=prior_effort.session_ref AND prior_model.revision=prior_effort.settings_revision WHERE prior_effort.session_ref=o.session_ref AND prior_effort.admission_position<o.admission_position AND prior_model.model=r.model ORDER BY prior_effort.admission_position DESC LIMIT 1) AS previous_reasoning_effort,(SELECT earlier_model.reasoning_effort FROM model_operation earlier JOIN session_revision earlier_model ON earlier_model.session_ref=earlier.session_ref AND earlier_model.revision=earlier.settings_revision WHERE earlier.session_ref=o.session_ref AND earlier.admission_position<o.admission_position AND earlier_model.model=r.model ORDER BY earlier.admission_position DESC LIMIT 1) AS previous_effort_override,(s.codec='openai-responses/2' AND o.reasoning_effort IS NOT NULL AND NOT (o.reasoning_effort IS (SELECT CASE WHEN retained.operation_id IS NOT NULL THEN retained.reasoning_effort WHEN first_effort.operation_id IS NOT NULL THEN first_effort.reasoning_effort ELSE o.reasoning_effort END FROM session effort_seed LEFT JOIN model_operation effort_base ON effort_base.operation_id=(SELECT selected.operation_id FROM model_operation selected WHERE selected.session_ref=o.session_ref AND selected.purpose=1 AND selected.resolution_code='compacted' AND selected.admission_position<o.admission_position ORDER BY selected.admission_position DESC LIMIT 1) LEFT JOIN session_revision effort_base_model ON effort_base_model.session_ref=effort_base.session_ref AND effort_base_model.revision=effort_base.settings_revision LEFT JOIN model_operation retained ON retained.operation_id=(SELECT earlier.operation_id FROM model_operation earlier JOIN session_revision earlier_model ON earlier_model.session_ref=earlier.session_ref AND earlier_model.revision=earlier.settings_revision WHERE earlier.session_ref=o.session_ref AND earlier.admission_position<o.admission_position AND earlier_model.model=r.model AND earlier.admission_position>max(coalesce(o.history_floor,0),CASE WHEN effort_base_model.model=r.model THEN coalesce(effort_base.history_floor,0) ELSE 0 END) AND earlier.admission_position>=CASE WHEN effort_base_model.model=r.model THEN coalesce((SELECT min(anchor.session_position) FROM model_output_item anchor WHERE anchor.operation_id=effort_base.operation_id AND anchor.item_kind=4),0) ELSE 0 END ORDER BY earlier.admission_position DESC LIMIT 1) LEFT JOIN model_operation first_effort ON first_effort.operation_id=(SELECT first.operation_id FROM model_operation first JOIN session_revision first_model ON first_model.session_ref=first.session_ref AND first_model.revision=first.settings_revision WHERE first.session_ref=o.session_ref AND first_model.model=r.model AND first.admission_position<o.admission_position ORDER BY first.admission_position LIMIT 1) WHERE effort_seed.session_ref=o.session_ref))) AS effort_update FROM model_operation o JOIN session_revision r ON r.session_ref=o.session_ref AND r.revision=o.settings_revision JOIN session s ON s.session_ref=o.session_ref",
+            "CREATE UNIQUE INDEX model_effort_before_66_key ON model_effort_before_66(operation_id)",
+            "ALTER TABLE model_operation RENAME TO model_operation_before_66",
+            "CREATE TABLE model_operation(\n operation_id INTEGER PRIMARY KEY NOT NULL CHECK(operation_id>0),\n turn_id INTEGER NOT NULL REFERENCES turn(turn_id),\n session_ref TEXT NOT NULL,\n settings_revision INTEGER NOT NULL CHECK(settings_revision>0),\n input_cutoff INTEGER NOT NULL CHECK(input_cutoff>0),\n admission_position INTEGER NOT NULL CHECK(admission_position>0),\n purpose INTEGER NOT NULL DEFAULT 0 CHECK(purpose IN (0,1)),\n compaction_trigger INTEGER CHECK(compaction_trigger IS NULL OR compaction_trigger>0),\n output_reservation INTEGER NOT NULL CHECK(output_reservation>=0),\n reasoning_effort TEXT CHECK(reasoning_effort IS NULL OR (reasoning_effort='none' OR reasoning_effort='low' OR reasoning_effort='medium' OR reasoning_effort='high' OR reasoning_effort='xhigh' OR reasoning_effort='max')),\n output_item_count INTEGER CHECK(output_item_count IS NULL OR output_item_count>=0),\n attempt_ordinal INTEGER NOT NULL CHECK(attempt_ordinal BETWEEN 1 AND 4),\n auth_refresh_claimed INTEGER NOT NULL DEFAULT 0 CHECK(auth_refresh_claimed IN (0,1)),\n retry_due_at_ms INTEGER CHECK(retry_due_at_ms IS NULL OR retry_due_at_ms>=0),\n last_failure_code TEXT CHECK(last_failure_code IS NULL OR length(CAST(last_failure_code AS BLOB)) BETWEEN 1 AND 96),\n resolution_code TEXT CHECK(resolution_code IS NULL OR length(CAST(resolution_code AS BLOB)) BETWEEN 1 AND 96),\n resolution_content_id INTEGER REFERENCES content(content_id),\n response_id TEXT CHECK(response_id IS NULL OR length(CAST(response_id AS BLOB))<=256),\n model_evidence BLOB CHECK(model_evidence IS NULL OR length(model_evidence) BETWEEN 7 AND 775),\n request_id TEXT CHECK(request_id IS NULL OR length(CAST(request_id AS BLOB))<=256),\n usage_uncached_tokens INTEGER CHECK(usage_uncached_tokens IS NULL OR usage_uncached_tokens>=0),\n usage_cache_read_tokens INTEGER CHECK(usage_cache_read_tokens IS NULL OR usage_cache_read_tokens>=0),\n usage_cache_write_tokens INTEGER CHECK(usage_cache_write_tokens IS NULL OR usage_cache_write_tokens>=0),\n usage_output_tokens INTEGER CHECK(usage_output_tokens IS NULL OR usage_output_tokens>=0),\n interrupted_by_command_key TEXT REFERENCES core_command(command_key),\n attempt_at INTEGER CHECK(attempt_at IS NULL OR attempt_at>0),\n retry_scheduled_at INTEGER CHECK(retry_scheduled_at IS NULL OR retry_scheduled_at>0),\n resolved_at INTEGER CHECK(resolved_at IS NULL OR resolved_at>0),\n history_floor INTEGER CHECK(history_floor IS NULL OR history_floor>0),\n history_level INTEGER CHECK(history_level IS NULL OR history_level BETWEEN 1 AND 3),\n history_dropped INTEGER CHECK(history_dropped IS NULL OR history_dropped>=0),\n tool_set_id INTEGER NOT NULL REFERENCES tool_set(tool_set_id) CHECK(tool_set_id>0),\n effort_source_revision INTEGER NOT NULL DEFAULT 1 CHECK(effort_source_revision>0 AND effort_source_revision<=settings_revision),\n previous_reasoning_effort TEXT CHECK(previous_reasoning_effort IS NULL OR (previous_reasoning_effort='none' OR previous_reasoning_effort='low' OR previous_reasoning_effort='medium' OR previous_reasoning_effort='high' OR previous_reasoning_effort='xhigh' OR previous_reasoning_effort='max')),\n effort_update INTEGER NOT NULL DEFAULT 0 CHECK(effort_update IN (0,1) AND (effort_update=0 OR reasoning_effort IS NOT NULL)),\n previous_effort_override TEXT CHECK(previous_effort_override IS NULL OR (previous_effort_override='none' OR previous_effort_override='low' OR previous_effort_override='medium' OR previous_effort_override='high' OR previous_effort_override='xhigh' OR previous_effort_override='max')),\n UNIQUE(operation_id,session_ref),\n FOREIGN KEY(session_ref,settings_revision) REFERENCES session_revision(session_ref,revision),\n CHECK((usage_uncached_tokens IS NULL AND usage_cache_read_tokens IS NULL AND usage_cache_write_tokens IS NULL AND usage_output_tokens IS NULL) OR (usage_uncached_tokens IS NOT NULL AND usage_cache_read_tokens IS NOT NULL AND usage_cache_write_tokens IS NOT NULL AND usage_output_tokens IS NOT NULL)),\n CHECK((resolution_code IS NULL AND retry_due_at_ms IS NOT NULL) OR (resolution_code IS NOT NULL AND retry_due_at_ms IS NULL)),\n CHECK((resolution_code IS NULL AND retry_due_at_ms=0 AND attempt_at IS NOT NULL AND retry_scheduled_at IS NULL AND resolved_at IS NULL) OR (resolution_code IS NULL AND retry_due_at_ms>0 AND attempt_at IS NULL AND retry_scheduled_at IS NOT NULL AND resolved_at IS NULL) OR (resolution_code IS NOT NULL AND attempt_at IS NULL AND retry_scheduled_at IS NULL AND resolved_at IS NOT NULL)),\n CHECK(((resolution_code IS 'interrupted') AND interrupted_by_command_key IS NOT NULL) OR (coalesce(resolution_code,'')!='interrupted' AND interrupted_by_command_key IS NULL)),\n CHECK((history_floor IS NULL AND history_level IS NULL AND history_dropped IS NULL) OR (history_floor IS NOT NULL AND purpose=1 AND ((history_level IS NULL AND history_dropped IS NULL) OR (history_level IS NOT NULL AND history_dropped IS NOT NULL))))\n) STRICT",
+            "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,purpose,compaction_trigger,output_reservation,reasoning_effort,output_item_count,attempt_ordinal,auth_refresh_claimed,retry_due_at_ms,last_failure_code,resolution_code,resolution_content_id,response_id,model_evidence,request_id,usage_uncached_tokens,usage_cache_read_tokens,usage_cache_write_tokens,usage_output_tokens,interrupted_by_command_key,attempt_at,retry_scheduled_at,resolved_at,history_floor,history_level,history_dropped,tool_set_id,effort_source_revision,previous_reasoning_effort,effort_update,previous_effort_override) SELECT old.operation_id,old.turn_id,old.session_ref,old.settings_revision,old.input_cutoff,old.admission_position,old.purpose,old.compaction_trigger,old.output_reservation,old.reasoning_effort,old.output_item_count,old.attempt_ordinal,old.auth_refresh_claimed,old.retry_due_at_ms,old.last_failure_code,old.resolution_code,old.resolution_content_id,old.response_id,old.model_evidence,old.request_id,old.usage_uncached_tokens,old.usage_cache_read_tokens,old.usage_cache_write_tokens,old.usage_output_tokens,old.interrupted_by_command_key,old.attempt_at,old.retry_scheduled_at,old.resolved_at,old.history_floor,old.history_level,old.history_dropped,old.tool_set_id,frozen.effort_source_revision,frozen.previous_reasoning_effort,frozen.effort_update,frozen.previous_effort_override FROM model_operation_before_66 old JOIN model_effort_before_66 frozen ON frozen.operation_id=old.operation_id",
+            "DROP TABLE model_operation_before_66",
+            "DROP TABLE model_effort_before_66",
+            "CREATE INDEX model_operation_retry_due ON model_operation(retry_due_at_ms,operation_id) WHERE resolution_code IS NULL AND attempt_ordinal<4",
+            "CREATE INDEX model_operation_retry_exhausted ON model_operation(operation_id) WHERE resolution_code IS NULL AND retry_due_at_ms=0 AND attempt_ordinal=4",
+            "CREATE INDEX model_operation_session_history ON model_operation(session_ref,operation_id)",
+            "CREATE INDEX model_operation_turn_history ON model_operation(turn_id,operation_id)",
+            "CREATE INDEX model_operation_admission ON model_operation(session_ref,admission_position)",
+            "CREATE INDEX model_operation_context_history ON model_operation(session_ref,admission_position) WHERE (resolution_code='answer' OR resolution_code='compacted' OR resolution_code='tool_proposals')",
+            "CREATE INDEX model_operation_compaction_bases ON model_operation(session_ref,admission_position) WHERE purpose=1 AND resolution_code='compacted'",
+            "CREATE UNIQUE INDEX model_operation_effort_source ON model_operation(operation_id,session_ref,effort_source_revision)",
+            "ALTER TABLE session_change RENAME TO session_change_before_66",
+            "CREATE TABLE session_change(\n session_ref TEXT NOT NULL REFERENCES session(session_ref),\n position INTEGER NOT NULL CHECK(position>0),\n ordinal INTEGER NOT NULL CHECK(ordinal>=0),\n revision INTEGER NOT NULL CHECK(revision>1),\n field TEXT NOT NULL CHECK((field='provider' OR field='model' OR field='instructions' OR field='tools' OR field='loaded_tools' OR field='permission_mode' OR field='output_schema' OR field='compaction_trigger' OR field='output_reservation' OR field='reasoning_effort' OR field='label' OR field='reasoning_effort_refused')),\n changed_at INTEGER NOT NULL CHECK(changed_at>0),\n provider_text TEXT CHECK(provider_text IS NULL OR length(CAST(provider_text AS BLOB))<=520),\n refused_operation_id INTEGER,\n PRIMARY KEY(session_ref,position,ordinal),\n UNIQUE(session_ref,revision,field),\n FOREIGN KEY(session_ref,revision) REFERENCES session_revision(session_ref,revision),\n FOREIGN KEY(refused_operation_id,session_ref,revision) REFERENCES model_operation(operation_id,session_ref,effort_source_revision),\n CHECK((field='reasoning_effort_refused')=(provider_text IS NOT NULL)),\n CHECK((field='reasoning_effort_refused')=(refused_operation_id IS NOT NULL))\n) STRICT, WITHOUT ROWID",
+            "INSERT INTO session_change(session_ref,position,ordinal,revision,field,changed_at) SELECT session_ref,position,ordinal,revision,field,changed_at FROM session_change_before_66",
+            "DROP TABLE session_change_before_66",
+            "CREATE INDEX session_change_refused_operation ON session_change(refused_operation_id,session_ref,revision)",
+            "UPDATE store_meta SET meta_value='13' WHERE meta_key='wire_version' AND meta_value='12'",
+        },
+        .mysql = &.{
+            "CREATE TABLE revision_effort_before_66 AS SELECT r.session_ref,r.revision,(SELECT choice.revision FROM session_revision choice LEFT JOIN session_revision before_choice ON before_choice.session_ref=choice.session_ref AND before_choice.revision=choice.revision-1 WHERE choice.session_ref=r.session_ref AND choice.revision<=r.revision AND (choice.revision=1 OR choice.model<>before_choice.model OR NOT (choice.reasoning_effort<=>before_choice.reasoning_effort) OR EXISTS(SELECT 1 FROM session_change changed WHERE changed.session_ref=choice.session_ref AND changed.revision=choice.revision AND changed.field IN ('reasoning_effort','model'))) ORDER BY choice.revision DESC LIMIT 1) AS effort_source_revision FROM session_revision r",
+            "ALTER TABLE session_revision ADD COLUMN effort_source_revision BIGINT NOT NULL DEFAULT 1,ADD CHECK(effort_source_revision>0 AND effort_source_revision<=revision),ADD FOREIGN KEY(session_ref,effort_source_revision) REFERENCES session_revision(session_ref,revision)",
+            "UPDATE session_revision r JOIN revision_effort_before_66 frozen ON frozen.session_ref=r.session_ref AND frozen.revision=r.revision SET r.effort_source_revision=frozen.effort_source_revision",
+            "DROP TABLE revision_effort_before_66",
+            "CREATE TABLE model_effort_before_66 AS SELECT o.operation_id,r.effort_source_revision AS effort_source_revision,(SELECT prior_effort.reasoning_effort FROM model_operation prior_effort JOIN session_revision prior_model ON prior_model.session_ref=prior_effort.session_ref AND prior_model.revision=prior_effort.settings_revision WHERE prior_effort.session_ref=o.session_ref AND prior_effort.admission_position<o.admission_position AND prior_model.model=r.model ORDER BY prior_effort.admission_position DESC LIMIT 1) AS previous_reasoning_effort,(SELECT earlier_model.reasoning_effort FROM model_operation earlier JOIN session_revision earlier_model ON earlier_model.session_ref=earlier.session_ref AND earlier_model.revision=earlier.settings_revision WHERE earlier.session_ref=o.session_ref AND earlier.admission_position<o.admission_position AND earlier_model.model=r.model ORDER BY earlier.admission_position DESC LIMIT 1) AS previous_effort_override,(s.codec='openai-responses/2' AND o.reasoning_effort IS NOT NULL AND NOT (o.reasoning_effort<=>(SELECT CASE WHEN retained.operation_id IS NOT NULL THEN retained.reasoning_effort WHEN first_effort.operation_id IS NOT NULL THEN first_effort.reasoning_effort ELSE o.reasoning_effort END FROM session effort_seed LEFT JOIN model_operation effort_base ON effort_base.operation_id=(SELECT selected.operation_id FROM model_operation selected WHERE selected.session_ref=o.session_ref AND selected.purpose=1 AND selected.resolution_code='compacted' AND selected.admission_position<o.admission_position ORDER BY selected.admission_position DESC LIMIT 1) LEFT JOIN session_revision effort_base_model ON effort_base_model.session_ref=effort_base.session_ref AND effort_base_model.revision=effort_base.settings_revision LEFT JOIN model_operation retained ON retained.operation_id=(SELECT earlier.operation_id FROM model_operation earlier JOIN session_revision earlier_model ON earlier_model.session_ref=earlier.session_ref AND earlier_model.revision=earlier.settings_revision WHERE earlier.session_ref=o.session_ref AND earlier.admission_position<o.admission_position AND earlier_model.model=r.model AND earlier.admission_position>greatest(coalesce(o.history_floor,0),CASE WHEN effort_base_model.model=r.model THEN coalesce(effort_base.history_floor,0) ELSE 0 END) AND earlier.admission_position>=CASE WHEN effort_base_model.model=r.model THEN coalesce((SELECT min(anchor.session_position) FROM model_output_item anchor WHERE anchor.operation_id=effort_base.operation_id AND anchor.item_kind=4),0) ELSE 0 END ORDER BY earlier.admission_position DESC LIMIT 1) LEFT JOIN model_operation first_effort ON first_effort.operation_id=(SELECT first.operation_id FROM model_operation first JOIN session_revision first_model ON first_model.session_ref=first.session_ref AND first_model.revision=first.settings_revision WHERE first.session_ref=o.session_ref AND first_model.model=r.model AND first.admission_position<o.admission_position ORDER BY first.admission_position LIMIT 1) WHERE effort_seed.session_ref=o.session_ref))) AS effort_update FROM model_operation o JOIN session_revision r ON r.session_ref=o.session_ref AND r.revision=o.settings_revision JOIN session s ON s.session_ref=o.session_ref",
+            "CREATE UNIQUE INDEX model_effort_before_66_key ON model_effort_before_66(operation_id)",
+            "ALTER TABLE model_operation ADD COLUMN effort_source_revision BIGINT NOT NULL DEFAULT 1 AFTER tool_set_id,ADD CHECK(effort_source_revision>0 AND effort_source_revision<=settings_revision),ADD COLUMN previous_reasoning_effort VARCHAR(6) AFTER effort_source_revision,ADD CHECK(previous_reasoning_effort IS NULL OR (previous_reasoning_effort='none' OR previous_reasoning_effort='low' OR previous_reasoning_effort='medium' OR previous_reasoning_effort='high' OR previous_reasoning_effort='xhigh' OR previous_reasoning_effort='max')),ADD COLUMN effort_update TINYINT NOT NULL DEFAULT 0 AFTER previous_reasoning_effort,ADD CHECK(effort_update IN (0,1) AND (effort_update=0 OR reasoning_effort IS NOT NULL)),ADD COLUMN previous_effort_override VARCHAR(6) AFTER effort_update,ADD CHECK(previous_effort_override IS NULL OR (previous_effort_override='none' OR previous_effort_override='low' OR previous_effort_override='medium' OR previous_effort_override='high' OR previous_effort_override='xhigh' OR previous_effort_override='max'))",
+            "UPDATE model_operation o JOIN model_effort_before_66 frozen ON frozen.operation_id=o.operation_id SET o.effort_source_revision=frozen.effort_source_revision,o.previous_reasoning_effort=frozen.previous_reasoning_effort,o.effort_update=frozen.effort_update,o.previous_effort_override=frozen.previous_effort_override",
+            "DROP TABLE model_effort_before_66",
+            "CREATE UNIQUE INDEX model_operation_effort_source ON model_operation(operation_id,session_ref,effort_source_revision)",
+            "CREATE TABLE session_change_66(\n session_ref VARCHAR(6) NOT NULL,\n position BIGINT NOT NULL,\n ordinal BIGINT NOT NULL,\n revision BIGINT NOT NULL,\n field VARCHAR(24) NOT NULL,\n changed_at BIGINT NOT NULL,\n provider_text TEXT,\n refused_operation_id BIGINT,\n PRIMARY KEY(session_ref,position,ordinal),\n UNIQUE(session_ref,revision,field),\n INDEX session_change_refused_operation(refused_operation_id,session_ref,revision),\n FOREIGN KEY(session_ref) REFERENCES session(session_ref),\n FOREIGN KEY(session_ref,revision) REFERENCES session_revision(session_ref,revision),\n CHECK(position>0),\n CHECK(ordinal>=0),\n CHECK(revision>1),\n CHECK((field='provider' OR field='model' OR field='instructions' OR field='tools' OR field='loaded_tools' OR field='permission_mode' OR field='output_schema' OR field='compaction_trigger' OR field='output_reservation' OR field='reasoning_effort' OR field='label' OR field='reasoning_effort_refused')),\n CHECK(changed_at>0),\n CHECK(provider_text IS NULL OR OCTET_LENGTH(provider_text)<=520),\n FOREIGN KEY(refused_operation_id,session_ref,revision) REFERENCES model_operation(operation_id,session_ref,effort_source_revision),\n CHECK((field='reasoning_effort_refused')=(provider_text IS NOT NULL)),\n CHECK((field='reasoning_effort_refused')=(refused_operation_id IS NOT NULL))\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
+            "INSERT INTO session_change_66(session_ref,position,ordinal,revision,field,changed_at) SELECT session_ref,position,ordinal,revision,field,changed_at FROM session_change",
+            "DROP TABLE session_change",
+            "RENAME TABLE session_change_66 TO session_change",
+            "UPDATE store_meta SET meta_value='13' WHERE meta_key='wire_version' AND meta_value='12'",
+        },
+    },
+    // Schema 67 (D39, D180): the first ending hop is the sole owed fact.
+    .{
+        .from = 66,
+        .sqlite = &.{
+            "ALTER TABLE session_forward RENAME TO session_forward_before_67",
+            "CREATE TABLE session_forward(\n forward_id INTEGER PRIMARY KEY NOT NULL CHECK(forward_id>0),\n target_ref TEXT NOT NULL REFERENCES session(session_ref),\n child_ref TEXT NOT NULL REFERENCES session(session_ref),\n kind INTEGER NOT NULL CHECK(kind BETWEEN 1 AND 2),\n source_id INTEGER NOT NULL CHECK(source_id>0),\n position INTEGER CHECK(position IS NULL OR position>0),\n ordinal INTEGER NOT NULL CHECK(ordinal=0),\n delivered_at INTEGER CHECK(delivered_at IS NULL OR delivered_at>0),\n message_delivered INTEGER CHECK(message_delivered IS NULL OR message_delivered IN (0,1)),\n suppress_message INTEGER NOT NULL DEFAULT 0 CHECK(suppress_message IN (0,1)),\n UNIQUE(target_ref,kind,source_id),\n CHECK((position IS NULL)=(delivered_at IS NULL)),\n CHECK(target_ref<>child_ref)\n) STRICT",
+            "INSERT INTO session_forward(forward_id,target_ref,child_ref,kind,source_id,position,ordinal,delivered_at,message_delivered,suppress_message) SELECT f.forward_id,f.target_ref,f.child_ref,f.kind,f.source_id,f.position,f.ordinal,f.delivered_at,e.delivered,COALESCE(e.suppress_message,0) FROM session_forward_before_67 f JOIN session child ON child.session_ref=f.child_ref LEFT JOIN session_ending_owed e ON f.kind=2 AND e.turn_id=f.source_id AND f.target_ref=child.parent_ref",
+            "INSERT INTO session_forward(forward_id,target_ref,child_ref,kind,source_id,position,ordinal,delivered_at,message_delivered,suppress_message) SELECT COALESCE((SELECT max(forward_id) FROM session_forward_before_67),0)+ROW_NUMBER() OVER(ORDER BY e.turn_id),child.parent_ref,t.session_ref,2,e.turn_id,NULL,0,NULL,e.delivered,e.suppress_message FROM session_ending_owed e JOIN turn t ON t.turn_id=e.turn_id JOIN session child ON child.session_ref=t.session_ref WHERE child.parent_ref IS NOT NULL AND NOT EXISTS(SELECT 1 FROM session_forward_before_67 f WHERE f.target_ref=child.parent_ref AND f.kind=2 AND f.source_id=e.turn_id)",
+            "DROP TABLE session_forward_before_67",
+            "DROP TABLE session_ending_owed",
+            "CREATE INDEX session_forward_message ON session_forward(message_delivered,source_id)",
+            "CREATE INDEX session_forward_open ON session_forward(forward_id) WHERE position IS NULL",
+            "CREATE INDEX session_forward_feed ON session_forward(target_ref,position)",
+        },
+        .mysql = &.{
+            "ALTER TABLE session_forward ADD COLUMN message_delivered TINYINT AFTER delivered_at, ADD COLUMN suppress_message TINYINT NOT NULL DEFAULT 0 AFTER message_delivered",
+            "ALTER TABLE session_forward ADD CHECK(message_delivered IS NULL OR message_delivered IN (0,1)), ADD CHECK(suppress_message IN (0,1))",
+            "UPDATE session_forward f JOIN session child ON child.session_ref=f.child_ref JOIN session_ending_owed e ON f.kind=2 AND e.turn_id=f.source_id AND f.target_ref=child.parent_ref SET f.message_delivered=e.delivered,f.suppress_message=e.suppress_message",
+            "INSERT INTO session_forward(forward_id,target_ref,child_ref,kind,source_id,position,ordinal,delivered_at,message_delivered,suppress_message) SELECT COALESCE((SELECT max(forward_id) FROM session_forward),0)+ROW_NUMBER() OVER(ORDER BY e.turn_id),child.parent_ref,t.session_ref,2,e.turn_id,NULL,0,NULL,e.delivered,e.suppress_message FROM session_ending_owed e JOIN turn t ON t.turn_id=e.turn_id JOIN session child ON child.session_ref=t.session_ref WHERE child.parent_ref IS NOT NULL AND NOT EXISTS(SELECT 1 FROM session_forward f WHERE f.target_ref=child.parent_ref AND f.kind=2 AND f.source_id=e.turn_id)",
+            "DROP TABLE session_ending_owed",
+            "CREATE INDEX session_forward_message ON session_forward(message_delivered,source_id)",
         },
     },
 };
@@ -949,6 +1026,7 @@ pub const tables = [_]Table{
             .{ .name = "output_reservation", .type = .int, .nullable = true, .check = "output_reservation IS NULL OR output_reservation>=0" },
             reasoning_effort_column,
             label_column,
+            .{ .name = "effort_source_revision", .type = .int, .default = "1", .check = "effort_source_revision>0 AND effort_source_revision<=revision" },
         },
         .primary_key = &.{ "session_ref", "revision" },
         .uniques = &.{&.{"command_key"}},
@@ -958,6 +1036,7 @@ pub const tables = [_]Table{
             references("instructions_content_id", "content", content_reference),
             references("tool_set_id", "tool_set", &.{"tool_set_id"}),
             references("loaded_tool_set_id", "tool_set", &.{"tool_set_id"}),
+            .{ .columns = &.{ "session_ref", "effort_source_revision" }, .references = "session_revision", .referenced = &.{ "session_ref", "revision" } },
             references("output_schema_content_id", "content", content_reference),
         },
         .without_rowid = true,
@@ -967,7 +1046,8 @@ pub const tables = [_]Table{
         // revision changed, written in the revision's own commit and never
         // edited. The revision keeps the current values; a row records
         // when its change was accepted. A revision's rows share one
-        // position, one ordinal each.
+        // position, one ordinal each. An effort refusal is appended later,
+        // naming that effort revision with the provider's bounded report.
         .name = "session_change",
         .columns = &.{
             .{ .name = "session_ref", .type = .{ .text = null } },
@@ -976,13 +1056,17 @@ pub const tables = [_]Table{
             .{ .name = "revision", .type = .int, .check = "revision>1" },
             .{ .name = "field", .type = .{ .tag = session_settings.revision_fields } },
             .{ .name = "changed_at", .type = .int, .check = "changed_at>0" },
+            .{ .name = "provider_text", .type = .{ .text = .{ .min = 0, .max = @import("../outcome_code.zig").max_report_bytes } }, .nullable = true },
+            .{ .name = "refused_operation_id", .type = .int, .nullable = true },
         },
         .primary_key = &.{ "session_ref", "position", "ordinal" },
         .uniques = &.{&.{ "session_ref", "revision", "field" }},
         .foreign_keys = &.{
             references("session_ref", "session", session_reference),
             .{ .columns = &.{ "session_ref", "revision" }, .references = "session_revision", .referenced = &.{ "session_ref", "revision" } },
+            .{ .columns = &.{ "refused_operation_id", "session_ref", "revision" }, .references = "model_operation", .referenced = &.{ "operation_id", "session_ref", "effort_source_revision" } },
         },
+        .checks = &.{ "(field='reasoning_effort_refused')=(provider_text IS NOT NULL)", "(field='reasoning_effort_refused')=(refused_operation_id IS NOT NULL)" },
         .without_rowid = true,
     },
     .{
@@ -1122,26 +1206,9 @@ pub const tables = [_]Table{
         .without_rowid = true,
     },
     .{
-        // An attached child's Turn ended, and its parent is owed a Message
-        // saying how (D39, D139); the Host delivers it, which marks the row
-        // delivered (the Store never deletes, D202). Host work, not a
-        // Session's state: no reader of a Session reads it.
-        .name = "session_ending_owed",
-        .columns = &.{
-            .{ .name = "turn_id", .type = .int, .check = "turn_id>0" },
-            .{ .name = "delivered", .type = .int, .check = "delivered BETWEEN 0 AND 1" },
-            // Archive-caused suppression outlives a later parent restore.
-            .{ .name = "suppress_message", .type = .flag, .default = "0" },
-        },
-        .primary_key = &.{"turn_id"},
-        .foreign_keys = &.{
-            references("turn_id", "turn", &.{"turn_id"}),
-        },
-        .without_rowid = true,
-    },
-    .{
         // Owed ancestor feed work claims no position until delivery. Like
         // session_stop_owed, enqueueing it does not change a Session head.
+        // The first ending hop also owes the parent a Message (D39).
         .name = "session_forward",
         .columns = &.{
             .{ .name = "forward_id", .type = .int, .check = "forward_id>0" },
@@ -1152,6 +1219,10 @@ pub const tables = [_]Table{
             .{ .name = "position", .type = .int, .nullable = true, .check = "position IS NULL OR position>0" },
             .{ .name = "ordinal", .type = .int, .check = "ordinal=0" },
             .{ .name = "delivered_at", .type = .int, .nullable = true, .check = "delivered_at IS NULL OR delivered_at>0" },
+            // Null on approvals/later hops, false while owed, true once settled.
+            .{ .name = "message_delivered", .type = .flag, .nullable = true },
+            // Archive suppression survives restoring the parent.
+            .{ .name = "suppress_message", .type = .flag, .default = "0" },
         },
         .primary_key = &.{"forward_id"},
         .uniques = &.{&.{ "target_ref", "kind", "source_id" }},
@@ -1217,6 +1288,11 @@ pub const tables = [_]Table{
             .{ .name = "history_dropped", .type = .int, .nullable = true, .check = "history_dropped IS NULL OR history_dropped>=0" },
             // Effective offer frozen at admission; Session sets are intent.
             tool_set_column,
+            // One admission snapshot; later refusals never rewrite it.
+            .{ .name = "effort_source_revision", .type = .int, .default = "1", .check = "effort_source_revision>0 AND effort_source_revision<=settings_revision" },
+            .{ .name = "previous_reasoning_effort", .type = reasoning_effort_column.type, .nullable = true },
+            .{ .name = "effort_update", .type = .flag, .default = "0", .check = "(effort_update=0 OR reasoning_effort IS NOT NULL)" },
+            .{ .name = "previous_effort_override", .type = reasoning_effort_column.type, .nullable = true },
         },
         .primary_key = &.{"operation_id"},
         .uniques = &.{&.{ "operation_id", "session_ref" }},
@@ -1497,8 +1573,8 @@ pub const indexes = [_]Index{
     .{ .name = "session_parent", .table = "session", .columns = &.{"parent_ref"}, .where = "parent_ref IS NOT NULL" },
     // The Host's next owed stop, skipping settled rows.
     .{ .name = "session_stop_open", .table = "session_stop_owed", .columns = &.{ "settled", "child_ref" } },
-    // The Host's next owed ending, among the delivered ones.
-    .{ .name = "session_ending_open", .table = "session_ending_owed", .columns = &.{ "delivered", "turn_id" } },
+    // The Host's next owed ending, skipping settled and feed-only rows.
+    .{ .name = "session_forward_message", .table = "session_forward", .columns = &.{ "message_delivered", "source_id" } },
     .{ .name = "session_forward_open", .table = "session_forward", .columns = &.{"forward_id"}, .where = "position IS NULL" },
     .{ .name = "session_forward_feed", .table = "session_forward", .columns = &.{ "target_ref", "position" } },
     .{ .name = "action_operation_session_order", .table = "action_operation", .columns = &.{ "session_ref", "action_id" } },
@@ -1523,6 +1599,8 @@ pub const indexes = [_]Index{
     .{ .name = "model_operation_turn_history", .table = "model_operation", .columns = &.{ "turn_id", "operation_id" } },
     // Every Operation by admission, whatever its outcome: request history
     // places each earlier Operation's effort boundary (codec /2).
+    .{ .name = "session_change_refused_operation", .table = "session_change", .columns = &.{ "refused_operation_id", "session_ref", "revision" } },
+    .{ .name = "model_operation_effort_source", .table = "model_operation", .columns = &.{ "operation_id", "session_ref", "effort_source_revision" }, .unique = true },
     .{ .name = "model_operation_admission", .table = "model_operation", .columns = &.{ "session_ref", "admission_position" } },
     .{ .name = "model_operation_context_history", .table = "model_operation", .columns = &.{ "session_ref", "admission_position" }, .where = oneOf("resolution_code", &accepted_resolutions) },
     .{ .name = "model_operation_compaction_bases", .table = "model_operation", .columns = &.{ "session_ref", "admission_position" }, .where = "purpose=1 AND " ++ resolutionIs("resolution_code", .compacted) },
@@ -2726,7 +2804,18 @@ test "schema 57 migration creates the canonical archive objects on SQLite and My
                     matched += 1;
                     break;
                 }
-            } else return error.NoncanonicalMigrationObject;
+            } else {
+                const retired = [_][]const u8{
+                    "CREATE TABLE session_ending_owed(\n turn_id INTEGER PRIMARY KEY NOT NULL REFERENCES turn(turn_id) CHECK(turn_id>0),\n delivered INTEGER NOT NULL CHECK(delivered BETWEEN 0 AND 1),\n suppress_message INTEGER NOT NULL DEFAULT 0 CHECK(suppress_message IN (0,1))\n) STRICT, WITHOUT ROWID",
+                    "CREATE INDEX session_ending_open ON session_ending_owed(delivered,turn_id)",
+                };
+                for (retired) |object| {
+                    if (dialect == .sqlite and std.mem.eql(u8, object, statement)) {
+                        matched += 1;
+                        break;
+                    }
+                } else return error.NoncanonicalMigrationObject;
+            }
         }
         try std.testing.expectEqual(@as(usize, if (dialect == .sqlite) 11 else 2), matched);
     }
@@ -2811,6 +2900,7 @@ test "schema 57 preserves Commands and stop references while adding nullable arc
     try sqlite.exec(database, "UPDATE session_stop SET position=NULL WHERE command_key='rui.core/stop0'");
     try sqlite.exec(database, "CREATE TEMP TABLE original_stops AS SELECT * FROM session_stop");
     try sqlite.exec(database, "CREATE TEMP TABLE original_commands AS SELECT * FROM core_command");
+    try sqlite.exec(database, "UPDATE session SET parent_ref='rhvzwc' WHERE session_ref IN ('d8mv7p','brhkcj')");
     try sqlite.exec(database, "INSERT INTO session_ending_owed(turn_id,delivered) VALUES(1,0),(2,1)");
     try sqlite.exec(database, "CREATE TEMP TABLE original_endings AS SELECT * FROM session_ending_owed");
     try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, "UPDATE core_command SET kind=6 WHERE command_key='fixture-stop'"));
@@ -2838,10 +2928,10 @@ test "schema 57 preserves Commands and stop references while adding nullable arc
         try std.testing.expectEqual(@as(c_int, @intFromBool(each.parent_caused)), c.sqlite3_column_int(provenance, 0));
     }
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT parent_caused FROM session_stop WHERE command_key='fixture-stop'"));
-    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM original_endings EXCEPT SELECT turn_id,delivered FROM session_ending_owed)"));
-    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT turn_id,delivered FROM session_ending_owed EXCEPT SELECT * FROM original_endings)"));
-    try std.testing.expectEqual(@as(u32, 2), try sqlite.pragmaInt(database, "SELECT count(*) FROM session_ending_owed WHERE suppress_message=0"));
-    try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT count(*) FROM sqlite_schema WHERE name='session_ending_open' AND sql='CREATE INDEX session_ending_open ON session_ending_owed(delivered,turn_id)'"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM original_endings EXCEPT SELECT source_id,message_delivered FROM session_forward WHERE message_delivered IS NOT NULL)"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT source_id,message_delivered FROM session_forward WHERE message_delivered IS NOT NULL EXCEPT SELECT * FROM original_endings)"));
+    try std.testing.expectEqual(@as(u32, 2), try sqlite.pragmaInt(database, "SELECT count(*) FROM session_forward WHERE suppress_message=0"));
+    try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT count(*) FROM sqlite_schema WHERE name='session_forward_message' AND sql='CREATE INDEX session_forward_message ON session_forward(message_delivered,source_id)'"));
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM session_archive"));
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM session_archive_command"));
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM pragma_foreign_key_check"));
@@ -2851,9 +2941,9 @@ test "schema 57 preserves Commands and stop references while adding nullable arc
         "UPDATE session_stop SET parent_caused=-1 WHERE command_key='fixture-stop'",
         "UPDATE session_stop SET parent_caused=2 WHERE command_key='fixture-stop'",
         "UPDATE session_stop SET parent_caused=NULL WHERE command_key='fixture-stop'",
-        "UPDATE session_ending_owed SET suppress_message=-1 WHERE turn_id=1",
-        "UPDATE session_ending_owed SET suppress_message=2 WHERE turn_id=1",
-        "UPDATE session_ending_owed SET suppress_message=NULL WHERE turn_id=1",
+        "UPDATE session_forward SET suppress_message=-1 WHERE source_id=1",
+        "UPDATE session_forward SET suppress_message=2 WHERE source_id=1",
+        "UPDATE session_forward SET suppress_message=NULL WHERE source_id=1",
         "UPDATE core_command SET kind=0 WHERE command_key='archive-request'",
         "UPDATE core_command SET kind=7 WHERE command_key='archive-request'",
         "UPDATE core_command SET command_key='fixture-stop' WHERE command_key='archive-request'",
@@ -2875,14 +2965,14 @@ test "schema 57 preserves Commands and stop references while adding nullable arc
         "INSERT INTO session_archive_command(command_key,archived) VALUES('archive-request',0)",
     }) |statement| try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, statement));
     // Causal ending suppression remains durable after restoring the parent.
-    try sqlite.exec(database, "UPDATE session_ending_owed SET suppress_message=1 WHERE turn_id=1");
+    try sqlite.exec(database, "UPDATE session_forward SET suppress_message=1 WHERE source_id=1");
     // Restore changes only current intent; each request keeps its own bool.
     try sqlite.exec(database, "UPDATE session_archive SET command_key=NULL WHERE session_ref='rhvzwc'");
     try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT count(*) FROM session_archive WHERE session_ref='rhvzwc' AND command_key IS NULL"));
     try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT archived FROM session_archive_command WHERE command_key='archive-request'"));
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT archived FROM session_archive_command WHERE command_key='restore-request'"));
     try openExisting(std.testing.io, database, root, null, null);
-    try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT suppress_message FROM session_ending_owed WHERE turn_id=1"));
+    try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT suppress_message FROM session_forward WHERE source_id=1"));
 }
 
 test "schema 61 migration preserves saved call rows and accepts 200 UTF-8 bytes" {

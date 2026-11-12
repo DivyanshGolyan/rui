@@ -164,13 +164,11 @@ pub const Encoder = struct {
             // unchanged effort writes nothing. Effort is null for a whole
             // Session or for none of it, so a boundary never returns to it.
             .operation => |effort| if (self.carry.version == .two and !std.meta.eql(effort, self.carry.effort)) {
-                const changed = effort orelse return error.Declined;
-                self.separateInput(out);
-                out.literal(switch (changed) {
-                    inline else => |value| "{\"type\":\"configuration_update\",\"reasoning\":{\"effort\":\"" ++ @tagName(value) ++ "\"}}",
-                });
-                self.carry.effort = changed;
+                self.changeEffort(effort orelse return error.Declined, out);
             },
+            // The original current boundary is an admission fact. Replay and
+            // refused retries above may restore an already admitted value.
+            .effort_update => |effort| if (self.carry.version == .two) self.changeEffort(effort, out),
             .declare_open => {
                 if (self.carry.version != .two) return error.Declined;
                 self.separateInput(out);
@@ -233,6 +231,14 @@ pub const Encoder = struct {
     }
 
     /// An input item after another takes a comma.
+    fn changeEffort(self: *Encoder, effort: codec_abi.Effort, out: *Pieces) void {
+        self.separateInput(out);
+        out.literal(switch (effort) {
+            inline else => |value| "{\"type\":\"configuration_update\",\"reasoning\":{\"effort\":\"" ++ @tagName(value) ++ "\"}}",
+        });
+        self.carry.effort = effort;
+    }
+
     fn separateInput(self: *Encoder, out: *Pieces) void {
         if (self.carry.input_comma) out.literal(",");
         self.carry.input_comma = true;
@@ -294,8 +300,39 @@ pub fn classify(scratch: *ClassifyScratch, body: []const u8, out: *codec_abi.Err
     out.report = .{ .code = null, .message = null };
     scratch.init();
     // A body that is not one whole JSON document establishes nothing.
-    scratch.reader.read(body, scratch) catch return;
+    scratch.reader.read(body, scratch) catch {
+        scratch.error_object = false;
+        return;
+    };
     scratch.find(out);
+}
+
+/// Status and error meaning belong together in the codec. Do not infer a
+/// refusal from free prose alone: it must name the parameter/item and carry
+/// an invalid/unsupported-request code (or the provider's equivalent type).
+pub fn effortChangeRefused(scratch: *const ClassifyScratch, status: u16, body: []const u8) bool {
+    if (status != 400 and status != 422) return false;
+    if (scratch.envelope.get(.@"error").count != 1 or !scratch.error_object) return false;
+    if (scratch.failure.get(.param).count != 1 or scratch.failure.get(.code).count > 1 or scratch.failure.get(.type).count > 1) return false;
+    const code = scratch.code[0..scratch.code_length];
+    const invalid = for ([_][]const u8{ "unsupported_value", "unsupported_parameter", "invalid_value", "invalid_parameter", "invalid_request_error", "unknown_parameter", "unsupported_item_type" }) |known| {
+        if (std.mem.eql(u8, code, known)) break true;
+    } else scratch.code_length == 0 and scratch.invalid_request_type;
+    if (!invalid) return false;
+    if (scratch.effort_parameter) return true;
+    if (!scratch.item_parameter) return false;
+    const message = ClassifyScratch.message(&scratch.failure) orelse return false;
+    const text = body[@intCast(message.start)..][0..@intCast(message.length)];
+    // The rejected value, not a mention in a list of supported item types.
+    for ([_][]const u8{
+        "configuration_update is not supported",
+        "'configuration_update' is not supported",
+        "Invalid value: 'configuration_update'",
+        "Unsupported value: 'configuration_update'",
+        "Unsupported item type: 'configuration_update'",
+        "Unsupported input type: 'configuration_update'",
+    }) |prefix| if (std.mem.startsWith(u8, text, prefix)) return true;
+    return false;
 }
 
 /// The classifier's working state over one body, which `classify` writes
@@ -316,9 +353,12 @@ pub const ClassifyScratch = struct {
     code_length: u8,
     /// The error object's `resets_at`, when it is a plain integer.
     resets_at: ?u64,
+    effort_parameter: bool,
+    item_parameter: bool,
+    invalid_request_type: bool,
 
     const Outer = enum { @"error", message, detail };
-    const Inner = enum { code, type, message, detail, resets_at };
+    const Inner = enum { code, type, message, detail, resets_at, param };
 
     const Member = struct {
         /// How often it appears, counting no further than a duplicate.
@@ -346,6 +386,9 @@ pub const ClassifyScratch = struct {
             .failure = .initFill(.{}),
             .code_length = 0,
             .resets_at = null,
+            .effort_parameter = false,
+            .item_parameter = false,
+            .invalid_request_type = false,
         };
     }
 
@@ -422,6 +465,20 @@ pub const ClassifyScratch = struct {
             2 => if (self.inError()) if (self.inner) |inner| switch (kind) {
                 .string => {
                     self.failure.getPtr(inner).set(reader.string());
+                    if (inner == .type) self.invalid_request_type = if (reader.text()) |text| std.mem.eql(u8, text, "invalid_request_error") else false;
+                    if (inner == .param) if (reader.text()) |text| {
+                        self.effort_parameter = std.mem.eql(u8, text, "reasoning.effort");
+                        if (std.mem.startsWith(u8, text, "input[")) if (std.mem.indexOfScalar(u8, text, ']')) |end_index| {
+                            const digits = text[6..end_index];
+                            const numbered = digits.len != 0 and for (digits) |byte| {
+                                if (byte < '0' or byte > '9') break false;
+                            } else true;
+                            if (numbered) {
+                                self.effort_parameter = std.mem.eql(u8, text[end_index + 1 ..], ".reasoning.effort");
+                                self.item_parameter = std.mem.eql(u8, text[end_index + 1 ..], ".type");
+                            }
+                        };
+                    };
                     if (inner == .code) if (reader.text()) |text| {
                         @memcpy(self.code[0..text.len], text);
                         self.code_length = @intCast(text.len);
@@ -1929,6 +1986,10 @@ test "every item at its longest fits max_pieces and names only handles it has" {
     for ([_]?codec_abi.Effort{null} ++ std.enums.values(codec_abi.Effort)) |effort| {
         cases[count] = .{ .item = .{ .operation = effort }, .handles = &.{0} };
         count += 1;
+        if (effort) |value| {
+            cases[count] = .{ .item = .{ .effort_update = value }, .handles = &.{0} };
+            count += 1;
+        }
     }
     for (std.enums.values(codec_abi.Author)) |author| {
         cases[count] = .{ .item = .{ .message = author }, .handles = &.{ 0b01, 0b11 } };
@@ -2335,4 +2396,29 @@ test "version two declares function tools in the history and keeps only provider
     try std.testing.expectError(error.Declined, two.encodeItem(&.{ .item = .tool, .handles = 0b111 }, &pieces));
     var one: Encoder = .{ .carry = .{ .version = .one } };
     try std.testing.expectError(error.Declined, one.encodeItem(&.{ .item = .declare_open, .handles = 0 }, &pieces));
+}
+
+test "effort update refusal requires an unambiguous parameter and invalid request at a rejecting status" {
+    const cases = [_]struct { status: u16 = 400, body: []const u8, refused: bool = false }{
+        .{ .body = "{\"error\":{\"code\":\"unsupported_value\",\"param\":\"reasoning.effort\",\"message\":\"high is not supported\"}}", .refused = true },
+        .{ .status = 422, .body = "{\"error\":{\"type\":\"invalid_request_error\",\"code\":null,\"param\":\"input[12].reasoning.effort\",\"message\":\"high is not supported\"}}", .refused = true },
+        .{ .body = "{\"error\":{\"code\":\"invalid_value\",\"param\":\"input[3].type\",\"message\":\"configuration_update is not supported\"}}", .refused = true },
+        .{ .body = "{\"error\":{\"code\":\"unsupported_value\",\"param\":\"temperature\",\"message\":\"high is not supported\"}}" },
+        .{ .status = 500, .body = "{\"error\":{\"code\":\"unsupported_value\",\"param\":\"reasoning.effort\"}}" },
+        .{ .status = 200, .body = "{\"error\":{\"code\":\"unsupported_value\",\"param\":\"reasoning.effort\"}}" },
+        .{ .body = "{\"error\":{\"code\":\"other\",\"param\":\"reasoning.effort\"}}" },
+        .{ .body = "{\"error\":{\"code\":\"invalid_value\",\"param\":null,\"message\":\"reasoning.effort high configuration_update unsupported\"}}" },
+        .{ .body = "{\"error\":{\"code\":\"invalid_value\",\"param\":\"input[3].type\",\"message\":\"additional_tools is not supported\"}}" },
+        .{ .body = "{\"error\":{\"code\":\"invalid_value\",\"param\":\"input[3].type\",\"message\":\"Invalid value: 'configuration_update'. Supported values: message\"}}", .refused = true },
+        .{ .body = "{\"error\":{\"code\":\"invalid_value\",\"param\":\"input[3].type\",\"message\":\"Unsupported additional_tools; supported: configuration_update\"}}" },
+        .{ .body = "{\"error\":{\"code\":\"invalid_value\",\"param\":\"input[x].reasoning.effort\"}}" },
+        .{ .body = "{\"error\":{\"code\":\"invalid_value\",\"param\":\"reasoning.effort\",\"param\":\"reasoning.effort\"}}" },
+        .{ .body = "{\"error\":{\"code\":\"invalid_value\",\"param\":\"reasoning.effort\"},\"later\":[1,]}" },
+    };
+    var scratch: ClassifyScratch = undefined;
+    var found: codec_abi.ErrorBody = undefined;
+    for (cases) |case| {
+        classify(&scratch, case.body, &found);
+        try std.testing.expectEqual(case.refused, effortChangeRefused(&scratch, case.status, case.body));
+    }
 }

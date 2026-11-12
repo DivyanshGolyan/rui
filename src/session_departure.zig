@@ -2,7 +2,7 @@
 //! they do not perform or stand in for restoration, cancellation or joins.
 const std = @import("std");
 
-pub const ReadPhase = enum { activity, history, inspection, permission, message, tool, recall };
+pub const ReadPhase = enum { activity, fill, inspection, permission, message, tool, recall, retry };
 /// `inspection`: a pending inspection supersedes a silent read it cancelled.
 pub const Mode = enum { active, inspection, final_exit };
 pub const ReadEnd = union(enum) {
@@ -15,7 +15,7 @@ pub const ReadEnd = union(enum) {
 
     pub fn preparationFailure(self: ReadEnd) bool {
         return self == .failed and self.failed.err != error.CanonicalStoreFailure and
-            (self.failed.progress.phase == .history or self.failed.progress.phase == .inspection or self.failed.progress.phase == .message or self.failed.progress.phase == .tool or self.failed.progress.phase == .recall) and
+            (self.failed.progress.phase == .fill or self.failed.progress.phase == .inspection or self.failed.progress.phase == .message or self.failed.progress.phase == .tool or self.failed.progress.phase == .recall) and
             !self.failed.progress.rendering;
     }
 
@@ -69,7 +69,7 @@ test "departure settlement precedence and reader exit policies retain independen
         const restored: Settled = .{ .restored = {}, .reader = .absent, .admission_error = error.CanonicalStoreFailure };
         try std.testing.expectEqual(error.CanonicalStoreFailure, restored.failure(mode, error.InteractiveInterrupted).?);
     }
-    for ([_]ReadPhase{ .history, .message, .tool, .inspection, .recall }) |phase| {
+    for ([_]ReadPhase{ .fill, .message, .tool, .inspection, .recall }) |phase| {
         const preparation: ReadEnd = .{ .failed = .{ .err = error.ConnectionResetByPeer, .progress = .{ .phase = phase, .rendering = false } } };
         try std.testing.expect(preparation.failure(.active) == null);
         try std.testing.expect(preparation.failure(.inspection) == null);
@@ -108,7 +108,7 @@ test "departure joined fact matrix preserves precedence and recovery" {
         .{ .reader = .complete, .admission = error.Cancelled },
         .{ .reader = .absent, .admission = error.ConnectionResetByPeer, .exit_error = error.ConnectionResetByPeer },
         .{ .reader = .complete, .admission = error.CanonicalStoreFailure, .cause = error.WriteFailed, .inspection_error = error.CanonicalStoreFailure, .exit_error = error.CanonicalStoreFailure },
-        .{ .reader = .{ .failed = .{ .err = error.CanonicalStoreFailure, .progress = .{ .phase = .history, .rendering = false } } }, .inspection_error = error.CanonicalStoreFailure, .exit_error = error.CanonicalStoreFailure },
+        .{ .reader = .{ .failed = .{ .err = error.CanonicalStoreFailure, .progress = .{ .phase = .fill, .rendering = false } } }, .inspection_error = error.CanonicalStoreFailure, .exit_error = error.CanonicalStoreFailure },
         .{ .reader = .{ .failed = .{ .err = error.ConnectionResetByPeer, .progress = .{ .phase = .message, .rendering = false } } }, .exit_error = error.ConnectionResetByPeer },
         .{ .reader = .{ .failed = .{ .err = error.ConnectionResetByPeer, .progress = .{ .phase = .message, .rendering = true } } }, .cause = error.WriteFailed, .inspection_error = error.ConnectionResetByPeer, .exit_error = error.WriteFailed },
         .{ .reader = .{ .cancelled = .{ .phase = .activity, .rendering = false } } },
@@ -123,6 +123,37 @@ test "departure joined fact matrix preserves precedence and recovery" {
                 const expected_error: ?anyerror = if (restore_error != null) restore_error else row.exit_error;
                 try std.testing.expectEqual(expected_error, plan.failure);
                 try std.testing.expectEqual(expected_error != null or unresolved, plan.recovery_before_notice);
+            }
+        }
+    }
+}
+
+test "retry settlement keeps substantive failures fatal in every supersession mode" {
+    for (std.enums.values(Mode)) |mode| for ([_]bool{ false, true }) |rendering| {
+        for ([_]anyerror{ error.ConnectionResetByPeer, error.HostInvocationFailed, error.CanonicalStoreFailure }) |err| {
+            const end: ReadEnd = .{ .failed = .{ .err = err, .progress = .{ .phase = .retry, .rendering = rendering } } };
+            try std.testing.expect(!end.preparationFailure());
+            try std.testing.expectEqual(err, end.failure(mode).?);
+        }
+        const cancelled: ReadEnd = .{ .cancelled = .{ .phase = .retry, .rendering = rendering } };
+        try std.testing.expectEqual(if (mode == .active) @as(?anyerror, error.Cancelled) else null, cancelled.failure(mode));
+    };
+}
+
+test "departure only historical fill preparation recovers while live scans and canonical failures remain fatal" {
+    for ([_]ReadPhase{ .fill, .activity, .permission }) |phase| {
+        for ([_]bool{ false, true }) |rendering| {
+            for ([_]anyerror{ error.ConnectionResetByPeer, error.CanonicalStoreFailure }) |err| {
+                const end: ReadEnd = .{ .failed = .{ .err = err, .progress = .{ .phase = phase, .rendering = rendering } } };
+                const recoverable = phase == .fill and !rendering and err != error.CanonicalStoreFailure;
+                try std.testing.expectEqual(recoverable, end.preparationFailure());
+                for ([_]Mode{ .active, .inspection }) |mode| {
+                    if (recoverable) try std.testing.expect(end.failure(mode) == null) else try std.testing.expect(end.failure(mode).? == err);
+                }
+                try std.testing.expectEqual(err, end.failure(.final_exit).?);
+                const cancelled: ReadEnd = .{ .cancelled = .{ .phase = phase, .rendering = rendering } };
+                try std.testing.expect(!cancelled.preparationFailure());
+                try std.testing.expectEqual(error.Cancelled, cancelled.failure(.active).?);
             }
         }
     }

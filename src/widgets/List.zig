@@ -53,6 +53,9 @@ on_press: ?Press = null,
 base_style: vaxis.Style = .{},
 /// Only background and reverse override the row's styles; foregrounds stay intact.
 selection_style: vaxis.Style = .{ .reverse = true },
+/// Optional presentation for the below line; row styles are unaffected.
+below_style: ?vaxis.Style = null,
+below_align: @FieldType(vxfw.RichText, "text_align") = .left,
 belowFn: ?*const fn (count: u32, arena: std.mem.Allocator) std.mem.Allocator.Error!Line = null,
 list: vxfw.ListView = .{ .children = .{ .slice = &.{} }, .draw_cursor = false },
 shown: Range = .{},
@@ -206,9 +209,14 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
             if (building.failed) return error.OutOfMemory;
             const remaining = count_from(self.rows.userdata, self.fullyShownEnd(surface));
             // Count includes a row whose bottom line does not fit, not headings.
-            const line = try below(remaining, ctx.arena);
+            var line = try below(remaining, ctx.arena);
+            if (self.below_style) |style| {
+                const styled = try ctx.arena.alloc(vaxis.Segment, line.len);
+                for (line, styled) |segment, *dest| dest.* = .{ .text = segment.text, .style = style };
+                line = styled;
+            }
             const label = try ctx.arena.create(vxfw.RichText);
-            label.* = .{ .text = line, .base_style = self.base_style, .width_basis = .parent, .softwrap = false };
+            label.* = .{ .text = line, .text_align = self.below_align, .base_style = self.base_style, .width_basis = .parent, .softwrap = false };
             const indicator = try label.widget().draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = 1 }));
             const children = try ctx.arena.alloc(vxfw.SubSurface, surface.children.len + 1);
             @memcpy(children[0..surface.children.len], surface.children);

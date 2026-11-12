@@ -37,8 +37,11 @@ The bare ESC expiry row waits 150 ms, observes the overview, then reopens the
 fixture's only Session with Enter and checks its identity and restored `ab`
 draft before typing `Z` and submitting `abZ`. Esc-with-text leaves the chat;
 it does not discard the draft or stay in the chat with a notice.
-Navigation checks exact seeded-history ranges after entry, intermediate
-Down/PgDn steps and return, distinguishing one-line movement from page movement.
+Navigation moves the continuous-feed anchor without switching documents; its
+reserved chip row never changes feed height. Checks cover exact seeded-history
+ranges after entry, intermediate Down/PgDn steps and End/Esc/Ctrl-G return,
+distinguishing one-line movement from page movement. At 80×24, the feed shows
+18 numbered lines away from end, or 17 plus the answer’s last line at end.
 It observes a later printable composer marker before checking each range, then
 clears that marker with Ctrl-U. The ordered marker prevents an intermediate
 frame from crediting an overshooting key batch; it never submits a Message.
