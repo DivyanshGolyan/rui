@@ -451,6 +451,9 @@ export interface components {
                         components["schemas"]["ActivityItemContent"],
                         components["schemas"]["ActivityItemContent"]
                     ];
+                    description: string | null;
+                    tool: string | null;
+                    server: string | null;
                 };
             };
         } | {
@@ -549,6 +552,9 @@ export interface components {
                     action: components["schemas"]["Decimal"];
                     operation: components["schemas"]["Decimal"];
                     call_ordinal: components["schemas"]["Decimal"];
+                    description: string | null;
+                    tool: string | null;
+                    server: string | null;
                 };
             };
         } | {

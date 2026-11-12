@@ -896,6 +896,9 @@ while True:
             lambda d: d["states"][1].update(open=[]),
             lambda d: d["states"][1].update(theme=[]),
             lambda d: d["states"][1].update(first_frame="yes"),
+            lambda d: d["states"][1].update(expect_last=""),
+            lambda d: d["states"][1].update(expect_last=[]),
+            lambda d: d["states"][1].update(expect_last="line\nbreak"),
             lambda d: d["states"][1].update(expect_next=[]),
             lambda d: d["states"][1].update(expect_next={"label": 42}),
             lambda d: d["states"][1].update(expect_next={"label": "line\nbreak"}),
@@ -1318,6 +1321,26 @@ while True:
         wrong = "■ Stop the slow job  0s\n   Old completed answer\n■ Another Session\n   Stopped\n■ Stopped"
         self.assertIsNotNone(failure(state, wrong))
         self.assertIsNone(failure(state, wrong.replace("Old completed answer", "Stopped")))
+
+    def test_chat_frames_require_loaded_sidebar_rows_and_a_last_row_footer(self):
+        states = {state["name"]: state for state in self.helper["load_scenario"](SCRIPT.with_name("frames.json"))["states"]}
+        for name in ("chat-no-new-session", "chat-sidebar-rows"):
+            state = states[name]
+            self.assertIn("+ New Session", state["absent"])
+            self.assertEqual(state["expect_last"], "alt+i info")
+        self.assertEqual(states["chat-no-new-session"]["sizes"][0], (140, 40))
+        self.assertIn({"wait": "Schema migration"}, states["chat-no-new-session"]["steps"])
+        self.assertEqual(states["chat-sidebar-rows"]["sizes"], [(140, 40)])
+        for label in ("Schema migration", "Sidebar chat", "Batch job"):
+            self.assertIn(label, states["chat-sidebar-rows"]["expect"])
+        failure = self.helper["frame_row_failure"]
+        state = {"expect_last": "alt+i info"}
+        for height in (30, 40):
+            good = "\n" * (height - 1) + "Sidebar chat  alt+i info\n"
+            self.assertIsNone(failure(state, good))
+            self.assertIsNotNone(failure(state, good + "\n"))
+            # A nonempty sidebar tail must not hide the chat's blank last row.
+            self.assertIsNotNone(failure(state, good + "  Settings  │\n"))
 
     def test_stop_waits_for_a_running_bash_not_an_approval(self):
         running = self.helper["frame_bash_running"]

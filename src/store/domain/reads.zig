@@ -16,6 +16,7 @@ const tool_proposal = @import("../../tool_proposal.zig");
 const workspace_path = @import("../../workspace_path.zig");
 const outcome_code = @import("../../outcome_code.zig");
 const content_string = @import("../../content_string.zig");
+const action_domain = @import("action.zig");
 const tool_presentation = @import("../../tool_presentation.zig");
 const idempotency_key = @import("../../idempotency_key.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
@@ -1182,9 +1183,7 @@ pub fn searchActivity(a: *ReadAccess, request: *const activity_read.ActivitySear
             var located: ?Located = null;
             try readItems(1, a, session_ref, end, &.{at}, (&scratch.item)[0..1], null, &located);
             scratch.matcher.init(request.query.slice());
-            if (located) |content| {
-                try searchContent(a, scratch, .{ .store = a.store, .content_id = content.id, .reference = .{ .length = content.metadata.length, .digest = content.metadata.digest } }, &budget);
-            } else if (scratch.item.value == .call) {
+            if (scratch.item.value == .call) {
                 const fields = scratch.item.value.call.fields;
                 // Same virtual text as read_transcript's full window: tool
                 // name, newline, then arguments in their stored JSON form.
@@ -1193,6 +1192,8 @@ pub fn searchActivity(a: *ReadAccess, request: *const activity_read.ActivitySear
                     scratch.matcher.feed("\n");
                     try searchField(a, scratch, fields[@backingInt(tool_proposal.Field.arguments)], &budget);
                 }
+            } else if (located) |content| {
+                try searchContent(a, scratch, .{ .store = a.store, .content_id = content.id, .reference = .{ .length = content.metadata.length, .digest = content.metadata.digest } }, &budget);
             }
             scratch.matcher.finish();
             if (scratch.matcher.count != 0) {
@@ -1443,10 +1444,12 @@ const activity_message = rsql.Read(.{
 /// The call Action ?1 of Session ?2 waits on, dated by its Operation's
 /// settlement, which saved the Action with the request for approval.
 const approval_request = rsql.Read(.{
-    .sql = "SELECT action.session_ref,action.parent_operation_id AS operation,action.call_ordinal,op.resolved_at FROM action_operation action " ++
+    .sql = "SELECT action.session_ref,action.parent_operation_id AS operation,action.call_ordinal,op.resolved_at,item.session_position FROM action_operation action " ++
+        "JOIN model_tool_call c ON c.operation_id=action.parent_operation_id AND c.call_ordinal=action.call_ordinal " ++
+        "JOIN model_output_item item ON item.operation_id=c.operation_id AND item.item_ordinal=c.item_ordinal " ++
         "JOIN model_operation op ON op.operation_id=action.parent_operation_id AND op.session_ref=action.session_ref WHERE action.action_id=?1 AND action.approval_position IS NOT NULL AND (action.session_ref=?2 OR EXISTS(SELECT 1 FROM session_forward f WHERE f.target_ref=?2 AND f.kind=1 AND f.source_id=action.action_id AND f.child_ref=action.session_ref AND f.position IS NOT NULL))",
     .Args = struct { action: u64, session: []const u8 },
-    .Row = struct { session_ref: SessionText, operation: rsql.Positive, call_ordinal: u64, resolved_at: rsql.Positive },
+    .Row = struct { session_ref: SessionText, operation: rsql.Positive, call_ordinal: u64, resolved_at: rsql.Positive, session_position: rsql.Positive },
     .cardinality = .optional,
 });
 
@@ -1523,12 +1526,25 @@ const ModelCallRead = struct {
     }
 };
 
-const call_resolved = rsql.Read(.{
-    .sql = "SELECT resolved_at FROM model_operation WHERE operation_id=?1 AND session_ref=?2",
-    .Args = struct { operation: u64, session: []const u8 },
-    .Row = struct { resolved_at: rsql.Positive },
-    .cardinality = .one,
+const call_details = rsql.Read(.{
+    .sql = "SELECT op.resolved_at,c.description,CASE WHEN name.byte_length<=" ++ std.fmt.comptimePrint("{d}", .{@import("../../tool_name.zig").max_bytes}) ++ " THEN @payload(name) END AS tool," ++
+        action_domain.mcpServerForNameSql("op", "c.name_content_id") ++ " AS server FROM model_operation op " ++
+        "JOIN model_tool_call c ON c.operation_id=op.operation_id JOIN content name ON name.content_id=c.name_content_id " ++
+        "WHERE op.operation_id=?1 AND op.session_ref=?2 AND c.call_ordinal=?3",
+    .Args = struct { operation: u64, session: []const u8, ordinal: u64 },
+    // Text has one address, in the output item, not a second bounded copy
+    // in every slot of the page's read-state union.
+    .Row = struct { resolved_at: rsql.Positive, description: *?Bounded(tool_presentation.max_description_bytes), tool: *?Bounded(@import("../../tool_name.zig").max_bytes), server: *?Bounded(@import("../../tool_record.zig").max_server_bytes) },
+    .cardinality = .optional,
 });
+
+/// Inline bytes retain the Proposal's admission-certified name identity.
+fn checkCallDetails(details: *const call_details.Row, metadata: *const activity_read.ProposalMetadata) error{CorruptStore}!void {
+    const field = metadata.fields[@backingInt(tool_proposal.Field.name)];
+    if (details.tool.*) |*tool| {
+        if (tool.slice().len != field.length or !std.mem.eql(u8, &content_string.digest(tool.slice()), &field.digest)) return error.CorruptStore;
+    } else if (field.length <= @import("../../tool_name.zig").max_bytes) return error.CorruptStore;
+}
 
 /// A Message the Session sent from position ?3, with whether its command
 /// agrees with it.
@@ -1784,13 +1800,13 @@ const ItemRead = struct {
         first: struct { missing: missing_assistant_entry.Result, row: activity_item.Result },
         message: struct { read: MessageRead, metadata: content_metadata.Row = undefined, label: LabelRead = undefined, entry: PublicContentRead },
         content: struct { read: PublicContentRead, presentation: PresentationRead = undefined, answer: answer_entry.Result = null },
-        call: struct { proposal: ProposalRead, resolved: call_resolved.Row = undefined },
+        call: struct { proposal: ProposalRead, resolved: call_details.Row = undefined, found: store_access.Found = undefined },
         hosted: HostedRead,
         sent: struct { read: SentRead, metadata: content_metadata.Row = undefined, label: LabelRead = undefined },
         failure: struct { read: FailureRead, label: LabelRead = undefined },
         outcome: struct { read: OutcomeRead, metadata: content_metadata.Row = undefined },
         stop: StopRead,
-        approval: approval_request.Result,
+        approval: struct { row: approval_request.Result = null, metadata: activity_read.ProposalMetadata = undefined, proposal: ProposalRead = undefined, details: call_details.Row = undefined, found: store_access.Found = undefined },
         // Text has one address, in the item: keeping another bounded copy
         // here would widen every slot of a page's read-state union.
         change: struct { row: session_change.Row = undefined, found: store_access.Found = undefined },
@@ -1840,7 +1856,12 @@ const ItemRead = struct {
             },
             4 => {
                 const call = &read.state.call;
-                if (read.round == 1) readProposal(a, session, &call.proposal) else a.read(call_resolved, .{ .operation = item.value.call.operation, .session = session }, &call.resolved);
+                if (read.round == 1) readProposal(a, session, &call.proposal) else {
+                    call.resolved.description = &item.value.call.description;
+                    call.resolved.tool = &item.value.call.tool;
+                    call.resolved.server = &item.value.call.server;
+                    a.readInto(call_details, .{ .operation = item.value.call.operation, .session = session, .ordinal = item.value.call.call_ordinal }, &call.resolved, &call.found);
+                }
             },
             10 => read.state.hosted.queue(a, session),
             8 => {
@@ -1863,7 +1884,16 @@ const ItemRead = struct {
                 if (read.round == 1) outcome.read.queue(a, session) else a.read(content_metadata, .{ .content_id = outcome.read.content_id.? }, &outcome.metadata);
             },
             7 => read.state.stop.queue(a, session),
-            12 => a.read(approval_request, .{ .action = item.value.approval_requested.action, .session = session }, &read.state.approval),
+            12 => {
+                const approval = &read.state.approval;
+                if (read.round == 1) a.read(approval_request, .{ .action = item.value.approval_requested.action, .session = session }, &approval.row) else if (read.round == 2) readProposal(a, item.value.approval_requested.session.slice(), &approval.proposal) else {
+                    const request = &item.value.approval_requested;
+                    approval.details.description = &request.description;
+                    approval.details.tool = &request.tool;
+                    approval.details.server = &request.server;
+                    a.readInto(call_details, .{ .operation = request.operation, .session = request.session.slice(), .ordinal = request.call_ordinal }, &approval.details, &approval.found);
+                }
+            },
             13 => {
                 const change = &read.state.change;
                 change.row.provider_text = &item.value.session_changed.provider_text;
@@ -1872,7 +1902,7 @@ const ItemRead = struct {
             14 => a.read(compaction_row, .{ .operation = item.value.compacted.operation, .session = session }, &read.state.compaction),
             15 => {
                 const call = &read.state.model_call;
-                call.decoded = a.store.reportScratch(model_call_row.Row);
+                call.decoded = &a.store.reportScratch(ActivityItemReads).model_call;
                 readRow(a, model_call_row, .{ .operation = call.operation, .session = session }, call);
             },
             else => unreachable,
@@ -1931,7 +1961,13 @@ const ItemRead = struct {
             },
             4 => {
                 const call = &read.state.call;
-                if (read.round == 1) return call.proposal.found();
+                if (read.round == 1) {
+                    try call.proposal.found();
+                    read.exposes(call.proposal.arguments_content_id, &call.proposal.arguments);
+                    return;
+                }
+                if (!call.found.get()) return error.CorruptStore;
+                try checkCallDetails(&call.resolved, &item.value.call);
                 item.at = call.resolved.resolved_at.get();
             },
             10 => {
@@ -1976,11 +2012,25 @@ const ItemRead = struct {
                 item.at = read.state.stop.at;
             },
             12 => {
-                const row = read.state.approval orelse return error.CorruptStore;
-                item.value.approval_requested.session.set(row.session_ref.slice()) catch return error.CorruptStore;
-                item.value.approval_requested.operation = row.operation.get();
-                item.value.approval_requested.call_ordinal = row.call_ordinal;
-                item.at = row.resolved_at.get();
+                const approval = &read.state.approval;
+                const row = approval.row orelse return error.CorruptStore;
+                const request = &item.value.approval_requested;
+                if (read.round == 1) {
+                    request.session.set(row.session_ref.slice()) catch return error.CorruptStore;
+                    request.operation = row.operation.get();
+                    request.call_ordinal = row.call_ordinal;
+                    item.at = row.resolved_at.get();
+                    approval.proposal = .{ .position = row.session_position.get(), .metadata = &approval.metadata };
+                    return;
+                }
+                if (read.round == 2) {
+                    try approval.proposal.found();
+                    if (approval.metadata.action != request.action or approval.metadata.operation != request.operation or approval.metadata.call_ordinal != request.call_ordinal) return error.CorruptStore;
+                    read.exposes(approval.proposal.arguments_content_id, &approval.proposal.arguments);
+                    return;
+                }
+                if (!approval.found.get()) return error.CorruptStore;
+                try checkCallDetails(&approval.details, &approval.metadata);
             },
             13 => {
                 const change = &read.state.change;
@@ -2052,7 +2102,7 @@ const ItemRead = struct {
             },
             12 => {
                 item.value = .{ .approval_requested = .{ .session = undefined, .action = (row.id orelse return error.CorruptStore).get(), .operation = undefined, .call_ordinal = undefined } };
-                read.state = .{ .approval = null };
+                read.state = .{ .approval = .{} };
             },
             13 => {
                 item.value = .{ .session_changed = .{ .revision = (row.id orelse return error.CorruptStore).get(), .field = undefined } };
@@ -2081,15 +2131,26 @@ const ItemRead = struct {
 /// Content an Activity item exposes: its row and public metadata.
 const Located = struct { id: i64, metadata: ContentMetadata };
 
+/// One Activity read's bounded state in the existing Store-owned report
+/// workspace. The decoder's transient row is disjoint from all retained item
+/// states: each model-call visitor consumes it before the next overwrites it.
+/// No buffer borrows this storage after readItems returns; Entry.release ends
+/// its custody. The Store's existing scratch-size assertion bounds this type.
+const ActivityItemReads = struct {
+    items: [activity_read.ActivityPage.items]ItemRead = undefined,
+    model_call: model_call_row.Row = undefined,
+};
+
 /// Reads the items at `at` through `end` into `items`, each round shared
 /// by every item (`ItemRead`), with an Activity page's call presentations
 /// (`calls`) in the rounds after its call read. Round 1 also runs what the
-/// caller queued before it. `max` bounds the items, so a lone item's read
-/// keeps a page's state out of its frame; `located`, when given, receives
-/// the content the first item exposes. Not inlined, so this state takes
-/// no slot in its caller's frame.
+/// caller queued before it. `max` bounds the caller's items; `located`,
+/// when given, receives the content the first item exposes. Page state lives
+/// in Store-owned scratch, including for a lone item's read; only the used
+/// slots are initialized. Keep the remaining round state off caller frames.
 noinline fn readItems(comptime max: usize, a: *ReadAccess, session: []const u8, end: u64, at: []const ItemAt, items: []activity_facts.Item, calls: ?*CallRows, located: ?*?Located) !void {
-    var reads: [max]ItemRead = undefined;
+    std.debug.assert(at.len <= max and max <= activity_read.ActivityPage.items);
+    const reads = &a.store.reportScratch(ActivityItemReads).items;
     for (at, items, reads[0..at.len]) |place, *item, *read| read.* = .{ .position = place.position, .ordinal = place.ordinal, .item = item };
     var round: u8 = 0;
     while (true) : (round += 1) {
@@ -2119,24 +2180,13 @@ pub fn openActivityContent(a: *ReadAccess, request: *const activity_read.ReadAct
     a.read(activity_sequence_guard, .{ .session = request.session.slice() }, &guard);
     a.run() catch |err| return store_core.fence(a.store, if (err == error.StatementFailed) error.CorruptStore else err);
     if (guard != null) return store_core.fence(a.store, error.CorruptStore);
-    // Only Tool Results have nonzero ordinals and content (an approval
-    // request's ordinal 1 has none). Byte readers need their
-    // canonical identity, not a second scan of the original arguments.
-    const content: Located = if (request.ordinal != 0) located: {
-        const found = publicConversationContent(a, request.session.slice(), request.position, request.ordinal) catch |err| switch (err) {
-            error.ContentNotFound => return err,
-            else => return store_core.fence(a.store, err),
-        };
-        break :located .{ .id = found.id, .metadata = found.metadata };
-    } else located: {
-        var item: activity_facts.Item = undefined;
-        var located: ?Located = null;
-        readItems(1, a, request.session.slice(), std.math.maxInt(i64), &.{.{ .position = request.position, .ordinal = 0 }}, (&item)[0..1], null, &located) catch |err| switch (err) {
-            error.ContentNotFound => return err,
-            else => return store_core.fence(a.store, err),
-        };
-        break :located located orelse return error.ContentNotFound;
+    var item: activity_facts.Item = undefined;
+    var located: ?Located = null;
+    readItems(1, a, request.session.slice(), std.math.maxInt(i64), &.{.{ .position = request.position, .ordinal = request.ordinal }}, (&item)[0..1], null, &located) catch |err| switch (err) {
+        error.ContentNotFound => return err,
+        else => return store_core.fence(a.store, err),
     };
+    const content = located orelse return error.ContentNotFound;
     return .{ .store = a.store, .content_id = content.id, .reference = .{ .length = content.metadata.length, .digest = content.metadata.digest } };
 }
 
@@ -2148,7 +2198,9 @@ pub const ActivityTool = struct {
     presentation: tool_presentation.ToolPresentation,
 };
 
-pub fn activityTool(a: *ReadAccess, request: *const activity_read.ReadActivityContent) !ActivityTool {
+// Keep the read state out of Queue.run: after this returns, releasing the
+// queue may drain a writer and must not retain these bounded read buffers.
+pub noinline fn activityTool(a: *ReadAccess, request: *const activity_read.ReadActivityContent) !ActivityTool {
     var metadata: activity_read.ProposalMetadata = undefined;
     var presentation: tool_presentation.ToolPresentation = undefined;
     const operation, const ordinal = if (request.ordinal == 0) call: {
@@ -2238,6 +2290,8 @@ pub const ProposalRead = struct {
     position: u64,
     metadata: ?*activity_read.ProposalMetadata = null,
     count: RowCount = .{},
+    arguments_content_id: u64 = 0,
+    arguments: activity_facts.Item.Content = undefined,
 
     pub fn visit(read: *ProposalRead, row: *const proposal_row.Row) bool {
         return visitRow(read, row);
@@ -2245,6 +2299,8 @@ pub const ProposalRead = struct {
 
     fn keep(read: *ProposalRead, row: *const proposal_row.Row) error{CorruptStore}!void {
         const fields = try certifiedFields(row);
+        read.arguments_content_id = row.arguments_content_id.get();
+        read.arguments = .{ .length = fields[2].length, .digest = fields[2].digest };
         if (read.metadata) |metadata| metadata.* = .{
             .position = read.position,
             .operation = row.operation_id.get(),
