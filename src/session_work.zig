@@ -40,8 +40,7 @@ pub const WorkState = union(Kind) {
     /// Eligible but not admitted: queued input, a continuation, approved Bash
     /// awaiting a slot, or a retry whose due time has passed.
     pending: Since,
-    /// A model Attempt is admitted and unresolved, or attached descendants
-    /// still have unfinished work after this Session's own work settled.
+    /// A model Attempt is admitted and unresolved.
     working: Since,
     /// The model Operation waits for a future retry time. `attempt` is the
     /// ordinal of the Attempt that failed; `cause` its failure code.
@@ -123,10 +122,6 @@ pub const Inputs = struct {
     /// earliest stop that excluded it. Ignored beside an active Turn.
     excluded: ?Excluded = null,
 
-    /// Earliest admission of unfinished work in the attached tree, excluding
-    /// this Session. The Store reads only live work and saved parent edges.
-    descendant_since: ?u64 = null,
-
     /// A queued Message's `admitted_at` and its admission position.
     pub const Pending = struct { at: u64, position: u64 };
     pub const Excluded = struct { admission: u64, stop_position: u64, stop_at: u64 };
@@ -201,14 +196,6 @@ pub const Work = struct {
 /// Inputs no writer produces return `error.CorruptStore`, and the reader
 /// fences as it does for other contradictions.
 pub fn derive(inputs: Inputs) error{CorruptStore}!Work {
-    var work = try deriveOwn(inputs);
-    if (work.state.progress() == null) {
-        if (inputs.descendant_since) |at| work.state = .{ .working = .{ .since = @max(work.state.since(), at) } };
-    }
-    return work;
-}
-
-fn deriveOwn(inputs: Inputs) error{CorruptStore}!Work {
     const latest = inputs.latest orelse return .{ .state = settled(inputs, null) orelse .{ .idle = .{ .since = inputs.created_at } } };
     const actions = latest.actions;
     if (actions.unresolved > actions.total or actions.awaiting + actions.running > actions.unresolved or

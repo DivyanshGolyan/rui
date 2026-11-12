@@ -3644,36 +3644,12 @@ Each state carries `since`, the Host Unix second the Session entered it, read fr
 | Every unresolved Action the active Turn's Operation proposed awaits a Permission Decision | `approval` | the group's latest change, else the proposing resolution |
 | Otherwise, with an active Turn | `pending` | the group's latest change, else the Operation's resolution |
 | No active Turn, and an eligible Message is queued | `pending` | the oldest queued admission, or the latest outcome when that Message was queued before it |
-| No own unfinished work, but an attached descendant has an active Turn or eligible queued Message | `working` | the later of the own settled state and the earliest descendant work admission |
 | No active Turn, and a stop excluded input newer than the latest Turn's input, after its outcome | `stopped`, cause `stop` | that stop |
 | The latest Turn completed | `finished` | its outcome |
 | The latest Turn was cancelled | `stopped`, cause `stop` when a stop selected it, else `interruption` | its outcome |
 | The latest Turn failed | `failed`, with its code and, for a quota code, the saved `resets_at` | its outcome |
 | No Turn | `idle` | Session creation |
 
-- **Attached tree work (D239)** reuses `working`; no client derives descendant state.
-  Own unfinished work keeps its more specific state and facts. When only descendants
-  remain unfinished (including a Permission Request), the Session is `working`;
-  its Turn, Operation and first Action still identify only its own work.
-  Standalone agents do not count. Current, Session listing and Activity pages share
-  `session_work.derive` and the Store-owned inputs under the same read lock.
-  The descendant read returns one aggregate fact per requested Session, seeded from
-  indexed live Turns and eligible queued admissions, following saved parent keys upward.
-  The queue seed walks attached Session keys and uses the existing
-  `(session_ref,turn_id,admission_id)` index to range-seek only unbound admissions
-  beyond each Session's indexed stop cutoff. It aggregates the earliest eligible
-  admission time, including when clocks stepped backward. It never scans stop-excluded
-  Message history or walks finished Turn history downward; queue-seed cost follows
-  attached Session keys and eligible queue size, followed by live ancestor edges.
-  A stopped, excluded admission is not live work. The existing TypeScript follow
-  loop keeps busy-polling for `working`, including after the root's own Turn ended.
-- **Attached-tree redesign pending Store format allocation:** a Session owes its
-  parent until its active Turn, eligible queued Message past its stop cutoff,
-  unpositioned forwarded rows, undelivered ending Message and recursively owed
-  descendants have all transferred into the parent's feed or eligible input.
-  The proposed single owner is a transactional Store live-obligation frontier,
-  shared by work reads and forwarding, indexed independently of finished children
-  and excluded admissions. This is not implemented by the current read-time seed.
 - **Latest** and **before** follow the Session's order, never the clock, which can step back.
   A tool group's changes follow its proposal, and its resolutions follow one another by acceptance position; a queued admission and an outcome compare by position.
   An `allow_once` decision and a Bash launch claim no position: a decision is ordered against a resolution by time, and `bash` dates from the earliest launch time among running Actions.

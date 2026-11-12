@@ -93,7 +93,6 @@ type CurrentReport = Extract<Schemas["InspectSessionReply"], { profile: "current
 /** Current Host facts. Decimal counts, times and IDs remain lossless strings. */
 export interface SessionStatus {
 	archiveState: SessionArchiveState;
-	/** `working` also includes unfinished attached descendants after this Session's own Turn ends. */
 	state: CurrentReport["work"]["state"]["kind"];
 	since: CurrentReport["work"]["state"]["since"];
 	turn: CurrentReport["work"]["turn"];

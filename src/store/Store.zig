@@ -1938,13 +1938,6 @@ pub const Entry = struct {
         if (store.engine.totalChanges() != self.changes and !reruns) {
             if (@import("builtin").is_test) if (untouchedForTesting(store)) |id|
                 std.debug.panic("rows of Session {s} changed, but the entry point that changed them did not touch it", .{&id});
-            // All token readers share this record. Resolve attached ancestors
-            // under the same holder, before publishing its generation/wakeup.
-            // This is a hint after saved writes: failure must forget coverage,
-            // never report unchanged; ordinary Store fencing still applies.
-            self.finish(Ordinary.none, store_access.touchAncestors(&self)) catch {
-                store.touched.everything = true;
-            };
             const generation = store.commit_generation.fetchAdd(1, .release) + 1;
             store.identities().survey.kept = if (store.identities().survey.kept == .fresh) .ready else .none;
             store.changes.record(generation, &store.touched);

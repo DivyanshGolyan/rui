@@ -1696,8 +1696,8 @@ test "a transition's commit lands its writes, positions and identities and answe
             const rounds = storage.testing_content_work.rounds;
             const result = try transition.apply(&storage, TestingDating, .{ .session = session.slice(), .revision = 1, .finish = .commit }, .{});
             try std.testing.expectEqual(TestingDating.Result{ .committed = before.next_position }, result);
-            // The head, the commit, then the shared ancestor invalidation read.
-            if (!case.rerun) try std.testing.expectEqual(rounds + 3, storage.testing_content_work.rounds);
+            // The head's round, then the commit; a rerun runs them again.
+            if (!case.rerun) try std.testing.expectEqual(rounds + 2, storage.testing_content_work.rounds);
             const after: TestingDatingState = try .of(&storage);
             try std.testing.expectEqual(before.next_position + 2, after.next_position);
             try std.testing.expectEqual(before.content_id, try store_testing.queryU64(&storage, "SELECT content_id FROM content WHERE byte_length=5 AND digest=?1", .{store_testing.Blob{ .bytes = &protocol.contentDigest("dated") }}));
@@ -2871,259 +2871,6 @@ test "Current, activity pages and Message progress report one work in each state
             _ = try storage.settleActionAttempt(action, .succeeded, "Bash succeeded.", .{});
             _ = try expectOneWork(&storage, &tmp, bash.slice(), "stopped");
             try std.testing.expect(!storage.isFenced());
-        }
-    }.run);
-}
-
-test "Session work includes only attached descendants with unfinished work" {
-    try store_testing.forEachEngine(struct {
-        fn run(case: *store_testing.Case) !void {
-            const Descendant = enum { absent, working, approval, grandchild, finished, standalone, queued, excluded };
-            inline for (std.enums.values(Descendant)) |descendant| {
-                for ([_]bool{ false, true }) |root_finished| {
-                    var tmp = std.testing.tmpDir(.{});
-                    defer tmp.cleanup();
-                    var storage: Store = undefined;
-                    try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
-                    defer storage.close() catch unreachable;
-                    const root = try configureTestSession(&storage, "tree-root");
-                    _ = try expectOneWork(&storage, &tmp, root.slice(), "idle");
-                    if (root_finished) {
-                        const answer = [_]TestingAnswerPart{.{ .encoded = "root done", .decoded = "root done" }};
-                        try answerTestTurn(&storage, &tmp, root.slice(), "tree-root-answer", &answer);
-                    }
-                    if (descendant != .absent) {
-                        const child = try configureTestSessionAsk(&storage, "tree-child");
-                        if (descendant != .standalone) try store_testing.exec(&storage, "UPDATE session SET parent_ref=?1 WHERE session_ref=?2", .{ root.slice(), child.slice() });
-                        const target = if (descendant == .grandchild) grandchild: {
-                            const grandchild = try configureTestSession(&storage, "tree-grandchild");
-                            try store_testing.exec(&storage, "UPDATE session SET parent_ref=?1 WHERE session_ref=?2", .{ child.slice(), grandchild.slice() });
-                            break :grandchild grandchild;
-                        } else child;
-                        if (descendant == .finished) {
-                            const answer = [_]TestingAnswerPart{.{ .encoded = "done", .decoded = "done" }};
-                            try answerTestTurn(&storage, &tmp, target.slice(), "tree-answer", &answer);
-                        } else {
-                            try submitTestMessage(&storage, &tmp, "tree-task", "tree-message", target.slice(), "work");
-                            if (descendant == .excluded) {
-                                var stop = try completeSessionStop("tree-stop", target.slice());
-                                try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
-                            } else if (descendant != .queued) {
-                                const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-                                if (descendant == .approval) try settleTwoActionsForTesting(&storage, &tmp, model, "tree-actions");
-                            }
-                        }
-                    }
-                    const busy = switch (descendant) {
-                        .working, .approval, .grandchild, .queued => true,
-                        .absent, .finished, .standalone, .excluded => false,
-                    };
-                    _ = try expectOneWork(&storage, &tmp, root.slice(), if (busy) "working" else if (root_finished) "finished" else "idle");
-                    try std.testing.expect(!storage.isFenced());
-                }
-            }
-        }
-    }.run);
-}
-
-test "descendant changes invalidate ancestor tokens without invalidating standalone starters" {
-    try store_testing.forEachEngine(struct {
-        fn run(case: *store_testing.Case) !void {
-            const Shape = enum { child, grandchild, standalone };
-            inline for (std.enums.values(Shape)) |shape| {
-                var tmp = std.testing.tmpDir(.{});
-                defer tmp.cleanup();
-                var storage: Store = undefined;
-                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
-                defer storage.close() catch unreachable;
-                var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
-                const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
-                var create = try completeConfiguration("invalidate-root", "", workspace, "model-a");
-                create.configuration.tools = try .of(&.{"start_agent"});
-                const root = (try storage.configure(&create, .{})).accepted.session;
-                const child = if (shape == .standalone) standalone: {
-                    // A real standalone start retains its starter in the first
-                    // Message, but deliberately saves no parent attachment.
-                    try submitTestMessage(&storage, &tmp, "starter-file", "starter-message", root.slice(), "start independently");
-                    const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-                    try settleCallsForTesting(&storage, &tmp, model, "starter-call", &.{.{
-                        .item_id = "starter-item",
-                        .name = "start_agent",
-                        .encoded_call_id = "starter-call",
-                        .decoded_call_id = "starter-call",
-                        .encoded_arguments = "{}",
-                        .decoded_arguments = "{}",
-                    }});
-                    const action = (try storage.nextCoreWork()).?.action;
-                    var spec = try testingAgentSpec(&.{}, "ask");
-                    try std.testing.expect(try storage.startAgent(action.binding, root.slice(), "independent work", false, &spec, null, .{}) == .started);
-                    const sessions = try TestingListing.read(&storage, &tmp, .{});
-                    try std.testing.expectEqual(@as(usize, 2), sessions.count);
-                    var agent: protocol.Bounded(protocol.max_session_bytes) = .{};
-                    for (sessions.references[0..sessions.count]) |*ref| {
-                        if (!std.mem.eql(u8, ref, root.slice())) try agent.set(ref);
-                    }
-                    var child_stop = try completeSessionStop("starter-child-stop", agent.slice());
-                    try std.testing.expect(storage.stopSession(&child_stop, .{}) == .accepted);
-                    var root_stop = try completeSessionStop("starter-root-stop", root.slice());
-                    try std.testing.expect(storage.stopSession(&root_stop, .{}) == .accepted);
-                    break :standalone agent;
-                } else try configureTestSession(&storage, "invalidate-child");
-                const unrelated = try configureTestSession(&storage, "invalidate-unrelated");
-                if (shape != .standalone) try store_testing.exec(&storage, "UPDATE session SET parent_ref=?1 WHERE session_ref=?2", .{ root.slice(), child.slice() });
-                const target = if (shape == .grandchild) grandchild: {
-                    const grandchild = try configureTestSession(&storage, "invalidate-grandchild");
-                    try store_testing.exec(&storage, "UPDATE session SET parent_ref=?1 WHERE session_ref=?2", .{ child.slice(), grandchild.slice() });
-                    break :grandchild grandchild;
-                } else child;
-                var request: protocol.ActivityPage = .{};
-                try request.session.set(root.slice());
-                var page: protocol.ActivityFacts = undefined;
-                try storage.activityPage(&request, &page);
-                var token = page.token.?;
-                var listing = try TestingListing.read(&storage, &tmp, .{});
-                var observed: store_core.Observed = undefined;
-                try storage.observeCommand("invalidate-root", null, &observed);
-                var observation_token = observed.full.token.?;
-                var unrelated_request: protocol.ActivityPage = .{};
-                try unrelated_request.session.set(unrelated.slice());
-                var unrelated_page: protocol.ActivityFacts = undefined;
-                try storage.activityPage(&unrelated_request, &unrelated_page);
-                unrelated_request.since = unrelated_page.token.?;
-                unrelated_request.position = unrelated_page.end;
-
-                // Both transitions are admission/stop only: there is no Turn
-                // ending or forwarded event that could incidentally touch root.
-                for ([_]bool{ true, false }) |queued| {
-                    request.position = page.end;
-                    request.since = token;
-                    if (queued) {
-                        try submitTestMessage(&storage, &tmp, "invalidate-file", "invalidate-message", target.slice(), "queued");
-                    } else {
-                        var stop = try completeSessionStop("invalidate-stop", target.slice());
-                        try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
-                    }
-                    try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM turn WHERE session_ref=?1", .{target.slice()}));
-                    try storage.activityPage(&request, &page);
-                    try std.testing.expectEqual(shape == .standalone, page.not_modified);
-                    const kind = if (shape == .standalone) "stopped" else if (queued) "working" else "idle";
-                    if (!page.not_modified) try std.testing.expectEqualStrings(kind, @tagName(page.work.work.state));
-                    token = page.token.?;
-                    try storage.observeCommand("invalidate-root", observation_token, &observed);
-                    try std.testing.expectEqual(shape == .standalone, observed == .not_modified);
-                    observation_token = if (observed == .full) observed.full.token.? else observed.not_modified;
-                    const changed = try TestingListing.read(&storage, &tmp, .{ .since = listing.since });
-                    try std.testing.expectEqual(protocol.ListDelta.changed, changed.delta);
-                    var expected: [3]change_ring.Id = undefined;
-                    var count: usize = 0;
-                    expected[count] = target.slice()[0..protocol.session_id_bytes].*;
-                    count += 1;
-                    if (shape != .standalone) {
-                        expected[count] = root.slice()[0..protocol.session_id_bytes].*;
-                        count += 1;
-                    }
-                    if (shape == .grandchild) {
-                        expected[count] = child.slice()[0..protocol.session_id_bytes].*;
-                        count += 1;
-                    }
-                    std.mem.sort(change_ring.Id, expected[0..count], {}, testingIdLess);
-                    try changed.expectReferences(expected[0..count]);
-                    listing = changed;
-                    // Current never short-circuits, and must agree with the
-                    // refreshed Activity footer even when no own row changed.
-                    _ = try expectOneWork(&storage, &tmp, root.slice(), kind);
-                    var row = try testingListRow(&storage, &tmp, root.slice());
-                    defer row.deinit();
-                    try std.testing.expectEqualStrings(kind, row.get(&.{ "work", "state", "kind" }).string);
-                    try storage.activityPage(&unrelated_request, &unrelated_page);
-                    try std.testing.expect(unrelated_page.not_modified);
-                    try std.testing.expect(!storage.isFenced());
-                }
-            }
-        }
-    }.run);
-}
-
-test "descendant queue seeds preserve eligible admission times when clocks step backward" {
-    try store_testing.forEachEngine(struct {
-        fn run(case: *store_testing.Case) !void {
-            var tmp = std.testing.tmpDir(.{});
-            defer tmp.cleanup();
-            var storage: Store = undefined;
-            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
-            defer storage.close() catch unreachable;
-            const root = try configureTestSession(&storage, "seed-root");
-            const child = try configureTestSession(&storage, "seed-child");
-            try store_testing.exec(&storage, "UPDATE session SET parent_ref=?1 WHERE session_ref=?2", .{ root.slice(), child.slice() });
-            try submitTestMessage(&storage, &tmp, "seed-first-file", "seed-first", child.slice(), "first");
-            try submitTestMessage(&storage, &tmp, "seed-later-file", "seed-later", child.slice(), "later");
-            try store_testing.exec(&storage, "UPDATE message_admission SET admitted_at=17 WHERE command_key='seed-first'", .{});
-            try store_testing.exec(&storage, "UPDATE message_admission SET admitted_at=9 WHERE command_key='seed-later'", .{});
-            try expectSeed(&storage, root.slice(), 9);
-            var stop = try completeSessionStop("seed-stop", child.slice());
-            try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
-            try expectSeed(&storage, root.slice(), null);
-            try submitTestMessage(&storage, &tmp, "seed-after-file", "seed-after", child.slice(), "after stop");
-            try store_testing.exec(&storage, "UPDATE message_admission SET admitted_at=23 WHERE command_key='seed-after'", .{});
-            try expectSeed(&storage, root.slice(), 23);
-            try std.testing.expect(try storage.admitNextModelAttempt(.{}) != null);
-            try expectSeed(&storage, root.slice(), 23);
-        }
-
-        fn expectSeed(storage: *Store, root: []const u8, expected: ?u64) !void {
-            const entry = try store_core.enter(storage, .none);
-            defer entry.release();
-            var a: reads_domain.ReadAccess = .open(&entry);
-            defer a.deinit();
-            var works = [_]report_domain.WorkRead{.{ .session = root }};
-            try report_domain.readWorks(&a, &works);
-            try std.testing.expectEqual(expected, works[0].inputs.descendant_since);
-        }
-    }.run);
-}
-
-test "new attachments invalidate saved ancestors and deep trees forget ring coverage" {
-    try store_testing.forEachEngine(struct {
-        fn run(case: *store_testing.Case) !void {
-            var tmp = std.testing.tmpDir(.{});
-            defer tmp.cleanup();
-            var storage: Store = undefined;
-            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
-            defer storage.close() catch unreachable;
-            const root = try configureTestSession(&storage, "attach-root");
-            const unrelated = try configureTestSession(&storage, "attach-unrelated");
-            var parent = root;
-            for (0..5) |depth| {
-                var request: protocol.ActivityPage = .{};
-                try request.session.set(root.slice());
-                var page: protocol.ActivityFacts = undefined;
-                try storage.activityPage(&request, &page);
-                const before = page.token.?;
-                const listing = try TestingListing.read(&storage, &tmp, .{});
-                var key: [32]u8 = undefined;
-                var command: wire_request.ConfigureCommand = .{};
-                try command.key.set(try std.fmt.bufPrint(&key, "attach-{d}", .{depth}));
-                command.configuration = try testingAgentSpec(&.{}, "ask");
-                command.configuration.parent.state = .value;
-                try command.configuration.parent.value.set(parent.slice());
-                parent = (try storage.configure(&command, .{})).accepted.session;
-                request.position = page.end;
-                request.since = before;
-                try storage.activityPage(&request, &page);
-                try std.testing.expect(!page.not_modified);
-                try std.testing.expect(page.work.work.state == .idle);
-                const changed = try TestingListing.read(&storage, &tmp, .{ .since = listing.since });
-                if (depth < 3) {
-                    try std.testing.expectEqual(protocol.ListDelta.changed, changed.delta);
-                    try std.testing.expectEqual(depth + 2, changed.count);
-                    for (changed.references[0..changed.count]) |ref| try std.testing.expect(!std.mem.eql(u8, &ref, unrelated.slice()));
-                } else {
-                    // Five distinct Sessions cannot fit Touched: forget, do
-                    // not silently truncate the chain before its root.
-                    try std.testing.expectEqual(protocol.ListDelta.full, changed.delta);
-                }
-                try std.testing.expect(!storage.isFenced());
-            }
         }
     }.run);
 }
@@ -10262,9 +10009,9 @@ test "a list page's rows share their rounds, so eight rows take as many as one" 
         fn run(case: *store_testing.Case) !void {
             // The page; its rows' latest Turns and first-Message seeks; then the
             // stop cutoff, the queue after it, the excluded Message and its stop;
-            // then the live-descendant fact and the rows themselves.
-            try std.testing.expectEqual(@as(u32, 8), try listRoundsForTesting(case, 1));
-            try std.testing.expectEqual(@as(u32, 8), try listRoundsForTesting(case, protocol.session_list_page_size));
+            // then the rows themselves.
+            try std.testing.expectEqual(@as(u32, 7), try listRoundsForTesting(case, 1));
+            try std.testing.expectEqual(@as(u32, 7), try listRoundsForTesting(case, protocol.session_list_page_size));
         }
     }.run);
 }
@@ -10409,11 +10156,10 @@ test "a Current report takes its reads' dependency depth in rounds, not its rows
             // work's and compaction facts' latest Turn; the pending count with
             // their second stages; then the recent Messages. Idle and finished
             // work reads the queue after the cutoff in a fourth round; stopped
-            // work then the excluded Message and its stop. Settled work adds
-            // the indexed live-descendant fact before the final output round.
-            try std.testing.expectEqual(@as(u32, 6), try reportRoundsForTesting(case, .idle));
-            try std.testing.expectEqual(@as(u32, 6), try reportRoundsForTesting(case, .finished));
-            try std.testing.expectEqual(@as(u32, 8), try reportRoundsForTesting(case, .stopped));
+            // work then the excluded Message and its stop.
+            try std.testing.expectEqual(@as(u32, 5), try reportRoundsForTesting(case, .idle));
+            try std.testing.expectEqual(@as(u32, 5), try reportRoundsForTesting(case, .finished));
+            try std.testing.expectEqual(@as(u32, 7), try reportRoundsForTesting(case, .stopped));
             // Awaiting work ends with its Actions in the third round; its Action
             // adds the unresolved, resolved and actionable lists, and with no
             // rejected call there is no rejected list.
@@ -11249,66 +10995,65 @@ const EntryPoint = enum {
 /// Each entry point's rounds (`Access.run` and `commit`, counted in
 /// `Store.testing_content_work.rounds`) on the path the round budget test
 /// drives it. Content rounds (`readRaw` windows) differ by engine, so
-/// `content_round_budgets` holds them apart. Session-changing paths include
-/// one bounded ancestor read at the shared change-ring recording boundary.
+/// `content_round_budgets` holds them apart.
 const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .commandExists = 1,
     .readSkills = 2,
-    .settleSkillTool = 4,
-    .configure = 5,
-    .submitMessageWithModel = 3,
-    .stopSession = 3,
-    .archiveSession = 3,
-    .interruptModel = 3,
-    .decidePermission = 3,
+    .settleSkillTool = 3,
+    .configure = 4,
+    .submitMessageWithModel = 2,
+    .stopSession = 2,
+    .archiveSession = 2,
+    .interruptModel = 2,
+    .decidePermission = 2,
     .observeCommand = 3,
     .commandResult = 1,
     .inspectSession = 3,
     .publicConversationPage = 4,
     .openPublicConversationContent = 2,
-    .activityPage = 8,
+    .activityPage = 7,
     .searchActivity = 5,
     .openActivityContent = 4,
     .activityTool = 4,
     .failedResponseBinding = 1,
-    .readSessionReport = 6,
-    .readSessionList = 7,
+    .readSessionReport = 5,
+    .readSessionList = 6,
     .actionContent = 2,
-    .admitModelAttempt = 3,
-    .admitNextActionAttempt = 3,
+    .admitModelAttempt = 2,
+    .admitNextActionAttempt = 2,
     .readBashExecutionInput = 2,
-    .admitActionAttempt = 3,
+    .admitActionAttempt = 2,
     .readMcpExecutionInput = 3,
-    .revokeActionSender = 3,
+    .revokeActionSender = 2,
     .nextCoreWork = 3,
     .nextAction = 1,
-    .resolveAction = 3,
-    .deliverAgentMessage = 4,
+    .resolveAction = 2,
+    .deliverAgentMessage = 3,
     .deliverChildEnding = 2,
-    .deliverSessionForward = 3,
-    .startAgent = 6,
-    .findTools = 6,
-    .stopOwedSession = 3,
-    .resolveCoreCall = 3,
+    .deliverSessionForward = 2,
+    .startAgent = 5,
+    .findTools = 5,
+    .stopOwedSession = 2,
+    .resolveCoreCall = 2,
     .actionSupersededByStop = 1,
     .withActionDispatchHandoff = 1,
-    .settleActionAttempt = 4,
+    .settleActionAttempt = 3,
     .recoverOneUncertainAction = 1,
     .tryAdmitNextModelRetry = 1,
     .dispatchWork = 1,
     .operationSupersededByControl = 1,
     .withDispatchHandoff = 1,
-    .claimModelAuthRefresh = 3,
-    .settleModelAttemptFailure = 3,
+    .claimModelAuthRefresh = 2,
+    .settleModelAttemptFailure = 2,
     .recoverOneExhaustedModelAttempt = 1,
-    .settleModelSuccess = 3,
+    .settleModelSuccess = 2,
     .openContentIdentity = 1,
     .readOwnedContent = 0,
     .readHistoricalSettings = 1,
     .readHistoricalEntry = 1,
     .validateHistoricalOutputsStep = 1,
     .readPrefixSeal = 1,
-    .recordPrefixSeal = 3,
+    .recordPrefixSeal = 2,
     // The entry batch's page already holds the item's parts.
     .readHistoricalParts = 0,
     .readHistoricalToolResult = 1,
@@ -15521,7 +15266,7 @@ test "MCP settlement saves one decoded presentation line or the tool name" {
 /// The fixed historical rows contain a finished root and two Bash calls in
 /// its attached child's open Turn, one authorized and one awaiting approval.
 pub fn expectWireMigrationFacts(storage: *Store, tmp: *std.testing.TmpDir) !void {
-    _ = try expectOneWork(storage, tmp, "d8mv7p", "working");
+    _ = try expectOneWork(storage, tmp, "d8mv7p", "finished");
     _ = try expectOneWork(storage, tmp, "brhkcj", "pending");
     var row = try testingListRow(storage, tmp, "brhkcj");
     defer row.deinit();
@@ -16130,8 +15875,8 @@ test "runner action seam covers selection admission input settlement stop and re
             };
             const host_tool_set: tool_defs.HostToolSet = .{ .records = &records, .digests = &digests };
             // The replay fixture executes every write transaction twice.
-            // Only the saved pass records ancestor invalidation, in one extra round.
-            const write_rounds: u64 = if (case.rerun) 5 else 3;
+            // Keep the exact two-round budget per execution on both passes.
+            const write_rounds: u64 = if (case.rerun) 4 else 2;
             inline for (.{ .bash, .mcp }) |runner| {
                 for (0..4) |scenario| {
                     var tmp = std.testing.tmpDir(.{});

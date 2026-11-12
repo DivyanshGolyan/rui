@@ -16,7 +16,6 @@
 
 const std = @import("std");
 const change_ring = @import("../change_ring.zig");
-const Bounded = @import("../bounded.zig").Bounded;
 const store_core = @import("Store.zig");
 const Store = store_core.Store;
 const rsql = @import("rsql.zig");
@@ -44,50 +43,6 @@ pub const Mode = enum {
 
 /// What a round reports besides its guards' errors. Each one fences.
 pub const Failure = engine.Failure;
-
-/// Expand the entry's changed Sessions at the one change-ring recording
-/// boundary, after its writes (including a newly saved attachment) have run.
-/// At most four Sessions fit in Touched. Four upward edges therefore either
-/// reach every ancestor or overflow it; no descendant/history scan is needed.
-/// Standalone starters are not parent_ref and cannot enter this walk.
-pub fn touchAncestors(entry: *const store_core.Entry) Failure!void {
-    const touched = &entry.store.touched;
-    if (touched.everything or touched.count == 0) return;
-    comptime std.debug.assert(change_ring.Touched.max == 4);
-    var refs: [4]change_ring.Id = @splat(touched.entries[0].session);
-    for (touched.entries[0..touched.count], 0..) |changed, i| refs[i] = changed.session;
-    var visitor: struct {
-        touched: *change_ring.Touched,
-        corrupt: bool = false,
-
-        pub fn visit(v: *@This(), row: *const changed_ancestors.Row) bool {
-            const ref = row.session.slice();
-            if (ref.len != change_ring.id_bytes) {
-                v.corrupt = true;
-                return false;
-            }
-            if (v.touched.needsEntry(ref)) v.touched.add(.{ .session = ref[0..change_ring.id_bytes].*, .workspace = row.workspace.get() });
-            return !v.touched.everything;
-        }
-    } = .{ .touched = touched };
-    var a: Access(.read, error{}) = .open(entry);
-    defer a.deinit();
-    a.readEach(changed_ancestors, .{ .first = &refs[0], .second = &refs[1], .third = &refs[2], .fourth = &refs[3] }, 5, &visitor);
-    try a.run();
-    if (visitor.corrupt) return error.CorruptStore;
-}
-
-const changed_ancestors = rsql.Read(.{
-    .sql = "WITH RECURSIVE ancestors(session_ref,parent_ref,workspace_key,depth) AS (" ++
-        "SELECT session_ref,parent_ref,workspace_key,0 FROM session WHERE session_ref IN (?1,?2,?3,?4) " ++
-        "UNION ALL SELECT s.session_ref,s.parent_ref,s.workspace_key,a.depth+1 " ++
-        "FROM ancestors a JOIN session s ON s.session_ref=a.parent_ref WHERE a.depth<4) " ++
-        "SELECT DISTINCT session_ref AS session,workspace_key AS workspace FROM ancestors WHERE depth>0 LIMIT 5",
-    .Args = struct { first: []const u8, second: []const u8, third: []const u8, fourth: []const u8 },
-    .Row = struct { session: Bounded(change_ring.id_bytes), workspace: rsql.Positive },
-    .cardinality = .each,
-    .compound = true,
-});
 
 /// A Session's positions claimed by one Access, from its head as a round
 /// read it. `commit` advances `next_position` once, by a compare-and-set
