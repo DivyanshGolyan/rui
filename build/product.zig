@@ -25,10 +25,21 @@ pub fn addRui(
     name: []const u8,
     pinned_transport: ?PinnedTransport,
 ) *std.Build.Step.Compile {
-    return addRuiWithIdentity(b, target, optimize, name, pinned_transport, .{ .version = buildVersion(b), .revision = buildRevision(b) });
+    return addRuiWithIdentity(b, target, optimize, name, pinned_transport, buildIdentity(b));
 }
 
 const BuildIdentity = struct { version: []const u8, revision: []const u8 };
+
+var identity_memo: ?struct { owner: *std.Build, identity: BuildIdentity } = null;
+
+/// The built commit's version and revision, read from git once per build
+/// graph however many artifacts and unit roots take it.
+pub fn buildIdentity(b: *std.Build) BuildIdentity {
+    if (identity_memo) |memo| if (memo.owner == b) return memo.identity;
+    const identity: BuildIdentity = .{ .version = buildVersion(b), .revision = buildRevision(b) };
+    identity_memo = .{ .owner = b, .identity = identity };
+    return identity;
+}
 
 pub fn addRuiWithIdentity(
     b: *std.Build,
@@ -78,7 +89,7 @@ pub fn addPinnedTransport(b: *std.Build, target: std.Build.ResolvedTarget) Pinne
     return .{ .output = output };
 }
 
-pub fn buildRevision(b: *std.Build) []const u8 {
+fn buildRevision(b: *std.Build) []const u8 {
     return gitHead(b, &.{ "rev-parse", "HEAD" }) orelse "unknown";
 }
 
@@ -110,7 +121,7 @@ fn configureTransport(
     /// Null type-checks without the built transport: headers only, no link.
     maybe_pinned: ?PinnedTransport,
 ) void {
-    configureTransportWithIdentity(b, compile, target, maybe_pinned, .{ .version = buildVersion(b), .revision = buildRevision(b) });
+    configureTransportWithIdentity(b, compile, target, maybe_pinned, buildIdentity(b));
 }
 
 fn configureTransportWithIdentity(
