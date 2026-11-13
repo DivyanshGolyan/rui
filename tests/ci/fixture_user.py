@@ -14,8 +14,8 @@ interpreter, toolchains and trust files never matters. Every run, under that
 lane's lock:
   - root reads `Inputs`: the commit REF (default HEAD) names, this checkout's
     common git directory, origin's URL, the file or directory each of the
-    caller's trust variables names (network_variables.TRUST and the tools'
-    bundle names) and the python3.12, zig and go the caller would run;
+    caller's trust variables names (network_variables.TRUST and TOOL_TRUST)
+    and the python3.12, zig and go the caller would run;
   - root places them (`place`): it fetches REF, origin/main and the v* tags
     (this repository's, then origin's) into a bare repository in
     /var/lib/rui-fixture/lanes/LANE, copies the trust files there, and uses each
@@ -76,9 +76,9 @@ PLACED = Path("/var/lib/rui-fixture")
 HOMES = Path("/home")
 SOURCE = "source.git"
 TRUST_COPIES = "trust"
-# Tools' own names for a CA bundle file. When the caller's trust names a bundle,
-# each of these points at its copy too, so pip, git, curl and node trust it.
-TOOL_BUNDLES = ("REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "GIT_SSL_CAINFO", "PIP_CERT", "NODE_EXTRA_CA_CERTS")
+# Tools' own trust variables. Each means something different to its tool (node's
+# adds to its store, pip's replaces it), so each is moved as the caller set it.
+TOOL_TRUST = ("REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "GIT_SSL_CAINFO", "PIP_CERT", "NODE_EXTRA_CA_CERTS")
 # Passed through unchanged when the caller sets them: the proxy, which listens
 # on loopback for every user, and the terminal and text decoding.
 PASSED = (*network_variables.PROXY, "TERM", "LANG", "LC_ALL", "LC_CTYPE")
@@ -208,21 +208,16 @@ def reexec_pinned(argv):
 
 
 def trust_sources(environ):
-    """The caller's trust, as each variable the run sets and the file or directory it names.
+    """The caller's trust, moved: each trust variable it set to an existing file or directory, and that path.
 
-    Each variable of network_variables.TRUST and TOOL_BUNDLES that names an
-    existing file or directory keeps what it names. Each tool variable the
-    caller left unset gets the main bundle: the first file among those, the
-    owner's names first. A variable naming nothing is dropped, with a notice.
+    Nothing is filled or derived: a variable the caller left unset stays unset,
+    and one naming a missing path is dropped with a notice.
     """
-    named = {name: Path(environ[name]) for name in (*network_variables.TRUST, *TOOL_BUNDLES) if environ.get(name)}
+    named = {name: Path(environ[name]) for name in (*network_variables.TRUST, *TOOL_TRUST) if environ.get(name)}
     for name, path in named.items():
         if not path.exists():
             say(f"{name} names {path}, which does not exist; the run leaves {name} unset")
     trust = {name: path for name, path in named.items() if path.exists()}
-    bundle = next((path for path in trust.values() if path.is_file()), None)
-    if bundle is not None:
-        trust.update({name: bundle for name in TOOL_BUNDLES if name not in named})
     if not trust:
         say("no CA bundle or certificate directory in the caller's trust variables; the run uses the system "
             "trust store")
@@ -418,7 +413,7 @@ def environment(user, home, path, trust, environ, keep=()):
         **{name: str(copy) for name, copy in trust.items()},
     }
     # The caller's trust names the run does not set stay unset, never pointing into root's state.
-    withheld = (*network_variables.TRUST, *TOOL_BUNDLES)
+    withheld = (*network_variables.TRUST, *TOOL_TRUST)
     refused = sorted(set(keep) & {*fixed, *withheld})
     if refused:
         raise SystemExit(f"{COMMAND}: --keep cannot override the run's own {', '.join(refused)}")
