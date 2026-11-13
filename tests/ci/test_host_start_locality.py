@@ -27,6 +27,18 @@ class HostStartLocalityTest(unittest.TestCase):
             with self.subTest(source=source):
                 self.assertEqual(1, len(scan(source)))
 
+    def test_origin_coupling_is_rejected_in_every_host_file(self):
+        for source in ('const frame = @import("launch_frame.zig");',
+                       'const frame = @import ( "./launch_frame.zig" );',
+                       'const @"launched" = true;',
+                       'test "field domain" { var launched = false; }'):
+            with self.subTest(source=source):
+                found = scan(source, "src/server_host.zig")
+                self.assertEqual(1, len(found))
+                self.assertIn("src/server_host.zig:1:", found[0])
+        self.assertEqual([], scan('// launched @import("launch_frame.zig")\n'
+                                  'const s = "launched";'))
+
     def test_comments_strings_and_balanced_tests_are_not_production(self):
         source = ('// writeRefusal and File.stdout\n'
                   'const s = "File.stdout writeRefusal // }";\n'

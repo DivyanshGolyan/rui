@@ -73,6 +73,9 @@ pub fn left(trigger: u64, pressure: u64) u8 {
 pub const Facts = struct {
     name: []const u8,
     model: []const u8,
+    /// Present only before the first Message, from the current Session read.
+    folder: ?[]const u8 = null,
+    home: []const u8 = "",
     effort: ?ReasoningEffort = null,
     /// Percent left before automatic compaction; null when no estimate
     /// decides the next model call.

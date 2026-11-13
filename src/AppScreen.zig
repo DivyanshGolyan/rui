@@ -22,7 +22,7 @@ fn Screen(comptime Body: type) type {
         const Self = @This();
 
         content: *Body,
-        input: *InputArea,
+        input: vxfw.Widget,
         style: @import("vaxis").Style = .{},
         header: ?vxfw.Widget = null,
         tail: ?vxfw.Widget = null,
@@ -37,8 +37,7 @@ fn Screen(comptime Body: type) type {
         userdata: *anyopaque,
         on_event: *const fn (*anyopaque, *vxfw.EventContext, vxfw.Event) anyerror!void,
 
-        pub const Part = enum { whole, list, compose };
-        const empty: vxfw.Text = .{ .text = "" };
+        pub const Part = enum { whole, list };
 
         pub fn widget(self: *Self) vxfw.Widget {
             return .{ .userdata = self, .eventHandler = event, .drawFn = draw };
@@ -48,18 +47,9 @@ fn Screen(comptime Body: type) type {
             return .{ .userdata = self, .drawFn = drawList };
         }
 
-        pub fn composeWidget(self: *Self) vxfw.Widget {
-            return .{ .userdata = self, .eventHandler = event, .drawFn = drawCompose };
-        }
-
         fn drawList(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
             const self: *Self = @ptrCast(@alignCast(raw));
             return self.drawPart(ctx, .list);
-        }
-
-        fn drawCompose(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
-            const self: *Self = @ptrCast(@alignCast(raw));
-            return self.drawPart(ctx, .compose);
         }
 
         fn event(raw: *anyopaque, ctx: *vxfw.EventContext, value: vxfw.Event) !void {
@@ -81,7 +71,6 @@ fn Screen(comptime Body: type) type {
             const own = switch (part) {
                 .whole => self.widget(),
                 .list => self.listWidget(),
-                .compose => self.composeWidget(),
             };
             const size = ctx.max.size();
             if (size.width == 0 or size.height == 0) return .empty(own);
@@ -90,7 +79,7 @@ fn Screen(comptime Body: type) type {
             const lower = try ctx.arena.create(Stack);
             const lower_children = try ctx.arena.alloc(Stack.Child, 4);
             var count: usize = 1;
-            lower_children[0] = .{ .widget = if (part == .compose) empty.widget() else self.content.widget(), .sizing = .fill };
+            lower_children[0] = .{ .widget = self.content.widget(), .sizing = .fill };
             if (part == .whole) if (self.marker) |marker| {
                 const row = try ctx.arena.create(Marker);
                 row.* = .{ .child = marker, .style = self.style };
@@ -114,10 +103,10 @@ fn Screen(comptime Body: type) type {
             const upper = try ctx.arena.create(Stack);
             const upper_children = try ctx.arena.alloc(Stack.Child, 2);
             count = 0;
-            if (part != .compose) if (self.header) |header| {
+            if (self.header) |header| {
                 upper_children[count] = .{ .widget = header };
                 count += 1;
-            };
+            }
             upper_children[count] = .{ .widget = feed, .sizing = .fill };
             upper.* = .{ .children = upper_children[0 .. count + 1] };
             const overlay = if (part == .list) null else self.overlay;
@@ -131,11 +120,12 @@ fn Screen(comptime Body: type) type {
             column_children[0] = .{ .widget = upper.widget(), .sizing = .fill };
             if (reserved) |slot| column_children[1] = .{ .widget = slot.spaceWidget() };
             const input_index = column_children.len - 1;
-            if (part != .list) column_children[input_index] = .{ .widget = self.input.widget() };
+            if (part != .list) column_children[input_index] = .{ .widget = self.input };
             column.* = .{ .children = column_children };
             // Stack measures from the bottom: input first, panel second, feed
             // last. Layer then paints the very same panel surface, once.
-            const base = try column.widget().draw(ctx);
+            var base = try column.widget().draw(ctx);
+            try groundBase(ctx, &base, self.style, if (reserved) |slot| slot.spaceWidget() else null);
             const panels = try ctx.arena.alloc(Layer.Panel, if (overlay != null) 1 else 0);
             if (overlay) |shown| panels[0] = .{
                 .child = if (reserved) |slot| slot.shownWidget() else shown,
@@ -151,12 +141,71 @@ fn Screen(comptime Body: type) type {
             // Existing screen policy still owns events; these parts change
             // composition without changing how panels or input handle keys.
             surface.widget = own;
-            surface.buffer = try vxfw.Surface.createBuffer(ctx.cell_arena, size);
-            @memset(surface.buffer, .{ .style = self.style });
             return surface;
         }
     };
 }
+
+/// AppScreen's transparent base consists of disjoint row bands and padding.
+/// Keep that layout/event tree intact; add inert surfaces only in its gaps.
+/// Layer owns overlapping panels separately, including the reserved slot.
+fn groundBase(ctx: vxfw.DrawContext, base: *vxfw.Surface, style: @import("vaxis").Style, reserved: ?vxfw.Widget) std.mem.Allocator.Error!void {
+    const arena = ctx.arena;
+    var ground: Ground = .{ .arena = arena, .cell_arena = ctx.cell_arena, .style = style, .reserved = reserved };
+    try ground.collect(base.*, .{ .row = 0, .col = 0 }, base.size);
+    if (ground.strips.items.len == 0) return;
+    const children = try arena.alloc(vxfw.SubSurface, base.children.len + ground.strips.items.len);
+    @memcpy(children[0..base.children.len], base.children);
+    @memcpy(children[base.children.len..], ground.strips.items);
+    base.children = children;
+}
+
+const Ground = struct {
+    arena: std.mem.Allocator,
+    cell_arena: std.mem.Allocator,
+    style: @import("vaxis").Style,
+    reserved: ?vxfw.Widget,
+    strips: std.ArrayList(vxfw.SubSurface) = .empty,
+    const inert: vxfw.Text = .{ .text = "" };
+
+    fn strip(self: *Ground, origin: vxfw.RelativePoint, size: vxfw.Size) std.mem.Allocator.Error!void {
+        if (size.width == 0 or size.height == 0) return;
+        const surface = try vxfw.Surface.init(self.cell_arena, inert.widget(), size);
+        @memset(surface.buffer, .{ .style = self.style });
+        try self.strips.append(self.arena, .{ .origin = origin, .surface = surface });
+    }
+
+    fn above(_: void, a: *const vxfw.SubSurface, b: *const vxfw.SubSurface) bool {
+        return a.origin.row < b.origin.row;
+    }
+
+    fn collect(self: *Ground, surface: vxfw.Surface, origin: vxfw.RelativePoint, size: vxfw.Size) std.mem.Allocator.Error!void {
+        if (size.width == 0 or size.height == 0 or surface.buffer.len != 0) return;
+        if (self.reserved) |slot| if (surface.widget.eql(slot)) return;
+        // Input facts can follow status on screen, and list indicators can
+        // precede the first child. Order references, never the event tree.
+        const rows = try self.arena.alloc(*const vxfw.SubSurface, surface.children.len);
+        for (surface.children, rows) |*child, *row| row.* = child;
+        std.mem.sort(*const vxfw.SubSurface, rows, {}, above);
+        var bottom: u16 = 0;
+        for (rows) |child| {
+            std.debug.assert(child.origin.row >= 0 and child.origin.col >= 0);
+            const top: u16 = @min(size.height, @as(u16, @intCast(child.origin.row)));
+            const left: u16 = @min(size.width, @as(u16, @intCast(child.origin.col)));
+            const height = @min(child.surface.size.height, size.height - top);
+            const width = @min(child.surface.size.width, size.width - left);
+            if (height == 0) continue;
+            // This is a column/padding walk, not overlapping-region algebra.
+            std.debug.assert(top >= bottom);
+            try self.strip(.{ .row = origin.row + bottom, .col = origin.col }, .{ .width = size.width, .height = top - bottom });
+            try self.strip(.{ .row = origin.row + top, .col = origin.col }, .{ .width = left, .height = height });
+            try self.collect(child.surface, .{ .row = origin.row + top, .col = origin.col + left }, .{ .width = width, .height = height });
+            try self.strip(.{ .row = origin.row + top, .col = origin.col + left + width }, .{ .width = size.width - left - width, .height = height });
+            bottom = top + height;
+        }
+        try self.strip(.{ .row = origin.row + bottom, .col = origin.col }, .{ .width = size.width, .height = size.height - bottom });
+    }
+};
 
 /// Draw-arena custody of one measured panel. Stack reserves its actual rows;
 /// Layer paints its retained surface over that space without drawing it again.
@@ -222,9 +271,9 @@ test "App screens compose content input facts status and an overlay without owni
             count.* += 1;
         }
     };
-    var overview: Overview = .{ .content = &list, .input = &input, .userdata = &events, .on_event = Handler.event };
+    var overview: Overview = .{ .content = &list, .input = input.widget(), .userdata = &events, .on_event = Handler.event };
     var facade: Content = .{ .shown = transcript.widget() };
-    var session: Session = .{ .content = &facade, .input = &input, .userdata = &events, .on_event = Handler.event };
+    var session: Session = .{ .content = &facade, .input = input.widget(), .userdata = &events, .on_event = Handler.event };
     const overlay: vxfw.Text = .{ .text = "Commands" };
     overview.overlay = overlay.widget();
     session.overlay = overlay.widget();
@@ -301,7 +350,7 @@ test "App screens render the original composition with painted marker rows" {
     const editor: @import("TerminalEditor.zig") = .{ .buffer = &bytes, .length = bytes.len, .cursor = 2 };
     var input: InputArea = .{ .composer = .{ .editor = &editor } };
     var content: TestContent = .{};
-    var screen: Screen(TestContent) = .{ .content = &content, .input = &input, .userdata = &content, .on_event = TestContent.event, .style = .{ .bg = .{ .index = 4 } } };
+    var screen: Screen(TestContent) = .{ .content = &content, .input = input.widget(), .userdata = &content, .on_event = TestContent.event, .style = .{ .bg = .{ .index = 4 } } };
     const header: vxfw.Text = .{ .text = "Header", .style = .{ .bold = true } };
     const tail: vxfw.Text = .{ .text = "Tail\nSecond" };
     const marker: vxfw.Text = .{ .text = "Up" };
@@ -317,8 +366,7 @@ test "App screens render the original composition with painted marker rows" {
         screen.overlay = if (flags & 8 != 0) overlay.widget() else null;
         const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = height }, .cell_size = .{} };
         const surface = try screen.widget().draw(ctx);
-        try std.testing.expectEqual(@as(usize, width) * height, surface.buffer.len);
-        if (width > 0 and height > 0) try std.testing.expectEqual(screen.style.bg, surface.readCell(width - 1, height - 1).style.bg);
+        try std.testing.expectEqual(@as(usize, 0), surface.buffer.len);
         var terminal: vaxis.Screen = .{ .width = width, .height = height, .width_method = .unicode, .buf = try arena.allocator().alloc(vaxis.Cell, @as(usize, width) * height) };
         @memset(terminal.buf, .{});
         const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = height, .screen = &terminal };
@@ -381,9 +429,9 @@ test "App screens update layout state through exhausted resizes for every option
         var all: []const GroupedList.Row = rows[0..3];
         var list: GroupedList = .{ .rows = .of(&all) };
         var transcript: @import("DocumentView.zig") = .{ .document = document };
-        var overview: Overview = .{ .content = &list, .input = &input, .userdata = &list, .on_event = Row.event };
+        var overview: Overview = .{ .content = &list, .input = input.widget(), .userdata = &list, .on_event = Row.event };
         var facade: Content = .{ .shown = transcript.widget() };
-        var session: Session = .{ .content = &facade, .input = &input, .userdata = &transcript, .on_event = Row.event };
+        var session: Session = .{ .content = &facade, .input = input.widget(), .userdata = &transcript, .on_event = Row.event };
         inline for (.{ &overview, &session }) |screen| {
             var header: Row = .{ .text = .{ .text = "Header" } };
             var tail: Row = .{ .text = .{ .text = "Tail\nSecond" } };
@@ -466,7 +514,7 @@ test "App screens reserve one measured natural panel before feed without shrinki
     var input: InputArea = .{ .composer = .{ .editor = &editor }, .status = null };
     var body: Body = .{};
     var panel: Panel = .{};
-    var screen: Screen(Body) = .{ .content = &body, .input = &input, .userdata = &body, .on_event = Body.event, .overlay_reserves_space = true };
+    var screen: Screen(Body) = .{ .content = &body, .input = input.widget(), .userdata = &body, .on_event = Body.event, .overlay_reserves_space = true };
     for ([_]u16{ 1, 2, 46, 140 }) |width| for ([_]u16{ 1, 2, 4, 7, 18, 30, 40 }) |height| {
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
@@ -501,4 +549,113 @@ test "App screens reserve one measured natural panel before feed without shrinki
             try std.testing.expectEqual(@as(usize, 4), editor.cursor);
         }
     };
+}
+
+test "App screens allocate cells once for a covered pane and its gutter" {
+    const Body = struct {
+        fn widget(self: *@This()) vxfw.Widget {
+            return .{ .userdata = self, .drawFn = draw };
+        }
+        fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            const surface = try vxfw.Surface.init(ctx.cell_arena, self.widget(), ctx.max.size());
+            @memset(surface.buffer, .{ .char = .{ .grapheme = "c", .width = 1 } });
+            return surface;
+        }
+        fn event(_: *anyopaque, _: *vxfw.EventContext, _: vxfw.Event) !void {}
+        fn cells(surface: vxfw.Surface) usize {
+            var count = surface.buffer.len;
+            for (surface.children) |child| count += cells(child.surface);
+            return count;
+        }
+    };
+    var bytes = "draft".*;
+    const editor: @import("TerminalEditor.zig") = .{ .buffer = &bytes, .length = bytes.len };
+    var input: InputArea = .{ .composer = .{ .editor = &editor } };
+    var body: Body = .{};
+    var screen: Screen(Body) = .{ .content = &body, .input = input.widget(), .content_gutter = true, .userdata = &body, .on_event = Body.event, .style = .{ .bg = .{ .index = 4 } } };
+    for ([_]u16{ 1, 2, 46, 120, 250 }) |width| for ([_]u16{ 1, 2, 5, 40, 70 }) |height| for ([_]Screen(Body).Part{ .whole, .list }) |part| {
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const drawn = try screen.drawPart(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = height }, .cell_size = .{} }, part);
+        // All children in this frame partition the pane. A full-pane ground
+        // beneath them would double the cell allocation, even at wide sizes.
+        try std.testing.expectEqual(@as(usize, width) * height, Body.cells(drawn));
+        try std.testing.expectEqual(@as(usize, 0), drawn.buffer.len);
+    };
+}
+
+test "App screens ground gutter short rows and empty space without changing hit targets" {
+    const vaxis = @import("vaxis");
+    const style: vaxis.Style = .{ .bg = .{ .index = 4 }, .fg = .{ .index = 7 } };
+    const painted: vaxis.Cell = .{ .char = .{ .grapheme = "x", .width = 1 }, .style = .{ .bg = .{ .index = 2 } } };
+    const text: vxfw.Text = .{ .text = "" };
+    const Handler = struct {
+        fn event(_: *anyopaque, _: *vxfw.EventContext, _: vxfw.Event) !void {}
+    };
+    var hit_widget = text.widget();
+    hit_widget.eventHandler = Handler.event;
+    // A natural-width row, a gutter beside a taller body, and leftover rows.
+    // Visit the children out of visual order, as InputArea and List can do.
+    for ([_]u16{ 1, 2, 7, 46, 120, 250 }) |width| for ([_]u16{ 1, 2, 5, 40, 70 }) |height| for (0..3) |mode| {
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const alloc = arena.allocator();
+        const row_width: u16 = if (mode == 0) 0 else width / 2;
+        const body_height: u16 = if (mode == 2) 0 else (height - 1) / 2;
+        const ctx: vxfw.DrawContext = .{ .arena = alloc, .cell_arena = alloc, .min = .{}, .max = .{ .width = width, .height = height }, .cell_size = .{} };
+        const row = try vxfw.Surface.init(ctx.cell_arena, hit_widget, .{ .width = row_width, .height = 1 });
+        @memset(row.buffer, painted);
+        const body = try vxfw.Surface.init(ctx.cell_arena, hit_widget, .{ .width = width - 1, .height = body_height });
+        @memset(body.buffer, painted);
+        const children = try alloc.dupe(vxfw.SubSurface, &.{
+            .{ .origin = .{ .row = 1, .col = 1 }, .surface = body },
+            .{ .origin = .{ .row = 0, .col = 0 }, .surface = row },
+        });
+        var base: vxfw.Surface = .{ .widget = hit_widget, .size = .{ .width = width, .height = height }, .buffer = &.{}, .children = children };
+        var before: std.ArrayList(vxfw.HitResult) = .empty;
+        try base.hitTest(alloc, &before, .{ .row = height - 1, .col = 0 });
+        try groundBase(ctx, &base, style, null);
+        var after: std.ArrayList(vxfw.HitResult) = .empty;
+        try base.hitTest(alloc, &after, .{ .row = height - 1, .col = 0 });
+        try std.testing.expectEqualDeep(before.items, after.items);
+        var terminal: vaxis.Screen = .{ .width = width, .height = height, .width_method = .unicode, .buf = try alloc.alloc(vaxis.Cell, @as(usize, width) * height) };
+        @memset(terminal.buf, .{});
+        try base.render(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = height, .screen = &terminal }, text.widget());
+        for (0..height) |y| for (0..width) |x| {
+            const covered = (y == 0 and x < row_width) or (y >= 1 and y < 1 + body_height and x >= 1);
+            const expected: vaxis.Cell = if (covered) painted else .{ .style = style };
+            try std.testing.expectEqualDeep(expected, terminal.readCell(@intCast(x), @intCast(y)).?);
+        };
+    };
+}
+
+// A frame-wide ground allocation would double these cells; putting even one
+// strip on the metadata arena would leave its pointer outside cell_storage.
+test "App screens allocate uncovered ground strips only in cell_arena" {
+    const vaxis = @import("vaxis");
+    const text: vxfw.Text = .{ .text = "" };
+    var cell_storage: [4096]u8 align(@alignOf(vaxis.Cell)) = undefined;
+    var cells: std.heap.FixedBufferAllocator = .init(&cell_storage);
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = cells.allocator(), .min = .{}, .max = .{ .width = 8, .height = 4 }, .cell_size = .{} };
+    const body = try vxfw.Surface.init(ctx.cell_arena, text.widget(), .{ .width = 6, .height = 2 });
+    const children = try ctx.arena.dupe(vxfw.SubSurface, &.{.{ .origin = .{ .row = 1, .col = 1 }, .surface = body }});
+    var base: vxfw.Surface = .{ .widget = text.widget(), .size = ctx.max.size(), .buffer = &.{}, .children = children };
+    try groundBase(ctx, &base, .{}, null);
+    try std.testing.expectEqual(@as(usize, 0), base.buffer.len);
+    try std.testing.expectEqual(@as(usize, 5), base.children.len);
+    const start = @intFromPtr(cell_storage[0..].ptr);
+    const end = start + cell_storage.len;
+    const metadata = @intFromPtr(base.children.ptr);
+    try std.testing.expect(metadata < start or metadata >= end);
+    var count: usize = 0;
+    for (base.children) |child| {
+        const ptr = @intFromPtr(child.surface.buffer.ptr);
+        try std.testing.expect(ptr >= start and ptr + std.mem.sliceAsBytes(child.surface.buffer).len <= end);
+        count += child.surface.buffer.len;
+    }
+    try std.testing.expectEqual(@as(usize, 32), count);
+    try std.testing.expectEqual(count * @sizeOf(vaxis.Cell), cells.end_index);
 }
