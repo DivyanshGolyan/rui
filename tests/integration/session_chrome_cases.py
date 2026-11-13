@@ -160,11 +160,14 @@ class Chrome:
 
 
 def composing(screen, draft):
-    """The composer shows `draft` on its row between the rules."""
+    """The composer shows `draft`; an empty editor may show its placeholder."""
     shown = [composer_line(screen, index) for index in range(len(rows(screen)))]
     bounds = composer_bounds(screen)
+    expected = {(" › " + draft).rstrip()}
+    if not draft:
+        expected.add(" › Type a task")
     return (len(shown) == ROWS and bounds is not None and bounds[1] == bounds[0] + 2
-            and shown[bounds[0] + 1].rstrip() == (" › " + draft).rstrip())
+            and shown[bounds[0] + 1].rstrip() in expected)
 
 
 def latest(screen, text):
@@ -633,7 +636,7 @@ def keys_case():
             chrome.frame(master, gesture, lambda screen: "Notifications" in screen and "Version" in screen)
             keys = chrome.frame(master, b"\x1b[B" * 6 + b"\r", lambda screen: "earlier message" in screen)
             expected = (
-                ("enter", "send"), ("esc", "back"), ("⇧enter", "new line"),
+                ("enter", "open / send"), ("esc", "back"), ("⇧enter", "new line"),
                 ("tab", "next footer field"), ("⇧tab", "previous footer field"),
                 ("ctrl+x", "stop"), ("↑↓", "scroll"), ("ctrl+o", "tool output"),
                 ("ctrl+p", "earlier message"), ("ctrl+r", "retry"),

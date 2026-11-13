@@ -3302,8 +3302,8 @@ test "cleanup publication follows complete execution retirement" {
         .clock = .awake,
     });
     var refused: bash.ArgumentSizes = .{};
-    var launched = try prepared.launch(bash.default_facts, null, null, &refused);
-    slot = .{ .bash = .{ .token = token, .binding = binding, .execution = &launched, .delivery = .{ .closed = .{ .reclaim_at = deadline } } } };
+    var bash_execution = try prepared.launch(bash.default_facts, null, null, &refused);
+    slot = .{ .bash = .{ .token = token, .binding = binding, .execution = &bash_execution, .delivery = .{ .closed = .{ .reclaim_at = deadline } } } };
     var window: [bash.copy_window_bytes]u8 = undefined;
     const service = .{ .execution = slot.bash.execution, .scratch = scratch, .window = &window };
     defer if (slot == .bash) {

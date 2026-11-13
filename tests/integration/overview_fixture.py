@@ -139,8 +139,8 @@ class World:
             process = spawn([str(fixture.RUI), *map(str, args)], env=self.env, cwd=self.workspace,
                             stdin=slave, stdout=slave, stderr=slave)
             screen = Screen(process, master, columns, rows)
-            screen.wait(lambda frame: " › " in frame or frame.rstrip().endswith("›") or "\n ›" in frame,
-                        "the overview's composer")
+            screen.wait(lambda frame: "+ New Session" in frame and "Settings" in frame and "enter open" in frame,
+                        "the overview's pinned rows and footer")
             yield screen
             if process.poll() is None:
                 screen.keys(b"\x04")

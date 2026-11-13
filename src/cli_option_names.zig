@@ -9,6 +9,7 @@ pub const names = [_][]const u8{
     "bash-timeout-ms",
     "clear-model",
     "compaction-trigger",
+    "device-code",
     "engine",
     "failed-response",
     "fault",

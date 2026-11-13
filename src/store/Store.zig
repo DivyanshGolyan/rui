@@ -179,10 +179,10 @@ pub const Store = struct {
     }
 
     /// Records `seal` for the current `binding` through the production
-    /// write (`historical.recordPrefixSeal`), whatever the seal holds.
+    /// write (`recordPrefixSeal`), whatever the seal holds.
     pub fn setPrefixSealForTesting(self: *Store, binding: AttemptBinding, seal: *const PrefixSeal) !void {
         if (!@import("builtin").is_test) @compileError("test-only Store fixture");
-        return historical_domain.recordPrefixSeal(self, binding, seal);
+        return self.recordPrefixSeal(binding, seal);
     }
 
     pub fn setHistoricalModelForTesting(self: *Store, binding: AttemptBinding, model: []const u8) !void {
@@ -1578,6 +1578,17 @@ pub const Store = struct {
         active: ActiveOperationFilter,
     ) !bool {
         return transition.apply(self, model_settlement_domain.RecoverExhausted, .{ .active = active }, .{});
+    }
+
+    /// Records `seal` as the prefix seal of the Session of the Attempt
+    /// `binding` names, while the binding is current
+    /// (`historical.RecordSeal`).
+    pub fn recordPrefixSeal(self: *Store, binding: AttemptBinding, seal: *const PrefixSeal) !void {
+        return self.queue().write(recordPrefixSealHeld, .{ self, binding, seal });
+    }
+
+    fn recordPrefixSealHeld(self: *Store, binding: AttemptBinding, seal: *const PrefixSeal) !void {
+        return transition.apply(self, historical_domain.RecordSeal, .{ .binding = binding, .seal = seal }, .{});
     }
 
     pub fn settleModelSuccess(

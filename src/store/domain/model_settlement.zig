@@ -261,18 +261,27 @@ const attempt_session = rsql.Read(.{
     .cardinality = .optional,
 });
 
-/// The Session of the Attempt `binding` names, read in one round, while
-/// the binding is current: what a write for the Attempt ties to with
-/// `@session`. A missing Operation is `StaleAttemptBinding`, and a failed
-/// step `OperationReadFailed`.
-pub fn currentAttemptSession(a: anytype, binding: AttemptBinding) !rsql.SessionHead {
-    var found: attempt_session.Result = undefined;
-    a.read(attempt_session, .{ .operation_id = binding.operation_id }, &found);
-    try runOperationRead(a);
-    const row = found orelse return error.StaleAttemptBinding;
-    try attemptStanding(row, binding);
-    return row.session;
-}
+/// The Session of the Attempt `binding` names, read in one round a
+/// transition runs, while the binding is current: what a write for the
+/// Attempt ties to with `@session`. `queue` queues the read, and
+/// `session`, after that round, answers; a missing Operation is
+/// `StaleAttemptBinding`. The round's failed step is
+/// `OperationReadFailed`, which its caller names. A transition keeps it
+/// in its own value, which outlives the round.
+pub const AttemptSession = struct {
+    found: attempt_session.Result = undefined,
+
+    pub fn queue(read: *AttemptSession, r: anytype, binding: AttemptBinding) void {
+        r.read(attempt_session, .{ .operation_id = binding.operation_id }, &read.found);
+    }
+
+    /// After `queue`'s round.
+    pub fn session(read: *const AttemptSession, binding: AttemptBinding) !rsql.SessionHead {
+        const row = read.found orelse return error.StaleAttemptBinding;
+        try attemptStanding(row, binding);
+        return row.session;
+    }
+};
 
 const superseding_control = rsql.Read(.{
     .sql = "SELECT turn_id,attempt_ordinal,interrupted_by_command_key FROM model_operation WHERE operation_id=?1",

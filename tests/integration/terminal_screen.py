@@ -477,7 +477,7 @@ class ScreenCapture:
                 and unicodedata.normalize("NFC", marker) in self.completed)
 
     def draft(self, text, caret, *, prompt="› "):
-        """Check the actual caret row, not an identical earlier User row."""
+        """Check the caret row; an empty chat may draw its placeholder there."""
         if self.synchronized or self.generation == 0:
             return False
         cursor = self.screen.cursor
@@ -490,7 +490,17 @@ class ScreenCapture:
         line = "".join(cell.data for cell in cells[origin:]).rstrip()
         # `caret` counts from the mark, after the pane's one-column margin.
         margin = 1 if line.startswith(" ") and not prompt.startswith(" ") else 0
+        matches = line[margin:] == (prompt + unicodedata.normalize("NFC", text)).rstrip()
+        if not text and prompt in ("› ", "> ") and line[margin:] == prompt + "Type a task":
+            # The empty-chat hint is quiet, unlike literal text parked at Home.
+            # Compare drawn styles instead of pinning a theme's colour. Without
+            # a visible distinction, these cells cannot prove an empty editor.
+            mark = cells[origin + margin]
+            start = origin + margin + len(prompt)
+            matches = caret == len(prompt) and all(
+                (cell.fg, cell.fg_rgb, cell.faint) != (mark.fg, mark.fg_rgb, mark.faint)
+                for cell in cells[start:start + len("Type a task")])
         return (not self.synchronized and self.generation > 0
                 and "Opening…" not in self.completed
                 and cursor.x - origin == caret + margin
-                and line[margin:] == (prompt + unicodedata.normalize("NFC", text)).rstrip())
+                and matches)

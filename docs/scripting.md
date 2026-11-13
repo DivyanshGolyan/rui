@@ -27,7 +27,7 @@ Start the Host first:
 STORE="$HOME/.local/share/rui/store"
 rui host start --store "$STORE"
 RECEIPT=$(printf '%s' 'Investigate the failing test' | rui session start --store "$STORE" \
-	--workspace "$PWD" --provider codex --model gpt-6-luna --permission-mode ask)
+	--workspace "$PWD" --provider chatgpt --model gpt-6-luna --permission-mode ask)
 SESSION=$(printf '%s' "$RECEIPT" | jq -r .context.session)
 HANDLE=$(printf '%s' "$RECEIPT" | jq -r .context.key)
 ```

@@ -121,12 +121,7 @@ pub const Frame = struct {
 
     /// One entry of `mcpServers`. The name labels the server in errors; the
     /// token is a secret and is wiped with the key.
-    pub const McpServer = struct {
-        name: protocol.Bounded(max_mcp_name_bytes) = .{},
-        url: protocol.Bounded(http1.max_url_bytes) = .{},
-        bearer_token: api_key.Key = .{},
-        call_timeout_ms: u32 = 0,
-    };
+    pub const McpServer = @import("server_mcp_settings.zig").Server;
 
     pub fn mcpServerSlice(self: *const Frame) []const McpServer {
         return self.mcp_servers[0..self.mcp_server_count];

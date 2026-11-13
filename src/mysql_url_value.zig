@@ -40,23 +40,23 @@ pub fn parseInto(self: anytype, text: []const u8) error{InvalidMysqlUrl}!void {
         const query = text[query_start + 1 ..];
         const key = "ssl-ca=";
         if (!std.mem.startsWith(u8, query, key) or std.mem.indexOfAny(u8, query, "&?") != null) return error.InvalidMysqlUrl;
-        try decode(&self.ca_file, query[key.len..]);
+        try decode(&self.ca_file, query[key.len..], true);
         if (self.ca_file.len == 0 or !std.fs.path.isAbsolute(self.ca_file.slice())) return error.InvalidMysqlUrl;
     }
     const rest = text["mysql://".len..query_start];
     const at = std.mem.indexOfScalar(u8, rest, '@') orelse return error.InvalidMysqlUrl;
     const colon = std.mem.indexOfScalar(u8, rest[0..at], ':') orelse return error.InvalidMysqlUrl;
-    try decode(&self.user, rest[0..colon]);
-    try decode(&self.password, rest[colon + 1 .. at]);
+    try decode(&self.user, rest[0..colon], false);
+    try decode(&self.password, rest[colon + 1 .. at], false);
     if (self.user.len == 0) return error.InvalidMysqlUrl;
     const target = rest[at + 1 ..];
     const slash = std.mem.lastIndexOfScalar(u8, target, '/') orelse return error.InvalidMysqlUrl;
     const address = target[0..slash];
-    try decode(&self.database, target[slash + 1 ..]);
+    try decode(&self.database, target[slash + 1 ..], false);
     if (address.len == 0 or self.database.len == 0 or std.mem.indexOfScalar(u8, self.database.slice(), '/') != null) return error.InvalidMysqlUrl;
     if (address[0] == '/' or std.mem.startsWith(u8, address, "%2F") or std.mem.startsWith(u8, address, "%2f")) {
         if (self.ca_file.len != 0) return error.InvalidMysqlUrl;
-        try decode(&self.socket, address);
+        try decode(&self.socket, address, true);
         if (!std.fs.path.isAbsolute(self.socket.slice())) return error.InvalidMysqlUrl;
         return;
     }
@@ -73,7 +73,7 @@ pub fn parseInto(self: anytype, text: []const u8) error{InvalidMysqlUrl}!void {
         hostname = address[0..end];
         port = address[end + 1 ..];
     }
-    try decode(&self.host, hostname);
+    try decode(&self.host, hostname, false);
     if (self.host.len == 0 or std.mem.indexOfAny(u8, self.host.slice(), "/@[] ") != null) return error.InvalidMysqlUrl;
     if (port) |digits| {
         if (digits.len == 0) return error.InvalidMysqlUrl;
@@ -83,7 +83,7 @@ pub fn parseInto(self: anytype, text: []const u8) error{InvalidMysqlUrl}!void {
     }
 }
 
-fn decode(out: anytype, text: []const u8) error{InvalidMysqlUrl}!void {
+fn decode(out: anytype, text: []const u8, comptime os_path: bool) error{InvalidMysqlUrl}!void {
     var at: usize = 0;
     while (at < text.len) {
         var byte = text[at];
@@ -94,12 +94,12 @@ fn decode(out: anytype, text: []const u8) error{InvalidMysqlUrl}!void {
             byte = @as(u8, hi) * 16 + lo;
             at += 2;
         }
-        if (byte < 0x20 or byte == 0x7f or out.len == out.bytes.len) return error.InvalidMysqlUrl;
+        if (byte == 0 or (!os_path and (byte < 0x20 or byte == 0x7f)) or out.len == out.bytes.len) return error.InvalidMysqlUrl;
         out.bytes[out.len] = byte;
         out.len += 1;
         at += 1;
     }
-    if (!std.unicode.utf8ValidateSlice(out.slice())) return error.InvalidMysqlUrl;
+    if (!os_path and !std.unicode.utf8ValidateSlice(out.slice())) return error.InvalidMysqlUrl;
 }
 
 test "mysql URL value parses TLS and socket targets and replaces prior fields" {
@@ -172,4 +172,15 @@ test "mysql URL value wipe erases every field buffer" {
         for (@field(value, field).bytes) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
     }
     try std.testing.expectEqual(@as(u16, 3306), value.port);
+}
+
+test "mysql URL OS paths carry non-NUL bytes while names remain text" {
+    var value: ValueWith(4095) = .{};
+    defer value.wipe();
+    try value.parse("mysql://u:p@/tmp/mysql%FF%0A.sock/db");
+    try std.testing.expectEqualStrings("/tmp/mysql\xff\n.sock", value.socket.slice());
+    try value.parse("mysql://u:p@localhost/db?ssl-ca=/tmp/ca%FF.pem");
+    try std.testing.expectEqualStrings("/tmp/ca\xff.pem", value.ca_file.slice());
+    try std.testing.expectError(error.InvalidMysqlUrl, value.parse("mysql://u:p@/tmp/socket%00/db"));
+    try std.testing.expectError(error.InvalidMysqlUrl, value.parse("mysql://u:p@local%FFhost/db"));
 }

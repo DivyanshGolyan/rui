@@ -9,7 +9,7 @@ pub fn main(init: std.process.Init) !void {
         try runtime.init(init.io, init.environ_map);
         defer runtime.deinit();
         var probe: ResizeProbe = .{};
-        var root: @import("Root.zig") = .{ .overview = probe.widget(), .list = probe.widget(), .compose = probe.widget() };
+        var root: @import("Root.zig") = .{ .overview = probe.widget(), .list = probe.widget() };
         try runtime.run(root.widget());
         return;
     }
@@ -18,7 +18,7 @@ pub fn main(init: std.process.Init) !void {
         try runtime.init(init.io, init.environ_map);
         defer runtime.deinit();
         var probe: ConsentProbe = .{ .replace_request = std.mem.eql(u8, args[1], "consent-replaced") };
-        var root: @import("Root.zig") = .{ .overview = probe.widget(), .list = probe.widget(), .compose = probe.widget() };
+        var root: @import("Root.zig") = .{ .overview = probe.widget(), .list = probe.widget() };
         root.overview_keys = .{ .context = &probe, .take = ConsentProbe.key };
         try runtime.run(root.widget());
         if (probe.decision) |decision|
@@ -40,7 +40,7 @@ pub fn main(init: std.process.Init) !void {
         screen.eventHandler = struct {
             fn event(_: *anyopaque, _: *@import("vaxis").vxfw.EventContext, _: @import("vaxis").vxfw.Event) !void {}
         }.event;
-        var root: @import("Root.zig") = .{ .overview = screen, .list = screen, .compose = screen };
+        var root: @import("Root.zig") = .{ .overview = screen, .list = screen };
         try runtime.run(root.widget());
         return;
     }

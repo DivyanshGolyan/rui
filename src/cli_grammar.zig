@@ -312,13 +312,7 @@ fn validateValue(option: Option, text: []const u8, refusal: *Refusal) Definition
     }
 }
 
-fn decodeHex(allocator: std.mem.Allocator, encoded: []const u8, limit: usize) ![]const u8 {
-    if (encoded.len == 0 or encoded.len % 2 != 0 or encoded.len / 2 > limit) return error.InvalidHexIdentity;
-    const bytes = try allocator.alloc(u8, encoded.len / 2);
-    const decoded = std.fmt.hexToBytes(bytes, encoded) catch return error.InvalidHexIdentity;
-    if (!std.unicode.utf8ValidateSlice(decoded)) return error.InvalidHexIdentity;
-    return decoded;
-}
+pub const decodeHex = @import("hex_value.zig").decodeIdentity;
 
 /// One invocation's values, keyed by option name. Handlers read these; none
 /// walks argv again.

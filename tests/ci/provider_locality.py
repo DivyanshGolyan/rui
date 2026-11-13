@@ -30,6 +30,8 @@ PROVIDER_OWNED = (
     "api_key.zig",
     # The shared credential adapter and its input-row sign-in screen.
     "provider_login.zig",
+    # Compatibility startup shell resolves each Adapter's saved credential.
+    "host_start.zig",
     "SignIn.zig",
     "model_list.zig",
     "model_capability.zig",

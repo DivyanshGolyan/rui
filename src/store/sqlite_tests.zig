@@ -8602,10 +8602,9 @@ test "Attempt checks keep main cost and prefix seals include one frontier reconc
         try std.testing.expectEqual(1, storage.testing_content_work.rounds - before);
     }
     {
-        var a: store_access.Access(.write, error{}) = .open(&entry);
-        defer a.deinit();
+        var seal: historical_domain.RecordSeal = .{ .input = .{ .binding = attempt.binding, .seal = &TestingAttempt.seal } };
         const before = storage.testing_content_work.rounds;
-        try historical_domain.sealOn(&a, attempt.binding, &TestingAttempt.seal);
+        try transition.run(&entry, historical_domain.RecordSeal, &seal, .{});
         try std.testing.expectEqual(2, storage.testing_content_work.rounds - before);
     }
     {
@@ -8637,6 +8636,38 @@ test "a prefix seal on a full disk answers CanonicalStorageFull and fences" {
     try std.testing.expectError(error.CanonicalStorageFull, view.recordPrefixSeal(&TestingAttempt.seal));
     try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.sqliteDatabase()));
     try std.testing.expect(storage.isFenced());
+}
+
+/// How many times the Store has run the cached statement whose text is
+/// `sql` on this connection.
+fn runsOf(database: *c.sqlite3, sql: []const u8) i64 {
+    var statement = c.sqlite3_next_stmt(database, null);
+    while (statement) |each| : (statement = c.sqlite3_next_stmt(database, each)) {
+        if (std.mem.eql(u8, std.mem.span(c.sqlite3_sql(each)), sql)) return c.sqlite3_stmt_status(each, c.SQLITE_STMTSTATUS_RUN, 0);
+    }
+    return 0;
+}
+
+test "a prefix seal reads its Attempt inside the transaction it writes in" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const attempt = try TestingAttempt.admit(&storage, &tmp);
+    var view: HistoricalView = undefined;
+    storage.openHistoricalView(attempt.binding, &view);
+    defer view.close();
+    try storage.settleModelAttemptFailure(attempt.binding, .{ .uncorrelated = "provider_failure" }, .ordinary, .{});
+    const database = storage.sqliteDatabase();
+    const begins = runsOf(database, "BEGIN IMMEDIATE");
+    const rollbacks = runsOf(database, "ROLLBACK");
+    // The read that finds the Attempt settled runs after BEGIN, and the
+    // seal's ROLLBACK ends the transaction it opened.
+    try std.testing.expectError(error.StaleAttemptBinding, view.recordPrefixSeal(&TestingAttempt.seal));
+    try std.testing.expectEqual(begins + 1, runsOf(database, "BEGIN IMMEDIATE"));
+    try std.testing.expectEqual(rollbacks + 1, runsOf(database, "ROLLBACK"));
+    try std.testing.expect(!storage.isFenced());
 }
 
 fn openRaw(path: []const u8) !*c.sqlite3 {

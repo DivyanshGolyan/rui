@@ -34,9 +34,16 @@ PgUp/PgDn, Shift-PgUp, CSI/SS3 Up, three End forms, Esc and Ctrl-G return,
 alternate-scroll wheel Up/Down encodings, and chat info (Alt-I opens its fields and footer; Esc returns to the feed).
 Unsolicited SGR/X10
 wheel and split-X10 reports must leave submitted text unchanged.
-The bare ESC expiry row waits 150 ms, observes the overview, then reopens the
-fixture's only Session with Enter and checks its identity and restored `ab`
-draft before typing `Z` and submitting `abZ`. Esc-with-text leaves the chat;
+The bare ESC expiry row first sends a real `TD4 saved conversation` Message
+through the same resumed chat and waits for its answer. This makes its only
+Session a populated conversation: a Configure-only empty Session intentionally
+disappears from the overview on departure. The row then waits 150 ms after Esc,
+observes that known conversation name, the pinned New Session and Settings
+rows and the overview footer with no editor, then selects the sole conversation
+with Home, Down, Enter (the pinned New Session action may remain selected).
+It requires the exact restored `ab` draft and caret before typing `Z`
+and submitting `abZ`; a replacement empty Session cannot satisfy that check.
+Provider requests must be exactly the seed Message followed by `abZ`. Esc-with-text leaves the chat;
 it does not discard the draft or stay in the chat with a notice.
 Navigation moves the continuous-feed anchor without switching documents; its
 reserved chip row never changes feed height. Checks cover exact seeded-history
@@ -70,7 +77,9 @@ terminal behavior.
 `delay_before` in seconds. A resize chunk contains `resize: [columns, rows]`.
 An `editor` row supplies `expected`, the exact submitted Unicode text.
 With `reopen_draft`, it first checks that `chunks` returned to the overview,
-reopens the sole Session and checks that restored draft, then runs `submit_chunks`.
+reopens the sole populated Session and checks that restored draft, then runs `submit_chunks`.
+Such rows first admit the seed Message described above; unsent empty chats are
+not expected to remain in the overview.
 
 ```json
 [

@@ -106,7 +106,7 @@ FIXTURES = {
     "launch-frame-integration": ((I + "launch_frame_integration.py", I + "launch_frame_mysql_integration.py",
                                   I + "store_rounds_cases.py"),
                                  (I + "mysql_launch_admin.zig",),
-                                 ("src/launch_frame.zig", "src/mysql_url.zig", "src/mcp/Running.zig", "src/mcp/servers.zig")),
+                                 ("src/launch_frame.zig", "src/host_start.zig", "src/server_mcp_settings.zig", "src/mysql_url.zig", "src/mcp/Running.zig", "src/mcp/servers.zig")),
     "ts-client": ((I + "host_process.py",), (), ("src/launch_frame.zig",)),
     "request-wait-integration": ((I + "request_wait_integration.py",), (),
                                  (CALLER, "src/request_wait.zig", "src/server_host.zig", "src/cli_args.zig", "src/serve_grammar.zig",
@@ -582,7 +582,7 @@ LIVE_POSTGRES_TARGETS = frozenset({"test-pg", "check", "check-full"})
 # development too, or its green would say nothing about that server.
 # Development keeps the rule's own targets among them.
 LIVE_RULES = (
-    (("src/launch_frame.zig", "src/mysql_url.zig", "tests/integration/launch_frame*", "tests/integration/mysql_launch_admin.zig"),
+    (("src/launch_frame.zig", "src/host_start.zig", "src/server_mcp_settings.zig", "src/mysql_url.zig", "tests/integration/launch_frame*", "tests/integration/mysql_launch_admin.zig"),
      ("test", "launch-frame-integration"), ("launch-frame-integration",),
      "The launch-frame Host opens a live MySQL Store on Linux; macOS skips the live server",
      frozenset({"launch-frame-integration", "check", "check-full"})),

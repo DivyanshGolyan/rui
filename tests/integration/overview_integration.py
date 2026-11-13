@@ -17,8 +17,8 @@ def smoke():
     with world("smoke") as w, w.overview() as screen:
         shown = screen.contains("+ New Session")
         assert shown.split("\n", 1)[0] == "  + New Session", shown
-        assert "Settings" in shown, shown
-        assert shown.split("\n")[-1].rstrip().endswith("enter start"), shown
+        assert "Settings" in shown and "Type a task" not in shown, shown
+        assert shown.split("\n")[-1].rstrip().endswith("enter open"), shown
     print("overview smoke: an empty Store's overview opens on a PTY", flush=True)
 
 

@@ -25,7 +25,7 @@ See [client installation](../clients/ts/README.md#install) for application-owned
 ## Configure the provider
 
 A TypeScript-launched Host uses the OpenAI-compatible key provider.
-It does not reuse a ChatGPT sign-in from `rui auth login codex`.
+It does not reuse a ChatGPT sign-in from `rui auth login chatgpt`.
 Set `OPENAI_API_KEY` and `RUI_MODEL` in your application's environment.
 Choose a model your provider offers that accepts `low` reasoning effort for this example.
 Change `effort` if your selected model needs a different supported value.

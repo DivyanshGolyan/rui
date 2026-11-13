@@ -27,6 +27,7 @@ const reads_domain = @import("reads.zig");
 const rsql = @import("../rsql.zig");
 const tool_set = @import("tool_set.zig");
 const store_access = @import("../access.zig");
+const transition = @import("../transition.zig");
 pub const ReadAccess = reads_domain.ReadAccess;
 const content_metadata = content_domain.content_metadata;
 const store_schema = @import("../schema.zig");
@@ -453,7 +454,7 @@ pub const HistoricalView = struct {
     /// the Attempt is still current.
     pub fn recordPrefixSeal(self: *HistoricalView, seal: *const PrefixSeal) !void {
         std.debug.assert(self.active);
-        return historical_domain.recordPrefixSeal(self.store, self.binding, seal);
+        return self.store.recordPrefixSeal(self.binding, seal);
     }
 
     /// The Operation's admission position, the exclusive upper bound of this
@@ -1143,18 +1144,6 @@ pub fn prefixSealOf(a: *ReadAccess, binding: AttemptBinding) !?PrefixSeal {
     return if (identity.same_model) seal else null;
 }
 
-pub fn recordPrefixSeal(self: *Store, binding: AttemptBinding, seal: *const PrefixSeal) !void {
-    return self.queue().write(recordPrefixSealHeld, .{ self, binding, seal });
-}
-
-fn recordPrefixSealHeld(self: *Store, binding: AttemptBinding, seal: *const PrefixSeal) !void {
-    const entry = try store_core.enter(self, .none);
-    defer entry.release();
-    var a: store_access.Access(.write, error{}) = .open(&entry);
-    defer a.deinit();
-    return entry.finishTransaction(Ordinary.attempt_binding, .{}, a.end(.{}, sealOn(&a, binding, seal)));
-}
-
 /// Records an Operation's Session's prefix seal.
 const record_prefix_seal = rsql.Write(.{
     .sql = "UPDATE session SET prefix_seal=?2 WHERE session_ref=@session(?1)",
@@ -1163,14 +1152,37 @@ const record_prefix_seal = rsql.Write(.{
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
-/// Round 1 reads the Attempt and its Session; the seal is written, in
-/// round 2 with the commit, only while the binding is current. Public so a
-/// test counts its rounds.
-pub fn sealOn(a: anytype, binding: AttemptBinding, seal: *const PrefixSeal) !void {
-    const session = try model_settlement_domain.currentAttemptSession(a, binding);
-    a.write(record_prefix_seal, .{ .session = session, .seal = seal.encode() });
-    try a.commit();
-}
+/// Records `seal` as the prefix seal of the Session of the Attempt
+/// `binding` names (`Store.recordPrefixSeal`). Round 1 reads the Attempt
+/// and its Session inside the transaction; the seal is written, in round 2
+/// with the commit, only while the binding is current.
+pub const RecordSeal = struct {
+    pub const rounds = transition.rounds(.{ .attempt = .{ .always, error.OperationReadFailed } });
+    pub const round_budget = 2;
+    pub const commit: transition.Commit = .transaction;
+    pub const begin: ?rounds.At = .attempt;
+    pub const Input = struct { binding: AttemptBinding, seal: *const PrefixSeal };
+    pub const Result = void;
+    pub const Ordinary = store_core.Ordinary.attempt_binding;
+    pub const Guards = error{};
+    pub const Declined = error{};
+
+    input: Input,
+    attempt: model_settlement_domain.AttemptSession = .{},
+
+    pub fn step(t: *RecordSeal, r: *transition.Round(RecordSeal), ran: ?rounds.At) !transition.Next(RecordSeal) {
+        if (ran == null) {
+            t.attempt.queue(r, t.input.binding);
+            return .{ .round = .attempt };
+        }
+        const session = try t.attempt.session(t.input.binding);
+        // The seal binds as a copy: no step's frame holds bytes it reads.
+        r.write(record_prefix_seal, .{ .session = session, .seal = t.input.seal.encode() });
+        return .commit;
+    }
+
+    pub fn committed(_: *const RecordSeal) Result {}
+};
 
 /// The newest accepted compaction before this boundary, without a model
 /// filter or fallback to an older base. Recipe.select owns replay selection.

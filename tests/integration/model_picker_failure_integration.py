@@ -9,7 +9,7 @@ import threading
 import codex_fixture
 import host_process
 import model_fixture as fixture
-from human_cli_fixture import AppModelCatalog, app_model_open, model_choice_frame, model_choice_shown, panel_frame, overview_frame, overview_title, read_terminal, terminal_exit
+from human_cli_fixture import AppModelCatalog, app_model_open, model_choice_frame, model_choice_shown, panel_frame, overview_frame, overview_title, open_new_chat, read_terminal, terminal_exit
 from terminal_process import close_pty, open_pty, spawn
 
 
@@ -71,19 +71,21 @@ def main():
         assert preferences.read_bytes() == b"version=1\n"
         preferences.write_bytes(original)
         # A failed panel save must not change the next Session's defaults.
-        panel_frame(master, lambda screen: "Rui · settings" not in screen, b"\x1b")
-        os.write(master, b"hello\r")
-        read_terminal(master, "› ")
+        overview_frame(master, overview_title, b"\x1b")
+        open_new_chat(master)
 
         def created_session():
             rows = json.loads(cli("session", "list", "--store", store, "--all"))["sessions"]
             return rows[0]["reference"] if len(rows) == 1 else None
 
         session = host_process.wait_for(created_session, "Session after failed save")
-        settings = json.loads(cli("session", "inspect", "--store", store, "--session", session))["session"]
-        assert settings["model"] == "gpt-5.5", settings
+        report = json.loads(cli("session", "inspect", "--store", store, "--session", session))
+        assert report["selected_message"] is None and report["recent_messages"] == [], report
+        assert report["session"]["model"] == "gpt-5.5", report
         saved = json.loads(cli("defaults", "inspect"))
         assert saved["model"] == "gpt-5.5", saved
+        os.write(master, b"hello\r")
+        read_terminal(master, "Hello", composer=True)
         os.write(master, b"\x03")
         _, errors = terminal_exit(caller, master)
         assert caller.returncode == 0, errors

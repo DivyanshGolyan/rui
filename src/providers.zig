@@ -25,6 +25,40 @@ pub const managed_endpoint = @import("provider_name.zig").managed_endpoint;
 /// ChatGPT plan sign-in's token goes (a fixture's loopback aside).
 pub const api_endpoint = @import("provider_name.zig").api_endpoint;
 
+/// Test-only transport facts. Never serialized into Host settings.
+pub const Fixtures = struct {
+    openai: bool = false,
+    codex: bool = false,
+    chatgpt_token_endpoint: ?[]const u8 = null,
+};
+
+/// Borrow resolved credentials, paths and full endpoints for the Host's life.
+/// The provider enum owns this projection's exhaustive credential dispatch.
+pub fn fromSettings(settings: *const @import("host_settings.zig").Settings, fixtures: Fixtures) Providers {
+    var result: Providers = .{ .ca_file = if (settings.network.ca_file) |*ca| ca.slice() else null };
+    inline for (std.enums.values(Provider)) |named| {
+        if (@field(settings.providers.entries, @tagName(named))) |*entry| {
+            const fixture = switch (named) {
+                .openai => fixtures.openai,
+                .codex => fixtures.codex,
+                .chatgpt => fixtures.chatgpt_token_endpoint != null,
+            };
+            result.table.set(named, .{
+                .endpoint = if (entry.endpoint) |*url| url.slice() else endpoint(named),
+                .credential = if (entry.unauthenticated.value and !fixture) .none else switch (comptime named.facts().credential) {
+                    .api_key => .{ .key_file = .{ .key = entry.key.value(), .fixture = fixtures.openai } },
+                    .sign_in => switch (named) {
+                        .codex => .{ .chatgpt_device = .{ .path = entry.credential_file.?.slice(), .refresh = if (fixtures.codex) .synthetic else .issuer } },
+                        .chatgpt => .{ .chatgpt_plan = .{ .path = entry.credential_file.?.slice(), .refresh = if (fixtures.chatgpt_token_endpoint) |token| .{ .fixture_endpoint = token } else .issuer } },
+                        .openai => unreachable,
+                    },
+                },
+            });
+        }
+    }
+    return result;
+}
+
 /// The model list beside `api_endpoint`: the only other place a ChatGPT
 /// plan sign-in's token goes.
 pub const api_models_endpoint = responsesBase(api_endpoint).? ++ "/models";
@@ -639,6 +673,51 @@ test "a sign-in's routing owner is its account and FedRAMP binding, which a refr
 test "the model list sits beside the Responses endpoint" {
     try std.testing.expectEqualStrings("https://api.openai.com/v1", responsesBase(endpoint(.openai)).?);
     try std.testing.expectEqual(@as(?[]const u8, null), responsesBase("https://host/v1/chat"));
+}
+
+test "prepared provider projection derives every credential endpoint and Host trust" {
+    const hs = @import("host_settings.zig");
+    const gpa = std.testing.allocator;
+    const settings = try gpa.create(hs.Settings);
+    defer gpa.destroy(settings);
+    settings.* = .{};
+    defer settings.deinit();
+    settings.network.ca_file = .{};
+    try settings.network.ca_file.?.text.set("relative/root.pem");
+    inline for (std.enums.values(Provider)) |named| {
+        const entry = &@field(settings.providers.entries, @tagName(named)).?;
+        switch (comptime named.facts().credential) {
+            .api_key => {
+                entry.key.bytes.len = 3;
+                @memcpy(entry.key.bytes.bytes[0..3], "key");
+                entry.endpoint = .{};
+                try entry.endpoint.?.text.set("https://proxy.example/responses");
+            },
+            .sign_in => {
+                entry.credential_file = .{};
+                try entry.credential_file.?.text.set("/tmp/" ++ @tagName(named) ++ ".json");
+            },
+        }
+    }
+    const served = fromSettings(settings, .{});
+    try std.testing.expectEqualStrings("relative/root.pem", served.ca_file.?);
+    inline for (std.enums.values(Provider)) |named| {
+        const entry = served.get(named).?;
+        try std.testing.expectEqualStrings(if (comptime named.facts().credential == .api_key) "https://proxy.example/responses" else endpoint(named), entry.endpoint);
+        switch (comptime named.facts().credential) {
+            .api_key => try std.testing.expectEqualStrings("key", entry.credential.key_file.key),
+            .sign_in => try std.testing.expectEqualStrings("/tmp/" ++ @tagName(named) ++ ".json", entry.credential.signIn().?.path),
+        }
+        @field(settings.providers.entries, @tagName(named)).?.unauthenticated.value = true;
+    }
+    const uncredentialed = fromSettings(settings, .{});
+    inline for (std.enums.values(Provider)) |named| try std.testing.expect(uncredentialed.get(named).?.credential == .none);
+    const fixture = fromSettings(settings, .{ .openai = true, .codex = true, .chatgpt_token_endpoint = "http://127.0.0.1:9/oauth/token" });
+    try std.testing.expect(fixture.get(.openai).?.credential.key_file.fixture);
+    try std.testing.expect(fixture.get(.codex).?.credential.chatgpt_device.refresh == .synthetic);
+    try std.testing.expectEqualStrings("http://127.0.0.1:9/oauth/token", fixture.get(.chatgpt).?.credential.chatgpt_plan.refresh.fixture_endpoint);
+    settings.providers.entries.openai = null;
+    try std.testing.expect(!fromSettings(settings, .{}).serves(.openai));
 }
 
 test "each route says how its model list reads, and a provider's list is live only over one that has a list" {

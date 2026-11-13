@@ -192,7 +192,9 @@ jobs:
     needs: plan
     if: ${{ needs.plan.outputs.targets != '' && needs.plan.outputs.targets != '[]' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    # Match the cold Release producer budget: a dependency repin misses the compiled cache,
+    # and a producer that times out never saves the warm one.
+    timeout-minutes: 60
     outputs:
       artifact: ${{ steps.publish.outputs.artifact-id }}
     steps:

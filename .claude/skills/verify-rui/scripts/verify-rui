@@ -2047,6 +2047,19 @@ def frame_absences(state, sessions=None):
     return value
 
 
+def frame_absent_regex(state):
+    value = state.get("absent_regex", [])
+    if not isinstance(value, list) or not all(
+            isinstance(pattern, str) and pattern and "\0" not in pattern for pattern in value):
+        raise ValueError(f"{state['name']}: absent_regex must be a list of nonempty regular expressions")
+    for pattern in value:
+        try:
+            re.compile(pattern)
+        except re.error as error:
+            raise ValueError(f"{state['name']}: invalid absent_regex {pattern!r}: {error}") from error
+    return value
+
+
 def cast_entries(entries):
     for entry in entries:
         for n in range(1, entry.get("count", 1) + 1):
@@ -2115,10 +2128,13 @@ def validate_scenario(data, sizes=None):
         require(isinstance(steps, list), f"{name}: steps must be a list")
         for step in steps:
             require(isinstance(step, dict), f"{name}: step must be an object")
-            actions = set(step) - {"timeout", "repaint"}
+            actions = set(step) - {"timeout", "repaint", "min_columns"}
             require(len(actions) == 1 and actions <= {"text", "keys", "wait", "gone", "sleep", "send", "host", "mouse", "exited"}, f"{name}: unknown or ambiguous step {step}")
             action = next(iter(actions))
             require("repaint" not in step or action == "mouse" and type(step["repaint"]) is bool, f"{name}: invalid repaint (mouse boolean only)")
+            require("min_columns" not in step or action in ("wait", "gone")
+                    and type(step["min_columns"]) is int and step["min_columns"] > 0,
+                    f"{name}: invalid min_columns (positive integer for wait/gone only)")
             value = step[action]
             require("timeout" not in step or action in ("wait", "gone", "exited") and duration(step["timeout"]), f"{name}: invalid timeout")
             if action == "mouse":
@@ -2143,6 +2159,7 @@ def validate_scenario(data, sizes=None):
             else:
                 require(isinstance(value, dict) and isinstance(value.get("to"), str) and value["to"] in labels and isinstance(value.get("text"), str)
                         and type(value.get("wait", True)) is bool, f"{name}: invalid send or unknown cast label")
+        frame_absent_regex(state)
         for text in frame_absences(state):
             match = re.fullmatch(r"\{session:(.+)\}", text)
             require(match is None or match.group(1) in labels,
@@ -2432,6 +2449,10 @@ def frame_steps(run, terminal, steps, exiting=False):
             terminal.mouse(step["mouse"], repaint=step.get("repaint", True))
         elif "wait" in step or "gone" in step:
             action = "wait" if "wait" in step else "gone"
+            if "min_columns" in step and terminal.frame.columns < step["min_columns"]:
+                print(f"skip {action} {step[action]!r}: {terminal.frame.columns} columns < {step['min_columns']}",
+                      file=sys.stderr)
+                continue
             frame_wait(run, terminal, step[action], action == "gone", step.get("timeout", 20), exiting)
         elif "exited" in step:
             terminal.wait(lambda _c: terminal.collected, "Rui exit", step.get("timeout", 20), allow_exit=True)
@@ -2456,10 +2477,15 @@ def frame_steps(run, terminal, steps, exiting=False):
 
 
 def frame_initial_ready(terminal, first_wait=None, allow_exit=False):
-    # The opening read resets the scroll anchor, so wait for it before releasing input.
-    terminal.wait(lambda c: "›" in c.completed and "Opening…" not in c.completed
+    # Chat/sign-in and old baseline images have a prompt. The editorless
+    # overview instead commits its pinned actions and bottom footer. Keep
+    # both paths so current recipes can still capture the unfixed baseline.
+    # The opening read resets the scroll anchor before input is released.
+    terminal.wait(lambda c: ("›" in c.completed or all(text in c.completed for text in
+                              ("+ New Session", "Settings", "enter open")))
+                  and "Opening…" not in c.completed
                   and (not first_wait or first_wait in c.completed),
-                  "initial composer ready" + (f" with {first_wait!r}" if first_wait else ""),
+                  "initial screen ready" + (f" with {first_wait!r}" if first_wait else ""),
                   allow_exit=allow_exit)
 
 
@@ -2471,6 +2497,9 @@ def frame_row_failure(state, plain):
         at = next((i for i, line in enumerate(lines) if row in line), None)
         if at is None or at + 1 >= len(lines) or detail not in lines[at + 1]:
             return f"row {row!r} must be followed by {detail!r}"
+    for pattern in frame_absent_regex(state):
+        if match := re.search(pattern, plain, re.MULTILINE):
+            return f"unexpected row matching {pattern!r}: {match.group(0)!r}"
     return None
 
 
@@ -2483,7 +2512,8 @@ def frame_ready(terminal, state, allow_exit=False, sessions=None):
     terminal.wait(lambda c: all(text in c.completed for text in expected)
                   and all(text not in c.completed for text in absent)
                   and frame_row_failure(state, c.completed) is None,
-                  "state expectations: " + repr({"expect": expected, "absent": absent}),
+                  "state expectations: " + repr({
+                      "expect": expected, "absent": absent, "absent_regex": frame_absent_regex(state)}),
                   allow_exit=allow_exit)
 
 

@@ -45,7 +45,6 @@ pub const Frame = struct {
     items: [std.enums.values(Target).len]Target = undefined,
     len: usize = 0,
     modal: bool = false,
-    overview: bool = false,
 
     pub fn append(self: *Frame, target: Target) void {
         if (std.mem.indexOfScalar(Target, self.slice(), target) != null) return;
@@ -67,7 +66,7 @@ pub fn tabNext(order: []const Target, current: Target, reverse: bool) ?Target {
 pub const State = struct {
     layer: Layer = .main,
     /// Keyboard navigation is in the list, while a wide chat stays drawn.
-    area: union(enum) { main, overview, list, settings_row, button: Target } = .main,
+    area: union(enum) { main, list, settings_row, button: Target } = .main,
 
     /// Between a bracketed paste's start and end. Keys inside it are pasted
     /// text, never actions.
@@ -77,7 +76,7 @@ pub const State = struct {
         return self.area == .list;
     }
     pub fn mainFocused(self: State) bool {
-        return self.area == .main or self.area == .overview;
+        return self.area == .main;
     }
 };
 
@@ -129,7 +128,6 @@ pub const Input = union(enum) {
     pub const Key = struct {
         /// The editor's name for the key; null for text and Enter.
         named: ?keymap.Key,
-        right: bool = false,
         enter: bool = false,
         tab: ?bool = null,
     };
@@ -154,10 +152,10 @@ pub const Effects = struct {
         reset,
     };
     /// Always the top visible layer after the input: never a hidden pane.
-    pub const Focus = enum { main, overview, list, settings, sign_in };
+    pub const Focus = enum { main, list, settings, sign_in };
     /// What a key the overview takes arrived under, and whether it is
     /// pasted text.
-    pub const Delivery = struct { under: Layer.Covered, pasted: bool, list_focus: bool = false, wide: bool = false };
+    pub const Delivery = struct { under: Layer.Covered, pasted: bool, wide: bool = false };
     pub const Route = union(enum) {
         /// vxfw's own focus or hit-test path delivers it to the shown pane;
         /// Root leaves the event alone. Navigation requests always pass.
@@ -192,7 +190,7 @@ pub fn pane(layer: Layer, session_open: bool) Pane {
 /// List focus only hides a retained chat when the sidebar cannot fit beside it.
 pub fn mainPane(state: State, session_open: bool, wide: bool) Pane {
     return pane(state.layer, session_open and (wide or switch (state.area) {
-        .list, .settings_row, .overview => false,
+        .list, .settings_row => false,
         else => true,
     }));
 }
@@ -283,7 +281,7 @@ pub fn step(state: *State, facts: Facts, input: Input) Effects {
     if (input == .key and !state.pasting and !facts.frame.modal) {
         if (input.key.tab) |reverse| if (tabNext(facts.frame.slice(), currentFocus(state.*, facts.field), reverse)) |target| {
             var effect: Effects = .{ .route = .swallow, .redraw = true };
-            chooseFocus(state, facts, target, &effect);
+            chooseFocus(state, target, &effect);
             return effect;
         };
         switch (state.area) {
@@ -315,22 +313,8 @@ pub fn step(state: *State, facts: Facts, input: Input) Effects {
     // the open Session's, else the overview's. A click passes.
     if (state.layer != .main or input == .mouse) return .{};
     const delivery: Effects.Delivery = .{ .under = .main, .pasted = state.pasting };
-    if (state.listFocused()) {
-        // In the narrow overview the composer is visible. Typing hands it
-        // focus; list activation itself never consults its retained bytes.
-        if ((!facts.session_open or facts.frame.overview) and input == .key and input.key.named == null and !input.key.right and !input.key.enter) {
-            state.area = if (facts.session_open) .overview else .main;
-            return .{ .route = .{ .overview = delivery } };
-        }
-        // A wide list has no composer: never edit the hidden overview draft.
-        if (facts.session_open and facts.wide) switch (input) {
-            .key => |key| if (state.pasting or (key.named == null and !key.right and !key.enter)) return .{ .route = .swallow },
-            .paste_start, .paste_end => return .{ .route = .swallow },
-            else => {},
-        };
-        return .{ .route = .{ .overview = .{ .under = .main, .pasted = state.pasting, .list_focus = true, .wide = facts.wide } } };
-    }
-    return .{ .route = if (facts.session_open and state.area != .overview) .{ .session = delivery } else .{ .overview = delivery } };
+    if (state.listFocused()) return .{ .route = .{ .overview = .{ .under = .main, .pasted = state.pasting, .wide = facts.wide } } };
+    return .{ .route = if (facts.session_open) .{ .session = delivery } else .{ .overview = .{ .under = .main, .pasted = state.pasting, .wide = facts.wide } } };
 }
 
 pub fn currentFocus(state: State, field: Field) Target {
@@ -338,7 +322,7 @@ pub fn currentFocus(state: State, field: Field) Target {
         .list => .list,
         .settings_row => .settings_row,
         .button => |target| target,
-        .main, .overview => switch (field) {
+        .main => switch (field) {
             .input => .input,
             .model => .model,
             .effort => .effort,
@@ -346,7 +330,7 @@ pub fn currentFocus(state: State, field: Field) Target {
     };
 }
 
-fn chooseFocus(state: *State, facts: Facts, target: Target, effect: *Effects) void {
+fn chooseFocus(state: *State, target: Target, effect: *Effects) void {
     switch (target) {
         .list => {
             state.area = .list;
@@ -357,14 +341,14 @@ fn chooseFocus(state: *State, facts: Facts, target: Target, effect: *Effects) vo
             effect.focus = .list;
         },
         .input, .model, .effort => {
-            state.area = if (facts.frame.overview and facts.session_open and !facts.wide) .overview else .main;
+            state.area = .main;
             effect.field = switch (target) {
                 .input => .input,
                 .model => .model,
                 .effort => .effort,
                 else => unreachable,
             };
-            effect.focus = if (state.area == .overview) .overview else .main;
+            effect.focus = .main;
         },
         else => {
             state.area = .{ .button = target };
@@ -629,8 +613,8 @@ test "App input list activation routes unchanged to its semantic owner" {
     for ([_]bool{ false, true }) |wide| {
         var state: State = .{ .area = .list };
         for ([_]bool{ false, true }) |enter| {
-            const result = step(&state, .{ .session_open = wide, .wide = wide }, .{ .key = .{ .named = null, .right = !enter, .enter = enter } });
-            try std.testing.expectEqual(Effects.Route{ .overview = .{ .under = .main, .pasted = false, .list_focus = true, .wide = wide } }, result.route);
+            const result = step(&state, .{ .session_open = wide, .wide = wide }, .{ .key = .{ .named = null, .enter = enter } });
+            try std.testing.expectEqual(Effects.Route{ .overview = .{ .under = .main, .pasted = false, .wide = wide } }, result.route);
             try std.testing.expect(state.listFocused());
         }
         const resumed = step(&state, .{ .session_open = true, .wide = wide }, .show_main);
@@ -639,12 +623,12 @@ test "App input list activation routes unchanged to its semantic owner" {
     }
 }
 
-test "App input list focus hides no editable draft and mouse hands focus back without changing feed" {
+test "App input list focus routes every list event to its semantic owner and mouse returns focus" {
     for ([_]bool{ false, true }) |pasting| {
         var state: State = .{ .area = .list, .pasting = pasting };
-        const facts: Facts = .{ .session_open = true, .wide = true };
         for ([_]Input{ .{ .key = .{ .named = null } }, .paste_start, .paste_end }) |input| {
-            try std.testing.expectEqual(Effects.Route.swallow, step(&state, facts, input).route);
+            const result = step(&state, .{ .session_open = true, .wide = true }, input);
+            try std.testing.expect(result.route == .overview);
         }
     }
     var state: State = .{};
