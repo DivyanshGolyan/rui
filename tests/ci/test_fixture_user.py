@@ -253,8 +253,8 @@ class FixtureUserTest(unittest.TestCase):
                 self.assertFalse((placed.source / "objects/info/alternates").exists())
                 lane = self.root / f"lane-checkout-{index}"
                 self.git("init", "--quiet", str(lane))
-                self.git("-c", f"safe.directory={placed.source}", "-C", str(lane), "fetch", "--quiet",
-                         str(placed.source), "+refs/*:refs/*")
+                subprocess.run(fixture_user.local_fetch(["git", "-C", str(lane)], placed.source, "+refs/*:refs/*"),
+                               check=True)
                 self.git("-C", str(lane), "checkout", "--quiet", "--detach", inputs.sha)
                 self.assertEqual((lane / "work.txt").read_text(), f"work {index}\n")
 

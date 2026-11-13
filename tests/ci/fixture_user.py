@@ -47,6 +47,7 @@ import os
 from pathlib import Path
 import pwd
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -259,17 +260,28 @@ def share(path, gid):
             os.chmod(file, 0o750 if os.stat(file).st_mode & stat.S_IXUSR else 0o640)
 
 
+def local_fetch(git, repository, *refspecs):
+    """`git fetch` of `refspecs` from the local `repository`, which another user may own.
+
+    git trusts that one repository for this fetch only. A local fetch's
+    upload-pack drops `git -c` settings, so the trust goes on its command.
+    """
+    upload_pack = f"git -c safe.directory={shlex.quote(str(repository))} upload-pack"
+    return [*git, "fetch", "--quiet", "--no-tags", "--update-shallow", f"--upload-pack={upload_pack}",
+            str(repository), *refspecs]
+
+
 def export(inputs, repository, gid):
     """Fetch the lane's refs from root's repository (and origin's tags) into the bare `repository`."""
-    git = ["git", "-c", f"safe.directory={inputs.source}", f"--git-dir={repository}"]
+    git = ["git", f"--git-dir={repository}"]
     if not repository.is_dir():
         subprocess.run(["git", "init", "--quiet", "--bare", "--template=", str(repository)], check=True)
-    fetch = [*git, "fetch", "--quiet", "--no-tags", "--update-shallow"]
-    subprocess.run([*fetch, str(inputs.source), f"+{inputs.sha}:refs/heads/fixture"], check=True)
+    subprocess.run(local_fetch(git, inputs.source, f"+{inputs.sha}:refs/heads/fixture"), check=True)
     # Merge bases against origin/main (prepush, select_tests) need it; a repository without one has none.
     for refspec in EXPORTED:
-        subprocess.run([*fetch, str(inputs.source), refspec], stderr=subprocess.DEVNULL)
-    tags = subprocess.run([*fetch, "--force", inputs.origin, EXPORTED[-1]]) if inputs.origin else None
+        subprocess.run(local_fetch(git, inputs.source, refspec), stderr=subprocess.DEVNULL)
+    tags = subprocess.run([*git, "fetch", "--quiet", "--no-tags", "--update-shallow", inputs.origin, EXPORTED[-1]]
+                          ) if inputs.origin else None
     if tags is None or tags.returncode:
         say(f"could not fetch release tags from {inputs.origin or 'an origin remote'}; fixtures that read them "
             "will fail")
@@ -419,9 +431,8 @@ class Lane:
         """Check out `sha` from the placed repository `source`, which root owns and the lane's group reads."""
         if not (self.checkout / ".git").is_dir():
             self.run(["git", "init", "--quiet", str(self.checkout)])
-        git = ["git", "-c", f"safe.directory={source}", "-C", str(self.checkout)]
-        self.run([*git, "fetch", "--quiet", "--no-tags", "--update-shallow", "--force", str(source),
-                  "+refs/*:refs/*"])
+        git = ["git", "-C", str(self.checkout)]
+        self.run(local_fetch(git, source, "+refs/*:refs/*"))
         self.run([*git, "checkout", "--quiet", "--force", "--detach", sha])
         # Ignored files stay: they are build caches such as .zig-cache, zig-out and zig-pkg.
         self.run([*git, "clean", "-ffdq"])
