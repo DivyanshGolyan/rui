@@ -1174,7 +1174,7 @@ Account IDs are nonempty opaque exact strings, not UUIDs.
 No independent token/account length quota, JWT verification/JWKS/discovery or generic OAuth framework; bounded credential/encoding owners fail explicitly on exhaustion.
 
 `rui auth login chatgpt --device-code` (also the unlisted `rui auth login codex`) uses the pinned device-code flow and installs one global account in an owner-only `~/.config/rui/codex.json`, or an absolute path selected by `RUI_CODEX_CREDENTIAL_FILE`.
-`rui host serve --set 'providers={"codex":{}}'` activates the fixed HTTPS subscription endpoint; a development endpoint and credential-free requests can instead be configured through provider settings.
+`rui host serve --set 'providers.codex={}'` activates the fixed HTTPS subscription endpoint; a development endpoint and credential-free requests can instead be configured through provider settings.
 An explicit `providers` object selects exactly the providers a Host serves; absent that setting, automatic selection serves device-code sign-in even while signed out, browser sign-in with a usable credential, and OpenAI with a usable key; model admission skips Sessions of any other provider, and `host_info` reports each provider's route.
 Configuration and saved-result inspection need no credential.
 The credential file and stable lock live in the same private directory and reject symlinks, wrong ownership and permissive modes; symlinks above that directory are followed, as macOS's `/var` needs, but the directory itself must not be one.

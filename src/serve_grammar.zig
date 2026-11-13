@@ -12,8 +12,8 @@ pub const destination = &[_]Option{ value("store", "PATH"), grammar.hex("store-h
 /// Temporary PR5 migration owner; remove in PR7. Never accepted as options.
 pub const retired_options = &[_]grammar.RetiredOption{
     .{ .name = "active-capacity", .replacement = "--set execution.activeCapacity=VALUE" },
-    .{ .name = "provider", .replacement = "--set providers='{\"VALUE\":{}}'" },
-    .{ .name = "provider-endpoint", .replacement = "--set providers.LABEL.endpoint=VALUE --set providers.LABEL.unauthenticated=true (replace LABEL with the provider name)" },
+    .{ .name = "provider", .replacement = "--set providers.VALUE={} (one --set per provider; each adds to the set)" },
+    .{ .name = "provider-endpoint", .replacement = "--set providers.codex.endpoint=VALUE --set providers.codex.unauthenticated=true" },
     .{ .name = "provider-ca-file", .replacement = "--set network.caFile=VALUE" },
     .{ .name = "bash-path", .replacement = "--set tools.bash.path=VALUE" },
     .{ .name = "bash-timeout-ms", .replacement = "--set tools.bash.timeoutMs=VALUE" },

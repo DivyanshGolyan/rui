@@ -139,12 +139,13 @@ Run such a Host with `rui host serve --store PATH`.
 ## Run in the foreground
 
 ```sh
-rui host serve --store PATH --set 'providers={"codex":{}}'
-rui host serve --store PATH --set 'providers={"codex":{},"openai":{}}'
-rui host serve --store PATH --set execution.activeCapacity=8 --set 'providers={"codex":{}}'
+rui host serve --store PATH --set 'providers.codex={}'
+rui host serve --store PATH --set 'providers.codex={}' --set 'providers.openai={}'
+rui host serve --store PATH --set execution.activeCapacity=8 --set 'providers.codex={}'
 ```
 
-An explicit `providers` object lists exactly which built-in providers to serve, each at its own endpoint with its own credential: `codex` is ChatGPT by device code (`rui auth login chatgpt --device-code`), `chatgpt` is ChatGPT in a browser (`rui auth login chatgpt`), and `openai` is an OpenAI API key (`rui auth login openai`, which reads the key from stdin).
+An explicit `providers` setting lists exactly which built-in providers to serve: each `providers.LABEL` assignment adds that provider, while `providers=` with an object replaces the whole set.
+Each is served at its own endpoint with its own credential: `codex` is ChatGPT by device code (`rui auth login chatgpt --device-code`), `chatgpt` is ChatGPT in a browser (`rui auth login chatgpt`), and `openai` is an OpenAI API key (`rui auth login openai`, which reads the key from stdin).
 A Host reads the key once when it starts and refuses to start `openai` without one, so after saving a key, pause a running Host and start it again to add it.
 An auto-started Host serves `openai` whenever a key is saved.
 To use an OpenAI-compatible server that speaks the Responses API, such as Azure OpenAI or a company proxy, set `RUI_OPENAI_BASE_URL` to its `https://` base URL (for example `https://example.openai.azure.com/openai/v1`) in the environment that starts the Host; the key is then sent only to that URL's `/responses` and `/models`.

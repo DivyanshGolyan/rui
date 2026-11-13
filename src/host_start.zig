@@ -937,7 +937,9 @@ test "Host start explicit providers replace automatic defaults and MySQL keeps i
     const settings = try gpa.create(hs.Settings);
     defer gpa.destroy(settings);
     var failure: start_report.Failure = undefined;
-    for ([_][]const []const u8{ &.{}, &.{ "--set", "providers={}" }, &.{ "--set", "providers.openai.unauthenticated=true" } }, 0..) |args, index| {
+    // Index 3 is the retired repeated --provider spelled as its replacement:
+    // each providers.LABEL assignment adds to the set, never replaces it.
+    for ([_][]const []const u8{ &.{}, &.{ "--set", "providers={}" }, &.{ "--set", "providers.openai.unauthenticated=true" }, &.{ "--set", "providers.codex={}", "--set", "providers.openai={}" } }, 0..) |args, index| {
         settings.* = .{};
         defer settings.deinit();
         const parsed = try parseForTest(arena.allocator(), args);
@@ -945,7 +947,12 @@ test "Host start explicit providers replace automatic defaults and MySQL keeps i
         try fillAt(init, &parsed, dir, settings, &fixtures, &failure);
         inline for (std.enums.values(protocol.Provider)) |provider| {
             const served = @field(settings.providers.entries, @tagName(provider)) != null;
-            const wanted = if (index == 0) provider.facts().credential == .sign_in and provider.facts().model_list == .catalog else if (index == 1) false else provider.facts().credential == .api_key;
+            const wanted = switch (index) {
+                0 => provider.facts().credential == .sign_in and provider.facts().model_list == .catalog,
+                1 => false,
+                2 => provider.facts().credential == .api_key,
+                else => provider == .codex or provider == .openai,
+            };
             try std.testing.expectEqual(wanted, served);
         }
     }
