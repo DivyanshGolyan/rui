@@ -677,7 +677,7 @@ const PlanShown = struct {
                     .missing_client_id => "ChatGPT's answer did not name Rui's app registration.",
                     .damaged => "The sign-in answer was incomplete or damaged.",
                 }}),
-                .unreachable_service => |err| try writer.print("rui: could not reach ChatGPT's sign-in service ({s})." ++ again, .{@errorName(err)}),
+                .unreachable_service => |cause| try writer.print("rui: could not reach ChatGPT's sign-in service ({s})." ++ again, .{cause}),
                 .exchange => |cause| try writer.print("rui: {s} Nothing was saved.\n", .{switch (cause) {
                     .plan_scope_missing => "You signed in, but ChatGPT did not let Rui use your plan. Allow it on the ChatGPT page, then run rui auth login chatgpt again.",
                     .code_refused => "ChatGPT refused the sign-in code. Run rui auth login chatgpt again for a new link.",
@@ -702,7 +702,7 @@ test "the terminal shows each plan sign-in value in the words the login printed 
         .{ .{ .failed = .{ .callback = .client_id_mismatch } }, "rui: ChatGPT answered for another app registration than the one Rui saved. Nothing was saved; run rui auth login chatgpt again.\n" },
         .{ .{ .failed = .{ .callback = .missing_client_id } }, "rui: ChatGPT's answer did not name Rui's app registration. Nothing was saved; run rui auth login chatgpt again.\n" },
         .{ .{ .failed = .{ .callback = .damaged } }, "rui: The sign-in answer was incomplete or damaged. Nothing was saved; run rui auth login chatgpt again.\n" },
-        .{ .{ .failed = .{ .unreachable_service = error.TransportFailed } }, "rui: could not reach ChatGPT's sign-in service (TransportFailed). Nothing was saved; run rui auth login chatgpt again.\n" },
+        .{ .{ .failed = .{ .unreachable_service = "TransportFailed" } }, "rui: could not reach ChatGPT's sign-in service (TransportFailed). Nothing was saved; run rui auth login chatgpt again.\n" },
         .{ .{ .failed = .{ .exchange = .plan_scope_missing } }, "rui: You signed in, but ChatGPT did not let Rui use your plan. Allow it on the ChatGPT page, then run rui auth login chatgpt again. Nothing was saved.\n" },
         .{ .{ .failed = .{ .exchange = .code_refused } }, "rui: ChatGPT refused the sign-in code. Run rui auth login chatgpt again for a new link. Nothing was saved.\n" },
         .{ .{ .failed = .{ .exchange = .not_for_this_sign_in } }, "rui: ChatGPT's answer was not for this sign-in. Nothing was saved.\n" },

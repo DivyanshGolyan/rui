@@ -82,8 +82,9 @@ pub const Failure = union(enum) {
     no_answer_source,
     /// The answer that arrived was not this sign-in's grant.
     callback: CallbackFailure,
-    /// The token exchange could not reach ChatGPT's sign-in service.
-    unreachable_service: anyerror,
+    /// The token exchange could not reach ChatGPT's sign-in service; the
+    /// transport's cause, by name, as shown before this was a value.
+    unreachable_service: []const u8,
     /// ChatGPT's token answer made no record.
     exchange: ExchangeFailure,
 };
@@ -201,7 +202,7 @@ pub fn login(io: std.Io, options: Options, display: anytype, paste: Paste, cance
     }
     const status = codex_auth.post(io, request, &room.response, cancelled) catch |err| {
         if (err == error.LoginInterrupted) return err;
-        return fail(display, .{ .unreachable_service = err });
+        return fail(display, .{ .unreachable_service = @errorName(err) });
     };
     wire.loginRecord(&room.attempt, grant, status, room.response.bytes[0..room.response.len], codex_auth.nowSeconds(io), record, &room.scratch) catch |err|
         return fail(display, .{ .exchange = exchangeFailure(err) });
@@ -543,6 +544,7 @@ const FakeCaller = struct {
                 .refused => |code| try writer.print("refused {s}", .{code}),
                 .callback => |cause| try writer.print("callback {t}", .{cause}),
                 .exchange => |cause| try writer.print("exchange {t}", .{cause}),
+                .unreachable_service => |cause| try writer.print("unreachable_service {s}", .{cause}),
                 else => try writer.print("{t}", .{failure}),
             },
         }
@@ -574,10 +576,12 @@ const FakeCaller = struct {
     fn read(buffer: []u8) ?usize {
         if (pipe) |fds| return std.posix.read(fds[0], buffer) catch 0;
         if (at == len) return if (linked and ends) 0 else null;
-        // One byte at a time, so a line arrives over several wakes.
-        buffer[0] = bytes[at];
-        at += 1;
-        return 1;
+        // One line at a time, so the lines arrive over several wakes.
+        const end = if (std.mem.indexOfScalarPos(u8, bytes[0..len], at, '\n')) |newline| newline + 1 else len;
+        const moved = @min(end - at, buffer.len);
+        @memcpy(buffer[0..moved], bytes[at..][0..moved]);
+        at += moved;
+        return moved;
     }
 
     fn cancelled() bool {
@@ -631,7 +635,7 @@ test "a login shows its link, then each stray paste, then the refusal a paste ca
             try writer.print("hello\n\nhttp://127.0.0.1:{s}/auth/callback?state={s}&error=access_denied\n", .{ port, state });
         }
     };
-    // Read a byte at a time, the stray line is shown before the answer.
+    // Read a line at a time, the stray line is shown before the answer.
     FakeCaller.reset(Script.write, false, false);
     try std.testing.expectError(error.Reported, testLogin(.openai, false, null));
     try expectShown(&.{ "link", "stray paste, this port", "refused access_denied" });
@@ -681,7 +685,7 @@ test "a granted paste whose token service cannot be reached shows that and saves
     const issuer: Issuer = .{ .fixture = try std.fmt.bufPrint(&base, "http://127.0.0.1:{d}", .{try @import("socket_fixture.zig").refusedPort()}) };
     FakeCaller.reset(Script.write, false, false);
     try std.testing.expectError(error.Reported, testLogin(issuer, false, null));
-    try expectShown(&.{ "link", "unreachable_service" });
+    try expectShown(&.{ "link", "unreachable_service TransportFailed" });
 }
 
 test "a host id file Rui did not write ends the login before any link" {
