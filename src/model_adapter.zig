@@ -5794,3 +5794,129 @@ test "request preparation streams exact built-in instructions across provider ro
         try std.testing.expect(retained == null);
     };
 }
+
+/// Prepares `binding`'s request over `storage` in full, its scratch in
+/// `tmp`, and answers its bytes, owned by the testing allocator, with the
+/// Session reference and the Workspace path written as fixed names, so a
+/// digest pinned over them holds on any machine and engine.
+fn pinnedRequest(storage: *store.Store, tmp: *std.testing.TmpDir, binding: store.AttemptBinding, session: []const u8, workspace: []const u8, byte_allowance: usize, item_allowance: usize) ![]u8 {
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var used: std.atomic.Value(u64) = .init(0);
+    var retained: ?named_scratch.Owner = null;
+    var preparation: Preparation = undefined;
+    storage.openHistoricalView(binding, &preparation.view);
+    try preparation.init(std.testing.io, root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
+    errdefer if (preparation.state.active) preparation.cancel();
+    const request = try drainPreparation(&preparation, byte_allowance, item_allowance, 1 << 24);
+    defer std.testing.allocator.free(request.bytes);
+    const quoted = try std.json.Stringify.valueAlloc(std.testing.allocator, workspace, .{});
+    defer std.testing.allocator.free(quoted);
+    const named = try std.mem.replaceOwned(u8, std.testing.allocator, request.bytes, quoted[1 .. quoted.len - 1], "WORKSPACE");
+    defer std.testing.allocator.free(named);
+    return std.mem.replaceOwned(u8, std.testing.allocator, named, session, "SESSION");
+}
+
+// The pinned request of each history below, prepared whole and in small
+// advances: a history of more entries than one page holds; a tool
+// continuation with seventeen results, more than a page's sixteen, and a
+// result of exactly the inline bound beside one past it; and messages at
+// those bounds around an answer of more parts than a page's thirty-two.
+// The digests were taken from main a5baaaf6, before the request's history
+// became a page the Store fills.
+test "a prepared request's bytes stay as pinned over pages, tool results and page bounds" {
+    const Scenario = enum { pages, tool_results, bounds };
+    const Pinned = struct {
+        const digests = std.EnumArray(Scenario, *const [64]u8).init(.{
+            .pages = "f8ee1d1f3cc1713b73030cc47695cefd58a1d6c142b8c4dbd4bf06bcd09a630d",
+            .tool_results = "947f4e1b9af86a718b1a479de7b0164ac10d96df90d6169ebd0dc01bb6eee1d0",
+            .bounds = "e5f899f1ae9d8f293479af1cb79f68fb6f63acefaa7a58fcd3cc7dcdd0d753bf",
+        });
+    };
+    try store.testing.forEachEngine(struct {
+        fn run(case: *store.testing.Case) !void {
+            const testing = store.testing;
+            inline for (comptime std.enums.values(Scenario)) |scenario| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: store.Store = undefined;
+                try testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+                const workspace = try testing.canonicalCwd(std.testing.io, &workspace_buffer);
+                const session = try testing.configureTestSession(&storage, "pinned-config");
+                switch (scenario) {
+                    .pages => inline for (0..9) |turn| {
+                        const answer = std.fmt.comptimePrint("answer {d}", .{turn});
+                        try testing.answerTestTurn(&storage, &tmp, session.slice(), std.fmt.comptimePrint("pinned-turn-{d}", .{turn}), &.{.{ .encoded = answer, .decoded = answer }});
+                    },
+                    .tool_results => {
+                        try testing.submitTestMessage(&storage, &tmp, "pinned-tools-input", "pinned-tools-key", session.slice(), "run the tools");
+                        const calling = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                        const call_count = 17;
+                        var item_buffers: [call_count][256]u8 = undefined;
+                        var items: [1 + call_count][]const u8 = undefined;
+                        items[0] = "{\"type\":\"reasoning\",\"id\":\"pinned-reasoning\",\"summary\":[],\"encrypted_content\":\"opaque\"}";
+                        for (items[1..], &item_buffers, 0..) |*item, *buffer, index| item.* = try std.fmt.bufPrint(buffer, "{{\"type\":\"function_call\",\"id\":\"pinned-item-{d}\",\"status\":\"completed\",\"name\":\"bash\",\"call_id\":\"pinned-call-{d}\",\"arguments\":\"{{\\\"cmd\\\":\\\"true\\\",\\\"description\\\":\\\"Run no-op command\\\",\\\"timeout_ms\\\":null}}\"}}", .{ index, index });
+                        try testing.settleItemsForTesting(&storage, &tmp, calling, &items, "");
+                        const inline_bound = &@as([16 * 1024]u8, @splat('i'));
+                        const past_bound = &@as([16 * 1024 + 1]u8, @splat('p'));
+                        for (0..call_count) |index| {
+                            const action = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
+                            var result_buffer: [32]u8 = undefined;
+                            const result: []const u8 = switch (index) {
+                                3 => inline_bound,
+                                11 => past_bound,
+                                else => try std.fmt.bufPrint(&result_buffer, "result {d}", .{index}),
+                            };
+                            _ = try storage.settleActionAttempt(action, .succeeded, result, .{});
+                        }
+                    },
+                    .bounds => {
+                        try testing.submitTestMessage(&storage, &tmp, "pinned-inline-input", "pinned-inline-key", session.slice(), &@as([16 * 1024]u8, @splat('m')));
+                        const answering = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                        var item_buffer: [4096]u8 = undefined;
+                        var item = std.Io.Writer.fixed(&item_buffer);
+                        var answer_buffer: [1024]u8 = undefined;
+                        var answer = std.Io.Writer.fixed(&answer_buffer);
+                        try item.writeAll("{\"type\":\"message\",\"id\":\"pinned-parts\",\"role\":\"assistant\",\"content\":[");
+                        for (0..33) |index| {
+                            if (index != 0) try item.writeByte(',');
+                            try item.print("{{\"type\":\"output_text\",\"text\":\"part {d};\"}}", .{index});
+                            try answer.print("part {d};", .{index});
+                        }
+                        try item.writeAll("]}");
+                        try testing.settleItemsForTesting(&storage, &tmp, answering, &.{item.buffered()}, answer.buffered());
+                    },
+                }
+                try testing.submitTestMessage(&storage, &tmp, "pinned-last-input", "pinned-last-key", session.slice(), if (scenario == .bounds) &@as([16 * 1024 + 1]u8, @splat('n')) else "the last input");
+                const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                for ([_][2]usize{ .{ preparation_byte_allowance, preparation_item_allowance }, .{ 7, 3 } }) |allowance| {
+                    const bytes = try pinnedRequest(&storage, &tmp, binding, session.slice(), workspace, allowance[0], allowance[1]);
+                    defer std.testing.allocator.free(bytes);
+                    // What each history is for, so a digest pins it.
+                    switch (scenario) {
+                        .pages => try std.testing.expectEqual(@as(usize, 9), std.mem.count(u8, bytes, "\"output_text\",\"text\":\"answer ")),
+                        .tool_results => {
+                            try std.testing.expectEqual(@as(usize, 17), std.mem.count(u8, bytes, "\"type\":\"function_call_output\""));
+                            try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, bytes, "\"" ++ @as([16 * 1024]u8, @splat('i')) ++ "\""));
+                            try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, bytes, "\"" ++ @as([16 * 1024 + 1]u8, @splat('p')) ++ "\""));
+                        },
+                        .bounds => {
+                            try std.testing.expectEqual(@as(usize, 33), std.mem.count(u8, bytes, "\"output_text\",\"text\":\"part "));
+                            try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, bytes, "\"" ++ @as([16 * 1024]u8, @splat('m')) ++ "\""));
+                            try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, bytes, "\"" ++ @as([16 * 1024 + 1]u8, @splat('n')) ++ "\""));
+                        },
+                    }
+                    var raw: [32]u8 = undefined;
+                    std.crypto.hash.sha2.Sha256.hash(bytes, &raw, .{});
+                    const digest = std.fmt.bytesToHex(raw, .lower);
+                    std.testing.expectEqualStrings(Pinned.digests.get(scenario), &digest) catch |err| {
+                        std.debug.print("{s} on {s} with allowance {d}/{d}\n", .{ @tagName(scenario), @tagName(case.engine), allowance[0], allowance[1] });
+                        return err;
+                    };
+                }
+            }
+        }
+    }.run);
+}
