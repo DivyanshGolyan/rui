@@ -1222,11 +1222,7 @@ fn drawPart(self: *Self, ctx: vxfw.DrawContext, part: AppScreen.Overview.Part) s
         } else self.app_screen.header = self.app_header.widget();
     }
     if (part != .list) {
-        self.app_input.composer.style = normal;
-        self.app_input.composer.quiet = quiet;
-        self.app_input.composer.rule_style = quiet;
-        self.app_input.composer.method = self.caps.width;
-        self.app_input.composer.ascii = !self.caps.unicode;
+        self.app_input.composer.setCaps(self.caps);
         self.app_input.composer.caret = self.state.inputMode() != .frozen and self.state.footer.focus == .input and !self.root.settings_page.standaloneOpen();
         self.state.commands = view.nextCommands(&self.state, self.composerDraft());
         self.app_input.facts = .{ .userdata = self, .drawFn = appFooterDraw };
@@ -2857,6 +2853,27 @@ const Rig = struct {
         return error.TestUnexpectedResult;
     }
 };
+
+test "New Session composer uses the shared input surface role in both themes and widths" {
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .provider = "codex", .model = "gpt-5.5" }, fake_operations, &cancellation);
+    defer rig.close();
+    for ([_]?view.Rgb{ null, .{ 255, 255, 255 } }) |background| for ([_]view.Caps.Depth{ .direct, .indexed, .none }) |depth| {
+        rig.overview.caps = .{ .background = background, .depth = depth };
+        const input = @import("widget_style.zig").of(rig.overview.caps, .{ .background = .input_surface });
+        const ground = @import("widget_style.zig").of(rig.overview.caps, .{ .colour = .quiet });
+        for ([_]vxfw.Size{ .{ .width = 140, .height = 40 }, .{ .width = 46, .height = 30 } }) |size| {
+            var shown = try rig.shown(size.width, size.height);
+            defer shown.deinit();
+            try std.testing.expect(std.mem.indexOf(u8, try shown.line(size.height - 3), "› Type a task") != null);
+            const left: u16 = if (size.width == 140) @import("Root.zig").list_width + 1 else 0;
+            for (left..size.width) |col| {
+                try std.testing.expectEqual(input.bg, shown.screen.readCell(@intCast(col), size.height - 3).?.style.bg);
+                for ([_]u16{ size.height - 4, size.height - 2, size.height - 1 }) |row| try std.testing.expectEqual(ground.bg, shown.screen.readCell(@intCast(col), row).?.style.bg);
+            }
+        }
+    };
+}
 
 test "App overview paints its ground and plain footer" {
     var cancellation: client.Cancellation = .{};

@@ -81,27 +81,35 @@
     },
     {
       "name": "inputtint-night-new-selected",
-      "note": "Home explicitly selects New Session after listing; hold for the terminal theme and selection repaint",
+      "note": "Wait for the listing before Home selects New Session; its active composer uses the shared input surface",
       "theme": "night",
       "open": "overview",
       "steps": [
+        {
+          "wait": "Input tint chat"
+        },
         {
           "keys": [
             "Home"
           ]
         },
         {
-          "sleep": 0.35
+          "wait": "enter start"
         }
       ],
       "expect": [
         "+ New Session",
-        "Settings"
+        "Settings",
+        "\u203a Type a task",
+        "enter start"
       ],
       "absent": [
         "Browsing \u00b7 Esc returns",
         "enter retry"
-      ]
+      ],
+      "expect_background": {
+        "\u203a Type a task": "#1a2246"
+      }
     },
     {
       "name": "inputtint-night-chat-selected",
@@ -191,27 +199,35 @@
     },
     {
       "name": "inputtint-day-new-selected",
-      "note": "Home explicitly selects New Session after listing; hold for the terminal theme and selection repaint",
+      "note": "Wait for the listing before Home selects New Session; its active composer uses the shared input surface",
       "theme": "day",
       "open": "overview",
       "steps": [
+        {
+          "wait": "Input tint chat"
+        },
         {
           "keys": [
             "Home"
           ]
         },
         {
-          "sleep": 0.35
+          "wait": "enter start"
         }
       ],
       "expect": [
         "+ New Session",
-        "Settings"
+        "Settings",
+        "\u203a Type a task",
+        "enter start"
       ],
       "absent": [
         "Browsing \u00b7 Esc returns",
         "enter retry"
-      ]
+      ],
+      "expect_background": {
+        "\u203a Type a task": "#e6ddc8"
+      }
     },
     {
       "name": "inputtint-day-chat-selected",

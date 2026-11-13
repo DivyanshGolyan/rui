@@ -2086,6 +2086,11 @@ def validate_scenario(data, sizes=None):
         require(isinstance(adjacent, dict) and all(isinstance(row, str) and row and "\n" not in row
                 and isinstance(detail, str) and detail and "\n" not in detail for row, detail in adjacent.items()),
                 f"{name}: expect_next maps row text to its following line")
+        backgrounds = state.get("expect_background", {})
+        require(isinstance(backgrounds, dict) and all(isinstance(text, str) and text
+                and not any(c in text for c in "\0\r\n") and isinstance(color, str)
+                and re.fullmatch(r"#[0-9a-fA-F]{6}", color) for text, color in backgrounds.items()),
+                f"{name}: expect_background maps row text to #rrggbb")
         last = state.get("expect_last")
         require(last is None or isinstance(last, str) and bool(last) and "\n" not in last,
                 f"{name}: expect_last must be nonempty single-line text")
@@ -2474,6 +2479,23 @@ def frame_row_failure(state, plain):
     return None
 
 
+def frame_background_failure(state, frame):
+    """Check the committed cells under each marker, not terminal output bytes."""
+    for text, color in state.get("expect_background", {}).items():
+        match = next(((row, line.index(text)) for row in frame.cells
+                      if text in (line := "".join(cell.data for cell in row))), None)
+        if match is None:
+            return f"background marker missing: {text!r}"
+        row, start = match
+        offset = 0
+        for cell in row:
+            end = offset + len(cell.data)
+            if start < end and offset < start + len(text) and frame.colors(cell)[1] != color[1:].lower():
+                return f"background under {text!r} must be {color}"
+            offset = end
+    return None
+
+
 def frame_ready(terminal, state, allow_exit=False, sessions=None):
     # Transitions are asserted at the frame their last wait observed, not
     # polled until a later frame happens to satisfy the regression oracle.
@@ -2482,8 +2504,9 @@ def frame_ready(terminal, state, allow_exit=False, sessions=None):
     expected, absent = frame_expectations(state), frame_absences(state, sessions)
     terminal.wait(lambda c: all(text in c.completed for text in expected)
                   and all(text not in c.completed for text in absent)
-                  and frame_row_failure(state, c.completed) is None,
-                  "state expectations: " + repr({"expect": expected, "absent": absent}),
+                  and frame_row_failure(state, c.completed) is None
+                  and (not state.get("expect_background") or frame_background_failure(state, c.frame) is None),
+                  "state expectations: " + repr({"expect": expected, "absent": absent, "expect_background": state.get("expect_background", {})}),
                   allow_exit=allow_exit)
 
 
@@ -2502,6 +2525,8 @@ def frame_capture(run, target, out, state, size, reason):
         reason = f"unexpected on screen: {unexpected}"
     if reason is None:
         reason = frame_row_failure(state, plain)
+    if reason is None:
+        reason = frame_background_failure(state, frame)
     (out / files["txt"]).write_text(plain)
     (out / files["ansi"]).write_text(ansi)
     (out / files["html"]).write_text(page)

@@ -1070,10 +1070,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     const facts_style = quiet;
     self.app_screen.style = normal;
     self.app_input.composer.caret = !self.app_hooks.root.input.list_focused and !self.info_open and !self.app_info.standaloneOpen() and self.footer.focus == .input;
-    self.app_input.composer.style = style.of(self.app_caps, .{ .background = .input_surface });
-    self.app_input.composer.quiet = style.of(self.app_caps, .{ .colour = .quiet, .background = .input_surface });
-    self.app_input.composer.rule_style = quiet;
-    self.app_input.composer.method = self.app_caps.width;
+    self.app_input.composer.setCaps(self.app_caps);
     self.app_input.composer.editor = &self.input.editors[self.input.active];
     self.app_card.style = normal;
     self.app_card.quiet = quiet;
