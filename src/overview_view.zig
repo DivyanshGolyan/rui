@@ -123,7 +123,20 @@ pub const marks = state_marks.marks;
 /// Your own Session's active mark turns through the shared frames.
 pub const spinner = state_marks.spinner;
 
-pub const Action = enum { previous, next, select_previous, select_next, first, last, clear, exit, stop, archive };
+pub const Action = enum {
+    previous,
+    next,
+    select_previous,
+    select_next,
+    first,
+    last,
+    clear,
+    exit,
+    stop,
+    archive,
+    /// Right: a Session row opens as Enter opens it; other rows do nothing.
+    open_session,
+};
 
 /// The one key table.
 pub const keys: keymap.Keymap(Action) = .init(.{
@@ -139,6 +152,8 @@ pub const keys: keymap.Keymap(Action) = .init(.{
     .alt_a = .archive,
     .up = .previous,
     .down = .next,
+    .left = null,
+    .right = .open_session,
     .shift_up = .select_previous,
     .shift_down = .select_next,
     .page_up = null,
@@ -153,7 +168,7 @@ test "keys list covers both screens without unbound or duplicate keys" {
 }
 
 /// Semantic list input: printable text has no editing route.
-pub const Input = union(enum) { action: Action, enter, right, ignored };
+pub const Input = union(enum) { action: Action, enter, ignored };
 
 /// The screen and paste context captured when this semantic key arrived.
 /// Covered Settings admits only exit and a still-cancellable Upgrade Escape.
@@ -2078,9 +2093,9 @@ fn listInput(state: *State, delivery: InputDelivery, effects: *Effects) error{Ou
     switch (input) {
         .ignored => unreachable,
         .enter => try enter(state, effects),
-        .right => if (state.selected == .session) try enter(state, effects),
         .action => |action| switch (action) {
             .exit => unreachable,
+            .open_session => if (state.selected == .session) try enter(state, effects),
             .clear => state.notice = null,
             .stop => stopKey(state, null, effects),
             .archive => archiveIntent(state, .selected_archive, effects),
@@ -5629,7 +5644,7 @@ test "shared model reads respect every Upgrade hold for opening and loading retr
 test "list input has no text domain and ignored printable or slash input preserves state" {
     const ignored: Input = .ignored;
     try std.testing.expect(switch (ignored) {
-        .action, .enter, .right => false,
+        .action, .enter => false,
         .ignored => true,
     });
     var state = try opened(&.{session("aaaaaa", .{ .idle = ago(1) }, .{})});
@@ -6250,9 +6265,8 @@ test "semantic list admission owns covered Settings paste creation and Upgrade p
     };
     const creations = enum { none, pending, uncertain };
     // The entire semantic key domain, independent of the terminal decoder.
-    var inputs: [std.enums.values(Action).len + 3]Input = undefined;
+    var inputs: [std.enums.values(Action).len + 2]Input = undefined;
     for (std.enums.values(Action), 0..) |action, at| inputs[at] = .{ .action = action };
-    inputs[inputs.len - 3] = .right;
     inputs[inputs.len - 2] = .enter;
     inputs[inputs.len - 1] = .ignored;
     for ([_]bool{ false, true }) |under| for ([_]bool{ false, true }) |pasted| for (std.enums.values(creations)) |creation| for (phases) |phase| for (inputs) |key| {
@@ -6290,10 +6304,6 @@ test "semantic list admission owns covered Settings paste creation and Upgrade p
             try std.testing.expectEqual(before_requests, state.request_count);
         } else switch (key) {
             .ignored => unreachable,
-            .right => {
-                try expectEffects(&.{}, effects);
-                try std.testing.expectEqual(before_requests, state.request_count);
-            },
             .enter => {
                 if (phase.held) {
                     try expectEffects(&.{}, effects);
@@ -6310,6 +6320,8 @@ test "semantic list admission owns covered Settings paste creation and Upgrade p
                 try std.testing.expectEqual(before_requests, state.request_count);
                 switch (action) {
                     .exit => unreachable,
+                    // New Session is selected: Right neither creates nor clears.
+                    .open_session => try std.testing.expect(std.meta.eql(before_notice, state.notice)),
                     .clear => try expectNotice(&state, null),
                     .stop, .archive => try expectNotice(&state, if (phase.held) upgrade_recovery else no_selection),
                     .previous, .next, .first, .last, .select_previous, .select_next => {
@@ -6326,7 +6338,7 @@ test "semantic list admission owns covered Settings paste creation and Upgrade p
 }
 
 test "Overview list activation resumes same or opens other chat at wide and narrow widths" {
-    for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |same| for ([_]Input{ .enter, .right }) |key| {
+    for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |same| for ([_]Input{ .enter, .{ .action = .open_session } }) |key| {
         var state = try opened(&mixed);
         defer state.deinit();
         _ = try step(&state, .{ .resized = .{ .width = width, .height = 30 } });
@@ -6354,7 +6366,7 @@ test "Overview list Right does not create or open Settings and clicks share resu
     defer state.deinit();
     for ([_]Selection{ .new_session, .settings }) |selection| {
         state.selected = selection;
-        const effects = try step(&state, .{ .input = .{ .key = .right } });
+        const effects = try step(&state, .{ .input = .{ .key = .{ .action = .open_session } } });
         for (effects.slice()) |effect| try std.testing.expect(effect != .create and effect != .open_settings);
     }
     _ = try step(&state, .{ .conversation = "b2c3d4".* });

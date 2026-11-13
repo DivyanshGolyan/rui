@@ -608,7 +608,7 @@ fn infoBackend(self: *Self) ChatInfo.Backend {
         }
         fn copied(raw: *anyopaque) bool {
             const frontend = owner(raw);
-            return frontend.shown_notice.isCopy(frontend.nowMs());
+            return frontend.shown_notice.showsPanelCopy(frontend.nowMs());
         }
         fn caps(raw: *anyopaque) overview_view.Caps {
             return owner(raw).app_caps;
@@ -962,8 +962,6 @@ fn sessionKey(event: vxfw.Event) session_keys.Key {
         .paste_start => .paste_start,
         .paste_end => .paste_end,
         .key_press => |key| if (Editor.named(key)) |name| .{ .named = name } else if (Editor.isEnter(key)) .enter else if (key.matchExact(vaxis.Key.tab, .{})) .tab else if (key.matchExact(vaxis.Key.tab, .{ .shift = true })) .shift_tab else if (key.matches('i', .{ .alt = true })) .info else if (key.matches('d', .{ .alt = true })) .details else if (hostStartKey(key)) .host_start else switch (Editor.selectKey(conversation_keys, key)) {
-            .left => .left,
-            .right => .right,
             .text => .text,
             else => .other,
         },
@@ -3081,13 +3079,16 @@ fn settleReader(self: *Self) !void {
     // a request left outstanding would refuse every later one.
     if (self.reading.phase == .recall and end != .complete) self.input.abandonStep();
     const phase = self.reading.phase;
+    // Chat info's own Copy last answer, not a typed /copy: only its outcome
+    // settles the panel's effect and labels the panel's action.
+    const panel_copy = phase == .inspection and self.info_effect == .copy;
     if (phase == .inspection and self.info_effect == .configure and self.job.info_edit != null) {
         self.info_effect = if (end == .complete and self.job.result.info_saved) .refreshing else .failed;
         if (self.info_effect == .refreshing) {
             self.inspection.status_requested = true;
             self.poll_at = 0;
         }
-    } else if (phase == .inspection and self.info_effect == .copy) {
+    } else if (panel_copy) {
         self.info_effect = if (end == .complete and self.job.result.copied == .clipboard) .saved else .failed;
     }
     // All terminal outcomes release the retry read, including supersession.
@@ -3124,7 +3125,7 @@ fn settleReader(self: *Self) !void {
         .recalled => try self.showRecalled(),
         .retried => try self.finishRetry(),
         .staged => try self.showStaged(),
-        .copy => try self.showCopy(),
+        .copy => try self.showCopy(if (panel_copy) .panel_copy else .other),
         .page => try self.showInspection(),
     };
     // Shown, or never written: exit no longer prints it.
@@ -3538,10 +3539,11 @@ fn showInspection(self: *Self) !void {
     self.notice = null;
 }
 
-/// A joined /copy. The clipboard's bytes go out between frames, so no frame
-/// splits the sequence.
-fn showCopy(self: *Self) !void {
-    errdefer if (self.info_effect == .saved) {
+/// A joined /copy; `answers` says whether Chat info's Copy last answer ran
+/// it. The clipboard's bytes go out between frames, so no frame splits the
+/// sequence.
+fn showCopy(self: *Self, answers: session_chrome.NoticeAnswers) !void {
+    errdefer if (answers == .panel_copy) {
         self.info_effect = .failed;
     };
     self.dirty = true;
@@ -3553,7 +3555,7 @@ fn showCopy(self: *Self) !void {
         .clipboard => |range| {
             try self.app_hooks.copy(self.app_hooks.context, self.files.scratch, range.start, range.length);
             self.notice = null;
-            self.shown_notice.showCopy(self.nowMs());
+            self.shown_notice.showCopy(self.nowMs(), answers);
             return;
         },
         .saved => saved: {
@@ -6527,7 +6529,7 @@ test "App Session copy notices are compact state phrases" {
     }) |case| {
         self.dirty = false;
         self.job.result.copied = case.result;
-        try self.showCopy();
+        try self.showCopy(.other);
         try std.testing.expectEqualStrings(case.words, self.notice orelse self.shown_notice.current(self.nowMs()).?);
         try std.testing.expect(self.dirty);
     }
@@ -9909,29 +9911,70 @@ test "chat standalone accepted departure ends presentation before handing back a
     };
 }
 
-test "App Session copy button feedback follows clipboard completion and refusal" {
-    var fixture: ChromeFixture = undefined;
-    try fixture.init();
-    defer fixture.deinit();
-    const self = fixture.self;
-    const backend = self.infoBackend();
-    self.job.result.copied = .{ .clipboard = .{ .start = 0, .length = 0 } };
-    try self.showCopy();
-    try std.testing.expect(backend.copied(backend.context));
-    self.shown_notice.dismiss();
-    try std.testing.expect(!backend.copied(backend.context));
-    self.job.result.copied = .no_answer;
-    try self.showCopy();
-    try self.afterInput(&fixture.ctx);
-    try std.testing.expect(!backend.copied(backend.context));
-    self.app_hooks.copy = struct {
+test "App Session copy button feedback follows only its own clipboard completion and refusal" {
+    const Copies = struct {
+        var result: reads.Copied = .no_answer;
+        fn read(raw: *anyopaque, _: *Task) !void {
+            const job: *Job = @ptrCast(@alignCast(raw));
+            job.result.copied = result;
+        }
+        fn take(_: *anyopaque, _: std.Io.File, _: u64, _: u64) !void {}
         fn refuse(_: *anyopaque, _: std.Io.File, _: u64, _: u64) !void {
             return error.AccessDenied;
         }
-    }.refuse;
-    self.info_effect = .saved;
-    self.job.result.copied = .{ .clipboard = .{ .start = 0, .length = 0 } };
-    try std.testing.expectError(error.AccessDenied, self.showCopy());
+        /// One joined /copy read: Chat info's own when `effect` is `.copy`,
+        /// else a typed one beside whatever the panel last settled.
+        fn run(self: *Self, copy: reads.Copy, effect: @TypeOf(self.info_effect), copied: reads.Copied) !void {
+            self.inspection.kind = .{ .copy = copy };
+            self.info_effect = effect;
+            result = copied;
+            try self.launch(self.freeze(.inspection), read);
+            self.inspection.command_running = true;
+            try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(2)), self, struct {
+                fn done(frontend: *Self) !bool {
+                    return frontend.reader.completed();
+                }
+            }.done);
+            try self.settleReader();
+        }
+    };
+    const clipboard: reads.Copied = .{ .clipboard = .{ .start = 0, .length = 0 } };
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    self.app_hooks.copy = Copies.take;
+    const backend = self.infoBackend();
+
+    // The panel's own copy: Copied while its reply shows.
+    try Copies.run(self, .answer, .copy, clipboard);
+    try std.testing.expectEqual(.saved, self.info_effect);
+    try std.testing.expect(backend.copied(backend.context));
+    self.shown_notice.dismiss();
+    try std.testing.expect(!backend.copied(backend.context));
+
+    // A typed /copy code or /copy reaches the clipboard too, whether the
+    // panel last copied or never did; neither is the panel's copy.
+    for ([_]@TypeOf(self.info_effect){ .idle, .saved }) |before| {
+        for ([_]reads.Copy{ .code, .answer }) |copy| {
+            if (before == .saved) try Copies.run(self, .answer, .copy, clipboard);
+            try Copies.run(self, copy, before, clipboard);
+            try std.testing.expectEqualStrings("Sent to clipboard", self.shown_notice.current(self.nowMs()).?);
+            try std.testing.expectEqual(before, self.info_effect);
+            try std.testing.expect(!backend.copied(backend.context));
+        }
+    }
+
+    // The panel's copy that found no answer.
+    try Copies.run(self, .answer, .copy, .no_answer);
+    try std.testing.expectEqual(.failed, self.info_effect);
+    try std.testing.expect(!backend.copied(backend.context));
+
+    // A refused clipboard fails only the panel's own copy: a typed one
+    // leaves the panel's last outcome as it was.
+    self.app_hooks.copy = Copies.refuse;
+    try std.testing.expectError(error.AccessDenied, Copies.run(self, .code, .saved, clipboard));
+    try std.testing.expectEqual(.saved, self.info_effect);
+    try std.testing.expectError(error.AccessDenied, Copies.run(self, .answer, .copy, clipboard));
     try std.testing.expectEqual(.failed, self.info_effect);
     try std.testing.expect(!backend.copied(backend.context));
 }

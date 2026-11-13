@@ -665,7 +665,7 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
 fn appKey(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event, delivery: @import("app_input.zig").Effects.Delivery) anyerror!void {
     const self: *Self = @ptrCast(@alignCast(raw));
     const selected = TerminalEditor.selectEvent(view.keys, input, delivery.pasted);
-    const semantic: view.Input = if (input == .key_press and input.key_press.matches(vaxis.Key.right, .{})) .right else switch (selected) {
+    const semantic: view.Input = switch (selected) {
         .action => |action| .{ .action = action },
         .enter => .enter,
         else => .ignored,
@@ -6984,6 +6984,8 @@ const key_encodings = std.enums.EnumArray(keymap.Key, []const []const u8).init(.
     .alt_a = &.{ "\x1ba", "\x1b[97;3u", "\x1b[27;3;97~" },
     .up = &.{ "\x1b[A", "\x1bOA", "\x1b[1;1A" },
     .down = &.{ "\x1b[B", "\x1bOB", "\x1b[1;1B" },
+    .left = &.{ "\x1b[D", "\x1bOD", "\x1b[1;1D" },
+    .right = &.{ "\x1b[C", "\x1bOC", "\x1b[1;1C" },
     .shift_up = &.{ "\x1b[1;2A", "\x1b[1;2:1A" },
     .shift_down = &.{ "\x1b[1;2B", "\x1b[1;2:1B" },
     .page_up = &.{ "\x1b[5~", "\x1b[5;1~", "\x1b[5;2~" },

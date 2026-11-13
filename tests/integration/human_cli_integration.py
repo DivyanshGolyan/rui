@@ -878,8 +878,10 @@ def persistent_copy_case():
             # The chat info action uses the same last-answer clipboard owner.
             copied = len(capture.clipboard)
             chat_info_open(master)
+            # Down stops on the action row beside its actions and walks the
+            # stacked row to Copy last answer; Right then walks the beside row.
             panel_frame(master, lambda frame: len(capture.clipboard) == copied + 1,
-                        b"\x1b[B" * 6 + b"\r")
+                        b"\x1b[B" * 6 + b"\x1b[C" * 2 + b"\r")
             assert capture.clipboard[-1] == osc52(answer), capture.clipboard
             panel_frame(master, lambda frame: "Copy last answer" not in frame, b"\x1b")
             assert sent("/copy code") == osc52("print('é')")

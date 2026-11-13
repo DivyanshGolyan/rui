@@ -60,6 +60,10 @@ pub const keys: keymap.Keymap(Action) = .init(.{
     .alt_a = .archive,
     .up = .previous,
     .down = .next,
+    // The draft's caret; Left on an empty draft goes to the list and the
+    // bare arrows move an Action's choice, both by `step`.
+    .left = null,
+    .right = null,
     .shift_up = .scroll_up,
     .shift_down = .scroll_down,
     .page_up = .page_up,
@@ -176,9 +180,6 @@ pub const Key = union(enum) {
     /// A key the line editor names, bound in `keys` or not.
     named: keymap.Key,
     enter,
-    /// The bare arrows, which move an Action's choice.
-    left,
-    right,
     tab,
     shift_tab,
     /// `r`, which starts a stopped Host from an empty draft; else text.
@@ -332,15 +333,19 @@ pub fn step(state: State, facts: Facts, input: Input) Take {
         .screen => .{ .perform = action.? },
         .selector => switch (input.key) {
             .enter => .{ .card = .enter },
-            .left => .{ .card = .left },
-            .right => .{ .card = .right },
+            // The bare arrows move an Action's choice.
+            .named => |name| switch (name) {
+                .left => .{ .card = .left },
+                .right => .{ .card = .right },
+                else => .taken,
+            },
             .paste_end => .{ .card = .cancel },
             else => .taken,
         },
         .blocked => if (input.key == .enter) .needs_decision else .taken,
         .draft => .consent_draft,
     };
-    const draft_key: @import("app_input.zig").DraftKey = if (input.key == .left and state.footer.focus == .input) .left else .other;
+    const draft_key: @import("app_input.zig").DraftKey = if (input.key == .named and input.key.named == .left and state.footer.focus == .input) .left else .other;
     if (!input.pasted and @import("app_input.zig").draftKey(facts.draft_empty, draft_key) == .list) return .back_to_list;
     if (input.key == .enter and !input.pasted and facts.shown_row) return .take_row;
     return .{ .edit = .{ .send = facts.send.allowed() } };
@@ -354,10 +359,10 @@ pub fn rowKey(input: Input) ActionConsent.RowKey {
     if (input.action()) |action| return if (action == .close) .escape else .screen;
     return switch (input.key) {
         .enter => .enter,
-        .left, .right => .arrows,
+        .named => |name| if (name == .left or name == .right) .arrows else .other,
         .text, .host_start => .printable,
         .paste_start => .paste,
-        .named, .tab, .shift_tab, .info, .details, .other, .paste_end => .other,
+        .tab, .shift_tab, .info, .details, .other, .paste_end => .other,
     };
 }
 
@@ -502,8 +507,8 @@ test "every key Root hands the Session means one thing in each Session state" {
                 .ctrl_g => .{ .key = .{ .named = .ctrl_g } },
                 .ctrl_c => .{ .key = .{ .named = .ctrl_c } },
                 .ctrl_d => .{ .key = .{ .named = .ctrl_d } },
-                .left => .{ .key = .left },
-                .right => .{ .key = .right },
+                .left => .{ .key = .{ .named = .left } },
+                .right => .{ .key = .{ .named = .right } },
                 .tab => .{ .key = .tab },
                 .shift_tab => .{ .key = .shift_tab },
                 .host_start => .{ .key = .host_start },

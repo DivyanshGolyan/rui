@@ -678,7 +678,7 @@ const Fixture = struct {
     }
     fn copied(raw: *anyopaque) bool {
         const self: *Fixture = @ptrCast(@alignCast(raw));
-        return self.copy_notice.isCopy(0);
+        return self.copy_notice.showsPanelCopy(0);
     }
     fn caps(raw: *anyopaque) view.Caps {
         const self: *Fixture = @ptrCast(@alignCast(raw));
@@ -1827,7 +1827,7 @@ test "Chat info copy label follows successful short reply dismissal replacement 
         try press(&page, &ctx, vaxis.Key.enter);
         try std.testing.expectEqual(@as(?usize, 8), page.pending);
         try std.testing.expect(std.mem.indexOf(u8, try dump(&page, arena.allocator(), width, 15), "Copied") == null);
-        fixture.copy_notice.showCopy(0);
+        fixture.copy_notice.showCopy(0, .panel_copy);
         fixture.state_value = .saved;
         try page.widget().handleEvent(&ctx, .tick);
         const copied = try dump(&page, arena.allocator(), width, 15);
@@ -1839,7 +1839,7 @@ test "Chat info copy label follows successful short reply dismissal replacement 
         fixture.copy_notice.dismiss();
         try press(&page, &ctx, vaxis.Key.left);
         try std.testing.expect(std.mem.indexOf(u8, try dump(&page, arena.allocator(), width, 15), "Copy last answer") != null);
-        fixture.copy_notice.showCopy(0);
+        fixture.copy_notice.showCopy(0, .panel_copy);
         fixture.copy_notice.show("another reply", 0);
         try std.testing.expect(std.mem.indexOf(u8, try dump(&page, arena.allocator(), width, 15), "Copied") == null);
         page.panel.selected = 8;
