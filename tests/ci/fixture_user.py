@@ -18,9 +18,10 @@ lane's lock:
     and the python3.12, zig and go the caller would run;
   - root places them (`place`): it fetches REF, origin/main and the v* tags
     (this repository's, then origin's) into a bare repository in
-    /var/lib/rui-fixture/lanes/LANE, copies the trust files there, and uses each
-    install in place when every user can reach it, otherwise a hard-linked copy
-    under /var/lib/rui-fixture/tools. The lane's directory is root's and only
+    /var/lib/rui-fixture/lanes/LANE, copies the trust files there, and uses an
+    install from the system's own prefixes in place, as every user does, and
+    any other as a copy every user can read under /var/lib/rui-fixture/tools.
+    The lane's directory is root's and only
     the lane's group reads it, so the lane cannot change what root reads next
     run and other lanes cannot read it;
   - as that user, checks out REF at ~/rui from the placed repository and
@@ -79,12 +80,16 @@ TRUST_COPIES = "trust"
 # Tools' own trust variables. Each means something different to its tool (node's
 # adds to its store, pip's replaces it), so each is moved as the caller set it.
 TOOL_TRUST = ("REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "GIT_SSL_CAINFO", "PIP_CERT", "NODE_EXTRA_CA_CERTS")
+# OpenSSL reads its certificate directory variable as a list of directories.
+TRUST_LISTS = ("SSL_CERT_DIR",)
 # Passed through unchanged when the caller sets them: the proxy, which listens
 # on loopback for every user, and the terminal and text decoding.
 PASSED = (*network_variables.PROXY, "TERM", "LANG", "LC_ALL", "LC_CTYPE")
 # Each toolchain's install root, as directories above its binary.
 TOOLS = {"zig": 1, "go": 2}
 BASE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+# The prefixes BASE_PATH's directories belong to; their installs serve every user already.
+SYSTEM_PREFIXES = frozenset(Path(entry).parent for entry in BASE_PATH.split(os.pathsep))
 # What the export holds, in the order root fetches it: REF (named in `export`), then these.
 EXPORTED = ("+refs/remotes/origin/main:refs/remotes/origin/main", "+refs/tags/v*:refs/tags/v*")
 
@@ -98,17 +103,6 @@ def user_for(lane):
     if not LANE.match(lane):
         raise SystemExit(f"{COMMAND}: lane {lane!r} must match {LANE.pattern} (lowercase letters, digits and dashes)")
     return f"rui-{lane}"
-
-
-def reachable(path):
-    """Whether a user with no special rights can search every directory down to `path`."""
-    path = Path(path)
-    if not path.is_absolute():
-        return False
-    try:
-        return all(os.stat(part).st_mode & stat.S_IXOTH for part in (path, *path.parents))
-    except OSError:
-        return False
 
 
 class Install(NamedTuple):
@@ -208,16 +202,23 @@ def reexec_pinned(argv):
 
 
 def trust_sources(environ):
-    """The caller's trust, moved: each trust variable it set to an existing file or directory, and that path.
+    """The caller's trust, moved: each trust variable it set, and the existing files or directories it names.
 
-    Nothing is filled or derived: a variable the caller left unset stays unset,
-    and one naming a missing path is dropped with a notice.
+    A variable in TRUST_LISTS names a list of paths, and each entry is its own
+    source; any other names one path. Nothing is filled or derived: a variable
+    the caller left unset stays unset, each missing entry is dropped with a
+    notice, and a variable left with no entry stays unset.
     """
-    named = {name: Path(environ[name]) for name in (*network_variables.TRUST, *TOOL_TRUST) if environ.get(name)}
-    for name, path in named.items():
-        if not path.exists():
-            say(f"{name} names {path}, which does not exist; the run leaves {name} unset")
-    trust = {name: path for name, path in named.items() if path.exists()}
+    trust = {}
+    for name in (*network_variables.TRUST, *TOOL_TRUST):
+        value = environ.get(name, "")
+        entries = [Path(entry) for entry in value.split(os.pathsep) if entry] if name in TRUST_LISTS else [
+            Path(value)] if value else []
+        for missing in (entry for entry in entries if not entry.exists()):
+            say(f"{name} names {missing}, which does not exist; the run leaves it out")
+        present = tuple(entry for entry in entries if entry.exists())
+        if present:
+            trust[name] = present
     if not trust:
         say("no CA bundle or certificate directory in the caller's trust variables; the run uses the system "
             "trust store")
@@ -229,14 +230,14 @@ class Inputs(NamedTuple):
     sha: str
     source: Path  # the repository's common git directory, shared by every worktree
     origin: str  # origin's URL, or "" without one
-    trust: dict  # trust variable -> the CA bundle file or certificate directory it names
+    trust: dict  # trust variable -> the CA bundle files or certificate directories it names, in order
     installs: dict  # name -> Install
 
 
 class Placed(NamedTuple):
     """Every path a lane reads that root provided; nothing else root has reaches the lane."""
     source: Path
-    trust: dict  # trust variable -> the lane's copy of what it names
+    trust: dict  # trust variable -> the lane's copies of what it names, in order
     binaries: dict  # name -> the binary the lane runs
 
 
@@ -311,54 +312,63 @@ def contents(path):
 
 
 def place_trust(trust, trust_dir, gid):
-    """Copy each file or directory `trust` names into `trust_dir` for group `gid`; each variable's copy.
+    """Copy each file or directory `trust` names into `trust_dir` for group `gid`; each variable's copies.
 
-    A hashed certificate directory is mostly links into other directories, so
-    its copy holds their contents. A copy whose contents are unchanged stays.
+    Each source gets its own copy, never merged with another: hashed names in
+    two certificate directories can collide. A hashed certificate directory is
+    mostly links into other directories, so its copy holds their contents. A
+    copy whose contents are unchanged stays.
     """
     trust_dir.mkdir(exist_ok=True)
     copies = {}
-    for name, source in trust.items():
-        if source not in copies:
-            copies[source] = trust_dir / name
+    for name, sources in trust.items():
+        for index, source in enumerate(sources):
+            if source in copies:
+                continue
+            copies[source] = trust_dir / f"{name}.{index}"
             wanted = contents(source)
-            if contents(copies[source]) != wanted:
-                staging = Path(tempfile.mkdtemp(dir=trust_dir))
-                copy = staging / "copy"
-                if isinstance(wanted, dict):
-                    copy.mkdir()
-                    for entry, data in wanted.items():
-                        (copy / entry).write_bytes(data)
-                else:
-                    copy.write_bytes(wanted)
-                share(staging, gid)
-                if copies[source].exists() or copies[source].is_symlink():
-                    copies[source].rename(staging / "old")
-                copy.rename(copies[source])
-                shutil.rmtree(staging)
+            if contents(copies[source]) == wanted:
+                continue
+            staging = Path(tempfile.mkdtemp(dir=trust_dir))
+            copy = staging / "copy"
+            if isinstance(wanted, dict):
+                copy.mkdir()
+                for entry, data in wanted.items():
+                    (copy / entry).write_bytes(data)
+            else:
+                copy.write_bytes(wanted)
+            share(staging, gid)
+            if copies[source].exists() or copies[source].is_symlink():
+                copies[source].rename(staging / "old")
+            copy.rename(copies[source])
+            shutil.rmtree(staging)
     for stale in set(trust_dir.iterdir()) - set(copies.values()):
         if stale.is_dir() and not stale.is_symlink():
             shutil.rmtree(stale)
         else:
             stale.unlink()
     share(trust_dir, gid)
-    return {name: copies[source] for name, source in trust.items()}
+    return {name: tuple(copies[source] for source in sources) for name, sources in trust.items()}
 
 
 def place_install(install, tools_dir):
-    """The binary the lane runs for `install`: itself when every user reaches it, else a copy in `tools_dir`."""
-    if reachable(install.binary):
+    """The binary the lane runs for `install`.
+
+    An install from the system's own prefixes is used in place, as every user
+    uses it (the system Python's root is all of /usr). Any other is copied
+    into `tools_dir` once per binary identity, and the copy is made readable
+    by every user whatever modes the source has.
+    """
+    if install.root in SYSTEM_PREFIXES:
         return install.binary
     identity = os.stat(install.binary)
     key = hashlib.sha256(f"{install.root}\0{identity.st_dev}:{identity.st_ino}:{identity.st_size}:"
-                         f"{identity.st_mtime_ns}".encode()).hexdigest()[:12]
+                         f"{identity.st_mtime_ns}\0readable copy".encode()).hexdigest()[:12]
     copy = tools_dir / f"{install.root.name}-{key}"
     if not copy.is_dir():
         staging = Path(tempfile.mkdtemp(dir=tools_dir))
-        # Hard links share the files' bytes; another filesystem needs a copy.
-        if subprocess.run(["cp", "-al", f"{install.root}/.", str(staging)], stderr=subprocess.DEVNULL).returncode:
-            subprocess.run(["cp", "-a", f"{install.root}/.", str(staging)], check=True)
-        os.chmod(staging, 0o755)
+        subprocess.run(["cp", "-a", f"{install.root}/.", str(staging)], check=True)
+        subprocess.run(["chmod", "-R", "a+rX", str(staging)], check=True)
         try:
             staging.rename(copy)
             say(f"copied {install.root} to {copy} for lanes")
@@ -399,10 +409,13 @@ def place(inputs, lane_dir, tools_dir, gid):
 
 
 def search_path(venv_bin, placed_dirs, caller_path):
-    """The run's PATH: the environment, placed installs, then the caller's directories every user can reach."""
-    entries = [str(venv_bin), *map(str, placed_dirs),
-               *(entry for entry in (caller_path or BASE_PATH).split(os.pathsep) if reachable(entry))]
-    return os.pathsep.join(dict.fromkeys(entries))
+    """The run's PATH: the environment, placed installs, then the caller's directories.
+
+    A caller's directory the lane cannot search is skipped by every lookup, so
+    nothing here decides what the lane can read.
+    """
+    entries = [str(venv_bin), *map(str, placed_dirs), *(caller_path or BASE_PATH).split(os.pathsep)]
+    return os.pathsep.join(dict.fromkeys(entry for entry in entries if entry))
 
 
 def environment(user, home, path, trust, environ, keep=()):
@@ -410,7 +423,7 @@ def environment(user, home, path, trust, environ, keep=()):
     fixed = {
         "HOME": str(home), "USER": user, "LOGNAME": user, "SHELL": "/bin/bash", "PATH": path,
         "ZIG_GLOBAL_CACHE_DIR": str(home / ".cache/zig"),
-        **{name: str(copy) for name, copy in trust.items()},
+        **{name: os.pathsep.join(map(str, copies)) for name, copies in trust.items()},
     }
     # The caller's trust names the run does not set stay unset, never pointing into root's state.
     withheld = (*network_variables.TRUST, *TOOL_TRUST)

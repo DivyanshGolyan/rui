@@ -3,6 +3,7 @@ from contextlib import redirect_stderr, redirect_stdout
 import io
 import os
 from pathlib import Path
+import stat
 import subprocess
 import sys
 import tempfile
@@ -52,15 +53,18 @@ class FixtureUserTest(unittest.TestCase):
             "ZIG_GLOBAL_CACHE_DIR": "/root/.cache/zig",
         }
         home = Path("/home/rui-a")
-        trust = {"SSL_CERT_FILE": Path("/t/SSL_CERT_FILE"), "GIT_SSL_CAINFO": Path("/t/SSL_CERT_FILE")}
+        trust = {"SSL_CERT_FILE": (Path("/t/SSL_CERT_FILE.0"),), "GIT_SSL_CAINFO": (Path("/t/SSL_CERT_FILE.0"),),
+                 "SSL_CERT_DIR": (Path("/t/SSL_CERT_DIR.0"), Path("/t/SSL_CERT_DIR.1"))}
         expected = {
             "HOME": "/home/rui-a", "USER": "rui-a", "LOGNAME": "rui-a", "SHELL": "/bin/bash", "PATH": "/p",
             "ZIG_GLOBAL_CACHE_DIR": "/home/rui-a/.cache/zig", "HTTPS_PROXY": "http://u:p@127.0.0.1:1",
             "https_proxy": "http://127.0.0.1:1", "NO_PROXY": "localhost", "LANG": "C.UTF-8", "TERM": "xterm",
-            "SSL_CERT_FILE": "/t/SSL_CERT_FILE", "GIT_SSL_CAINFO": "/t/SSL_CERT_FILE",
+            "SSL_CERT_FILE": "/t/SSL_CERT_FILE.0", "GIT_SSL_CAINFO": "/t/SSL_CERT_FILE.0",
+            "SSL_CERT_DIR": "/t/SSL_CERT_DIR.0:/t/SSL_CERT_DIR.1",
         }
-        self.assertEqual(fixture_user.environment("rui-a", home, "/p", trust, caller), expected,
-                         "a trust name with no copy, here SSL_CERT_DIR, stays unset rather than naming /root")
+        self.assertEqual(fixture_user.environment("rui-a", home, "/p", trust, caller), expected)
+        self.assertNotIn("PIP_CERT", fixture_user.environment("rui-a", home, "/p", trust, {**caller, "PIP_CERT": "/x"}),
+                         "a trust name with no copy stays unset rather than naming root's path")
         self.assertEqual(fixture_user.environment("rui-a", home, "/p", trust, caller, ("RUI_TEST_X",)),
                          {**expected, "RUI_TEST_X": "1"})
         without = fixture_user.environment("rui-a", home, "/p", {}, caller)
@@ -78,7 +82,7 @@ class FixtureUserTest(unittest.TestCase):
             (checkout / requirement).write_text("h2==1\n")
         bundle = self.root / "trust/SSL_CERT_FILE"
         inputs = fixture_user.Inputs("0" * 40, self.root / "source", "", {}, {})
-        placed = fixture_user.Placed(self.root / "source.git", {"SSL_CERT_FILE": bundle},
+        placed = fixture_user.Placed(self.root / "source.git", {"SSL_CERT_FILE": (bundle,)},
                                      {fixture_user.PYTHON: self.root / "python/bin/python3.12"})
         started = []
 
@@ -107,19 +111,12 @@ class FixtureUserTest(unittest.TestCase):
         self.assertEqual({name: command_env.get(name) for name in secrets}, secrets)
         self.assertEqual(command_env["SSL_CERT_FILE"], str(bundle))
 
-    def test_path_starts_with_the_environment_and_keeps_only_directories_others_can_search(self):
-        closed, open_ = self.root / "closed", self.root / "open"
-        (closed / "bin").mkdir(parents=True)
-        open_.mkdir()
-        os.chmod(self.root, 0o755)
-        os.chmod(closed, 0o700)
-        os.chmod(open_, 0o755)
-        self.assertFalse(fixture_user.reachable(closed / "bin"))
-        self.assertTrue(fixture_user.reachable(open_))
-        self.assertFalse(fixture_user.reachable(Path("relative")))
+    def test_path_is_the_environment_then_placed_installs_then_the_callers_directories(self):
         self.assertEqual(fixture_user.search_path(Path("/venv/bin"), [Path("/tools/zig")],
-                                                  f"{closed / 'bin'}:{open_}::{open_}"),
-                         f"/venv/bin:/tools/zig:{open_}")
+                                                  "/root/.local/bin:/usr/bin::/usr/bin:/tools/zig"),
+                         "/venv/bin:/tools/zig:/root/.local/bin:/usr/bin")
+        self.assertEqual(fixture_user.search_path(Path("/venv/bin"), [], ""),
+                         f"/venv/bin:{fixture_user.BASE_PATH}")
 
     def test_the_lane_sees_exactly_the_callers_trust_and_nothing_filled_in(self):
         bundle, other, directory = self.root / "ca.crt", self.root / "corp.crt", self.root / "certs"
@@ -127,25 +124,41 @@ class FixtureUserTest(unittest.TestCase):
         other.write_text("corporate")
         directory.mkdir()
         missing = self.root / "missing"
+        second = self.root / "more-certs"
+        second.mkdir()
         every = {"SSL_CERT_FILE": bundle, "SSL_CERT_DIR": directory, "REQUESTS_CA_BUNDLE": other,
                  "CURL_CA_BUNDLE": bundle, "GIT_SSL_CAINFO": other, "PIP_CERT": other, "NODE_EXTRA_CA_CERTS": bundle}
+
+        def listed(*paths):
+            return ":".join(map(str, paths))
+
         cases = {
-            # The caller's trust variables: the run's trust, and the variables a notice names.
+            # The caller's trust variables: the run's trust, each variable and the paths it keeps in order,
+            # and the variables a notice names.
             "only SSL_CERT_FILE; unset tool variables stay unset": ({"SSL_CERT_FILE": bundle},
-                                                                    {"SSL_CERT_FILE": bundle}, ()),
-            "only SSL_CERT_DIR": ({"SSL_CERT_DIR": directory}, {"SSL_CERT_DIR": directory}, ()),
+                                                                    {"SSL_CERT_FILE": (bundle,)}, ()),
+            "only SSL_CERT_DIR": ({"SSL_CERT_DIR": directory}, {"SSL_CERT_DIR": (directory,)}, ()),
             "both": ({"SSL_CERT_FILE": bundle, "SSL_CERT_DIR": directory},
-                     {"SSL_CERT_FILE": bundle, "SSL_CERT_DIR": directory}, ()),
-            "only NODE_EXTRA_CA_CERTS": ({"NODE_EXTRA_CA_CERTS": other}, {"NODE_EXTRA_CA_CERTS": other}, ()),
+                     {"SSL_CERT_FILE": (bundle,), "SSL_CERT_DIR": (directory,)}, ()),
+            "only NODE_EXTRA_CA_CERTS": ({"NODE_EXTRA_CA_CERTS": other}, {"NODE_EXTRA_CA_CERTS": (other,)}, ()),
             "tools with their own bundles": ({"SSL_CERT_FILE": bundle, "PIP_CERT": other, "NODE_EXTRA_CA_CERTS": other},
-                                             {"SSL_CERT_FILE": bundle, "PIP_CERT": other,
-                                              "NODE_EXTRA_CA_CERTS": other}, ()),
-            "every variable": (every, every, ()),
-            "a tool naming a directory": ({"CURL_CA_BUNDLE": directory}, {"CURL_CA_BUNDLE": directory}, ()),
+                                             {"SSL_CERT_FILE": (bundle,), "PIP_CERT": (other,),
+                                              "NODE_EXTRA_CA_CERTS": (other,)}, ()),
+            "every variable": (every, {variable: (value,) for variable, value in every.items()}, ()),
+            "a tool naming a directory": ({"CURL_CA_BUNDLE": directory}, {"CURL_CA_BUNDLE": (directory,)}, ()),
+            "a certificate directory list": ({"SSL_CERT_DIR": listed(directory, second)},
+                                             {"SSL_CERT_DIR": (directory, second)}, ()),
+            "a list keeps its order": ({"SSL_CERT_DIR": listed(second, directory)},
+                                       {"SSL_CERT_DIR": (second, directory)}, ()),
+            "a list with a missing and an empty entry": ({"SSL_CERT_DIR": listed(missing, directory, "", second)},
+                                                         {"SSL_CERT_DIR": (directory, second)}, ("SSL_CERT_DIR",)),
+            "a list of missing entries": ({"SSL_CERT_DIR": listed(missing, self.root / "gone")}, {},
+                                          ("SSL_CERT_DIR",)),
+            "a bundle is one path, never a list": ({"SSL_CERT_FILE": listed(bundle, other)}, {}, ("SSL_CERT_FILE",)),
             "a missing bundle beside a tool's": ({"SSL_CERT_FILE": missing, "CURL_CA_BUNDLE": bundle},
-                                                 {"CURL_CA_BUNDLE": bundle}, ("SSL_CERT_FILE",)),
+                                                 {"CURL_CA_BUNDLE": (bundle,)}, ("SSL_CERT_FILE",)),
             "a missing directory": ({"SSL_CERT_DIR": missing}, {}, ("SSL_CERT_DIR",)),
-            "a missing tool bundle": ({"SSL_CERT_FILE": bundle, "PIP_CERT": missing}, {"SSL_CERT_FILE": bundle},
+            "a missing tool bundle": ({"SSL_CERT_FILE": bundle, "PIP_CERT": missing}, {"SSL_CERT_FILE": (bundle,)},
                                       ("PIP_CERT",)),
             "an empty value": ({"SSL_CERT_FILE": ""}, {}, ()),
             "none": ({}, {}, ()),
@@ -231,7 +244,7 @@ class FixtureUserTest(unittest.TestCase):
     def test_a_lane_reads_only_what_root_placed_wherever_root_keeps_its_inputs(self):
         """Provisioning over each input at a public and a private path, a linked worktree's common dir among them."""
         os.chmod(self.root, 0o755)
-        if not fixture_user.reachable(self.root):
+        if not lane_reads(self.root, gid=None):
             self.skipTest(f"{self.root}'s parents are closed to other users, so nothing under it is public")
         public, private = self.root / "public", self.root / "private"
         public.mkdir()
@@ -260,7 +273,8 @@ class FixtureUserTest(unittest.TestCase):
         def install(parent, tool, binary, data):
             """A toolchain whose binary prints itself, then, with no arguments, a file from its installation.
 
-            Python's probe passes arguments and reads only the binary, as from sys.executable.
+            Python's probe passes arguments and reads only the binary, as from sys.executable. Every
+            directory and file takes the umask's modes, as an install root builds does.
             """
             program = parent / tool / binary
             program.parent.mkdir(parents=True)
@@ -268,14 +282,25 @@ class FixtureUserTest(unittest.TestCase):
             (parent / tool / data).write_text(f"{tool} data\n")
             up = "/.." * (len(Path(binary).parts) - 1)
             program.write_text(f'#!/bin/sh\necho "$0"\n[ $# -eq 0 ] || exit 0\ncat "$(dirname "$0"){up}/{data}"\n')
-            program.chmod(0o755)
+            umask = os.umask(0)
+            os.umask(umask)
+            program.chmod(0o777 & ~umask)
             return program
 
-        tools = {parent: {fixture_user.PYTHON: install(parent / "tools", fixture_user.PYTHON, "bin/python3.12",
-                                                       "lib/python3.12/os.py"),
-                          "zig": install(parent / "tools", "zig", "zig", "lib/std/std.zig"),
-                          "go": install(parent / "tools", "go", "bin/go", "src/runtime/runtime.go")}
-                 for parent in (public, private)}
+        def installs(parent):
+            return {fixture_user.PYTHON: install(parent / "tools", fixture_user.PYTHON, "bin/python3.12",
+                                                 "lib/python3.12/os.py"),
+                    "zig": install(parent / "tools", "zig", "zig", "lib/std/std.zig"),
+                    "go": install(parent / "tools", "go", "bin/go", "src/runtime/runtime.go")}
+
+        tools = {public: installs(public)}
+        # Root-private installs built under umask 077: bin/ and lib/ are 0700 and every file 0600 or 0700.
+        umask = os.umask(0o077)
+        try:
+            tools[private] = installs(private)
+        finally:
+            os.umask(umask)
+        self.assertEqual(stat.S_IMODE(os.stat(private / "tools/zig/lib").st_mode), 0o700)
         (private / "share").mkdir()
         (private / "share/linked.pem").write_text("linked certificate\n")
         for parent in (public, private):
@@ -285,6 +310,9 @@ class FixtureUserTest(unittest.TestCase):
             (parent / "certs").mkdir()
             (parent / "certs/abcd1234.0").write_text(f"{parent.name} hashed certificate\n")
             (parent / "certs/efgh5678.0").symlink_to(private / "share/linked.pem")
+            # A second directory in the list, whose hashed name collides with the first's.
+            (parent / "more-certs").mkdir()
+            (parent / "more-certs/abcd1234.0").write_text(f"{parent.name} more hashed certificate\n")
         every = {"SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "GIT_SSL_CAINFO", "PIP_CERT",
                  "NODE_EXTRA_CA_CERTS"}
         cases = {
@@ -293,13 +321,23 @@ class FixtureUserTest(unittest.TestCase):
             "private checkout": (private / "checkout", private, ("SSL_CERT_DIR",)),
             "linked worktree": (public / "linked", private, ("SSL_CERT_FILE", "PIP_CERT")),
         }
-        trust_files = {"SSL_CERT_FILE": "ca.crt", "SSL_CERT_DIR": "certs", "PIP_CERT": "corp.crt"}
+        # SSL_CERT_DIR is a list: a missing entry, then two directories.
+        trust_files = {"SSL_CERT_FILE": ("ca.crt",), "SSL_CERT_DIR": ("missing-certs", "certs", "more-certs"),
+                       "PIP_CERT": ("corp.crt",)}
+        trust_contents = {
+            "SSL_CERT_FILE": lambda at: ["{} certificate\n".format(at.name)],
+            "PIP_CERT": lambda at: ["{} corporate certificate\n".format(at.name)],
+            "SSL_CERT_DIR": lambda at: [{"abcd1234.0": f"{at.name} hashed certificate\n",
+                                         "efgh5678.0": "linked certificate\n"},
+                                        {"abcd1234.0": f"{at.name} more hashed certificate\n"}],
+        }
         tools_dir = self.root / "placed/tools"
         gid = os.getgid()
 
         def provision(source, inputs_at, trust, lane_dir):
             caller_path = os.pathsep.join(str(program.parent) for program in tools[inputs_at].values())
-            environ = {variable: str(inputs_at / trust_files[variable]) for variable in trust}
+            environ = {variable: ":".join(str(inputs_at / entry) for entry in trust_files[variable])
+                       for variable in trust}
             with redirect_stderr(io.StringIO()):
                 inputs = fixture_user.read_inputs("HEAD", caller_path, environ, root=source)
                 return inputs, fixture_user.place(inputs._replace(origin=str(origin)), lane_dir, tools_dir, gid)
@@ -311,7 +349,11 @@ class FixtureUserTest(unittest.TestCase):
                 inputs, placed = provision(source, inputs_at, trust, lane_dir)
 
                 # Every path the lane reads, and everything under it, is readable through other or the lane's group.
-                for path in (placed.source, *placed.trust.values(), *placed.binaries.values()):
+                copied_roots = [placed.binaries[tool].parents[len(program.relative_to(inputs_at / "tools").parts) - 2]
+                                for tool, program in tools[inputs_at].items()]
+                read = [placed.source, *(copy for copies in placed.trust.values() for copy in copies),
+                        *placed.binaries.values(), *copied_roots]
+                for path in read:
                     self.assertFalse(path.is_relative_to(private), f"the lane reads {path}, inside root's own state")
                     for item in (path, *(path.rglob("*") if path.is_dir() else ())):
                         self.assertFalse(item.is_symlink(), f"{item} leads back to where root keeps it")
@@ -323,24 +365,17 @@ class FixtureUserTest(unittest.TestCase):
                 self.assertEqual(set(placed.trust), expected)
                 env = fixture_user.environment("rui-x", Path("/home/rui-x"), "/p", placed.trust, {})
                 self.assertEqual({variable: env.get(variable) for variable in every},
-                                 {variable: str(placed.trust[variable]) if variable in expected else None
-                                  for variable in every})
-                for variable, copy in placed.trust.items():
-                    self.assertTrue(copy.is_relative_to(lane_dir))
-                    if variable == "SSL_CERT_DIR":
-                        self.assertEqual({entry.name: entry.read_text() for entry in copy.iterdir()},
-                                         {"abcd1234.0": f"{inputs_at.name} hashed certificate\n",
-                                          "efgh5678.0": "linked certificate\n"})
-                    else:
-                        corporate = "corporate " if variable == "PIP_CERT" else ""
-                        self.assertEqual(copy.read_text(), f"{inputs_at.name} {corporate}certificate\n", variable)
+                                 {variable: ":".join(map(str, placed.trust[variable])) if variable in expected
+                                  else None for variable in every})
+                for variable, copies in placed.trust.items():
+                    self.assertTrue(all(copy.is_relative_to(lane_dir) for copy in copies))
+                    self.assertEqual([{entry.name: entry.read_text() for entry in copy.iterdir()} if copy.is_dir()
+                                      else copy.read_text() for copy in copies],
+                                     trust_contents[variable](inputs_at), variable)
                 self.assertEqual(set(placed.binaries), set(tools[inputs_at]))
                 for tool, program in tools[inputs_at].items():
                     binary = placed.binaries[tool]
-                    if inputs_at == public:
-                        self.assertEqual(binary, program, "an install every user reaches is used in place")
-                    else:
-                        self.assertTrue(binary.is_relative_to(tools_dir), f"{tool} is copied for lanes")
+                    self.assertTrue(binary.is_relative_to(tools_dir), f"{tool} outside the system prefixes is copied")
                     output = subprocess.run([str(binary)], capture_output=True, text=True, check=True).stdout
                     self.assertEqual(output.splitlines(), [str(binary), f"{tool} data"],
                                      "the binary runs with its whole installation")
@@ -364,6 +399,16 @@ class FixtureUserTest(unittest.TestCase):
                 self.assertEqual(provision(source, inputs_at, trust, lane_dir)[1], placed)
                 self.assertEqual(sorted(tools_dir.iterdir()), copies)
                 self.assertEqual(self.git("--git-dir", str(placed.source), "rev-parse", "refs/heads/fixture"), later)
+
+    def test_an_install_in_the_systems_own_prefix_is_used_in_place(self):
+        """The system Python's install root is all of /usr: every user already runs it, and root never copies it."""
+        tools_dir = self.root / "tools"
+        tools_dir.mkdir()
+        for root in ("/usr", "/usr/local", "/"):
+            with self.subTest(root=root):
+                binary = Path(root) / "bin/python3.12"
+                self.assertEqual(fixture_user.place_install(Install(binary, Path(root)), tools_dir), binary)
+        self.assertEqual(list(tools_dir.iterdir()), [])
 
     def git(self, *args):
         """Run git with a fixed identity and return its output, stripped."""
