@@ -15,7 +15,7 @@ Steps:
 - `{"send": {"to": "LABEL", "text": "message", "wait": false}}`: public Session send; `wait` defaults true.
 - `{"host": "pause"}` / `{"host": "start"}`, `{"sleep": 1}` (explicit recorded hold), or `{"exited": 0}` (wait for that Rui exit status, optional `timeout`).
 
-Only the first size runs steps; later sizes set the PTY window size and wait for a committed repaint, not a sleep. An exited terminal instead reflows its final screen. Sizes accept `140x40,46x30` or `["140x40", "46x30"]`; `--sizes` overrides all state sizes. `--only` captures chosen states while executing their predecessors through the last selection, preserving cumulative side effects.
+Only the first size runs steps; later sizes set the PTY window size and wait for a committed repaint, not a sleep. An exited terminal instead reflows its final screen. Sizes accept `140x40,46x30` or `["140x40", "46x30"]`; `--sizes` overrides all state sizes. `--only` captures chosen states. For predecessors through the last selection it seeds cast and runs input and mutating steps (text, keys, mouse, send and host) to preserve cumulative side effects, but skips their wait, gone, exited and sleep steps and their readiness assertions and captures. A predecessor with no remaining steps opens no terminal. Initial terminal readiness is still required for predecessors with steps. Unknown names are rejected with the valid names.
 
 Each size waits for the combined `expect`/`absent`/`absent_regex` predicate, then verifies the actual saved snapshot again.
 `expect_next: {"row text": "detail text"}` additionally requires the line containing that row to be followed by its expected detail.

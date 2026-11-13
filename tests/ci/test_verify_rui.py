@@ -1154,6 +1154,22 @@ while True:
             self.assertEqual(ps(42), ("Wed Nov 11 07:56:31 2026", "tmux -S /private/socket"))
 
 
+    def test_frame_step_selection_preserves_mutations_only(self):
+        decide = self.helper["frame_step_selected"]
+        for action in ("text", "keys", "mouse", "send", "host"):
+            self.assertTrue(decide({action: "fixture"}, False), action)
+        for action in ("wait", "gone", "exited", "sleep"):
+            self.assertFalse(decide({action: "fixture"}, False), action)
+            self.assertTrue(decide({action: "fixture"}, True), action)
+
+    def test_invalid_build_jobs_fails_before_build(self):
+        build = self.helper["cmd_build"]
+        for value in ("", "0", "-1", "1.5", "abc"):
+            with self.subTest(value=value), patch.dict(os.environ, {"RUI_BUILD_JOBS": value}), \
+                    contextlib.redirect_stderr(io.StringIO()) as err, self.assertRaises(SystemExit):
+                build(types.SimpleNamespace())
+            self.assertIn("RUI_BUILD_JOBS must be a positive integer", err.getvalue())
+
     def test_no_screen_build_skips_emulator_and_records_null(self):
         build = self.helper["cmd_build"]
         sha = "a" * 40
@@ -1173,7 +1189,7 @@ while True:
                 return types.SimpleNamespace(returncode=0, stdout=text)
 
             args = types.SimpleNamespace(sha=sha, source=str(source), repo=None, force=False, pkg_dir=None, no_screen=True)
-            with patch.dict(build.__globals__, {"CACHE": root / "cache"}), patch("subprocess.run", command), \
+            with patch.dict(os.environ, {"RUI_BUILD_JOBS": "2"}), patch.dict(build.__globals__, {"CACHE": root / "cache"}), patch("subprocess.run", command), \
                     contextlib.redirect_stdout(io.StringIO()):
                 build(args)
             manifest = json.loads((root / "cache/builds" / sha / "manifest.json").read_text())
@@ -1236,6 +1252,7 @@ while True:
                         "reason": reason if capture_ok else "state left before capture: Working"}
 
             def steps(_run, target, _steps, **_kwargs):
+                calls.append(("step-values", target.state["name"], _steps))
                 calls.append(("steps",))
                 if target.state["name"] == failing_state:
                     raise self.helper["FrameFailure"]("fixture state failed")
@@ -1329,6 +1346,30 @@ while True:
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as result:
             self.run_frames_scenario(scenario, capture_ok=False)
         self.assertEqual(result.exception.code, 1)
+
+    def test_only_filters_predecessor_steps_and_skips_observation_only_terminal(self):
+        scenario = {"sizes": ["100x30"], "states": [
+            {"name": "observe", "open": "overview", "steps": [{"wait": "never"}]},
+            {"name": "mutate", "open": "overview", "steps": [
+                {"wait": "never"}, {"text": "draft"}, {"gone": "never"}, {"sleep": 1}], "expect": []},
+            {"name": "chosen", "open": "overview", "steps": [{"wait": "ready"}]},
+        ]}
+        calls, records = self.run_frames_scenario(scenario, only="chosen", initial_frames=("› ready",))
+        self.assertEqual([c[1] for c in calls if c[0] == "open"], ["mutate", "chosen"])
+        self.assertEqual([c[1:] for c in calls if c[0] == "step-values"], [
+            ("mutate", [{"text": "draft"}]), ("chosen", [{"wait": "ready"}])])
+        self.assertEqual([r["name"] for r in records], ["chosen"])
+
+    def test_only_unknown_lists_valid_states(self):
+        command = self.helper["cmd_frames"]
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "scenario.json"
+            path.write_text(json.dumps({"sizes": ["100x30"], "states": [
+                {"name": "valid", "open": "overview", "steps": []}]}))
+            args = types.SimpleNamespace(scenario=str(path), sizes=None, only="bad")
+            with contextlib.redirect_stderr(io.StringIO()) as err, self.assertRaises(SystemExit):
+                command(args)
+            self.assertIn("unknown states: bad; valid states: valid", err.getvalue())
 
     def test_only_warns_for_failed_unselected_predecessor_and_records_selected_states(self):
         scenario = {"sizes": ["100x30"], "states": [
