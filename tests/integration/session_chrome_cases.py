@@ -688,10 +688,10 @@ def notice_case():
     with Chrome("rui-chrome-notice.", []) as chrome:
         session = chrome.session()
         master, caller, _ = chrome.open(session, lambda screen: True)
-        unknown = chrome.frame(master, b"/nosuch\r", lambda screen: footer(screen).endswith("! Unknown command /nosuch"))
-        assert composing(unknown, ""), unknown
+        misused = chrome.frame(master, b"/new unexpected\r", lambda screen: footer(screen).endswith("! Usage: /new"))
+        assert composing(misused, ""), misused
         gone = chrome.frame(master, b"a", lambda screen: composing(screen, "a"))
-        assert status(gone) == "" and "Unknown command" not in footer(gone) and footer(gone).strip().startswith("‹ "), gone
+        assert status(gone) == "" and "Usage:" not in footer(gone) and footer(gone).strip().startswith("‹ "), gone
         os.write(master, b"\x15")
         chrome.frame(master, b"", lambda screen: composing(screen, ""))
         question = chrome.frame(master, b"?", lambda screen: composing(screen, "?"))

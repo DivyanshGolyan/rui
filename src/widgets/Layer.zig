@@ -36,7 +36,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
 }
 
 /// Compose an already drawn base when panel bounds depend on its layout.
-/// The base and all returned storage belong to the draw arena.
+/// Tree metadata belongs to ctx.arena; cell buffers belong to ctx.cell_arena.
 pub fn drawAbove(self: *const Self, ctx: vxfw.DrawContext, base: vxfw.Surface) std.mem.Allocator.Error!vxfw.Surface {
     std.debug.assert(self.panels.len <= 254);
     if (base.size.width == 0 or base.size.height == 0) return .empty(self.widget());
@@ -46,7 +46,7 @@ pub fn drawAbove(self: *const Self, ctx: vxfw.DrawContext, base: vxfw.Surface) s
         const bottom = @min(panel.bottom, base.size.height);
         const top = @min(panel.top, bottom);
         const drawn = try panel.child.draw(ctx.withConstraints(.{}, .{ .width = base.size.width, .height = bottom - top }));
-        var ground = try vxfw.Surface.init(ctx.arena, .{ .userdata = @constCast(self), .drawFn = draw }, drawn.size);
+        var ground = try vxfw.Surface.init(ctx.cell_arena, .{ .userdata = @constCast(self), .drawFn = draw }, drawn.size);
         @memset(ground.buffer, .{ .style = panel.style });
         const above = try ctx.arena.alloc(vxfw.SubSurface, 1);
         above[0] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = drawn };
@@ -71,7 +71,7 @@ test "Layer panels have independent ground and ordered depth above a bounded bas
     const layer: Self = .{ .base = base.widget(), .panels = &panels };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 8, .height = 4 }, .cell_size = .{} };
+    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 8, .height = 4 }, .cell_size = .{} };
     const drawn = try layer.widget().draw(ctx);
     try std.testing.expect(drawn.children[0].surface.widget.eql(base.widget()));
     try std.testing.expectEqual(@as(u16, 4), drawn.children[0].surface.size.height);
