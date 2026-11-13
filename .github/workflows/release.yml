@@ -260,6 +260,28 @@ jobs:
             fi
           } > notes.md
           python3 -B tests/ci/release.py publish "$VERSION" "$SHA" dist notes.md
+  recheck_wire_prs:
+    needs: [plan, publish]
+    if: ${{ needs.plan.outputs.version != '' && needs.publish.result == 'success' }}
+    runs-on: ubuntu-24.04
+    # The script owns a shared 90-minute deadline, including API calls. Leave
+    # checkout slack so its named timeout reaches the log before job teardown.
+    timeout-minutes: 95
+    permissions:
+      actions: write
+      pull-requests: read
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        timeout-minutes: 3
+        with:
+          # Trusted workflow code, never an open PR's head.
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Recheck wire-changing PRs against the published release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -B tests/ci/recheck_wire_prs.py
   npm_publish:
     # Publishes the npm tarballs after the GitHub release; scripts/publish.mjs reads their manifests
     # and orders dependencies first. npm trusted publishing (OIDC) authenticates it: each package
