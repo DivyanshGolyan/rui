@@ -15,7 +15,7 @@
         "alt+i info"
       ],
       "absent": [
-        "Browsing \u00b7 Esc returns",
+        "Browsing · Esc returns",
         "enter retry"
       ],
       "cast": [
@@ -27,6 +27,9 @@
             "Surface witness"
           ]
         }
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -50,9 +53,12 @@
         "Third draft row"
       ],
       "absent": [
-        "Browsing \u00b7 Esc returns",
+        "Browsing · Esc returns",
         "enter retry",
         "Type a task"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -75,8 +81,11 @@
         "alt+i info"
       ],
       "absent": [
-        "Browsing \u00b7 Esc returns",
+        "Browsing · Esc returns",
         "enter retry"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -99,17 +108,20 @@
         }
       ],
       "expect": [
-        "\u203a Type a task",
+        "› Type a task",
         "alt+i info"
       ],
       "absent": [
-        "Browsing \u00b7 Esc returns",
+        "Browsing · Esc returns",
         "enter retry",
         "enter start"
       ],
       "expect_background": {
-        "\u203a Type a task": "#1a2246"
-      }
+        "› Type a task": "#1a2246"
+      },
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
     },
     {
       "name": "inputtint-night-chat-selected",
@@ -128,8 +140,11 @@
         "Settings"
       ],
       "absent": [
-        "Browsing \u00b7 Esc returns",
+        "Browsing · Esc returns",
         "enter retry"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -143,8 +158,11 @@
         "alt+i info"
       ],
       "absent": [
-        "Browsing \u00b7 Esc returns",
+        "Browsing · Esc returns",
         "enter retry"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -168,9 +186,12 @@
         "Third draft row"
       ],
       "absent": [
-        "Browsing \u00b7 Esc returns",
+        "Browsing · Esc returns",
         "enter retry",
         "Type a task"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -193,8 +214,11 @@
         "alt+i info"
       ],
       "absent": [
-        "Browsing \u00b7 Esc returns",
+        "Browsing · Esc returns",
         "enter retry"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -217,17 +241,20 @@
         }
       ],
       "expect": [
-        "\u203a Type a task",
+        "› Type a task",
         "alt+i info"
       ],
       "absent": [
-        "Browsing \u00b7 Esc returns",
+        "Browsing · Esc returns",
         "enter retry",
         "enter start"
       ],
       "expect_background": {
-        "\u203a Type a task": "#e6ddc8"
-      }
+        "› Type a task": "#e6ddc8"
+      },
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
     },
     {
       "name": "inputtint-day-chat-selected",
@@ -246,8 +273,11 @@
         "Settings"
       ],
       "absent": [
-        "Browsing \u00b7 Esc returns",
+        "Browsing · Esc returns",
         "enter retry"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
