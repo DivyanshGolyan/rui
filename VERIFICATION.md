@@ -870,7 +870,7 @@ Required: minimum ten-client intake; budget covers wake pair, 100 ordinary excha
 ## Release demonstrations
 
 `upgrade-integration` builds `rui-upgrade-release-fixture` from the current production sources with a synthetic release version and the actual source revision.
-The historical Host-info profiles include wire 14 (v0.70.0), with all provider routes required. Parser, framing, discovery and exact-instance lifecycle tests exercise it alongside wires 13 and 9; ordinary readiness remains current-wire only. Format 71 migration tests cover the conditional saved-wire 14-to-15 update, populated SQLite reopen and live MySQL when configured.
+The historical Host-info profiles include wire 15 (v0.71.0) and wire 14 (v0.70.0), with all provider routes required. Parser, framing, discovery and exact-instance lifecycle tests exercise them alongside wires 13 and 9; ordinary readiness remains current-wire only. Format 72 migration tests cover the conditional saved-wire 15-to-16 update, populated SQLite reopen and live MySQL when configured.
 
 Its `restart_all_cases` suite also runs alone with `python3 tests/integration/upgrade_integration.py REAL_RUI restart-all` as an isolated non-root user.
 Two real retained managed builds serve separate Stores; `host restart --all` must replace both instances with the selected pinned executable and retire both old PIDs, preserve capacity/environment, then leave both current instances unchanged on retry.
