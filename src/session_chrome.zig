@@ -232,7 +232,7 @@ test "a send is progress while in flight, needs the person once unresolved, and 
 }
 
 /// Bytes `factsRow` writes at most.
-pub const facts_bytes = session_line.capacity + " · ".len + "Stopping and archiving".len;
+pub const facts_bytes = @import("protocol.zig").max_workspace_bytes + session_line.capacity + " · ".len + "Stopping and archiving".len;
 
 /// The footer keeps its editable facts visible before the name and context.
 /// Ask and effort stay whole, then the model fits (with an ellipsis only
@@ -248,20 +248,26 @@ pub fn factsSpans(buffer: *[facts_bytes]u8, facts: ?session_line.Facts, name: []
     const tail = if (badge) |text| separator + session_line.cells(text, method) else 0;
     const room = width -| tail;
     var percent: [session_line.left_text.len]u8 = undefined;
-    const parts: [5]?[]const u8 = if (facts) |value| .{
-        value.name,
+    var folder_buffer: [@import("protocol.zig").max_workspace_bytes + 1]u8 = undefined;
+    const folder: ?[]const u8 = if (facts) |value| if (value.folder) |path| blk: {
+        const short = @import("home_path.zig").shortPath(value.home, path);
+        break :blk std.fmt.bufPrint(&folder_buffer, "{s}{s}", .{ short.prefix, short.rest }) catch unreachable;
+    } else null else null;
+    const parts: [6]?[]const u8 = if (facts) |value| .{
+        if (folder == null) value.name else null,
         value.model,
         if (value.effort) |effort| @tagName(effort) else null,
-        if (value.left) |left| std.fmt.bufPrint(&percent, "{d}% left", .{left}) catch unreachable else null,
-        if (value.asks) "ask" else null,
-    } else .{ name[0..@min(name.len, session_line.max_name_bytes)], null, null, null, null };
-    var kept: [5]?[]const u8 = @splat(null);
+        if (if (folder == null) value.left else null) |left| std.fmt.bufPrint(&percent, "{d}% left", .{left}) catch unreachable else null,
+        if (folder == null and value.asks) "ask" else null,
+        folder,
+    } else .{ name[0..@min(name.len, session_line.max_name_bytes)], null, null, null, null, null };
+    var kept: [6]?[]const u8 = @splat(null);
     var used: usize = 0;
     var count: usize = 0;
     var model_buffer: [facts_bytes]u8 = undefined;
     var name_buffer: [facts_bytes]u8 = undefined;
     // Fitting policy lives here, not in the widgets that draw these spans.
-    for ([_]usize{ 4, 2, 1, 3, 0 }) |index| {
+    for (if (folder != null) [_]usize{ 2, 1, 5, 4, 3, 0 } else [_]usize{ 4, 2, 1, 3, 0, 5 }) |index| {
         const text = parts[index] orelse continue;
         if (text.len == 0) continue;
         const join = if (count != 0) separator else 0;
@@ -748,4 +754,29 @@ test "copy success shares short reply next-key replacement and expiry owner" {
     try std.testing.expect(!notice.isCopy(11));
     notice.showCopy(10);
     try std.testing.expect(!notice.isCopy(10 + notice_ms));
+}
+
+test "empty chat facts fit model effort and home folder with semantic fields" {
+    const facts: session_line.Facts = .{ .name = "reference", .model = "gpt-6.1-sol", .effort = .low, .folder = "/home/u/code/rui", .home = "/home/u", .left = 100, .asks = true };
+    for ([_]usize{ 33, 46, 140 }) |width| {
+        var buffer: [facts_bytes]u8 = undefined;
+        const shown = factsSpans(&buffer, facts, "ref", null, width, .unicode);
+        try std.testing.expectEqualStrings("gpt-6.1-sol · low · ~/code/rui", shown.text);
+        var model: usize = 0;
+        var effort: usize = 0;
+        for (shown.spans[0..shown.len]) |span| if (span.field) |field| {
+            switch (field) {
+                .model => model += 1,
+                .effort => effort += 1,
+            }
+        };
+        try std.testing.expectEqual(@as(usize, 1), model);
+        try std.testing.expectEqual(@as(usize, 1), effort);
+    }
+    for (0..47) |width| {
+        var buffer: [facts_bytes]u8 = undefined;
+        const shown = factsSpans(&buffer, facts, "ref", null, width, .unicode);
+        try std.testing.expect(session_line.cells(shown.text, .unicode) <= width);
+        if (std.mem.indexOf(u8, shown.text, "~/") != null) try std.testing.expect(std.mem.endsWith(u8, shown.text, "~/code/rui"));
+    }
 }

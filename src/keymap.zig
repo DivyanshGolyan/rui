@@ -112,7 +112,7 @@ pub const every: Keymap(Key) = blk: {
 
 /// The app's one reference list, in pairs across a fitting panel. Each
 /// screen key is represented directly or explicitly grouped under a listed
-/// key as an alias. Empty `keys` name draft operations, not screen actions.
+/// key as an alias. Empty `keys` name input handled separately from `Key`.
 pub const Reference = struct {
     key: []const u8,
     meaning: []const u8,
@@ -121,7 +121,7 @@ pub const Reference = struct {
 };
 
 pub const list = [_]Reference{
-    .{ .key = "enter", .meaning = "send / open" },
+    .{ .key = "enter", .meaning = "open / send" },
     .{ .key = "esc", .meaning = "back", .keys = &.{.escape}, .aliases = &.{.ctrl_g} },
     .{ .key = "⇧enter", .meaning = "new line" },
     .{ .key = "tab", .meaning = "next panel/footer field" },
@@ -171,6 +171,11 @@ test "keys reference rejects unbound rows and covers every screen key" {
     try std.testing.expectEqual(@as(?ListError, .missing_bound_key), referenceError(list[0 .. list.len - 1], .{every}));
     const duplicate = list ++ .{list[list.len - 1]};
     try std.testing.expectEqual(@as(?ListError, .duplicate_key), referenceError(&duplicate, .{every}));
+}
+
+test "keys reference gives Enter both its list and chat meanings" {
+    try std.testing.expectEqualStrings("enter", list[0].key);
+    try std.testing.expectEqualStrings("open / send", list[0].meaning);
 }
 
 test "keys reference aliases are explicit under their listed rows" {

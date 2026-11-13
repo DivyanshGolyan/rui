@@ -140,6 +140,48 @@ class FramesTest(unittest.TestCase):
             ], "steps": [{"text": "/help"}, {"keys": ["Enter"]}, {"wait": "Keys", "timeout": 2}]},
         ]}
 
+    def test_min_columns_is_a_positive_integer_wait_or_gone_modifier_only(self):
+        validate = self.helper["validate_scenario"]
+        for action in ("wait", "gone"):
+            data = self.scenario()
+            data["states"][0].update(steps=[{action: "Sidebar", "min_columns": 140}], expect=[])
+            self.assertEqual(validate(data)["states"][0]["steps"], data["states"][0]["steps"])
+            for value in (None, 0, -1, True, 140.0, "140"):
+                with self.subTest(action=action, value=value), self.assertRaisesRegex(ValueError, "min_columns"):
+                    data["states"][0]["steps"][0]["min_columns"] = value
+                    validate(data)
+        for step in ({"text": "draft"}, {"keys": ["Enter"]}, {"sleep": 1},
+                     {"mouse": {"at": "Settings", "do": "click"}}, {"exited": 0},
+                     {"host": "pause"}, {"send": {"to": "Fix it", "text": "hello"}}):
+            with self.subTest(step=step), self.assertRaisesRegex(ValueError, "min_columns"):
+                data = self.scenario()
+                data["states"][1].update(steps=[{**step, "min_columns": 140}], expect=[])
+                validate(data)
+
+    def test_min_columns_skips_only_narrow_waits_and_logs_the_reason(self):
+        steps = [{"wait": "Sidebar", "min_columns": 140},
+                 {"gone": "Old sidebar", "min_columns": 140, "timeout": 3},
+                 {"wait": "Input"}, {"gone": "Loading"}]
+        for columns in (46, 140, 180):
+            with self.subTest(columns=columns), patch.dict(self.helper["frame_steps"].__globals__) as owner:
+                wait = unittest.mock.Mock()
+                owner["frame_wait"] = wait
+                terminal = types.SimpleNamespace(frame=committed("Input", columns=columns), status=None)
+                with contextlib.redirect_stderr(io.StringIO()) as log:
+                    self.helper["frame_steps"](None, terminal, steps)
+                expected = [] if columns < 140 else [
+                    unittest.mock.call(None, terminal, "Sidebar", False, 20, False),
+                    unittest.mock.call(None, terminal, "Old sidebar", True, 3, False),
+                ]
+                expected += [unittest.mock.call(None, terminal, "Input", False, 20, False),
+                             unittest.mock.call(None, terminal, "Loading", True, 20, False)]
+                self.assertEqual(wait.call_args_list, expected)
+                if columns < 140:
+                    self.assertIn("skip wait 'Sidebar': 46 columns < 140", log.getvalue())
+                    self.assertIn("skip gone 'Old sidebar': 46 columns < 140", log.getvalue())
+                else:
+                    self.assertEqual(log.getvalue(), "")
+
     def test_mouse_steps_validate_shared_nested_shape(self):
         validate = self.helper["validate_scenario"]
         for action in ("move", "click", "press", "release", "wheel-up", "wheel-down"):
@@ -675,6 +717,109 @@ while True:
         self.assertEqual(default["sizes"], [(140, 40), (46, 30)])
         self.assertGreater(len(default["states"]), 25)
 
+    def test_regex_absences_validate_and_roundtrip_before_launch(self):
+        pattern = r"^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+        data = self.scenario()
+        data["states"][0]["absent_regex"] = [pattern]
+        validated = self.helper["validate_scenario"](data)
+        self.assertEqual(validated["states"][0]["absent_regex"], [pattern])
+        self.assertEqual(self.helper["validate_scenario"](self.helper["scenario_snapshot"](validated)), validated)
+        for invalid in (None, "pattern", [""], [12], ["nul\0"], ["("], ["(?q)"]):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, "absent_regex"):
+                data["states"][0]["absent_regex"] = invalid
+                self.helper["validate_scenario"](data)
+
+    def test_regex_absences_reject_dynamic_rows_in_readiness_and_saved_captures(self):
+        state = {"name": "no-empty-rows", "steps": [], "expect": ["Settings"],
+                 "absent_regex": [r"^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"]}
+        clean = "  + New Session\n ✓ Existing conversation  3h\n  Settings\nenter open"
+        run = types.SimpleNamespace(meta={"sha": "a" * 40})
+        for size in ((140, 40), (46, 30)):
+            for sid, age in (("9xt4vy", "42s"), ("emged6", "7m"), ("000000", "3h"), ("zzzzzz", "12d"),
+                             ("9xt4vy", "0s │"), ("emged6", "42s│ Model")):
+                with self.subTest(size=size, sid=sid, age=age), tempfile.TemporaryDirectory() as temp:
+                    bad = f"{clean}\n ○ {sid}                  {age}"
+
+                    def wait(predicate, description, **_kwargs):
+                        self.assertIn("absent_regex", description)
+                        self.assertFalse(predicate(types.SimpleNamespace(completed=bad)))
+                        self.assertTrue(predicate(types.SimpleNamespace(completed=clean)))
+
+                    self.helper["frame_ready"](types.SimpleNamespace(wait=wait), state)
+                    for frame, expected in ((bad, False), (clean, True)):
+                        terminal = types.SimpleNamespace(frame=committed(frame, *size))
+                        record = self.helper["frame_capture"](run, terminal, Path(temp), state, size, None)
+                        self.assertEqual(record["ok"], expected)
+                        if not expected:
+                            self.assertIn("unexpected row matching", record["reason"])
+                            self.assertIn(sid, record["reason"])
+                        self.assertEqual((Path(temp) / record["files"]["txt"]).read_text(), frame + "\n")
+                    # Transition captures may skip readiness, never the saved oracle.
+                    terminal = types.SimpleNamespace(wait=unittest.mock.Mock(), frame=committed(bad, *size))
+                    transition = {**state, "first_frame": True}
+                    self.helper["frame_ready"](terminal, transition)
+                    terminal.wait.assert_not_called()
+                    self.assertFalse(self.helper["frame_capture"](run, terminal, Path(temp), transition, size, None)["ok"])
+        for row in (" ○ Existing 9xt4vy  2m", " ○ 9xt4vy extra  2m", " ○ 9xt4vy  text  2m",
+                    " ○ 9xt4vy", "text mentions ○ 9xt4vy  2m"):
+            with self.subTest(named_or_nonrow=row):
+                self.assertIsNone(self.helper["frame_row_failure"](state, clean + "\n" + row))
+        for row in (" ○ 9xt4vy  0s │", " ○ emged6  42s│ Model", " ○ 000000  2m │chat text"):
+            with self.subTest(raw_sidebar=row):
+                self.assertIsNotNone(self.helper["frame_row_failure"](state, row))
+        for row in (" ○ New Session  0s │", " ○ New Session  0s │Model",
+                    " ○ Existing 9xt4vy  2m │chat", " ○ 9xt4vy extra  2m │chat"):
+            with self.subTest(named_sidebar=row):
+                self.assertIsNone(self.helper["frame_row_failure"](state, row))
+        # The helper remains generic: only recipes opt into row exclusions.
+        self.assertIsNone(self.helper["frame_row_failure"]({"name": "unrelated"}, " ○ 9xt4vy  0s"))
+
+    def test_empty_chat_roundtrips_and_current_chat_labels_exclude_raw_ids(self):
+        scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
+        states = {state["name"]: state for state in scenario["states"]}
+        for name in ("start-empty", "day-start", "start-busy", "overview-printable-ignored", "many-sessions",
+                     "many-sessions-middle", "many-sessions-end", "many-sessions-pinned-end",
+                     "empty-chat-left", "empty-chat-model-left", "empty-chat-two-left"):
+            with self.subTest(state=name):
+                state = states[name]
+                self.assertEqual(set(state["sizes"]), {(140, 40), (46, 30)})
+                self.assertIsNotNone(self.helper["frame_row_failure"](state, " ○ 9xt4vy                  2m"))
+        for name, state in states.items():
+            if state.get("first_run"):
+                continue
+            with self.subTest(raw_id_excluded_in_state=name):
+                self.assertIsNotNone(self.helper["frame_row_failure"](state, " ○ 9xt4vy  0s │ chat"))
+        for name in ("chat-empty", "start-model", "start-effort", "start-picked"):
+            state = states[name]
+            steps = state["steps"]
+            typed_ready = steps.index({"wait": "Type a task"})
+            self.assertEqual(steps[typed_ready + 1], {"wait": "○ New Session", "min_columns": 140})
+            self.assertEqual(state["sizes"], [(140, 40), (46, 30)])
+            self.assertIsNone(self.helper["frame_row_failure"](
+                {"name": name, "absent_regex": state["absent_regex"]}, " ○ New Session  0s │chat"))
+        for name in ("empty-chat-left", "empty-chat-model-left", "empty-chat-two-left"):
+            state = states[name]
+            self.assertTrue(state["first_frame"])
+            self.assertIn("Type a task", state["absent"])
+            self.assertIn("Existing conversation", state["expect"])
+            self.assertEqual(state["steps"][-1], {"wait": "enter open"})
+        model = states["empty-chat-model-left"]["steps"]
+        opened = model.index({"mouse": {"at": "gpt-6.1-sol", "do": "click"}})
+        typed = model.index({"text": "ter"})
+        picked = model.index({"keys": ["Down", "Enter"]})
+        # A sidebar's completed row already has ✓ before the choice opens.
+        # Standalone Model puts its filter on the next row, not Settings' inline value.
+        self.assertEqual(model[opened + 1:typed], [{"wait": "Model"}])
+        self.assertEqual(model[typed + 1:picked], [{"wait": "ter\n"}, {"wait": "gpt-6.1-terra"}])
+        self.assertNotIn({"wait": "Model           ter"}, model)
+        self.assertNotIn({"mouse": {"at": "gpt-6.1-terra", "do": "click"}}, model)
+        self.assertIn({"wait": "gpt-6.1-terra ·"}, model)
+        self.assertIn({"gone": "Model"}, model)
+        self.assertEqual(sum(step == {"keys": ["Home", "Enter"]} for step in states["empty-chat-two-left"]["steps"]), 2)
+        self.assertIn("Existing second conversation", states["empty-chat-two-left"]["expect"])
+        self.assertTrue(states["empty-chat-left"]["cast"][0]["messages"])
+        self.assertTrue(states["empty-chat-two-left"]["cast"][0]["messages"])
+
     def test_settings_frame_opens_the_list_row_and_waits_for_the_page(self):
         scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
         state = next(state for state in scenario["states"] if state["name"] == "settings")
@@ -1127,6 +1272,36 @@ while True:
                                  [("initial-frame", screen, allow_exit) for screen in screens[:count]])
                 self.assertEqual(calls[calls.index(("steps",)) - 1],
                                  ("initial-frame", screens[count - 1], allow_exit))
+                self.assertTrue(records[0]["ok"])
+
+    def test_initial_readiness_accepts_editorless_list_and_legacy_prompt(self):
+        listed = "  + New Session\n  Settings\nenter open"
+        self.assertNotIn("Type a task", listed)
+        def accepts_list(predicate, _description, **_kwargs):
+            self.assertTrue(predicate(types.SimpleNamespace(completed=listed)),
+                            "committed overview list must not require an editor")
+        self.helper["frame_initial_ready"](types.SimpleNamespace(wait=accepts_list))
+        cases = [
+            ([listed], None, 1),
+            ([listed.replace("+ New Session", ""), listed], None, 2),
+            ([listed.replace("Settings", ""), listed], None, 2),
+            ([listed.replace("enter open", ""), listed], None, 2),
+            ([listed + " Opening…", listed], None, 2),
+            ([listed, listed + " Ready"], "Ready", 2),
+            # Before captures use the old image with the same new recipes.
+            ([" › Type a task"], None, 1),
+            ([" › ChatGPT    API key"], None, 1),
+        ]
+        for screens, first_wait, count in cases:
+            with self.subTest(screens=screens, first_wait=first_wait):
+                state = {"name": "initial-list", "open": "overview",
+                         "steps": [{"wait": first_wait}] if first_wait else []}
+                calls, records = self.run_frames_scenario({"sizes": ["100x30"], "states": [state]},
+                                                         initial_frames=screens)
+                self.assertEqual([call for call in calls if call[0] == "initial-frame"],
+                                 [("initial-frame", screen, False) for screen in screens[:count]])
+                self.assertEqual(calls[calls.index(("steps",)) - 1],
+                                 ("initial-frame", screens[count - 1], False))
                 self.assertTrue(records[0]["ok"])
 
     def test_frame_terminal_receives_initial_size_and_theme(self):
