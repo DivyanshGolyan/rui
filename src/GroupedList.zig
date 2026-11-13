@@ -199,6 +199,62 @@ test "GroupedList selection preserves each segment foreground" {
     }
 }
 
+test "GroupedList quiet rows normalize whole lines before selection and hover in every colour depth" {
+    const view = overview_view;
+    for ([_]view.Caps.Depth{ .direct, .indexed, .none }) |depth| for ([_]bool{ false, true }) |wrote| for ([_]bool{ false, true }) |selected| for ([_]?i16{ null, 0, 1 }) |hover_row| for ([_]u16{ 46, 140 }) |width| {
+        const caps: view.Caps = .{ .depth = depth };
+        const token: view.Token = .{ .instance = @splat(0xab), .generation = 1 };
+        var state: view.State = undefined;
+        try state.init(std.testing.allocator, .{ .cwd = "/work/quiet", .home = "/work" });
+        defer state.deinit();
+        _ = try view.step(&state, .{ .host = .{ .instance = token.instance, .started_at = 100, .slots = 2, .slots_in_use = 0 } });
+        _ = try view.step(&state, .{ .tick = 100_000 });
+        const listed: view.Listed = .{
+            .reference = "quiet1".*,
+            .read_version = token,
+            .workspace = "/work/quiet",
+            .provider = .codex,
+            .label = "Quiet row",
+            .state = .{ .finished = .{ .since = 100 } },
+            .first = .{ .position = 1, .admission = 1, .sender = null },
+            .from_person_at = if (wrote) 100 else null,
+            .last_line = .{ .position = 1, .text = "Last answer" },
+        };
+        _ = try view.step(&state, .{ .list = .{ .page = .{ .rows = &.{listed}, .answer = .{ .delta = .full, .since = token } } } });
+        state.selected = if (selected) .{ .session = listed.reference } else .new_session;
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const first = try view.listSegments(arena.allocator(), &state, .{ .row = 0 }, width, caps, 0);
+        const rows: []const Row = &.{.{
+            .segments = first.segments,
+            .second = try view.rowSecondSegments(arena.allocator(), &state, 0, width, caps),
+            .height = 2,
+            .target = .{ .open = listed.reference },
+        }};
+        var presses: Pressed = .{};
+        var list: Self = .{ .rows = .of(&rows), .selected = if (first.selected) 0 else null, .caps = caps, .on_press = presses.press() };
+        const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 2 }, .cell_size = .{} };
+        _ = try list.widget().draw(ctx);
+        if (hover_row) |row| {
+            var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+            try list.widget().handleEvent(&events, .{ .mouse = .{ .col = 1, .row = row, .button = .none, .type = .motion, .mods = .{} } });
+        }
+        const surface = try list.widget().draw(ctx);
+        const background: view.Background = if (selected) .selection else if (hover_row != null) .hover else .ground;
+        const highlight = widget_style.of(caps, .{ .background = background });
+        for (surface.children[0].surface.buffer) |cell| {
+            // Includes both lines' visible text, interstitial padding and ends.
+            try std.testing.expectEqual(!wrote and !selected and hover_row == null, cell.style.dim);
+            try std.testing.expectEqual(highlight.bg, cell.style.bg);
+            try std.testing.expectEqual(highlight.reverse, cell.style.reverse);
+            try std.testing.expectEqual(highlight.ul_style, cell.style.ul_style);
+            if (depth == .none) try std.testing.expectEqual(vaxis.Color.default, cell.style.fg);
+        }
+        // The selected name stays bold, including in monochrome.
+        try std.testing.expectEqual(selected, surface.children[0].surface.readCell(3, 0).style.bold);
+    };
+}
+
 /// Records each press GroupedList reports, for the press tests.
 const Pressed = struct {
     targets: [8]Target = undefined,

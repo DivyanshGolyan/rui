@@ -140,6 +140,74 @@ class FramesTest(unittest.TestCase):
             ], "steps": [{"text": "/help"}, {"keys": ["Enter"]}, {"wait": "Keys", "timeout": 2}]},
         ]}
 
+    def test_dim_expectations_validate_and_assert_saved_cells_not_text_alone(self):
+        for value in (None, {}, [{"text": "", "dim": True}], [{"text": "Row", "dim": 1}],
+                      [{"text": "Row", "dim": True, "min_columns": False}],
+                      [{"text": "Row", "dim": True, "unknown": 1}]):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "expect_dim"):
+                data = self.scenario()
+                data["states"][0]["expect_dim"] = value
+                self.helper["validate_scenario"](data)
+        for dim in (False, True):
+            state = {"name": "dim-row", "steps": [], "expect": "Row",
+                     "expect_dim": [{"text": "Row", "dim": dim}]}
+            for drawn in (False, True):
+                frame = committed("Row")
+                frame = frame._replace(cells=tuple(tuple(cell._replace(faint=drawn) for cell in row)
+                                                  for row in frame.cells))
+                with self.subTest(want=dim, drawn=drawn), tempfile.TemporaryDirectory() as temp:
+                    record = self.helper["frame_capture"](types.SimpleNamespace(meta={"sha": "a" * 40}),
+                        types.SimpleNamespace(frame=frame), Path(temp), state, (100, 20), None)
+                    self.assertEqual(record["ok"], dim == drawn)
+                    self.assertTrue((Path(temp) / record["files"]["txt"]).exists())
+            self.assertIsNotNone(self.helper["frame_dim_failure"](state, committed("Missing")))
+            state["expect_dim"][0]["min_columns"] = 140
+            self.assertIsNone(self.helper["frame_dim_failure"](state, committed("Missing", columns=46)))
+        # One wrongly styled character must not pass a whole-label assertion.
+        frame = committed("Row")
+        frame = frame._replace(cells=((frame.cells[0][0]._replace(faint=True), *frame.cells[0][1:]),))
+        self.assertIsNotNone(self.helper["frame_dim_failure"](
+            {"expect_dim": [{"text": "Row", "dim": True}]}, frame))
+
+    def test_peer_cast_configures_empty_and_relays_every_message_from_a_live_sender(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            run = types.SimpleNamespace(home=root, root=root, store=root / "store",
+                                        meta={"sessions": {"Person": "person"}}, sid=lambda _name: "person")
+            calls = []
+            def command(*args, **kwargs):
+                calls.append((args, kwargs))
+                payload = {"work": {"state": {"kind": "finished"}}} if args[1] == "inspect" else {
+                    "context": {"session": "agent1"}}
+                return types.SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="request: key\n")
+            run.rui_cmd = command
+            seed = self.helper["seed_cast"]
+            with patch.dict(seed.__globals__, frame_request=unittest.mock.Mock()):
+                seed(run, [{"label": "Agent", "sender": "Person", "workspace": "code/quiet",
+                            "mode": "bypass", "messages": ["First", "Second"]}])
+            self.assertEqual(calls[0][0][:2], ("session", "configure"))
+            self.assertIsNone(calls[0][1]["input"])
+            sends = [(args, kwargs) for args, kwargs in calls if args[1] == "send"]
+            self.assertEqual([kwargs["input"] for _, kwargs in sends],
+                             ["relay to agent1: First", "relay to agent1: Second"])
+            self.assertTrue(all(args[-1] == "person" for args, _ in sends))
+            self.assertEqual(run.meta["sessions"]["Agent"], "agent1")
+        data = self.scenario()
+        data["states"][1]["cast"][0]["sender"] = "missing"
+        with self.assertRaisesRegex(ValueError, "sender"):
+            self.helper["validate_scenario"](data)
+
+        for sender in ([], {}, None):
+            data["states"][1]["cast"][0]["sender"] = sender
+            with self.subTest(sender=sender), self.assertRaisesRegex(ValueError, "sender"):
+                self.helper["validate_scenario"](data)
+        data = self.scenario()
+        data["states"][1]["cast"][0].update(sender="Person", settle="stop")
+        data["states"][0]["cast"] = [{"label": "Person", "workspace": "code/quiet",
+                                      "mode": "bypass", "messages": ["Ready"]}]
+        with self.assertRaisesRegex(ValueError, "sender cast supports"):
+            self.helper["validate_scenario"](data)
+
     def test_min_columns_is_a_positive_integer_wait_or_gone_modifier_only(self):
         validate = self.helper["validate_scenario"]
         for action in ("wait", "gone"):
