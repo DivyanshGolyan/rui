@@ -63,6 +63,7 @@ Arm auto-merge only on a PR whose base is `main`; on a stacked PR it would merge
 Diagnose failures through [rui-ci-triage](../../.claude/skills/rui-ci-triage/SKILL.md) and follow [Evidence](../../CODING_STANDARDS.md#evidence) for reruns, strict-path holds and failure retention.
 A red whose failing file or fixture is outside the PR's diff is first reproduced on `main`; when `main` itself is red, it gets one fix owner, and the PR's owner is not asked to fix it.
 The fastest fix for a red `main` is often a revert of the one merged PR that broke it, which merges on green `admission` alone.
+The [main build](../../.github/workflows/main-build.yml) names the PRs merged since `main` last compiled in its `ci-red` issue, and when two of them crossed, a revert of the later one is the fast fix.
 A red counts as fixed only when a commit between the red and a later green changed its failing fixture or owner.
 For a recurring fixture-and-assertion signature on SHAs that did not touch its code, update or file one issue for that signature and own the race fix.
 Preserve the assertion's strength.
