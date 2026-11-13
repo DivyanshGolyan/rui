@@ -1980,11 +1980,11 @@ fn hostFacts(self: *Self) HostRead {
         .incompatible => .incompatible,
         .access_failure => .unreadable,
     };
-    // The same read samples the counts line's memory.
+    // The same read samples live memory.
     return .{ .observation = observation, .memory = self.liveMemory(if (observation.facts()) |host| host.started_at else null) };
 }
 
-/// The counts line's memory: this TUI, the Host that started at
+/// Live memory: this TUI, the Host that started at
 /// `host_started_at` and its tools. With no Host ready it is this TUI alone.
 /// The Host's pid is read once per Host start.
 fn liveMemory(self: *Self, host_started_at: ?u64) view.Memory {
