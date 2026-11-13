@@ -81,6 +81,72 @@
       ]
     },
     {
+      "name": "appcmds-hidden-discard-collision",
+      "note": "The complete grammar reserves hidden commands; noncolliding skills still complete",
+      "open": "Catalog authority",
+      "cast": [
+        {
+          "label": "Catalog authority",
+          "workspace": "code/rui",
+          "messages": [
+            "Seed a fresh chat."
+          ],
+          "mode": "bypass",
+          "skills": [
+            "discard",
+            "discarded"
+          ]
+        }
+      ],
+      "steps": [
+        {
+          "text": "/dis"
+        },
+        {
+          "wait": "/discarded"
+        }
+      ],
+      "expect": [
+        "/discarded"
+      ],
+      "absent_regex": [
+        "^\\s*/discard\\s+"
+      ]
+    },
+    {
+      "name": "appcmds-hidden-recover-collision",
+      "note": "The complete grammar reserves hidden commands; noncolliding skills still complete",
+      "open": "Catalog authority",
+      "cast": [
+        {
+          "label": "Catalog authority",
+          "workspace": "code/rui",
+          "messages": [
+            "Seed a fresh chat."
+          ],
+          "mode": "bypass",
+          "skills": [
+            "recover",
+            "recovering"
+          ]
+        }
+      ],
+      "steps": [
+        {
+          "text": "/reco"
+        },
+        {
+          "wait": "/recovering"
+        }
+      ],
+      "expect": [
+        "/recovering"
+      ],
+      "absent_regex": [
+        "^\\s*/recover\\s+"
+      ]
+    },
+    {
       "name": "appcmds-conversation",
       "note": "All chat commands are listed beside skills with their descriptions",
       "open": "App command replacements",

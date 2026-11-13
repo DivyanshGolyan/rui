@@ -166,10 +166,9 @@ pub const Reads = struct {
         // Commands keep their action and take precedence over a same-named skill.
         var listed = commands orelse slash_commands.List{ .typed = typed };
         if (skills) |found| for (found.shown()) |entry| {
-            const duplicate = for (listed.shown()) |command| {
-                if (std.mem.eql(u8, std.mem.trimEnd(u8, command.word, " "), std.mem.trimEnd(u8, entry.word, " "))) break true;
-            } else false;
-            if (duplicate) continue;
+            // Hidden local actions own their names too. Visible rows are
+            // not the grammar, and must never admit a colliding skill.
+            if (slash_commands.conversation.nameOf(std.mem.trimEnd(u8, entry.word, " ")) != null) continue;
             if (listed.count == slash_commands.List.capacity) break;
             listed.entries[listed.count] = entry;
             listed.count += 1;
@@ -330,6 +329,60 @@ test "skills do not replace a command argument or invent an argument list" {
     var rows: Rows = .{};
     for ([_][]const u8{ "/reload-skills ", "/recover " }) |draft| {
         try std.testing.expect(reads.shown(&rows, draft, draft.len, 5, slash_commands.conversation.suggest(draft, .{}), null) == null);
+    }
+}
+
+test "leading skill collisions use the complete grammar including hidden commands" {
+    // Independent command-domain oracle: the two recovery actions are grammar,
+    // even though neither is a row in the slash list.
+    const names = [_][]const u8{ "archive", "clear", "copy", "discard", "effort", "model", "new", "recover", "reload-skills", "rename", "requests", "result", "setup", "unarchive" };
+    var entries: [names.len]skill_suggestions.Entry = undefined;
+    for (names, &entries) |name, *entry| entry.* = .{ .name = name, .description = "Colliding skill" };
+    var reads: Reads = .{};
+    var rows: Rows = .{};
+    _ = reads.answer(reads.ask("").?.read, testPage(&entries), "");
+    for (names) |name| {
+        try std.testing.expect(slash_commands.conversation.nameOf(name) != null);
+        // Every prefix, including the empty slash list and exact hidden names.
+        for (0..name.len + 1) |length| {
+            var buffer: [80]u8 = undefined;
+            const draft = try std.fmt.bufPrint(&buffer, "/{s}", .{name[0..length]});
+            const shown = reads.shown(&rows, draft, draft.len, 1, slash_commands.conversation.suggest(draft, .{}), null);
+            var expected: usize = 0;
+            for (names) |command| {
+                if (std.mem.eql(u8, command, "discard") or std.mem.eql(u8, command, "recover")) continue;
+                if (std.mem.startsWith(u8, command, name[0..length])) expected += 1;
+            }
+            try std.testing.expectEqual(expected, if (shown) |found| found.list.count else 0);
+            if (shown) |found| for (found.list.shown()) |entry| {
+                try std.testing.expect(!std.mem.eql(u8, entry.description, "Colliding skill"));
+            };
+        }
+        // The same name inside a Message belongs to skills, not local commands.
+        var buffer: [80]u8 = undefined;
+        const inline_draft = try std.fmt.bufPrint(&buffer, "use /{s}", .{name});
+        const inline_rows = reads.shown(&rows, inline_draft, inline_draft.len, 1, null, null).?.list;
+        try std.testing.expectEqual(@as(usize, 1), inline_rows.count);
+        try std.testing.expectEqualStrings("Colliding skill", inline_rows.entries[0].description);
+        try std.testing.expect(!inline_rows.entries[0].runs);
+    }
+    // Similar spellings are not reserved just because a visible command shares
+    // a prefix. Only exact names in the grammar take precedence.
+    const lookalikes = [_]skill_suggestions.Entry{
+        .{ .name = "discarded", .description = "Skill" },
+        .{ .name = "recovering", .description = "Skill" },
+        .{ .name = "model-extra", .description = "Skill" },
+    };
+    _ = reads.reset();
+    _ = reads.answer(reads.ask("").?.read, testPage(&lookalikes), "");
+    for (lookalikes) |skill| {
+        try std.testing.expect(slash_commands.conversation.nameOf(skill.name) == null);
+        var buffer: [80]u8 = undefined;
+        const draft = try std.fmt.bufPrint(&buffer, "/{s}", .{skill.name});
+        const shown = reads.shown(&rows, draft, draft.len, 1, slash_commands.conversation.suggest(draft, .{}), null).?.list;
+        try std.testing.expectEqual(@as(usize, 1), shown.count);
+        try std.testing.expectEqualStrings("Skill", shown.entries[0].description);
+        try std.testing.expect(slash_commands.conversation.parse(draft) == .unknown);
     }
 }
 

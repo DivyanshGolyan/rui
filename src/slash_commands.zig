@@ -237,11 +237,17 @@ pub fn Commands(comptime N: type, comptime commands: std.enums.EnumFieldStruct(N
             command: struct { name: Name, argument: []const u8 },
         };
 
+        /// A command name in the complete grammar, including unlisted actions.
+        /// Takes the bare name, without `/` or arguments; visibility is irrelevant.
+        pub fn nameOf(word: []const u8) ?Name {
+            return std.meta.stringToEnum(Name, word);
+        }
+
         /// Reads a draft line that starts with `/`.
         pub fn parse(text: []const u8) Parsed {
             std.debug.assert(text.len != 0 and text[0] == '/');
             const end = std.mem.indexOfScalar(u8, text, ' ') orelse text.len;
-            const name = std.meta.stringToEnum(Name, text[1..end]) orelse return .unknown;
+            const name = nameOf(text[1..end]) orelse return .unknown;
             const argument = trimmed(text[end..]);
             const admitted = switch (table.get(name).argument) {
                 .none => argument.len == 0,
@@ -284,7 +290,7 @@ pub fn Commands(comptime N: type, comptime commands: std.enums.EnumFieldStruct(N
                 }
                 return list;
             };
-            const name = std.meta.stringToEnum(Name, draft[1..end]) orelse return null;
+            const name = nameOf(draft[1..end]) orelse return null;
             const words = draft[end + 1 ..];
             // A quote or an escape starts text the list cannot follow.
             if (std.mem.indexOfAny(u8, words, "\"'\\") != null) return null;
