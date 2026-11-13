@@ -430,7 +430,7 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
     } else {
         if (!self.hasChoice() and input == .key_press) {
             if (focusMove(input.key_press)) |move| {
-                self.panel.selected = @backingInt(focus.step(@fromBackingInt(@intCast(self.panel.selected)), move));
+                self.panel.selected = @backingInt(focus.step(if (self.panel.stacked_actions) .stacked else .horizontal, @fromBackingInt(@intCast(self.panel.selected)), move));
                 ctx.consumeAndRedraw();
                 return;
             }
@@ -1248,6 +1248,7 @@ test "Chat info hidden Context preserves action IDs failures and the blank actio
     for ([_]?u64{ null, 18 }) |estimate| for ([_]u16{ 46, 99 }) |width| {
         fixture.session.context_estimate = estimate;
         page.refresh();
+        _ = try dumpWidget(page.bodyWidget(), arena.allocator(), width, 15);
         page.panel.selected = 4;
         for ([_]usize{ 6, 7, 8 }) |selected| {
             try press(&page, &ctx, if (selected == 6) vaxis.Key.down else vaxis.Key.right);
@@ -1872,4 +1873,35 @@ test "Chat info routes horizontal and forward reverse Tab without opening choice
     try page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.tab, .mods = .{ .shift = true } } });
     try std.testing.expectEqual(@as(usize, 7), page.panel.selected);
     try std.testing.expect(!page.hasChoice());
+}
+
+test "Chat info focus consumes drawn action layout across pending failures and Context visibility" {
+    for ([_]?u64{ null, 18 }) |context| for ([_]u16{ 46, 99 }) |width| for ([_]bool{ false, true }) |archive_failed| for ([_]bool{ false, true }) |copy_pending| {
+        var fixture: Fixture = .{};
+        fixture.init();
+        fixture.session.context_estimate = context;
+        fixture.state_value = .pending;
+        var page: Self = .{ .backend = fixture.backend() };
+        page.refresh();
+        page.failures[7] = if (archive_failed) " · couldn't archive" else null;
+        page.pending = if (copy_pending) 8 else null;
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        _ = try dumpWidget(page.bodyWidget(), arena.allocator(), width, 20);
+        const stacked = page.panel.stacked_actions;
+        try std.testing.expectEqual(width == 46 and archive_failed, stacked);
+        page.panel.selected = 6;
+        try press(&page, &ctx, vaxis.Key.down);
+        try std.testing.expectEqual(@as(usize, if (stacked) 7 else 6), page.panel.selected);
+        page.panel.selected = 6;
+        try press(&page, &ctx, vaxis.Key.right);
+        try std.testing.expectEqual(@as(usize, if (stacked) 6 else 7), page.panel.selected);
+        page.panel.selected = 8;
+        try press(&page, &ctx, vaxis.Key.up);
+        try std.testing.expectEqual(@as(usize, if (stacked) 7 else 4), page.panel.selected);
+        page.panel.selected = 4;
+        try press(&page, &ctx, vaxis.Key.tab);
+        try std.testing.expectEqual(@as(usize, 6), page.panel.selected);
+    };
 }

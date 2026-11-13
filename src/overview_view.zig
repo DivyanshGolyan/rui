@@ -404,6 +404,7 @@ pub const Event = union(enum) {
 /// One terminal input as the shell classified it. Bindings match exact
 /// modifiers, as the line editor's do.
 pub const Key = union(enum) {
+    right,
     /// A key the screen's table names, as `keys` binds it.
     named: keymap.Key,
     enter,
@@ -433,6 +434,8 @@ pub const KeyInput = struct {
     choice: ?Choice = null,
     /// The Host is stopped and a start can mend it now.
     host_startable: bool = false,
+    /// Keyboard focus is on the list; hidden composer text has no authority.
+    list_focus: bool = false,
 
     pub const Choice = struct {
         /// Drawn: open and not hidden while its save is pending.
@@ -768,6 +771,7 @@ pub const Effect = union(enum) {
     read_commands: Commands,
     start: StartRequest,
     open: Reference,
+    focus_chat,
     open_settings,
     open_choice: FooterField,
     stop: Reference,
@@ -1959,6 +1963,16 @@ fn keyInput(state: *State, input: KeyInput, effects: *Effects) error{OutOfMemory
             return if (action == .exit) toComposer(state, input, action, effects) else .drop;
         }
     }
+    if (input.list_focus and !input.pasted) {
+        switch (input.key) {
+            .enter, .right => try activateList(state, input.key == .enter, effects),
+            .named => |name| if (keys.get(name)) |pressed| {
+                try compose(state, .{ .input = .{ .composer = .{ .action = pressed } }, .draft = .{} }, effects);
+            },
+            else => {},
+        }
+        return .taken;
+    }
     if (!footerInput(state, footerKey(input), effects)) return .taken;
     if (input.key == .host_start and !input.pasted and input.draft.bytes.len == 0 and input.host_startable) return .start_host;
     return toComposer(state, input, action, effects);
@@ -1989,7 +2003,7 @@ fn footerKey(input: KeyInput) FooterInput {
         .enter => .enter,
         .named => |name| if (name == .escape or name == .ctrl_g) .escape else .other,
         .text, .host_start => .text,
-        .other, .paste_start, .paste_end => .other,
+        .right, .other, .paste_start, .paste_end => .other,
     };
 }
 
@@ -2573,7 +2587,27 @@ fn workLine(words: *[work_line.max_words_bytes]u8, state: *const State, row: *co
 fn clickOpen(state: *State, reference: Reference, effects: *Effects) error{OutOfMemory}!void {
     _ = position(state, reference) orelse return;
     state.selected = .{ .session = reference };
-    try enter(state, "", effects);
+    try activateList(state, true, effects);
+}
+
+/// All list activation uses the selection, never the composer's retained text.
+/// Right enters only a chat; Enter also activates the Settings row.
+fn activateList(state: *State, enter_key: bool, effects: *Effects) error{OutOfMemory}!void {
+    if (state.inputMode() == .frozen) return;
+    switch (state.selected) {
+        .new_session => {},
+        .settings => if (enter_key) effects.add(.open_settings),
+        .session => |reference| {
+            _ = state.selectedRow() orelse return;
+            if (state.conversing) |open| if (std.mem.eql(u8, &reference, &open)) {
+                effects.add(.focus_chat);
+                return;
+            };
+            if (!admitHostRequest(state) or waitForCommand(state)) return;
+            state.closePanel();
+            effects.add(.{ .open = reference });
+        },
+    }
 }
 
 /// Moves the selection where the Sessions show.
@@ -2667,11 +2701,7 @@ fn enter(state: *State, text: []const u8, effects: *Effects) error{OutOfMemory}!
         // blank draft opens the selected row instead.
         .open_session => {
             if (text.len != 0) effects.add(.clear_draft);
-            const row = state.selectedRow() orelse return;
-            // The conversation's own commands write where this one does.
-            if (waitForCommand(state)) return;
-            state.closePanel();
-            effects.add(.{ .open = row.reference });
+            try activateList(state, true, effects);
         },
         .start => {
             if (!state.request(.start, null)) return;
@@ -4131,7 +4161,7 @@ fn expectEffects(expected: []const Effect, actual: Effects) !void {
                 }
             },
             .open_choice => |field| try std.testing.expectEqual(field, got.open_choice),
-            .list_models, .clear_draft, .cancel_upgrade, .open_settings, .exit => {},
+            .list_models, .clear_draft, .cancel_upgrade, .open_settings, .focus_chat, .exit => {},
         }
     }
 }
@@ -8269,5 +8299,46 @@ test "new chat footer effort and stops match creation across catalog saved and h
         try std.testing.expectEqual(FooterFocus.model, state.footer.focus);
         try expectEffects(&.{}, try step(&state, .{ .footer_input = .{ .tab = false } }));
         try std.testing.expectEqual(if (expected != null) FooterFocus.effort else .input, state.footer.focus);
+    };
+}
+
+test "Overview list activation ignores retained drafts over widths and selected chat identity" {
+    for ([_]u16{ 46, 140 }) |width| for ([_][]const u8{ "", "retained task" }) |draft| for ([_]bool{ false, true }) |same| for ([_]Key{ .enter, .right }) |key| {
+        var state = try opened(&mixed);
+        defer state.deinit();
+        _ = try step(&state, .{ .resized = .{ .width = width, .height = 30 } });
+        _ = try step(&state, .{ .conversation = "b2c3d4".* });
+        state.selected = .{ .session = if (same) "b2c3d4".* else "g7h8j9".* };
+        const effects = try step(&state, .{ .key = .{ .key = key, .list_focus = true, .draft = .{ .bytes = draft } } });
+        try std.testing.expectEqual(Take.taken, effects.take);
+        var opens: usize = 0;
+        var resumes: usize = 0;
+        for (effects.slice()) |effect| switch (effect) {
+            .open => |reference| {
+                opens += 1;
+                try std.testing.expectEqualStrings("g7h8j9", &reference);
+            },
+            .focus_chat => resumes += 1,
+            .start, .clear_draft, .replace => return error.HiddenDraftActed,
+            else => {},
+        };
+        try std.testing.expectEqual(@as(usize, @intFromBool(!same)), opens);
+        try std.testing.expectEqual(@as(usize, @intFromBool(same)), resumes);
+    };
+}
+
+test "Overview list activation never submits a retained draft on New Session or Settings" {
+    var state = try opened(&mixed);
+    defer state.deinit();
+    for ([_]Selection{ .new_session, .settings }) |selection| for ([_]Key{ .enter, .right }) |key| {
+        state.selected = selection;
+        const effects = try step(&state, .{ .key = .{ .key = key, .list_focus = true, .draft = .{ .bytes = "retained task" } } });
+        var settings: usize = 0;
+        for (effects.slice()) |effect| switch (effect) {
+            .open_settings => settings += 1,
+            .start, .clear_draft, .open => return error.HiddenDraftActed,
+            else => {},
+        };
+        try std.testing.expectEqual(@as(usize, @intFromBool(selection == .settings and key == .enter)), settings);
     };
 }
