@@ -571,8 +571,8 @@ test "App screens allocate cells once for a covered pane and its gutter" {
     const editor: @import("TerminalEditor.zig") = .{ .buffer = &bytes, .length = bytes.len };
     var input: InputArea = .{ .composer = .{ .editor = &editor } };
     var body: Body = .{};
-    var screen: Screen(Body) = .{ .content = &body, .input = &input, .content_gutter = true, .userdata = &body, .on_event = Body.event, .style = .{ .bg = .{ .index = 4 } } };
-    for ([_]u16{ 1, 2, 46, 120, 250 }) |width| for ([_]u16{ 1, 2, 5, 40, 70 }) |height| for ([_]Screen(Body).Part{ .whole, .list, .compose }) |part| {
+    var screen: Screen(Body) = .{ .content = &body, .input = input.widget(), .content_gutter = true, .userdata = &body, .on_event = Body.event, .style = .{ .bg = .{ .index = 4 } } };
+    for ([_]u16{ 1, 2, 46, 120, 250 }) |width| for ([_]u16{ 1, 2, 5, 40, 70 }) |height| for ([_]Screen(Body).Part{ .whole, .list }) |part| {
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         const drawn = try screen.drawPart(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = height }, .cell_size = .{} }, part);

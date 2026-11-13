@@ -44,9 +44,7 @@ revision: u64 = 0,
 menu: *const picker.Menu = &fallback,
 provider: picker.Provider = .codex,
 current: []const u8 = "",
-selected: ?usize = null,
-/// The filter and its result list are one nested focus owner.
-focus: enum { filter, rows } = .filter,
+navigation: @import("app_input.zig").ChoiceFocus = .{ .filter = null },
 scroll: usize = 0,
 query_bytes: [catalog.max_model_bytes]u8 = undefined,
 editor: Editor = .{ .buffer = &.{} },
@@ -74,12 +72,11 @@ pub fn open(self: *Self, menu: ?*const picker.Menu, provider: picker.Provider, c
     self.failure = null;
     self.pasting = false;
     self.scroll = 0;
-    self.selected = null;
-    self.focus = .filter;
+    self.navigation = .{ .filter = null };
     for (self.menu.entries, 0..) |entry, at| if (self.row(entry) != null) {
-        if (self.selected == null or std.mem.eql(u8, entry.id, current)) self.selected = at;
+        if (self.navigation.selected() == null or std.mem.eql(u8, entry.id, current)) self.navigation.select(at);
     };
-    self.active = self.selected != null;
+    self.active = self.navigation.selected() != null;
 }
 
 pub fn openSource(self: *Self, source: Source, provider: picker.Provider, current: []const u8) void {
@@ -141,7 +138,7 @@ fn drawInput(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxf
     }
     paint(ctx, surface, bytes[start..], 0, 0, edit_width, self.ground);
     paint(ctx, surface, tail, 0, edit_width, size.width, self.quiet);
-    if (self.focus == .filter and edit_width > 0) surface.cursor = .{ .row = 0, .col = @intCast(ctx.stringWidth(bytes[start..cursor])) };
+    if (self.navigation == .filter and edit_width > 0) surface.cursor = .{ .row = 0, .col = @intCast(ctx.stringWidth(bytes[start..cursor])) };
     return surface;
 }
 
@@ -153,18 +150,18 @@ fn row(self: *const Self, entry: picker.Entry) ?picker.Row {
 }
 
 fn move(self: *Self, down: bool) void {
-    var at = self.selected orelse return;
+    var at = self.navigation.selected() orelse return;
     while (if (down) at + 1 < self.menu.entries.len else at > 0) {
         at = if (down) at + 1 else at - 1;
         if (self.row(self.menu.entries[at]) != null) {
-            self.selected = at;
+            self.navigation.select(at);
             return;
         }
     }
 }
 
 fn pick(self: *Self, ctx: *vxfw.EventContext) !void {
-    const at = self.selected orelse return;
+    const at = self.navigation.selected() orelse return;
     const id = self.menu.entries[at].id;
     self.cancel();
     if (self.on_pick) |callback| try callback(self.userdata.?, ctx, id);
@@ -188,7 +185,7 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
                 if (mouse.type != .press or mouse.row < 0) return;
                 const at: usize = @intCast(mouse.row);
                 if (at >= self.hits.len or !self.hover.targets[at].contains(mouse.col, mouse.row)) return;
-                self.selected = self.hits[at];
+                self.navigation.select(self.hits[at]);
                 try self.pick(ctx);
             },
             else => return,
@@ -200,25 +197,19 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
         const key = input.key_press;
         if (key.matches(vaxis.Key.escape, .{})) return;
         if (key.matches(vaxis.Key.tab, .{}) or key.matches(vaxis.Key.tab, .{ .shift = true })) {
-            if (self.hits.len != 0) {
-                const at = if (self.focus == .filter) @as(usize, 0) else (std.mem.indexOfScalar(usize, self.hits, self.selected.?) orelse 0) + 1;
-                const count = self.hits.len + 1;
-                const next = (at + (if (key.mods.shift) count - 1 else @as(usize, 1))) % count;
-                self.focus = if (next == 0) .filter else .rows;
-                if (next != 0) self.selected = self.hits[next - 1];
-            }
+            self.navigation.tab(self.hits, key.mods.shift);
             ctx.consumeAndRedraw();
             return;
         }
 
         if (key.matches(vaxis.Key.up, .{})) {
-            self.focus = .rows;
+            self.navigation.browse();
             self.move(false);
             ctx.consumeAndRedraw();
             return;
         }
         if (key.matches(vaxis.Key.down, .{})) {
-            self.focus = .rows;
+            self.navigation.browse();
             self.move(true);
             ctx.consumeAndRedraw();
             return;
@@ -236,19 +227,19 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
     if (outcome == .submit) {
         try self.pick(ctx);
     } else if (outcome == .append or outcome == .redraw) {
-        self.focus = .filter;
+        self.navigation.edit();
         var first: ?usize = null;
         var kept = false;
         for (self.menu.entries, 0..) |entry, at| if (self.row(entry) != null) {
             if (first == null) first = at;
-            if (self.selected == at) kept = true;
+            if (self.navigation.selected() == at) kept = true;
         };
         self.no_match = first == null;
         if (first == null) {
             @memcpy(self.editor.buffer[0..length], backup[0..length]);
             self.editor.length = length;
             self.editor.cursor = cursor;
-        } else if (!kept) self.selected = first;
+        } else if (!kept) self.navigation.select(first);
     }
     ctx.consumeAndRedraw();
 }
@@ -262,7 +253,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     var indices: std.array_list.Managed(usize) = .init(ctx.arena);
     var selected_row: usize = 0;
     for (self.menu.entries, 0..) |entry, at| if (self.row(entry) != null) {
-        if (self.selected == at) selected_row = indices.items.len;
+        if (self.navigation.selected() == at) selected_row = indices.items.len;
         try indices.append(at);
     };
     const size: vxfw.Size = .{ .width = limit.width, .height = @intCast(@min(limit.height, indices.items.len)) };
@@ -293,7 +284,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     for (shown, 0..) |at, y| {
         const entry = self.menu.entries[at];
         const line = try picker_view.modelLine(ctx.arena, entry, self.row(entry).?, widest, size.width -| 3, self.unicode);
-        const style = if (self.selected == at) self.selection else if (self.hover.contains(targets[y])) self.hover_style else self.ground;
+        const style = if (self.navigation == .row and self.navigation.selected() == at) self.selection else if (self.hover.contains(targets[y])) self.hover_style else self.ground;
         for (0..size.width) |x| surface.writeCell(@intCast(x), @intCast(y), .{ .style = style });
         paint(ctx, surface, line.text, @intCast(y), @min(3, size.width), size.width, style);
     }
@@ -340,7 +331,7 @@ test "Model choice shares picker rows filters never empty and picks only its pro
     var choice: Self = .{ .userdata = &fixture, .on_pick = Fixture.pickModel };
     choice.open(&menu, .codex, "gpt-6.1-sol");
     try std.testing.expect(choice.active);
-    try std.testing.expectEqual(@as(?usize, 0), choice.selected);
+    try std.testing.expectEqual(@as(?usize, 0), choice.navigation.selected());
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
@@ -354,19 +345,19 @@ test "Model choice shares picker rows filters never empty and picks only its pro
         try std.testing.expect(std.mem.indexOf(u8, text.written(), "API key") == null);
     }
     try choice.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = '5', .text = "5.5" } });
-    try std.testing.expectEqual(@as(?usize, 1), choice.selected);
+    try std.testing.expectEqual(@as(?usize, 1), choice.navigation.selected());
     try std.testing.expectEqualStrings("5.5", choice.editor.buffer[0..choice.editor.length]);
     try choice.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = 'z', .text = "zzz" } });
     try std.testing.expect(choice.no_match);
     try std.testing.expectEqualStrings("5.5", choice.editor.buffer[0..choice.editor.length]);
-    try std.testing.expectEqual(@as(?usize, 1), choice.selected);
+    try std.testing.expectEqual(@as(?usize, 1), choice.navigation.selected());
     try press(&choice, &ctx, vaxis.Key.down);
-    try std.testing.expectEqual(@as(?usize, 1), choice.selected);
+    try std.testing.expectEqual(@as(?usize, 1), choice.navigation.selected());
     try press(&choice, &ctx, vaxis.Key.enter);
     try std.testing.expectEqualStrings("gpt-5.5", fixture.picked.?);
     try std.testing.expect(!choice.active);
     choice.open(&menu, .openai, "api-only");
-    try std.testing.expectEqual(@as(?usize, 2), choice.selected);
+    try std.testing.expectEqual(@as(?usize, 2), choice.navigation.selected());
     choice.cancel();
     try std.testing.expect(!choice.active);
     try std.testing.expectEqualStrings("gpt-5.5", fixture.picked.?);
@@ -383,7 +374,7 @@ test "Model choice bounds scrolling and mouse picking use the visible list" {
     defer arena.deinit();
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
     for (0..8) |_| try press(&choice, &ctx, vaxis.Key.down);
-    const wanted = choice.menu.entries[choice.selected.?].id;
+    const wanted = choice.menu.entries[choice.navigation.selected().?].id;
     const drawn = try choice.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 99, .height = 3 }, .cell_size = .{} });
     try std.testing.expectEqual(@as(u16, 99), drawn.size.width);
     try std.testing.expect(choice.scroll > 0);
@@ -539,7 +530,7 @@ test "Model choice Panel field keeps its input visible and compacts indented mat
             try std.testing.expect(child.origin.col + child.surface.size.width <= width);
         }
         if (count > 0 and width > 19 and height >= 3) try std.testing.expect(drawn.cursor != null);
-        if (count > 0 and width > 0 and height >= 4) try std.testing.expect(std.mem.indexOfScalar(usize, choice.hits, choice.selected.?) != null);
+        if (count > 0 and width > 0 and height >= 4) try std.testing.expect(std.mem.indexOfScalar(usize, choice.hits, choice.navigation.selected().?) != null);
         if (drawn.cursor) |cursor| {
             try std.testing.expect(cursor.row < height and cursor.col < width);
             try std.testing.expectEqual(@as(u16, 19), cursor.col);
@@ -749,7 +740,7 @@ test "Model choice hover and click follow full-width Panel matches without selec
             const surface = try panel.widget().draw(draw_ctx);
             const child = surface.children[surface.children.len - 1].surface;
             try std.testing.expectEqual(choice.hover_style, child.readCell(width - 1, 1).style);
-            try std.testing.expectEqual(@as(?usize, 0), choice.selected);
+            try std.testing.expectEqual(@as(?usize, 0), choice.navigation.selected());
             try std.testing.expectEqual(@as(usize, 0), panel.selected);
             try std.testing.expectEqual(@as(?[]const u8, null), fixture.picked);
             try std.testing.expect(choice.hover.pointing);
@@ -799,5 +790,34 @@ test "Model choice standalone rows use all bounded space without viewport hints"
         var text: std.Io.Writer.Allocating = .init(arena.allocator());
         for (drawn.buffer) |cell| try text.writer.writeAll(cell.char.grapheme);
         try std.testing.expect(std.mem.indexOf(u8, text.written(), "more") == null);
+    };
+}
+
+test "Model choice Tab wraps filter and only the result rows drawn at both widths" {
+    const entries = [_]picker.Entry{
+        .{ .id = "one", .known = true, .catalogued = true, .providers = .initOne(.codex) },
+        .{ .id = "two", .known = true, .catalogued = true, .providers = .initOne(.codex) },
+        .{ .id = "three", .known = true, .catalogued = true, .providers = .initOne(.codex) },
+        .{ .id = "four", .known = true, .catalogued = true, .providers = .initOne(.codex) },
+    };
+    const menu: picker.Menu = .{ .entries = &entries };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |reverse| {
+        var choice: Self = .{};
+        choice.open(&menu, .codex, "one");
+        const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 2 }, .cell_size = .{} };
+        _ = try choice.widget().draw(ctx);
+        const hits = try arena.allocator().dupe(usize, choice.hits);
+        var at: usize = 0;
+        for (0..hits.len + 1) |_| {
+            try choice.widget().handleEvent(&events, .{ .key_press = .{ .codepoint = vaxis.Key.tab, .mods = .{ .shift = reverse } } });
+            at = (at + (if (reverse) hits.len else @as(usize, 1))) % (hits.len + 1);
+            try std.testing.expectEqual(at == 0, choice.navigation == .filter);
+            if (at != 0) try std.testing.expectEqual(@as(?usize, hits[at - 1]), choice.navigation.selected());
+            const input = try drawInput(&choice, ctx.withConstraints(.{}, .{ .width = width, .height = 1 }));
+            try std.testing.expectEqual(at == 0, input.cursor != null);
+        }
     };
 }

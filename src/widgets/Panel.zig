@@ -90,26 +90,23 @@ fn move(self: *Self, down: bool, only: ?usize) void {
     }
 }
 
-/// The same row projection used for drawing supplies Tab's wrapping order.
+/// Keyboard and pointer navigation use the same drawn targets. A choice is
+/// modal within the panel; fields behind it are not part of its Tab cycle.
 fn tab(self: *Self, reverse: bool, only: ?usize) void {
-    if (self.choice) |*choice| {
-        choice.selected = (choice.selected + (if (reverse) choice.labels.len - 1 else @as(usize, 1))) % choice.labels.len;
-        return;
+    const current = if (self.choice) |choice| choice.selected else only orelse self.selected;
+    var first: ?usize = null;
+    var last: ?usize = null;
+    var previous: ?usize = null;
+    var next: ?usize = null;
+    for (self.targets) |target| {
+        if (target.choice != (self.choice != null)) continue;
+        if (first == null) first = target.index;
+        last = target.index;
+        if (target.index < current) previous = target.index;
+        if (target.index > current and next == null) next = target.index;
     }
-    if (only) |field| {
-        self.selected = field;
-        return;
-    }
-    const count = self.fields.len + self.actions.len;
-    if (count == 0) return;
-    var at = @min(self.selected, count - 1);
-    for (0..count) |_| {
-        at = (at + (if (reverse) count - 1 else @as(usize, 1))) % count;
-        if (self.selectable(at)) {
-            self.selected = at;
-            return;
-        }
-    }
+    const chosen = (if (reverse) previous orelse last else next orelse first) orelse return;
+    if (self.choice) |*choice| choice.selected = chosen else self.selected = chosen;
 }
 
 fn activate(self: *Self, ctx: *vxfw.EventContext, only: ?usize) !void {
@@ -1095,4 +1092,34 @@ test "Panel explicit choice scope never persists into normal page events or draw
     // The next standalone event likewise carries its own field, not page selection.
     try panel.choiceEvent(&events, .{ .key_press = .{ .codepoint = vaxis.Key.enter } }, 1);
     try std.testing.expectEqual(@as(?usize, 1), fixture.activated);
+}
+
+test "Panel Tab uses only drawn selectable targets and wraps both directions inside choices" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |reverse| {
+        var panel: Self = .{ .title = "Settings", .fields = &.{
+            .{ .label = "First", .value = "one" },
+            .{ .label = "Read only", .value = "skip", .selectable = false },
+            .{ .label = "Hidden", .value = "skip", .visible = false },
+            .{ .label = "Last", .value = "two" },
+        }, .actions = &.{"Save"} };
+        const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 30 }, .cell_size = .{} };
+        _ = try panel.widget().draw(ctx);
+        const order = [_]usize{ 0, 3, 4 };
+        for (order, 0..) |at, i| {
+            panel.selected = at;
+            try panel.widget().handleEvent(&events, .{ .key_press = .{ .codepoint = vaxis.Key.tab, .mods = .{ .shift = reverse } } });
+            try std.testing.expectEqual(order[(i + (if (reverse) order.len - 1 else @as(usize, 1))) % order.len], panel.selected);
+        }
+        panel.selected = 0;
+        panel.openChoice(&.{ "one", "two", "three" }, 0);
+        _ = try panel.widget().draw(ctx);
+        for (0..3) |at| {
+            panel.choice.?.selected = at;
+            try panel.widget().handleEvent(&events, .{ .key_press = .{ .codepoint = vaxis.Key.tab, .mods = .{ .shift = reverse } } });
+            try std.testing.expectEqual((at + (if (reverse) @as(usize, 2) else 1)) % 3, panel.choice.?.selected);
+        }
+    };
 }

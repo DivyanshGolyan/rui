@@ -2106,7 +2106,7 @@ fn listInput(state: *State, delivery: InputDelivery, effects: *Effects) error{Ou
         },
     }
     if (input == .action and (input.action == .previous or input.action == .next)) {
-        state.browse_pending = delivery.wide and !std.meta.eql(before, state.selected);
+        state.browse_pending = delivery.wide and (state.browse_pending or !std.meta.eql(before, state.selected));
     }
 }
 
@@ -2236,11 +2236,12 @@ fn move(state: *State, action: Action) void {
         .session => |ref| if (position(state, ref)) |at| at + 1 else 0,
         .settings => order.len + 1,
     };
+    const first: usize = if (showsNewSession(state)) 0 else 1;
     const target = switch (action) {
-        .first => 0,
+        .first => first,
         .last => order.len + 1,
         .next => @min(current + 1, order.len + 1),
-        .previous => current -| 1,
+        .previous => @max(current -| 1, first),
         else => unreachable,
     };
     state.selected = if (target == 0) .new_session else if (target > order.len) .settings else .{ .session = state.rows.items[order[target - 1]].reference };
@@ -6330,4 +6331,88 @@ test "Overview list Right does not create or open Settings and clicks share resu
         try std.testing.expect(effect != .open);
     }
     try std.testing.expectEqual(@as(usize, 1), resumes);
+}
+
+test "Overview browse settles only the last wide list move and never activates controls" {
+    const rows = [_]Listed{
+        session("aaaaaa", .{ .idle = ago(1) }, .{ .label = "One" }),
+        session("bbbbbb", .{ .idle = ago(2) }, .{ .label = "Two" }),
+        session("cccccc", .{ .idle = ago(3) }, .{ .label = "Three" }),
+        session("dddddd", .{ .idle = ago(4) }, .{ .label = "Four" }),
+    };
+    for ([_]bool{ false, true }) |wide| for (std.enums.values(enum { chat, new_session, settings, rapid })) |landing| {
+        var state = try opened(&rows);
+        defer state.deinit();
+        _ = try step(&state, .{ .conversation = "aaaaaa".* });
+        state.selected = .{ .session = "aaaaaa".* };
+        if (landing == .settings) state.selected = .{ .session = "dddddd".* };
+        const moves: usize = if (landing == .rapid) 3 else 1;
+        var reads: usize = 0;
+        for (0..moves) |_| {
+            const effects = try step(&state, .{ .input = .{ .wide = wide, .key = .{ .action = if (landing == .new_session) .previous else .next } } });
+            for (effects.slice()) |effect| {
+                if (effect == .open) reads += 1;
+                try std.testing.expect(effect != .create and effect != .open_settings);
+            }
+        }
+        try std.testing.expectEqual(@as(usize, 0), reads);
+        const settled = try step(&state, .{ .list_settled = .{ .wide = wide, .focused = true } });
+        for (settled.slice()) |effect| {
+            if (effect == .open) {
+                reads += 1;
+                try std.testing.expectEqualStrings(if (landing == .rapid) "dddddd" else "bbbbbb", &effect.open);
+            }
+            try std.testing.expect(effect != .create and effect != .open_settings and effect != .focus_chat);
+        }
+        const expected = wide and (landing == .chat or landing == .rapid);
+        try std.testing.expectEqual(@as(usize, @intFromBool(expected)), reads);
+        try std.testing.expectEqual(expected, settled.browse_open);
+        try std.testing.expectEqual(@as(usize, 0), (try step(&state, .{ .list_settled = .{ .wide = wide, .focused = true } })).len);
+    };
+}
+
+test "Overview browse explicit Enter and Right share activation and focus departure cancels settle" {
+    for ([_]bool{ false, true }) |wide| for ([_]Input{ .enter, .right }) |key| for ([_]Selection{ .new_session, .settings, .{ .session = "b2c3d4".* }, .{ .session = "g7h8j9".* } }) |selection| {
+        var state = try opened(&mixed);
+        defer state.deinit();
+        _ = try step(&state, .{ .conversation = "b2c3d4".* });
+        state.selected = selection;
+        state.browse_pending = true;
+        const effects = try step(&state, .{ .input = .{ .wide = wide, .key = key } });
+        try std.testing.expect(!state.browse_pending and !effects.browse_open);
+        const expected: std.meta.Tag(Effect) = switch (selection) {
+            .new_session => if (key == .enter) .create else continue,
+            .settings => if (key == .enter) .open_settings else continue,
+            .session => |reference| if (std.mem.eql(u8, &reference, "b2c3d4")) .focus_chat else .open,
+        };
+        var count: usize = 0;
+        for (effects.slice()) |effect| if (std.meta.activeTag(effect) == expected) {
+            count += 1;
+        };
+        try std.testing.expectEqual(@as(usize, 1), count);
+    };
+    var state = try opened(&mixed);
+    defer state.deinit();
+    _ = try step(&state, .{ .input = .{ .wide = true, .key = .{ .action = .next } } });
+    try std.testing.expect(state.browse_pending);
+    const cancelled = try step(&state, .{ .list_settled = .{ .wide = true, .focused = false } });
+    try std.testing.expectEqual(@as(usize, 0), cancelled.len);
+    try std.testing.expect(!state.browse_pending);
+}
+
+test "Overview browse New Session never creates until Enter and chat lists skip its hidden control" {
+    for ([_]bool{ false, true }) |wide| {
+        var state = try opened(&mixed);
+        defer state.deinit();
+        state.selected = .new_session;
+        state.browse_pending = true;
+        const settled = try step(&state, .{ .list_settled = .{ .wide = wide, .focused = true } });
+        try std.testing.expectEqual(@as(usize, 0), settled.len);
+        _ = try step(&state, .{ .conversation = "b2c3d4".* });
+        _ = try step(&state, .{ .input = .{ .wide = wide, .key = .{ .action = .first } } });
+        try std.testing.expect(state.selected == .session);
+        const first = state.selected.session;
+        _ = try step(&state, .{ .input = .{ .wide = wide, .key = .{ .action = .previous } } });
+        try std.testing.expectEqualStrings(&first, &state.selected.session);
+    }
 }

@@ -9879,3 +9879,50 @@ test "empty chat composer placeholder follows current no-message facts" {
     _ = try fixture.draw();
     try std.testing.expectEqualStrings("", fixture.self.app_input.composer.placeholder);
 }
+
+test "App Session Tab projection visits only drawn input and chrome controls at both widths" {
+    const focus = @import("app_input.zig");
+    for ([_]u16{ 46, 140 }) |width| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        held.size = .{ .width = width, .height = 30 };
+        try captureInfo(held, "Chat");
+        held.self.line.read = .{ .revision = 1, .end = 0 };
+        try held.self.line.model.set("gpt-5.5");
+        held.self.line.effort = .high;
+        held.self.hint = .absent;
+        held.self.line.folder = .{};
+        try held.self.line.folder.?.set("/work");
+        _ = held.self.input.append("draft");
+        const ctx: vxfw.DrawContext = .{ .arena = held.arena.allocator(), .min = .{}, .max = held.size, .cell_size = .{} };
+        _ = try held.root.widget().draw(ctx);
+        const order = try held.arena.allocator().dupe(focus.Target, held.root.focus_frame.slice());
+        try std.testing.expect(std.mem.indexOfScalar(focus.Target, order, .input) != null);
+        try std.testing.expect(std.mem.indexOfScalar(focus.Target, order, .model) != null);
+        try std.testing.expectEqual(width == 46, std.mem.indexOfScalar(focus.Target, order, .back) != null);
+        for ([_]bool{ false, true }) |reverse| {
+            held.root.input.area = .main;
+            held.self.footer.focus = .input;
+            var index = std.mem.indexOfScalar(focus.Target, order, .input).?;
+            for (0..order.len) |_| {
+                try held.keys(if (reverse) "\x1b[Z" else "\t");
+                index = (index + (if (reverse) order.len - 1 else @as(usize, 1))) % order.len;
+                try std.testing.expectEqual(order[index], focus.currentFocus(held.root.input, held.self.footer.focus));
+                _ = try held.root.widget().draw(ctx);
+                try std.testing.expectEqual(order[index] == .input, held.self.app_input.composer.caret);
+                try std.testing.expectEqualStrings("draft", held.self.input.composition().bytes);
+            }
+        }
+        // A panel replaces the cycle, including when it was opened by a footer control.
+        var events = held.context();
+        try chromeClick(.status)(&held.self, &events);
+        _ = try held.root.widget().draw(ctx);
+        try std.testing.expect(held.root.focus_frame.modal);
+        const selected = held.self.app_info.panel.selected;
+        try held.keys("\t");
+        try std.testing.expect(selected != held.self.app_info.panel.selected);
+        try held.keys("\x1b[Z");
+        try std.testing.expectEqual(selected, held.self.app_info.panel.selected);
+        try std.testing.expectEqualStrings("draft", held.self.input.composition().bytes);
+    }
+}

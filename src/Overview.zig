@@ -5015,6 +5015,7 @@ test "App overview list stays live beside a focused child and wheels stay in the
     try std.testing.expect(try rig.settle() == null);
     var peer: Peer = .{};
     overview.root.session = peer.widget();
+    overview.root.input.area = .main;
     _ = try overview.event(.{ .conversation = "k7m2qx".* });
     overview.state.selected = .{ .session = "b4n8wd".* };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
@@ -7337,6 +7338,10 @@ const EmptySessionOwner = struct {
     }
 
     fn leave(self: *EmptySessionOwner) !void {
+        // These canonical-row tests need actual retirement, not the wide
+        // Esc-to-sidebar navigation tested by the input owner matrix.
+        var narrow = try self.rig.shown(46, 24);
+        defer narrow.deinit();
         try std.testing.expect(try self.rig.press("\x1b") == null);
         try std.testing.expect(self.rig.overview.app_session == null);
         try std.testing.expect(self.rig.overview.root.session == null);
@@ -7498,7 +7503,7 @@ test "empty New Session owner upgrade handoff preserves model draft and caret th
     try std.testing.expectEqual(cursor, parsed.value.drafts[0].snapshot.cursor);
     fixture.closeRig();
     try fixture.mount(&parsed.value);
-    try std.testing.expect(try fixture.rig.next(.{ .open = fixture.rig.overview.options.open.? }) == null);
+    try std.testing.expect(try fixture.rig.next(.{ .open = .{ .reference = fixture.rig.overview.options.open.? } }) == null);
     try fixture.readCurrent();
     try fixture.refresh();
     try fixture.expectVisible(&.{reference});
@@ -7597,7 +7602,7 @@ test "App list selection consumes the core projection through arrivals covered S
                 // Root deliberately hides a narrow sidebar. Exercise its
                 // production draw owner too, without inventing its policy.
                 if (!overview.root.listVisible()) _ = try overview.listWidget().draw(.{ .arena = shown.arena.allocator(), .min = .{}, .max = .{ .width = Root.list_width, .height = 24 }, .cell_size = .{} });
-                const expected: ?u32 = if (view.selectedLine(&overview.state)) |line| @intCast(line) else null;
+                const expected: ?u32 = if (view.focusedLine(&overview.state, overview.root.input.listFocused() or overview.root.session == null)) |line| @intCast(line) else null;
                 try std.testing.expectEqual(expected, overview.app_sessions.selected);
             }
         }
@@ -7631,7 +7636,7 @@ test "App list selection consumes the core projection through arrivals covered S
     }
     try fixture.refresh();
     try Check.draw(rig);
-    try std.testing.expect(try rig.next(.{ .open = first }) == null);
+    try std.testing.expect(try rig.next(.{ .open = .{ .reference = first } }) == null);
     try std.testing.expectEqual(first, overview.state.conversing.?);
     try fixture.readCurrent();
     try Check.draw(rig);
@@ -7641,13 +7646,15 @@ test "App list selection consumes the core projection through arrivals covered S
     try overview.root.openSettings(&ctx);
     try std.testing.expect(overview.root.input.layer.settingsOpen());
     try Check.draw(rig);
-    try std.testing.expect(try rig.next(.{ .open = second }) == null);
+    try std.testing.expect(try rig.next(.{ .open = .{ .reference = second } }) == null);
     try std.testing.expectEqual(second, overview.state.conversing.?);
     try std.testing.expect(!overview.root.input.layer.settingsOpen());
     try fixture.readCurrent();
     try Check.draw(rig);
 
     // A followed peer returns once to its origin, then to the overview.
+    var narrow = try rig.shown(46, 24);
+    defer narrow.deinit();
     try std.testing.expect(try rig.press("\x1b") == null);
     try std.testing.expectEqual(first, overview.state.conversing.?);
     try fixture.readCurrent();
@@ -7778,4 +7785,66 @@ test "creation preference read failure is retained through repair and ordinary r
     try std.testing.expectEqual(@as(usize, 1), Seen.now.creates);
     try std.testing.expectEqualStrings("high", Seen.now.creation.reasoning_effort.?.slice());
     try std.testing.expectEqualStrings("bypass", Seen.now.creation.permission_mode.slice());
+}
+
+test "App overview Tab projection is list then Settings and Settings Enter uses the drawn identity" {
+    for ([_]u16{ 46, 140 }) |width| {
+        const rig = try openListed();
+        defer rig.close();
+        var shown = try rig.shown(width, 30);
+        defer shown.deinit();
+        try std.testing.expectEqualSlices(@import("app_input.zig").Target, &.{ .list, .settings_row }, rig.overview.root.focus_frame.slice());
+        try std.testing.expect(try rig.press("\t") == null);
+        try std.testing.expectEqual(@import("app_input.zig").Target.settings_row, @import("app_input.zig").currentFocus(rig.overview.root.input, .input));
+        try std.testing.expect(try rig.press("\x1b[Z") == null);
+        try std.testing.expect(rig.overview.root.input.listFocused());
+        try std.testing.expect(try rig.press("\t\r") == null);
+        try std.testing.expect(rig.overview.root.input.layer.settingsOpen());
+        _ = try rig.overview.root.widget().draw(.{ .arena = shown.arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 30 }, .cell_size = .{} });
+        const selected = rig.overview.root.settings_page.panel.selected;
+        try std.testing.expect(try rig.press("\t") == null);
+        // This harness's focused widget is the overview; Root passing panel keys
+        // is separately connected through the page's native handler below.
+        var events = rig.context();
+        defer events.cmds.deinit(std.testing.allocator);
+        try rig.overview.root.settings_page.widget().handleEvent(&events, .{ .key_press = .{ .codepoint = vaxis.Key.tab } });
+        try std.testing.expect(selected != rig.overview.root.settings_page.panel.selected);
+    }
+}
+
+test "App overview browse coalesces a rapid batch to one feed-open boundary and keeps wide list focus" {
+    const Read = struct {
+        const chat: vxfw.Text = .{ .text = "Selected chat feed" };
+        fn open(overview: *Self, ctx: *vxfw.EventContext) !void {
+            // This is the existing production open/feed-read boundary. No
+            // skipped selection may reach it; no per-selection feeds are cached.
+            Seen.now.conversations += 1;
+            Seen.now.conversed = overview.opened;
+            try overview.root.openSession(ctx, chat.widget(), null);
+        }
+    };
+    for ([_]u16{ 46, 140 }) |width| {
+        const rig = try openListed();
+        defer rig.close();
+        const overview = rig.overview;
+        overview.ops.open = Read.open;
+        overview.state.selected = .{ .session = overview.state.rows.items[overview.state.order.items[0]].reference };
+        var shown = try rig.shown(width, 30);
+        defer shown.deinit();
+        Seen.now.conversations = 0;
+        try std.testing.expect(try rig.press("\x1b[B\x1b[B\x1b[B") == null);
+        const last = overview.state.selected.session;
+        try std.testing.expectEqual(@as(usize, 0), Seen.now.conversations);
+        var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = shown.arena.allocator(), .cmds = .empty };
+        try overview.root.widget().handleEvent(&events, .tick);
+        try std.testing.expectEqual(@as(usize, @intFromBool(width == 140)), Seen.now.conversations);
+        if (width == 140) {
+            try std.testing.expectEqualStrings(&last, &Seen.now.conversed);
+            try std.testing.expect(overview.root.input.listFocused());
+            try std.testing.expect(overview.root.session.?.eql(Read.chat.widget()));
+        } else try std.testing.expect(overview.root.session == null);
+        // A repeated tick with no new move never reopens/re-reads.
+        try overview.root.widget().handleEvent(&events, .tick);
+        try std.testing.expectEqual(@as(usize, @intFromBool(width == 140)), Seen.now.conversations);
+    }
 }

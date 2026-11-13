@@ -429,7 +429,7 @@ test "App settings choices submit typed edits and show saved values after the ba
     try press(&page, &ctx, vaxis.Key.enter);
     try std.testing.expect(page.hasChoice());
     try press(&page, &ctx, vaxis.Key.down);
-    const chosen_model = page.model_choice.menu.entries[page.model_choice.selected.?].id;
+    const chosen_model = page.model_choice.menu.entries[page.model_choice.navigation.selected().?].id;
     try press(&page, &ctx, vaxis.Key.enter);
     try std.testing.expect(!page.hasChoice());
     const model_edit = fixture.last_edit.?;

@@ -913,7 +913,7 @@ while True:
         self.assertIn("ctrl+o   tool output", states["keys"]["expect"])
         self.assertIn("ctrl+c   leave", states["keys"]["expect"])
         self.assertEqual(len(states["keys"]["expect"]), 14)
-        for meaning in ("next panel/footer field", "previous panel/footer field", "list/chat · info actions"):
+        for meaning in ("next focus", "previous focus", "list/chat · info actions"):
             self.assertIn(meaning, states["keys"]["expect"])
         self.assertIn("/help", states["keys"]["absent"])
         self.assertIn("× Fail with exit 127 · 127", states["chat"]["expect"])

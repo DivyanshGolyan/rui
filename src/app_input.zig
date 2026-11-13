@@ -63,6 +63,36 @@ pub fn tabNext(order: []const Target, current: Target, reverse: bool) ?Target {
     return order[(at + (if (reverse) order.len - 1 else @as(usize, 1))) % order.len];
 }
 
+/// A modal filter and its drawn results share one focus value. The filter
+/// retains its candidate for Enter; there is no second widget focus flag.
+pub const ChoiceFocus = union(enum) {
+    filter: ?usize,
+    row: usize,
+
+    pub fn selected(self: ChoiceFocus) ?usize {
+        return switch (self) {
+            .filter => |at| at,
+            .row => |at| at,
+        };
+    }
+    pub fn select(self: *ChoiceFocus, at: ?usize) void {
+        self.* = if (self.* == .filter or at == null) .{ .filter = at } else .{ .row = at.? };
+    }
+    pub fn edit(self: *ChoiceFocus) void {
+        self.* = .{ .filter = self.selected() };
+    }
+    pub fn browse(self: *ChoiceFocus) void {
+        if (self.selected()) |at| self.* = .{ .row = at };
+    }
+    pub fn tab(self: *ChoiceFocus, hits: []const usize, reverse: bool) void {
+        if (hits.len == 0) return;
+        const at = if (self.* == .filter) @as(usize, 0) else (std.mem.indexOfScalar(usize, hits, self.row) orelse 0) + 1;
+        const count = hits.len + 1;
+        const next = (at + (if (reverse) count - 1 else @as(usize, 1))) % count;
+        self.* = if (next == 0) .{ .filter = self.selected() } else .{ .row = hits[next - 1] };
+    }
+};
+
 pub const State = struct {
     layer: Layer = .main,
     /// Keyboard navigation is in the list, while a wide chat stays drawn.
@@ -313,6 +343,7 @@ pub fn step(state: *State, facts: Facts, input: Input) Effects {
     // the open Session's, else the overview's. A click passes.
     if (state.layer != .main or input == .mouse) return .{};
     const delivery: Effects.Delivery = .{ .under = .main, .pasted = state.pasting };
+    if (facts.frame.modal and facts.session_open) return .{ .route = .{ .session = delivery } };
     if (state.listFocused()) return .{ .route = .{ .overview = .{ .under = .main, .pasted = state.pasting, .wide = facts.wide } } };
     return .{ .route = if (facts.session_open) .{ .session = delivery } else .{ .overview = .{ .under = .main, .pasted = state.pasting, .wide = facts.wide } } };
 }
@@ -545,7 +576,7 @@ test "Root input routing over every layer, main pane, settings state and input" 
         try std.testing.expectEqual(shown_pane, pane(state.layer, session));
         // No effect focuses a hidden pane: focus names the pane now shown.
         if (effects.focus) |focus| try std.testing.expect(switch (focus) {
-            .main, .overview, .list => shown_pane == .overview or shown_pane == .session,
+            .main, .list => shown_pane == .overview or shown_pane == .session,
             .settings => shown_pane == .settings,
             .sign_in => shown_pane == .sign_in,
         });
@@ -639,4 +670,71 @@ test "App input list focus routes every list event to its semantic owner and mou
     const chat = step(&state, facts, .{ .mouse = .chat_click });
     try std.testing.expect(!state.listFocused());
     try std.testing.expectEqual(@as(?Effects.Focus, .main), chat.focus);
+}
+
+test "App input Tab order follows each drawn frame at wide and narrow widths and traps panels" {
+    for ([_]bool{ false, true }) |wide| for (std.enums.values(enum { overview, chat, info, settings, keys })) |shown| {
+        var frame: Frame = .{ .modal = shown == .info };
+        const session_open = shown != .overview;
+        if (wide or !session_open) {
+            frame.append(.list);
+            frame.append(.settings_row);
+        }
+        if (session_open and shown != .settings and shown != .keys) {
+            frame.append(.input);
+            if (!wide) frame.append(.back);
+            frame.append(.model);
+            frame.append(.effort);
+            frame.append(.info);
+        }
+        for (frame.slice(), 0..) |target, index| for ([_]bool{ false, true }) |reverse| {
+            var state: State = .{ .layer = if (shown == .settings or shown == .keys) .settings else .main };
+            var initial: Effects = .{};
+            chooseFocus(&state, target, &initial);
+            const facts: Facts = .{ .wide = wide, .session_open = session_open, .frame = frame, .field = initial.field orelse .input, .settings = .{ .takes_key = true, .keys_open = shown == .keys } };
+            const result = step(&state, facts, .{ .key = .{ .named = null, .tab = reverse } });
+            if (shown == .settings or shown == .keys) {
+                // The page owns its fields; the read-only Keys reference has no stops.
+                try std.testing.expectEqual(Effects.Route.pass, result.route);
+                try std.testing.expect(result.focus == null and result.activate == null);
+            } else if (shown == .info) {
+                try std.testing.expect(result.route == .session);
+                try std.testing.expectEqual(target, currentFocus(state, facts.field));
+            } else {
+                const expected = frame.slice()[(index + (if (reverse) frame.len - 1 else @as(usize, 1))) % frame.len];
+                try std.testing.expectEqual(expected, currentFocus(state, result.field orelse facts.field));
+                try std.testing.expectEqual(Effects.Route.swallow, result.route);
+            }
+        };
+    };
+}
+
+test "App input Tab never activates or edits and paste cannot traverse" {
+    var frame: Frame = .{};
+    for ([_]Target{ .list, .settings_row, .input, .model, .effort, .info }) |target| frame.append(target);
+    var state: State = .{ .area = .list };
+    const facts: Facts = .{ .session_open = true, .wide = true, .frame = frame };
+    _ = step(&state, facts, .{ .key = .{ .named = null, .tab = false } });
+    try std.testing.expectEqual(Target.settings_row, currentFocus(state, .input));
+    const activate = step(&state, facts, .{ .key = .{ .named = null, .enter = true } });
+    try std.testing.expectEqual(@as(?Target, .settings_row), activate.activate);
+    state.pasting = true;
+    const pasted = step(&state, facts, .{ .key = .{ .named = null, .tab = false } });
+    try std.testing.expect(pasted.activate == null and pasted.focus == null);
+    try std.testing.expectEqual(Target.settings_row, currentFocus(state, .input));
+}
+
+test "App input model choice Tab domain retains its candidate in the filter and excludes hidden rows" {
+    const hits = [_]usize{ 3, 7, 11 };
+    for (0..4) |index| for ([_]bool{ false, true }) |reverse| {
+        var focus: ChoiceFocus = if (index == 0) .{ .filter = 99 } else .{ .row = hits[index - 1] };
+        focus.tab(&hits, reverse);
+        const expected = (index + (if (reverse) @as(usize, 3) else 1)) % 4;
+        try std.testing.expectEqual(expected == 0, focus == .filter);
+        if (expected != 0) try std.testing.expectEqual(@as(?usize, hits[expected - 1]), focus.selected());
+    };
+    var focus: ChoiceFocus = .{ .filter = 7 };
+    focus.tab(&.{}, false);
+    try std.testing.expectEqual(@as(?usize, 7), focus.selected());
+    try std.testing.expect(focus == .filter);
 }

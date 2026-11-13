@@ -1013,7 +1013,7 @@ test "Chat info model choice is a full-width field and saves a typed model" {
         try std.testing.expectEqualStrings("5", screen.readCell(19, 6).?.char.grapheme);
         try std.testing.expectEqualStrings("C", screen.readCell(3, 7 + page.panel.custom_height).?.char.grapheme);
     }
-    const id = page.model_choice.menu.entries[page.model_choice.selected.?].id;
+    const id = page.model_choice.menu.entries[page.model_choice.navigation.selected().?].id;
     try press(&page, &ctx, vaxis.Key.enter);
     try std.testing.expectEqualStrings(id, fixture.edit.?.model);
     try std.testing.expect(!page.hasChoice());

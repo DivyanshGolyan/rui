@@ -302,6 +302,17 @@ fn contains(surface: vxfw.Surface, target: vxfw.Widget) bool {
     return false;
 }
 
+const Point = struct { row: i32, col: i32 };
+fn position(surface: vxfw.Surface, target: vxfw.Widget) ?Point {
+    if (surface.size.width == 0 or surface.size.height == 0) return null;
+    if (surface.widget.eql(target)) return .{ .row = 0, .col = 0 };
+    for (surface.children) |child| {
+        if (child.origin.row >= surface.size.height or child.origin.col >= surface.size.width) continue;
+        if (position(child.surface, target)) |point| return .{ .row = child.origin.row + point.row, .col = child.origin.col + point.col };
+    }
+    return null;
+}
+
 /// One projection from the cells just drawn. Candidates supply semantic
 /// identities, never width/visibility decisions or an independent focus.
 fn projectFocus(self: *Self, surface: vxfw.Surface, layout: Layout) void {
@@ -315,7 +326,22 @@ fn projectFocus(self: *Self, surface: vxfw.Surface, layout: Layout) void {
         var candidates: [std.enums.values(app_input.Target).len]Candidate = undefined;
         const projection = owner.candidates(owner.context, &candidates);
         self.focus_frame.modal = projection.modal;
-        for (candidates[0..projection.len]) |candidate| if (contains(surface, candidate.widget)) self.appendFocus(candidate);
+        // Pane-major order: sidebar first, then main controls in the actual
+        // row/column order. Omitted/clipped widgets never enter the cycle.
+        const Placed = struct { candidate: Candidate, row: i32, col: i32 };
+        var placed: [std.enums.values(app_input.Target).len]Placed = undefined;
+        var count: usize = 0;
+        for (candidates[0..projection.len]) |candidate| if (position(surface, candidate.widget)) |point| {
+            placed[count] = .{ .candidate = candidate, .row = point.row, .col = point.col };
+            count += 1;
+        };
+        const Order = struct {
+            fn less(_: void, a: Placed, b: Placed) bool {
+                return a.row < b.row or (a.row == b.row and a.col < b.col);
+            }
+        };
+        std.mem.sort(Placed, placed[0..count], {}, Order.less);
+        for (placed[0..count]) |item| self.appendFocus(item.candidate);
     }
 }
 
