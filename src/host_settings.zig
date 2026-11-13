@@ -2328,12 +2328,13 @@ test "Host settings proof admits the complete provider presence and credential d
         try apply(settings, gpa, "{\"providers\":{}}", .file, checkSample, &failure);
         var choices = combination;
         inline for (std.enums.values(provider_name.Provider)) |provider| {
-            const state: State = @fromBackingInt(@intCast(choices % 3));
+            const name = @tagName(provider);
+            const state: State = @fromBackingInt(@intCast(choices % state_count));
             choices /= state_count;
             if (state != .absent) {
-                const at = "providers." ++ @tagName(provider);
+                const at = "providers." ++ name;
                 try assign(settings, gpa, at, "{}", checkSample, &failure);
-                const entry = &@field(settings.providers.entries, @tagName(provider)).?;
+                const entry = &@field(settings.providers.entries, name).?;
                 if (state == .unauthenticated) {
                     try assign(settings, gpa, at ++ ".unauthenticated", "true", checkSample, &failure);
                 } else switch (comptime provider.facts().credential) {
@@ -2342,7 +2343,7 @@ test "Host settings proof admits the complete provider presence and credential d
                         @memcpy(entry.key.bytes.bytes[0..entry.key.bytes.len], "resolved-key");
                         entry.key.source = .literal;
                     },
-                    .sign_in => try assign(settings, gpa, at ++ ".credentialFile", "/tmp/" ++ @tagName(provider) ++ ".json", checkSample, &failure),
+                    .sign_in => try assign(settings, gpa, at ++ ".credentialFile", "/tmp/" ++ name ++ ".json", checkSample, &failure),
                 }
             }
         }
