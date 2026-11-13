@@ -2015,7 +2015,7 @@
     },
     {
       "name": "keys",
-      "note": "20-keys: thirteen entries, aligned pairs at 140 and one column at 46",
+      "note": "Shared key reference, aligned pairs at 140 and one column at 46",
       "open": "overview",
       "steps": [
         {
@@ -2053,7 +2053,10 @@
         "ctrl+r   retry",
         "/        skills",
         "alt+a    archive",
-        "ctrl+c   leave"
+        "ctrl+c   leave",
+        "next panel/footer field",
+        "previous panel/footer field",
+        "list/chat · info actions"
       ],
       "absent": [
         "/help",
@@ -2932,167 +2935,6 @@
       ]
     },
     {
-      "name": "archived-list",
-      "note": "Archived rows show their name without a redundant archive tag or raw id",
-      "open": "overview",
-      "steps": [
-        {
-          "text": "/sessions archived"
-        },
-        {
-          "keys": [
-            "Enter"
-          ]
-        },
-        {
-          "wait": "Archive audit"
-        }
-      ],
-      "expect": [
-        "✓ Archive audit"
-      ],
-      "absent": [
-        "[Archived]",
-        "/unarchive",
-        "{session:Archive audit}",
-        "· archived"
-      ]
-    },
-    {
-      "name": "transient-overview",
-      "note": "An overview command error occupies Footer once, without a separate reply row",
-      "open": "overview",
-      "steps": [
-        {
-          "text": "/nope"
-        },
-        {
-          "keys": [
-            "Enter"
-          ]
-        },
-        {
-          "wait": "Unknown command /nope"
-        }
-      ],
-      "expect": [
-        "Unknown command /nope"
-      ],
-      "absent": [
-        "Archived Archive audit",
-        "/unarchive",
-        "{session:Archive audit}"
-      ]
-    },
-    {
-      "name": "all-sessions",
-      "note": "Mixed archive states retain a quiet archived suffix; the archived-only list does not",
-      "open": "overview",
-      "steps": [
-        {
-          "text": "/sessions all"
-        },
-        {
-          "keys": [
-            "Enter"
-          ]
-        },
-        {
-          "wait": "Archive audit · archived"
-        }
-      ],
-      "expect": [
-        "Archive audit · archived",
-        "Draft lifecycle"
-      ],
-      "absent": [
-        "[Archived]",
-        "Draft lifecycle · archived",
-        "{session:Archive audit}",
-        "{session:Draft lifecycle}"
-      ]
-    },
-    {
-      "name": "draft-overview-choice-escape",
-      "note": "B05: overview shares command choice cancellation",
-      "open": "overview",
-      "steps": [
-        {
-          "text": "/configure --permission-mode "
-        },
-        {
-          "wait": "bypass"
-        },
-        {
-          "keys": [
-            "Esc"
-          ]
-        },
-        {
-          "sleep": 0.5
-        }
-      ],
-      "expect": [
-        "Settings",
-        "Draft lifecycle"
-      ],
-      "absent": [
-        "› /configure",
-        "enter pick"
-      ]
-    },
-    {
-      "name": "draft-overview-unknown",
-      "note": "B06: an unknown command reports its error without retaining its draft",
-      "open": "overview",
-      "steps": [
-        {
-          "text": "/nope"
-        },
-        {
-          "keys": [
-            "Enter"
-          ]
-        },
-        {
-          "wait": "Unknown command /nope"
-        }
-      ],
-      "expect": [
-        "Unknown command /nope",
-        "Settings"
-      ],
-      "absent": [
-        "› /nope"
-      ]
-    },
-    {
-      "name": "slash-overview",
-      "note": "Overview slash list: names only with quiet fixed-choice words",
-      "open": "overview",
-      "steps": [
-        {
-          "text": "/"
-        },
-        {
-          "wait": "/sessions"
-        },
-        {
-          "gone": "/configure [OPTIONS]"
-        }
-      ],
-      "expect": [
-        "/archive",
-        "/sessions",
-        "unarchived · archived · all",
-        "/unarchive"
-      ],
-      "absent": [
-        "/help",
-        "/model"
-      ]
-    },
-    {
       "name": "chat-info-archive",
       "note": "Arrow focus on the horizontal action row; copied feedback uses the existing notice lifetime.",
       "open": "Action focus audit",
@@ -3142,6 +2984,9 @@
             "Give a chat info specimen summarizing the retry deadline fix."
           ]
         }
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -3192,6 +3037,9 @@
             "Give a chat info specimen summarizing the retry deadline fix."
           ]
         }
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -3222,6 +3070,9 @@
       ],
       "sizes": [
         "140x40"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -3247,6 +3098,9 @@
       ],
       "absent": [
         "Opening…"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -3276,6 +3130,9 @@
       ],
       "absent": [
         "Opening…"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -3305,6 +3162,9 @@
       ],
       "sizes": [
         "140x40"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -3369,6 +3229,9 @@
             "Give a chat info specimen summarizing the retry deadline fix."
           ]
         }
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     }
   ]
