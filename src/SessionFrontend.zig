@@ -49,7 +49,6 @@ const empty_app_text: vxfw.Text = .{ .text = "" };
 
 const reads = @import("session_reads.zig");
 const session_line = @import("session_line.zig");
-const command_input = @import("command_input.zig");
 const slash_commands_shared = @import("slash_commands.zig");
 const skill_completion = @import("skill_completion.zig");
 const skill_suggestions = @import("skill_suggestions.zig");
@@ -880,7 +879,7 @@ fn appKey(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event, delivery:
         .draft_empty = self.input.composition().bytes.len == 0,
         .host_startable = if (self.app_hooks.host) |host| host.startable(host.context) else false,
         .shown_row = shown != null,
-        .send = self.sendFacts(),
+        .send = .{ .host_held = self.hostHeld(), .opening = self.reading.opening, .preparing = self.reading.phase == .permission, .command_active = self.commandActive(), .submitting = self.submission.intent != null },
     }, input);
     switch (take) {
         .taken => {},
@@ -921,21 +920,20 @@ fn appKey(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event, delivery:
         },
         .take_row => {
             self.notice = null;
-            self.takeRow(shown.?);
+            try self.takeRow(shown.?);
         },
         .edit => |edit| {
             self.notice = null;
             switch (self.input.appEvent(conversation_keys, event, delivery.pasted, edit.send)) {
                 .message => |ticket| try self.beginMessage(.{ .message = ticket }),
-                .command => try self.commandLine(),
+                .command => try self.runLine(),
                 .busy => self.sayBusy(null, false),
                 .editor => |outcome| switch (outcome) {
                     .action => |action| try self.perform(action),
                     .refused => |why| if (why != .unbound) {
                         self.notice = refusedNotice(why);
                     },
-                    .submit => if (self.shownCommands() != null) try self.commandLine(),
-                    .none, .append, .redraw => {},
+                    .none, .append, .redraw, .submit => {},
                 },
             }
         },
@@ -1972,6 +1970,85 @@ test "a Session lists the skills it saved for the caret's /word, and Tab or Ente
     try std.testing.expectEqualStrings("/review this change", try held.self.input.message(held.self.submission.intent.?.message));
 }
 
+test "Enter, Esc and Ctrl-G read every draft as the grammar does, with and without a drawn list" {
+    const entries = [_]skill_suggestions.Entry{.{ .name = "review", .description = "Review a change" }};
+    const Enter = union(enum) {
+        /// Nothing sent or run; the draft afterwards.
+        draft: []const u8,
+        /// Sent to the agent as these bytes; the draft is taken.
+        message: []const u8,
+        /// Run as a command; the draft is taken and no Message sent.
+        command,
+    };
+    const Case = struct {
+        text: []const u8,
+        caret: ?usize = null,
+        /// A frame draws a list for this draft and caret.
+        list: bool = false,
+        /// Esc or Ctrl-G on that list takes the draft.
+        cancel_takes: bool = false,
+        /// Enter with no list drawn.
+        plain: Enter,
+        /// Enter on the drawn list's first row.
+        row: Enter = .{ .draft = "" },
+    };
+    // Expected outcomes are written out per draft, not read from the grammar.
+    const cases = [_]Case{
+        .{ .text = "/copy", .list = true, .cancel_takes = true, .plain = .command, .row = .command },
+        .{ .text = "/effort", .list = true, .cancel_takes = true, .plain = .command, .row = .{ .draft = "/effort " } },
+        .{ .text = "/discard", .plain = .command },
+        .{ .text = "/new extra", .plain = .command },
+        .{ .text = "/re", .list = true, .cancel_takes = true, .plain = .{ .message = "/re" }, .row = .command },
+        .{ .text = "/review", .list = true, .cancel_takes = true, .plain = .{ .message = "/review" }, .row = .{ .draft = "/review " } },
+        .{ .text = "/review this change", .caret = "/review".len, .list = true, .plain = .{ .message = "/review this change" }, .row = .{ .draft = "/review this change" } },
+        .{ .text = "/review this change", .plain = .{ .message = "/review this change" } },
+        .{ .text = "/genuinely-unknown", .plain = .{ .message = "/genuinely-unknown" } },
+        .{ .text = "/genuinely-unknown this change", .plain = .{ .message = "/genuinely-unknown this change" } },
+        .{ .text = "please /review now", .caret = "please /review".len, .list = true, .plain = .{ .message = "please /review now" }, .row = .{ .draft = "please /review now" } },
+        .{ .text = "plain text", .plain = .{ .message = "plain text" } },
+        .{ .text = "//copy", .plain = .{ .message = "/copy" } },
+        .{ .text = "", .plain = .{ .draft = "" } },
+    };
+    for ([_][]const u8{ "\r", "\x1b", "\x07" }) |key| {
+        for ([_]bool{ false, true }) |drawn| {
+            for (cases) |case| {
+                const held = try HeldFrontend.create();
+                defer held.destroy();
+                const self = &held.self;
+                errdefer std.debug.print("draft domain: key={any} drawn={} draft={s}\n", .{ key, drawn, case.text });
+                // The preview is presentation: it holds the skill throughout.
+                defer _ = self.skills.reset();
+                try std.testing.expect(self.skills.answer(self.skills.ask("").?.read, .{ .entries = @constCast(&entries), .total = entries.len }, "") == null);
+                _ = self.input.append(case.text);
+                self.input.editors[self.input.active].cursor = case.caret orelse case.text.len;
+                if (drawn) _ = try held.draw();
+                const listed = drawn and case.list;
+                try std.testing.expectEqual(listed, self.shownCommands() != null);
+                try held.keys(key);
+                const expected: Enter = if (key[0] != '\r')
+                    .{ .draft = if (listed and case.cancel_takes) "" else case.text }
+                else if (listed) case.row else case.plain;
+                switch (expected) {
+                    .draft => |text| {
+                        try std.testing.expectEqualStrings(text, self.input.composition().bytes);
+                        try std.testing.expect(self.submission.intent == null);
+                    },
+                    .message => |text| {
+                        try std.testing.expectEqualStrings("", self.input.composition().bytes);
+                        try std.testing.expectEqualStrings(text, try self.input.message(self.submission.intent.?.message));
+                    },
+                    .command => {
+                        try std.testing.expectEqualStrings("", self.input.composition().bytes);
+                        try std.testing.expect(self.submission.intent == null);
+                    },
+                }
+                // Esc and Ctrl-G close a drawn list and never send.
+                if (key[0] != '\r' and listed) try std.testing.expect(self.shownCommands() == null);
+            }
+        }
+    }
+}
+
 test "Message routing ignores absent pending failed complete truncated and replaced skill previews" {
     const Preview = enum { absent, pending, failed, complete, truncated, replaced };
     const review = [_]skill_suggestions.Entry{.{ .name = "review", .description = "Review" }};
@@ -2012,8 +2089,9 @@ test "Message routing ignores absent pending failed complete truncated and repla
             try std.testing.expectEqualStrings(text, try self.input.message(self.submission.intent.?.message));
             try std.testing.expectEqualStrings("", self.input.composition().bytes);
             // The ordinary Message hold preserves a second leading-slash draft.
-            _ = self.input.append(text);
-            try self.commandLine();
+            try held.keys("\x1b[200~");
+            try held.keys(text);
+            try held.keys("\x1b[201~\r");
             try std.testing.expectEqualStrings(text, self.input.composition().bytes);
             try std.testing.expectEqualStrings(text, try self.input.message(self.submission.intent.?.message));
         }
@@ -2364,7 +2442,7 @@ fn nextCommands(self: *Self, previous: ?slash_commands_shared.Shown) ?slash_comm
     // The Session's model offers its efforts once a read names it.
     const context: slash_commands_shared.Context = if (self.line.read != null) .{ .model = self.line.model.slice(), .effort = self.line.effort } else .{};
     const draft = self.input.composition().bytes;
-    if (draft.len != 0) return self.skills.shown(&self.skill_rows, draft, self.input.composition().cursor, self.input.revision, slash_commands.suggest(draft, context), previous);
+    if (draft.len != 0) return self.skills.shown(&self.skill_rows, draft, self.input.composition().cursor, self.input.revision, context, previous);
     // The rows change without the draft: other rows are another list.
     const rows = self.requestList() orelse return null;
     var named = std.hash.Wyhash.init(0);
@@ -2609,7 +2687,11 @@ fn perform(self: *Self, action: ConversationAction) !void {
             // Esc closes only a list the person saw.
             if (action == .close) if (self.shownCommands()) |shown| {
                 shown.close();
-                if (command_input.consumesDraft(self.input.composition().bytes, .cancelled)) self.input.clear();
+                // The list goes; text for the agent stays.
+                switch (slash_commands.draftOf(self.input.composition().bytes)) {
+                    .word, .command => self.input.clear(),
+                    .message => {},
+                }
                 self.dirty = true;
                 return;
             };
@@ -2855,58 +2937,38 @@ fn heldOriginal(self: *const Self) ?session_notice.Held {
 /// another follows. Only a list the latest frame drew for this draft: a
 /// screen too short for one shows none, and Enter there runs the line as
 /// typed.
-fn sendFacts(self: *const Self) session_keys.Facts.Send {
-    return .{ .host_held = self.hostHeld(), .opening = self.reading.opening, .preparing = self.reading.phase == .permission, .command_active = self.commandActive(), .submitting = self.submission.intent != null };
-}
-
-fn admitsMessage(self: *const Self) bool {
-    return self.sendFacts().allowed() and self.input.submitted == null;
-}
-
-fn commandLine(self: *Self) !void {
-    if (self.shownCommands()) |shown| {
-        const taken = shown.list.enter(shown.highlight);
-        if (!taken.runs) return self.takeRow(shown);
-        switch (self.input.append(taken.rest)) {
-            .refused => |why| self.notice = refusedNotice(why),
-            else => if (taken.runs) try self.runLine(),
-        }
-    } else if (slash_commands.parse(self.input.composition().bytes) == .unknown) {
-        // Only the app grammar owns local commands. The Host binds skill
-        // references against this Session's complete catalog; suggestion
-        // pages are presentation, never Message-routing authority. Unknown
-        // /names remain literal agent text, even before any preview arrives.
-        if (!self.admitsMessage()) return self.sayBusy(null, false);
-        const ticket = self.input.submitText(self.input.composition().bytes);
-        try self.beginMessage(.{ .message = ticket });
-    } else try self.runLine();
-}
-
-/// Runs the draft as a command and takes its line. A line a hold refused
-/// stays until the hold lifts.
+/// Runs the draft, a command line, and takes it. A line an Upgrade's hold
+/// refused stays until the hold lifts.
 fn runLine(self: *Self) !void {
-    const text = self.input.composition().bytes;
-    const end: command_input.DraftEnd = if (self.upgradeHeld()) .held else .submitted;
-    defer if (command_input.consumesDraft(text, end)) self.input.clear();
-    try self.slashCommand(text);
+    const held = self.upgradeHeld();
+    defer if (!held) self.input.clear();
+    try self.slashCommand(self.input.composition().bytes);
 }
 
-/// The list whose highlighted row Enter takes: one the latest frame drew
-/// for a Message draft. A command line's Enter goes to `commandLine`.
+/// The list whose highlighted row Enter takes: one the latest frame drew.
 fn shownRow(self: *Self) ?*slash_commands_shared.Shown {
     // A rejected line is the editor's to refuse and clear.
     if (self.input.editors[self.input.active].rejected != null) return null;
-    const draft = self.input.composition().bytes;
-    if (draft.len == 0 or (draft[0] == '/' and !std.mem.startsWith(u8, draft, "//"))) return null;
     return self.shownCommands();
 }
 
-/// Enter on a row that runs nothing: its word in place of the caret's
-/// `/word` name, or after the command's word, for the next.
-fn takeRow(self: *Self, shown: *slash_commands_shared.Shown) void {
+/// Enter or a click on the list's highlighted row, as `skill_completion`
+/// reads it: the row's word goes into the draft, and a row that runs then
+/// runs the line, admitted as a typed command is.
+fn takeRow(self: *Self, shown: *slash_commands_shared.Shown) !void {
     const draft = self.input.composition();
-    const change = skill_completion.edit(draft.bytes, draft.cursor, shown);
-    switch (self.input.replace(.{ .start = change.start, .end = change.end, .text = change.text })) {
+    const refused = switch (skill_completion.enter(draft.bytes, draft.cursor, shown)) {
+        .run => |rest| {
+            if (!self.input.admitsCommand()) return self.sayBusy(null, false);
+            switch (self.input.append(rest)) {
+                .refused => |why| self.notice = refusedNotice(why),
+                else => try self.runLine(),
+            }
+            return;
+        },
+        .edit => |change| self.input.replace(.{ .start = change.start, .end = change.end, .text = change.text }),
+    };
+    switch (refused) {
         .refused => |why| self.notice = refusedNotice(why),
         else => {},
     }
