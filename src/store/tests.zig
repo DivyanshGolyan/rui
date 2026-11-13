@@ -5019,15 +5019,40 @@ test "a call id repeated in a later call batch fails the settlement" {
     }.run);
 }
 
-/// One reasoning item of 300 summary texts, more identities than a
-/// settlement batch holds (`batch_identities`), and an answer. Part 280
+/// A success output whose items can hold more content identities than a
+/// settlement batch (`batch_identities`, 257), so the settlement cuts
+/// them across batches, and what each item saves when settled whole, as
+/// main's settlement saved it. The default is one reasoning item of 300
+/// summary texts and the answer "done". In a reasoning item part 280
 /// repeats part 3's text, one the first batch collected, and part 290
 /// repeats part 285's, which it did not.
 const OversizedItem = struct {
+    const Item = union(enum) {
+        /// Summary texts, `text(index)` each, every part's bag empty.
+        reasoning: usize,
+        /// output_text parts, each with a bag of its own (`"n":index`)
+        /// and the text `messageText(index, blank)`.
+        message: struct { parts: usize, blank: bool = false },
+        /// A web search call that finds "Io" in ziglang.org: an action
+        /// and a pattern record.
+        find_in_page,
+        /// A failed web search call: an action record alone.
+        failed_search,
+        /// The message "done", one part with an empty bag.
+        done,
+    };
     const parts = 300;
-    const answer = "done";
-    reasoning: [16384]u8 = undefined,
-    reasoning_length: usize = 0,
+    const usage_json = "{\"input_tokens\":400,\"output_tokens\":7,\"input_tokens_details\":{\"cached_tokens\":100}}";
+
+    items: []const Item = &.{ .{ .reasoning = parts }, .done },
+    /// The answer message's ordinal; its text is the answer unless
+    /// `empty_answer`.
+    answer: u64 = 1,
+    empty_answer: bool = false,
+    /// A usage record follows the items.
+    usage: bool = false,
+    bytes: [8][]u8 = undefined,
+    built: usize = 0,
 
     fn text(index: usize, buffer: *[16]u8) []const u8 {
         const shown: usize = switch (index) {
@@ -5038,64 +5063,203 @@ const OversizedItem = struct {
         return std.fmt.bufPrint(buffer, "summary {d}", .{shown}) catch unreachable;
     }
 
-    fn build(item: *OversizedItem) !void {
-        var writer = std.Io.Writer.fixed(&item.reasoning);
-        try writer.writeAll("{\"type\":\"reasoning\",\"id\":\"wide\",\"summary\":[");
-        for (0..parts) |index| {
-            var buffer: [16]u8 = undefined;
-            try writer.print("{s}{{\"type\":\"summary_text\",\"text\":\"{s}\"}}", .{ if (index == 0) "" else ",", text(index, &buffer) });
+    fn messageText(index: usize, blank: bool, buffer: *[16]u8) []const u8 {
+        if (blank) return " ";
+        return std.fmt.bufPrint(buffer, "w{d} ", .{index}) catch unreachable;
+    }
+
+    fn build(output: *OversizedItem) !void {
+        errdefer output.deinit();
+        for (output.items, 0..) |item, ordinal| {
+            var json: std.Io.Writer.Allocating = .init(std.testing.allocator);
+            defer json.deinit();
+            const writer = &json.writer;
+            switch (item) {
+                .reasoning => |count| {
+                    try writer.print("{{\"type\":\"reasoning\",\"id\":\"item{d}\",\"summary\":[", .{ordinal});
+                    for (0..count) |index| {
+                        var buffer: [16]u8 = undefined;
+                        try writer.print("{s}{{\"type\":\"summary_text\",\"text\":\"{s}\"}}", .{ if (index == 0) "" else ",", text(index, &buffer) });
+                    }
+                    try writer.writeAll("],\"encrypted_content\":\"opaque\"}");
+                },
+                .message => |message| {
+                    try writer.print("{{\"type\":\"message\",\"id\":\"item{d}\",\"role\":\"assistant\",\"content\":[", .{ordinal});
+                    for (0..message.parts) |index| {
+                        var buffer: [16]u8 = undefined;
+                        try writer.print("{s}{{\"type\":\"output_text\",\"text\":\"{s}\",\"n\":{d}}}", .{ if (index == 0) "" else ",", messageText(index, message.blank, &buffer), index });
+                    }
+                    try writer.writeAll("]}");
+                },
+                .find_in_page => try writer.print("{{\"type\":\"web_search_call\",\"id\":\"item{d}\",\"action\":{{\"type\":\"find_in_page\",\"url\":\"ziglang.org\",\"pattern\":\"Io\"}}}}", .{ordinal}),
+                .failed_search => try writer.print("{{\"type\":\"web_search_call\",\"id\":\"item{d}\",\"status\":\"failed\",\"action\":{{\"type\":\"search\",\"query\":\"zig\"}}}}", .{ordinal}),
+                .done => try writer.writeAll("{\"type\":\"message\",\"id\":\"answer\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}"),
+            }
+            output.bytes[ordinal] = try json.toOwnedSlice();
+            output.built += 1;
         }
-        try writer.writeAll("],\"encrypted_content\":\"opaque\"}");
-        item.reasoning_length = writer.end;
     }
 
-    fn items(item: *const OversizedItem) [2][]const u8 {
-        return .{ item.reasoning[0..item.reasoning_length], "{\"type\":\"message\",\"id\":\"answer\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}" };
+    fn deinit(output: *OversizedItem) void {
+        for (output.bytes[0..output.built]) |bytes| std.testing.allocator.free(bytes);
+        output.built = 0;
     }
 
-    /// Settles the item and the answer, as `settleItemsForTesting` does,
-    /// but first makes the source's copy of part `changed`'s text differ
+    /// A message item's whole text: its parts' texts back to back.
+    fn wholeText(item: Item, writer: *std.Io.Writer) !void {
+        switch (item) {
+            .message => |message| for (0..message.parts) |index| {
+                var buffer: [16]u8 = undefined;
+                try writer.writeAll(messageText(index, message.blank, &buffer));
+            },
+            .done => try writer.writeAll("done"),
+            .reasoning, .find_in_page, .failed_search => unreachable,
+        }
+    }
+
+    /// Settles the output, as `settleItemsForTesting` does, but first
+    /// makes the source's copy of the first item's part `changed` differ
     /// from what its metadata recorded, when given.
-    fn settle(item: *const OversizedItem, storage: *Store, tmp: *std.testing.TmpDir, binding: AttemptBinding, changed: ?usize) !void {
-        const both = item.items();
+    fn settle(output: *const OversizedItem, storage: *Store, tmp: *std.testing.TmpDir, binding: AttemptBinding, changed: ?usize) !void {
         const source = try tmp.dir.createFile(std.testing.io, "oversized-output", .{ .read = true, .truncate = true });
         defer source.close(std.testing.io);
         var root: [protocol.max_store_bytes]u8 = undefined;
         const root_length = try tmp.dir.realPath(std.testing.io, &root);
         var used: std.atomic.Value(u64) = .init(0);
         var retained: ?named_scratch.Owner = null;
-        var metadata = try OutputMetadataWriter.init(std.testing.io, root[0..root_length], "oversized-metadata", .{ .used = &used, .limit = 1 << 20 }, false, &retained);
+        var metadata = try OutputMetadataWriter.init(std.testing.io, root[0..root_length], "oversized-metadata", .{ .used = &used, .limit = 1 << 21 }, false, &retained);
         defer metadata.deinit();
         var offset: u64 = 0;
-        for (both, 0..) |bytes, ordinal| {
+        for (output.bytes[0..output.built], 0..) |bytes, ordinal| {
             try source.writeStreamingAll(std.testing.io, bytes);
             try source.sync(std.testing.io);
             _ = try output_decode.recordItemForTesting(&metadata, source, offset, bytes.len, ordinal, .assistant_response);
             offset += bytes.len;
+        }
+        if (output.usage) {
+            try source.writeStreamingAll(std.testing.io, usage_json);
+            try source.sync(std.testing.io);
+            try metadata.append(&.{
+                .tag = .usage,
+                .start = offset,
+                .length = usage_json.len,
+                .content_digest = protocol.contentDigest(usage_json),
+                .usage = try output_decode.readUsageForTesting(std.testing.io, source, offset, usage_json.len),
+            });
+            offset += usage_json.len;
         }
         try metadata.sealForRead();
         if (changed) |index| {
             var buffer: [16]u8 = undefined;
             var needle: [24]u8 = undefined;
             const quoted = try std.fmt.bufPrint(&needle, "\"{s}\"", .{text(index, &buffer)});
-            const at = std.mem.find(u8, both[0], quoted).?;
+            const at = std.mem.find(u8, output.bytes[0], quoted).?;
             // Same length, other bytes: only the digest check sees it.
             try source.writePositionalAll(std.testing.io, "#", at + 1);
             try source.sync(std.testing.io);
         }
+        var answer: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer answer.deinit();
+        if (!output.empty_answer) try wholeText(output.items[output.answer], &answer.writer);
         try storage.settleModelSuccess(binding, &.{
             .source = source,
             .source_length = offset,
             .metadata = metadata.file,
-            .item_count = both.len,
+            .item_count = output.built,
             .call_count = 0,
-            .answer_item_ordinal = 1,
-            .answer_length = answer.len,
-            .answer_digest = protocol.contentDigest(answer),
+            .answer_item_ordinal = output.answer,
+            .answer_length = answer.written().len,
+            .answer_digest = protocol.contentDigest(answer.written()),
             .response_id = .{},
             .model_evidence = testing_absent_model_evidence,
             .request_id = .{},
         }, .{});
+    }
+
+    /// Checks every row the settlement saved for operation `operation`
+    /// against what each item holds: each part's own text or text length
+    /// and bag, each item's part count, text and description, the
+    /// Conversation entries, the answer and the usage.
+    fn expectSaved(output: *const OversizedItem, storage: *Store, operation: u64) !void {
+        var part_rows: usize = 0;
+        var messages: usize = 0;
+        for (output.items, 0..) |item, ordinal| {
+            switch (item) {
+                .reasoning => |count| for (0..count) |index| {
+                    var buffer: [16]u8 = undefined;
+                    const own = text(index, &buffer);
+                    try std.testing.expectEqual(1, try store_testing.queryU64(storage, "SELECT count(*) FROM model_output_part p JOIN content c ON c.content_id=p.text_content_id JOIN content b ON b.content_id=p.extras_content_id " ++
+                        "WHERE p.operation_id=?1 AND p.item_ordinal=?2 AND p.part_ordinal=?3 AND p.part_kind=3 AND p.text_length IS NULL AND c.digest=?4 AND c.byte_length=?5 AND c.private=1 AND b.byte_length=0 AND b.private=1", .{ operation, ordinal, index, store_testing.Blob{ .bytes = &protocol.contentDigest(own) }, own.len }));
+                },
+                .message => |message| for (0..message.parts) |index| {
+                    var buffer: [16]u8 = undefined;
+                    var bag_buffer: [16]u8 = undefined;
+                    const bag = try std.fmt.bufPrint(&bag_buffer, "\"n\":{d}", .{index});
+                    try std.testing.expectEqual(1, try store_testing.queryU64(storage, "SELECT count(*) FROM model_output_part p JOIN content b ON b.content_id=p.extras_content_id " ++
+                        "WHERE p.operation_id=?1 AND p.item_ordinal=?2 AND p.part_ordinal=?3 AND p.part_kind=1 AND p.text_length=?4 AND p.text_content_id IS NULL AND b.digest=?5 AND b.byte_length=?6 AND b.private=1", .{ operation, ordinal, index, messageText(index, message.blank, &buffer).len, store_testing.Blob{ .bytes = &protocol.contentDigest(bag) }, bag.len }));
+                },
+                .done => try std.testing.expectEqual(1, try store_testing.queryU64(storage, "SELECT count(*) FROM model_output_part p JOIN content b ON b.content_id=p.extras_content_id " ++
+                    "WHERE p.operation_id=?1 AND p.item_ordinal=?2 AND p.part_ordinal=0 AND p.part_kind=1 AND p.text_length=4 AND p.text_content_id IS NULL AND b.byte_length=0 AND b.private=1", .{ operation, ordinal })),
+                .find_in_page, .failed_search => {},
+            }
+            const part_count: usize = switch (item) {
+                .reasoning => |count| count,
+                .message => |message| message.parts,
+                .done => 1,
+                .find_in_page, .failed_search => 0,
+            };
+            part_rows += part_count;
+            switch (item) {
+                .reasoning => try std.testing.expectEqual(1, try store_testing.queryU64(storage, "SELECT count(*) FROM model_output_item i JOIN content b ON b.content_id=i.extras_content_id " ++
+                    "WHERE i.operation_id=?1 AND i.item_ordinal=?2 AND i.part_count=?3 AND i.message_content_id IS NULL AND i.description IS NULL AND b.private=1", .{ operation, ordinal, part_count })),
+                .find_in_page, .failed_search => try std.testing.expectEqual(1, try store_testing.queryU64(storage, "SELECT count(*) FROM model_output_item i JOIN content b ON b.content_id=i.extras_content_id " ++
+                    "WHERE i.operation_id=?1 AND i.item_ordinal=?2 AND i.part_count=0 AND i.message_content_id IS NULL AND i.description=?3 AND i.call_failed=?4 AND b.private=1", .{
+                    operation,
+                    ordinal,
+                    if (item == .find_in_page) "Find “Io” in ziglang.org" else "Search “zig”",
+                    @intFromBool(item == .failed_search),
+                })),
+                .message, .done => {
+                    messages += 1;
+                    var whole: std.Io.Writer.Allocating = .init(std.testing.allocator);
+                    defer whole.deinit();
+                    try wholeText(item, &whole.writer);
+                    const digest = protocol.contentDigest(whole.written());
+                    try std.testing.expectEqual(1, try store_testing.queryU64(storage, "SELECT count(*) FROM model_output_item i JOIN content c ON c.content_id=i.message_content_id JOIN content b ON b.content_id=i.extras_content_id " ++
+                        "WHERE i.operation_id=?1 AND i.item_ordinal=?2 AND i.part_count=?3 AND c.digest=?4 AND c.byte_length=?5 AND c.private=0 AND b.private=1", .{ operation, ordinal, part_count, store_testing.Blob{ .bytes = &digest }, whole.written().len }));
+                    // The text streamed across the item's batches reads back whole.
+                    var reader: ContentReader = undefined;
+                    reader.open(try content_domain.openContentIdentity(storage, .{ .digest = digest, .length = whole.written().len }, false));
+                    defer reader.close();
+                    var saved: [4096]u8 = undefined;
+                    var length: usize = 0;
+                    while (length < whole.written().len) {
+                        const read = try reader.read(length, saved[length..]);
+                        if (read == 0) break;
+                        length += read;
+                    }
+                    try std.testing.expectEqualStrings(whole.written(), saved[0..length]);
+                },
+            }
+        }
+        try std.testing.expectEqual(part_rows, try store_testing.queryU64(storage, "SELECT count(*) FROM model_output_part WHERE operation_id=?1", .{operation}));
+        // Every item, at dense positions in output order.
+        try std.testing.expectEqual(output.items.len, try store_testing.queryU64(storage, "SELECT count(*) FROM model_output_item WHERE operation_id=?1 AND " ++
+            "session_position-item_ordinal=(SELECT min(session_position) FROM model_output_item WHERE operation_id=?1)", .{operation}));
+        try std.testing.expectEqual(output.items.len, try store_testing.queryU64(storage, "SELECT count(*) FROM model_output_item WHERE operation_id=?1", .{operation}));
+        // Each message is an entry of its own text at its own position.
+        try std.testing.expectEqual(messages, try store_testing.queryU64(storage, "SELECT count(*) FROM conversation_entry e JOIN model_output_item i ON i.operation_id=e.source_operation_id AND i.item_ordinal=e.source_item_ordinal " ++
+            "WHERE e.source_operation_id=?1 AND e.content_id=i.message_content_id AND e.session_position=i.session_position", .{operation}));
+        try std.testing.expectEqual(messages, try store_testing.queryU64(storage, "SELECT count(*) FROM conversation_entry WHERE source_operation_id=?1", .{operation}));
+        var answer: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer answer.deinit();
+        if (!output.empty_answer) try wholeText(output.items[output.answer], &answer.writer);
+        try std.testing.expectEqual(1, try store_testing.queryU64(storage, "SELECT count(*) FROM model_operation o JOIN content c ON c.content_id=o.resolution_content_id " ++
+            "WHERE o.operation_id=?1 AND o.output_item_count=?2 AND c.digest=?3 AND c.byte_length=?4", .{ operation, output.items.len, store_testing.Blob{ .bytes = &protocol.contentDigest(answer.written()) }, answer.written().len }));
+        if (output.usage) {
+            try std.testing.expectEqual(1, try store_testing.queryU64(storage, "SELECT count(*) FROM model_operation WHERE operation_id=?1 AND usage_uncached_tokens=300 AND usage_cache_read_tokens=100 AND usage_cache_write_tokens=0 AND usage_output_tokens=7", .{operation}));
+        } else try std.testing.expectEqual(1, try store_testing.queryU64(storage, "SELECT count(*) FROM model_operation WHERE operation_id=?1 AND usage_output_tokens IS NULL", .{operation}));
+        try std.testing.expect(!storage.isFenced());
     }
 };
 
@@ -5112,6 +5276,7 @@ test "an item with more content than a batch holds saves each part's own text, a
             const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             var item: OversizedItem = .{};
             try item.build();
+            defer item.deinit();
             const contents = try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{});
             const rounds = storage.testing_content_work.rounds;
             try item.settle(&storage, &tmp, binding, null);
@@ -5163,6 +5328,7 @@ test "an item with more content than a batch holds saves nothing when a part aft
             const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             var item: OversizedItem = .{};
             try item.build();
+            defer item.deinit();
             const contents = try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{});
             // Part 295's text is past the 257 identities the first batch holds.
             try std.testing.expectError(error.OutputSourceChanged, item.settle(&storage, &tmp, binding, 295));
@@ -5171,6 +5337,53 @@ test "an item with more content than a batch holds saves nothing when a part aft
             try std.testing.expectEqual(0, try store_testing.queryU64(&storage, "SELECT count(*) FROM model_output_part", .{}));
             try std.testing.expectEqual(0, try store_testing.queryU64(&storage, "SELECT count(*) FROM model_output_item", .{}));
             try std.testing.expectEqual(1, try store_testing.queryU64(&storage, "SELECT count(*) FROM model_operation WHERE operation_id=?1 AND resolution_code IS NULL", .{binding.operation_id}));
+        }
+    }.run);
+}
+
+test "an item cut across settlement batches saves what the same output saves whole" {
+    // Each output's rounds are the facts round, then one per batch after
+    // the first, then the commit. A batch holds 257 identities: a part's
+    // bag or summary text, an item's bag, a message's text, an empty
+    // answer.
+    const Case = struct { name: []const u8, output: OversizedItem, rounds: u16 };
+    const cases = [_]Case{
+        // 600 part bags, the item's bag and its text: cut after part 256,
+        // then after part 513, then the rest to the item. Its text length
+        // spans three batches.
+        .{ .name = "an answer cut twice", .output = .{ .items = &.{.{ .message = .{ .parts = 600 } }}, .answer = 0 }, .rounds = 4 },
+        .{ .name = "an empty answer cut twice", .output = .{ .items = &.{.{ .message = .{ .parts = 600, .blank = true } }}, .answer = 0, .empty_answer = true }, .rounds = 4 },
+        // 255 part bags, the item's bag and its text fill the batch: only
+        // the empty answer's identity does not fit, so the item is cut
+        // after its last part.
+        .{ .name = "an empty answer cut only for its empty text", .output = .{ .items = &.{.{ .message = .{ .parts = 255, .blank = true } }}, .answer = 0, .empty_answer = true }, .rounds = 3 },
+        // A web search call alone, the reasoning item cut once, then a
+        // failed search, the answer and the usage record.
+        .{ .name = "web search calls around a later reasoning item, then usage", .output = .{ .items = &.{ .find_in_page, .{ .reasoning = OversizedItem.parts }, .failed_search, .done }, .answer = 3, .usage = true }, .rounds = 5 },
+        // The empty part bag and 256 texts, twice, then the rest.
+        .{ .name = "reasoning cut twice", .output = .{ .items = &.{ .{ .reasoning = 600 }, .done }, .answer = 1 }, .rounds = 5 },
+        .{ .name = "a later answer cut once, then a web search call and usage", .output = .{ .items = &.{ .{ .reasoning = 5 }, .{ .message = .{ .parts = OversizedItem.parts } }, .find_in_page }, .answer = 1, .usage = true }, .rounds = 5 },
+    };
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            for (cases) |entry| {
+                errdefer std.debug.print("case: {s}\n", .{entry.name});
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                const session = try configureTestSession(&storage, "cut-config");
+                try submitTestMessage(&storage, &tmp, "cut-input", "cut-key", session.slice(), "wide");
+                const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                var output = entry.output;
+                try output.build();
+                defer output.deinit();
+                const rounds = storage.testing_content_work.rounds;
+                try output.settle(&storage, &tmp, binding, null);
+                if (!case.rerun) try std.testing.expectEqual(entry.rounds, storage.testing_content_work.rounds - rounds);
+                try output.expectSaved(&storage, binding.operation_id);
+            }
         }
     }.run);
 }
