@@ -97,13 +97,35 @@ pub const Source = struct {
 /// Reads a snapshot without a refresh lock and applies the runtime's routing
 /// and expiry checks to it.
 pub fn localStatus(path: []const u8, now_seconds: i64) !LocalStatus {
+    var shown: Shown = undefined;
+    try localSignIn(path, now_seconds, &shown);
+    return shown.status;
+}
+
+/// What `rui auth status` shows of a sign-in: its local status and, while it
+/// is usable, the email its ID token names (empty when none) and when its
+/// access token expires (0 for an opaque one).
+pub const Shown = struct {
+    status: LocalStatus,
+    email: policy.Email = .{},
+    expires_at: i64 = 0,
+};
+
+/// `localStatus`, with what a person reads to recognize the sign-in.
+pub fn localSignIn(path: []const u8, now_seconds: i64, shown: *Shown) !void {
+    shown.* = .{ .status = .missing };
     const mapped = try pages.Mapped(Work).map();
     defer mapped.unmap();
     const work = mapped.value;
     const record = &work.credentials.current;
     defer std.crypto.secureZero(u8, std.mem.asBytes(record));
-    if (!try credentials.readSnapshotInto(path, record, &work.credentials)) return .missing;
-    return policy.localStatus(record, now_seconds, &work.claims);
+    if (!try credentials.readSnapshotInto(path, record, &work.credentials)) return;
+    shown.status = try policy.localStatus(record, now_seconds, &work.claims);
+    if (!shown.status.usable()) return;
+    shown.expires_at = record.expires_at;
+    // The email only labels the account; a token that names none is still
+    // the sign-in the status reports.
+    policy.emailOf(record.id_token.slice(), &work.claims, &shown.email) catch {};
 }
 
 /// Selects on the lease it holds; a due refresh releases it, exchanges, and
@@ -223,13 +245,17 @@ test "a forced refresh runs only for the rejected lease's unchanged generation" 
     try std.testing.expectEqualStrings("provider_sign_in_required", failureCode(error.RefreshRequiresLogin));
 }
 
-const Response = struct {
+/// One issuer answer, and whether the request provably never left.
+pub const Response = struct {
     bytes: [response_limit]u8 = undefined,
     len: usize = 0,
     request_not_sent: bool = true,
 };
 
-fn post(io: std.Io, request: wire.Request, response: *Response, cancelled: ?*const fn () bool) !u16 {
+/// Posts one form to the token issuer, over system trust, and returns the
+/// answer's status with its body in `response`. Every sign-in exchange,
+/// refresh and revocation goes through here.
+pub fn post(io: std.Io, request: wire.Request, response: *Response, cancelled: ?*const fn () bool) !u16 {
     response.* = .{};
     if (cancelled) |check| if (check()) return error.LoginInterrupted;
     const fields = [_]h2.Field{.{ .name = "content-type", .value = request.content_type }};
