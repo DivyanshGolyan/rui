@@ -72,6 +72,7 @@ class Endpoint(socketserver.ThreadingTCPServer):
         self.isolation_release = threading.Event()
         self.ready = threading.Event()
         self.lock = threading.Lock()
+        self.requests_changed = threading.Condition(self.lock)
 
     def get_request(self):
         sock, address = super().get_request()
@@ -217,6 +218,7 @@ class StreamHandler(socketserver.BaseRequestHandler):
                     assert event.stream_id not in bodies
                     with self.server.lock:
                         self.server.request_headers.append(dict(event.headers))
+                        self.server.requests_changed.notify_all()
                         refuse = self.server.refuse_at == "headers" and not self.server.refused
                         if refuse:
                             self.server.refused = True

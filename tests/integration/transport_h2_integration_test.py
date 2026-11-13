@@ -623,18 +623,46 @@ class OpenAiBaseUrlCleanupTests(unittest.TestCase):
     def test_clean_run_removes_its_root(self):
         self.run_case(fail_body=False, fail_shutdown=False)
 
-    def run_case(self, *, fail_body, fail_shutdown, fail_start=False):
+    def test_delayed_discovery_is_observed_before_configuration_while_response_stays_held(self):
+        for catalog_available in (False, True):
+            with self.subTest(catalog_available=catalog_available):
+                self.run_case(fail_body=False, fail_shutdown=False, delay_get=True,
+                              catalog_available=catalog_available)
+
+    def run_case(self, *, fail_body, fail_shutdown, fail_start=False, delay_get=False, catalog_available=False):
         calls = []
         primary = AssertionError("original OpenAI base URL body failure")
         secondary = RuntimeError("endpoint shutdown failure")
         bearer = ("Bearer " + codex_h2.codex.OPENAI_KEY).encode()
-        requests = [{b":method": b"GET", b":path": b"/custom/v1/models", b":authority": b"localhost:1", b"authorization": bearer},
-                    {b":method": b"POST", b":path": b"/custom/v1/responses", b":authority": b"localhost:1", b"authorization": bearer}]
+        get = {b":method": b"GET", b":path": b"/custom/v1/models", b":authority": b"localhost:1", b"authorization": bearer}
+        post = {b":method": b"POST", b":path": b"/custom/v1/responses", b":authority": b"localhost:1", b"authorization": bearer}
+        requests = [] if delay_get else [get, post]
+        phases = []
+        test_case = self
+
+        class DelayedDiscovery(threading.Condition):
+            def wait_for(self, predicate, timeout=None):
+                test_case.assertEqual(timeout, 20)
+                test_case.assertEqual(phases, ["pending"])
+                test_case.assertFalse(predicate(), "pending does not prove discovery GET receipt")
+                # Neither catalog discovery nor the wrong method/path credits
+                # the provider GET. None of these probes remains in the log.
+                for method, path in ((b"GET", b"/api.json"), (b"POST", b"/custom/v1/models"),
+                                     (b"GET", b"/custom/v1/other")):
+                    requests.append({**get, b":method": method, b":path": path})
+                    test_case.assertFalse(predicate(), (method, path))
+                    requests.pop()
+                requests.append(get)
+                phases.append("GET")
+                test_case.assertTrue(predicate())
+                return True
         listed = {"providers": [{"provider": "openai", "source": "live", "models": [
             {"id": "gpt-6-sol", "known": True}, {"id": "custom-model", "known": False}]}]}
         pending = {"providers": [{"provider": "openai", "source": "pending", "models": []}]}
         fallback = {"providers": [{"provider": "openai", "source": "catalog_fallback", "models": [
             {"id": "gpt-6-sol", "known": True}]}]}
+        if catalog_available:
+            fallback["providers"][0]["models"].insert(0, {"id": "catalog-only", "known": True})
         host_models = {}
 
         def shutdown():
@@ -642,7 +670,9 @@ class OpenAiBaseUrlCleanupTests(unittest.TestCase):
             if fail_shutdown:
                 raise secondary
 
-        endpoint = SimpleNamespace(server_address=("localhost", 1), request_headers=requests, connections=["list", "message"],
+        endpoint = SimpleNamespace(server_address=("localhost", 1), request_headers=requests,
+                                   requests_changed=DelayedDiscovery() if delay_get else threading.Condition(),
+                                   connections=["list", "message", "catalog"] if catalog_available else ["list", "message"],
                                    serve_forever=lambda: None, shutdown=shutdown,
                                    server_close=lambda: calls.append("close"))
         thread = SimpleNamespace(start=lambda: None, is_alive=lambda: False,
@@ -664,16 +694,42 @@ class OpenAiBaseUrlCleanupTests(unittest.TestCase):
                 host_models[socket] = listed
             return host, {"socket": socket}
 
+        def configure(*args):
+            if delay_get:
+                self.assertTrue(any(headers[b":method"] == b"GET" and headers[b":path"] == b"/custom/v1/models"
+                                    for headers in requests), "configure preceded the discovery GET")
+                self.assertEqual(phases, ["pending", "GET"])
+                phases.append("configure")
+            self.assertFalse(endpoint.models_release.is_set(), "discovery response released before configure")
+            return {"answer": {"status": "accepted", "session": "s"}}
+
         def message(*args):
             if fail_body:
                 raise primary
+            self.assertFalse(endpoint.models_release.is_set(), "discovery response released before POST")
+            if delay_get:
+                self.assertEqual(phases, ["pending", "GET", "configure"])
+                requests.append(post)
+                phases.append("POST")
+
+        def completed(*args):
+            self.assertFalse(endpoint.models_release.is_set(), "discovery response released before Message completed")
+            if delay_get:
+                self.assertEqual(phases, ["pending", "GET", "configure", "POST"])
+                phases.append("completed")
+            return {"result": {"status": "completed"}}, b"answer-custom-base", None
 
         def model_list(socket, *args):
             if endpoint.models_release.is_set():
-                requests.append(requests[0].copy())  # A model-list request refreshes again.
+                requests.append(get.copy())  # A model-list request refreshes again.
+                if catalog_available:
+                    requests.append({b":method": b"GET", b":path": b"/api.json",
+                                     b"if-none-match": b'"catalog-v1"', b"accept-encoding": b"identity"})
                 # Reply for the addressed Host, including the restarted Host's
                 # failed fetch; never reuse the first Host's live list.
                 return host_models[socket]
+            if delay_get:
+                phases.append("pending")
             return pending
 
         with tempfile.TemporaryDirectory() as parent, contextlib.ExitStack() as stack:
@@ -692,10 +748,9 @@ class OpenAiBaseUrlCleanupTests(unittest.TestCase):
                     (codex_h2.threading, "Thread", lambda **kwargs: thread),
                     (codex_h2, "start_ready_process", start),
                     (codex_h2.h2_fixture, "closed_host_request", model_list),
-                    (codex_h2.fixture, "command", lambda *a: {"answer": {"status": "accepted", "session": "s"}}),
+                    (codex_h2.fixture, "command", configure),
                     (codex_h2.fixture, "message", message),
-                    (codex_h2.fixture, "wait_for_result_release", lambda *a: (
-                        {"result": {"status": "completed"}}, b"answer-custom-base", None)),
+                    (codex_h2.fixture, "wait_for_result_release", completed),
                     (codex_h2.fixture, "stop_host", lambda host: calls.append(("stop_host", host.pid))),
                     (codex_h2, "retain_failure_state", lambda label, state: retained.append(state)),
                     (codex_h2.shutil, "rmtree", lambda path: removed.append(path))):
@@ -706,10 +761,10 @@ class OpenAiBaseUrlCleanupTests(unittest.TestCase):
             stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
             expected = primary if fail_body or fail_start else secondary if fail_shutdown else None
             if expected is None:
-                codex_h2.openai_base_url_run()
+                codex_h2.openai_base_url_run(catalog_available=catalog_available)
             else:
                 with self.assertRaises(type(expected)) as raised:
-                    codex_h2.openai_base_url_run()
+                    codex_h2.openai_base_url_run(catalog_available=catalog_available)
                 self.assertIs(raised.exception, expected)
             disposals = ["shutdown", "close", "join"]
             hosts = [] if fail_start else [1] if fail_body else [1, 2]
