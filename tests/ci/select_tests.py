@@ -147,8 +147,9 @@ FIXTURES = {
 # Fixtures a broader target runs in full.
 FIXTURE_COVERS = {"human-cli-integration": {"canonical-failure-integration", "terminal-restoration-integration"}}
 # Test code under src/: it reaches the unit roots and test executables that
-# compile it, never Rui's behavior.
-TEST_CODE = ("src/*tests.zig", "src/*_test.zig", "src/*testing.zig", "src/*testing/*", "src/mcp/test_server.zig",
+# compile it, never Rui's behavior. A module's tests live in one file
+# (`*tests.zig`) or in a folder of per-domain files (`*tests/`).
+TEST_CODE = ("src/*tests.zig", "src/*tests/*", "src/*_test.zig", "src/*testing.zig", "src/*testing/*", "src/mcp/test_server.zig",
              "src/socket_fixture.zig", "src/store/mysql_dialect_check.zig")
 # Targets that need a Linux runner; Mac Selected never runs them.
 LINUX_ONLY = {"login-signal-integration", "mysql-wire-integration"}

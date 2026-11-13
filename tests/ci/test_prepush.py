@@ -257,11 +257,11 @@ class PrepushTest(unittest.TestCase):
             "src/store/rsql.zig": (["test-store"], None),
             "src/store/mysql.zig": (["test-store"], None),
             "src/store/Store.zig": (["test-store"], None),
-            "tests/integration/launch_frame_integration.py": (["launch-frame-integration"], None),
+            "tests/integration/settings_integration.py": (["settings-integration"], None),
+            "src/host_start.zig": (["settings-integration"], None),
             # forEachEngine tests in the native root: no root runs only them.
             "src/find_tools_tests.zig": (None, [no_root]),
             "src/read_transcript.zig": (None, [no_root]),
-            "src/launch_frame.zig": (["launch-frame-integration"], [no_root]),
             # Roots that need Postgres, or start their own MySQL in Docker.
             "src/store/wire/pg.zig": (None, ["(test-pg)"]),
             "src/store/wire/mysql_connection.zig": (["test-store"], ["(mysql-wire-integration)"]),

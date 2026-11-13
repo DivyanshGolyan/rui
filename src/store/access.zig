@@ -38,8 +38,11 @@ pub const Mode = enum {
     /// One domain write: SQLite autocommit under the Entry lock, or an
     /// ownership-fenced transaction on a batching engine. It takes no
     /// identities or positions; `commit` runs exactly one queued write.
-    /// Only the transition runner opens one (`transition.Commit.single`).
     single,
+    // Only the transition runner opens a writing Access, `.write`,
+    // `.settlement` or `.single` (`transition.Commit`, `transition.Pass`);
+    // "Store entry points queue and fence only through canonical access"
+    // refuses one opened in any other Store file, tests included.
 };
 
 /// What a round reports besides its guards' errors. Each one fences.
@@ -429,6 +432,17 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// statement that failed.
         pub fn failedOn(a: *const Self, comptime S: type) bool {
             return a.failed_sql == S.sql.ptr;
+        }
+
+        /// Whether this write Access's transaction is open with no failure:
+        /// BEGIN ran when its first statement was queued, and on a batching
+        /// engine rides the next pass. A trace that marks a transaction
+        /// active asks it.
+        pub fn transactionOpen(a: *const Self) bool {
+            comptime std.debug.assert(transacts);
+            if (a.phase != .opened or a.failure != null) return false;
+            std.debug.assert(a.store.engine.inWriteTransaction());
+            return true;
         }
 
         /// Records that this Access changes `head`'s Session, and returns

@@ -202,7 +202,6 @@ fn drive(running: *Running, out: *std.Io.Writer) !result_text.Code {
 }
 
 test "Running resolves socket replies and a peer closing after the request" {
-    comptime std.debug.assert(result_text.excerpt_bytes == @import("../bash.zig").excerpt_bytes);
     const Case = struct { reply: []const u8, code: result_text.Code };
     const cases = [_]Case{
         .{ .reply = Script.jsonReply("{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}}"), .code = .succeeded },

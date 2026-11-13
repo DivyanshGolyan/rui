@@ -39,6 +39,8 @@ pub const Layer = union(enum) {
 
 pub const State = struct {
     layer: Layer = .main,
+    /// Keyboard navigation is in the list, while a wide chat stays drawn.
+    list_focused: bool = false,
     /// Between a bracketed paste's start and end. Keys inside it are pasted
     /// text, never actions.
     pasting: bool = false,
@@ -49,6 +51,7 @@ pub const Facts = struct {
     /// A Session is open, so the main pane shows it, not the overview.
     session_open: bool = false,
     settings: Settings = .{},
+    wide: bool = false,
 
     pub const Settings = struct {
         /// The Keys reference is open over the page.
@@ -75,6 +78,11 @@ pub const Input = union(enum) {
     colors,
     /// Focus changes and every other event Root does not route.
     other,
+    /// Left on an empty draft asks for the list beside a wide chat.
+    back_to_list,
+    session_closed,
+    /// Keyboard focus returns from the list to the open chat it shows.
+    focus_chat,
     open_settings,
     /// Show the main pane: close settings, keeping any sign-in over it.
     show_main,
@@ -88,7 +96,7 @@ pub const Input = union(enum) {
         /// The editor's name for the key; null for text and Enter.
         named: ?keymap.Key,
     };
-    pub const Mouse = enum { click, wheel, motion };
+    pub const Mouse = enum { click, list_click, chat_click, wheel, motion };
 };
 
 /// The whole decision for one input. Root applies it in field order: the
@@ -107,7 +115,7 @@ pub const Effects = struct {
         reset,
     };
     /// Always the top visible layer after the input: never a hidden pane.
-    pub const Focus = std.meta.Tag(Layer);
+    pub const Focus = enum { main, list, settings, sign_in };
     /// What a key the overview takes arrived under, and whether it is
     /// pasted text.
     pub const Delivery = struct { under: Layer.Covered, pasted: bool };
@@ -142,23 +150,47 @@ pub fn pane(layer: Layer, session_open: bool) Pane {
     };
 }
 
+/// List focus only hides a retained chat when the sidebar cannot fit beside it.
+pub fn mainPane(state: State, session_open: bool, wide: bool) Pane {
+    return pane(state.layer, session_open and (wide or !state.list_focused));
+}
+
 /// A layer change: the page change it makes, focus on the top layer, a redraw.
 fn navigated(layer: Layer, page: Effects.Page) Effects {
-    return .{ .page = page, .focus = std.meta.activeTag(layer), .redraw = true };
+    const top: Effects.Focus = switch (layer) {
+        .main => .main,
+        .settings => .settings,
+        .sign_in => .sign_in,
+    };
+    return .{ .page = page, .focus = top, .redraw = true };
 }
 
 /// Root reloads the settings page before it sends `open_settings`, so a
 /// failed reload never reaches this state.
 pub fn step(state: *State, facts: Facts, input: Input) Effects {
+    // Under main, resuming the chat only moves keys, as a chat-pane click
+    // does. A page over main is left first, exactly as showing main leaves it.
+    if (input == .focus_chat and state.layer == .main) return if (facts.session_open) focusChat(state) else .{};
     switch (input) {
+        .back_to_list => {
+            if (!facts.wide or !facts.session_open or state.layer != .main) return .{};
+            state.list_focused = true;
+            return .{ .focus = .list, .redraw = true };
+        },
+        .session_closed => {
+            state.list_focused = true;
+            return if (state.layer == .main) .{ .focus = .main, .redraw = true } else .{};
+        },
         .open_settings => {
+            state.list_focused = false;
             state.layer = switch (state.layer) {
                 .main, .settings => .settings,
                 .sign_in => .{ .sign_in = .{ .over = .settings } },
             };
             return navigated(state.layer, .close_keys);
         },
-        .show_main => {
+        .show_main, .focus_chat => {
+            state.list_focused = false;
             state.layer = switch (state.layer) {
                 .main, .settings => .main,
                 .sign_in => .{ .sign_in = .{ .over = .main } },
@@ -166,6 +198,7 @@ pub fn step(state: *State, facts: Facts, input: Input) Effects {
             return navigated(state.layer, .reset);
         },
         .open_sign_in => {
+            state.list_focused = false;
             state.layer = switch (state.layer) {
                 .main => .{ .sign_in = .{ .over = .main } },
                 .settings => .{ .sign_in = .{ .over = .settings } },
@@ -184,6 +217,7 @@ pub fn step(state: *State, facts: Facts, input: Input) Effects {
             return navigated(state.layer, .keep);
         },
         .signed_in => {
+            state.list_focused = false;
             state.layer = .main;
             return navigated(state.layer, .reset);
         },
@@ -199,7 +233,7 @@ pub fn step(state: *State, facts: Facts, input: Input) Effects {
         else => {},
     }
     // A click inside a paste is pasted bytes, never a press: nothing takes it.
-    if (input == .mouse and input.mouse == .click and state.pasting) return .{ .route = .swallow };
+    if (input == .mouse and (input.mouse == .click or input.mouse == .list_click or input.mouse == .chat_click) and state.pasting) return .{ .route = .swallow };
     // The sign-in page owns keys and pastes even over settings or a list
     // that had focus before it opened, and no click navigates behind it.
     if (state.layer == .sign_in) return switch (input) {
@@ -207,11 +241,31 @@ pub fn step(state: *State, facts: Facts, input: Input) Effects {
         else => .{ .route = .sign_in },
     };
     if (input == .key and state.layer == .settings) return settingsKey(state, facts.settings, input.key);
+    if (state.layer == .main and input == .mouse and facts.session_open and facts.wide) switch (input.mouse) {
+        .list_click => {
+            state.list_focused = true;
+            return .{ .focus = .list, .redraw = true };
+        },
+        .chat_click => return focusChat(state),
+        else => {},
+    };
     // The main pane's core takes every key and paste mark:
     // the open Session's, else the overview's. A click passes.
     if (state.layer != .main or input == .mouse) return .{};
+    // `pasted` classifies keys, not lifecycle delivery. In particular the
+    // end still reaches this same pane after clearing the stream flag; an
+    // editor that accepted the start owns its completion, even with no text.
     const delivery: Effects.Delivery = .{ .under = .main, .pasted = state.pasting };
+    if (state.list_focused) return .{ .route = .{ .overview = delivery } };
+
     return .{ .route = if (facts.session_open) .{ .session = delivery } else .{ .overview = delivery } };
+}
+
+/// The one list-to-chat transition, by click or list activation. It only
+/// moves keys: what the chat presents, such as Chat Info, stays open.
+fn focusChat(state: *State) Effects {
+    state.list_focused = false;
+    return .{ .focus = .main, .redraw = true };
 }
 
 /// The overview's keys under the settings page, never pasted.
@@ -402,7 +456,7 @@ test "Root input routing over every layer, main pane, settings state and input" 
         try std.testing.expectEqual(shown_pane, pane(state.layer, session));
         // No effect focuses a hidden pane: focus names the pane now shown.
         if (effects.focus) |focus| try std.testing.expect(switch (focus) {
-            .main => shown_pane == .overview or shown_pane == .session,
+            .main, .list => shown_pane == .overview or shown_pane == .session,
             .settings => shown_pane == .settings,
             .sign_in => shown_pane == .sign_in,
         });
@@ -444,4 +498,102 @@ test "Layer answers settings and sign-in open from the one union" {
     const over_settings: Layer = .{ .sign_in = .{ .over = .settings } };
     try std.testing.expect(!over_main.settingsOpen() and over_main.signInOpen());
     try std.testing.expect(over_settings.settingsOpen() and over_settings.signInOpen());
+}
+
+pub const DraftKey = enum { left, other };
+pub const DraftTake = enum { edit, list };
+
+/// Left on an actually empty draft asks for the list; Esc is never this,
+/// and keeps its own meaning (leave). A caret at column zero is not an
+/// empty draft.
+pub fn draftKey(empty: bool, key: DraftKey) DraftTake {
+    return if (empty and key == .left) .list else .edit;
+}
+
+test "App input draft list domain distinguishes empty text from a caret at start" {
+    for ([_]struct { bytes: []const u8, cursor: usize }{
+        .{ .bytes = "", .cursor = 0 },
+        .{ .bytes = "draft", .cursor = 5 },
+        .{ .bytes = "draft", .cursor = 0 },
+    }) |draft| {
+        try std.testing.expectEqual(DraftTake.edit, draftKey(draft.bytes.len == 0, .other));
+        try std.testing.expectEqual(if (draft.bytes.len == 0) DraftTake.list else .edit, draftKey(draft.bytes.len == 0, .left));
+    }
+}
+
+test "App input list activation routes unchanged to its semantic owner" {
+    for ([_]bool{ false, true }) |wide| {
+        var state: State = .{ .list_focused = true };
+        const result = step(&state, .{ .session_open = wide, .wide = wide }, .{ .key = .{ .named = null } });
+        try std.testing.expectEqual(Effects.Route{ .overview = .{ .under = .main, .pasted = false } }, result.route);
+        try std.testing.expect(state.list_focused);
+        const resumed = step(&state, .{ .session_open = true, .wide = wide }, .focus_chat);
+        try std.testing.expectEqual(@as(?Effects.Focus, .main), resumed.focus);
+        try std.testing.expect(!state.list_focused);
+    }
+}
+
+test "App input list activation and chat-pane click share one focus transition that keeps the chat's presentation" {
+    const layers = [_]Layer{ .main, .settings, .{ .sign_in = .{ .over = .main } }, .{ .sign_in = .{ .over = .settings } } };
+    for (layers) |layer| for ([_]bool{ false, true }) |wide| for ([_]bool{ false, true }) |session_open| for ([_]bool{ false, true }) |list_focused| {
+        const facts: Facts = .{ .session_open = session_open, .wide = wide };
+        var activated: State = .{ .layer = layer, .list_focused = list_focused };
+        const resume_effects = step(&activated, facts, .focus_chat);
+        try std.testing.expectEqual(Effects.Route.pass, resume_effects.route);
+        if (layer != .main) {
+            // Over a page, activation leaves it as showing main does.
+            var shown: State = .{ .layer = layer, .list_focused = list_focused };
+            try std.testing.expectEqualDeep(step(&shown, facts, .show_main), resume_effects);
+            try std.testing.expectEqualDeep(shown, activated);
+            continue;
+        }
+        // Under main, never a page reset: an open Chat Info survives.
+        try std.testing.expectEqual(Effects.Page.keep, resume_effects.page);
+        try std.testing.expectEqual(Layer.main, activated.layer);
+        try std.testing.expectEqual(if (session_open) false else list_focused, activated.list_focused);
+        try std.testing.expectEqual(if (session_open) @as(?Effects.Focus, .main) else null, resume_effects.focus);
+        if (!session_open or !wide) continue;
+        var clicked: State = .{ .layer = layer, .list_focused = list_focused };
+        try std.testing.expectEqualDeep(resume_effects, step(&clicked, facts, .{ .mouse = .chat_click }));
+        try std.testing.expectEqualDeep(activated, clicked);
+    };
+}
+
+test "App input list focus routes every list event to its semantic owner and mouse returns focus" {
+    for ([_]bool{ false, true }) |pasting| {
+        var state: State = .{ .list_focused = true, .pasting = pasting };
+        for ([_]Input{ .{ .key = .{ .named = null } }, .paste_start, .paste_end }) |input| {
+            const result = step(&state, .{ .session_open = true, .wide = true }, input);
+            try std.testing.expect(result.route == .overview);
+        }
+    }
+    var state: State = .{};
+    const facts: Facts = .{ .session_open = true, .wide = true };
+    const list = step(&state, facts, .{ .mouse = .list_click });
+    try std.testing.expect(state.list_focused);
+    try std.testing.expectEqual(@as(?Effects.Focus, .list), list.focus);
+    const chat = step(&state, facts, .{ .mouse = .chat_click });
+    try std.testing.expect(!state.list_focused);
+    try std.testing.expectEqual(@as(?Effects.Focus, .main), chat.focus);
+}
+
+test "App input paste completion routes to the same owner for every focus and paste shape" {
+    for ([_]bool{ false, true }) |wide| for ([_]bool{ false, true }) |session_open| for ([_]bool{ false, true }) |list_focused| for ([_][]const u8{ "", "\n", "text" }) |paste| {
+        var state: State = .{ .list_focused = list_focused };
+        const facts: Facts = .{ .wide = wide, .session_open = session_open };
+        const start = step(&state, facts, .paste_start);
+        const overview = list_focused or !session_open;
+        try std.testing.expectEqual(overview, start.route == .overview);
+        try std.testing.expectEqual(!overview, start.route == .session);
+        try std.testing.expect(state.pasting);
+        for (paste) |_| {
+            const text = step(&state, facts, .{ .key = .{ .named = null } });
+            try std.testing.expectEqual(start.route, text.route);
+        }
+        const end = step(&state, facts, .paste_end);
+        try std.testing.expectEqual(std.meta.activeTag(start.route), std.meta.activeTag(end.route));
+        const delivery = if (overview) end.route.overview else end.route.session;
+        try std.testing.expect(!delivery.pasted and !state.pasting);
+        try std.testing.expectEqual(list_focused, state.list_focused);
+    };
 }
