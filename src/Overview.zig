@@ -2121,9 +2121,7 @@ const Seen = struct {
     var now: Seen = .{};
 
     fn bounded(bytes: []const u8) protocol.Bounded(64) {
-        var value: protocol.Bounded(64) = .{};
-        value.set(bytes) catch unreachable;
-        return value;
+        return protocol.Bounded(64).from(bytes) catch unreachable;
     }
 };
 

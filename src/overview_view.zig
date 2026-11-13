@@ -1700,10 +1700,8 @@ fn readListing(state: *State) error{OutOfMemory}!void {
 }
 
 fn labelOf(text: []const u8) Bounded(max_label_bytes) {
-    var value: Bounded(max_label_bytes) = .{};
     // The list decoder validated the Label; this bound is its own.
-    value.set(text) catch unreachable;
-    return value;
+    return Bounded(max_label_bytes).from(text) catch unreachable;
 }
 
 /// Applies a completed listing: `changed` replaces rows by reference, `full`
@@ -3043,9 +3041,7 @@ fn testToken(generation: u64) Token {
 }
 
 fn bounded(comptime capacity: usize, text: []const u8) Bounded(capacity) {
-    var value: Bounded(capacity) = .{};
-    value.set(text) catch unreachable;
-    return value;
+    return Bounded(capacity).from(text) catch unreachable;
 }
 
 const TestSession = struct {
