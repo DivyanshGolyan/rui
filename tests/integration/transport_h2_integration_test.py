@@ -638,24 +638,7 @@ class OpenAiBaseUrlCleanupTests(unittest.TestCase):
         post = {b":method": b"POST", b":path": b"/custom/v1/responses", b":authority": b"localhost:1", b"authorization": bearer}
         requests = [] if delay_get else [get, post]
         phases = []
-        test_case = self
-
-        class DelayedDiscovery(threading.Condition):
-            def wait_for(self, predicate, timeout=None):
-                test_case.assertEqual(timeout, 20)
-                test_case.assertEqual(phases, ["pending"])
-                test_case.assertFalse(predicate(), "pending does not prove discovery GET receipt")
-                # Neither catalog discovery nor the wrong method/path credits
-                # the provider GET. None of these probes remains in the log.
-                for method, path in ((b"GET", b"/api.json"), (b"POST", b"/custom/v1/models"),
-                                     (b"GET", b"/custom/v1/other")):
-                    requests.append({**get, b":method": method, b":path": path})
-                    test_case.assertFalse(predicate(), (method, path))
-                    requests.pop()
-                requests.append(get)
-                phases.append("GET")
-                test_case.assertTrue(predicate())
-                return True
+        original_wait = codex_h2.fixture.wait_for
         listed = {"providers": [{"provider": "openai", "source": "live", "models": [
             {"id": "gpt-6-sol", "known": True}, {"id": "custom-model", "known": False}]}]}
         pending = {"providers": [{"provider": "openai", "source": "pending", "models": []}]}
@@ -671,7 +654,7 @@ class OpenAiBaseUrlCleanupTests(unittest.TestCase):
                 raise secondary
 
         endpoint = SimpleNamespace(server_address=("localhost", 1), request_headers=requests,
-                                   requests_changed=DelayedDiscovery() if delay_get else threading.Condition(),
+                                   lock=threading.Lock(),
                                    connections=["list", "message", "catalog"] if catalog_available else ["list", "message"],
                                    serve_forever=lambda: None, shutdown=shutdown,
                                    server_close=lambda: calls.append("close"))
@@ -698,7 +681,7 @@ class OpenAiBaseUrlCleanupTests(unittest.TestCase):
             if delay_get:
                 self.assertTrue(any(headers[b":method"] == b"GET" and headers[b":path"] == b"/custom/v1/models"
                                     for headers in requests), "configure preceded the discovery GET")
-                self.assertEqual(phases, ["pending", "GET"])
+                self.assertEqual(phases, ["pending", "wait", "GET", "observed"])
                 phases.append("configure")
             self.assertFalse(endpoint.models_release.is_set(), "discovery response released before configure")
             return {"answer": {"status": "accepted", "session": "s"}}
@@ -708,14 +691,14 @@ class OpenAiBaseUrlCleanupTests(unittest.TestCase):
                 raise primary
             self.assertFalse(endpoint.models_release.is_set(), "discovery response released before POST")
             if delay_get:
-                self.assertEqual(phases, ["pending", "GET", "configure"])
+                self.assertEqual(phases, ["pending", "wait", "GET", "observed", "configure"])
                 requests.append(post)
                 phases.append("POST")
 
         def completed(*args):
             self.assertFalse(endpoint.models_release.is_set(), "discovery response released before Message completed")
             if delay_get:
-                self.assertEqual(phases, ["pending", "GET", "configure", "POST"])
+                self.assertEqual(phases, ["pending", "wait", "GET", "observed", "configure", "POST"])
                 phases.append("completed")
             return {"result": {"status": "completed"}}, b"answer-custom-base", None
 
@@ -731,6 +714,39 @@ class OpenAiBaseUrlCleanupTests(unittest.TestCase):
             if delay_get:
                 phases.append("pending")
             return pending
+
+        def wait_for(predicate, description, *args, **kwargs):
+            if not delay_get or description != "the initial OpenAI models GET":
+                return original_wait(predicate, description, *args, **kwargs)
+            self.assertEqual(kwargs.get("timeout"), 20)
+            self.assertEqual(phases, ["pending"])
+            phases.append("wait")
+            self.assertFalse(predicate(), "pending does not prove discovery GET receipt")
+            # Neither catalog discovery nor the wrong method/path credits the
+            # provider GET. None of these probes remains in the request log.
+            for method, path in ((b"GET", b"/api.json"), (b"POST", b"/custom/v1/models"),
+                                 (b"GET", b"/custom/v1/other")):
+                with endpoint.lock:
+                    requests.append({**get, b":method": method, b":path": path})
+                self.assertFalse(predicate(), (method, path))
+                with endpoint.lock:
+                    requests.pop()
+
+            def receive_get():
+                self.assertEqual(phases, ["pending", "wait"])
+                with endpoint.lock:
+                    requests.append(get)
+                phases.append("GET")
+
+            # The real shared waiter drains this registered hook before its
+            # observation; no local waiting loop or preseeded GET can pass.
+            hooks = [*host_process.WAIT_HOOKS, (receive_get, lambda: [])]
+            with patch.object(host_process, "WAIT_HOOKS", hooks):
+                observed = original_wait(predicate, description, *args, **kwargs)
+            self.assertIs(observed, True)
+            self.assertEqual(phases, ["pending", "wait", "GET"])
+            phases.append("observed")
+            return observed
 
         with tempfile.TemporaryDirectory() as parent, contextlib.ExitStack() as stack:
             # Resolved as the fixture resolves it: Darwin's temp root is a link.
@@ -748,6 +764,7 @@ class OpenAiBaseUrlCleanupTests(unittest.TestCase):
                     (codex_h2.threading, "Thread", lambda **kwargs: thread),
                     (codex_h2, "start_ready_process", start),
                     (codex_h2.h2_fixture, "closed_host_request", model_list),
+                    (codex_h2.fixture, "wait_for", wait_for),
                     (codex_h2.fixture, "command", configure),
                     (codex_h2.fixture, "message", message),
                     (codex_h2.fixture, "wait_for_result_release", completed),
