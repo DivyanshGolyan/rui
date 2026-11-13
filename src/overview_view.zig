@@ -2801,6 +2801,7 @@ pub fn listItem(state: *const State, line: usize) ?Item {
 pub fn rowSegments(arena: Allocator, state: *const State, at: usize, width: u16, caps: Caps, frame: u64) error{OutOfMemory}![]const Segment {
     var built: Spans = .of(arena, caps, width);
     const row = &state.rows.items[state.order.items[at]];
+    const quiet = rowQuiet(state, row);
     const rule = rules.get(shownKind(state, row));
     built.begin();
     const mark = marks.get(rule.mark);
@@ -2812,7 +2813,7 @@ pub fn rowSegments(arena: Allocator, state: *const State, at: usize, width: u16,
         .quiet => Colour.quiet,
         .attention => Colour.attention,
     } else rule.colour;
-    _ = try built.put(1, glyph, 1, .{ .colour = colour });
+    _ = try built.put(1, glyph, 1, .{ .colour = colour, .dim = quiet });
     const named = title(state, row);
     const name = switch (row.archive_state) {
         .active, .archived => named.text,
@@ -2830,10 +2831,10 @@ pub fn rowSegments(arena: Allocator, state: *const State, at: usize, width: u16,
     else
         "";
     const name_room: usize = name_end -| 3;
-    const name_cells = try built.put(3, name, name_room -| built.measure(archived), .{ .colour = if (selected) .strong else .normal, .bold = selected, .dim = rowQuiet(state, row) });
-    _ = try built.put(3 + name_cells, archived, name_room -| name_cells, .{ .colour = .quiet });
-    _ = try built.put(end -| age_cells, age, age_cells, .{ .colour = .quiet });
-    return segmentsOf(arena, try built.finish(), width, .{});
+    const name_cells = try built.put(3, name, name_room -| built.measure(archived), .{ .colour = if (selected) .strong else .normal, .bold = selected, .dim = quiet });
+    _ = try built.put(3 + name_cells, archived, name_room -| name_cells, .{ .colour = .quiet, .dim = quiet });
+    _ = try built.put(end -| age_cells, age, age_cells, .{ .colour = .quiet, .dim = quiet });
+    return segmentsOf(arena, try built.finish(), width, .{ .dim = quiet });
 }
 
 /// Second line: terminal-safe detail, then a non-overlapping folder and gap.
@@ -2841,14 +2842,15 @@ pub fn rowSecondSegments(arena: Allocator, state: *const State, at: usize, width
     var built: Spans = .of(arena, caps, width);
     built.begin();
     const row = &state.rows.items[state.order.items[at]];
+    const quiet = rowQuiet(state, row);
     const folder = folderOf(state, row);
     const end = width -| 1;
     const folder_cells = @min(built.measure(folder), end -| 3);
     const folder_start = end -| folder_cells;
     var buffer: [max_second_line_bytes]u8 = undefined;
-    _ = try built.put(3, secondLine(state, row, &buffer), folder_start -| 1 -| 3, .{ .colour = .quiet, .dim = rowQuiet(state, row) });
-    _ = try built.putTail(folder_start, folder, folder_cells, .{ .colour = .quiet });
-    return segmentsOf(arena, try built.finish(), width, .{});
+    _ = try built.put(3, secondLine(state, row, &buffer), folder_start -| 1 -| 3, .{ .colour = .quiet, .dim = quiet });
+    _ = try built.putTail(folder_start, folder, folder_cells, .{ .colour = .quiet, .dim = quiet });
+    return segmentsOf(arena, try built.finish(), width, .{ .dim = quiet });
 }
 
 /// Whether `item`'s mark turns with the frame. Your own Session at work
@@ -3356,7 +3358,8 @@ test "every work state follows the rules table, in Unicode and ASCII" {
         state.selected = .new_session;
         var unselected = try Frame.of(&state, 80, 24, .{}, 0);
         defer unselected.deinit();
-        try std.testing.expectEqual(Style{ .colour = case.colour }, unselected.styleAt(2, 1).?);
+        // The sender/work domain below owns whole-row dim expectations.
+        try std.testing.expectEqual(case.colour, unselected.styleAt(2, 1).?.colour);
         try std.testing.expectEqual(Colour.quiet, unselected.styleAt(3, 79 - "rui".len).?.colour);
     }
 }
@@ -5387,7 +5390,10 @@ test "overview quiet rows cover sender work selection and the open empty chat" {
         try std.testing.expectEqual(if (selected) Colour.strong else Colour.normal, name.colour);
         const second = try rowSecondSegments(arena.allocator(), &state, 0, width, .{});
         try std.testing.expectEqual(quiet, (try styleOf(second, case[2])).dim);
-        try std.testing.expect(!(try styleOf(second, "rui")).dim);
+        try std.testing.expectEqual(quiet, (try styleOf(second, "rui")).dim);
+        // The mark, age, folder and padding share the name/detail's value.
+        for (first.segments) |segment| try std.testing.expectEqual(quiet, segment.style.dim);
+        for (second) |segment| try std.testing.expectEqual(quiet, segment.style.dim);
     };
     var empty = try opened(&.{session("newone", .{ .idle = ago(0) }, .{ .first = null })});
     defer empty.deinit();

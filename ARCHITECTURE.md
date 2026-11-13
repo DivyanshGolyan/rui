@@ -2470,7 +2470,7 @@ The counts line replaces the headline and the Host health line; full Host facts 
 Divyansh chose the counts line and totals-only memory on 2026-11-09 (TUI rework plan, "What changes" O1 to O4 and "Live memory on the overview").
 Only your own Session at work (an active mark under Yours) turns a spinner, `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`, one frame per 200 ms of the monotonic clock, every spinner in step.
 Only a Unicode, colour screen spins, and a row faded while the Host does not answer holds still.
-In both the full Sessions list and the conversation sidebar, a Session with no `from_person_at` dims its name and last line unless its shown work needs approval, failed, or stopped.
+In both the full Sessions list and the conversation sidebar, a Session with no `from_person_at` dims both complete row lines, including the mark, age and folder, unless its shown work needs approval, failed, or stopped.
 The open empty New Session is yours and stays normal; selection and hover override dim text.
 Quietness is derived by the overview core from the listed facts, never stored or added to the wire.
 The overview wakes for frames only while a spinner is on screen, and each frame writes only the cells that changed.

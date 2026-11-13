@@ -35,7 +35,7 @@
     },
     {
       "name": "quiet-overview",
-      "note": "Names and last lines dim only for never-written finished and working chats; approval stays loud",
+      "note": "Whole rows, including marks, ages and folders, dim only for never-written finished and working chats; approval stays loud",
       "open": "overview",
       "cast": [
         {
@@ -92,7 +92,7 @@
       ],
       "expect_dim": [
         {
-          "text": "Agent done",
+          "text": "✓ Agent done",
           "dim": true
         },
         {
@@ -100,7 +100,7 @@
           "dim": true
         },
         {
-          "text": "Agent working",
+          "text": "⠹ Agent working",
           "dim": true
         },
         {
@@ -149,7 +149,7 @@
       ],
       "expect_dim": [
         {
-          "text": "Agent done",
+          "text": "✓ Agent done",
           "dim": true,
           "min_columns": 140
         },
@@ -159,7 +159,7 @@
           "min_columns": 140
         },
         {
-          "text": "Agent working",
+          "text": "⠹ Agent working",
           "dim": true,
           "min_columns": 140
         },
