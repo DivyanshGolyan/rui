@@ -177,19 +177,14 @@ install_go() (
 
 install_python312() {
     local found
-    # tests/ci/fixture_user.py owns the question: for root, the interpreter must
-    # also be one .agents/as-fixture-user's users can run, not one under /root.
+    # tests/ci/fixture_user.py owns the question. .agents/as-fixture-user gives
+    # its users a copy of an interpreter they cannot reach, so root's may be private.
     if found=$(python3 "$repo_root/tests/ci/fixture_user.py" --python); then
         printf 'Python 3.12 already installed: %s\n' "$found"
         return
     fi
     command -v uv >/dev/null || python3 -m pip install --user --quiet --disable-pip-version-check uv
     local destination=$local_opt/python link=$local_bin/python3.12
-    if ((EUID == 0)); then
-        # .agents/as-fixture-user's users run it too, and root's home is closed to them.
-        destination=/usr/local/lib/rui-python
-        link=/usr/local/bin/python3.12
-    fi
     UV_PYTHON_INSTALL_DIR=$destination uv python install --no-bin 3.12
     ln -sfn "$(UV_PYTHON_INSTALL_DIR=$destination uv python find --managed-python 3.12)" "$link"
     found=$(python3 "$repo_root/tests/ci/fixture_user.py" --python)

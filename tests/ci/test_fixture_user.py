@@ -1,15 +1,32 @@
-"""The fixture user's names, environment and reuse, without creating a user."""
+"""The fixture user's names, provisioning, environment and reuse, without creating a user."""
 from contextlib import redirect_stderr, redirect_stdout
 import io
 import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 
 import fixture_user
-from fixture_user import TRUST, VENV
+from fixture_user import Install, TRUST, VENV
+
+
+def lane_reads(path, gid):
+    """Whether a user who owns nothing here and whose only group is `gid` can read `path`.
+
+    Independent of fixture_user: every directory down to it must be searchable,
+    and it readable, through its group bits when its group is `gid` and through
+    its other bits otherwise.
+    """
+    def allowed(part, bits):
+        status = os.stat(part)
+        return status.st_mode & (bits << 3 if status.st_gid == gid else bits) == (bits << 3 if status.st_gid == gid
+                                                                                   else bits)
+
+    path = Path(path)
+    return all(allowed(part, 0o1) for part in path.parents) and allowed(path, 0o5 if path.is_dir() else 0o4)
 
 
 class FixtureUserTest(unittest.TestCase):
@@ -75,16 +92,16 @@ class FixtureUserTest(unittest.TestCase):
         requirements[0].write_text("ruff==1\n")
         requirements[1].write_text("h2==1\n")
         ran = []
-        interpreter = Path("/opt/python/bin/python3.12")
 
         def run(argv):
             ran.append(argv[1:3])
             if argv[1:3] == ["-m", "venv"]:
-                self.assertEqual(argv[0], str(interpreter), "the environment comes from the chosen interpreter")
-                (venv / "bin").mkdir(parents=True)
+                self.assertEqual(argv[3:], ["--clear", str(venv)])
+                (venv / "bin").mkdir(parents=True, exist_ok=True)
                 (venv / "bin/python").touch()
+                (venv / "pyvenv.cfg").write_text(f"home = {Path(argv[0]).parent}\nversion = 3.12.3\n")
 
-        def ensure():
+        def ensure(interpreter=Path("/opt/python/bin/python3.12")):
             ran.clear()
             return fixture_user.ensure_venv(venv, interpreter, requirements, run,
                                             lambda path, text: path.write_text(text))
@@ -97,61 +114,169 @@ class FixtureUserTest(unittest.TestCase):
         self.assertTrue(ensure())
         self.assertEqual(ran, [["-m", "pip"]], "changed pins keep the interpreter")
         self.assertFalse(ensure())
+        self.assertTrue(ensure(Path("/var/lib/rui-fixture/tools/python-1/bin/python3.12")))
+        self.assertEqual(ran, [["-m", "venv"], ["-m", "pip"]], "another interpreter rebuilds the environment")
+        self.assertEqual(fixture_user.venv_home(venv), Path("/var/lib/rui-fixture/tools/python-1/bin"))
 
-    def interpreter(self, directory, *, builds_venv=True, mode=0o755):
-        """A python3.12 in `directory` (made with `mode`) that can or cannot import venv."""
+    def interpreter(self, directory, *, builds_venv=True, mode=0o755, reports=None):
+        """A python3.12 in `directory` (made with `mode`) that can or cannot import venv.
+
+        It reports running `reports`, or itself, as a shim reports the interpreter it runs.
+        """
         directory.mkdir(parents=True, exist_ok=True)
         os.chmod(directory, mode)
         python = directory / fixture_user.PYTHON
-        python.write_text(f"#!/bin/sh\nexit {0 if builds_venv else 1}\n")
+        report = f"'{reports}'" if reports else '"$0"'
+        python.write_text(f"#!/bin/sh\necho {report}\n" if builds_venv else "#!/bin/sh\nexit 1\n")
         python.chmod(0o755)
         return python
 
-    def test_a_lane_builds_its_environment_only_from_an_interpreter_its_user_can_run(self):
+    def test_the_interpreter_is_the_installation_python_reports_running(self):
         os.chmod(self.root, 0o755)
-        private = self.interpreter(self.root / "private/.pyenv/bin", mode=0o755)
-        os.chmod(self.root / "private", 0o700)
         public = self.interpreter(self.root / "public/bin")
-        system = self.interpreter(self.root / "system/bin")
-        linked = self.root / "links"
-        linked.mkdir()
-        (linked / fixture_user.PYTHON).symlink_to(private)
+        private = self.interpreter(self.root / "private/.pyenv/versions/3.12/bin")
+        os.chmod(self.root / "private", 0o700)
+        shim = self.interpreter(self.root / "private/.pyenv/shims", reports=private)
         broken = self.interpreter(self.root / "broken/bin", builds_venv=False)
         cases = {
-            # (caller's PATH, system fallback): the interpreter the lane uses, or None to refuse.
-            "public": ((public.parent,), (), public),
-            "public before the system one": ((public.parent,), (system.parent,), public),
-            "root-private only": ((private.parent,), (), None),
-            "root-private with a system fallback": ((private.parent,), (system.parent,), system),
-            "public link into root's home": ((linked,), (), None),
-            "public link with a system fallback": ((linked,), (system.parent,), system),
-            "public but without venv": ((broken.parent,), (system.parent,), system),
+            # The search path: the installation the lane's environment comes from, or None.
+            "public": ((public.parent,), Install(public.resolve(), public.resolve().parents[1])),
+            "root-private": ((private.parent,), Install(private.resolve(), private.resolve().parents[1])),
+            "a shim names what it runs": ((shim.parent,), Install(private.resolve(), private.resolve().parents[1])),
+            "one without venv is passed over": ((broken.parent, public.parent),
+                                                Install(public.resolve(), public.resolve().parents[1])),
+            "none": ((broken.parent,), None),
         }
-        for name, (caller, fallback, expected) in cases.items():
+        for name, (search, expected) in cases.items():
             with self.subTest(name):
-                caller_path = os.pathsep.join(map(str, caller))
-                system_path = os.pathsep.join(map(str, fallback))
-                if expected is None:
-                    with self.assertRaises(SystemExit) as refusal:
-                        fixture_user.fixture_python(caller_path, system_path)
-                    self.assertIn(".agents/setup installs one", str(refusal.exception.code))
-                else:
-                    self.assertEqual(fixture_user.fixture_python(caller_path, system_path), expected.resolve())
-        self.assertEqual(fixture_user.usable_python(str(private.parent), public=False), private.resolve(),
-                         "the caller's own environment may use its private interpreter")
-
-    def test_setup_installs_a_shared_interpreter_when_roots_is_private(self):
-        os.chmod(self.root, 0o755)
-        private = self.interpreter(self.root / "private/bin")
-        os.chmod(self.root / "private", 0o700)
-        public = self.interpreter(self.root / "public/bin")
-        for euid, search, fallback, status in ((0, private.parent, "", 1), (0, private.parent, public.parent, 0),
-                                               (1000, private.parent, "", 0)):
-            with self.subTest(euid=euid, fallback=str(fallback)), \
-                    patch.dict(os.environ, PATH=str(search)), patch.object(fixture_user, "BASE_PATH", str(fallback)), \
-                    patch.object(fixture_user.os, "geteuid", return_value=euid), \
+                self.assertEqual(fixture_user.find_python(os.pathsep.join(map(str, search))), expected)
+        for search, status in ((private.parent, 0), (broken.parent, 1)):
+            with self.subTest(python=str(search)), patch.dict(os.environ, PATH=str(search)), \
+                    patch.object(fixture_user, "BASE_PATH", ""), \
                     redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
                 self.assertEqual(fixture_user.main(["--python"]), status)
+
+    def test_a_lane_reads_only_what_root_placed_wherever_root_keeps_its_inputs(self):
+        """Provisioning over each input at a public and a private path, a linked worktree's common dir among them."""
+        os.chmod(self.root, 0o755)
+        if not fixture_user.reachable(self.root):
+            self.skipTest(f"{self.root}'s parents are closed to other users, so nothing under it is public")
+        public, private = self.root / "public", self.root / "private"
+        public.mkdir()
+        private.mkdir()
+        os.chmod(public, 0o755)
+        os.chmod(private, 0o700)
+        origin = private / "origin"
+        self.git("init", "--quiet", str(origin))
+        self.commit(origin, "release")
+        self.git("-C", str(origin), "tag", "v1.0")
+        release = self.git("-C", str(origin), "rev-parse", "v1.0")
+
+        def checkout(path):
+            """A repository whose origin/main and v0.9 are its first commit."""
+            self.git("init", "--quiet", str(path))
+            first = self.commit(path, "one")
+            self.git("-C", str(path), "update-ref", "refs/remotes/origin/main", first)
+            self.git("-C", str(path), "tag", "v0.9")
+            return first
+
+        firsts = {"public checkout": checkout(public / "checkout"), "private checkout": checkout(private / "checkout"),
+                  "linked worktree": checkout(private / "repository")}
+        self.git("-C", str(private / "repository"), "worktree", "add", "--quiet", "--detach",
+                 str(public / "linked"), "HEAD")
+
+        def install(parent, tool, binary, data):
+            """A toolchain whose binary prints itself, then, with no arguments, a file from its installation.
+
+            Python's probe passes arguments and reads only the binary, as from sys.executable.
+            """
+            program = parent / tool / binary
+            program.parent.mkdir(parents=True)
+            (parent / tool / data).parent.mkdir(parents=True, exist_ok=True)
+            (parent / tool / data).write_text(f"{tool} data\n")
+            up = "/.." * (len(Path(binary).parts) - 1)
+            program.write_text(f'#!/bin/sh\necho "$0"\n[ $# -eq 0 ] || exit 0\ncat "$(dirname "$0"){up}/{data}"\n')
+            program.chmod(0o755)
+            return program
+
+        tools = {parent: {fixture_user.PYTHON: install(parent / "tools", fixture_user.PYTHON, "bin/python3.12",
+                                                       "lib/python3.12/os.py"),
+                          "zig": install(parent / "tools", "zig", "zig", "lib/std/std.zig"),
+                          "go": install(parent / "tools", "go", "bin/go", "src/runtime/runtime.go")}
+                 for parent in (public, private)}
+        for parent in (public, private):
+            (parent / "ca.crt").write_text(f"{parent.name} certificate\n")
+        cases = {
+            # The checkout root reads, and the directory that holds its CA bundle and installs.
+            "public checkout": (public / "checkout", public),
+            "private checkout": (private / "checkout", private),
+            "linked worktree": (public / "linked", private),
+        }
+        tools_dir = self.root / "placed/tools"
+        gid = os.getgid()
+
+        def provision(source, inputs_at, lane_dir):
+            caller_path = os.pathsep.join(str(program.parent) for program in tools[inputs_at].values())
+            inputs = fixture_user.read_inputs("HEAD", caller_path, {"SSL_CERT_FILE": str(inputs_at / "ca.crt")},
+                                              root=source)
+            with redirect_stderr(io.StringIO()):
+                return inputs, fixture_user.place(inputs._replace(origin=str(origin)), lane_dir, tools_dir, gid)
+
+        for index, (name, (source, inputs_at)) in enumerate(cases.items()):
+            with self.subTest(name):
+                lane_dir = self.root / "placed/lanes" / f"lane{index}"
+                head = self.commit(source, f"work {index}")
+                inputs, placed = provision(source, inputs_at, lane_dir)
+
+                # Every path the lane reads, and everything under it, is readable through other or the lane's group.
+                for path in (placed.source, placed.bundle, *placed.binaries.values()):
+                    self.assertFalse(path.is_relative_to(private), f"the lane reads {path}, inside root's own state")
+                    for item in (path, *(path.rglob("*") if path.is_dir() else ())):
+                        self.assertTrue(lane_reads(item, gid), f"the lane cannot read {item}")
+                self.assertEqual(placed.bundle.read_text(), f"{inputs_at.name} certificate\n")
+                self.assertEqual(set(placed.binaries), set(tools[inputs_at]))
+                for tool, program in tools[inputs_at].items():
+                    binary = placed.binaries[tool]
+                    if inputs_at == public:
+                        self.assertEqual(binary, program, "an install every user reaches is used in place")
+                    else:
+                        self.assertTrue(binary.is_relative_to(tools_dir), f"{tool} is copied for lanes")
+                    output = subprocess.run([str(binary)], capture_output=True, text=True, check=True).stdout
+                    self.assertEqual(output.splitlines(), [str(binary), f"{tool} data"],
+                                     "the binary runs with its whole installation")
+
+                # The export holds REF, origin/main and both release tags, and no path back to the source.
+                refs = self.git("--git-dir", str(placed.source), "for-each-ref", "--format=%(refname) %(objectname)")
+                self.assertEqual(dict(line.split() for line in refs.splitlines()),
+                                 {"refs/heads/fixture": head, "refs/remotes/origin/main": firsts[name],
+                                  "refs/tags/v0.9": firsts[name], "refs/tags/v1.0": release})
+                self.assertFalse((placed.source / "objects/info/alternates").exists())
+                lane = self.root / f"lane-checkout-{index}"
+                self.git("init", "--quiet", str(lane))
+                self.git("-c", f"safe.directory={placed.source}", "-C", str(lane), "fetch", "--quiet",
+                         str(placed.source), "+refs/*:refs/*")
+                self.git("-C", str(lane), "checkout", "--quiet", "--detach", inputs.sha)
+                self.assertEqual((lane / "work.txt").read_text(), f"work {index}\n")
+
+                # Reuse: a new commit arrives in the same export, and no install is copied again.
+                copies = sorted(tools_dir.iterdir())
+                later = self.commit(source, f"more {index}")
+                self.assertEqual(provision(source, inputs_at, lane_dir)[1], placed)
+                self.assertEqual(sorted(tools_dir.iterdir()), copies)
+                self.assertEqual(self.git("--git-dir", str(placed.source), "rev-parse", "refs/heads/fixture"), later)
+
+    def git(self, *args):
+        """Run git with a fixed identity and return its output, stripped."""
+        return subprocess.run(["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                               "-c", "init.defaultBranch=main", *args],
+                              capture_output=True, text=True, check=True).stdout.strip()
+
+    def commit(self, checkout, text):
+        """Commit `text` as work.txt in `checkout`; its commit."""
+        (checkout / "work.txt").write_text(text + "\n")
+        self.git("-C", str(checkout), "add", "work.txt")
+        self.git("-C", str(checkout), "commit", "--quiet", "-m", text)
+        return self.git("-C", str(checkout), "rev-parse", "HEAD")
 
     def test_prepush_reexecutes_only_outside_an_existing_environment(self):
         python = self.root / VENV / "bin/python"

@@ -31,6 +31,7 @@ It also requires that every `measure-*` step goes through the exec entry.
 Where the shell is root, as in many containers, run the command through `.agents/as-fixture-user LANE [--ref REF] -- COMMAND...`, for example `.agents/as-fixture-user pr4 -- python3 tests/integration/host_process_test.py`.
 On first use it creates the ordinary account `rui-LANE`, which owns its home, its checkout of the committed REF (HEAD by default), its Zig cache and its Python 3.12 environment from the pinned requirements; later runs reuse them, and `.agents/as-fixture-user --remove LANE` deletes them.
 Each lane has its own account, so concurrent lanes never share a checkout, a Host or a Store.
+The account reads nothing of root's in place: root exports REF, `origin/main` and the `v*` tags into a repository only that account's group reads, copies the CA bundle beside it, and copies any Python 3.12, Zig or Go the account cannot reach, all under `/var/lib/rui-fixture`, so the source checkout and toolchains may stay root-private.
 COMMAND starts under `env -i` with the caller's proxy and a readable copy of its CA bundle, which `host_process.py` still withholds from fixtures; [fixture_user.py](tests/ci/fixture_user.py) names everything else the run keeps.
 
 A fixture starts every process on a PTY through `spawn` in [terminal_process.py](tests/integration/terminal_process.py), never `subprocess.Popen`.

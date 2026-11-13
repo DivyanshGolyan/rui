@@ -8,22 +8,30 @@ run as root. `.agents/as-fixture-user` runs this module as root:
   .agents/as-fixture-user --remove LANE
 
 The first run for LANE creates the user `rui-LANE` with the home /home/rui-LANE.
-Every run then, under that lane's lock:
-  - checks out REF (default HEAD) of this checkout's repository at ~/rui as
-    that user, fetching it with origin/main from this repository and the
-    release tags from origin, and removes untracked files that are not ignored
-    (ignored build caches stay);
-  - copies the caller's CA bundle to ~/.config/rui-fixture/ca-bundle.crt;
-  - makes the caller's Zig and Go reachable when they sit behind an
-    unreadable directory such as /root, through a hard-linked copy under
-    /usr/local/lib/rui-fixture-tools;
+Root reads its own state and places what the lane needs where the lane can
+read it; the lane reads nothing else, so where root keeps its checkout,
+interpreter, toolchains and CA bundle never matters. Every run, under that
+lane's lock:
+  - root reads `Inputs`: the commit REF (default HEAD) names, this checkout's
+    common git directory, origin's URL, the caller's CA bundle and the
+    python3.12, zig and go the caller would run;
+  - root places them (`place`): it fetches REF, origin/main and the v* tags
+    (this repository's, then origin's) into a bare repository in
+    /var/lib/rui-fixture/lanes/LANE, copies the CA bundle there, and uses each
+    install in place when every user can reach it, otherwise a hard-linked copy
+    under /var/lib/rui-fixture/tools. The lane's directory is root's and only
+    the lane's group reads it, so the lane cannot change what root reads next
+    run and other lanes cannot read it;
+  - as that user, checks out REF at ~/rui from the placed repository and
+    removes untracked files that are not ignored (ignored build caches stay);
   - keeps the Python 3.12 environment at ~/.local/share/rui/venv-3.12 current
-    with tests/ci/requirements.txt and tests/integration/requirements.txt at
-    REF, rebuilding nothing whose pins are unchanged;
+    with the placed interpreter and with tests/ci/requirements.txt and
+    tests/integration/requirements.txt at REF, rebuilding nothing unchanged;
   - runs COMMAND in ~/rui as that user under `env -i`, with only the
     variables `environment` names, and exits with its status.
 Lanes never share a user, home, checkout, Zig cache or environment. The user and
-home are kept for the next run; --remove stops the user's processes and deletes both.
+home are kept for the next run; --remove stops the user's processes and deletes
+them and the lane's placed directory.
 
   python3 tests/ci/fixture_user.py --venv
   python3 tests/ci/fixture_user.py --python
@@ -31,8 +39,7 @@ home are kept for the next run; --remove stops the user's processes and deletes 
 --venv creates or refreshes the caller's own environment at the same
 home-relative path; .agents/setup runs it, and tests/ci/prepush.py re-executes
 itself in it. --python prints the Python 3.12 those environments are built from
-and fails when there is none; as root it names only one a fixture user can run,
-and .agents/setup installs one when it fails.
+and fails when there is none; .agents/setup installs one when it fails.
 """
 import fcntl
 import hashlib
@@ -45,6 +52,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+from typing import NamedTuple
 
 ROOT = Path(__file__).resolve().parents[2]
 COMMAND = ".agents/as-fixture-user"
@@ -56,7 +64,10 @@ STAMP = "rui-requirements.sha256"
 REQUIREMENTS = ("tests/ci/requirements.txt", "tests/integration/requirements.txt")
 MARKER = ".rui-fixture-user"
 CHECKOUT = "rui"
-CA_COPY = Path(".config/rui-fixture/ca-bundle.crt")
+# Everything root places for lanes: tools/ every user reads, lanes/LANE/ only that lane's group reads.
+PLACED = Path("/var/lib/rui-fixture")
+SOURCE = "source.git"
+BUNDLE = "ca-bundle.crt"
 # The caller's trust variables, read in this order for the bundle to copy; each
 # points at the copy in the run.
 TRUST = ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "GIT_SSL_CAINFO", "PIP_CERT",
@@ -66,8 +77,9 @@ TRUST = ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "GIT_SSL_CAINF
 PASSED = ("HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy", "TERM", "LANG", "LC_ALL", "LC_CTYPE")
 # Each toolchain's install root, as directories above its binary.
 TOOLS = {"zig": 1, "go": 2}
-TOOL_MIRROR = Path("/usr/local/lib/rui-fixture-tools")
 BASE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+# What the export holds, in the order root fetches it: REF (named in `export`), then these.
+EXPORTED = ("+refs/remotes/origin/main:refs/remotes/origin/main", "+refs/tags/v*:refs/tags/v*")
 
 
 def say(message):
@@ -92,32 +104,37 @@ def reachable(path):
         return False
 
 
-def usable_python(search, public):
-    """The first python3.12 on `search` that can build a venv, resolved; None when there is none.
+class Install(NamedTuple):
+    """An executable a lane runs: its resolved binary and the directory tree it needs."""
+    binary: Path
+    root: Path
 
-    With `public`, only an interpreter every user can run counts: a lane's user
-    cannot follow a name on root's PATH into /root (a pyenv shim, uv's default
-    install), even through a link in a directory it can search.
+
+def find_python(search):
+    """The first python3.12 on `search` that can build a venv, as an Install; None when there is none.
+
+    The binary is the one the interpreter reports running, so a shim or a venv
+    on the search path names the real installation.
     """
     for entry in search.split(os.pathsep):
         candidate = Path(entry) / PYTHON if entry else None
         if candidate is None or not candidate.is_file() or not os.access(candidate, os.X_OK):
             continue
-        interpreter = candidate.resolve()
-        if public and not reachable(interpreter):
-            continue
-        if subprocess.run([str(interpreter), "-c", "import ensurepip, venv"], capture_output=True).returncode == 0:
-            return interpreter
+        probe = subprocess.run([str(candidate), "-c", "import ensurepip, sys, venv; print(sys.executable)"],
+                               capture_output=True, text=True)
+        if probe.returncode == 0 and probe.stdout.strip():
+            binary = Path(probe.stdout.strip()).resolve()
+            return Install(binary, binary.parents[1])
     return None
 
 
-def fixture_python(caller_path, system_path=BASE_PATH):
-    """The Python 3.12 a lane's environment is built from: the caller's first one every user can run."""
-    python = usable_python(os.pathsep.join(filter(None, (caller_path, system_path))), public=True)
-    if python is None:
-        raise SystemExit(f"{COMMAND}: no {PYTHON} that a fixture user can run; .agents/setup installs one "
-                         "under /usr/local")
-    return python
+def find_tool(tool, search):
+    """The caller's `tool` as an Install, or None."""
+    found = shutil.which(tool, path=search)
+    if found is None:
+        return None
+    binary = Path(found).resolve()
+    return Install(binary, binary.parents[TOOLS[tool] - 1])
 
 
 def requirement_stamp(texts):
@@ -128,19 +145,34 @@ def requirement_stamp(texts):
     return digest.hexdigest()
 
 
+def venv_home(venv):
+    """The directory of the interpreter `venv` was built from, from its pyvenv.cfg; None when unknown."""
+    try:
+        lines = (venv / "pyvenv.cfg").read_text().splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        key, _, value = line.partition("=")
+        if key.strip() == "home":
+            return Path(value.strip())
+    return None
+
+
 def ensure_venv(venv, interpreter, requirements, run, write):
     """Create or refresh the Python 3.12 environment `venv` from `interpreter`; True when it ran pip.
 
     `run(argv)` and `write(path, text)` act as the environment's owner. An
-    environment whose stamp matches `requirements` is reused untouched; one
-    with other pins keeps its interpreter and reinstalls only the pins.
+    environment built from `interpreter` whose stamp matches `requirements` is
+    reused untouched; one with other pins keeps its interpreter and reinstalls
+    only the pins; one built from another interpreter is rebuilt.
     """
     want = requirement_stamp([Path(path).read_text() for path in requirements])
     python, stamp = venv / "bin/python", venv / STAMP
-    if python.exists() and stamp.is_file() and stamp.read_text().strip() == want:
+    current = python.exists() and venv_home(venv) == Path(interpreter).parent
+    if current and stamp.is_file() and stamp.read_text().strip() == want:
         return False
-    if not python.exists():
-        run([str(interpreter), "-m", "venv", str(venv)])
+    if not current:
+        run([str(interpreter), "-m", "venv", "--clear", str(venv)])
     run([str(python), "-m", "pip", "install", "--quiet", "--disable-pip-version-check",
          *(argument for path in requirements for argument in ("-r", str(path)))])
     write(stamp, want + "\n")
@@ -176,9 +208,146 @@ def source_bundle(environ):
     return None
 
 
-def search_path(venv_bin, mirrored, caller_path):
-    """The run's PATH: the environment, mirrored toolchains, then the caller's directories every user can reach."""
-    entries = [str(venv_bin), *map(str, mirrored),
+class Inputs(NamedTuple):
+    """Everything a lane needs from root, as root read it from its own state."""
+    sha: str
+    source: Path  # the repository's common git directory, shared by every worktree
+    origin: str  # origin's URL, or "" without one
+    bundle: Path | None
+    installs: dict  # name -> Install
+
+
+class Placed(NamedTuple):
+    """Every path a lane reads that root provided; nothing else root has reaches the lane."""
+    source: Path
+    bundle: Path | None
+    binaries: dict  # name -> the binary the lane runs
+
+
+def read_inputs(ref, caller_path, environ, root=ROOT):
+    """Root's inputs for a lane at `ref` of the checkout `root`, read before any user exists.
+
+    Refuses a missing commit or Python 3.12.
+    """
+    git = ["git", "-C", str(root)]
+    sha = subprocess.run([*git, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"], capture_output=True,
+                         text=True).stdout.strip()
+    if not sha:
+        raise SystemExit(f"{COMMAND}: {ref!r} names no commit in {root}")
+    source = Path(subprocess.check_output([*git, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                                          text=True).strip())
+    origin = subprocess.run([*git, "remote", "get-url", "origin"], capture_output=True, text=True).stdout.strip()
+    python = find_python(os.pathsep.join(filter(None, (caller_path, BASE_PATH))))
+    if python is None:
+        raise SystemExit(f"{COMMAND}: no {PYTHON} that can build a venv; .agents/setup installs one")
+    installs = {PYTHON: python}
+    for tool in TOOLS:
+        found = find_tool(tool, caller_path)
+        if found is not None:
+            installs[tool] = found
+    return Inputs(sha, source, origin, source_bundle(environ), installs)
+
+
+def share(path, gid):
+    """Give `path` and everything under it to group `gid`, readable and searchable by it, writable by no one else."""
+    for directory, _, files in os.walk(path):
+        os.chown(directory, -1, gid)
+        os.chmod(directory, 0o750)
+        for name in files:
+            file = Path(directory) / name
+            os.chown(file, -1, gid)
+            os.chmod(file, 0o750 if os.stat(file).st_mode & stat.S_IXUSR else 0o640)
+
+
+def export(inputs, repository, gid):
+    """Fetch the lane's refs from root's repository (and origin's tags) into the bare `repository`."""
+    git = ["git", "-c", f"safe.directory={inputs.source}", f"--git-dir={repository}"]
+    if not repository.is_dir():
+        subprocess.run(["git", "init", "--quiet", "--bare", "--template=", str(repository)], check=True)
+    fetch = [*git, "fetch", "--quiet", "--no-tags", "--update-shallow"]
+    subprocess.run([*fetch, str(inputs.source), f"+{inputs.sha}:refs/heads/fixture"], check=True)
+    # Merge bases against origin/main (prepush, select_tests) need it; a repository without one has none.
+    for refspec in EXPORTED:
+        subprocess.run([*fetch, str(inputs.source), refspec], stderr=subprocess.DEVNULL)
+    tags = subprocess.run([*fetch, "--force", inputs.origin, EXPORTED[-1]]) if inputs.origin else None
+    if tags is None or tags.returncode:
+        say(f"could not fetch release tags from {inputs.origin or 'an origin remote'}; fixtures that read them "
+            "will fail")
+    share(repository, gid)
+
+
+def place_bundle(source, lane_dir, gid):
+    """Copy the CA bundle `source` into `lane_dir` for the lane's group; the copy, or None without one."""
+    if source is None:
+        say("no CA bundle in SSL_CERT_FILE or its peers; the run uses the system trust store")
+        return None
+    copy, content = lane_dir / BUNDLE, source.read_bytes()
+    if not copy.is_file() or copy.read_bytes() != content:
+        handle, staging = tempfile.mkstemp(dir=lane_dir)
+        with os.fdopen(handle, "wb") as file:
+            file.write(content)
+        os.chown(staging, -1, gid)
+        os.chmod(staging, 0o640)
+        os.replace(staging, copy)
+    return copy
+
+
+def place_install(install, tools_dir):
+    """The binary the lane runs for `install`: itself when every user reaches it, else a copy in `tools_dir`."""
+    if reachable(install.binary):
+        return install.binary
+    identity = os.stat(install.binary)
+    key = hashlib.sha256(f"{install.root}\0{identity.st_dev}:{identity.st_ino}:{identity.st_size}:"
+                         f"{identity.st_mtime_ns}".encode()).hexdigest()[:12]
+    copy = tools_dir / f"{install.root.name}-{key}"
+    if not copy.is_dir():
+        staging = Path(tempfile.mkdtemp(dir=tools_dir))
+        # Hard links share the files' bytes; another filesystem needs a copy.
+        if subprocess.run(["cp", "-al", f"{install.root}/.", str(staging)], stderr=subprocess.DEVNULL).returncode:
+            subprocess.run(["cp", "-a", f"{install.root}/.", str(staging)], check=True)
+        os.chmod(staging, 0o755)
+        try:
+            staging.rename(copy)
+            say(f"copied {install.root} to {copy} for lanes")
+        except OSError:
+            # Another lane's run made the same copy first.
+            shutil.rmtree(staging)
+            if not copy.is_dir():
+                raise
+    return copy / install.binary.relative_to(install.root)
+
+
+def public_dir(path):
+    """Make `path`, and each parent it lacks, searchable by every user whatever the umask."""
+    missing = [part for part in (path, *path.parents) if not part.exists()]
+    for part in reversed(missing):
+        part.mkdir(exist_ok=True)
+        os.chmod(part, 0o755)
+    os.chmod(path, 0o755)
+
+
+def place(inputs, lane_dir, tools_dir, gid):
+    """Root's one provisioning step: put each input where group `gid` reads it, and return those paths.
+
+    The git objects and the CA bundle always go to `lane_dir`, which stays the
+    caller's and only `gid` reads, so the lane never changes what root reads
+    next. An install every user reaches is used in place; any other is copied
+    under `tools_dir`, which every user reads.
+    """
+    public_dir(lane_dir.parent)
+    public_dir(tools_dir)
+    lane_dir.mkdir(exist_ok=True)
+    os.chown(lane_dir, -1, gid)
+    os.chmod(lane_dir, 0o750)
+    export(inputs, lane_dir / SOURCE, gid)
+    bundle = place_bundle(inputs.bundle, lane_dir, gid)
+    binaries = {name: place_install(install, tools_dir) for name, install in inputs.installs.items()}
+    return Placed(lane_dir / SOURCE, bundle, binaries)
+
+
+def search_path(venv_bin, placed_dirs, caller_path):
+    """The run's PATH: the environment, placed installs, then the caller's directories every user can reach."""
+    entries = [str(venv_bin), *map(str, placed_dirs),
                *(entry for entry in (caller_path or BASE_PATH).split(os.pathsep) if reachable(entry))]
     return os.pathsep.join(dict.fromkeys(entries))
 
@@ -204,7 +373,7 @@ def env_command(user, env, argv):
 
 
 class Lane:
-    """One lane's user, home and checkout, acting as that user."""
+    """One lane's user, home and checkout, acting as that user, and the directory root places for it."""
 
     def __init__(self, lane):
         self.lane = lane
@@ -212,7 +381,7 @@ class Lane:
         self.home = Path("/home") / self.user
         self.checkout = self.home / CHECKOUT
         self.venv = self.home / VENV
-        self.bundle = self.home / CA_COPY
+        self.placed = PLACED / "lanes" / lane
         self.env = {"HOME": str(self.home), "USER": self.user, "LOGNAME": self.user, "PATH": BASE_PATH}
 
     def run(self, argv, *, check=True, **options):
@@ -238,81 +407,24 @@ class Lane:
     def ensure_user(self):
         if self.owned():
             say(f"reusing {self.user} ({self.home})")
-            return
-        subprocess.run(["useradd", "--create-home", "--home-dir", str(self.home), "--shell", "/bin/bash",
-                        "--user-group", self.user], check=True)
-        os.chmod(self.home, 0o750)
-        self.write(self.home / MARKER, self.lane + "\n")
-        say(f"created {self.user} ({self.home})")
+        else:
+            subprocess.run(["useradd", "--create-home", "--home-dir", str(self.home), "--shell", "/bin/bash",
+                            "--user-group", self.user], check=True)
+            os.chmod(self.home, 0o750)
+            self.write(self.home / MARKER, self.lane + "\n")
+            say(f"created {self.user} ({self.home})")
+        return pwd.getpwnam(self.user).pw_gid
 
-    def ensure_bundle(self, environ):
-        source = source_bundle(environ)
-        if source is None:
-            say("no CA bundle in SSL_CERT_FILE or its peers; the run uses the system trust store")
-            return None
-        content = source.read_bytes()
-        if not self.bundle.is_file() or self.bundle.read_bytes() != content:
-            self.write(self.bundle, content)
-        return self.bundle
-
-    def ensure_checkout(self, sha, network):
+    def ensure_checkout(self, source, sha):
+        """Check out `sha` from the placed repository `source`, which root owns and the lane's group reads."""
         if not (self.checkout / ".git").is_dir():
             self.run(["git", "init", "--quiet", str(self.checkout)])
-        git = ["git", "-C", str(self.checkout)]
-        # The repository every worktree shares: git upload-pack refuses a linked worktree's path
-        # owned by another user even when safe.directory names it.
-        source = subprocess.check_output(["git", "-C", str(ROOT), "rev-parse", "--path-format=absolute",
-                                          "--git-common-dir"], text=True).strip()
-        # Only this repository, never '*': git refuses to read another user's repository without it.
-        trusted = self.run(["git", "config", "--global", "--get-all", "safe.directory"], check=False,
-                           capture_output=True, text=True).stdout.split("\n")
-        if source not in trusted:
-            self.run(["git", "config", "--global", "--add", "safe.directory", source])
-        self.run([*git, "fetch", "--quiet", "--no-tags", "--update-shallow", source, f"+{sha}:refs/heads/fixture"])
-        # Merge bases against origin/main (prepush, select_tests) need it; a repository without one skips it.
-        self.run([*git, "fetch", "--quiet", "--no-tags", "--update-shallow", source,
-                  "+refs/remotes/origin/main:refs/remotes/origin/main"], check=False, stderr=subprocess.DEVNULL)
+        git = ["git", "-c", f"safe.directory={source}", "-C", str(self.checkout)]
+        self.run([*git, "fetch", "--quiet", "--no-tags", "--update-shallow", "--force", str(source),
+                  "+refs/*:refs/*"])
         self.run([*git, "checkout", "--quiet", "--force", "--detach", sha])
         # Ignored files stay: they are build caches such as .zig-cache, zig-out and zig-pkg.
         self.run([*git, "clean", "-ffdq"])
-        origin = subprocess.run(["git", "-C", str(ROOT), "remote", "get-url", "origin"], capture_output=True,
-                                text=True).stdout.strip()
-        tags = subprocess.run(env_command(self.user, network, [*git, "fetch", "--quiet", "--no-tags", "--force",
-                                                                origin, "+refs/tags/v*:refs/tags/v*"]),
-                              cwd=self.home) if origin else None
-        if tags is None or tags.returncode:
-            say(f"could not fetch release tags from {origin or 'an origin remote'}; fixtures that read them will fail")
-
-    def ensure_tools(self, caller_path):
-        mirrored = []
-        for tool, levels in TOOLS.items():
-            found = shutil.which(tool, path=caller_path)
-            if found is None:
-                continue
-            binary = Path(found).resolve()
-            if reachable(binary):
-                continue
-            install = binary.parents[levels - 1]
-            key = hashlib.sha256(str(install).encode()).hexdigest()[:8]
-            mirror = TOOL_MIRROR / f"{install.name}-{key}"
-            if not mirror.is_dir():
-                TOOL_MIRROR.mkdir(parents=True, exist_ok=True)
-                os.chmod(TOOL_MIRROR, 0o755)
-                staging = Path(tempfile.mkdtemp(dir=TOOL_MIRROR))
-                # Hard links share the files' bytes; another filesystem needs a copy.
-                if subprocess.run(["cp", "-al", f"{install}/.", str(staging)]).returncode:
-                    subprocess.run(["cp", "-a", f"{install}/.", str(staging)], check=True)
-                os.chmod(staging, 0o755)
-                try:
-                    staging.rename(mirror)
-                    say(f"made {tool} reachable at {mirror}")
-                except OSError:
-                    # Another lane's run made the same mirror first.
-                    shutil.rmtree(staging)
-                    if not mirror.is_dir():
-                        raise
-            mirrored.append(mirror / binary.relative_to(install).parent)
-        return mirrored
 
 
 def lock(lane):
@@ -329,23 +441,20 @@ def lock(lane):
 def run(lane, ref, keep, command):
     lane = Lane(lane)
     caller_path = os.environ.get("PATH", BASE_PATH)
-    interpreter = fixture_python(caller_path)
-    sha = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
-                         capture_output=True, text=True).stdout.strip()
-    if not sha:
-        raise SystemExit(f"{COMMAND}: {ref!r} names no commit in {ROOT}")
+    inputs = read_inputs(ref, caller_path, os.environ)
     held = lock(lane.lane)
-    lane.ensure_user()
-    bundle = lane.ensure_bundle(os.environ)
-    path = search_path(lane.venv / "bin", lane.ensure_tools(caller_path), caller_path)
-    network = environment(lane.user, lane.home, path, bundle, os.environ)
-    lane.ensure_checkout(sha, network)
-    say(f"{lane.user} at {sha[:12]} in {lane.checkout}")
-    built = ensure_venv(lane.venv, interpreter, [lane.checkout / path for path in REQUIREMENTS],
+    placed = place(inputs, lane.placed, PLACED / "tools", lane.ensure_user())
+    # The environment carries Python; the toolchains' own directories come before the caller's.
+    tools = [binary.parent for name, binary in placed.binaries.items() if name != PYTHON]
+    path = search_path(lane.venv / "bin", tools, caller_path)
+    network = environment(lane.user, lane.home, path, placed.bundle, os.environ)
+    lane.ensure_checkout(placed.source, inputs.sha)
+    say(f"{lane.user} at {inputs.sha[:12]} in {lane.checkout}")
+    built = ensure_venv(lane.venv, placed.binaries[PYTHON], [lane.checkout / path for path in REQUIREMENTS],
                         lambda argv: subprocess.run(env_command(lane.user, network, argv), cwd=lane.home, check=True),
                         lane.write)
     say(f"{'installed' if built else 'reusing'} {lane.venv}")
-    env = environment(lane.user, lane.home, path, bundle, os.environ, keep)
+    env = environment(lane.user, lane.home, path, placed.bundle, os.environ, keep)
     status = subprocess.run(env_command(lane.user, env, command), cwd=lane.checkout).returncode
     held.close()
     return status
@@ -358,9 +467,11 @@ def remove(lane):
         raise SystemExit(f"{COMMAND}: {lane.user} does not exist")
     subprocess.run(["pkill", "-KILL", "-u", lane.user])
     subprocess.run(["userdel", "--remove", lane.user], stderr=subprocess.DEVNULL)
-    if lane.home.exists() or subprocess.run(["id", lane.user], capture_output=True).returncode == 0:
-        raise SystemExit(f"{COMMAND}: could not delete {lane.user} and {lane.home}")
-    say(f"deleted {lane.user} and {lane.home}")
+    shutil.rmtree(lane.placed, ignore_errors=True)
+    if (lane.home.exists() or lane.placed.exists()
+            or subprocess.run(["id", lane.user], capture_output=True).returncode == 0):
+        raise SystemExit(f"{COMMAND}: could not delete {lane.user}, {lane.home} and {lane.placed}")
+    say(f"deleted {lane.user}, {lane.home} and {lane.placed}")
     held.close()
     return 0
 
@@ -399,22 +510,16 @@ def parse(argv):
 
 def main(argv):
     action, lane, ref, keep, command = parse(argv)
-    if action == "python":
-        # .agents/setup's question: root's interpreter must serve fixture users too.
-        search = os.pathsep.join(filter(None, (os.environ.get("PATH"), BASE_PATH)))
-        python = usable_python(search, public=os.geteuid() == 0)
+    if action in ("python", "venv"):
+        python = find_python(os.pathsep.join(filter(None, (os.environ.get("PATH"), BASE_PATH))))
         if python is None:
-            print(f"No {PYTHON} that can build a venv{' for a fixture user' if os.geteuid() == 0 else ''}.",
-                  file=sys.stderr)
+            print(f"No {PYTHON} that can build a venv; .agents/setup installs one.", file=sys.stderr)
             return 1
-        print(python)
-        return 0
-    if action == "venv":
+        if action == "python":
+            print(python.binary)
+            return 0
         home = Path.home()
-        interpreter = usable_python(os.environ.get("PATH", BASE_PATH), public=False)
-        if interpreter is None:
-            raise SystemExit(f"No {PYTHON} that can build a venv; .agents/setup installs one.")
-        built = ensure_venv(home / VENV, interpreter, [ROOT / path for path in REQUIREMENTS],
+        built = ensure_venv(home / VENV, python.binary, [ROOT / path for path in REQUIREMENTS],
                             lambda argv: subprocess.run(argv, check=True), lambda path, text: path.write_text(text))
         print(f"{'Installed' if built else 'Reusing'} {home / VENV}.")
         return 0
