@@ -138,6 +138,9 @@ test "find_tools no match and bad words resolve without revisions then equality 
                 const code = if (index == 0) "succeeded" else "failed";
                 try std.testing.expectEqual(@as(u64, 1), try testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE action_id=?1 AND resolution_code=?2", .{ input.binding.action_id, code }));
                 if (index != 0) try std.testing.expect(std.mem.indexOf(u8, try result(&storage, session, alloc), "words") != null);
+                // A refused call's command saves why, as its typed code.
+                const key = try std.fmt.allocPrint(alloc, "rui.core/find_tools/{d}", .{input.binding.action_id});
+                try std.testing.expectEqual(@as(u64, @intFromBool(index != 0)), try testing.queryU64(&storage, "SELECT count(*) FROM core_command WHERE command_key=?1 AND accepted=0 AND code='invalid_arguments'", .{key}));
             }
             // A huge argument is refused before it is read: a 16 KiB arena
             // cannot hold its 64 KiB, so success proves it was never copied.
@@ -154,6 +157,48 @@ test "find_tools no match and bad words resolve without revisions then equality 
             const input = try call(&storage, &tmp, session.slice(), "{\"words\":\"bash\"}", "find-equality", alloc);
             try loader.run(&storage, alloc, &input, .{});
             try std.testing.expectEqual(@as(u64, 1), try testing.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref=?1 AND loaded_tool_set_id IS NULL AND revision=2", .{session.slice()}));
+            try std.testing.expect(!storage.isFenced());
+        }
+    }.run);
+}
+
+test "find_tools lists a match's whole first line, however many windows it takes" {
+    try testing.forEachEngine(struct {
+        fn run(case: *testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer arena.deinit();
+            const alloc = arena.allocator();
+            // A first line past two of the Store's verified windows.
+            const line_bytes = 5000;
+            const description = try alloc.alloc(u8, line_bytes + 16);
+            for (description[0..line_bytes], 0..) |*byte, index| byte.* = 'a' + @as(u8, @intCast(index % 26));
+            @memcpy(description[line_bytes..], "\nSecond line....");
+            var records: [tools.built_in_tool_set.records.len + 1]tools.Record = undefined;
+            @memcpy(records[0..tools.built_in_tool_set.records.len], tools.built_in_tool_set.records);
+            records[tools.built_in_tool_set.records.len] = .{ .name = "probe", .owner = .mcp, .server = "test", .description = description, .input_schema = "{}" };
+            std.mem.sort(tools.Record, &records, {}, struct {
+                fn less(_: void, a: tools.Record, b: tools.Record) bool {
+                    return std.mem.lessThan(u8, a.name, b.name);
+                }
+            }.less);
+            var digests: [records.len][32]u8 = undefined;
+            for (&records, &digests) |*record, *digest| digest.* = tools.recordDigest(record);
+            const host_tool_set: tools.HostToolSet = .{ .records = &records, .digests = &digests };
+            try storage.saveHostToolSet(&host_tool_set);
+            const session = try configure(&storage, "find-long-line", &.{ "find_tools", "probe" }, &.{"find_tools"});
+            try testing.submitTestMessage(&storage, &tmp, "find-long-line-input", "find-long-line-input", session.slice(), "find tools");
+            const input = try call(&storage, &tmp, session.slice(), "{\"words\":\"probe\"}", "long-line-call", alloc);
+            try loader.run(&storage, alloc, &input, .{});
+            try std.testing.expect(try loaded(&storage, session.slice(), "probe"));
+            const expected = try std.fmt.allocPrint(alloc, "- probe: {s}\n", .{description[0..line_bytes]});
+            const bytes = try result(&storage, session, alloc);
+            try std.testing.expect(std.mem.endsWith(u8, bytes, expected));
+            try std.testing.expect(std.mem.indexOf(u8, bytes, "Second line") == null);
             try std.testing.expect(!storage.isFenced());
         }
     }.run);

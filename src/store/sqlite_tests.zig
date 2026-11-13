@@ -9950,6 +9950,36 @@ test "a saved tool set whose text no longer matches its digest fences the Store"
     try std.testing.expectError(error.StoreFenced, storage.readHostToolSet(std.testing.allocator));
 }
 
+test "find_tools fences a description whose bytes no longer match its digest, searched or listed" {
+    // "fetch" matches the tool's name, so only its listing reads the
+    // description; "absent" matches nothing, so the search reads it whole.
+    for ([_][]const u8{ "fetch", "absent" }) |word| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStoreToolSet(&storage, &tmp, std.testing.io, &mcp_tool_set);
+        defer storage.close() catch unreachable;
+        var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+        var command = try completeConfiguration("find-corrupt", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
+        command.configuration.tools = try .of(&.{ "fetch_page", "find_tools" });
+        command.configuration.loaded_tools = try .of(&.{"find_tools"});
+        const session = (try storage.configure(&command, .{})).accepted.session;
+        try submitTestMessage(&storage, &tmp, "find-corrupt-input", "find-corrupt-key", session.slice(), "find tools");
+        const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        const calls = [_]TestingCall{.{ .item_id = "find", .name = "find_tools", .encoded_call_id = "find", .decoded_call_id = "find", .encoded_arguments = "{\\\"words\\\":\\\"fetch\\\"}", .decoded_arguments = "{\"words\":\"fetch\"}" }};
+        try settleCallsForTesting(&storage, &tmp, model, "find-corrupt", &calls);
+        const input = (try storage.nextCoreWork()).?.action;
+        try std.testing.expect(input.tool == .find_tools);
+        try sqlite.exec(storage.sqliteDatabase(), "UPDATE content SET payload=CAST(upper(CAST(payload AS TEXT)) AS BLOB) WHERE content_id=(SELECT description_content_id FROM tool_record WHERE owner='mcp')");
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        var words: @import("../find_tools_words.zig").FindTools = .{ .count = 1 };
+        words.words[0] = word;
+        try std.testing.expectError(error.CorruptStore, storage.findTools(input.binding, arena.allocator(), &words, null, .{}));
+        try std.testing.expect(storage.isFenced());
+    }
+}
+
 test "a Session offering an MCP server's tool is listed, reported and settled" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
