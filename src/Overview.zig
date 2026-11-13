@@ -710,7 +710,7 @@ fn appNext(self: *Self, ctx: *vxfw.EventContext, next: ?Next) !void {
                     ctx.quit = true;
                 };
             }
-            if (opening.browse) _ = try self.root.focusList(ctx, true);
+            if (opening.browse) _ = try self.root.focusList(ctx);
         },
     }
 }
@@ -6990,6 +6990,8 @@ const key_encodings = std.enums.EnumArray(keymap.Key, []const []const u8).init(.
     .down = &.{ "\x1b[B", "\x1bOB", "\x1b[1;1B" },
     .left = &.{ "\x1b[D", "\x1bOD", "\x1b[1;1D" },
     .right = &.{ "\x1b[C", "\x1bOC", "\x1b[1;1C" },
+    .tab = &.{ "\t", "\x1b[9u" },
+    .shift_tab = &.{ "\x1b[Z", "\x1b[9;2u" },
     .shift_up = &.{ "\x1b[1;2A", "\x1b[1;2:1A" },
     .shift_down = &.{ "\x1b[1;2B", "\x1b[1;2:1B" },
     .page_up = &.{ "\x1b[5~", "\x1b[5;1~", "\x1b[5;2~" },
@@ -7075,7 +7077,7 @@ test "new and clear retire the old chat through the real lender and open empty C
         defer rig.close();
         const overview = rig.overview;
         overview.hooks.scratch = Files.scratch;
-        try std.testing.expect(try rig.next(.{ .open = "k7m2qx".* }) == null);
+        try std.testing.expect(try rig.next(.{ .open = .{ .reference = "k7m2qx".* } }) == null);
         defer {
             if (overview.app_session) |left| {
                 left.frontend.?.stop();

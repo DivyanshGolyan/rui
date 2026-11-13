@@ -25,6 +25,10 @@ pub const Key = enum {
     /// drawn in place of the draft takes any its screen leaves unbound.
     left,
     right,
+    /// Tab and Shift-Tab: `app_input.keys` moves focus through the drawn
+    /// order with them before any screen sees them.
+    tab,
+    shift_tab,
     shift_up,
     shift_down,
     /// With or without Shift.
@@ -128,8 +132,8 @@ pub const list = [_]Reference{
     .{ .key = "enter", .meaning = "open / send" },
     .{ .key = "esc", .meaning = "back", .keys = &.{.escape}, .aliases = &.{.ctrl_g} },
     .{ .key = "⇧enter", .meaning = "new line" },
-    .{ .key = "tab", .meaning = "next focus" },
-    .{ .key = "⇧tab", .meaning = "previous focus" },
+    .{ .key = "tab", .meaning = "next focus", .keys = &.{.tab} },
+    .{ .key = "⇧tab", .meaning = "previous focus", .keys = &.{.shift_tab} },
     .{ .key = "ctrl+x", .meaning = "stop", .keys = &.{.ctrl_x} },
     .{ .key = "↑↓", .meaning = "scroll", .keys = &.{ .up, .down }, .aliases = &.{ .shift_up, .shift_down, .page_up, .page_down, .home, .end, .ctrl_end } },
     // Left (an empty draft back to the list) and the info panel's actions

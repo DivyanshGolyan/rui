@@ -64,6 +64,10 @@ pub const keys: keymap.Keymap(Action) = .init(.{
     // bare arrows move an Action's choice, both by `step`.
     .left = null,
     .right = null,
+    // Focus order's keys: `app_input.keys` takes them first, and an open
+    // panel moves its own rows with them.
+    .tab = null,
+    .shift_tab = null,
     .shift_up = .scroll_up,
     .shift_down = .scroll_down,
     .page_up = .page_up,
@@ -180,8 +184,6 @@ pub const Key = union(enum) {
     /// A key the line editor names, bound in `keys` or not.
     named: keymap.Key,
     enter,
-    tab,
-    shift_tab,
     /// `r`, which starts a stopped Host from an empty draft; else text.
     host_start,
     /// Alt-I: the chat's info panel.
@@ -320,6 +322,8 @@ pub fn step(state: State, facts: Facts, input: Input) Take {
         if (input.closes()) return if (facts.info_choice) .cancel_panel_choice else .close_info;
         return .panel;
     }
+    // Focus order is Root's: a Tab that reaches the chat moves nothing here.
+    if (!input.pasted and input.key == .named and @import("app_input.zig").keys.get(input.key.named) != null) return .taken;
     switch (footer(state.footer, .{ .has_effort = facts.has_effort, .opens = !facts.info_open and !facts.saving }, footerKey(input))) {
         .open_choice => return .open_choice,
         .taken => return .taken,
@@ -362,7 +366,7 @@ pub fn rowKey(input: Input) ActionConsent.RowKey {
         .named => |name| if (name == .left or name == .right) .arrows else .other,
         .text, .host_start => .printable,
         .paste_start => .paste,
-        .tab, .shift_tab, .info, .details, .other, .paste_end => .other,
+        .info, .details, .other, .paste_end => .other,
     };
 }
 
@@ -399,8 +403,6 @@ fn footerKey(input: Input) session_chrome.FooterInput {
     if (input.pasted) return .other;
     if (input.closes()) return .escape;
     return switch (input.key) {
-        .tab => .{ .tab = false },
-        .shift_tab => .{ .tab = true },
         .enter => .enter,
         .text, .host_start => .text,
         else => .other,
@@ -456,16 +458,14 @@ test "every key Root hands the Session means one thing in each Session state" {
         .{ .setups = &.{.submitting}, .keys = &.{.details}, .take = .details },
         .{ .setups = &.{ .host_held, .opening, .preparing, .command_active }, .keys = &.{.details}, .take = hold },
         .{ .setups = &main, .keys = &.{.info}, .take = .open_info },
-        // Footer focus takes Tab and Shift-Tab before anything else does.
-        .{ .setups = &(main ++ [_]Setup{ .selector, .draft_row }), .keys = &.{.tab}, .take = .taken, .focus = .model },
-        .{ .setups = &(main ++ [_]Setup{ .selector, .draft_row }), .keys = &.{.shift_tab}, .take = .taken, .focus = .effort },
+        // Root moves focus with Tab and Shift-Tab; one that reaches the
+        // chat without a panel moves and edits nothing.
+        .{ .setups = &(main ++ [_]Setup{ .selector, .draft_row, .footer_focused }), .keys = &.{ .tab, .shift_tab }, .take = .taken },
         // Focus on the footer's model.
         .{ .setups = &.{.footer_focused}, .keys = &.{ .printable, .host_start, .paste_start }, .take = send, .focus = .input },
         .{ .setups = &.{.footer_focused}, .keys = &.{ .pasted_printable, .pasted_enter, .ctrl_c, .ctrl_d, .left, .right, .details, .paste_end }, .take = send },
         .{ .setups = &.{.footer_focused}, .keys = &.{.enter}, .take = .open_choice, .focus = .input },
         .{ .setups = &.{.footer_focused}, .keys = &closing, .take = .taken, .focus = .input },
-        .{ .setups = &.{.footer_focused}, .keys = &.{.tab}, .take = .taken, .focus = .effort },
-        .{ .setups = &.{.footer_focused}, .keys = &.{.shift_tab}, .take = .taken, .focus = .input },
         .{ .setups = &.{.footer_focused}, .keys = &.{.info}, .take = .open_info },
         // A shown footer choice and the info panel take every key but
         // Esc, which closes the topmost thing, and the Session's own work.
@@ -509,8 +509,8 @@ test "every key Root hands the Session means one thing in each Session state" {
                 .ctrl_d => .{ .key = .{ .named = .ctrl_d } },
                 .left => .{ .key = .{ .named = .left } },
                 .right => .{ .key = .{ .named = .right } },
-                .tab => .{ .key = .tab },
-                .shift_tab => .{ .key = .shift_tab },
+                .tab => .{ .key = .{ .named = .tab } },
+                .shift_tab => .{ .key = .{ .named = .shift_tab } },
                 .host_start => .{ .key = .host_start },
                 .info => .{ .key = .info },
                 .details => .{ .key = .details },

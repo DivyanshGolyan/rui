@@ -4025,6 +4025,98 @@
       ]
     },
     {
+      "name": "focus-tab-narrow-input",
+      "note": "Narrow chat: only drawn controls are in the order; the input holds focus first.",
+      "sizes": [
+        "46x30"
+      ],
+      "open": "Current focus audit",
+      "steps": [
+        {
+          "wait": "The retry draft is ready."
+        },
+        {
+          "sleep": 0.2
+        }
+      ],
+      "expect": [
+        "Current focus task",
+        "The retry draft is ready."
+      ],
+      "absent": [
+        "Opening\u2026",
+        "Alternate focus audit"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+      ]
+    },
+    {
+      "name": "focus-tab-narrow-back",
+      "note": "Narrow Tab from the input visits the drawn back button; the hidden list is not in the order.",
+      "sizes": [
+        "46x30"
+      ],
+      "open": "Current focus audit",
+      "steps": [
+        {
+          "wait": "The retry draft is ready."
+        },
+        {
+          "keys": [
+            "Tab"
+          ]
+        },
+        {
+          "sleep": 0.2
+        }
+      ],
+      "expect": [
+        "Current focus task",
+        "The retry draft is ready."
+      ],
+      "absent": [
+        "Opening\u2026",
+        "Alternate focus audit"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+      ]
+    },
+    {
+      "name": "focus-tab-narrow-model",
+      "note": "Narrow second Tab visits the footer Model button; draft and feed are unchanged.",
+      "sizes": [
+        "46x30"
+      ],
+      "open": "Current focus audit",
+      "steps": [
+        {
+          "wait": "The retry draft is ready."
+        },
+        {
+          "keys": [
+            "Tab",
+            "Tab"
+          ]
+        },
+        {
+          "sleep": 0.2
+        }
+      ],
+      "expect": [
+        "Current focus task",
+        "The retry draft is ready."
+      ],
+      "absent": [
+        "Opening\u2026",
+        "Alternate focus audit"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+      ]
+    },
+    {
       "name": "appcmds-skill-without-preview",
       "note": "Whole-line bracketed paste uses normal Message admission, never the suggestion preview",
       "open": "Skill catalog authority",

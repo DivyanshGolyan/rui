@@ -205,11 +205,14 @@ pub fn selectKey(comptime keys: anytype, pressed: vaxis.Key) Selection(@TypeOf(k
 
 test "a choice takes its arrows and Enter, the screen's keys and typing, and refuses chords" {
     const Name = keymap.Key;
-    // A screen that leaves the arrows unbound, as the conversation does.
+    // A screen that leaves the arrows unbound, as the conversation does,
+    // and Tab, which every screen leaves to `app_input.keys`.
     const keys = comptime blk: {
         var map = keymap.every;
         map.meanings.set(.left, null);
         map.meanings.set(.right, null);
+        map.meanings.set(.tab, null);
+        map.meanings.set(.shift_tab, null);
         break :blk map;
     };
     const Case = struct { bytes: []const u8, expected: Selection(Name) };
@@ -367,6 +370,8 @@ const chords = std.enums.EnumArray(Key, []const Chord).init(.{
     .down = &.{.{ .code = vaxis.Key.down }},
     .left = &.{.{ .code = vaxis.Key.left }},
     .right = &.{.{ .code = vaxis.Key.right }},
+    .tab = &.{.{ .code = vaxis.Key.tab }},
+    .shift_tab = &.{.{ .code = vaxis.Key.tab, .mods = .{ .shift = true } }},
     .shift_up = &.{.{ .code = vaxis.Key.up, .mods = .{ .shift = true } }},
     .shift_down = &.{.{ .code = vaxis.Key.down, .mods = .{ .shift = true } }},
     .page_up = &.{ .{ .code = vaxis.Key.page_up }, .{ .code = vaxis.Key.page_up, .mods = .{ .shift = true } } },
@@ -397,7 +402,9 @@ fn edit(self: *Editor, key_name: Key) ?KeyOutcome {
         .ctrl_d => if (self.length == 0) null else self.deleteNext(),
         .left => self.move(self.previous(self.cursor)),
         .right => self.move(self.next(self.cursor)),
-        .escape, .ctrl_c, .ctrl_g, .ctrl_n, .ctrl_o, .ctrl_p, .ctrl_r, .ctrl_x, .alt_a, .shift_up, .shift_down, .page_up, .page_down, .ctrl_end => null,
+        // A rejected line takes no edit, as every other edit key finds.
+        .tab => if (self.rejected != null) .none else self.tab(),
+        .escape, .shift_tab, .ctrl_c, .ctrl_g, .ctrl_n, .ctrl_o, .ctrl_p, .ctrl_r, .ctrl_x, .alt_a, .shift_up, .shift_down, .page_up, .page_down, .ctrl_end => null,
     };
 }
 
@@ -428,7 +435,6 @@ fn key(self: *Editor, value: vaxis.Key, pasted_input: bool) KeyOutcome {
     switch (press) {
         .key, .enter => unreachable,
         .edit => |command| return switch (command) {
-            .tab => self.tab(),
             .newline => self.insert('\n', true),
             .left => self.move(self.previous(self.cursor)),
             .right => self.move(self.next(self.cursor)),
@@ -454,7 +460,7 @@ fn key(self: *Editor, value: vaxis.Key, pasted_input: bool) KeyOutcome {
 }
 
 /// An edit the draft makes with a typed key.
-const Edit = enum { tab, newline, left, right, line_start, line_end, delete_next, delete_previous, delete_to_line_start, delete_to_line_end, delete_word, delete_word_part, word_left, word_right };
+const Edit = enum { newline, left, right, line_start, line_end, delete_next, delete_previous, delete_to_line_start, delete_to_line_end, delete_word, delete_word_part, word_left, word_right };
 
 /// What one typed (not pasted) key is, before the draft or a choice gives it
 /// a use: the one classification both share.
@@ -482,7 +488,6 @@ fn classify(value: vaxis.Key) Press {
     // with text j would send and Shift-Enter with text CR would too.
     if (named(value)) |key_name| return .{ .key = key_name };
     if (isEnter(value)) return .enter;
-    if (value.matchExact(vaxis.Key.tab, .{})) return .{ .edit = .tab };
     // Alt-Enter adds a line in every form: Ghostty and other terminals send
     // Shift-Enter as ESC CR, which decodes exactly as Kitty's Alt-Enter.
     if (value.matchExact(vaxis.Key.enter, .{ .shift = true }) or value.matchExact(vaxis.Key.enter, .{ .alt = true }) or value.matchExact('j', .{ .ctrl = true })) return .{ .edit = .newline };

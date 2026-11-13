@@ -12,7 +12,9 @@ pub const Method = session_line.Method;
 
 pub const FooterField = enum { model, effort };
 pub const FooterFocus = @import("app_input.zig").Field;
-pub const FooterInput = union(enum) { tab: bool, enter, escape, text, click: ?FooterField, other };
+/// Focus moves between the input and its model and effort through Root's
+/// drawn order (`app_input`), which sets `Footer.focus`; none moves it here.
+pub const FooterInput = union(enum) { enter, escape, text, click: ?FooterField, other };
 pub const FooterDecision = struct {
     focus: FooterFocus,
     open_choice: ?FooterField = null,
@@ -23,11 +25,6 @@ pub const FooterDecision = struct {
 pub fn footerInput(focus: FooterFocus, has_effort: bool, input: FooterInput) FooterDecision {
     return switch (input) {
         .click => |field| .{ .focus = .input, .open_choice = field, .forward = field == null },
-        .tab => |reverse| .{ .focus = fieldOf(@import("app_input.zig").tabNext(if (has_effort) &.{ .input, .model, .effort } else &.{ .input, .model }, switch (focus) {
-            .input => .input,
-            .model => .model,
-            .effort => .effort,
-        }, reverse).?) },
         .enter => switch (focus) {
             .input => .{ .focus = .input, .forward = true },
             .model => .{ .focus = .input, .open_choice = .model },
@@ -36,15 +33,6 @@ pub fn footerInput(focus: FooterFocus, has_effort: bool, input: FooterInput) Foo
         .escape => .{ .focus = .input, .forward = focus == .input },
         .text => .{ .focus = .input, .forward = true },
         .other => .{ .focus = focus, .forward = true },
-    };
-}
-
-fn fieldOf(target: @import("app_input.zig").Target) FooterFocus {
-    return switch (target) {
-        .input => .input,
-        .model => .model,
-        .effort => .effort,
-        else => unreachable,
     };
 }
 
@@ -623,21 +611,11 @@ fn repeat(comptime text: []const u8, comptime count: usize) []const u8 {
     return joined;
 }
 
-test "footer focus domain routes navigation opening escape text and drawn click identity" {
+test "footer focus domain routes opening escape text and drawn click identity" {
     const Case = struct { input: FooterInput, want: FooterDecision };
     for ([_]bool{ false, true }) |effort| {
         for (std.enums.values(FooterFocus)) |focus| {
             const cases = [_]Case{
-                .{ .input = .{ .tab = false }, .want = .{ .focus = switch (focus) {
-                    .input => .model,
-                    .model => if (effort) .effort else .input,
-                    .effort => .input,
-                } } },
-                .{ .input = .{ .tab = true }, .want = .{ .focus = switch (focus) {
-                    .input => if (effort) .effort else .model,
-                    .model => .input,
-                    .effort => .model,
-                } } },
                 .{ .input = .escape, .want = .{ .focus = .input, .forward = focus == .input } },
                 .{ .input = .text, .want = .{ .focus = .input, .forward = true } },
                 .{ .input = .other, .want = .{ .focus = focus, .forward = true } },
@@ -651,15 +629,6 @@ test "footer focus domain routes navigation opening escape text and drawn click 
                 .{ .input = .{ .click = null }, .want = .{ .focus = .input, .forward = true } },
             };
             for (cases) |case| try std.testing.expectEqualDeep(case.want, footerInput(focus, effort, case.input));
-        }
-        var focus: FooterFocus = .input;
-        const cycle: []const FooterFocus = if (effort) &.{ .model, .effort, .input } else &.{ .model, .input };
-        for (cycle) |want| {
-            const next = footerInput(focus, effort, .{ .tab = false });
-            try std.testing.expectEqual(want, next.focus);
-            try std.testing.expectEqual(@as(?FooterField, null), next.open_choice);
-            try std.testing.expect(!next.forward);
-            focus = next.focus;
         }
     }
 }
@@ -707,7 +676,7 @@ test "footer spans identify only whole model and effort words across widths effo
 }
 
 test "deferred footer effect is superseded by interaction without making invisible content modal" {
-    const inputs: []const FooterInput = &.{ .escape, .text, .other, .{ .tab = false }, .{ .tab = true }, .{ .click = null }, .enter };
+    const inputs: []const FooterInput = &.{ .escape, .text, .other, .{ .click = null }, .enter };
     for (std.enums.values(FooterField)) |field| for (inputs) |input| {
         var footer: Footer = .{ .pending = field };
         const decision = footer.step(true, input);

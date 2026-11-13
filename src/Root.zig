@@ -238,7 +238,7 @@ pub fn closeSession(self: *Self, ctx: *vxfw.EventContext) !void {
 fn capture(raw: *anyopaque, ctx: *vxfw.EventContext, routed: vxfw.Event) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     const input: app_input.Input = switch (routed) {
-        .key_press => |key| .{ .key = .{ .named = @import("TerminalEditor.zig").named(key), .enter = key.matches(vaxis.Key.enter, .{}), .tab = if (key.matches(vaxis.Key.tab, .{})) false else if (key.matches(vaxis.Key.tab, .{ .shift = true })) true else null } },
+        .key_press => |key| .{ .key = .{ .named = @import("TerminalEditor.zig").named(key), .enter = @import("TerminalEditor.zig").isEnter(key) } },
         .paste_start => .paste_start,
         .paste_end => .paste_end,
         .mouse => |mouse| .{ .mouse = switch (mouse.button) {

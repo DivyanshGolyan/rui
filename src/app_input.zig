@@ -56,7 +56,38 @@ pub const Frame = struct {
     }
 };
 
-/// Shared wrapping traversal, including the footer's standalone projection.
+/// Focus moves through the drawn order. Every screen sees the keys bound
+/// here only when no drawn order takes them.
+pub const Move = enum { next, previous };
+
+/// The app's own key table: Tab and Shift-Tab, decided before any screen.
+pub const keys: keymap.Keymap(Move) = .init(.{
+    .escape = null,
+    .ctrl_c = null,
+    .ctrl_d = null,
+    .ctrl_g = null,
+    .ctrl_n = null,
+    .ctrl_o = null,
+    .ctrl_p = null,
+    .ctrl_r = null,
+    .ctrl_x = null,
+    .alt_a = null,
+    .up = null,
+    .down = null,
+    .left = null,
+    .right = null,
+    .tab = .next,
+    .shift_tab = .previous,
+    .shift_up = null,
+    .shift_down = null,
+    .page_up = null,
+    .page_down = null,
+    .home = null,
+    .end = null,
+    .ctrl_end = null,
+});
+
+/// The one wrapping traversal over a drawn order.
 pub fn tabNext(order: []const Target, current: Target, reverse: bool) ?Target {
     if (order.len == 0) return null;
     const at = std.mem.indexOfScalar(Target, order, current) orelse return if (reverse) order[order.len - 1] else order[0];
@@ -161,8 +192,8 @@ pub const Input = union(enum) {
     pub const Key = struct {
         /// The editor's name for the key; null for text and Enter.
         named: ?keymap.Key,
+        /// Enter as the line editor reads it.
         enter: bool = false,
-        tab: ?bool = null,
     };
     pub const Mouse = enum { click, list_click, chat_click, wheel, motion };
 };
@@ -315,7 +346,8 @@ pub fn step(state: *State, facts: Facts, input: Input) Effects {
     };
     if (input == .key and state.layer == .settings) return settingsKey(state, facts.settings, input.key);
     if (input == .key and !state.pasting and !facts.frame.modal) {
-        if (input.key.tab) |reverse| if (tabNext(facts.frame.slice(), currentFocus(state.*, facts.field), reverse)) |target| {
+        const move = if (input.key.named) |name| keys.get(name) else null;
+        if (move) |direction| if (tabNext(facts.frame.slice(), currentFocus(state.*, facts.field), direction == .previous)) |target| {
             var effect: Effects = .{ .route = .swallow, .redraw = true };
             chooseFocus(state, target, &effect);
             return effect;
@@ -441,7 +473,7 @@ test "Root input routing over every layer, main pane, settings state and input" 
     const all_pages = std.enums.values(Page);
     const shown = [_]LayerCase{ .main, .settings };
     const signing = [_]LayerCase{ .sign_in_over_main, .sign_in_over_settings };
-    const keys = [_]Event{ .printable, .pasted_printable, .enter, .pasted_enter, .escape, .ctrl_g, .ctrl_c };
+    const pressed = [_]Event{ .printable, .pasted_printable, .enter, .pasted_enter, .escape, .ctrl_g, .ctrl_c };
     const closing = [_]Event{ .escape, .ctrl_g };
     const Row = struct {
         layers: []const LayerCase = all_layers,
@@ -474,7 +506,7 @@ test "Root input routing over every layer, main pane, settings state and input" 
         // A click inside a paste is pasted bytes: nothing takes it.
         .{ .events = &.{.pasted_click}, .effects = .{ .route = .swallow } },
         // Sign-in takes keys and pastes; the paste is still one.
-        .{ .layers = &signing, .events = &keys, .effects = .{ .route = .sign_in } },
+        .{ .layers = &signing, .events = &pressed, .effects = .{ .route = .sign_in } },
         .{ .layers = &signing, .events = &.{.paste_start}, .effects = .{ .route = .sign_in }, .pasting = true },
         .{ .layers = &signing, .events = &.{.paste_end}, .effects = .{ .route = .sign_in }, .pasting = false },
         .{ .layers = &signing, .events = &.{ .click, .wheel }, .effects = .{ .route = .swallow } },
@@ -732,7 +764,7 @@ test "App input Tab order follows each drawn frame at wide and narrow widths and
             var initial: Effects = .{};
             chooseFocus(&state, target, &initial);
             const facts: Facts = .{ .wide = wide, .session_open = session_open, .frame = frame, .field = initial.field orelse .input, .settings = .{ .takes_key = true, .keys_open = shown == .keys } };
-            const result = step(&state, facts, .{ .key = .{ .named = null, .tab = reverse } });
+            const result = step(&state, facts, .{ .key = .{ .named = if (reverse) .shift_tab else .tab } });
             if (shown == .settings or shown == .keys) {
                 // The page owns its fields; the read-only Keys reference has no stops.
                 try std.testing.expectEqual(Effects.Route.pass, result.route);
@@ -754,12 +786,12 @@ test "App input Tab never activates or edits and paste cannot traverse" {
     for ([_]Target{ .list, .settings_row, .input, .model, .effort, .info }) |target| frame.append(target);
     var state: State = .{ .area = .list };
     const facts: Facts = .{ .session_open = true, .wide = true, .frame = frame };
-    _ = step(&state, facts, .{ .key = .{ .named = null, .tab = false } });
+    _ = step(&state, facts, .{ .key = .{ .named = .tab } });
     try std.testing.expectEqual(Target.settings_row, currentFocus(state, .input));
     const activate = step(&state, facts, .{ .key = .{ .named = null, .enter = true } });
     try std.testing.expectEqual(@as(?Target, .settings_row), activate.activate);
     state.pasting = true;
-    const pasted = step(&state, facts, .{ .key = .{ .named = null, .tab = false } });
+    const pasted = step(&state, facts, .{ .key = .{ .named = .tab } });
     try std.testing.expect(pasted.activate == null and pasted.focus == null);
     try std.testing.expectEqual(Target.settings_row, currentFocus(state, .input));
 }

@@ -154,6 +154,9 @@ pub const keys: keymap.Keymap(Action) = .init(.{
     .down = .next,
     .left = null,
     .right = .open_session,
+    // Focus order's keys, which `app_input.keys` takes first.
+    .tab = null,
+    .shift_tab = null,
     .shift_up = .select_previous,
     .shift_down = .select_next,
     .page_up = null,
@@ -164,7 +167,7 @@ pub const keys: keymap.Keymap(Action) = .init(.{
 });
 
 test "keys list covers both screens without unbound or duplicate keys" {
-    try std.testing.expectEqual(@as(?keymap.ListError, null), keymap.listError(.{ keys, @import("session_keys.zig").keys }));
+    try std.testing.expectEqual(@as(?keymap.ListError, null), keymap.listError(.{ keys, @import("session_keys.zig").keys, @import("app_input.zig").keys }));
 }
 
 /// Semantic list input: printable text has no editing route.
