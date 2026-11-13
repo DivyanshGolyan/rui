@@ -52,7 +52,7 @@ IDLE_SECONDS = 5
 BUDGET = {
     # A Session's first operation, exact.
     "first_commits": 4,
-    "first_write_round_trips": 8,
+    "first_write_round_trips": 7,
     # Each later operation, exact.
     "commits": 3,
     "write_round_trips": 5,

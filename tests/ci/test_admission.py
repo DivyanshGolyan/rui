@@ -134,6 +134,7 @@ class AdmissionTest(unittest.TestCase):
             return int(re.search(r'(?m)^        timeout-minutes: (\d+)$', step)[1])
 
         release = RELEASE.read_text()
+        self.assertGreaterEqual(budget(job(text, 'linux_build')), budget(job(release, 'build')))
         self.assertGreaterEqual(budget(job(text, 'macos_build')), budget(job(release, 'build')))
         # On-demand Mac qualification compiles the same native gates cold.
         qualify = job((ROOT / '.github/workflows/qualify-macos.yml').read_text(), 'compile')
@@ -147,7 +148,7 @@ class AdmissionTest(unittest.TestCase):
         self.assertIn("    timeout-minutes: ${{ inputs.batch-base && 300 || 45 }}", upgrade)
         self.assertEqual(step_budget(upgrade, 'Start detached, then install, save real work, reinstall and '
                                      'restart the same Store'), 45)
-        for name in ('linux_build', 'linux_build_unit', 'macos_build_unit'):
+        for name in ('linux_build_unit', 'macos_build_unit'):
             self.assertEqual(budget(job(text, name)), 15)
 
     def test_main_ruleset_requires_admission_and_prs_with_only_an_admin_pr_bypass(self):

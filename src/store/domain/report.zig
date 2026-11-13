@@ -4,6 +4,7 @@
 //! binding.
 
 const std = @import("std");
+const obligation = @import("session_obligation.zig");
 const attempt = @import("../../attempt.zig");
 const named_scratch = @import("../../named_scratch.zig");
 const session_report = @import("../../session_report.zig");
@@ -645,7 +646,7 @@ pub const WorkRead = struct {
     description: ?Bounded(tool_presentation.max_description_bytes) = null,
     cutoff: u64 = 0,
 
-    const Stage = enum { latest, actions, oldest, cutoff, queued, excluded, stop, done };
+    const Stage = enum { latest, actions, oldest, cutoff, queued, excluded, stop, owed, done };
 
     /// Queues this stage's read; false once the work is read.
     pub fn queue(w: *WorkRead, a: *ReadAccess) bool {
@@ -658,6 +659,7 @@ pub const WorkRead = struct {
             .queued => reads_domain.readFirst(a, work_queued, .{ .session = w.session, .cutoff = w.cutoff }, w),
             .excluded => reads_domain.readFirst(a, work_excluded, .{ .session = w.session, .cutoff = w.cutoff }, w),
             .stop => reads_domain.readFirst(a, work_stop, .{ .session = w.session, .admission = w.inputs.excluded.?.admission }, w),
+            .owed => reads_domain.readFirst(a, obligation.read, .{ .session = w.session }, w),
             .done => return false,
         }
         return true;
@@ -710,10 +712,12 @@ pub const WorkRead = struct {
             .latest => if (found and w.inputs.latest.?.terminal == null) .actions else .cutoff,
             // An aggregate always has a row.
             .actions => if (!found) return error.ActionReadFailed else if (w.inputs.latest.?.actions.running != 0) .oldest else .done,
-            .oldest, .stop => if (!found) return error.CorruptStore else .done,
+            .oldest => if (!found) return error.CorruptStore else .done,
+            .stop => if (!found) return error.CorruptStore else .owed,
             .cutoff => .queued,
-            .queued => if (found or w.cutoff == 0) .done else .excluded,
-            .excluded => if (found) .stop else .done,
+            .queued => if (found) .done else if (w.cutoff == 0) .owed else .excluded,
+            .excluded => if (found) .stop else .owed,
+            .owed => if (!found) return error.CorruptStore else .done,
             .done => .done,
         };
     }
@@ -747,6 +751,8 @@ pub const WorkRead = struct {
             const excluded = &w.inputs.excluded.?;
             excluded.stop_position = row.position.get();
             excluded.stop_at = row.stopped_at.get();
+        } else if (Row == obligation.read.Row) {
+            w.inputs.owed_since = optional(row.owed_since);
         } else @compileError("WorkRead reads no " ++ @typeName(Row));
     }
 

@@ -30,7 +30,9 @@ const wire_request = @import("wire_request.zig");
 const store_module = @import("store.zig");
 const session_list_reply = @import("session_list_reply.zig");
 const session_report_reply = @import("session_report_reply.zig");
-const launch_frame = @import("launch_frame.zig");
+const host_settings = @import("host_settings.zig");
+const server_mcp_settings = @import("server_mcp_settings.zig");
+const MysqlUrl = @import("mysql_url.zig");
 const start_report = @import("start_report.zig");
 const core_tools = @import("core_tools.zig");
 const tools = @import("tools.zig");
@@ -166,10 +168,10 @@ const Intake = struct {
     workers: [2]Worker = undefined,
     threads: [2]std.Thread = undefined,
     started: usize = 0,
-    /// A launched Host's stdin, watched for its close (D5, D118).
+    /// stdin, watched when interface.lifetime selects it (D5, D118).
     stdin: ?std.posix.fd_t = null,
-    /// Set for a Host started from a launch frame; its shutdown is bounded.
-    launched: bool = false,
+    /// Lifetime remains after EOF clears the watched descriptor.
+    lifetime: host_settings.Interface.Lifetime = .detached,
     deadline_armed: bool = false,
 
     const Worker = struct {
@@ -712,11 +714,11 @@ const Intake = struct {
         _ = self.host.stopAsked();
     }
 
-    /// A launched Host's shutdown, however it began (stdin close or
+    /// A stdin-lifetime Host's shutdown, however it began (stdin close or
     /// `host-stop`), ends the process 10 seconds later if cleanup is still
     /// running; the alarm survives the drains after intake returns.
     fn armShutdownDeadline(self: *Intake) void {
-        if (!self.launched or self.deadline_armed) return;
+        if (self.lifetime != .stdin or self.deadline_armed) return;
         self.deadline_armed = true;
         const default: std.posix.Sigaction = .{ .handler = .{ .handler = std.posix.SIG.DFL }, .mask = std.posix.sigemptyset(), .flags = 0 };
         std.posix.sigaction(.ALRM, &default, null);
@@ -954,25 +956,10 @@ fn reserveMcpDescriptors(requirement: *descriptor_capacity.Requirement) !void {
     requirement.total = try std.math.add(usize, requirement.total, sockets);
 }
 
-/// A Host started with a launch frame: its socket path, in the caller's
-/// runtime directory, and the stdin whose close stops it.
-pub const Launch = struct {
-    runtime_dir: []const u8,
-    socket_path: []const u8,
-    stdin: std.posix.fd_t,
-    mysql_url: ?*launch_frame.MysqlUrl = null,
-    /// Open with Turns paused (D196): set before execution starts, so a Turn
-    /// recovered from the Store waits too.
-    paused: bool = false,
-    /// The MCP servers whose tools the Host offers (M3a).
-    mcp_servers: []const launch_frame.Frame.McpServer = &.{},
-    presets: []const core_tools.Preset = &.{},
-};
-
 /// Lists each MCP server and saves the Host tool set: the built-ins and
 /// the servers' tools, with an unreachable server's last saved tools kept
 /// (D147). A name two sources share refuses the start (D142).
-noinline fn offerMcpTools(io: std.Io, arena: std.mem.Allocator, scratch: std.mem.Allocator, storage: *store_module.Store, servers: []const launch_frame.Frame.McpServer, stop: ?std.posix.fd_t, failure: *?start_report.Failure) !void {
+noinline fn offerMcpTools(io: std.Io, arena: std.mem.Allocator, scratch: std.mem.Allocator, storage: *store_module.Store, servers: []const server_mcp_settings.Server, stop: ?std.posix.fd_t, failure: *?start_report.Failure) !void {
     var saved = try storage.readHostToolSet(arena);
     const kept: ?tools.HostToolSet = if (saved) |*found| found.toolSet() else null;
     var collision: mcp_offered.Collision = .{};
@@ -995,22 +982,23 @@ noinline fn offerMcpTools(io: std.Io, arena: std.mem.Allocator, scratch: std.mem
     try storage.saveHostToolSet(owned);
 }
 
-pub fn serve(
+// Keep the measured Host main-thread root distinct from its CLI shell.
+pub noinline fn serve(
     io: std.Io,
     allocator: std.mem.Allocator,
-    store_path: []const u8,
-    active_capacity: usize,
-    limits: Limits,
-    hooks: Hooks,
-    served: *const providers.Providers,
-    bash_path: []const u8,
-    bash_timeout_ms: u64,
-    home: ?[]const u8,
-    launch: ?Launch,
+    prepared: host_settings.Prepared,
+    tuning: Tuning,
     failure: *?start_report.Failure,
 ) !void {
     failure.* = null;
-    const mcp_servers: []const launch_frame.Frame.McpServer = if (launch) |value| value.mcp_servers else &.{};
+    const settings = prepared.get();
+    const active_capacity = settings.execution.active_capacity.value;
+    const limits = tuning.limits;
+    const served_value = providers.fromSettings(settings, tuning.fixtures);
+    const served = &served_value;
+    var connections = try server_mcp_settings.Connections.init(allocator, settings);
+    defer connections.deinit();
+    const mcp_servers = connections.servers;
     // The Host owns child waits. Automatic reaping or an inherited handler
     // would release process identities before their signal owners retire.
     const child_action: std.posix.Sigaction = .{
@@ -1076,14 +1064,20 @@ pub fn serve(
         try std.fmt.bufPrint(&descriptor_limit_buffer, "{d}", .{limit})
     else
         "unlimited";
-    const mysql_url = if (launch) |value| value.mysql_url else null;
-    var lease: platform.StoreLease = undefined;
+    const mysql_url = if (settings.store == .mysql) try mysqlLogin(allocator, &settings.store.mysql.url.bytes) else null;
+    defer if (mysql_url) |url| url.destroy();
+    var socket_buffer: [host_settings.max_launch_socket_path_bytes]u8 = undefined;
+    const socket_path = if (!settings.interface.dir.anchored) try std.fmt.bufPrint(&socket_buffer, "{s}/" ++ host_settings.socket_name, .{settings.interface.dir.slice()}) else "";
+    // One Host-owned lease in final storage, through Store close and cleanup.
+    // Keep its bounded path buffers off the resident Host main-thread frame.
+    const lease = try allocator.create(platform.StoreLease);
+    defer allocator.destroy(lease);
     if (mysql_url != null)
-        try lease.acquireMysql(io, launch.?.runtime_dir, launch.?.socket_path)
+        try lease.acquireMysql(io, settings.interface.dir.slice(), socket_path)
     else
-        lease = try platform.StoreLease.acquire(io, store_path);
+        lease.* = try platform.StoreLease.acquire(io, settings.store.sqlite.dir.slice());
     defer lease.release();
-    if (mysql_url == null) if (launch) |value| try lease.useRuntimeDirectory(value.runtime_dir, value.socket_path);
+    if (mysql_url == null and !settings.interface.dir.anchored) try lease.useRuntimeDirectory(settings.interface.dir.slice(), socket_path);
     // fd1 may alias fd2. Exclude flag borrowing before any continuing
     // startup diagnostic, through readiness delivery and failed unwind.
     if (!stderr.tryExclude()) return error.HostReadinessOutputUnavailable;
@@ -1104,24 +1098,24 @@ pub fn serve(
     var tool_set_memory = std.heap.ArenaAllocator.init(allocator);
     defer tool_set_memory.deinit();
     var storage: store_module.Store = undefined;
-    openStoreForHost(io, &storage, &lease, served, &limits, mcp_servers.len != 0, mysql_url, if (diagnostics) |*writer| writer else null) catch |err| {
+    openStoreForHost(io, &storage, lease, served, &limits, mcp_servers.len != 0, mysql_url, if (diagnostics) |*writer| writer else null) catch |err| {
         if (err == error.StoreIdentityMismatch) startup_failure = "store_identity_mismatch";
         return err;
     };
     defer storage.close() catch |err| stderr.print("rui: Store close failed: {s}\n", .{@errorName(err)});
-    return finishServing(&storage, launch != null, failure, serveOpened(
+    return finishServing(&storage, failure, serveOpened(
         io,
         allocator,
         &storage,
-        &lease,
+        lease,
         active_capacity,
         limits,
-        hooks,
+        tuning.hooks,
         served,
-        bash_path,
-        bash_timeout_ms,
-        home,
-        launch,
+        settings.tools.bash.path.slice(),
+        settings.tools.bash.timeout_ms.value,
+        tuning.home,
+        settings,
         &tool_set_memory,
         mcp_servers,
         intake_capacity,
@@ -1148,9 +1142,9 @@ fn serveOpened(
     bash_path: []const u8,
     bash_timeout_ms: u64,
     home: ?[]const u8,
-    launch: ?Launch,
+    settings: *const host_settings.Settings,
     tool_set_memory: *std.heap.ArenaAllocator,
-    mcp_servers: []const launch_frame.Frame.McpServer,
+    mcp_servers: []const server_mcp_settings.Server,
     intake_capacity: usize,
     descriptor_requirement: usize,
     descriptor_soft_limit: ?usize,
@@ -1160,7 +1154,7 @@ fn serveOpened(
     readiness_owned: *bool,
     failure: *?start_report.Failure,
 ) !void {
-    if (mcp_servers.len != 0) try offerMcpTools(io, tool_set_memory.allocator(), allocator, storage, mcp_servers, if (launch) |value| value.stdin else null, failure);
+    if (mcp_servers.len != 0) try offerMcpTools(io, tool_set_memory.allocator(), allocator, storage, mcp_servers, if (settings.interface.lifetime.value == .stdin) 0 else null, failure);
     try storage.validateRetryWaits(limits.retry_waits_ms);
     try lease.prepareForServing(hooks.fails(.startup_cleanup));
 
@@ -1203,7 +1197,7 @@ fn serveOpened(
         .hooks = hooks,
         .limits = limits,
         .providers = served,
-        .presets = if (launch) |value| value.presets else &.{},
+        .presets = settings.presets.specs,
         .bash_path = bash_path,
         .bash_facts = bash_facts,
         .environments = environments,
@@ -1211,7 +1205,7 @@ fn serveOpened(
         .retention = undefined,
         .trace_run_ns = @intCast(std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds),
         .custody = execution.CustodyPool.initialize(custody_records),
-        .turns_paused = .init(if (launch) |value| value.paused else false),
+        .turns_paused = .init(settings.execution.paused.value),
     };
     storage.modelTimingSource().* = host.custody.timingSource();
     defer storage.modelTimingSource().* = .{};
@@ -1256,10 +1250,8 @@ fn serveOpened(
     var intake: Intake = undefined;
     try intake.init(&host);
     defer intake.deinit();
-    if (launch) |value| {
-        intake.stdin = value.stdin;
-        intake.launched = true;
-    }
+    intake.lifetime = settings.interface.lifetime.value;
+    if (intake.lifetime == .stdin) intake.stdin = 0;
     host.intake_wake = intake.wake[1];
     StopSignals.attach(intake.wake[1]);
     // Before intake.deinit closes the socket a handler would write.
@@ -1294,10 +1286,10 @@ fn serveOpened(
     return intake.run(&listener, &listener_open, &socket_owned);
 }
 
-fn finishServing(storage: *const store_module.Store, launched: bool, failure: *?start_report.Failure, result: anyerror!void) !void {
+fn finishServing(storage: *const store_module.Store, failure: *?start_report.Failure, result: anyerror!void) !void {
     // This is the sole fence decision site, after intake, workers
     // and execution have drained. A fence wins over every serving outcome.
-    if (launched and storage.kind() == .mysql and storage.isFenced()) {
+    if (storage.kind() == .mysql and storage.isFenced()) {
         failure.* = .init(.store_fenced, "the MySQL Store lost ownership or its connection; restart the Host");
         return error.StoreFenced;
     }
@@ -1315,6 +1307,14 @@ noinline fn recordCapacity(writer: *HostDiagnostics, intake_capacity: usize, des
     }));
 }
 
+/// Admission gets its own mutable password scratch; Prepared remains immutable.
+noinline fn mysqlLogin(gpa: std.mem.Allocator, bytes: *const host_settings.MysqlBytes) !*MysqlUrl {
+    const source = bytes.parsed.?;
+    const login = try gpa.create(MysqlUrl);
+    login.* = .{ .allocator = gpa, .user = source.user, .password = source.password, .host = source.host, .socket = source.socket, .database = source.database, .ca_file = source.ca_file, .port = source.port };
+    return login;
+}
+
 /// Admission's options and login framing are startup scratch, not part of
 /// serve's resident frame on either engine. The caller provides both owners.
 noinline fn openStoreForHost(
@@ -1324,7 +1324,7 @@ noinline fn openStoreForHost(
     served: *const providers.Providers,
     limits: *const Limits,
     has_mcp: bool,
-    mysql_url: ?*launch_frame.MysqlUrl,
+    mysql_url: ?*MysqlUrl,
     diagnostics: ?*HostDiagnostics,
 ) !void {
     var found_schema_version: u32 = store_module.schema_version;
@@ -1740,7 +1740,7 @@ noinline fn submitConfigure(host: *Host, command: *const wire_request.ConfigureC
         .reload_skills = command.reload_skills,
     };
     const checked = core_tools.parseAgentSpec(arena, preset.spec, &resolved.configuration) catch |err| return configureFailure(host, err);
-    // The immutable launch frame checked this same spec with this parser.
+    // Prepared settings checked this same spec with this parser.
     std.debug.assert(checked == .accepted);
     inline for (@typeInfo(wire_request.Configuration).@"struct".field_names) |field| {
         const override = &@field(command.configuration, field);
@@ -3876,7 +3876,7 @@ test "intake accepts and physically retires a hundred incomplete exchanges" {
     }
 }
 
-test "launch frame fenced MySQL shutdown is decided once at the return boundary without clients" {
+test "Host settings fields decide fenced MySQL shutdown once at the return boundary without clients" {
     const Probe = struct {
         var storage: *store_module.Store = undefined;
         var fence_on_delete: bool = false;
@@ -3915,56 +3915,56 @@ test "launch frame fenced MySQL shutdown is decided once at the return boundary 
     vtable.dirDeleteFile = Probe.delete;
     vtable.operate = Probe.operate;
     const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
-    for ([_]struct { mysql: bool, launched: bool, early: bool, late: bool }{
-        .{ .mysql = true, .launched = true, .early = false, .late = true },
-        .{ .mysql = true, .launched = true, .early = true, .late = false },
-        .{ .mysql = true, .launched = true, .early = false, .late = false },
-        .{ .mysql = true, .launched = false, .early = false, .late = true },
-        .{ .mysql = false, .launched = true, .early = false, .late = true },
-    }) |case| {
-        var storage: store_module.Store = .{ .io = io, .engine = undefined, .selector = .{}, .changes = undefined };
-        // No engine operation occurs: only its tag and atomic fence are read.
-        storage.engine = if (case.mysql) .{ .mysql = undefined } else .{ .sqlite = undefined };
-        storage.fenced.store(case.early, .release);
-        Probe.storage = &storage;
-        Probe.fence_on_delete = case.late;
-        Probe.used = 0;
-        var lease: platform.StoreLease = .{
-            .io = io,
-            .paths = .{},
-            .store_dir = .cwd(),
-            .lock_file = undefined,
-        };
-        try lease.paths.socket.set(path);
-        var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = &lease, .store = &storage, .phase = .init(.stopping) };
-        var intake: Intake = .{ .host = &host, .launched = case.launched, .deadline_armed = true };
-        // Reuse the real intake owner, with idle workers but no worker threads.
-        for (&intake.workers) |*worker| worker.* = .{ .owner = &intake };
-        try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &intake.wake));
-        try setNonblocking(intake.wake[0]);
-        defer intake.deinit();
-        var stdin: [2]c_int = undefined;
-        try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&stdin));
-        defer _ = std.c.close(stdin[0]);
-        _ = std.c.close(stdin[1]);
-        intake.stdin = stdin[0]; // EOF makes poll ready without a sleep.
-        const address = try std.Io.net.UnixAddress.init(path);
-        var listener = try address.listen(io, .{ .kernel_backlog = 8 });
-        var open = true;
-        var owned = true;
-        defer if (open) listener.deinit(io);
-        var failure: ?start_report.Failure = null;
-        const outcome = finishServing(&storage, case.launched, &failure, intake.run(&listener, &open, &owned));
-        const fenced = case.mysql and case.launched and (case.early or case.late);
-        try std.testing.expectError(if (fenced) error.StoreFenced else error.EffectAwareShutdown, outcome);
-        try std.testing.expectEqual(@as(usize, 0), Probe.used); // The Host never publishes stdout.
-        var line_buffer: [start_report.max_line_bytes]u8 = undefined;
-        try std.testing.expectEqual(fenced, failure != null);
-        try std.testing.expectEqualStrings(if (fenced)
-            "{\"rui_start_error\":{\"code\":\"store_fenced\",\"message\":\"the MySQL Store lost ownership or its connection; restart the Host\"}}\n"
-        else
-            "", if (failure) |*value| start_report.line(value, &line_buffer) else "");
-        try std.testing.expectEqual(@as(usize, 0), intake.exchanges.items.len);
+    for ([_]host_settings.Interface.Lifetime{ .detached, .stdin }) |lifetime| {
+        for ([_]bool{ false, true }) |mysql| {
+            for ([_]bool{ false, true }) |early| {
+                for ([_]bool{ false, true }) |late| {
+                    var storage: store_module.Store = .{ .io = io, .engine = undefined, .selector = .{}, .changes = undefined };
+                    // No engine operation occurs: only its tag and atomic fence are read.
+                    storage.engine = if (mysql) .{ .mysql = undefined } else .{ .sqlite = undefined };
+                    storage.fenced.store(early, .release);
+                    Probe.storage = &storage;
+                    Probe.fence_on_delete = late;
+                    Probe.used = 0;
+                    var lease: platform.StoreLease = .{
+                        .io = io,
+                        .paths = .{},
+                        .store_dir = .cwd(),
+                        .lock_file = undefined,
+                    };
+                    try lease.paths.socket.set(path);
+                    var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = &lease, .store = &storage, .phase = .init(.stopping) };
+                    var intake: Intake = .{ .host = &host, .lifetime = lifetime, .deadline_armed = true };
+                    // Reuse the real intake owner, with idle workers but no worker threads.
+                    for (&intake.workers) |*worker| worker.* = .{ .owner = &intake };
+                    try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &intake.wake));
+                    try setNonblocking(intake.wake[0]);
+                    defer intake.deinit();
+                    var stdin: [2]c_int = undefined;
+                    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&stdin));
+                    defer _ = std.c.close(stdin[0]);
+                    _ = std.c.close(stdin[1]);
+                    intake.stdin = stdin[0]; // EOF makes poll ready without a sleep.
+                    const address = try std.Io.net.UnixAddress.init(path);
+                    var listener = try address.listen(io, .{ .kernel_backlog = 8 });
+                    var open = true;
+                    var owned = true;
+                    defer if (open) listener.deinit(io);
+                    var failure: ?start_report.Failure = null;
+                    const outcome = finishServing(&storage, &failure, intake.run(&listener, &open, &owned));
+                    const fenced = mysql and (early or late);
+                    try std.testing.expectError(if (fenced) error.StoreFenced else error.EffectAwareShutdown, outcome);
+                    try std.testing.expectEqual(@as(usize, 0), Probe.used); // The Host never publishes stdout.
+                    var line_buffer: [start_report.max_line_bytes]u8 = undefined;
+                    try std.testing.expectEqual(fenced, failure != null);
+                    try std.testing.expectEqualStrings(if (fenced)
+                        "{\"rui_start_error\":{\"code\":\"store_fenced\",\"message\":\"the MySQL Store lost ownership or its connection; restart the Host\"}}\n"
+                    else
+                        "", if (failure) |*value| start_report.line(value, &line_buffer) else "");
+                    try std.testing.expectEqual(@as(usize, 0), intake.exchanges.items.len);
+                }
+            }
+        }
     }
 }
 
@@ -4905,7 +4905,7 @@ test "Host startup reports MCP tool collision and excess tools as owned failures
         var script: Script = .{ .reply = reply };
         try script.start();
         defer script.stop();
-        var server: launch_frame.Frame.McpServer = .{};
+        var server: server_mcp_settings.Server = .{};
         try server.name.set("docs");
         @memcpy(server.bearer_token.bytes[0..6], "secret");
         server.bearer_token.len = 6;
@@ -4945,7 +4945,7 @@ test "Host startup projects MCP offers after a changed listing and restart" {
         var storage: store_module.Store = undefined;
         try testing.testingStoreToolSet(&storage, &tmp, std.testing.io, null);
         defer storage.close() catch unreachable;
-        var server: launch_frame.Frame.McpServer = .{};
+        var server: server_mcp_settings.Server = .{};
         try server.name.set("docs");
         @memcpy(server.bearer_token.bytes[0..6], "secret");
         server.bearer_token.len = 6;

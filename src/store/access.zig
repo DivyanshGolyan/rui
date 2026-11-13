@@ -8,14 +8,15 @@
 //! engine lowers binds into its outgoing batch. A pass runs on queue or
 //! packet pressure, before rebinding an in-process statement, when an
 //! in-process sink needs its row, before position compare-and-sets, and at
-//! `run`. The queue stays bounded (eight slots, sixteen for a survey or a
-//! settlement).
+//! `run`. Queues stay bounded: eight slots normally, 24 for a survey,
+//! 12 for a write and 20 for a settlement.
 //! In-process passes cost no round trip; network passes send a batch.
 //! Until the pass that steps a read, `Found` is `.pending` and Debug/test
 //! builds poison its destination (`Access.read` says what that catches).
 
 const std = @import("std");
 const change_ring = @import("../change_ring.zig");
+const obligation = @import("domain/session_obligation.zig");
 const store_core = @import("Store.zig");
 const Store = store_core.Store;
 const rsql = @import("rsql.zig");
@@ -192,13 +193,15 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// A transaction of any number of writes.
         const transacts = mode == .write or mode == .settlement;
         /// The statements one engine pass steps at most. Accesses sit on
-        /// the deepest stack chains, so only a survey's and a settlement's
-        /// queue is wide. A survey's holds the reads a commit carries: an
+        /// the deepest stack chains. Writers reserve four more slots for the two-statement
+        /// obligation projection/hints and COMMIT, so maintenance never evicts
+        /// a full ordinary write batch. A survey holds the reads a commit carries: an
         /// admitted request's settings and first history round (12) and
         /// the dispatch survey (12).
         const max_queued = switch (mode) {
             .survey => 24,
-            .settlement => 16,
+            .settlement => 20,
+            .write => 12,
             else => 8,
         };
         const Guarded = if (max_queued > 16) u32 else u16;
@@ -232,6 +235,10 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// None in a read Access, which claims no positions.
         claims: [if (reads_only or mode == .single) 0 else max_claims]Positions = undefined,
         claimed: u8 = 0,
+        // Changed canonical Sessions, not the lossy change-ring record. If a
+        // transaction visits more, reconcile this bounded batch before reuse.
+        obligation_heads: [if (reads_only or mode == .single) 0 else max_claims]rsql.SessionHead = undefined,
+        obligation_count: u8 = 0,
         /// The last `max_taken` content ids this Access took, the rows
         /// `contentSink` may open; 0 marks a free entry.
         taken: [if (reads_only or mode == .single) 0 else max_taken]u64 = @splat(0),
@@ -447,6 +454,17 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
 
         fn queueWrite(a: *Self, comptime S: type, args: *const S.Args, target: @FieldType(Queued, "target")) void {
             comptime std.debug.assert(S.kind == .write and !reads_only and S.session_fields.len <= max_sessions);
+            // Reserve for the whole statement before marking either Session.
+            // Flushing on its second head could otherwise forget its first
+            // head before this write has even entered the queue.
+            if (!reads_only and mode != .single and
+                a.obligation_count + S.session_fields.len > a.obligation_heads.len)
+            {
+                a.reconcileObligations() catch |err| {
+                    a.failure = err;
+                    return;
+                };
+            }
             inline for (S.session_fields) |field| a.touch(@field(args, field));
             _ = a.queueStatement(S, args, runWrite(S), target);
         }
@@ -672,6 +690,11 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
                 const expected = claim.head.next_position.get();
                 _ = a.queueStatement(advance, &.{ .session = claim.head, .expected = expected, .next = expected + claim.taken }, runWrite(advance), .{ .none = {} });
             };
+            // The frontier belongs to this transaction, before any engine may
+            // append COMMIT or a post-commit survey. No reader can see the gap.
+            if (mode != .single and a.obligation_count != 0) {
+                try a.reconcileObligations();
+            }
             const commits = a.bindCommit();
             if (commits and transacts) store_core.commitWithSurvey(a.store, a) else a.pass();
             a.claimed = 0;
@@ -749,6 +772,44 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         fn touch(a: *Self, head: rsql.SessionHead) void {
             const touched = &a.store.touched;
             if (touched.needsEntry(&head.ref)) touched.add(.{ .session = head.ref, .workspace = head.workspace_key.get() });
+            // The sole .single writer revokes an Action sender; it changes no
+            // obligation input and retains its one-write/autocommit contract.
+            if (reads_only or mode == .single) return;
+            for (a.obligation_heads[0..a.obligation_count]) |known| if (std.mem.eql(u8, &known.ref, &head.ref)) return;
+            if (a.obligation_count == a.obligation_heads.len) {
+                a.reconcileObligations() catch |err| {
+                    a.failure = err;
+                    return;
+                };
+            }
+            a.obligation_heads[a.obligation_count] = head;
+            a.obligation_count += 1;
+        }
+
+        /// For publication writes that name a forwarding identity rather than
+        /// a Session column (ending Message settlement). The same frontier
+        /// owner handles them; callers do not derive another liveness seed.
+        pub fn obligationsChanged(a: *Self, head: rsql.SessionHead) void {
+            comptime std.debug.assert(transacts);
+            a.touch(head);
+        }
+
+        /// The frontier owner also records ancestor invalidation. It is not a
+        /// second ancestry walk after commit, and failure rolls back both facts.
+        pub fn obligationTouch(a: *Self, head: rsql.SessionHead) void {
+            const touched = &a.store.touched;
+            if (touched.needsEntry(&head.ref)) touched.add(.{ .session = head.ref, .workspace = head.workspace_key.get() });
+        }
+
+        pub fn visit(a: *Self, row: anytype) bool {
+            return obligation.hint(a, row);
+        }
+
+        noinline fn reconcileObligations(a: *Self) Error!void {
+            if (a.failure) |err| return err;
+            if (a.obligation_count == 0) return;
+            obligation.reconcile(a, a.obligation_heads[0..a.obligation_count]);
+            a.obligation_count = 0;
         }
 
         /// Binds and queues `S`, after an engine pass when `S` is already

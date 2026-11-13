@@ -703,6 +703,81 @@ fn liveWrite(storage: *Store, comptime S: type, args: S.Args) !u64 {
     return changed;
 }
 
+/// Counts actual row-handler operations on the restricted application session,
+/// not the fixture root connection. SHOW requires no broader database grants.
+fn handlerReads(storage: *Store) !u64 {
+    const source = &storage.engine.mysql.state.connection;
+    try source.query("SHOW SESSION STATUS LIKE 'Handler_read%'");
+    const Row = struct { name: protocol.Bounded(64), value: protocol.Bounded(32) };
+    var columns: rows.Columns(Row) = undefined;
+    var total: u64 = 0;
+    var count: usize = 0;
+    while (!source.isReady()) switch (try source.next()) {
+        .columns => |n| columns = try rows.readColumns(Row, source, n),
+        .row => {
+            var row: Row = undefined;
+            try rows.decodeRow(Row, &columns, source, &row);
+            total += try std.fmt.parseInt(u64, row.value.slice(), 10);
+            count += 1;
+        },
+        .err => return error.QueryFailed,
+        else => {},
+    };
+    try std.testing.expect(count >= 7);
+    return total;
+}
+
+test "store.mysql obligation reconciliation reads stay flat in completed Turn history" {
+    const fixtures = @import("tests.zig");
+    for ([_]bool{ false, true }) |active| {
+        var costs: [2]u64 = undefined;
+        for ([_]usize{ 10, 10_000 }, &costs) |history, *cost| {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try openLive(&storage, &tmp);
+            defer storage.close() catch unreachable;
+            const parent = try testing.configureTestSession(&storage, "frontier-cost-parent");
+            const child = try testing.configureTestSession(&storage, "frontier-cost-child");
+            try exec(&storage, "UPDATE session SET parent_ref=?1 WHERE session_ref=?2", .{ parent.slice(), child.slice() });
+            if (active) {
+                try testing.submitTestMessage(&storage, &tmp, "frontier-cost-input", "frontier-cost-message", child.slice(), "work");
+                _ = (try storage.admitNextModelAttempt(.{})).?;
+            }
+            // Native population fixture, like SQLite's cost fixtures: terminal
+            // Turns and their bound admissions have no owed input/publication.
+            // Unrelated core-command FK rows are omitted, not the joined admissions.
+            // Seed both the changed Session and its ancestor; the owner visits both.
+            var buffer: [2048]u8 = undefined;
+            const seed = try std.fmt.bufPrint(&buffer, "INSERT INTO turn(turn_id,session_ref,first_admission_id,input_cutoff,operation_id,outcome_code,outcome_at,outcome_position,outcome_content_id) " ++
+                "WITH RECURSIVE sequence(value) AS (SELECT 1 UNION ALL SELECT value+1 FROM sequence WHERE value<{d}) " ++
+                "SELECT 100000+value,CASE WHEN value<={d} THEN '{s}' ELSE '{s}' END,100000+value,100000+value,1,'completed',1,1,1 FROM sequence;" ++
+                "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at) " ++
+                "WITH RECURSIVE sequence(value) AS (SELECT 1 UNION ALL SELECT value+1 FROM sequence WHERE value<{d}) " ++
+                "SELECT 100000+value,CASE WHEN value<={d} THEN '{s}' ELSE '{s}' END,CONCAT('frontier-history-',value),1,100000+value,100000+value,1 FROM sequence", .{ 2 * history, history, child.slice(), parent.slice(), 2 * history, history, child.slice(), parent.slice() });
+            try rawExec(&storage, "SET SESSION foreign_key_checks=0");
+            {
+                defer rawExec(&storage, "SET SESSION foreign_key_checks=1") catch @panic("foreign keys stayed off");
+                try rawExec(&storage, seed);
+            }
+            // Reused fixture tables otherwise retain estimates from an earlier
+            // population. Compare plans against each population's actual stats.
+            try rawExec(&storage, "ANALYZE TABLE turn,message_admission,session");
+            // Warm the real write owner and its commit survey before measuring;
+            // the saved time is unchanged, so neither visit needs a frontier UPDATE.
+            try fixtures.refreshFrontierForTesting(&storage, child.slice());
+            const before = try handlerReads(&storage);
+            try fixtures.refreshFrontierForTesting(&storage, child.slice());
+            cost.* = (try handlerReads(&storage)) - before;
+            try std.testing.expectEqual(@as(u64, if (active) 2 else 0), try queryU64(&storage, "SELECT count(*) FROM session WHERE obligation_since IS NOT NULL", .{}));
+            try std.testing.expect(!storage.isFenced());
+        }
+        std.debug.print("MySQL obligation reconcile active={}: 10={d}, 10000={d} handler reads (child and ancestor)\n", .{ active, costs[0], costs[1] });
+        try std.testing.expect(costs[0] > 0);
+        try std.testing.expectEqual(costs[0], costs[1]);
+    }
+}
+
 test "Store target MySQL owns admitted identity routes and neutral diagnostics" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -1818,7 +1893,7 @@ test "store.mysql live buffered payloads keep streamed query budgets under queue
     try openLive(&storage, &tmp);
     defer storage.close() catch unreachable;
     const chunk = schema.content_chunk_bytes;
-    const bytes = try std.testing.allocator.alloc(u8, 9 * chunk + 17);
+    const bytes = try std.testing.allocator.alloc(u8, 13 * chunk + 17);
     defer std.testing.allocator.free(bytes);
     // Reused source, never mutated until both kinds of queued borrow end.
     for ([_]usize{ 0, 1, chunk - 1, chunk, chunk + 1, 3 * chunk + 17, bytes.len }) |length| {
@@ -1846,7 +1921,7 @@ test "store.mysql live buffered payloads keep streamed query budgets under queue
             // A row write after the bytes shares the last data pass.
             access.write(live_noop, .{});
             try access.commit();
-            const queries: u64 = if (length > 8 * chunk) 3 else 2;
+            const queries: u64 = if (length > 12 * chunk) 3 else 2;
             try std.testing.expectEqual(before + queries, storage.engine.mysql.state.connection.queries);
             const chunks: u64 = @intCast((length + chunk - 1) / chunk);
             try std.testing.expectEqual(chunks, try queryU64(&storage, "SELECT count(*) FROM content_chunk WHERE content_id=?1", .{id}));

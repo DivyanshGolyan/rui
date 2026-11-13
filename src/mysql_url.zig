@@ -107,10 +107,8 @@ test "mysql launch URLs refuse every unsupported ssl-ca query shape" {
         "mysql://u:p@h/db?ssl-ca=/ca.pem?ssl-ca=/other.pem",
         "mysql://u:p@h/db?ssl-ca=/ca.pem#fragment",
         "mysql://u:p@h/db?ssl-ca=/ca%00.pem",
-        "mysql://u:p@h/db?ssl-ca=/ca%0a.pem",
         "mysql://u:p@h/db?ssl-ca=/ca%gg.pem",
         "mysql://u:p@h/db?ssl-ca=/ca%.pem",
-        "mysql://u:p@h/db?ssl-ca=/ca%ff.pem",
         "mysql://u:p@h/db?SSL-CA=/ca.pem",
         "mysql://u:p@h/db?ssl%2Dca=/ca.pem",
         "mysql://u:p@h/db?ssl-mode=DISABLED",
@@ -133,4 +131,27 @@ test "mysql launch URLs percent-decode ssl-ca filename punctuation only once" {
     const url = try create(std.testing.allocator, "mysql://u:p@h/db?ssl-ca=%2Fca%20%26%3F%23%25%3D.pem");
     defer url.destroy();
     try std.testing.expectEqualStrings("/ca &?#%=.pem", url.options().address.tcp_tls.trust.ca_file);
+}
+
+// The allocating adapter must preserve the core's OS-byte path domain all the
+// way to the transport, including after login credentials have been wiped.
+test "mysql launch URL transport paths preserve every non-NUL decoded byte" {
+    inline for (.{ true, false }) |socket| {
+        for (1..256) |number| {
+            const byte: u8 = @intCast(number);
+            const hex = std.fmt.bytesToHex([_]u8{byte}, .lower);
+            var encoded: [128]u8 = undefined;
+            const text = try std.fmt.bufPrint(&encoded, if (socket) "mysql://u:secret@%2Ftmp%2Fpath%{s}/db" else "mysql://u:secret@host/db?ssl-ca=%2Ftmp%2Fpath%{s}", .{hex});
+            const url = try create(std.testing.allocator, text);
+            defer url.destroy();
+            var expected: [32]u8 = undefined;
+            const path = try std.fmt.bufPrint(&expected, "/tmp/path{c}", .{byte});
+            try std.testing.expectEqualStrings(path, if (socket) url.options().address.unix_socket else url.options().address.tcp_tls.trust.ca_file);
+            url.wipe();
+            try std.testing.expectEqualStrings(path, if (socket) url.options().address.unix_socket else url.options().address.tcp_tls.trust.ca_file);
+            try std.testing.expectEqualStrings("", url.options().password);
+            for (url.password.bytes) |secret_byte| try std.testing.expectEqual(@as(u8, 0), secret_byte);
+        }
+        try std.testing.expectError(error.InvalidMysqlUrl, create(std.testing.allocator, if (socket) "mysql://u:p@%2Ftmp%2Fpath%00/db" else "mysql://u:p@host/db?ssl-ca=%2Ftmp%2Fpath%00"));
+    }
 }

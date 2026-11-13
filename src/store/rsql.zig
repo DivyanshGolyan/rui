@@ -1,9 +1,11 @@
 //! Rui SQL: Store SQL text written once for every engine. Source text is SQLite
 //! SQL restricted to a portable subset, plus markers that each engine renders
 //! in its own spelling. The schema's checks and index predicates and every
-//! typed statement (`Read`, `Write`) pass its checks. `Store.cachedTyped`,
-//! the one way a typed statement reaches SQLite, takes only a type `Read` or
-//! `Write` made (`isStatement`). The Store prepares other text in three
+//! typed statement passes its checks. `Store.cachedTyped`, the one way a
+//! typed statement reaches SQLite, authenticates its constructor (`isStatement`).
+//! `ObligationProjection` alone lowers a checked SELECT to an ancestor-frontier
+//! update; it cannot change any other column or relax ordinary `Write` guards.
+//! The Store prepares other text in three
 //! places only: its transaction control (`Store.Control`), its test-only
 //! fixtures, and, at open, PRAGMAs, schema bootstrap and one sweep held to
 //! `portabilityError` alone.
@@ -482,7 +484,39 @@ pub fn Write(comptime spec: WriteSpec) type {
 
 pub const StatementKind = enum { read, write };
 
-/// Whether `S` is the type `Read`, `Write` or `Page` made, so its text passed every
+/// A derived frontier projection, not a domain mutation: the SELECT supplies
+/// (session_ref, saved_since, owed_since). This constructor can change only
+/// session.obligation_since; ordinary Session writes retain every head/tie rule.
+/// Grouping materializes the source before MySQL updates its source table
+/// (error 1093), and gives each target key exactly one minimum owed time.
+pub const ObligationProjectionSpec = struct { sql: []const u8, Args: type };
+pub fn ObligationProjection(comptime spec: ObligationProjectionSpec) type {
+    const R = Read(.{
+        .sql = spec.sql,
+        .Args = spec.Args,
+        .Row = struct { session_ref: @import("../bounded.zig").Bounded(change_ring.id_bytes), saved_since: ?Positive, owed_since: ?Positive },
+        .cardinality = .each,
+        .compound = true,
+    });
+    const projected = "SELECT session_ref,min(saved_since) AS saved_since,min(owed_since) AS owed_since FROM (" ++ spec.sql ++ ") obligation_values GROUP BY session_ref";
+    const text = "UPDATE session SET obligation_since=(SELECT owed_since FROM (" ++ projected ++ ") obligation_new WHERE obligation_new.session_ref=session.session_ref) " ++
+        "WHERE session_ref IN (SELECT session_ref FROM (" ++ projected ++ ") obligation_changed WHERE @distinct(owed_since,saved_since))";
+    return struct {
+        pub const kind: StatementKind = .write;
+        pub const made_from = spec;
+        pub const Args = spec.Args;
+        pub const expect: Expect = .{ .at_most = std.math.maxInt(u32) };
+        pub const guarded = true;
+        pub const sql = renderStatement(text, fieldCount(Args));
+        pub const mysql: Template = mysqlTemplate(text);
+        pub const uses_now = R.uses_now;
+        // Access already holds the changed domain heads. The projection's
+        // owner streams ancestor hints in the same batch, without new heads.
+        pub const session_fields: []const []const u8 = &.{};
+    };
+}
+
+/// Whether `S` is the type a checked constructor made, so its text passed every
 /// check. A struct that copies a statement's declarations, `made_from`
 /// included, is not: `S` must be the very type its spec makes.
 pub fn isStatement(comptime S: type) bool {
@@ -491,7 +525,7 @@ pub fn isStatement(comptime S: type) bool {
         if (@TypeOf(S.kind) != StatementKind) return false;
         return switch (S.kind) {
             .read => if (@TypeOf(S.made_from) == ReadSpec) S == Read(S.made_from) else @TypeOf(S.made_from) == PageSpec and S == Page(S.made_from),
-            .write => @TypeOf(S.made_from) == WriteSpec and S == Write(S.made_from),
+            .write => if (@TypeOf(S.made_from) == WriteSpec) S == Write(S.made_from) else @TypeOf(S.made_from) == ObligationProjectionSpec and S == ObligationProjection(S.made_from),
         };
     }
 }
@@ -3193,6 +3227,19 @@ test "only a type Read, Write or Page made counts as a typed statement" {
     try std.testing.expect(comptime isStatement(Real));
     try std.testing.expect(comptime isStatement(Written));
     try std.testing.expect(comptime isStatement(TestCalls));
+    const Projection = ObligationProjection(.{
+        .sql = "SELECT session_ref,obligation_since AS saved_since,obligation_since AS owed_since FROM session WHERE session_ref=?1 UNION SELECT session_ref,obligation_since AS saved_since,obligation_since AS owed_since FROM session WHERE session_ref=?1",
+        .Args = struct { session: []const u8 },
+    });
+    try std.testing.expect(comptime isStatement(Projection));
+    try std.testing.expect(std.mem.startsWith(u8, Projection.sql, "UPDATE session SET obligation_since="));
+    try std.testing.expect(std.mem.indexOf(u8, Projection.sql, "IS NOT") != null);
+    try std.testing.expectEqual(@as(usize, 0), Projection.session_fields.len);
+    try std.testing.expect(!comptime isStatement(struct {
+        pub const kind = Projection.kind;
+        pub const made_from = Projection.made_from;
+        pub const sql: [:0]const u8 = "UPDATE session SET parent_ref=NULL";
+    }));
     // Open text in a struct shaped like a statement.
     try std.testing.expect(!comptime isStatement(struct {
         pub const kind: StatementKind = .write;

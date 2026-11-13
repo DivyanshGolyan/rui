@@ -134,28 +134,51 @@ def leave(tty):
     tty.finish()
 
 
+def escaped_overview(tty, conversation):
+    """A standalone Esc returns to the list, never to another editor."""
+    tty.wait(lambda: all(marker in tty.screen.completed for marker in
+                         ("+ New Session", conversation, "Settings", "enter open")),
+             label="overview after expired standalone Esc")
+    assert "Type a task" not in tty.screen.completed, ("overview has an editor", tty.screen.completed)
+    assert not re.search(r"(?m)(?:^|│)\s*[›>](?: |$)", tty.screen.completed), \
+        ("overview has a composer", tty.screen.completed)
+
+
 def editor(fixture, row):
+    expected = []
+    if "reopen_draft" in row:
+        fixture.answer("TD4 saved conversation answer")
     fixture.answer("TD4 exact answer")
     tty = fixture.terminal()
+    if "reopen_draft" in row:
+        # Configure-only chats intentionally disappear from the overview on
+        # departure. Admit a real Message through this same chat so its sole
+        # row remains available for the draft save/restore vector below.
+        tty.send(b"TD4 saved conversation\r")
+        tty.marker("TD4 saved conversation answer")
+        tty.draft("", 2)
+        expected.append("TD4 saved conversation")
+        assert_submitted(fixture.endpoint.requests, list(expected))
     chunks(tty, row["chunks"])
     if "reopen_draft" in row:
-        # The expired standalone Esc leaves the chat, saving its draft. The
-        # fixture creates exactly one Session, so Enter must reopen that row.
+        # The expired standalone Esc leaves the chat, saving its draft. Enter
+        # reopens the sole, now-populated Session. Its initial empty entry may
+        # have left overview navigation on pinned New Session, so select the
+        # first conversation explicitly instead of relying on chat selection.
         # If Esc merged with a later byte, this overview observation must fail.
-        tty.marker("+ New Session")
-        tty.marker(f"○ {fixture.session}")
-        tty.marker("enter open")
-        tty.send(b"\r")
-        tty.marker(f"‹ {fixture.session} · ")
+        escaped_overview(tty, "TD4 saved conversation")
+        tty.send(b"\x1b[H\x1b[B\r")
+        # The reopened chat retains its own draft and caret.
         tty.draft(row["reopen_draft"], 2 + len(row["reopen_draft"]))
         chunks(tty, row["submit_chunks"])
     # Each vector supplies its own submit byte(s). This makes wrong Enter,
     # swallowed suffix and accidental multi-Message behavior observable.
     tty.marker("TD4 exact answer")
     tty.draft("", 2)
-    assert_submitted(fixture.endpoint.requests, [row["expected"]])
+    expected.append(row["expected"])
+    assert_submitted(fixture.endpoint.requests, list(expected))
     leave(tty)
-    assert_submitted(fixture.endpoint.requests, [row["expected"]])
+    assert_submitted(fixture.endpoint.requests, list(expected))
 
 
 def rejection(fixture, row):
