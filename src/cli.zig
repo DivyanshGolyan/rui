@@ -730,11 +730,14 @@ fn planLogout(init: std.process.Init, provider: []const u8, fixture_endpoint: ?[
         stderr.diagnostic("rui: rui auth logout signs out of chatgpt only; Rui keeps no sign-in to end for another provider.\n", .{});
         return usage();
     }
+    // A bad test issuer is a bad invocation, refused before either login
+    // is touched. A credential path Rui cannot resolve is only that
+    // login's outcome (`unlocated`); the other is still ended.
     const issuer = try planIssuer(init, fixture_endpoint);
     var browser_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const browser_path = try credentialPath(init, .chatgpt, &browser_buffer, false);
+    const browser_path = provider_login.credentialPath(init, .chatgpt, &browser_buffer, false) catch null;
     var device_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const device_path = try credentialPath(init, .codex, &device_buffer, false);
+    const device_path = provider_login.credentialPath(init, .codex, &device_buffer, false) catch null;
     const receipt = logoutReceipt(chatgpt_plan_login.logout(init.io, browser_path, device_path, issuer));
     if (receipt.done) |line| try std.Io.File.stdout().writeStreamingAll(init.io, line);
     if (receipt.browser) |line| stderr.diagnosticBytes(line);
@@ -761,7 +764,7 @@ fn logoutReceipt(ended: chatgpt_plan_login.Logout) LogoutReceipt {
     const again = "inspect it, then run rui auth logout chatgpt again.\n";
     const removed_browser = ended.browser == .revoked or ended.browser == .unconfirmed;
     const removed_device = ended.device_code == .removed;
-    const partial = ended.browser == .failed or ended.device_code == .failed;
+    const partial = ended.browser == .failed or ended.browser == .unlocated or ended.device_code == .failed or ended.device_code == .unlocated;
     return .{
         .done = if (partial)
             if (removed_browser) "Rui: Signed out of ChatGPT in the browser.\n" else if (removed_device) "Rui: Signed out of ChatGPT with a device code.\n" else null
@@ -770,12 +773,21 @@ fn logoutReceipt(ended: chatgpt_plan_login.Logout) LogoutReceipt {
             .absent, .revoked => null,
             .unconfirmed => "rui: ChatGPT did not confirm it ended the browser sign-in; Rui deleted its tokens. To end it there too, disconnect Rui in ChatGPT's settings.\n",
             .failed => "rui: still signed in to ChatGPT in the browser: Rui could not read or change its private credential; " ++ again,
+            .unlocated => unlocated("browser", .chatgpt),
         },
         .device_code = switch (ended.device_code) {
             .absent, .removed => null,
             .failed => "rui: still signed in to ChatGPT with a device code: Rui could not read or change its private credential; " ++ again,
+            .unlocated => unlocated("device-code", .codex),
         },
     };
+}
+
+/// A login whose credential path Rui could not resolve, naming the variable
+/// that sets it.
+fn unlocated(comptime way: []const u8, comptime provider: protocol.Provider) []const u8 {
+    return "rui: could not end the ChatGPT " ++ way ++ " sign-in: Rui could not find its credential. Set " ++
+        comptime provider_login.credentialVariable(provider) ++ " to an absolute path, or leave it unset with HOME absolute, then run rui auth logout chatgpt again.\n";
 }
 
 test "logout says how it left each ChatGPT login, and fails while either may remain" {
@@ -792,6 +804,8 @@ test "logout says how it left each ChatGPT login, and fails while either may rem
     const unconfirmed = "rui: ChatGPT did not confirm it ended the browser sign-in; Rui deleted its tokens. To end it there too, disconnect Rui in ChatGPT's settings.\n";
     const browser_stays = "rui: still signed in to ChatGPT in the browser: Rui could not read or change its private credential; inspect it, then run rui auth logout chatgpt again.\n";
     const device_stays = "rui: still signed in to ChatGPT with a device code: Rui could not read or change its private credential; inspect it, then run rui auth logout chatgpt again.\n";
+    const browser_unfound = "rui: could not end the ChatGPT browser sign-in: Rui could not find its credential. Set RUI_CHATGPT_CREDENTIAL_FILE to an absolute path, or leave it unset with HOME absolute, then run rui auth logout chatgpt again.\n";
+    const device_unfound = "rui: could not end the ChatGPT device-code sign-in: Rui could not find its credential. Set RUI_CODEX_CREDENTIAL_FILE to an absolute path, or leave it unset with HOME absolute, then run rui auth logout chatgpt again.\n";
     const B = chatgpt_plan_login.Browser;
     const D = chatgpt_plan_login.DeviceCode;
     const Row = struct { Readiness, Readiness, B, D, ?[]const u8, ?[]const u8, ?[]const u8, u8 };
@@ -827,6 +841,16 @@ test "logout says how it left each ChatGPT login, and fails while either may rem
         .{ .configured, .renewal_due, .unconfirmed, .removed, out, unconfirmed, null, 1 },
         .{ .configured, .refresh_required, .unconfirmed, .removed, out, unconfirmed, null, 1 },
         .{ .configured, .credential_error, .unconfirmed, .failed, out_browser, unconfirmed, device_stays, 1 },
+        // A credential path Rui cannot resolve, beside each outcome of the
+        // other login, and both at once.
+        .{ .missing, .missing, .unlocated, .absent, null, browser_unfound, null, 1 },
+        .{ .missing, .configured, .unlocated, .removed, out_device, browser_unfound, null, 1 },
+        .{ .missing, .credential_error, .unlocated, .failed, null, browser_unfound, device_stays, 1 },
+        .{ .missing, .missing, .absent, .unlocated, null, null, device_unfound, 1 },
+        .{ .configured, .missing, .revoked, .unlocated, out_browser, null, device_unfound, 1 },
+        .{ .configured, .missing, .unconfirmed, .unlocated, out_browser, unconfirmed, device_unfound, 1 },
+        .{ .credential_error, .missing, .failed, .unlocated, null, browser_stays, device_unfound, 1 },
+        .{ .missing, .missing, .unlocated, .unlocated, null, browser_unfound, device_unfound, 1 },
     };
     // Every pair of states is in the table once with a confirmed revocation.
     var seen = std.EnumArray(Readiness, std.EnumSet(Readiness)).initFill(.empty);

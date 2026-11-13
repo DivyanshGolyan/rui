@@ -407,6 +407,8 @@ pub const Browser = enum {
     revoked,
     /// The tokens are gone, but the issuer did not confirm the revocation.
     unconfirmed,
+    /// Rui could not find the record: its path is unset or not absolute.
+    unlocated,
     /// Rui could not read or sign out the record, which stays as it was.
     failed,
 };
@@ -418,6 +420,8 @@ pub const DeviceCode = enum {
     absent,
     /// The tokens are gone.
     removed,
+    /// Rui could not find the record: its path is unset or not absolute.
+    unlocated,
     /// Rui could not read or sign out the record, which stays as it was.
     failed,
 };
@@ -436,25 +440,37 @@ const Revoke = struct {
 /// `credentials.signOut`: the browser sign-in at `browser_path` revokes its
 /// refresh token, best effort, then removes the tokens and keeps the issued
 /// client id; the device-code one at `device_code_path` only removes its
-/// tokens. A failure to end one never keeps the other from ending.
-pub fn logout(io: std.Io, browser_path: []const u8, device_code_path: []const u8, issuer: Issuer) Logout {
-    const mapped = pages.Mapped(Revoke).map() catch return .{ .browser = .failed, .device_code = .failed };
+/// tokens. A null path is one Rui could not find. Each login has its own
+/// path and room, so nothing that fails for one keeps the other from ending.
+pub fn logout(io: std.Io, browser_path: ?[]const u8, device_code_path: ?[]const u8, issuer: Issuer) Logout {
+    return .{
+        .browser = if (browser_path) |path| endBrowser(io, path, issuer) else .unlocated,
+        .device_code = if (device_code_path) |path| endDeviceCode(path) else .unlocated,
+    };
+}
+
+fn endBrowser(io: std.Io, path: []const u8, issuer: Issuer) Browser {
+    const mapped = pages.Mapped(Revoke).map() catch return .failed;
     defer mapped.unmap();
     const room = mapped.value;
     defer std.crypto.secureZero(u8, std.mem.asBytes(room));
-    return .{
-        .browser = if (revokeBrowser(io, browser_path, issuer, room)) |outcome| outcome else |err| switch (err) {
-            // No private directory: never signed in.
-            error.FileNotFound => .absent,
-            else => .failed,
-        },
-        .device_code = if (credentials.signOut(device_code_path, &room.credentials, {}, keepDeviceCode)) |ended|
-            if (ended) .removed else .absent
-        else |err| switch (err) {
-            error.FileNotFound => .absent,
-            else => .failed,
-        },
+    return revokeBrowser(io, path, issuer, room) catch |err| switch (err) {
+        // No private directory: never signed in.
+        error.FileNotFound => .absent,
+        else => .failed,
     };
+}
+
+fn endDeviceCode(path: []const u8) DeviceCode {
+    const mapped = pages.Mapped(credentials.Scratch).map() catch return .failed;
+    defer mapped.unmap();
+    const scratch = mapped.value;
+    defer std.crypto.secureZero(u8, std.mem.asBytes(scratch));
+    const ended = credentials.signOut(path, scratch, {}, keepDeviceCode) catch |err| return switch (err) {
+        error.FileNotFound => .absent,
+        else => .failed,
+    };
+    return if (ended) .removed else .absent;
 }
 
 /// The device-code sign-in has no revocation Rui knows of: nothing is sent.
@@ -526,6 +542,16 @@ test "logout ends the device-code sign-in in each state it can be in, beside a b
             if (case[0]) |bytes| try tmp.dir.writeFile(io, .{ .sub_path = "private/codex.json", .data = bytes, .flags = .{ .permissions = .fromMode(0o600) } });
             if (browser[0]) |bytes| try tmp.dir.writeFile(io, .{ .sub_path = "private/chatgpt.json", .data = bytes, .flags = .{ .permissions = .fromMode(0o600) } });
             try std.testing.expectEqual(Logout{ .browser = browser[1], .device_code = case[1] }, logout(io, browser_path, device_path, .{ .fixture = "http://127.0.0.1:9" }));
+            // A login Rui cannot find is that login's own outcome; the other
+            // is still ended, and the unfound one is untouched.
+            if (case[1] == .removed) {
+                try tmp.dir.writeFile(io, .{ .sub_path = "private/codex.json", .data = case[0].?, .flags = .{ .permissions = .fromMode(0o600) } });
+                try std.testing.expectEqual(Logout{ .browser = .unlocated, .device_code = .removed }, logout(io, null, device_path, .{ .fixture = "http://127.0.0.1:9" }));
+                try tmp.dir.writeFile(io, .{ .sub_path = "private/codex.json", .data = case[0].?, .flags = .{ .permissions = .fromMode(0o600) } });
+                try std.testing.expectEqual(Logout{ .browser = browser[1], .device_code = .unlocated }, logout(io, browser_path, null, .{ .fixture = "http://127.0.0.1:9" }));
+                try tmp.dir.writeFile(io, .{ .sub_path = "private/codex.json", .data = case[0].?, .flags = .{ .permissions = .fromMode(0o600) } });
+                try std.testing.expectEqual(Logout{ .browser = browser[1], .device_code = case[1] }, logout(io, browser_path, device_path, .{ .fixture = "http://127.0.0.1:9" }));
+            }
             var bytes: [policy.max_file_bytes]u8 = undefined;
             const after: ?[]const u8 = tmp.dir.readFile(io, "private/codex.json", &bytes) catch |err| switch (err) {
                 error.FileNotFound => null,
@@ -533,7 +559,7 @@ test "logout ends the device-code sign-in in each state it can be in, beside a b
             };
             switch (case[1]) {
                 // Nothing changed.
-                .absent, .failed => if (case[0]) |before| try std.testing.expectEqualStrings(before, after.?) else try std.testing.expectEqual(@as(?[]const u8, null), after),
+                .absent, .failed, .unlocated => if (case[0]) |before| try std.testing.expectEqualStrings(before, after.?) else try std.testing.expectEqual(@as(?[]const u8, null), after),
                 // Signed out at the next generation: nothing selects it, and status reads no sign-in.
                 .removed => {
                     try std.testing.expectEqualStrings("version=3\ngeneration=2\naccount_id=" ++ policy.fixture_account_id ++

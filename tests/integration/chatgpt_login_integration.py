@@ -163,9 +163,14 @@ UNCONFIRMED = ("rui: ChatGPT did not confirm it ended the browser sign-in; Rui d
                "To end it there too, disconnect Rui in ChatGPT's settings.\n")
 
 
-def logout(url):
+def logout(url, **variables):
     return subprocess.run([str(fixture.RUI), "auth", "logout", "chatgpt", "--test-chatgpt-fixture-endpoint", url],
-                          capture_output=True, text=True, timeout=30)
+                          capture_output=True, text=True, timeout=30, env={**os.environ, **variables})
+
+
+def unfound(way, variable):
+    return (f"rui: could not end the ChatGPT {way} sign-in: Rui could not find its credential. Set {variable} "
+            "to an absolute path, or leave it unset with HOME absolute, then run rui auth logout chatgpt again.\n")
 
 
 def challenge(verifier):
@@ -187,7 +192,7 @@ def run():
     # from the fixture.
     os.environ["RUI_CODEX_CREDENTIAL_FILE"] = str(device_file)
     first, second, third = compact({"exp": FAR}, "Zmlyc3Q"), compact({"exp": FAR}, "c2Vjb25k"), compact({"exp": FAR}, "dGhpcmQ")
-    fourth = compact({"exp": FAR}, "Zm91cnRo")
+    fourth, fifth = compact({"exp": FAR}, "Zm91cnRo"), compact({"exp": FAR}, "ZmlmdGg")
     endpoint = fixture.SuccessEndpoint([
         fixture.sse_answer("plan-1", "plan-r1", "plan-m1", "first plan answer")[0],
         fixture.sse_answer("plan-2", "plan-r2", "plan-m2", "after a returning sign-in")[0],
@@ -465,6 +470,34 @@ def run():
         assert (out.returncode, out.stdout, out.stderr) == (1, SIGNED_OUT, UNCONFIRMED), out
         assert endpoint.revoke_requests[2]["token"] == ["plan-refresh-4"], endpoint.revoke_requests
         assert credential_facts(credential_file)["state"] == credential_facts(device_file)["state"] == "signed_out"
+
+        # A credential path Rui cannot resolve fails only its own login: the
+        # other is still ended, and the command fails naming the variable.
+        login = Login(url)
+        logins.append(login)
+        link = login.link(base)
+        port = urllib.parse.urlsplit(link["redirect_uri"]).port
+        with endpoint.lock:
+            endpoint.tokens.append(tokens(link, fifth, "plan-refresh-5"))
+        assert get(callback(port, {"code": "ac-made-up-6", "state": link["state"]}))[0] == 200
+        code, stdout, stderr = login.finish()
+        assert code == 0, (code, stdout, stderr)
+        codex_fixture.credentials(device_file)
+        out = logout(url, RUI_CHATGPT_CREDENTIAL_FILE="private/chatgpt.json")
+        assert (out.returncode, out.stdout, out.stderr) == (
+            1, "Rui: Signed out of ChatGPT with a device code.\n", unfound("browser", "RUI_CHATGPT_CREDENTIAL_FILE")), out
+        assert len(endpoint.revoke_requests) == 3, endpoint.revoke_requests
+        assert credential_facts(credential_file)["access_token"] == fifth
+        assert credential_facts(device_file)["state"] == "signed_out"
+        codex_fixture.credentials(device_file)
+        with endpoint.lock:
+            endpoint.revocations.append((200, None))
+        out = logout(url, RUI_CODEX_CREDENTIAL_FILE="codex.json")
+        assert (out.returncode, out.stdout, out.stderr) == (
+            1, "Rui: Signed out of ChatGPT in the browser.\n", unfound("device-code", "RUI_CODEX_CREDENTIAL_FILE")), out
+        assert endpoint.revoke_requests[3]["token"] == ["plan-refresh-5"], endpoint.revoke_requests
+        assert credential_facts(credential_file)["state"] == "signed_out"
+        assert credential_facts(device_file)["state"] == "ready"
         fixture.stop_host(host)
         host = None
         print("chatgpt login passed: listener and pasted sign-in, returning client reused, stale answer refused, "
