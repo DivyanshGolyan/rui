@@ -1047,13 +1047,20 @@ pub fn runAs(a: anytype, comptime failed: anytype) (RunError(@TypeOf(a.*)) || @T
 
 /// Ends `a`'s round with `run`, answering a failed step with the name main
 /// gave the statement that failed: the error of the first pair in `named`
-/// whose statement it was (`failedOn`), or `otherwise`.
+/// whose statement it was (`failedName`), or `otherwise`.
 pub fn runNamed(a: anytype, comptime named: anytype, comptime otherwise: anytype) (RunError(@TypeOf(a.*)) || NamedErrors(named) || @TypeOf(otherwise))!void {
     a.run() catch |err| {
         if (err != error.StatementFailed) return err;
-        inline for (named) |pair| if (a.failedOn(pair[0])) return pair[1];
-        return otherwise;
+        return failedName(a, named) orelse otherwise;
     };
+}
+
+/// The name main gave the statement whose step failed in `a`: the error of
+/// the first pair in `named`, in declared order, whose statement it was
+/// (`failedOn`), or null when no pair names it.
+pub fn failedName(a: anytype, comptime named: anytype) ?NamedErrors(named) {
+    inline for (named) |pair| if (a.failedOn(pair[0])) return pair[1];
+    return null;
 }
 
 /// The errors `A.run` returns.
@@ -1061,7 +1068,7 @@ fn RunError(comptime A: type) type {
     return @typeInfo(@typeInfo(@TypeOf(A.run)).@"fn".return_type.?).error_union.error_set;
 }
 
-/// The errors `runNamed`'s pairs name.
+/// The errors `runNamed`'s and `failedName`'s pairs name.
 fn NamedErrors(comptime named: anytype) type {
     comptime var set: type = error{};
     inline for (named) |pair| set = set || @TypeOf(pair[1]);

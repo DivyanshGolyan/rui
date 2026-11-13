@@ -109,12 +109,12 @@ pub fn rounds(comptime spec: anytype) type {
         /// The error a failed statement in `at` answers, or null when the
         /// round names none: the name of the statement whose step failed
         /// in `access`, the Access that ran the round, if the round names
-        /// it, or else the round's.
+        /// it (`store_access.failedName`), or else the round's.
         pub fn failed(at: At, access: anytype) ?Error {
             return switch (at) {
                 inline else => |tag| {
                     const round = @field(spec, @tagName(tag));
-                    if (round.len == 3) inline for (round[2]) |pair| if (access.failedOn(pair[0])) return pair[1];
+                    if (round.len == 3) if (store_access.failedName(access, round[2])) |name| return name;
                     return if (round.len >= 2) round[1] else null;
                 },
             };
