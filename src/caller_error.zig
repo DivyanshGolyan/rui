@@ -224,7 +224,6 @@ pub const pending = .{
     "UnixConnectFailed",
     "UnknownArgument",
     "UnknownReportProfile",
-    "UnsupportedProvider",
     "ValueTooLong",
     "WouldBlock",
     "WriteFailed",

@@ -132,6 +132,9 @@ Use `rui host set --store PATH SETTING @FILE` to read a JSON value from a file.
 `settings` fills in defaults and shows secret sources, not secret bytes; saved literal secrets are refused.
 `unset` removes the saved assignment, restoring its default when no later source overrides it.
 Changes apply to the next Host; they do not reconfigure a running one.
+`rui host start` takes `--settings FILE` but not `-`, because a started Host has no stdin; pass a document on stdin with `rui host serve --settings -`.
+Bare `rui` and `rui host start` reach a Host only in `PATH`, so they refuse settings that move it elsewhere: a MySQL Store, `interface.dir`, or a `store.sqlite.dir` other than `PATH`.
+Run such a Host with `rui host serve --store PATH`.
 
 ## Run in the foreground
 

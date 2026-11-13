@@ -32,4 +32,3 @@ class HostServeDialect:
                          ["--provider-endpoint", endpoint])
         return [str(self.binary), *self.serve(), "--store", str(store), *settings,
                 *(["--test-retry-waits-ms", "50,100,150"] if endpoint is not None and retry_waits else [])]
-
