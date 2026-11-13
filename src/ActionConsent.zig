@@ -18,7 +18,6 @@ pub const Input = union(enum) {
     release: ?policy.Choice,
     cancel,
     other,
-    invalid,
 };
 
 /// Input policy is independent of rendering and of whether the kept draft is empty.
@@ -98,7 +97,7 @@ pub fn handle(self: *Self, input: Input, pasting: bool) ?policy.Decision {
             return null;
         },
         .enter => self.highlight,
-        .other, .invalid, .cancel => return null,
+        .other, .cancel => return null,
     };
     const decision: policy.Decision = .{ .action = self.drawn.?, .choice = choice };
     self.withdraw();
@@ -126,7 +125,7 @@ test "Action consent ignores typing and defaults each request to Allow once" {
     _ = consent.draw();
     try std.testing.expectEqual(null, consent.handle(.right, false));
     consent.adopt(17);
-    for ([_]Input{ .other, .invalid }) |input| try std.testing.expectEqual(null, consent.handle(input, false));
+    try std.testing.expectEqual(null, consent.handle(.other, false));
     try std.testing.expectEqual(policy.Decision{ .action = 17, .choice = .deny }, consent.handle(.enter, false).?);
     consent.adopt(29);
     _ = consent.draw();
@@ -147,7 +146,7 @@ test "Action consent marked paste never chooses even across request replacement"
     consent.withdraw();
     consent.adopt(29);
     _ = consent.draw();
-    for ([_]Input{ .left, .right, .enter, .{ .press = .deny }, .{ .release = .deny }, .other, .invalid }) |input|
+    for ([_]Input{ .left, .right, .enter, .{ .press = .deny }, .{ .release = .deny }, .other }) |input|
         try std.testing.expectEqual(null, consent.handle(input, true));
     try std.testing.expectEqual(policy.Decision{ .action = 29, .choice = .allow_once }, consent.handle(.enter, false).?);
 }
