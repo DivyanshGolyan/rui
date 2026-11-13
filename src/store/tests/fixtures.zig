@@ -30,6 +30,6 @@ test "a fixture's SQL is portable Rui SQL and names no SQLite mechanism" {
             return error.FixtureVerdictChanged;
         }
     }
-    try std.testing.expectEqualStrings("fixture: 'pragma' is a SQLite mechanism; write the test in sqlite_tests.zig", comptime store_testing.fixtureTextError("DELETE FROM turn; pragma ignore_check_constraints=ON").?);
+    try std.testing.expectEqualStrings("fixture: 'pragma' is a SQLite mechanism; write the test under sqlite_tests/", comptime store_testing.fixtureTextError("DELETE FROM turn; pragma ignore_check_constraints=ON").?);
     try std.testing.expectEqualStrings("rsql: 'INSERT OR' is not portable; read in an earlier round, then guard the write", comptime store_testing.fixtureTextError("INSERT OR IGNORE INTO turn VALUES(1)").?);
 }

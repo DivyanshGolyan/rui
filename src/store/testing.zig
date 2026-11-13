@@ -390,10 +390,10 @@ pub fn fixtureTextError(comptime text: []const u8) ?[]const u8 {
             const word = text[index..end];
             index = end;
             for (fixture_sqlite_words) |sqlite_word| {
-                if (std.ascii.eqlIgnoreCase(word, sqlite_word)) return "fixture: '" ++ word ++ "' is a SQLite mechanism; write the test in sqlite_tests.zig";
+                if (std.ascii.eqlIgnoreCase(word, sqlite_word)) return "fixture: '" ++ word ++ "' is a SQLite mechanism; write the test under sqlite_tests/";
             }
             for (fixture_sqlite_prefixes) |prefix| {
-                if (std.ascii.startsWithIgnoreCase(word, prefix)) return "fixture: '" ++ word ++ "' is a SQLite mechanism; write the test in sqlite_tests.zig";
+                if (std.ascii.startsWithIgnoreCase(word, prefix)) return "fixture: '" ++ word ++ "' is a SQLite mechanism; write the test under sqlite_tests/";
             }
             if (std.ascii.eqlIgnoreCase(previous, "AS") and std.ascii.eqlIgnoreCase(word, "TEXT"))
                 return "fixture: 'AS TEXT' is not a MySQL cast; compare the bytes another way";
@@ -510,8 +510,8 @@ pub fn queryU64(storage: *Store, comptime sql: [:0]const u8, args: anytype) !u64
     return sqliteQueryU64(storage.sqliteDatabase(), sql, args);
 }
 
-/// `exec` on a SQLite connection, for any SQLite text: sqlite_tests.zig's
-/// raw SQL.
+/// `exec` on a SQLite connection, for any SQLite text: the raw SQL of
+/// sqlite_tests.zig and sqlite_tests/.
 pub fn sqliteExec(database: *sqlite.c.sqlite3, sql: [:0]const u8, args: anytype) !void {
     if (args.len == 0) return sqlite.exec(database, sql);
     const statement = try sqlite.prepare(database, sql);
@@ -520,8 +520,8 @@ pub fn sqliteExec(database: *sqlite.c.sqlite3, sql: [:0]const u8, args: anytype)
     try sqlite.expectDone(statement);
 }
 
-/// `queryU64` on a SQLite connection, for any SQLite text:
-/// sqlite_tests.zig's raw SQL.
+/// `queryU64` on a SQLite connection, for any SQLite text: the raw SQL
+/// of sqlite_tests.zig and sqlite_tests/.
 pub fn sqliteQueryU64(database: *sqlite.c.sqlite3, sql: [:0]const u8, args: anytype) !u64 {
     const statement = try sqlite.prepare(database, sql);
     defer _ = sqlite.c.sqlite3_finalize(statement);
@@ -556,7 +556,7 @@ pub fn withoutForeignKeys(storage: *Store, comptime sql: [:0]const u8, args: any
 }
 
 /// The same fixtures for tests that run only on SQLite
-/// (sqlite_tests.zig): `sql` is SQLite's text, held to no portability
+/// (sqlite_tests.zig and sqlite_tests/): `sql` is SQLite's text, held to no portability
 /// rule and never handed to the live MySQL check.
 pub const sqlite_only = struct {
     pub fn exec(storage: *Store, sql: [:0]const u8, args: anytype) !void {

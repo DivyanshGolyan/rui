@@ -35,13 +35,10 @@ test files under src/store/sqlite_tests/.
     python3 tests/ci/store_conformance.py check
 
 `rewrite` leaves formatting to `zig fmt src/store/tests.zig src/store/sqlite_tests.zig`.
-It is a fixpoint on tests already split, so after merging a base that
-changed the pre-split tests.zig, rerun it on that file with the change
-merged in: the harness commit's tests.zig, three-way merged with the base.
-Some tests were edited by hand after the split. Before rerunning, take
-those edits as a patch: rewrite the unmerged harness commit's tests.zig,
-`zig fmt` both files, and `git diff` them against the branch's own. After
-rerunning on the merged file, `git apply -3` that patch.
+It is a fixpoint on tests already split. It writes the two-file layout the
+per-domain split replaced, so it records how tests were classified rather
+than producing today's files: a test a base adds goes by hand into the
+domain file under tests/ or sqlite_tests/ that `check` admits.
 """
 
 import re
@@ -512,22 +509,25 @@ def table(pre_split):
     return rows
 
 
-def check(text):
-    """Why the supplied helper text or a conformance test file is not neutral.
+def conformance_sources(root=ROOT):
+    """tests.zig and every tests/**/*.zig file under `root`, as (name, text).
 
-    Keep the historical codemod's text argument, but include every domain
-    file in the placement rule so existing callers also check moved tests.
     SQLite helpers and tests live in sqlite_tests.zig and sqlite_tests/;
     neither is part of this engine-neutral source set.
     """
-    sources = [(TESTS, text)]
-    directory = ROOT / Path(TESTS).with_suffix("")
-    sources.extend((path.relative_to(ROOT).as_posix(), path.read_text())
-                   for path in sorted(directory.rglob("*.zig")))
-    sqlite_import = re.compile(r'@import\("(?:\.\./)*(?:sqlite(?:_tests)?\.zig|sqlite_tests/[^"\n]+\.zig)"\)')
+    directory = root / Path(TESTS).with_suffix("")
+    return [(TESTS, (root / TESTS).read_text())] + [
+        (path.relative_to(root).as_posix(), path.read_text()) for path in sorted(directory.rglob("*.zig"))]
+
+
+SQLITE_MODULE_IMPORT = re.compile(r'@import\("(?:\.\./)*(?:sqlite(?:_tests)?\.zig|sqlite_tests/[^"\n]+\.zig)"\)')
+
+
+def check(sources):
+    """Why one of `sources`, (name, text) pairs, is not engine-neutral, or None."""
     destination = "the SQLite test files under src/store/sqlite_tests/"
     for name, source in sources:
-        if sqlite_import.search(source):
+        if SQLITE_MODULE_IMPORT.search(source):
             return f"{name} imports a SQLite module; SQLite-only tests belong in {destination}"
         for number, line in enumerate(code_only(source).split("\n"), 1):
             match = SQLITE_CODE.search(line)
@@ -544,7 +544,7 @@ def main(argv):
             print("rewrite needs the pre-split tests.zig", file=sys.stderr)
             return 2
         text = Path(argv[2]).read_text()
-        if check(text) is None:
+        if check([(TESTS, text)]) is None:
             print(f"{argv[2]} is already split; rewrite takes the pre-split tests.zig", file=sys.stderr)
             return 1
         tests, moved, stats = rewrite(text)
@@ -557,7 +557,7 @@ def main(argv):
             print(f"{file}\t{reason}\t{name}")
         return 0
     if argv[1:2] == ["check"]:
-        problem = check((ROOT / TESTS).read_text())
+        problem = check(conformance_sources())
         if problem:
             print(problem, file=sys.stderr)
             return 1
