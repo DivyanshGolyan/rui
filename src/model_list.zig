@@ -1,9 +1,11 @@
 //! Each served provider's model list: the IDs its account can use, and
-//! whether Rui's catalog knows each one's facts. ChatGPT has no public list,
-//! so its list is the catalog's OpenAI IDs. The OpenAI API's is fetched once at Host start
-//! (`GET BASE/models`) and kept; until it arrives, or when it fails, the
-//! catalog's OpenAI IDs stand in. A model the catalog does not list runs with default
-//! limits (`product_defaults.unlisted_context_window`).
+//! whether Rui's catalog knows each one's facts. A provider whose list is
+//! live (an OpenAI key, a ChatGPT plan) has it fetched at Host start and on
+//! each model-list request (`GET BASE/models`) and kept; until it arrives,
+//! or when it fails, the catalog's OpenAI IDs stand in, as they do for a
+//! provider with no list (the ChatGPT device sign-in). A live list names
+//! IDs only: a model's facts come from the catalog, and one the catalog does
+//! not list runs with default limits (`product_defaults.unlisted_context_window`).
 const std = @import("std");
 const catalog = @import("model_catalog.zig");
 const model_capability = @import("model_capability.zig");
@@ -11,7 +13,7 @@ const provider_name = @import("provider_name.zig");
 
 /// Where a provider's list came from.
 pub const Source = enum {
-    /// Catalog OpenAI IDs: the provider has no list.
+    /// Catalog OpenAI IDs: the provider has no live list here.
     catalog,
     /// Catalog OpenAI IDs while the fetch is still in flight; ask again later.
     pending,
