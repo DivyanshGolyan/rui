@@ -17,6 +17,7 @@ const Bounded = @import("../../bounded.zig").Bounded;
 const cli_value = @import("../../cli_value.zig");
 const mutation_answer = @import("../../mutation_answer.zig");
 const provider_name = @import("../../provider_name.zig");
+const provider_route = @import("../../provider_route.zig");
 const session_archive = @import("../../session_archive.zig");
 const session_id = @import("../../session_id.zig");
 const content_custody = @import("../../content_custody.zig");
@@ -231,239 +232,366 @@ fn readMessage(a: anytype, selector: []const u8, command: *const content_custody
     if (claimedHandle(command, selector)) |handle| a.read(message_sender, .{ .handle = handle }, &reads.sender);
 }
 
-/// A Message's answer when round 1 found it saved, or null for a fresh
-/// one. An accepted replay reads its admission and text in a round of its
-/// own.
-fn replayMessage(a: anytype, command: *const content_custody.MessageCommand, reads: *const MessageReads) !?MessageReply {
-    switch (try classify(message_admission.Rejection, &reads.saved, .message, command.session.slice(), &reads.digest)) {
-        .fresh => return null,
-        .conflict => {
-            try a.abandon(.{});
-            return .conflict;
-        },
-        .rejected => |code| {
-            try a.abandon(.{});
-            return .{ .rejected = .{ .replayed = true, .code = code, .content = .{ .length = command.text.length, .digest = command.text.digest } } };
-        },
-        .accepted => |existing| {
-            const content_id = existing.primary_content_id orelse return error.CorruptStore;
-            var row: message_replay.Result = undefined;
-            a.read(message_replay, .{ .key = command.key.slice() }, &row);
-            try a.run();
-            if (row.content_id.get() != content_id or !existing.target.eql(row.session_ref.slice())) return error.CorruptStore;
-            try a.abandon(.{});
-            return .{ .accepted = .{
-                .replayed = true,
-                .admission_id = row.admission_id.get(),
-                .content = .{ .length = row.length, .digest = row.digest },
-                .session = existing.target,
-            } };
-        },
-    }
-}
-
-/// Saves a rejected Message; a peer's rejection takes its sender's next
-/// position. Then commits.
-fn rejectMessage(
-    a: anytype,
-    command: *const content_custody.MessageCommand,
-    reads: *const MessageReads,
-    sender_known: bool,
-    code: message_admission.Rejection,
-    faults: Faults,
-) !MessageReply {
-    return rejectMessageWithFailure(a, command, reads, sender_known, code, null, faults);
-}
-
-fn rejectMessageWithFailure(
-    a: anytype,
-    command: *const content_custody.MessageCommand,
-    reads: *const MessageReads,
-    sender_known: bool,
-    code: message_admission.Rejection,
-    failure: ?skills_domain.MessageFailure,
-    faults: Faults,
-) !MessageReply {
-    const outcome_id = if (failure) |diagnostic| try skills_domain.importFailure(a, diagnostic.bytes, faults) else null;
-    var answer = StoredAnswer{ .accepted = false };
-    try answer.code.set(@tagName(code));
-    try queueCommand(a, command.key.slice(), .message, command.session.slice(), &reads.digest, outcome_id, null, &answer);
-    if (sender_known) {
-        const sender = reads.sender.?.session;
-        a.write(reject_sent, .{ .key = command.key.slice(), .sender = sender, .position = try (try a.positions(sender)).take(1) });
-    }
-    if (faults.before_commit) return error.InjectedCommitFailure;
-    try a.commit();
-    return .{ .rejected = .{ .replayed = false, .code = code, .content = .{ .length = command.text.length, .digest = command.text.digest } } };
-}
-
-/// After the text's lookup round: imports the text and saves the command
-/// (with the Session revision `configured` wrote, when it created the
-/// Session) and the admission at `head`'s next position, then commits.
-fn admitMessage(
-    a: anytype,
-    io: std.Io,
-    command: *const content_custody.MessageCommand,
-    reads: *MessageReads,
-    head: rsql.SessionHead,
-    session: Bounded(session_id.max_reference_bytes),
-    configured: ?*const configuration_domain.Applied,
-    committed: ?MessageCommitted,
-    faults: Faults,
-) !MessageReply {
-    const text_id = try content_domain.importSealed(a, io, &command.text, &reads.text, faults);
-    const answer: StoredAnswer = .{ .accepted = true };
-    const admission_id = if (command.sender != null)
-        try admitFromSession(a, &reads.sender.?.session, &head, command.key.slice(), text_id, &reads.digest, configured, &answer)
-    else person: {
-        try queueMessageCommand(a, &head, command.key.slice(), text_id, &reads.digest, configured, &answer);
-        const admission_id = try a.identity(.admission_id);
-        a.write(admit_message, .{ .admission_id = admission_id, .session = head, .key = command.key.slice(), .content_id = text_id, .position = try (try a.positions(head)).take(1) });
-        break :person admission_id;
-    };
-    try skills_domain.saveBound(a, admission_id, reads.bound, faults);
-    try commitMessage(a, head, admission_id, command.sender != null, committed, faults);
-    return .{
-        .accepted = .{
-            .replayed = false,
-            .admission_id = admission_id,
-            // The text's row was found or written under exactly this identity.
-            .content = .{ .length = reads.text.length, .digest = reads.text.digest },
-            .session = session,
-        },
-    };
-}
-
 /// A Message to an existing Session, or one that creates its Session.
 /// Only an authenticated Action can acquire a sender position; an exact
 /// replay needs no still-live handle.
-pub fn submitMessage(
-    a: anytype,
-    io: std.Io,
-    served: anytype,
-    selector: []const u8,
-    command: *const content_custody.MessageCommand,
-    committed: ?MessageCommitted,
-    initial_skills: ?*const skills_domain.Initial,
-    captured_skill: ?*const skills_domain.MessageCapture,
-    faults: Faults,
-) !MessageReply {
-    if (command.configuration != null) return submitCreating(a, io, served, selector, command, committed, initial_skills, captured_skill, faults);
-    var reads: MessageReads = .{ .digest = command.semanticDigest(), .text = content_domain.sealedIdentity(&command.text) };
-    return submitTo(a, io, served, selector, command, committed, captured_skill, faults, &reads);
-}
+///
+/// Round `.facts` reads the saved answer and the sender's Action, with
+/// the Session and the text's content row, or for a creation the rows its
+/// configuration needs (`configuration.prepareConfiguration`). An accepted
+/// replay reads its admission and text in `.replay`. A creation's
+/// validation and application add their own rounds (`.model` to
+/// `.loaded`, `configuration.validateStep`; `.creation` and `.catalog`,
+/// `configuration.applyStep`), then the text's lookup is `.text`, which
+/// also runs the creation's writes. A refusal with a diagnostic looks its
+/// row up in `.failure`. An admitted Message saves the skills its text
+/// bound, one `.skill` round each. The commit round saves the rest.
+pub const SubmitMessage = struct {
+    pub const rounds = transition.rounds(.{
+        .facts = .{.always},
+        .replay = .{.branch},
+        .model = .{.branch},
+        .saved_tools = .{.branch},
+        .saved_loaded = .{.branch},
+        .loaded_source = .{.branch},
+        .loaded = .{.branch},
+        .creation = .{.paged},
+        .catalog = .{.branch},
+        .text = .{.branch},
+        .failure = .{.branch},
+        .skill = .{.paged},
+    });
+    pub const round_budget = 2;
+    pub const commit: transition.Commit = .transaction;
+    pub const begin: ?rounds.At = .facts;
+    /// Each is the caller's, which outlives the transition.
+    pub const Input = struct {
+        io: std.Io,
+        served: provider_route.Routes,
+        tools: *const store_core.HostTools,
+        /// This Store's selector, which a peer sender's address names.
+        selector: []const u8,
+        command: *const content_custody.MessageCommand,
+        committed: ?MessageCommitted,
+        initial_skills: ?*const skills_domain.Initial,
+        captured: ?*const skills_domain.MessageCapture,
+        /// Where the answer goes, in the caller's frame: a step's result
+        /// stays one word wide.
+        reply: *MessageReply,
+    };
+    pub const Result = void;
+    pub const Ordinary = store_core.Ordinary.none;
+    pub const Guards = error{SessionUpdateFailed};
+    pub const Declined = error{};
 
-/// Round 1 reads the saved answer, the sender's Action, the Session and
-/// the text's content row. The decision is plain; the write round imports
-/// the text and saves the command and the admission, then commits.
-/// noinline: its reads stay out of the frame a creation's chain runs under.
-noinline fn submitTo(
-    a: anytype,
-    io: std.Io,
-    served: anytype,
-    selector: []const u8,
-    command: *const content_custody.MessageCommand,
-    committed: ?MessageCommitted,
-    captured_skill: ?*const skills_domain.MessageCapture,
-    faults: Faults,
-    reads: *MessageReads,
-) !MessageReply {
-    const session = command.session.slice();
-    readMessage(a, selector, command, reads);
-    var target: target_session.Result = null;
-    readTarget(a, session, &target);
-    content_domain.lookup(a, &reads.text);
-    try a.run();
-    if (try replayMessage(a, command, reads)) |reply| return reply;
-    const sender_valid = senderValid(command, selector, reads.sender);
-    const rejection: ?message_admission.Rejection = if (!session_id.valid(session))
-        .invalid_session_reference
-    else if (!sender_valid)
-        .invalid_sender_handle
-    else if (target == null)
-        .unknown_session
-    else if (target.?.archive_state == .archiving)
-        .session_archiving
-    else if (command.require_model and !configuration_domain.servesProviderOf(served, null, target.?.provider))
-        .model_capability_unavailable
-    else
-        null;
-    if (rejection) |code| return rejectMessage(a, command, reads, command.sender != null and sender_valid, code, faults);
-    // The Host bound the text's `/name` words to skills, or found none.
-    if (captured_skill) |captured| {
-        switch (captured.*) {
-            .failed => |failure| return rejectMessageWithFailure(a, command, reads, command.sender != null and sender_valid, failure.rejection(), failure, faults),
-            .bound => |bound| reads.bound = bound,
+    input: Input,
+    /// A plain Message's reads; a creation's are its configure reads'.
+    plain: MessageReads = undefined,
+    target: target_session.Result = null,
+    /// A creation's configure reads, leased from the Store's scratch.
+    creation: *configuration_domain.ConfigurationReads = undefined,
+    sender_valid: bool = false,
+    rejection: message_admission.Rejection = undefined,
+    /// The command's answer, whose code its write reads in place.
+    answer: StoredAnswer = undefined,
+    /// The admitted Session, whose reference the command's write reads in
+    /// place.
+    head: rsql.SessionHead = undefined,
+    /// What the rounds after the decision keep, as one path runs them: a
+    /// replay's admission, a creation's saved tool selection, a refusal's
+    /// diagnostic or the admitted Message's skills.
+    later: union {
+        replay: message_replay.Result,
+        saved: tool_set.SavedSelection,
+        failure: skills_domain.ImportingFailure,
+        skills: skills_domain.SavingBound,
+    } = undefined,
+    /// The admission the commit saves, or 0 for a refusal.
+    admission_id: u64 = 0,
+
+    pub fn step(t: *SubmitMessage, r: *transition.Round(SubmitMessage), ran: ?rounds.At) !transition.Next(SubmitMessage) {
+        const at = ran orelse return t.start(r);
+        switch (at) {
+            .facts => return t.decide(r),
+            .replay => return t.replayed(),
+            .model, .saved_tools, .saved_loaded, .loaded_source, .loaded => {
+                if (try t.validate(r, switch (at) {
+                    inline .model, .saved_tools, .saved_loaded, .loaded_source, .loaded => |tag| @field(configuration_domain.ValidationRound, @tagName(tag)),
+                    else => unreachable,
+                })) |next| return next;
+                return t.applyValidated(r);
+            },
+            .creation => return t.apply(r, .creation),
+            .catalog => return t.apply(r, .catalog),
+            .text => {
+                const applied = &t.creation.applied;
+                t.head = applied.head;
+                return t.admit(r, applied);
+            },
+            .failure => return t.rejectDiagnosed(r),
+            .skill => return t.saveSkill(r),
         }
     }
-    if (target.?.archive_state == .archived) a.write(clear_archive, .{ .session = target.?.session });
-    return admitMessage(a, io, command, reads, target.?.session, command.session, null, committed, faults);
-}
 
-/// Round 1 reads the saved answer, the sender's Action and the content
-/// rows the configuration needs. `configuration.applyConfiguration` adds
-/// its own rounds (a created Session's reference, an output schema). The
-/// text's lookup is a round of its own, as the lookup statement is in
-/// round 1; that round also runs the creation's writes. Its configuration
-/// reads, over 4.6 KB, are the Store's (`Store.configurationReads`), and
-/// it is kept out of `submitMessage`'s frame, so the plain path holds none
-/// of what a creation applies.
-noinline fn submitCreating(
-    a: anytype,
-    io: std.Io,
-    served: anytype,
-    selector: []const u8,
-    command: *const content_custody.MessageCommand,
-    committed: ?MessageCommitted,
-    initial_skills: ?*const skills_domain.Initial,
-    captured_skill: ?*const skills_domain.MessageCapture,
-    faults: Faults,
-) !MessageReply {
-    const configuration = &command.configuration.?;
-    // Creation's configuration and Message facts have one address in the
-    // Store's existing scratch until this transaction settles.
-    const creation = a.store.configurationReads();
-    creation.* = .{ .next = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } } };
-    const reads = &creation.message;
-    reads.* = .{ .digest = command.semanticDigest(), .text = content_domain.sealedIdentity(&command.text) };
-    readMessage(a, selector, command, reads);
-    configuration_domain.prepareConfiguration(a, a.store.hostTools().host_tool_set, "", configuration, creation);
-    try a.run();
-    if (try replayMessage(a, command, reads)) |reply| return reply;
-    const sender_valid = senderValid(command, selector, reads.sender);
-    var rejection: ?message_admission.Rejection = if (command.session.len != 0)
-        .invalid_session_reference
-    else if (!sender_valid)
-        .invalid_sender_handle
-    else if (command.require_model and !configuration_domain.servesProviderOf(served, configuration, if (creation.inherits_parent and creation.parent_found.get()) creation.inherited.provider else null))
-        .model_capability_unavailable
-    else
-        null;
-    if (rejection != null) return rejectMessage(a, command, reads, command.sender != null and sender_valid, rejection.?, faults);
-    const checked = try configuration_domain.validateConfiguration(a, io, "", configuration, initial_skills, creation);
-    switch (checked) {
-        .rejected => |code| return rejectMessage(a, command, reads, command.sender != null and sender_valid, std.meta.stringToEnum(message_admission.Rejection, @tagName(code)).?, faults),
-        .ready => {},
+    /// After `.failure`: the refusal, with its diagnostic's row.
+    noinline fn rejectDiagnosed(t: *SubmitMessage, r: *transition.Round(SubmitMessage)) !transition.Next(SubmitMessage) {
+        return t.reject(r, try t.later.failure.import(r, r.faults()));
     }
-    // Configuration's validation-only phase owns ordinary refusal precedence.
-    // No configuration/content/Session writes exist when a batch refuses.
-    // The Host bound the text's `/name` words to skills, or found none.
-    if (captured_skill) |captured| {
-        switch (captured.*) {
-            .failed => |failure| return rejectMessageWithFailure(a, command, reads, command.sender != null and sender_valid, failure.rejection(), failure, faults),
-            .bound => |bound| reads.bound = bound,
+
+    /// After `.skill`: the skill it looked up, then the next.
+    noinline fn saveSkill(t: *SubmitMessage, r: *transition.Round(SubmitMessage)) !transition.Next(SubmitMessage) {
+        try t.later.skills.save(r, r.faults());
+        return t.saveSkills(r);
+    }
+
+    fn reads(t: *SubmitMessage) *MessageReads {
+        return if (t.input.command.configuration != null) &t.creation.message else &t.plain;
+    }
+
+    // The steps that run a round's work are noinline, so none sits under
+    // another on the engine thread's chain.
+    noinline fn start(t: *SubmitMessage, r: *transition.Round(SubmitMessage)) transition.Next(SubmitMessage) {
+        const command = t.input.command;
+        if (command.configuration != null) {
+            // Creation's configuration and Message facts have one address in
+            // the Store's scratch until this transaction settles.
+            t.creation = r.configurationReads();
+            t.creation.* = .{ .next = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } } };
         }
+        const message = t.reads();
+        message.* = .{ .digest = command.semanticDigest(), .text = content_domain.sealedIdentity(&command.text) };
+        readMessage(r, t.input.selector, command, message);
+        if (command.configuration) |*configuration| {
+            configuration_domain.prepareConfiguration(r, t.input.tools.host_tool_set, "", configuration, t.creation);
+        } else {
+            readTarget(r, command.session.slice(), &t.target);
+            content_domain.lookup(r, &message.text);
+        }
+        return .{ .round = .facts };
     }
-    switch (try configuration_domain.applyValidatedConfiguration(a, io, "", configuration, initial_skills, faults, creation)) {
-        .rejected => |code| rejection = std.meta.stringToEnum(message_admission.Rejection, @tagName(code)).?,
-        .accepted => |applied| {
-            content_domain.lookup(a, &reads.text);
-            try a.run();
-            return admitMessage(a, io, command, reads, applied.head, applied.session, &applied, committed, faults);
-        },
+
+    /// After `.facts`: a replay answers what was saved; a fresh Message
+    /// is refused or goes on.
+    noinline fn decide(t: *SubmitMessage, r: *transition.Round(SubmitMessage)) !transition.Next(SubmitMessage) {
+        const command = t.input.command;
+        const message = t.reads();
+        switch (try classify(message_admission.Rejection, &message.saved, .message, command.session.slice(), &message.digest)) {
+            .fresh => {},
+            .conflict => return t.done(.conflict),
+            .rejected => |code| return t.done(.{ .rejected = .{ .replayed = true, .code = code, .content = .{ .length = command.text.length, .digest = command.text.digest } } }),
+            .accepted => |existing| {
+                _ = existing.primary_content_id orelse return error.CorruptStore;
+                t.later = .{ .replay = undefined };
+                r.read(message_replay, .{ .key = command.key.slice() }, &t.later.replay);
+                return .{ .round = .replay };
+            },
+        }
+        t.sender_valid = senderValid(command, t.input.selector, message.sender);
+        if (command.configuration != null) return t.decideCreation(r);
+        const session = command.session.slice();
+        const target = t.target;
+        const rejection: ?message_admission.Rejection = if (!session_id.valid(session))
+            .invalid_session_reference
+        else if (!t.sender_valid)
+            .invalid_sender_handle
+        else if (target == null)
+            .unknown_session
+        else if (target.?.archive_state == .archiving)
+            .session_archiving
+        else if (command.require_model and !configuration_domain.servesProviderOf(t.input.served, null, target.?.provider))
+            .model_capability_unavailable
+        else
+            null;
+        if (rejection) |code| return t.refuse(r, code, null);
+        // The Host bound the text's `/name` words to skills, or found none.
+        if (t.input.captured) |captured| switch (captured.*) {
+            .failed => |failure| return t.refuse(r, failure.rejection(), failure.bytes),
+            .bound => |bound| message.bound = bound,
+        };
+        if (target.?.archive_state == .archived) r.write(clear_archive, .{ .session = target.?.session });
+        t.head = target.?.session;
+        return t.admit(r, null);
     }
-    return rejectMessage(a, command, reads, command.sender != null and sender_valid, rejection.?, faults);
-}
+
+    /// After `.replay`: the saved admission, which must be the one the
+    /// command saved.
+    noinline fn replayed(t: *SubmitMessage) !transition.Next(SubmitMessage) {
+        const command = t.input.command;
+        const message = t.reads();
+        const existing = switch (try classify(message_admission.Rejection, &message.saved, .message, command.session.slice(), &message.digest)) {
+            .accepted => |existing| existing,
+            else => unreachable,
+        };
+        const row = &t.later.replay;
+        if (row.content_id.get() != existing.primary_content_id.? or !existing.target.eql(row.session_ref.slice())) return error.CorruptStore;
+        return t.done(.{ .accepted = .{
+            .replayed = true,
+            .admission_id = row.admission_id.get(),
+            .content = .{ .length = row.length, .digest = row.digest },
+            .session = existing.target,
+        } });
+    }
+
+    /// Answers `reply` without writing.
+    fn done(t: *SubmitMessage, reply: MessageReply) transition.Next(SubmitMessage) {
+        t.input.reply.* = reply;
+        return .{ .done = {} };
+    }
+
+    /// A creating Message's own refusals, then its configuration's.
+    fn decideCreation(t: *SubmitMessage, r: *transition.Round(SubmitMessage)) !transition.Next(SubmitMessage) {
+        const command = t.input.command;
+        const creation = t.creation;
+        const rejection: ?message_admission.Rejection = if (command.session.len != 0)
+            .invalid_session_reference
+        else if (!t.sender_valid)
+            .invalid_sender_handle
+        else if (command.require_model and !configuration_domain.servesProviderOf(t.input.served, &command.configuration.?, if (creation.inherits_parent and creation.parent_found.get()) creation.inherited.provider else null))
+            .model_capability_unavailable
+        else
+            null;
+        if (rejection) |code| return t.refuse(r, code, null);
+        t.later = .{ .saved = undefined };
+        // Validation's first step asks for the model's facts or refuses.
+        return (try t.validate(r, null)).?;
+    }
+
+    /// What the creation's configuration steps read besides its rows.
+    fn request(t: *SubmitMessage) configuration_domain.Request {
+        return .{
+            .io = t.input.io,
+            .tools = t.input.tools,
+            .served = t.input.served,
+            .session = "",
+            .configuration = &t.input.command.configuration.?,
+            .initial_skills = t.input.initial_skills,
+            .saved = &t.later.saved,
+        };
+    }
+
+    /// Configuration's validation owns ordinary refusal precedence: no
+    /// configuration, content or Session write exists when it refuses.
+    /// Null once the configuration is valid.
+    noinline fn validate(t: *SubmitMessage, r: *transition.Round(SubmitMessage), ran: ?configuration_domain.ValidationRound) !?transition.Next(SubmitMessage) {
+        return switch (try configuration_domain.validateStep(r, &t.request(), t.creation, ran)) {
+            .round => |round| .{ .round = switch (round) {
+                inline else => |tag| @field(rounds.At, @tagName(tag)),
+            } },
+            .rejected => |code| try t.refuse(r, std.meta.stringToEnum(message_admission.Rejection, @tagName(code)).?, null),
+            .ready => null,
+        };
+    }
+
+    /// Once the configuration is valid: a skill the text could not bind
+    /// refuses it, before any configuration, content or Session write.
+    noinline fn applyValidated(t: *SubmitMessage, r: *transition.Round(SubmitMessage)) !transition.Next(SubmitMessage) {
+        // The Host bound the text's `/name` words to skills, or found none.
+        if (t.input.captured) |captured| switch (captured.*) {
+            .failed => |failure| return t.refuse(r, failure.rejection(), failure.bytes),
+            .bound => |bound| t.creation.message.bound = bound,
+        };
+        return t.apply(r, null);
+    }
+
+    noinline fn apply(t: *SubmitMessage, r: *transition.Round(SubmitMessage), ran: ?configuration_domain.ApplyRound) !transition.Next(SubmitMessage) {
+        switch (try configuration_domain.applyStep(r, &t.request(), r.faults(), t.creation, ran)) {
+            .round => |round| return .{ .round = switch (round) {
+                inline else => |tag| @field(rounds.At, @tagName(tag)),
+            } },
+            .accepted => {},
+        }
+        content_domain.lookup(r, &t.creation.message.text);
+        return .{ .round = .text };
+    }
+
+    /// A refusal; one with a diagnostic looks its row up in `.failure`.
+    fn refuse(t: *SubmitMessage, r: *transition.Round(SubmitMessage), code: message_admission.Rejection, diagnostic: ?[]const u8) !transition.Next(SubmitMessage) {
+        t.rejection = code;
+        const bytes = diagnostic orelse return t.reject(r, null);
+        t.later = .{ .failure = .{ .bytes = bytes } };
+        t.later.failure.lookup(r);
+        return .{ .round = .failure };
+    }
+
+    /// Saves the refused Message; a peer's refusal takes its sender's next
+    /// position.
+    fn reject(t: *SubmitMessage, r: *transition.Round(SubmitMessage), outcome_id: ?u64) !transition.Next(SubmitMessage) {
+        const command = t.input.command;
+        const message = t.reads();
+        t.answer = .{ .accepted = false };
+        try t.answer.code.set(@tagName(t.rejection));
+        try queueCommand(r, command.key.slice(), .message, command.session.slice(), &message.digest, outcome_id, null, &t.answer);
+        if (command.sender != null and t.sender_valid) {
+            const sender = message.sender.?.session;
+            r.write(reject_sent, .{ .key = command.key.slice(), .sender = sender, .position = try (try r.positions(sender)).take(1) });
+        }
+        if (r.faults().before_commit) return error.InjectedCommitFailure;
+        return .commit;
+    }
+
+    /// After the text's lookup round: imports the text and saves the
+    /// command (with the Session revision `configured` wrote, when it
+    /// created the Session) and the admission at `head`'s next position.
+    noinline fn admit(
+        t: *SubmitMessage,
+        r: *transition.Round(SubmitMessage),
+        configured: ?*const configuration_domain.Applied,
+    ) !transition.Next(SubmitMessage) {
+        const command = t.input.command;
+        const message = t.reads();
+        const text_id = try content_domain.importSealed(r, t.input.io, &command.text, &message.text, r.faults());
+        t.answer = .{ .accepted = true };
+        const admission_id = if (command.sender != null)
+            try admitFromSession(r, &message.sender.?.session, &t.head, command.key.slice(), text_id, &message.digest, configured, &t.answer)
+        else person: {
+            try queueMessageCommand(r, &t.head, command.key.slice(), text_id, &message.digest, configured, &t.answer);
+            const admission_id = try r.identity(.admission_id);
+            r.write(admit_message, .{ .admission_id = admission_id, .session = t.head, .key = command.key.slice(), .content_id = text_id, .position = try (try r.positions(t.head)).take(1) });
+            break :person admission_id;
+        };
+        t.later = .{ .skills = .{ .admission_id = admission_id, .bound = message.bound } };
+        t.admission_id = admission_id;
+        return t.saveSkills(r);
+    }
+
+    /// A `.skill` round for the next bound skill, or the commit once every
+    /// one is saved.
+    fn saveSkills(t: *SubmitMessage, r: *transition.Round(SubmitMessage)) !transition.Next(SubmitMessage) {
+        if (t.later.skills.lookupNext(r)) return .{ .round = .skill };
+        if (r.faults().before_commit) return error.InjectedCommitFailure;
+        return .commit;
+    }
+
+    /// Commit before announcing an admission: in a batch, once the batch
+    /// commits (`Store.admitted`).
+    pub fn announced(t: *const SubmitMessage) ?store_core.Announcement {
+        if (t.admission_id == 0) return null;
+        const callback = t.input.committed orelse return null;
+        return .{ .message = .{ .callback = callback, .admission = .{
+            .session = &t.head.ref,
+            .admission_id = t.admission_id,
+            .from_peer = t.input.command.sender != null,
+        } } };
+    }
+
+    pub fn committed(t: *SubmitMessage) Result {
+        const command = t.input.command;
+        if (t.admission_id == 0) {
+            t.input.reply.* = .{ .rejected = .{ .replayed = false, .code = t.rejection, .content = .{ .length = command.text.length, .digest = command.text.digest } } };
+            return;
+        }
+        const message = t.reads();
+        t.input.reply.* = .{
+            .accepted = .{
+                .replayed = false,
+                .admission_id = t.admission_id,
+                // The text's row was found or written under exactly this identity.
+                .content = .{ .length = message.text.length, .digest = message.text.digest },
+                .session = if (command.configuration != null) t.creation.applied.session else command.session,
+            },
+        };
+    }
+};
 
 /// The skills a door's capture bound; none for no capture or a failed one.
 fn boundOf(captured: ?*const skills_domain.MessageCapture) []const skills_domain.BoundSkill {
@@ -1813,8 +1941,9 @@ pub const saved_command = rsql.Read(.{
 });
 
 /// Queues reading the saved answer of the command `key`; `classify`
-/// follows its round.
-pub fn lookupCommand(a: anytype, key: []const u8, destination: *saved_command.Result) void {
+/// follows its round. noinline, like `queueCommand`, so each Held
+/// body's frame stays its own whatever callers share the instance.
+pub noinline fn lookupCommand(a: anytype, key: []const u8, destination: *saved_command.Result) void {
     a.read(saved_command, .{ .key = key }, destination);
 }
 
@@ -1903,8 +2032,9 @@ const insert_command = rsql.Write(.{
 });
 
 /// Queues saving the command `key` with its `answer`, which, like `key`
-/// and `target`, must outlive the round; `digest` is copied.
-pub fn queueCommand(
+/// and `target`, must outlive the round; `digest` is copied. noinline:
+/// its locals stay off configure's frame on the engine's deepest chain.
+pub noinline fn queueCommand(
     a: anytype,
     key: []const u8,
     kind: cli_value.CommandKind,

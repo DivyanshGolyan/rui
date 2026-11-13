@@ -303,7 +303,7 @@ pub fn stageEndingMessageUpgrade(storage: *Store, keep_pending_forward: bool) !v
     }
 }
 
-/// Remove only format 72's derived representation; keep canonical input and
+/// Remove only format 73's derived representation; keep canonical input and
 /// forwarding facts so the production migration must reconstruct the frontier.
 fn dropObligationFrontier(storage: *Store) !void {
     const Native = struct {
@@ -328,12 +328,12 @@ pub fn stageObligationUpgrade(storage: *Store) !void {
     const schema = @import("schema.zig");
     try dropObligationFrontier(storage);
     if (storage.engine == .mysql) {
-        try mysql_testing.rawExec(storage, "UPDATE store_meta SET meta_value='71' WHERE meta_key='format'");
-        for (schema.migrations[71 - schema.migration_baseline].mysql) |sql| try mysql_testing.rawExec(storage, sql);
         try mysql_testing.rawExec(storage, "UPDATE store_meta SET meta_value='72' WHERE meta_key='format'");
+        for (schema.migrations[72 - schema.migration_baseline].mysql) |sql| try mysql_testing.rawExec(storage, sql);
+        try mysql_testing.rawExec(storage, "UPDATE store_meta SET meta_value='73' WHERE meta_key='format'");
     } else {
-        try sqlite.exec(storage.sqliteDatabase(), "UPDATE store_meta SET meta_value='71' WHERE meta_key='format'");
-        try sqlite.exec(storage.sqliteDatabase(), "PRAGMA user_version=71");
+        try sqlite.exec(storage.sqliteDatabase(), "UPDATE store_meta SET meta_value='72' WHERE meta_key='format'");
+        try sqlite.exec(storage.sqliteDatabase(), "PRAGMA user_version=72");
     }
 }
 

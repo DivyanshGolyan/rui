@@ -197,8 +197,10 @@ pub const empty_content: Import = blk: {
 };
 
 /// Queues the read that finds `value`'s row; `importSlot` follows its round.
-/// `value` must outlive the round, which defines its `found`.
-pub fn lookup(a: anytype, value: *Import) void {
+/// `value` must outlive the round, which defines its `found`. noinline:
+/// its arguments stay off configure's reload frame on the engine's
+/// deepest chain.
+pub noinline fn lookup(a: anytype, value: *Import) void {
     a.read(lookup_content, .{ .digest = value.digest, .length = value.length, .private = value.private }, &value.found);
 }
 

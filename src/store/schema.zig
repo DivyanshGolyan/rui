@@ -20,7 +20,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 72;
+pub const schema_version: u32 = 73;
 
 pub const IdentityMismatch = struct {
     saved_selector: Bounded(store_path.max_bytes) = .{},
@@ -58,7 +58,8 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 69, .digest = 0x8db67f4a14f18a37 },
     .{ .schema_version = 70, .digest = 0xb60d036b364ad267 },
     .{ .schema_version = 71, .digest = 0xa61e85ed49f9fa8b },
-    .{ .schema_version = 72, .digest = 0xa455b6a361f2e2b9 },
+    .{ .schema_version = 72, .digest = 0x93ee71c21e7438ab },
+    .{ .schema_version = 73, .digest = 0x515b60c7f5df332d },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -658,9 +659,18 @@ pub const migrations = [_]Migration{
             "UPDATE store_meta SET meta_value='15' WHERE meta_key='wire_version' AND meta_value='14'",
         },
     },
-    // D239: the nullable fact and its live index are the durable frontier.
     .{
         .from = 71,
+        .sqlite = &.{
+            "UPDATE store_meta SET meta_value='16' WHERE meta_key='wire_version' AND meta_value='15'",
+        },
+        .mysql = &.{
+            "UPDATE store_meta SET meta_value='16' WHERE meta_key='wire_version' AND meta_value='15'",
+        },
+    },
+    // D239: the nullable fact and its live index are the durable frontier.
+    .{
+        .from = 72,
         .sqlite = &.{
             "ALTER TABLE session ADD COLUMN obligation_since INTEGER CHECK(obligation_since IS NULL OR obligation_since>0)",
             "CREATE INDEX session_obligation_parent ON session(parent_ref,obligation_since,session_ref) WHERE obligation_since IS NOT NULL",
@@ -2951,6 +2961,17 @@ test "MySQL sessions read literals as rsql copies them, and strictly" {
         } else false;
         try std.testing.expect(found);
     }
+}
+
+test "schema 72 migration updates only wire metadata on SQLite and MySQL" {
+    const step = migrations[71 - migration_baseline];
+    try std.testing.expectEqual(@as(u32, 71), step.from);
+    inline for (.{ rsql.Dialect.sqlite, rsql.Dialect.mysql }) |dialect| {
+        const statements = if (dialect == .sqlite) step.sqlite else step.mysql;
+        try std.testing.expectEqual(@as(usize, 1), statements.len);
+        for (statements) |statement| try std.testing.expectEqualStrings("UPDATE store_meta SET meta_value='16' WHERE meta_key='wire_version' AND meta_value='15'", statement);
+    }
+    try std.testing.expectEqualStrings("UPDATE store_meta SET meta_value='16' WHERE meta_key='wire_version' AND meta_value='15';\n", mysqlMigration(71));
 }
 
 test "schema 71 migration updates only wire metadata on SQLite and MySQL" {
