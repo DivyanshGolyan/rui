@@ -1,5 +1,5 @@
-//! JSON field values the Host's reply decoders read: bounded strings, closed
-//! enums, omittable fields and decimal IDs. Values only; the decoders in
+//! JSON field values the Host's reply decoders read: bounded strings and
+//! arrays, closed enums, omittable fields and decimal IDs. Values only; the decoders in
 //! protocol_reply.zig and client.zig own the reply shapes.
 const std = @import("std");
 const Bounded = @import("bounded.zig").Bounded;
@@ -30,6 +30,31 @@ pub fn JsonString(comptime limit: usize) type {
                 .string, .allocated_string => |value| value,
                 else => unreachable,
             }) catch return error.InvalidCharacter;
+            return result;
+        }
+    };
+}
+
+/// A JSON array of at most `capacity` `T`s, held inline. A longer array is
+/// refused, never cut.
+pub fn JsonArray(comptime T: type, comptime capacity: usize) type {
+    return struct {
+        values: [capacity]T = undefined,
+        count: usize = 0,
+
+        pub fn slice(self: *const @This()) []const T {
+            return self.values[0..self.count];
+        }
+
+        pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
+            if (try source.next() != .array_begin) return error.UnexpectedToken;
+            var result: @This() = .{};
+            while (try source.peekNextTokenType() != .array_end) {
+                if (result.count == capacity) return error.LengthMismatch;
+                result.values[result.count] = try std.json.innerParse(T, allocator, source, options);
+                result.count += 1;
+            }
+            _ = try source.next();
             return result;
         }
     };
