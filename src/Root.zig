@@ -887,7 +887,7 @@ test "App root routes typed and pasted settings text only to the Model filter wi
     };
 }
 
-test "Sign-in frames keep the list at 140 columns and the code link and masked key at 46" {
+test "Sign-in frames keep the list at 140 columns and the code link, browser link, masked entries and failure at 46" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const empty: vxfw.Text = .{ .text = "" };
@@ -903,13 +903,23 @@ test "Sign-in frames keep the list at 140 columns and the code link and masked k
     };
     var page: @import("SignIn.zig") = .{ .userdata = &root, .list_visible = Owner.listVisible };
     root.sign_in = page.widget();
+    const SignIn = @import("SignIn.zig");
+    const browser = try @import("os/pages.zig").Mapped(SignIn.Browser).map();
+    defer browser.unmap();
+    const link = "https://auth.openai.com/api/accounts/authorize?client_id=app_made_up&state=made-up";
+    const pasted = "http://127.0.0.1:1455/auth/callback?code=made-up-grant";
     for ([_]u16{ 140, 46 }) |width| {
-        for ([_]@import("sign_in.zig").Stage{ .choice, .codex_waiting, .key_entry }) |stage| {
-            page.state.stage = stage;
+        for ([_]@import("sign_in.zig").Stage{ .choice, .browser_waiting, .codex_waiting, .key_entry, .failed }) |stage| {
+            page.state = .{ .stage = stage, .failure = .answer };
             try page.code.set("BDL9-KI88H");
             const secret = "sk-secret";
             @memcpy(page.key.bytes[0..secret.len], secret);
             page.key.len = secret.len;
+            browser.value.init();
+            try browser.value.link.set(link);
+            browser.value.edit(.{ .append = pasted });
+            page.browser = if (stage == .browser_waiting) browser else null;
+            defer page.browser = null;
             const surface = try root.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 12 }, .cell_size = .{} });
             try std.testing.expectEqual(width >= split_at, root.listVisible());
             var screen = try vaxis.Screen.init(arena.allocator(), .{ .cols = width, .rows = 12, .x_pixel = 0, .y_pixel = 0 });
@@ -923,8 +933,9 @@ test "Sign-in frames keep the list at 140 columns and the code link and masked k
                     const cell = screen.readCell(@intCast(col), @intCast(row)).?;
                     try line.writer.writeAll(cell.char.grapheme);
                     if (cell.link.uri.len != 0) {
-                        try std.testing.expectEqualStrings("https://auth.openai.com/codex/device", cell.link.uri);
-                        try std.testing.expect(std.mem.indexOf(u8, "auth.openai.com/codex/device", cell.char.grapheme) != null);
+                        // The browser's link is its whole address behind its host.
+                        try std.testing.expectEqualStrings(if (stage == .browser_waiting) link else "https://auth.openai.com/codex/device", cell.link.uri);
+                        try std.testing.expect(std.mem.indexOf(u8, if (stage == .browser_waiting) "auth.openai.com" else "auth.openai.com/codex/device", cell.char.grapheme) != null);
                         linked += 1;
                     }
                 }
@@ -937,8 +948,17 @@ test "Sign-in frames keep the list at 140 columns and the code link and masked k
             try std.testing.expectEqual(@as(usize, 1), titles);
             try std.testing.expect(std.mem.startsWith(u8, text, " rui"));
             try std.testing.expect(std.mem.indexOf(u8, text, secret) == null);
+            try std.testing.expect(std.mem.indexOf(u8, text, "made-up-grant") == null);
+            // Tab offers the device code while the browser waits and after it failed.
+            try std.testing.expectEqual(stage == .browser_waiting or stage == .failed, std.mem.indexOf(u8, text, "tab device code · esc back") != null);
             switch (stage) {
                 .choice => try std.testing.expect(std.mem.indexOf(u8, text, "› ChatGPT    API key") != null),
+                .browser_waiting => {
+                    try std.testing.expectEqual(@as(usize, "auth.openai.com".len), linked);
+                    try std.testing.expect(std.mem.indexOf(u8, text, "••••••••••") != null);
+                },
+                // SignIn's own test checks the failure line fits.
+                .failed => {},
                 .codex_waiting => {
                     try std.testing.expect(std.mem.indexOf(u8, text, "auth.openai.com/codex/device · BDL9-KI88H") != null);
                     try std.testing.expectEqual(@as(usize, "auth.openai.com/codex/device".len), linked);
@@ -946,7 +966,6 @@ test "Sign-in frames keep the list at 140 columns and the code link and masked k
                 .key_entry => try std.testing.expect(std.mem.indexOf(u8, text, "•••••••••") != null),
                 else => unreachable,
             }
-            std.debug.print("\nSIGN-IN {s} {d}x12\n{s}END SIGN-IN\n", .{ @tagName(stage), width, text });
         }
     }
 }
