@@ -26,7 +26,7 @@ pub const ContentLocation = struct {
 
 /// The digest check of one content value's bytes as they are read from
 /// its start: every reader of content uses it (`ContentReader`,
-/// `streamVerified`).
+/// `Windows`).
 pub const DigestCheck = struct {
     hash: @TypeOf(content_string.hasher()) = content_string.hasher(),
     /// The bytes hashed so far, in order from the value's start.
@@ -56,27 +56,49 @@ pub const verified_window_bytes = 2048;
 
 /// Streams content `content_id`, whose metadata is `reference`, to
 /// `sink.write(bytes)` in windows of `verified_window_bytes`, each a
-/// round of `a` of its own (`readRaw`), hashed in order by `DigestCheck`,
-/// which compares the digest once the last window is hashed. So a wrong
-/// payload's earlier windows reach `sink` before the call is
-/// `CorruptStore`: the caller must not seal what `sink` wrote. Empty
-/// content reads nothing and is not compared. Not inlined, so its window
-/// sits only on the chains that stream.
+/// round of `a` of its own (`Windows`). So a wrong payload's earlier
+/// windows reach `sink` before the call is `CorruptStore`: the caller must
+/// not seal what `sink` wrote. Empty content reads nothing and is not
+/// compared. Not inlined, so its window sits only on the chains that
+/// stream.
 pub noinline fn streamVerified(a: anytype, content_id: u64, reference: ContentReference, sink: anytype) !void {
-    var check: DigestCheck = .{};
-    var window: [verified_window_bytes]u8 = undefined;
-    var offset: u64 = 0;
-    while (offset < reference.length) {
-        const bytes = window[0..@intCast(@min(window.len, reference.length - offset))];
-        try a.readRaw(content_id, offset, bytes);
-        if (!check.absorb(reference, offset, bytes)) return error.CorruptStore;
-        try sink.write(bytes);
-        offset += bytes.len;
-    }
+    var buffer: [verified_window_bytes]u8 = undefined;
+    var windows: Windows = .{ .content_id = content_id, .reference = reference, .buffer = &buffer };
+    while (try windows.next(a)) try sink.write(try windows.window());
 }
 
-/// Readers allow ranged reads and retain copied bytes and identities, never
-/// SQLite handles.
+/// A content value's bytes from its start, one `readRaw` window of
+/// `buffer` at a time, hashed in order by `DigestCheck`: `next` asks for
+/// the next window, false once every byte is read, and `window`, after its
+/// round, is the bytes it read. A transition keeps it, and `buffer`, in
+/// storage that outlives the round.
+pub const Windows = struct {
+    content_id: u64,
+    reference: ContentReference,
+    buffer: []u8,
+    check: DigestCheck = .{},
+    /// Where the window `next` asked for starts, and its length.
+    offset: u64 = 0,
+    length: usize = 0,
+
+    pub fn next(windows: *Windows, a: anytype) !bool {
+        windows.offset += windows.length;
+        windows.length = 0;
+        if (windows.offset >= windows.reference.length) return false;
+        windows.length = @intCast(@min(windows.buffer.len, windows.reference.length - windows.offset));
+        try a.readRaw(windows.content_id, windows.offset, windows.buffer[0..windows.length]);
+        return true;
+    }
+
+    /// After `next`'s round: its bytes, once they pass the digest check
+    /// (`CorruptStore` when the last window's digest differs).
+    pub fn window(windows: *Windows) ![]const u8 {
+        const bytes = windows.buffer[0..windows.length];
+        if (!windows.check.absorb(windows.reference, windows.offset, bytes)) return error.CorruptStore;
+        return bytes;
+    }
+};
+
 pub const ContentReader = struct {
     pub const content_window_bytes = 64 * 1024;
 

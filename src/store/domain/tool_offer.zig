@@ -37,11 +37,12 @@ const projected = rsql.Read(.{
 });
 pub const OfferedRecord = projected.Row;
 
-/// Read a current offer without saving any derived state. The caller owns the
-/// bounded sink; both admission and find_tools consume this same projection.
-pub fn project(a: anytype, allowed: u64, loaded: ?u64, sink: anytype) !void {
+/// Queues reading a current offer without saving any derived state, in a
+/// round its caller runs. The caller owns the bounded sink, which must
+/// outlive the round; both admission and find_tools consume this same
+/// projection.
+pub fn project(a: anytype, allowed: u64, loaded: ?u64, sink: anytype) void {
     a.readEach(projected, .{ .allowed = allowed, .loaded = loaded orelse allowed }, tool_name.max_tools + 1, sink);
-    try a.run();
 }
 
 const Projection = struct {
@@ -83,7 +84,8 @@ pub fn freeze(a: anytype, allowed: u64, loaded: ?u64, stale: bool) !u64 {
     if (!stale) return loaded orelse allowed;
     const scratch = a.store.reportScratch(Projection);
     scratch.* = .{};
-    try project(a, allowed, loaded, scratch);
+    project(a, allowed, loaded, scratch);
+    try a.run();
     if (scratch.invalid) return error.CorruptStore;
     const set = try tool_set.internMembers(a, scratch.members[0..scratch.count]);
     // Consume queued borrowed member names before the scratch can be reused.
