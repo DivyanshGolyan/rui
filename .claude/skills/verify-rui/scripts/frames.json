@@ -5,6 +5,236 @@
   ],
   "states": [
     {
+      "name": "inputtint-night-empty",
+      "note": "Input surface, plain footer and ink-wash selection; colour-only changes are asserted by style-role tests",
+      "theme": "night",
+      "open": "Input tint chat",
+      "steps": [],
+      "expect": [
+        "Surface witness",
+        "alt+i info"
+      ],
+      "absent": [
+        "Browsing \u00b7 Esc returns",
+        "enter retry"
+      ],
+      "cast": [
+        {
+          "label": "Input tint chat",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "messages": [
+            "Surface witness"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "inputtint-night-draft",
+      "note": "Input surface, plain footer and ink-wash selection; colour-only changes are asserted by style-role tests",
+      "theme": "night",
+      "open": "Input tint chat",
+      "steps": [
+        {
+          "text": "\u001b[200~First draft row\nSecond draft row\nThird draft row\u001b[201~"
+        },
+        {
+          "wait": "Third draft row"
+        }
+      ],
+      "expect": [
+        "Surface witness",
+        "alt+i info",
+        "First draft row",
+        "Second draft row",
+        "Third draft row"
+      ],
+      "absent": [
+        "Browsing \u00b7 Esc returns",
+        "enter retry",
+        "Type a task"
+      ]
+    },
+    {
+      "name": "inputtint-night-model-focus",
+      "note": "Tab focuses the model; hold the presentation so unchanged footer text cannot capture the pre-Tab frame",
+      "theme": "night",
+      "open": "Input tint chat",
+      "steps": [
+        {
+          "keys": [
+            "Tab"
+          ]
+        },
+        {
+          "sleep": 0.35
+        }
+      ],
+      "expect": [
+        "Surface witness",
+        "alt+i info"
+      ],
+      "absent": [
+        "Browsing \u00b7 Esc returns",
+        "enter retry"
+      ]
+    },
+    {
+      "name": "inputtint-night-new-selected",
+      "note": "Home explicitly selects New Session after listing; hold for the terminal theme and selection repaint",
+      "theme": "night",
+      "open": "overview",
+      "steps": [
+        {
+          "keys": [
+            "Home"
+          ]
+        },
+        {
+          "sleep": 0.35
+        }
+      ],
+      "expect": [
+        "+ New Session",
+        "Settings"
+      ],
+      "absent": [
+        "Browsing \u00b7 Esc returns",
+        "enter retry"
+      ]
+    },
+    {
+      "name": "inputtint-night-chat-selected",
+      "note": "Input surface, plain footer and ink-wash selection; colour-only changes are asserted by style-role tests",
+      "theme": "night",
+      "open": "Input tint chat",
+      "steps": [
+        {
+          "keys": [
+            "Esc"
+          ]
+        }
+      ],
+      "expect": [
+        "Input tint chat",
+        "Settings"
+      ],
+      "absent": [
+        "Browsing \u00b7 Esc returns",
+        "enter retry"
+      ]
+    },
+    {
+      "name": "inputtint-day-empty",
+      "note": "Input surface, plain footer and ink-wash selection; colour-only changes are asserted by style-role tests",
+      "theme": "day",
+      "open": "Input tint chat",
+      "steps": [],
+      "expect": [
+        "Surface witness",
+        "alt+i info"
+      ],
+      "absent": [
+        "Browsing \u00b7 Esc returns",
+        "enter retry"
+      ]
+    },
+    {
+      "name": "inputtint-day-draft",
+      "note": "Input surface, plain footer and ink-wash selection; colour-only changes are asserted by style-role tests",
+      "theme": "day",
+      "open": "Input tint chat",
+      "steps": [
+        {
+          "text": "\u001b[200~First draft row\nSecond draft row\nThird draft row\u001b[201~"
+        },
+        {
+          "wait": "Third draft row"
+        }
+      ],
+      "expect": [
+        "Surface witness",
+        "alt+i info",
+        "First draft row",
+        "Second draft row",
+        "Third draft row"
+      ],
+      "absent": [
+        "Browsing \u00b7 Esc returns",
+        "enter retry",
+        "Type a task"
+      ]
+    },
+    {
+      "name": "inputtint-day-model-focus",
+      "note": "Tab focuses the model; hold the presentation so unchanged footer text cannot capture the pre-Tab frame",
+      "theme": "day",
+      "open": "Input tint chat",
+      "steps": [
+        {
+          "keys": [
+            "Tab"
+          ]
+        },
+        {
+          "sleep": 0.35
+        }
+      ],
+      "expect": [
+        "Surface witness",
+        "alt+i info"
+      ],
+      "absent": [
+        "Browsing \u00b7 Esc returns",
+        "enter retry"
+      ]
+    },
+    {
+      "name": "inputtint-day-new-selected",
+      "note": "Home explicitly selects New Session after listing; hold for the terminal theme and selection repaint",
+      "theme": "day",
+      "open": "overview",
+      "steps": [
+        {
+          "keys": [
+            "Home"
+          ]
+        },
+        {
+          "sleep": 0.35
+        }
+      ],
+      "expect": [
+        "+ New Session",
+        "Settings"
+      ],
+      "absent": [
+        "Browsing \u00b7 Esc returns",
+        "enter retry"
+      ]
+    },
+    {
+      "name": "inputtint-day-chat-selected",
+      "note": "Input surface, plain footer and ink-wash selection; colour-only changes are asserted by style-role tests",
+      "theme": "day",
+      "open": "Input tint chat",
+      "steps": [
+        {
+          "keys": [
+            "Esc"
+          ]
+        }
+      ],
+      "expect": [
+        "Input tint chat",
+        "Settings"
+      ],
+      "absent": [
+        "Browsing \u00b7 Esc returns",
+        "enter retry"
+      ]
+    },
+    {
       "name": "archive-state",
       "note": "Archive confirmation is one durable left fact; editable model/effort precede the optional name, with no blank row below Footer",
       "cast": [

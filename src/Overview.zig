@@ -2858,15 +2858,15 @@ const Rig = struct {
     }
 };
 
-test "App overview paints its ground and both selvedge rows" {
+test "App overview paints its ground and plain footer" {
     var cancellation: client.Cancellation = .{};
     const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .provider = "codex", .model = "gpt-5.5" }, fake_operations, &cancellation);
     defer rig.close();
-    for ([_]struct { caps: view.Caps, ground: vaxis.Color, band: vaxis.Color }{
-        .{ .caps = .{}, .ground = .{ .rgb = .{ 0x12, 0x19, 0x33 } }, .band = .{ .rgb = .{ 0x1a, 0x22, 0x46 } } },
-        .{ .caps = .{ .background = .{ 255, 255, 255 } }, .ground = .{ .rgb = .{ 0xf3, 0xee, 0xe2 } }, .band = .{ .rgb = .{ 0xe6, 0xdd, 0xc8 } } },
-        .{ .caps = .{ .depth = .indexed }, .ground = .{ .index = 234 }, .band = .{ .index = 236 } },
-        .{ .caps = .{ .depth = .none }, .ground = .default, .band = .default },
+    for ([_]struct { caps: view.Caps, ground: vaxis.Color }{
+        .{ .caps = .{}, .ground = .{ .rgb = .{ 0x12, 0x19, 0x33 } } },
+        .{ .caps = .{ .background = .{ 255, 255, 255 } }, .ground = .{ .rgb = .{ 0xf3, 0xee, 0xe2 } } },
+        .{ .caps = .{ .depth = .indexed }, .ground = .{ .index = 234 } },
+        .{ .caps = .{ .depth = .none }, .ground = .default },
     }) |case| {
         rig.overview.caps = case.caps;
         var shown = try rig.shown(80, 24);
@@ -2874,7 +2874,7 @@ test "App overview paints its ground and both selvedge rows" {
         try std.testing.expectEqual(@import("widget_style.zig").of(case.caps, .{ .background = .selection }).bg, shown.screen.readCell(79, 0).?.style.bg);
         try std.testing.expectEqual(case.ground, shown.screen.readCell(79, 10).?.style.bg);
         try std.testing.expectEqual(case.ground, shown.screen.readCell(79, 22).?.style.bg);
-        try std.testing.expectEqual(case.band, shown.screen.readCell(79, 23).?.style.bg);
+        try std.testing.expectEqual(case.ground, shown.screen.readCell(79, 23).?.style.bg);
     }
 }
 

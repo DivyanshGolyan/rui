@@ -187,7 +187,7 @@ test "GroupedList selection preserves each segment foreground" {
     try std.testing.expect(!cells.readCell(2, 0).style.bold);
     try std.testing.expect(!std.meta.eql(cells.readCell(0, 0).style.fg, cells.readCell(2, 0).style.fg));
     for ([_]u16{ 0, 2, 11 }) |column| {
-        try std.testing.expectEqual(vaxis.Color{ .rgb = .{ 0x2a, 0x34, 0x67 } }, cells.readCell(column, 0).style.bg);
+        try std.testing.expectEqual(widget_style.of(list.caps, .{ .background = .selection }).bg, cells.readCell(column, 0).style.bg);
     }
     list.caps.depth = .none;
     const plain = try list.widget().draw(ctx);

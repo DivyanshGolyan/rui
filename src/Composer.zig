@@ -12,7 +12,7 @@ editor: *const Editor,
 method: vaxis.gwidth.Method = .unicode,
 style: vaxis.Style = .{},
 quiet: vaxis.Style = .{ .dim = true },
-rule_style: vaxis.Style = .{},
+rule_style: vaxis.Style = .{ .dim = true },
 placeholder: []const u8 = "",
 anchor: usize = 0,
 /// Draw rules, marks and the prompt in ASCII, for a terminal without

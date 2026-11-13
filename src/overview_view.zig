@@ -46,7 +46,6 @@ const skill_suggestions = @import("skill_suggestions.zig");
 const submission = @import("submission_state.zig");
 pub const commands = slash_commands.overview;
 const TerminalText = @import("TerminalText.zig");
-const theme = @import("theme.zig");
 const work_line = @import("work_line.zig");
 const workspace_path = @import("workspace_path.zig");
 const unicode = @import("terminal_unicode");
@@ -3104,46 +3103,6 @@ pub const Rgb = [3]u8;
 /// an indigo-dyed ground with cotton text. Both alarm in station-board
 /// yellow with black and fail in madder.
 pub const Skin = enum { day, night };
-
-pub const Palette = struct {
-    colours: std.enums.EnumArray(Colour, Rgb),
-    backgrounds: std.enums.EnumArray(Background, Rgb),
-};
-
-fn hex(comptime text: *const [7]u8) Rgb {
-    @setEvalBranchQuota(10_000);
-    return .{
-        std.fmt.parseInt(u8, text[1..3], 16) catch unreachable,
-        std.fmt.parseInt(u8, text[3..5], 16) catch unreachable,
-        std.fmt.parseInt(u8, text[5..7], 16) catch unreachable,
-    };
-}
-
-/// One table per skin, from the Rui Khadi mock's `SKINS`. `render` reads
-/// roles only; the frame looks each up here.
-pub const palettes = std.enums.EnumArray(Skin, Palette).init(.{
-    .day = .{
-        .colours = .init(.{ .strong = hex("#121a44"), .ink = hex("#1d2a63"), .normal = hex("#3a4677"), .quiet = hex("#535c86"), .mark = hex("#7d84a6"), .rule = hex("#d8cfbb"), .attention = hex("#7a5200"), .failure = hex("#9e2328"), .on_band = hex("#141414") }),
-        .backgrounds = .init(.{ .ground = hex("#f3eee2"), .bar = hex("#e7dfcc"), .input_surface = hex("#e7dfcc"), .selection = hex("#dcdcec"), .hover = hex("#e1dddc"), .band = hex("#f2c200") }),
-    },
-    .night = .{
-        .colours = .init(.{ .strong = hex("#f6f1e4"), .ink = hex("#e2dccb"), .normal = hex("#bdb8a9"), .quiet = hex("#9d9bb0"), .mark = hex("#6e7396"), .rule = hex("#2a3157"), .attention = hex("#f2c200"), .failure = hex("#ff8f7d"), .on_band = hex("#141414") }),
-        .backgrounds = .init(.{ .ground = hex("#121833"), .bar = hex("#1a2142"), .input_surface = hex("#1a2142"), .selection = hex("#2b3568"), .hover = hex("#222b55"), .band = hex("#f2c200") }),
-    },
-});
-
-/// The same tables as 256-colour entries.
-pub const indexed = blk: {
-    @setEvalBranchQuota(400_000);
-    var tables = std.enums.EnumArray(Skin, struct { colours: std.enums.EnumArray(Colour, u8), backgrounds: std.enums.EnumArray(Background, u8) }).initUndefined();
-    for (std.enums.values(Skin)) |skin| {
-        const palette = palettes.get(skin);
-        var table = tables.getPtr(skin);
-        for (std.enums.values(Colour)) |role| table.colours.set(role, theme.nearestIndex(palette.colours.get(role)));
-        for (std.enums.values(Background)) |role| table.backgrounds.set(role, theme.nearestIndex(palette.backgrounds.get(role)));
-    }
-    break :blk tables;
-};
 
 pub const Caps = struct {
     /// Unicode marks and text; false draws ASCII only, a cell a character.
@@ -6406,17 +6365,6 @@ test "overview sender does not change ended title styling" {
     defer screen.deinit();
     try std.testing.expectEqual(Style{ .colour = .normal }, screen.styleAt(2, 4).?);
     try std.testing.expectEqual(Style{ .colour = .normal }, screen.styleAt(4, 4).?);
-}
-
-test "the overview indexed palettes retain every colour" {
-    const expected = [_]struct { skin: Skin, colours: [9]u8, backgrounds: [6]u8 }{
-        .{ .skin = .day, .colours = .{ 235, 17, 239, 60, 103, 187, 94, 124, 233 }, .backgrounds = .{ 255, 253, 253, 254, 253, 214 } },
-        .{ .skin = .night, .colours = .{ 255, 188, 249, 247, 60, 237, 214, 210, 233 }, .backgrounds = .{ 234, 235, 235, 238, 237, 214 } },
-    };
-    for (expected) |case| {
-        for (std.enums.values(Colour), case.colours) |role, value| try std.testing.expectEqual(value, indexed.get(case.skin).colours.get(role));
-        for (std.enums.values(Background), case.backgrounds) |role, value| try std.testing.expectEqual(value, indexed.get(case.skin).backgrounds.get(role));
-    }
 }
 
 test "numbers group the Indian way" {
