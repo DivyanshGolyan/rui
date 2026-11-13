@@ -92,6 +92,7 @@ test "overview header draws no counts view name or Host-stopped band" {
 /// Pinned list tail, with a click target only on the Settings row.
 pub const Settings = struct {
     selected: bool,
+    memory: ?overview_view.Memory = null,
     hover: Hover = .{},
     size: vxfw.Size = .{ .width = 0, .height = 0 },
     caps: overview_view.Caps,
@@ -126,10 +127,20 @@ pub const Settings = struct {
         for (0..size.width) |x| surface.writeCell(@intCast(x), 0, .{ .char = .{ .grapheme = if (self.caps.unicode) "─" else "-", .width = 1 }, .style = widget_style.of(self.caps, .{ .colour = .quiet }) });
         if (height < 2) return surface;
         const style = widget_style.of(self.caps, .{ .colour = .quiet, .background = ground });
-        const footer: @import("widgets/Footer.zig") = .{ .left = "", .right = @import("transport_options").version ++ " ", .style = style };
+        const version = @import("transport_options").version ++ " ";
+        const label_text = "  Settings";
+        var right: []const u8 = version;
+        for (try @import("memory_text.zig").choices(ctx.arena, self.memory, self.caps.unicode)) |memory| {
+            if (memory.len == 0) break;
+            // Settings and the version keep their space; memory drops first.
+            if (label_text.len + 2 + ctx.stringWidth(memory) + 2 + version.len > size.width) continue;
+            right = try std.fmt.allocPrint(ctx.arena, "{s}  {s}", .{ memory, version });
+            break;
+        }
+        const footer: @import("widgets/Footer.zig") = .{ .left = "", .right = right, .style = style };
         const drawn = try footer.widget().draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = 1 }));
         @memcpy(surface.buffer[size.width..], drawn.buffer);
-        const name: vxfw.RichText = .{ .text = &.{.{ .text = "  Settings", .style = widget_style.of(self.caps, .{ .colour = if (self.selected) .strong else .normal, .bold = self.selected, .background = ground }) }}, .softwrap = false };
+        const name: vxfw.RichText = .{ .text = &.{.{ .text = label_text, .style = widget_style.of(self.caps, .{ .colour = if (self.selected) .strong else .normal, .bold = self.selected, .background = ground }) }}, .softwrap = false };
         const label = try name.widget().draw(ctx.withConstraints(.{}, .{ .width = size.width -| @as(u16, @intCast(@import("transport_options").version.len + 2)), .height = 1 }));
         if (label.size.height > 0) @memcpy(surface.buffer[size.width..][0..label.size.width], label.buffer[0..label.size.width]);
         return surface;
@@ -197,4 +208,37 @@ test "overview Settings hover follows only its drawn row without selecting or fo
     try settings.widget().handleEvent(&events, .{ .mouse = .{ .col = 3, .row = 1, .button = .none, .type = .motion, .mods = .{} } });
     const both = try settings.widget().draw(draw_ctx);
     try std.testing.expectEqual(widget_style.of(settings.caps, .{ .background = .selection }).bg, both.readCell(3, 1).style.bg);
+}
+
+test "overview Settings memory width domain preserves label and drops rui before tools" {
+    var clicks: Clicks = .{};
+    var settings: Settings = .{ .selected = false, .caps = .{}, .userdata = &clicks, .on_click = Clicks.take };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const version = @import("transport_options").version ++ " ";
+    const full = "rui 38 MB · tools 120 MB";
+    const tools = "tools 120 MB";
+    const rui = "rui 38 MB";
+    for ([_]?overview_view.Memory{ null, .{ .rui = 38 * overview_view.mib, .tools = null }, .{ .rui = 38 * overview_view.mib, .tools = 120 * overview_view.mib } }) |memory| {
+        settings.memory = memory;
+        for (0..101) |width| {
+            const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = @intCast(width), .height = 2 }, .cell_size = .{} };
+            const surface = try settings.widget().draw(ctx);
+            const text = try cells(arena.allocator(), surface, 1);
+            const expected = if (memory) |live| (if (live.tools != null)
+                (if (width >= 14 + ctx.stringWidth(full) + version.len) full else if (width >= 14 + tools.len + version.len) tools else "")
+            else if (width >= 14 + rui.len + version.len) rui else "") else "";
+            if (width >= "  Settings".len + version.len + 1) try std.testing.expect(std.mem.startsWith(u8, text, "  Settings"));
+            if (width >= version.len) try std.testing.expect(std.mem.endsWith(u8, text, version));
+            if (expected.len > 0) {
+                try std.testing.expect(std.mem.indexOf(u8, text, expected) != null);
+                try std.testing.expectEqualStrings(expected, text[text.len - version.len - 2 - expected.len ..][0..expected.len]);
+            } else {
+                try std.testing.expect(std.mem.indexOf(u8, text, "rui ") == null);
+                try std.testing.expect(std.mem.indexOf(u8, text, "tools ") == null);
+            }
+            if (std.mem.eql(u8, expected, tools)) try std.testing.expect(std.mem.indexOf(u8, text, "rui ") == null);
+            _ = arena.reset(.retain_capacity);
+        }
+    }
 }

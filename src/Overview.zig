@@ -730,7 +730,7 @@ fn openSession(self: *Self, ctx: *vxfw.EventContext) !void {
     }
     const files: SessionFrontend.Files = .{ .scratch = opened[0], .action = opened[1], .inspection = opened[2], .details = opened[3], .actions = opened[4..6].* };
     const frontend = try self.init.gpa.create(SessionFrontend);
-    const lender: SessionFrontend.Lender = .{ .context = self, .step = conversed, .service = service, .line = conversationLine, .observed = observed, .upgrade = upgradeValue, .archive_state = archiveState, .models = modelsSnapshot };
+    const lender: SessionFrontend.Lender = .{ .context = self, .step = conversed, .service = service, .line = conversationLine, .observed = observed, .upgrade = upgradeValue, .archive_state = archiveState, .models = modelsSnapshot, .memory = memoryValue };
     frontend.begin(self.init, self.options.store, &self.opened, self.options.directory, files, self.hooks.command, self.hooks.requests, self.hooks.status, screen, self.interrupted, lender);
     const child = frontend.attach(.{ .configure = self.hooks.configure, .drafts = &self.session_drafts, .root = &self.root, .context = self, .leave = appSessionLeft, .copy = appCopy, .on_open = appSessionFollow, .host = .{ .context = self, .held = hostHeld, .lost = hostLost, .startable = hostStartable, .start = requestHostStart, .notice = hostNotice } }, self.caps);
     // Custody transfers before focus delivery: on failure the exit
@@ -1095,6 +1095,7 @@ fn drawPart(self: *Self, ctx: vxfw.DrawContext, part: AppScreen.Overview.Part) s
     self.app_sessions.aboveFn = SessionRows.above;
     self.app_sessions.belowFn = SessionRows.below;
     self.app_settings_line.selected = self.state.selected == .settings;
+    self.app_settings_line.memory = self.state.memory;
     self.app_settings_line.caps = self.caps;
     self.app_sessions.tail = .{ .widget = self.app_settings_line.widget(), .rows = view.layout(&self.state).settings.len() };
     self.app_sessions.caps = self.caps;
@@ -1701,6 +1702,11 @@ fn quiesceUpgrade(self: *Self) !bool {
         }
     }
     return self.worker.thread == null and self.job_count == 0;
+}
+
+fn memoryValue(raw: *anyopaque) ?view.Memory {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    return self.state.memory;
 }
 
 /// One borrowed source for app settings and the open conversation's choices.
@@ -7772,4 +7778,67 @@ test "creation preference read failure is retained through repair and ordinary r
     try std.testing.expectEqual(@as(usize, 1), Seen.now.creates);
     try std.testing.expectEqualStrings("high", Seen.now.creation.reasoning_effort.?.slice());
     try std.testing.expectEqualStrings("bypass", Seen.now.creation.permission_mode.slice());
+}
+
+test "Overview Settings live memory frame uses quiet role in day and night" {
+    const rig = try openListed();
+    defer rig.close();
+    for ([_]view.Caps{ .{}, .{ .background = .{ 255, 255, 255 } } }) |caps| {
+        rig.overview.caps = caps;
+        var before = try rig.shown(80, 24);
+        defer before.deinit();
+        if (rig.overview.state.memory == null) try std.testing.expect(std.mem.indexOf(u8, try before.text(), "rui 38 MB") == null);
+        _ = try rig.overview.event(.{ .memory = .{ .rui = 38 * view.mib, .tools = 120 * view.mib } });
+        var shown = try rig.shown(80, 24);
+        defer shown.deinit();
+        const row: u16 = for (0..24) |y| {
+            if (std.mem.startsWith(u8, try shown.line(@intCast(y)), "  Settings")) break @intCast(y);
+        } else return error.TestExpectedSettingsRow;
+        const text = try shown.line(row);
+        const memory = std.mem.indexOf(u8, text, "rui 38 MB · tools 120 MB") orelse return error.TestExpectedMemory;
+        const expected = @import("widget_style.zig").of(caps, .{ .colour = .quiet });
+        for (memory..memory + "rui 38 MB".len) |column| try std.testing.expectEqual(expected, shown.screen.readCell(@intCast(column), row).?.style);
+        // The lender returns the same latest shell read, without a second cache.
+        try std.testing.expectEqual(rig.overview.state.memory, memoryValue(rig.overview));
+    }
+}
+
+test "chat info live memory backend borrows the latest Overview read through the real lender" {
+    const Files = struct {
+        var dir: std.Io.Dir = undefined;
+        var count: u8 = 0;
+        fn scratch(init: std.process.Init) !std.Io.File {
+            count += 1;
+            return dir.createFile(init.io, &.{'a' + count}, .{ .read = true });
+        }
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const home = path[0..try tmp.dir.realPath(std.testing.io, &path)];
+    Files.dir = tmp.dir;
+    Files.count = 0;
+    var ops = fake_operations;
+    ops.open = openSession;
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = home, .workspace = "/work", .home = home, .directory = home, .provider = "codex", .model = "gpt-5.5" }, ops, &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+    overview.hooks.scratch = Files.scratch;
+    try std.testing.expect(try rig.next(.{ .open = "k7m2qx".* }) == null);
+    defer {
+        if (overview.app_session) |left| {
+            left.frontend.?.stop();
+            overview.disposeSession(left);
+            overview.app_session = null;
+        }
+    }
+    try std.testing.expect(try rig.settle() == null);
+    const backend = overview.app_session.?.frontend.?.app_info.backend;
+    const read_memory = backend.memory orelse return error.TestExpectedMemoryReader;
+    try std.testing.expectEqual(@as(?view.Memory, null), read_memory(backend.context));
+    for ([_]view.Memory{ .{ .rui = 38 * view.mib, .tools = 120 * view.mib }, .{ .rui = 1024 * view.mib, .tools = null } }) |memory| {
+        _ = try overview.event(.{ .memory = memory });
+        try std.testing.expectEqual(@as(?view.Memory, memory), read_memory(backend.context));
+    }
 }

@@ -405,6 +405,7 @@ pub const Lender = struct {
     upgrade: *const fn (context: *anyopaque) session_upgrade.Upgrade,
     archive_state: ?*const fn (*anyopaque) ChatInfo.SaveState = null,
     models: ?*const fn (*anyopaque) ModelChoice.Snapshot = null,
+    memory: ?*const fn (*anyopaque) ?overview_view.Memory = null,
 
     pub const Said = struct {
         /// The overview's notice; null for none.
@@ -598,11 +599,15 @@ fn infoBackend(self: *Self) ChatInfo.Backend {
             const frontend = owner(raw);
             return if (frontend.lender.models) |read_models| read_models(frontend.lender.context) else .{};
         }
+        fn memory(raw: *anyopaque) ?overview_view.Memory {
+            const frontend = owner(raw);
+            return if (frontend.lender.memory) |read_memory| read_memory(frontend.lender.context) else null;
+        }
         fn caps(raw: *anyopaque) overview_view.Caps {
             return owner(raw).app_caps;
         }
     };
-    return .{ .context = self, .read = Backend.read, .configure = Backend.configure, .archive = Backend.archive, .copy_last_answer = Backend.copy, .state = Backend.state, .models = Backend.models, .caps = Backend.caps };
+    return .{ .context = self, .read = Backend.read, .configure = Backend.configure, .archive = Backend.archive, .copy_last_answer = Backend.copy, .state = Backend.state, .models = Backend.models, .caps = Backend.caps, .memory = Backend.memory };
 }
 
 /// The archive owner delivers its answer to the panel's one outstanding effect.
@@ -4709,7 +4714,7 @@ test "chat info owns typed keys before Host restart across every modal editor an
             .permissions => 1,
             .tools => 2,
             .model => 4,
-            .rename => 6,
+            .rename => ChatInfo.rename_row,
         };
         if (mode != .rows) try held.keys("\r");
         const selected = page.panel.selected;
@@ -8516,10 +8521,10 @@ test "chat info Archive delegates once and settles only its exact Session answer
         try captureInfo(held, "Fix retry deadline");
         try held.keys("draft\x1bi");
         _ = try held.draw();
-        held.self.app_info.panel.selected = 7;
+        held.self.app_info.panel.selected = ChatInfo.archive_row;
         try held.keys("\r");
         try std.testing.expectEqual(@as(usize, 1), overview.archives);
-        try std.testing.expectEqual(@as(?usize, 7), held.self.app_info.pending);
+        try std.testing.expectEqual(@as(?usize, ChatInfo.archive_row), held.self.app_info.pending);
         const result: overview_view.ArchiveResult = .{ .request = .{ .reference = "k7m2qx".* }, .outcome = switch (ending) {
             0 => .{ .requested = .pending },
             1 => .{ .failed = "refused" },
@@ -8533,7 +8538,7 @@ test "chat info Archive delegates once and settles only its exact Session answer
         var ctx = held.context();
         try held.self.app_info.widget().handleEvent(&ctx, .tick);
         try std.testing.expect(held.self.app_info.pending == null);
-        try std.testing.expectEqual(ending != 0, held.self.app_info.failures[7] != null);
+        try std.testing.expectEqual(ending != 0, held.self.app_info.failures[ChatInfo.archive_row] != null);
         try std.testing.expectEqualStrings("draft", held.self.input.composition().bytes);
         try std.testing.expect(held.self.input.queuedCommand() == null);
     }
@@ -8569,27 +8574,27 @@ test "chat info archive admission refuses full and unresolved ledgers without tr
         try captureInfo(held, "Fix retry deadline");
         try held.keys("kept draft\x1bi");
         _ = try held.draw();
-        held.self.app_info.panel.selected = 7;
+        held.self.app_info.panel.selected = ChatInfo.archive_row;
         try held.keys("\r");
         try std.testing.expectEqual(@as(usize, @intFromBool(!refused)), overview.archives);
         try std.testing.expectEqual(before + @intFromBool(!refused), overview.state.request_count);
-        try std.testing.expectEqual(@as(?usize, if (refused) null else 7), held.self.app_info.pending);
-        try std.testing.expectEqual(refused, held.self.app_info.failures[7] != null);
+        try std.testing.expectEqual(@as(?usize, if (refused) null else ChatInfo.archive_row), held.self.app_info.pending);
+        try std.testing.expectEqual(refused, held.self.app_info.failures[ChatInfo.archive_row] != null);
         try std.testing.expectEqual(@as(@TypeOf(held.self.info_effect), if (refused) .idle else .archive), held.self.info_effect);
         // Reopening must not turn a refusal into a permanent modal hold.
         try held.keys("\x07\x1bi");
         _ = try held.draw();
         if (refused) {
-            held.self.app_info.panel.selected = 6;
+            held.self.app_info.panel.selected = ChatInfo.rename_row;
             try held.keys("\r");
             try std.testing.expect(held.self.app_info.renaming);
             try held.keys("\x07");
             // Once the owner has room again, the same action can be admitted.
             overview.state.request_count = 0;
-            held.self.app_info.panel.selected = 7;
+            held.self.app_info.panel.selected = ChatInfo.archive_row;
             try held.keys("\r");
             try std.testing.expectEqual(@as(usize, 1), overview.archives);
-            try std.testing.expectEqual(@as(?usize, 7), held.self.app_info.pending);
+            try std.testing.expectEqual(@as(?usize, ChatInfo.archive_row), held.self.app_info.pending);
         }
         // An unrelated answer cannot settle an admitted request, even hidden.
         try held.keys("\x07");
@@ -8599,11 +8604,11 @@ test "chat info archive admission refuses full and unresolved ledgers without tr
         held.self.archiveAnswered(other);
         var ctx = held.context();
         try held.self.app_info.widget().handleEvent(&ctx, .tick);
-        try std.testing.expectEqual(@as(?usize, 7), held.self.app_info.pending);
+        try std.testing.expectEqual(@as(?usize, ChatInfo.archive_row), held.self.app_info.pending);
         held.self.archiveAnswered(result);
         try held.self.app_info.widget().handleEvent(&ctx, .tick);
         try std.testing.expect(held.self.app_info.pending == null);
-        try std.testing.expect(held.self.app_info.failures[7] == null);
+        try std.testing.expect(held.self.app_info.failures[ChatInfo.archive_row] == null);
         try std.testing.expectEqualStrings("kept draft", held.self.input.composition().bytes);
     };
 }
@@ -8620,10 +8625,10 @@ test "chat info archive owner errors propagate instead of becoming ordinary admi
     try held.keys("kept draft\x1bi");
     _ = try held.draw();
     held.self.lender.step = Failed.step;
-    held.self.app_info.panel.selected = 7;
+    held.self.app_info.panel.selected = ChatInfo.archive_row;
     try std.testing.expectError(error.TestArchiveDispatchFailed, held.keys("\r"));
     try std.testing.expect(held.self.app_info.pending == null);
-    try std.testing.expect(held.self.app_info.failures[7] == null);
+    try std.testing.expect(held.self.app_info.failures[ChatInfo.archive_row] == null);
     try std.testing.expectEqual(.idle, held.self.info_effect);
     try std.testing.expectEqualStrings("kept draft", held.self.input.composition().bytes);
 }
@@ -8757,7 +8762,7 @@ test "chat info retains Session detach keys with full-page and standalone choice
             held.self.app_info.panel.selected = switch (choice) {
                 1 => 0,
                 2 => 4,
-                else => 6,
+                else => ChatInfo.rename_row,
             };
             try held.keys("\r");
             try std.testing.expect(held.self.app_info.hasChoice());
