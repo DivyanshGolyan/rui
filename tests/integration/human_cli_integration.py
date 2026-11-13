@@ -2627,7 +2627,7 @@ def main(selected="all"):
             col = line.index("Settings") + 1
             gesture = f"\x1b[<0;{col};{row + 1}M\x1b[<0;{col};{row + 1}m".encode()
             app_settings = keyed_frame(master, gesture, lambda screen, x, y: "Notifications" in screen and "Version" in screen)
-            assert any("Sign-in" in row and "Codex" in row for row in app_settings.splitlines()), app_settings
+            assert any("Sign-in" in row and "ChatGPT" in row for row in app_settings.splitlines()), app_settings
             keys = keyed_frame(master, b"\x1b[B" * 6 + b"\r", lambda screen, x, y: "earlier message" in screen)
             for expected in ('enter    open / send', 'esc      back', '⇧enter   new line', 'ctrl+x   stop', '↑↓       scroll', 'ctrl+o   tool output', 'ctrl+p   earlier message', 'ctrl+r   retry', '/        skills', 'alt+a    archive', 'ctrl+c   leave'):
                 assert expected in keys, (expected, keys)

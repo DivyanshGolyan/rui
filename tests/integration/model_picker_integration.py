@@ -44,7 +44,7 @@ def main():
                        env=env, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         overview_frame(master, overview_title)
         opened = app_model_open(master, catalog=catalog)
-        assert any("Sign-in" in row and "Codex" in row for row in opened.splitlines()), opened
+        assert any("Sign-in" in row and "ChatGPT" in row for row in opened.splitlines()), opened
         full = assert_model_choice(opened, query="", more=True)
         filtered = model_choice_frame(master, b"luna", query="luna", more=False)
         narrow = assert_model_choice(filtered, query="luna", more=False)
