@@ -4,6 +4,8 @@ const std = @import("std");
 const Bounded = @import("../../bounded.zig").Bounded;
 const catalog = @import("../../model_catalog.zig");
 const rsql = @import("../rsql.zig");
+const store_core = @import("../Store.zig");
+const transition = @import("../transition.zig");
 
 pub const Source = struct {
     etag: ?Bounded(512),
@@ -193,31 +195,58 @@ const Existing = struct {
     }
 };
 
-pub fn save(a: anytype, entries: []const catalog.Entry, etag: ?[]const u8) !void {
-    var known: Existing = .{ .ids = .init(std.heap.page_allocator) };
-    defer known.ids.deinit();
-    for (entries) |entry| try known.ids.put(entry.id, false);
+/// Saves `entries` and `etag` as the next generation in one transaction.
+/// Round `.facts` reads the saved source and which IDs exist, in any
+/// generation; the commit round inserts or updates each fact and the
+/// source. Access flushes the commit round's writes in bounded batches,
+/// all inside the transaction.
+pub const Save = struct {
+    pub const rounds = transition.rounds(.{ .facts = .{.always} });
+    pub const round_budget = 2;
+    pub const commit: transition.Commit = .transaction;
+    pub const begin: ?rounds.At = .facts;
+    /// The caller's, which outlive the transition: the writes bind each
+    /// entry's ID and the etag in place.
+    pub const Input = struct { entries: []const catalog.Entry, etag: ?[]const u8 };
+    pub const Result = void;
+    pub const Ordinary = store_core.Ordinary.none;
+    pub const Guards = error{};
+    pub const Declined = error{};
 
-    var previous: ?Source = null;
-    a.read(source, .{}, &previous);
-    // D202 forbids production DELETE, and rsql has no upsert. Read all
-    // existence once, then let Access batch writes without per-ID waits.
-    a.readEach(existing, .{}, std.math.maxInt(u64), &known);
-    try a.run();
-    const generation = std.math.add(u64, if (previous) |p| p.generation else 0, 1) catch return error.CorruptStore;
-    for (entries) |entry| {
-        const args: FactArgs = .{
-            .id = entry.id,
-            .context_window = entry.context_window,
-            .efforts = @intCast(entry.efforts.bits.mask),
-            .openai_listed = entry.openai_listed,
-            .generation = generation,
-        };
-        const old = known.ids.getPtr(entry.id).?;
-        if (old.*) a.write(update_fact, args) else a.write(insert_fact, args);
-        old.* = true;
+    input: Input,
+    known: Existing = .{ .ids = .init(std.heap.page_allocator) },
+    previous: ?Source = null,
+
+    pub fn step(t: *Save, r: *transition.Round(Save), ran: ?rounds.At) !transition.Next(Save) {
+        if (ran == null) {
+            for (t.input.entries) |entry| try t.known.ids.put(entry.id, false);
+            r.read(source, .{}, &t.previous);
+            // D202 forbids production DELETE, and rsql has no upsert. Read all
+            // existence once, then let Access batch writes without per-ID waits.
+            r.readEach(existing, .{}, std.math.maxInt(u64), &t.known);
+            return .{ .round = .facts };
+        }
+        const generation = std.math.add(u64, if (t.previous) |p| p.generation else 0, 1) catch return error.CorruptStore;
+        for (t.input.entries) |entry| {
+            const args: FactArgs = .{
+                .id = entry.id,
+                .context_window = entry.context_window,
+                .efforts = @intCast(entry.efforts.bits.mask),
+                .openai_listed = entry.openai_listed,
+                .generation = generation,
+            };
+            const old = t.known.ids.getPtr(entry.id).?;
+            if (old.*) r.write(update_fact, args) else r.write(insert_fact, args);
+            old.* = true;
+        }
+        const args: SourceArgs = .{ .etag = t.input.etag, .generation = generation };
+        if (t.previous != null) r.write(update_source, args) else r.write(insert_source, args);
+        return .commit;
     }
-    const args: SourceArgs = .{ .etag = etag, .generation = generation };
-    if (previous != null) a.write(update_source, args) else a.write(insert_source, args);
-    try a.commit();
-}
+
+    pub fn committed(_: *const Save) Result {}
+
+    pub fn deinit(t: *Save) void {
+        t.known.ids.deinit();
+    }
+};

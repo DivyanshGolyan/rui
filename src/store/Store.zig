@@ -259,16 +259,12 @@ pub const Store = struct {
     }
 
     fn saveModelFactsHeld(self: *Store, entries: []const model_catalog.Entry, etag: ?[]const u8) !void {
-        const entry = try enter(self, .none);
-        defer {
-            // Access has reset its statements and committed or rolled back.
-            // Keep the maintenance hint inside this serialized queue entry.
-            if (self.batch == .none) self.engine.releaseUnusedMemory(model_facts_domain.save_statements) else self.release_bulk_memory = true;
-            entry.release();
-        }
-        var access: Access(.write, error{}) = .open(&entry);
-        defer access.deinit();
-        return entry.finishTransaction(Ordinary.none, .{}, access.end(.{}, model_facts_domain.save(&access, entries, etag)));
+        // The runner has reset its statements and committed or rolled back.
+        // Keep the maintenance hint inside this serialized queue entry.
+        defer if (self.batch == .none) self.engine.releaseUnusedMemory(model_facts_domain.save_statements) else {
+            self.release_bulk_memory = true;
+        };
+        return transition.apply(self, model_facts_domain.Save, .{ .entries = entries, .etag = etag }, .{});
     }
 
     /// The selected generation for one operation. Saved entries/IDs belong to
@@ -391,11 +387,7 @@ pub const Store = struct {
     /// id, or null when none holds `offered`; below the record count, the
     /// records from `start`; at it, the set, whose id it returns.
     fn saveHostToolSetHeld(self: *Store, offered: *const tool_record.HostToolSet, digest: *const [32]u8, start: ?usize) !?u64 {
-        const entry = try enter(self, .none);
-        defer entry.release();
-        var access: Access(.write, error{}) = .open(&entry);
-        defer access.deinit();
-        return entry.finishTransaction(Ordinary.none, .{}, access.end(.{}, saveHostToolSetStep(&access, offered, digest, start)));
+        return transition.apply(self, tool_set_domain.SaveHostToolSet, .{ .offered = offered, .digest = digest, .start = start }, .{});
     }
 
     /// The Host tool set the last `saveHostToolSet` saved, read back with every
@@ -2332,41 +2324,6 @@ pub fn publicConversationPageForTesting(self: *Store, request: conversation_read
 /// a Store-wide order.
 pub const Identity = enum { turn_id, operation_id, action_id, content_id, created_seq, command_seq, admission_id, tool_record_id, tool_set_id, forward_id };
 
-/// What the Host hands to transactions. The next value of each `Identity`
-/// is the Store's maximum plus one, read at open and again for each column
-/// a rolled-back transaction took from. Correct because one Host owns the
-/// Store; the primary or unique key still refuses a duplicate, and a
-/// refused write fences.
-fn saveHostToolSetStep(a: anytype, offered: *const tool_record.HostToolSet, digest: *const [32]u8, start: ?usize) !?u64 {
-    const at = start orelse {
-        var set: tool_set_domain.ToolSetLookup = null;
-        tool_set_domain.lookupHostToolSet(a, digest, &set);
-        try a.run();
-        const row = set orelse {
-            try a.abandon(.{});
-            return null;
-        };
-        if (row.current) {
-            try a.abandon(.{});
-        } else {
-            tool_set_domain.pointHostToolSet(a, row.tool_set_id.get());
-            try a.commit();
-        }
-        return row.tool_set_id.get();
-    };
-    if (at < offered.records.len) {
-        var reads: tool_set_domain.RecordReads = undefined;
-        try tool_set_domain.ensureRecords(a, offered.records[at..@min(offered.records.len, at + tool_set_domain.records_per_transaction)], &reads);
-        try a.commit();
-        return null;
-    }
-    const set_id = try a.identity(.tool_set_id);
-    tool_set_domain.insertHostToolSet(a, offered, digest, set_id);
-    tool_set_domain.pointHostToolSet(a, set_id);
-    try a.commit();
-    return set_id;
-}
-
 /// A tool set `readHostToolSet` read back, in its caller's memory.
 pub const SavedHostToolSet = struct {
     records: []tool_record.Record,
@@ -2393,6 +2350,11 @@ pub const HostTools = struct {
     set_id: u64,
 };
 
+/// What the Host hands to transactions. The next value of each `Identity`
+/// is the Store's maximum plus one, read at open and again for each column
+/// a rolled-back transaction took from. Correct because one Host owns the
+/// Store; the primary or unique key still refuses a duplicate, and a
+/// refused write fences.
 const HostValues = struct {
     next: std.EnumArray(Identity, u64),
     /// The columns that handed out a value since `begin`.
