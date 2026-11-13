@@ -7812,6 +7812,28 @@ test "an admission that selects nothing fences a Store whose blocked Operations 
     }.run);
 }
 
+test "an admission that selects nothing fences a Store whose blocked Operation's calls fail the tool outcome rule" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try configureTestSessionAsk(&storage, "outcome-admission");
+            try submitTestMessage(&storage, &tmp, "outcome", "outcome", session.slice(), "start");
+            const first = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
+            try settleTwoActionsForTesting(&storage, &tmp, first, "outcome-admission");
+            // The calls lose their output items: the Turn still agrees it
+            // waits, so only the calls' own round finds the damage.
+            try store_testing.exec(&storage, "UPDATE model_output_item SET item_kind=1 WHERE item_kind=3", .{});
+            try std.testing.expect(!storage.isFenced());
+            try std.testing.expectError(error.CorruptStore, storage.admitModelAttempt(.message, .{}));
+            try std.testing.expect(storage.isFenced());
+        }
+    }.run);
+}
+
 test "an admission that selects nothing reads a blocked Operation's calls in a round of their own" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
