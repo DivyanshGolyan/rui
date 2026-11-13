@@ -1116,8 +1116,8 @@ pub fn hostLockState(io: std.Io, store_path: []const u8) HostLockState {
     // MySQL owns its Store through GET_LOCK, not the runtime's socket lease.
     // No filesystem result, including a missing runtime, proves its ownership.
     const selected = platform.resolveClientSelection(store_path);
+    if (selected == .mysql) return .failure;
     const paths = selected.paths(io) catch |err| return if (err == error.FileNotFound) .free else .failure;
-    if (paths.kind == .mysql) return .failure;
     return lockState(io, &paths);
 }
 
@@ -1221,15 +1221,7 @@ fn readHostInfo(io: std.Io, paths: *const platform.Paths, deadline: ?i128) proto
     };
     if (reply.status == 503) return if (protocol_reply.validHostUnavailable(reply.body)) .owned_unavailable else .incompatible;
     if (reply.status != 200) return .incompatible;
-    if (paths.store.len != 0) return protocol_reply.parseHostInfo(reply.body, paths.store.slice()) catch .incompatible;
-    // Only startup creates an empty-selector route. Discovery learns a hint,
-    // then normal strict parsing confirms the canonical identity and instance.
-    const discovered = protocol_reply.discoverHostInfo(reply.body, paths.kind) catch return .incompatible;
-    var canonical = paths.*;
-    canonical.store = discovered.store;
-    const confirmed = readHostInfo(io, &canonical, deadline);
-    if (confirmed != .ready or !std.mem.eql(u8, &confirmed.ready.instance, &discovered.instance)) return .owned_unavailable;
-    return confirmed;
+    return protocol_reply.parseHostInfo(reply.body, paths.store.slice()) catch .incompatible;
 }
 
 pub fn captureSessionStop(io: std.Io, input: SessionStopInput, target: CaptureTarget) !CapturedRecord {

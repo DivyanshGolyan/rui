@@ -492,20 +492,6 @@ pub fn parseHostInfoForProfile(body: []const u8, store: []const u8, profile: Hos
     };
 }
 
-/// Startup-only empty-selector discovery. The ordinary parser still requires
-/// exact expected Store equality; all reply fields pass that parser here too.
-pub noinline fn discoverHostInfo(body: []const u8, kind: @import("store_target.zig").Kind) !HostInfoFacts {
-    if (body.len > protocol.max_host_info_response_bytes) return error.InvalidHostInfo;
-    var storage: [protocol.max_host_info_response_bytes * 2]u8 = undefined;
-    var arena = std.heap.FixedBufferAllocator.init(&storage);
-    const hint = try std.json.parseFromSliceLeaky(struct { store: []const u8 }, arena.allocator(), body, .{ .ignore_unknown_fields = true });
-    switch (kind) {
-        .mysql => if (!@import("store_id.zig").valid(hint.store)) return error.InvalidHostInfo,
-        .sqlite => if (!std.fs.path.isAbsolute(hint.store)) return error.InvalidHostInfo,
-    }
-    return parseHostInfoForProfile(body, hint.store, .current);
-}
-
 fn parseHostInfoShape(comptime Info: type, body: []const u8, store: []const u8, profile: HostInfoProfile) !HostInfoFacts {
     if (body.len > protocol.max_host_info_response_bytes) return error.InvalidHostInfo;
     var parse_storage: [protocol.max_host_info_response_bytes * 2]u8 = undefined;
@@ -600,22 +586,6 @@ test "Host information parses omitted and bounded string diagnostics with one se
         defer std.testing.allocator.free(oversized);
         try std.testing.expectError(error.ValueTooLong, parseHostInfo(oversized, selector));
     }
-}
-
-test "startup discovery validates identity kind and reuses the complete strict Host shape" {
-    const prefix = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"host_info\",\"store\":\"";
-    const suffix = "\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"17\",\"started_at\":\"1792918800\",\"custody_occupied\":\"17\",\"paused\":true,\"capabilities\":{\"bash\":true,\"providers\":{\"codex\":\"unserved\",\"openai\":\"unserved\",\"chatgpt\":\"unserved\"}}}";
-    const path_reply = prefix ++ "/one" ++ suffix;
-    const network_reply = prefix ++ "0123456789abcdef0123456789abcdef" ++ suffix;
-    const path = try discoverHostInfo(path_reply, .sqlite);
-    const network = try discoverHostInfo(network_reply, .mysql);
-    try std.testing.expect(path.store.eql("/one"));
-    try std.testing.expect(network.store.eql("0123456789abcdef0123456789abcdef"));
-    try std.testing.expectError(error.InvalidHostInfo, discoverHostInfo(path_reply, .mysql));
-    try std.testing.expectError(error.InvalidHostInfo, discoverHostInfo(network_reply, .sqlite));
-    try std.testing.expectError(error.MissingField, discoverHostInfo(prefix ++ "0123456789abcdef0123456789abcdef\"}", .mysql));
-    try std.testing.expectError(error.InvalidHostInfo, parseHostInfo(path_reply, ""));
-    try std.testing.expectError(error.InvalidHostInfo, parseHostInfo(network_reply, "wrong-store"));
 }
 
 test "Host information is bounded and rejects ambiguous identities and capacity" {

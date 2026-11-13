@@ -83,7 +83,7 @@ pub fn observe(allocator: std.mem.Allocator, io: std.Io, home: []const u8, store
         .access_failure => return .{ .unsupported = .inaccessible },
         .ready => {},
     }
-    if (platform.isMysqlClientSelection(store)) return .{ .unsupported = .application_owned };
+    if (platform.mysqlRuntimeDirectory(store) != null) return .{ .unsupported = .application_owned };
     const observed = client.observeHostForUpgrade(io, store, null) catch return .{ .unsupported = .ownership_unconfirmed };
     var snapshot = identity.snapshot(allocator, observed.pid) catch return .{ .unsupported = .configuration_unavailable };
     errdefer snapshot.deinit(allocator);

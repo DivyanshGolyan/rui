@@ -40,36 +40,6 @@ pub const Paths = struct {
     }
 };
 
-/// One frontend may retain the route of the Host it actually observed. This
-/// is a connection hint, never Store authority: each use revalidates private
-/// directories, and the normal client still checks the lease and Host identity.
-/// Only owned bytes are copied. The critical sections contain bounded copies,
-/// no I/O/allocation; the atomic mutex also serves selector callers without Io.
-var route_mutex: std.atomic.Mutex = .unlocked;
-var route_present = false;
-var client_route: Paths = undefined;
-
-pub fn rememberClientRoute(_: std.Io, route: *const Paths) void {
-    while (!route_mutex.tryLock()) std.atomic.spinLoopHint();
-    defer route_mutex.unlock();
-    client_route = route.*;
-    route_present = true;
-}
-
-pub fn clearClientRoute(_: std.Io) void {
-    while (!route_mutex.tryLock()) std.atomic.spinLoopHint();
-    defer route_mutex.unlock();
-    route_present = false;
-    std.crypto.secureZero(u8, std.mem.asBytes(&client_route));
-}
-
-fn rememberedRoute(selector: []const u8) ?Paths {
-    while (!route_mutex.tryLock()) std.atomic.spinLoopHint();
-    defer route_mutex.unlock();
-    if (route_present and client_route.store.eql(selector)) return client_route;
-    return null;
-}
-
 /// The stop record's name, in the directory that holds the lease.
 const stop_record_name = "host.stopped";
 
@@ -92,7 +62,6 @@ pub const StoreLease = struct {
         const runtime: ?[]const u8 = switch (selected) {
             .sqlite => null,
             .mysql => |value| value.runtime,
-            .routed => |*route| if (route.kind == .mysql) std.fs.path.dirname(route.socket.slice()).? else null,
         };
         var store_dir = std.Io.Dir.cwd().openDir(io, runtime orelse supplied_path, .{}) catch |err| return switch (err) {
             error.FileNotFound => .unowned,
@@ -100,7 +69,10 @@ pub const StoreLease = struct {
         };
         defer store_dir.close(io);
         validatePrivateDirectory(store_dir, io) catch return .access_failure;
-        const paths = selected.paths(io) catch return .access_failure;
+        const paths = if (runtime) |directory|
+            mysqlClientPaths(io, supplied_path, directory) catch return .access_failure
+        else
+            pathsFromOpenStore(store_dir, io) catch return .access_failure;
         // A hostile FIFO must not wait for a writer; never follow or create
         // a replacement lock node during observation.
         const fd = std.posix.openat(store_dir.handle, if (runtime != null) "rui.lock" else "host.lock", .{
@@ -277,11 +249,9 @@ pub const StoreLease = struct {
     /// Only meaningful while the lease is free. The record's presence is
     /// its whole content; nothing else reads it.
     pub fn lastStop(io: std.Io, supplied_path: []const u8) LastStop {
-        const selection = resolveClientSelection(supplied_path);
-        const directory = switch (selection) {
+        const directory = switch (resolveClientSelection(supplied_path)) {
             .sqlite => |path| path,
             .mysql => |value| value.runtime,
-            .routed => |*route| if (route.kind == .mysql) std.fs.path.dirname(route.socket.slice()).? else route.store.slice(),
         };
         var dir = std.Io.Dir.cwd().openDir(io, directory, .{}) catch return .unknown;
         defer dir.close(io);
@@ -336,30 +306,13 @@ pub const StoreLease = struct {
 /// Selection syntax is interpreted once, before filesystem or socket work.
 /// A missing MySQL runtime still names a network Store, never a SQLite path.
 /// The slices borrow CLI/environment storage for this selection's lifetime.
-pub const ClientSelection = union(enum) {
+pub const ClientSelection = union(Kind) {
     sqlite: []const u8,
     mysql: struct { store: []const u8, runtime: []const u8 },
-    routed: Paths,
 
     pub fn paths(self: ClientSelection, io: std.Io) !Paths {
         return switch (self) {
             .mysql => |value| mysqlClientPaths(io, value.store, value.runtime),
-            .routed => |*route| blk: {
-                const runtime = std.fs.path.dirname(route.socket.slice()).?;
-                if (route.kind == .mysql) break :blk try mysqlClientPaths(io, route.store.slice(), runtime);
-                var directory = try std.Io.Dir.cwd().openDir(io, route.store.slice(), .{});
-                defer directory.close(io);
-                try validatePrivateDirectory(directory, io);
-                var resolved = try pathsFromOpenStore(directory, io);
-                if (!resolved.store.eql(route.store.slice())) return error.InvalidStorePath;
-                if (!std.mem.eql(u8, resolved.socket.slice(), route.socket.slice())) {
-                    var interface_dir = try std.Io.Dir.cwd().openDir(io, runtime, .{});
-                    defer interface_dir.close(io);
-                    try validatePrivateDirectory(interface_dir, io);
-                    resolved.socket = route.socket;
-                }
-                break :blk resolved;
-            },
             .sqlite => |path| blk: {
                 var store_dir = try std.Io.Dir.cwd().openDir(io, path, .{});
                 defer store_dir.close(io);
@@ -372,11 +325,6 @@ pub const ClientSelection = union(enum) {
 
 pub fn resolveClientSelection(supplied_path: []const u8) ClientSelection {
     const hint = if (std.c.getenv("RUI_RUNTIME_DIR")) |value| std.mem.span(value) else null;
-    return clientSelectionWithRoute(supplied_path, hint);
-}
-
-fn clientSelectionWithRoute(supplied_path: []const u8, hint: ?[]const u8) ClientSelection {
-    if (hint == null) if (rememberedRoute(supplied_path)) |route| return .{ .routed = route };
     return clientSelection(supplied_path, hint);
 }
 
@@ -402,15 +350,6 @@ pub fn mysqlRuntimeDirectory(store: []const u8) ?[]const u8 {
     return switch (resolveClientSelection(store)) {
         .sqlite => null,
         .mysql => |value| value.runtime,
-        .routed => null, // Owned route bytes cannot escape this value by slice.
-    };
-}
-
-pub fn isMysqlClientSelection(store: []const u8) bool {
-    return switch (resolveClientSelection(store)) {
-        .mysql => true,
-        .sqlite => false,
-        .routed => |route| route.kind == .mysql,
     };
 }
 
@@ -439,9 +378,8 @@ pub fn validateStoreDestination(io: std.Io, supplied_path: []const u8) !void {
 /// Return the same read-only destination proof to callers that retain its
 /// canonical value. Creation/lease acquisition still rechecks against races.
 pub noinline fn canonicalStoreDestination(io: std.Io, supplied_path: []const u8, buffer: *[protocol.max_store_bytes]u8) ![]const u8 {
-    // A raw OS spelling may traverse a non-text alias and still resolve to a
-    // canonical text identity. Only structural NUL/empty rejection is early.
-    if (supplied_path.len == 0 or std.mem.indexOfScalar(u8, supplied_path, 0) != null) return error.InvalidStorePath;
+    if (supplied_path.len == 0 or !std.unicode.utf8ValidateSlice(supplied_path)) return error.InvalidStorePath;
+    for (supplied_path) |byte| if (byte < 0x20 or byte == 0x7f) return error.InvalidStorePath;
     return existingStoreDestination(io, supplied_path, buffer) catch |err| switch (err) {
         error.FileNotFound => missingStoreDestination(io, supplied_path, buffer),
         else => err,
@@ -531,15 +469,6 @@ fn pathsFromOpenStore(store_dir: std.Io.Dir, io: std.Io) !Paths {
     const canonical = canonical_buffer[0..canonical_length];
     try validateCanonicalPath(canonical);
 
-    return pathsForCanonical(canonical);
-}
-
-pub fn pathsForDestination(io: std.Io, destination: []const u8) !Paths {
-    var buffer: [protocol.max_store_bytes]u8 = undefined;
-    return pathsForCanonical(try canonicalStoreDestination(io, destination, &buffer));
-}
-
-fn pathsForCanonical(canonical: []const u8) !Paths {
     var paths: Paths = .{};
     try paths.store.set(canonical);
     var database_buffer: [max_database_path_bytes]u8 = undefined;
@@ -556,7 +485,6 @@ fn pathsForCanonical(canonical: []const u8) !Paths {
 fn validateCanonicalPath(canonical: []const u8) !void {
     if (canonical.len > protocol.max_store_bytes) return error.StorePathTooLong;
     if (!std.unicode.utf8ValidateSlice(canonical)) return error.InvalidStorePath;
-    for (canonical) |byte| if (byte < 0x20 or byte == 0x7f) return error.InvalidStorePath;
 }
 
 /// Caller owns every path and the returned slice. Discovery never creates the
@@ -1310,44 +1238,4 @@ test "runtime socket storage preserves every non-NUL OS byte" {
     const over: [@max(max_socket_path_bytes, max_launch_socket_path_bytes) + 1]u8 = @splat('x');
     try std.testing.expectError(error.SettingsInvalid, paths.socket.set(&over));
     try std.testing.expectEqualSlices(u8, &.{255}, paths.socket.slice());
-}
-
-test "proven client routing owns bytes preserves explicit hints and revalidates private directories" {
-    const io = std.testing.io;
-    defer clearClientRoute(io);
-    var tmp = std.testing.tmpDir(.{ .iterate = true });
-    defer tmp.cleanup();
-    var actual = try tmp.dir.createDirPathOpen(io, "store", .{ .permissions = .fromMode(0o700), .open_options = .{ .iterate = true } });
-    defer actual.close(io);
-    var runtime = try tmp.dir.createDirPathOpen(io, "interface", .{ .permissions = .fromMode(0o700), .open_options = .{ .iterate = true } });
-    defer runtime.close(io);
-    var store_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const store = store_buffer[0..try actual.realPath(io, &store_buffer)];
-    var runtime_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const interface_dir = runtime_buffer[0..try runtime.realPath(io, &runtime_buffer)];
-    var route = try pathsForDestination(io, store);
-    route.socket.len = (try std.fmt.bufPrint(&route.socket.bytes, "{s}/rui.sock", .{interface_dir})).len;
-    rememberClientRoute(io, &route);
-    route.socket.len = 0; // retained ownership cannot borrow the producer
-    const selected = clientSelectionWithRoute(store, null);
-    try std.testing.expect(selected == .routed);
-    const resolved = try selected.paths(io);
-    try std.testing.expect(std.mem.endsWith(u8, resolved.socket.slice(), "/interface/rui.sock"));
-    try std.testing.expect(clientSelectionWithRoute("/unrelated", null) == .sqlite);
-    try runtime.setPermissions(io, .fromMode(0o755));
-    try std.testing.expectError(error.InsecureDirectoryPermissions, selected.paths(io));
-    try runtime.setPermissions(io, .fromMode(0o700));
-    route = resolved;
-    route.kind = .mysql;
-    try route.store.set("0123456789abcdef0123456789abcdef");
-    rememberClientRoute(io, &route);
-    try std.testing.expect(clientSelectionWithRoute(store, null) == .sqlite);
-    const network = clientSelectionWithRoute(route.store.slice(), null);
-    try std.testing.expect(network == .routed and network.routed.kind == .mysql);
-    _ = try network.paths(io);
-    const explicit = clientSelectionWithRoute(route.store.slice(), "/explicit-runtime");
-    try std.testing.expect(explicit == .mysql);
-    try std.testing.expectEqualStrings("/explicit-runtime", explicit.mysql.runtime);
-    clearClientRoute(io);
-    try std.testing.expect(clientSelectionWithRoute(route.store.slice(), null) == .sqlite);
 }
