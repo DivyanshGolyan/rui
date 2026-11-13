@@ -201,6 +201,14 @@ fn RoundOf(comptime R: type, comptime commit: Commit, comptime Guards: type, com
             if (core.inside()) core.writer.readEach(S, args, limit, visitor) else core.reader.readEach(S, args, limit, visitor);
         }
 
+        /// `Access.readEachFrom`: `readEach` with Args too large to copy
+        /// into a frame. Their fixed values are copied when queued, so
+        /// `args` may go once this returns; `visitor` as for `readEach`.
+        pub fn readEachFrom(r: *Self, comptime S: type, args: *const S.Args, limit: u64, visitor: anytype) void {
+            const core = r.get();
+            if (core.inside()) core.writer.readEachFrom(S, args, limit, visitor) else core.reader.readEachFrom(S, args, limit, visitor);
+        }
+
         /// `Access.write`: it runs in the commit round, or, from `begin`
         /// on, in the round it is queued for.
         pub fn write(r: *Self, comptime S: type, args: S.Args) void {

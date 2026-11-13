@@ -1893,7 +1893,8 @@ const TestingSessionPages = struct {
             t.after_len = t.after.len;
         }
         t.page_rows = 0;
-        r.readEach(after_ref, .{ .after = t.after[0..t.after_len] }, 1, t);
+        // Through `readEachFrom`, whose Args the call need not keep.
+        r.readEachFrom(after_ref, &.{ .after = t.after[0..t.after_len] }, 1, t);
         return .{ .round = if (ran == null) .first else .next };
     }
 
