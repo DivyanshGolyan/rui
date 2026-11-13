@@ -300,9 +300,11 @@ pub fn fillAt(init: std.process.Init, parsed: *const cli_args.Parsed, dir: []con
     }
 }
 
-pub fn fill(init: std.process.Init, parsed: *const cli_args.Parsed, settings: *hs.Settings, fixtures: *providers.Fixtures, failure: *start_report.Failure) !void {
-    var cwd: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    return fillAt(init, parsed, parsed.get("store") orelse cwd[0..try std.Io.Dir.cwd().realPath(init.io, &cwd)], settings, fixtures, failure);
+/// A private, empty Host directory: tests must not read the checkout's cwd.
+fn testHostDir(tmp: *std.testing.TmpDir, buffer: *[std.Io.Dir.max_path_bytes]u8) ![]const u8 {
+    var host = try tmp.dir.createDirPathOpen(std.testing.io, "host-dir", .{ .permissions = .fromMode(0o700) });
+    defer host.close(std.testing.io);
+    return buffer[0..try host.realPath(std.testing.io, buffer)];
 }
 
 fn fixtureInputs(init: std.process.Init, parsed: *const cli_args.Parsed, settings: *hs.Settings, fixtures: *providers.Fixtures, failure: *start_report.Failure) !void {
@@ -655,6 +657,7 @@ test "Host start private file origin refuses literal secrets and assignments ove
     const init = initForTest(&arena, &environment);
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
+    var host_root: [std.Io.Dir.max_path_bytes]u8 = undefined;
     var private = try tmp.dir.createDirPathOpen(init.io, "private", .{ .permissions = .fromMode(0o700), .open_options = .{ .iterate = true } });
     defer private.close(init.io);
     var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -673,7 +676,7 @@ test "Host start private file origin refuses literal secrets and assignments ove
     try private.writeFile(init.io, .{ .sub_path = "host.json", .data = "{\"providers\":{},\"tools\":{\"bash\":{\"timeoutMs\":17}},\"execution\":{\"activeCapacity\":3},\"interface\":{\"lifetime\":\"stdin\"}}" });
     const parsed = try parseForTest(arena.allocator(), &.{ "--settings", path, "--set", "tools.bash.timeoutMs=99", "--set", "execution.activeCapacity=4", "--set", "providers.codex={}" });
     var fixtures: providers.Fixtures = .{};
-    fill(init, &parsed, settings, &fixtures, &failure) catch |e| { std.debug.print("DEBUGFILL {s} {s}\n", .{ @errorName(e), failure.message.slice() }); return e; };
+    try fillAt(init, &parsed, try testHostDir(&tmp, &host_root), settings, &fixtures, &failure);
     try std.testing.expectEqual(@as(u64, 99), settings.tools.bash.timeout_ms.value);
     try std.testing.expectEqual(@as(usize, 4), settings.execution.active_capacity.value);
     try std.testing.expectEqual(hs.Interface.Lifetime.stdin, settings.interface.lifetime.value);
@@ -719,6 +722,7 @@ test "Host start pipe file and assignment admissions report every code on both s
     const init = initForTest(&arena, &environment);
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
+    var host_root: [std.Io.Dir.max_path_bytes]u8 = undefined;
     var private = try tmp.dir.createDirPathOpen(init.io, "private", .{ .permissions = .fromMode(0o700), .open_options = .{ .iterate = true } });
     defer private.close(init.io);
     const document = "{\"providers\":{},\"tools\":{\"bash\":{\"timeoutMs\":17}}}";
@@ -751,11 +755,11 @@ test "Host start pipe file and assignment admissions report every code on both s
             },
             .file => {
                 const parsed = try parseForTest(arena.allocator(), &.{ "--settings", path });
-                fill(init, &parsed, settings, &fixtures, &admission_failure) catch |e| { std.debug.print("DEBUGFILL {s} {s}\n", .{ @errorName(e), admission_failure.message.slice() }); return e; };
+                try fillAt(init, &parsed, try testHostDir(&tmp, &host_root), settings, &fixtures, &admission_failure);
             },
             .assignments => {
                 const parsed = try parseForTest(arena.allocator(), &.{ "--set", "tools.bash.timeoutMs=17" });
-                fill(init, &parsed, settings, &fixtures, &admission_failure) catch |e| { std.debug.print("DEBUGFILL {s} {s}\n", .{ @errorName(e), admission_failure.message.slice() }); return e; };
+                try fillAt(init, &parsed, try testHostDir(&tmp, &host_root), settings, &fixtures, &admission_failure);
             },
         }
         try std.testing.expectEqual(@as(u64, 17), settings.tools.bash.timeout_ms.value);
@@ -1036,12 +1040,13 @@ test "Host start unset retains exact provider sets and selected Store arms" {
     try showSaved(init, dir, &shown.writer, &failure);
     var json = try parse(arena.allocator(), shown.written(), &failure);
     try std.testing.expect(lookup(json, "providers.openai") != null);
-    try std.testing.expectEqual(std.json.Value.null, lookup(json, "providers.codex").?);
+    try std.testing.expect(lookup(json, "providers.codex") == null);
     try savedEdit(init, dir, "providers.openai", null, &failure);
     shown.clearRetainingCapacity();
     try showSaved(init, dir, &shown.writer, &failure);
     json = try parse(arena.allocator(), shown.written(), &failure);
-    inline for (std.enums.values(protocol.Provider)) |provider| try std.testing.expectEqual(std.json.Value.null, lookup(json, "providers." ++ @tagName(provider)).?);
+    try std.testing.expect(lookup(json, "providers") != null);
+    inline for (std.enums.values(protocol.Provider)) |provider| try std.testing.expect(lookup(json, "providers." ++ @tagName(provider)) == null);
     try savedEdit(init, dir, "store.mysql.url", "env:MYSQL_TEST_URL", &failure);
     try savedEdit(init, dir, "store.mysql.url", null, &failure);
     shown.clearRetainingCapacity();
