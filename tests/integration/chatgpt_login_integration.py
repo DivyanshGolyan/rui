@@ -10,7 +10,8 @@ OpenAI one stays and the receipt names the command that changes it, and a
 saved device-code one (`codex`) is replaced keeping its model, as both are
 ways into one ChatGPT account. Status shows both ways in, and logout ends
 both: a running Host refuses work on either route, status shows no sign-in,
-and logout fails, saying so, when ChatGPT does not confirm the revocation."""
+and logout says when ChatGPT does not confirm the revocation, and fails
+only when a login could not be found, read or changed."""
 
 import base64
 import hashlib
@@ -159,8 +160,8 @@ def saved_default():
 # What `rui auth logout chatgpt` says.
 SIGNED_OUT = "Rui: Signed out of ChatGPT.\n"
 NOTHING = "Rui: Not signed in to ChatGPT; nothing changed.\n"
-UNCONFIRMED = ("rui: ChatGPT did not confirm it ended the browser sign-in; Rui deleted its tokens. "
-               "To end it there too, disconnect Rui in ChatGPT's settings.\n")
+UNCONFIRMED = ("Rui: Signed out of ChatGPT: Rui deleted its tokens, but ChatGPT did not confirm it ended the "
+               "browser sign-in. To end it there too, disconnect Rui in ChatGPT's settings.\n")
 
 
 def logout(url, **variables):
@@ -452,8 +453,8 @@ def run():
         assert credential_facts(device_file)["state"] == "signed_out"
 
         # A revocation ChatGPT does not confirm still removes both logins'
-        # tokens, but the command fails and says the browser sign-in may
-        # remain at ChatGPT.
+        # tokens, so the command succeeds, as before, and says the browser
+        # sign-in may remain at ChatGPT.
         login = Login(url)
         logins.append(login)
         link = login.link(base)
@@ -467,7 +468,7 @@ def run():
         with endpoint.lock:
             endpoint.revocations.append((400, {"error": "invalid_request"}))
         out = logout(url)
-        assert (out.returncode, out.stdout, out.stderr) == (1, SIGNED_OUT, UNCONFIRMED), out
+        assert (out.returncode, out.stdout, out.stderr) == (0, UNCONFIRMED, ""), out
         assert endpoint.revoke_requests[2]["token"] == ["plan-refresh-4"], endpoint.revoke_requests
         assert credential_facts(credential_file)["state"] == credential_facts(device_file)["state"] == "signed_out"
 
@@ -501,7 +502,7 @@ def run():
         fixture.stop_host(host)
         host = None
         print("chatgpt login passed: listener and pasted sign-in, returning client reused, stale answer refused, "
-              "logout ends both sign-ins and a running Host refuses either until the next sign-in, and fails while "
+              "logout ends both sign-ins and a running Host refuses either until the next sign-in, and says when "
               "ChatGPT has not confirmed; an unset default is filled, an OpenAI default stays and a device-code one is "
               "replaced keeping its model")
         complete = True

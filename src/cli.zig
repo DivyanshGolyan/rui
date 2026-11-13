@@ -765,13 +765,18 @@ fn logoutReceipt(ended: chatgpt_plan_login.Logout) LogoutReceipt {
     const removed_browser = ended.browser == .revoked or ended.browser == .unconfirmed;
     const removed_device = ended.device_code == .removed;
     const partial = ended.browser == .failed or ended.browser == .unlocated or ended.device_code == .failed or ended.device_code == .unlocated;
+    // An unconfirmed revocation still ended the sign-in locally: it is said
+    // on stdout, as before, and fails nothing.
+    const unconfirmed = ": Rui deleted its tokens, but ChatGPT did not confirm it ended the browser sign-in. To end it there too, disconnect Rui in ChatGPT's settings.\n";
+    const confirmed = ended.browser != .unconfirmed;
     return .{
         .done = if (partial)
-            if (removed_browser) "Rui: Signed out of ChatGPT in the browser.\n" else if (removed_device) "Rui: Signed out of ChatGPT with a device code.\n" else null
-        else if (removed_browser or removed_device) "Rui: Signed out of ChatGPT.\n" else "Rui: Not signed in to ChatGPT; nothing changed.\n",
+            if (removed_browser)
+                if (confirmed) "Rui: Signed out of ChatGPT in the browser.\n" else "Rui: Signed out of ChatGPT in the browser" ++ unconfirmed
+            else if (removed_device) "Rui: Signed out of ChatGPT with a device code.\n" else null
+        else if (!confirmed) "Rui: Signed out of ChatGPT" ++ unconfirmed else if (removed_browser or removed_device) "Rui: Signed out of ChatGPT.\n" else "Rui: Not signed in to ChatGPT; nothing changed.\n",
         .browser = switch (ended.browser) {
-            .absent, .revoked => null,
-            .unconfirmed => "rui: ChatGPT did not confirm it ended the browser sign-in; Rui deleted its tokens. To end it there too, disconnect Rui in ChatGPT's settings.\n",
+            .absent, .revoked, .unconfirmed => null,
             .failed => "rui: still signed in to ChatGPT in the browser: Rui could not read or change its private credential; " ++ again,
             .unlocated => unlocated("browser", .chatgpt),
         },
@@ -794,14 +799,16 @@ test "logout says how it left each ChatGPT login, and fails while either may rem
     const Readiness = provider_selection.Readiness;
     // Written out by hand for every pair of local states, as `rui auth
     // status` reads them, with the revocation confirmed, and then
-    // unconfirmed for each state that holds a browser sign-in to revoke.
+    // unconfirmed for each state that holds a browser sign-in to revoke,
+    // which still ends it locally and exits 0, as before.
     // A readable record whose claims status rejects (`credential_error`)
     // is signed out like any other; these rows are an unreadable one.
     const out = "Rui: Signed out of ChatGPT.\n";
     const nothing = "Rui: Not signed in to ChatGPT; nothing changed.\n";
     const out_browser = "Rui: Signed out of ChatGPT in the browser.\n";
     const out_device = "Rui: Signed out of ChatGPT with a device code.\n";
-    const unconfirmed = "rui: ChatGPT did not confirm it ended the browser sign-in; Rui deleted its tokens. To end it there too, disconnect Rui in ChatGPT's settings.\n";
+    const unconfirmed = "Rui: Signed out of ChatGPT: Rui deleted its tokens, but ChatGPT did not confirm it ended the browser sign-in. To end it there too, disconnect Rui in ChatGPT's settings.\n";
+    const unconfirmed_browser = "Rui: Signed out of ChatGPT in the browser: Rui deleted its tokens, but ChatGPT did not confirm it ended the browser sign-in. To end it there too, disconnect Rui in ChatGPT's settings.\n";
     const browser_stays = "rui: still signed in to ChatGPT in the browser: Rui could not read or change its private credential; inspect it, then run rui auth logout chatgpt again.\n";
     const device_stays = "rui: still signed in to ChatGPT with a device code: Rui could not read or change its private credential; inspect it, then run rui auth logout chatgpt again.\n";
     const browser_unfound = "rui: could not end the ChatGPT browser sign-in: Rui could not find its credential. Set RUI_CHATGPT_CREDENTIAL_FILE to an absolute path, or leave it unset with HOME absolute, then run rui auth logout chatgpt again.\n";
@@ -836,11 +843,11 @@ test "logout says how it left each ChatGPT login, and fails while either may rem
         .{ .credential_error, .refresh_required, .failed, .removed, out_device, browser_stays, null, 1 },
         .{ .credential_error, .credential_error, .failed, .failed, null, browser_stays, device_stays, 1 },
         // ChatGPT did not confirm the revocation.
-        .{ .configured, .missing, .unconfirmed, .absent, out, unconfirmed, null, 1 },
-        .{ .configured, .configured, .unconfirmed, .removed, out, unconfirmed, null, 1 },
-        .{ .configured, .renewal_due, .unconfirmed, .removed, out, unconfirmed, null, 1 },
-        .{ .configured, .refresh_required, .unconfirmed, .removed, out, unconfirmed, null, 1 },
-        .{ .configured, .credential_error, .unconfirmed, .failed, out_browser, unconfirmed, device_stays, 1 },
+        .{ .configured, .missing, .unconfirmed, .absent, unconfirmed, null, null, 0 },
+        .{ .configured, .configured, .unconfirmed, .removed, unconfirmed, null, null, 0 },
+        .{ .configured, .renewal_due, .unconfirmed, .removed, unconfirmed, null, null, 0 },
+        .{ .configured, .refresh_required, .unconfirmed, .removed, unconfirmed, null, null, 0 },
+        .{ .configured, .credential_error, .unconfirmed, .failed, unconfirmed_browser, null, device_stays, 1 },
         // A credential path Rui cannot resolve, beside each outcome of the
         // other login, and both at once.
         .{ .missing, .missing, .unlocated, .absent, null, browser_unfound, null, 1 },
@@ -848,7 +855,7 @@ test "logout says how it left each ChatGPT login, and fails while either may rem
         .{ .missing, .credential_error, .unlocated, .failed, null, browser_unfound, device_stays, 1 },
         .{ .missing, .missing, .absent, .unlocated, null, null, device_unfound, 1 },
         .{ .configured, .missing, .revoked, .unlocated, out_browser, null, device_unfound, 1 },
-        .{ .configured, .missing, .unconfirmed, .unlocated, out_browser, unconfirmed, device_unfound, 1 },
+        .{ .configured, .missing, .unconfirmed, .unlocated, unconfirmed_browser, null, device_unfound, 1 },
         .{ .credential_error, .missing, .failed, .unlocated, null, browser_stays, device_unfound, 1 },
         .{ .missing, .missing, .unlocated, .unlocated, null, browser_unfound, device_unfound, 1 },
     };
