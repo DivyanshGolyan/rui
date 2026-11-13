@@ -159,7 +159,7 @@ def saved_default():
 # What `rui auth logout chatgpt` says.
 SIGNED_OUT = "Rui: Signed out of ChatGPT.\n"
 NOTHING = "Rui: Not signed in to ChatGPT; nothing changed.\n"
-UNCONFIRMED = ("rui: Rui deleted its tokens, but ChatGPT did not confirm it ended the browser sign-in. "
+UNCONFIRMED = ("rui: ChatGPT did not confirm it ended the browser sign-in; Rui deleted its tokens. "
                "To end it there too, disconnect Rui in ChatGPT's settings.\n")
 
 

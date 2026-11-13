@@ -768,12 +768,12 @@ fn logoutReceipt(ended: chatgpt_plan_login.Logout) LogoutReceipt {
         else if (removed_browser or removed_device) "Rui: Signed out of ChatGPT.\n" else "Rui: Not signed in to ChatGPT; nothing changed.\n",
         .browser = switch (ended.browser) {
             .absent, .revoked => null,
-            .unconfirmed => "rui: Rui deleted its tokens, but ChatGPT did not confirm it ended the browser sign-in. To end it there too, disconnect Rui in ChatGPT's settings.\n",
-            .failed => "rui: Still signed in to ChatGPT in the browser: Rui could not read or change its private credential; " ++ again,
+            .unconfirmed => "rui: ChatGPT did not confirm it ended the browser sign-in; Rui deleted its tokens. To end it there too, disconnect Rui in ChatGPT's settings.\n",
+            .failed => "rui: still signed in to ChatGPT in the browser: Rui could not read or change its private credential; " ++ again,
         },
         .device_code = switch (ended.device_code) {
             .absent, .removed => null,
-            .failed => "rui: Still signed in to ChatGPT with a device code: Rui could not read or change its private credential; " ++ again,
+            .failed => "rui: still signed in to ChatGPT with a device code: Rui could not read or change its private credential; " ++ again,
         },
     };
 }
@@ -789,9 +789,9 @@ test "logout says how it left each ChatGPT login, and fails while either may rem
     const nothing = "Rui: Not signed in to ChatGPT; nothing changed.\n";
     const out_browser = "Rui: Signed out of ChatGPT in the browser.\n";
     const out_device = "Rui: Signed out of ChatGPT with a device code.\n";
-    const unconfirmed = "rui: Rui deleted its tokens, but ChatGPT did not confirm it ended the browser sign-in. To end it there too, disconnect Rui in ChatGPT's settings.\n";
-    const browser_stays = "rui: Still signed in to ChatGPT in the browser: Rui could not read or change its private credential; inspect it, then run rui auth logout chatgpt again.\n";
-    const device_stays = "rui: Still signed in to ChatGPT with a device code: Rui could not read or change its private credential; inspect it, then run rui auth logout chatgpt again.\n";
+    const unconfirmed = "rui: ChatGPT did not confirm it ended the browser sign-in; Rui deleted its tokens. To end it there too, disconnect Rui in ChatGPT's settings.\n";
+    const browser_stays = "rui: still signed in to ChatGPT in the browser: Rui could not read or change its private credential; inspect it, then run rui auth logout chatgpt again.\n";
+    const device_stays = "rui: still signed in to ChatGPT with a device code: Rui could not read or change its private credential; inspect it, then run rui auth logout chatgpt again.\n";
     const B = chatgpt_plan_login.Browser;
     const D = chatgpt_plan_login.DeviceCode;
     const Row = struct { Readiness, Readiness, B, D, ?[]const u8, ?[]const u8, ?[]const u8, u8 };
