@@ -800,6 +800,8 @@ def select(paths, phase, available, graph=None, contents=None, fixture_literals=
                               for path in paths)}
     targets, native_targets, reasons = set(), set(), set()
     live_targets, live_reasons = set(), set()
+    # Each live need as (the one target that runs only its tests, or None, reason).
+    live_needs = set()
     manual_checks = set()
     linux_memory_checks = False
     for path in paths:
@@ -831,10 +833,13 @@ def select(paths, phase, available, graph=None, contents=None, fixture_literals=
             if matches(path, patterns):
                 live_targets.update(set(checks) & served_by)
                 live_reasons.add((reason, served_by))
+                live_needs.update((root, reason) for root in set(checks) & served_by)
         if path in graph.live_conformance and path not in graph.reached["test-store"]:
             targets.add("test")
             native_targets.add("test")
             live_targets.add("test")
+            # These tests sit among the native root's others: no root runs only them.
+            live_needs.add((None, "Native Store conformance tests require live MySQL"))
             live_reasons.add(("Native Store conformance tests require live MySQL", LIVE_MYSQL_DIALECT_TARGETS))
             reasons.add("Native Store conformance tests require live MySQL")
             matched = True
@@ -945,6 +950,8 @@ def select(paths, phase, available, graph=None, contents=None, fixture_literals=
             "mysql_suites": sorted(graph.live_mysql),
             # The selected targets that start a live server in CI (`LIVE_RULES`).
             "server_targets": sorted((targets & live_targets) | ({"test"} if "test" in targets and "test-store" in live_targets else set())),
+            # Each live need: [the target that runs only its tests, or null, reason].
+            "live_needs": sorted(([root, reason] for root, reason in live_needs), key=lambda need: (need[0] or "", need[1])),
             "native_targets": sorted(native_targets), "native_required": bool(native_targets),
             "mac_required": mac_required, "upgrade_required": upgrade_required,
             # Store, recovery and upgrade changes fail for real; never rerun them.
