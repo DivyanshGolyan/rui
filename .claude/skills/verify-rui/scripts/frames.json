@@ -28,13 +28,13 @@
           ]
         },
         {
-          "wait": "· Archived"
+          "wait": "\u00b7 Archived"
         }
       ],
       "expect": [
         "Seed history",
         "low",
-        "· Archived"
+        "\u00b7 Archived"
       ],
       "absent": [
         "[Archived]",
@@ -61,13 +61,13 @@
         }
       ],
       "expect": [
-        "✓ Archive audit"
+        "\u2713 Archive audit"
       ],
       "absent": [
         "[Archived]",
         "/unarchive",
         "{session:Archive audit}",
-        "· archived"
+        "\u00b7 archived"
       ]
     },
     {
@@ -89,7 +89,7 @@
       ],
       "expect": [
         "Sent to clipboard",
-        "· Archived"
+        "\u00b7 Archived"
       ],
       "absent": [
         "Archived Archive audit",
@@ -130,11 +130,11 @@
       "first_run": true,
       "steps": [
         {
-          "wait": "› ChatGPT    API key"
+          "wait": "\u203a ChatGPT    API key"
         }
       ],
       "expect": [
-        "› ChatGPT    API key",
+        "\u203a ChatGPT    API key",
         "API key",
         "Sign in"
       ],
@@ -156,7 +156,7 @@
       },
       "steps": [
         {
-          "wait": "› ChatGPT    API key"
+          "wait": "\u203a ChatGPT    API key"
         },
         {
           "keys": [
@@ -168,7 +168,7 @@
         }
       ],
       "expect": [
-        "auth.openai.com/codex/device · BDL9-KI88H",
+        "auth.openai.com/codex/device \u00b7 BDL9-KI88H",
         "Waiting for ChatGPT"
       ],
       "absent": [
@@ -186,7 +186,7 @@
       "first_run": true,
       "steps": [
         {
-          "wait": "› ChatGPT    API key"
+          "wait": "\u203a ChatGPT    API key"
         },
         {
           "keys": [
@@ -201,11 +201,11 @@
           "text": "sk-secret"
         },
         {
-          "wait": "•••••••••"
+          "wait": "\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022"
         }
       ],
       "expect": [
-        "•••••••••",
+        "\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022",
         "esc back"
       ],
       "absent": [
@@ -224,7 +224,7 @@
         "Type a task",
         "Settings",
         "enter start",
-        "gpt-6.1-sol · low"
+        "gpt-6.1-sol \u00b7 low"
       ]
     },
     {
@@ -263,7 +263,7 @@
         "gpt-6.1-sol"
       ],
       "absent": [
-        "› /effort",
+        "\u203a /effort",
         "enter pick"
       ]
     },
@@ -281,16 +281,16 @@
           ]
         },
         {
-          "wait": "Archive audit · archived"
+          "wait": "Archive audit \u00b7 archived"
         }
       ],
       "expect": [
-        "Archive audit · archived",
+        "Archive audit \u00b7 archived",
         "Draft lifecycle"
       ],
       "absent": [
         "[Archived]",
-        "Draft lifecycle · archived",
+        "Draft lifecycle \u00b7 archived",
         "{session:Archive audit}",
         "{session:Draft lifecycle}"
       ]
@@ -320,7 +320,7 @@
         "Draft lifecycle"
       ],
       "absent": [
-        "› /configure",
+        "\u203a /configure",
         "enter pick"
       ]
     },
@@ -346,7 +346,7 @@
         "Settings"
       ],
       "absent": [
-        "› /nope"
+        "\u203a /nope"
       ]
     },
     {
@@ -371,7 +371,7 @@
         "Draft lifecycle"
       ],
       "absent": [
-        "› /nope"
+        "\u203a /nope"
       ]
     },
     {
@@ -425,19 +425,19 @@
           ]
         },
         {
-          "wait": "✓"
+          "wait": "\u2713"
         }
       ],
       "expect": [
         "Rui",
         "Model",
-        "✓",
+        "\u2713",
         "gpt-6.1-sol",
         "Keys"
       ],
       "absent": [
         "Filter:",
-        "↑ "
+        "\u2191 "
       ]
     },
     {
@@ -465,7 +465,7 @@
           ]
         },
         {
-          "wait": "✓"
+          "wait": "\u2713"
         },
         {
           "text": "sol"
@@ -482,7 +482,7 @@
       ],
       "absent": [
         "Filter:",
-        "↑ ",
+        "\u2191 ",
         "gpt-5.5"
       ]
     },
@@ -529,13 +529,13 @@
           }
         },
         {
-          "wait": "✓"
+          "wait": "\u2713"
         }
       ],
       "expect": [
         "Model",
         "gpt-6.1-sol",
-        "✓",
+        "\u2713",
         "Type a task"
       ],
       "absent": [
@@ -543,7 +543,7 @@
         "Permissions",
         "Copy last answer",
         "click to change",
-        "▾",
+        "\u25be",
         "Filter:"
       ]
     },
@@ -569,7 +569,7 @@
         "medium",
         "high",
         "xhigh",
-        "✓",
+        "\u2713",
         "Type a task"
       ],
       "absent": [
@@ -577,7 +577,7 @@
         "Permissions",
         "Copy last answer",
         "click to change",
-        "▾",
+        "\u25be",
         "Filter:"
       ]
     },
@@ -603,20 +603,20 @@
           }
         },
         {
-          "wait": "gpt-6.1-sol · xhigh"
+          "wait": "gpt-6.1-sol \u00b7 xhigh"
         }
       ],
       "expect": [
-        "gpt-6.1-sol · xhigh",
+        "gpt-6.1-sol \u00b7 xhigh",
         "Type a task",
         "enter start"
       ],
       "absent": [
-        "gpt-6.1-sol · high",
+        "gpt-6.1-sol \u00b7 high",
         "Effort",
-        "✓",
+        "\u2713",
         "click to change",
-        "▾"
+        "\u25be"
       ]
     },
     {
@@ -733,7 +733,7 @@
       "expect": [
         "Schema migration",
         "Settings",
-        "■"
+        "\u25a0"
       ]
     },
     {
@@ -757,7 +757,7 @@
       "expect": [
         "Schema migration",
         "Settings",
-        "■",
+        "\u25a0",
         "Release notes for 0.60"
       ]
     },
@@ -782,7 +782,7 @@
       "expect": [
         "Schema migration",
         "Settings",
-        "■"
+        "\u25a0"
       ]
     },
     {
@@ -858,9 +858,9 @@
         }
       ],
       "expect": [
-        "✓ List project files",
-        "× Fail with exit 127 · 127",
-        "× Fail with an excerpt · 1",
+        "\u2713 List project files",
+        "\u00d7 Fail with exit 127 \u00b7 127",
+        "\u00d7 Fail with an excerpt \u00b7 1",
         "The project has a README",
         "retry policy notes"
       ],
@@ -891,23 +891,23 @@
           }
         },
         {
-          "wait": "gpt-6.1-sol · low · 100% left"
+          "wait": "gpt-6.1-sol \u00b7 low \u00b7 100% left"
         },
         {
           "gone": "Configured."
         }
       ],
       "expect": [
-        "gpt-6.1-sol · low",
+        "gpt-6.1-sol \u00b7 low",
         "The project has a README"
       ],
       "absent": [
-        "gpt-6.1-sol · high",
+        "gpt-6.1-sol \u00b7 high",
         "Effort",
         "Copy last answer",
         "Configured.",
         "click to change",
-        "▾"
+        "\u25be"
       ]
     },
     {
@@ -940,9 +940,9 @@
         }
       ],
       "expect": [
-        "✓ List project files",
-        "× Fail with exit 127 · 127",
-        "× Fail with an excerpt · 1",
+        "\u2713 List project files",
+        "\u00d7 Fail with exit 127 \u00b7 127",
+        "\u00d7 Fail with an excerpt \u00b7 1",
         "The project has a README",
         "retry policy notes",
         "Fail with an excerpt"
@@ -951,8 +951,8 @@
         "asks before Bash/MCP",
         "Type a message",
         "enter sends",
-        " · exit 127",
-        " · exit 1"
+        " \u00b7 exit 127",
+        " \u00b7 exit 1"
       ]
     },
     {
@@ -971,7 +971,7 @@
           "wait": "    stderr tail:"
         },
         {
-          "gone": "Opening tool output…"
+          "gone": "Opening tool output\u2026"
         },
         {
           "keys": [
@@ -982,13 +982,13 @@
           "wait": "    unknown option --help"
         },
         {
-          "gone": "▸"
+          "gone": "\u25b8"
         }
       ],
       "expect": [
-        "✓ List project files",
-        "× Fail with exit 127 · 127",
-        "× Fail with an excerpt · 1",
+        "\u2713 List project files",
+        "\u00d7 Fail with exit 127 \u00b7 127",
+        "\u00d7 Fail with an excerpt \u00b7 1",
         "    Bash failed. Exit code: 1.",
         "    stderr tail:",
         "    usage: example",
@@ -1016,7 +1016,7 @@
           "wait": "    stderr tail:"
         },
         {
-          "gone": "Opening tool output…"
+          "gone": "Opening tool output\u2026"
         },
         {
           "keys": [
@@ -1043,10 +1043,10 @@
           ]
         },
         {
-          "wait": "✓ List project files"
+          "wait": "\u2713 List project files"
         },
         {
-          "gone": "× Fail with exit 127"
+          "gone": "\u00d7 Fail with exit 127"
         },
         {
           "keys": [
@@ -1057,7 +1057,7 @@
           "wait": "    Bash succeeded. Exit code: 0."
         },
         {
-          "gone": "Opening tool output…"
+          "gone": "Opening tool output\u2026"
         },
         {
           "keys": [
@@ -1070,17 +1070,17 @@
           "wait": "    unknown option --help"
         },
         {
-          "gone": "▸"
+          "gone": "\u25b8"
         }
       ],
       "expect": [
-        "✓ List project files",
+        "\u2713 List project files",
         "    Bash succeeded. Exit code: 0.",
         "    stdout tail:",
         "    README.md",
         "    src",
-        "× Fail with exit 127 · 127",
-        "× Fail with an excerpt · 1",
+        "\u00d7 Fail with exit 127 \u00b7 127",
+        "\u00d7 Fail with an excerpt \u00b7 1",
         "    Bash failed. Exit code: 1.",
         "    stderr tail:",
         "    usage: example",
@@ -1092,8 +1092,8 @@
       ],
       "note": "10b-tool-open-two: open the literal excerpt, scroll twelve rows from the narrow tail to select List, then show both quiet stored results before and after the sidebar appears",
       "absent": [
-        " · exit 127",
-        " · exit 1"
+        " \u00b7 exit 127",
+        " \u00b7 exit 1"
       ]
     },
     {
@@ -1122,18 +1122,18 @@
           "wait": "more lines"
         },
         {
-          "gone": "Opening tool output…"
+          "gone": "Opening tool output\u2026"
         },
         {
-          "gone": "▸"
+          "gone": "\u25b8"
         }
       ],
       "expect": [
-        "✓ Print thirty-two lines",
+        "\u2713 Print thirty-two lines",
         "    Bash succeeded. Exit code: 0.",
         "    stdout tail:",
         "    output line 18",
-        "    … 14 more lines"
+        "    \u2026 14 more lines"
       ],
       "sizes": [
         "46x30",
@@ -1160,7 +1160,7 @@
           "wait": "    stderr tail:"
         },
         {
-          "gone": "Opening tool output…"
+          "gone": "Opening tool output\u2026"
         },
         {
           "keys": [
@@ -1171,13 +1171,13 @@
           "wait": "    unknown option --help"
         },
         {
-          "gone": "▸"
+          "gone": "\u25b8"
         }
       ],
       "expect": [
-        "✓ List project files",
-        "× Fail with exit 127 · 127",
-        "× Fail with an excerpt · 1",
+        "\u2713 List project files",
+        "\u00d7 Fail with exit 127 \u00b7 127",
+        "\u00d7 Fail with an excerpt \u00b7 1",
         "    Bash failed. Exit code: 1.",
         "    stderr tail:",
         "    usage: example",
@@ -1229,11 +1229,11 @@
           ]
         },
         {
-          "wait": "↓"
+          "wait": "\u2193"
         }
       ],
       "expect": [
-        "↓"
+        "\u2193"
       ]
     },
     {
@@ -1255,7 +1255,7 @@
       ],
       "expect": [
         "The retry loop waits",
-        "↓"
+        "\u2193"
       ]
     },
     {
@@ -1287,7 +1287,7 @@
       ],
       "expect": [
         "The retry loop waits",
-        "↓",
+        "\u2193",
         "new"
       ]
     },
@@ -1446,7 +1446,7 @@
           ]
         },
         {
-          "wait": "◌ and one more thing"
+          "wait": "\u25cc and one more thing"
         }
       ],
       "cast": [
@@ -1466,7 +1466,7 @@
     },
     {
       "name": "tools-running",
-      "note": "14-tools-running: ⠹ marks active tool calls; owns its parallel jobs, leaving the retry transcript unchanged",
+      "note": "14-tools-running: \u2839 marks active tool calls; owns its parallel jobs, leaving the retry transcript unchanged",
       "open": "Run parallel checks",
       "steps": [
         {
@@ -1487,7 +1487,7 @@
         }
       ],
       "expect": [
-        "⠹ Build the docs",
+        "\u2839 Build the docs",
         "Run the slow tests",
         "ctrl+x stop"
       ],
@@ -1527,7 +1527,7 @@
           }
         },
         {
-          "wait": "⠹ Sleep eight seconds"
+          "wait": "\u2839 Sleep eight seconds"
         },
         {
           "keys": [
@@ -1535,12 +1535,12 @@
           ]
         },
         {
-          "wait": "■ Stopped",
+          "wait": "\u25a0 Stopped",
           "timeout": 60
         }
       ],
       "expect": [
-        "■ Stopped",
+        "\u25a0 Stopped",
         "   Stopped"
       ],
       "absent": [
@@ -1551,7 +1551,7 @@
       ],
       "first_frame": true,
       "expect_next": {
-        "■ Stop the slow job": "   Stopped"
+        "\u25a0 Stop the slow job": "   Stopped"
       }
     },
     {
@@ -1578,7 +1578,7 @@
           }
         },
         {
-          "wait": "⠹ Sleep eight seconds"
+          "wait": "\u2839 Sleep eight seconds"
         },
         {
           "keys": [
@@ -1586,11 +1586,11 @@
           ]
         },
         {
-          "wait": "■ Stopped",
+          "wait": "\u25a0 Stopped",
           "timeout": 60
         }
       ],
-      "expect": "■ Stopped",
+      "expect": "\u25a0 Stopped",
       "absent": [
         "Stopping",
         "ctrl+x stop"
@@ -1602,21 +1602,21 @@
     },
     {
       "name": "stopped",
-      "note": "14d-stopped: one ■ Stopped line, without continuation advice; independently seeded with settle: stop",
+      "note": "14d-stopped: one \u25a0 Stopped line, without continuation advice; independently seeded with settle: stop",
       "open": "Profile the Host under load",
       "steps": [
         {
-          "wait": "■ Stopped"
+          "wait": "\u25a0 Stopped"
         }
       ]
     },
     {
       "name": "chat-failed",
-      "note": "16-conversation-failed: × Model reply unreadable, without a saved code or provider report",
+      "note": "16-conversation-failed: \u00d7 Model reply unreadable, without a saved code or provider report",
       "open": "Flaky upload test",
       "steps": [
         {
-          "wait": "× Model reply unreadable · ctrl+r retries"
+          "wait": "\u00d7 Model reply unreadable \u00b7 ctrl+r retries"
         }
       ],
       "absent": [
@@ -1638,13 +1638,13 @@
         }
       ],
       "expect": [
-        " · ask"
+        " \u00b7 ask"
       ],
       "absent": [
         "asks before Bash/MCP",
         "Type a message",
         "enter sends",
-        "more lines · shift+↓"
+        "more lines \u00b7 shift+\u2193"
       ]
     },
     {
@@ -1669,7 +1669,7 @@
         "asks before Bash/MCP",
         "Type a message",
         "enter sends",
-        "more lines · shift+↓"
+        "more lines \u00b7 shift+\u2193"
       ],
       "expect": [
         "Deny"
@@ -1695,7 +1695,7 @@
         "approving it."
       ],
       "absent": [
-        "more lines · shift+↓"
+        "more lines \u00b7 shift+\u2193"
       ]
     },
     {
@@ -1751,9 +1751,9 @@
       "expect": [
         "enter    send / open",
         "esc      back",
-        "⇧enter   new line",
+        "\u21e7enter   new line",
         "ctrl+x   stop",
-        "↑↓       scroll",
+        "\u2191\u2193       scroll",
         "ctrl+o   tool output",
         "ctrl+p   earlier message",
         "ctrl+r   retry",
@@ -1762,7 +1762,7 @@
         "ctrl+c   leave",
         "next panel/footer field",
         "previous panel/footer field",
-        "list/chat · info actions"
+        "list/chat \u00b7 info actions"
       ],
       "absent": [
         "/help",
@@ -1773,8 +1773,8 @@
         "Esc returns",
         "Browsing",
         "Keys",
-        "↑↓ · enter change · esc close",
-        "‹ Rui · settings",
+        "\u2191\u2193 \u00b7 enter change \u00b7 esc close",
+        "\u2039 Rui \u00b7 settings",
         "ctrl+g",
         "ctrl+d",
         "ctrl+n",
@@ -1809,7 +1809,7 @@
       ],
       "expect": [
         "/copy",
-        "code · file",
+        "code \u00b7 file",
         "/effort"
       ],
       "absent": [
@@ -1842,7 +1842,7 @@
       ],
       "expect": [
         "/copy",
-        "code · file",
+        "code \u00b7 file",
         "/effort"
       ]
     },
@@ -1864,7 +1864,7 @@
       "expect": [
         "/archive",
         "/sessions",
-        "unarchived · archived · all",
+        "unarchived \u00b7 archived \u00b7 all",
         "/unarchive"
       ],
       "absent": [
@@ -1959,12 +1959,12 @@
         "Folder",
         "Model",
         "Copy last answer",
-        "Retry deadline info · info",
+        "Retry deadline info \u00b7 info",
         "esc close",
         "~/code/rui",
         "Backoff stays within time left.",
         "The retry draft is ready.",
-        "› keep this retry draft"
+        "\u203a keep this retry draft"
       ],
       "absent": [
         "Context",
@@ -2011,25 +2011,25 @@
           ]
         },
         {
-          "wait": "✓"
+          "wait": "\u2713"
         }
       ],
       "expect": [
         "Model",
         "gpt-6.1-sol",
-        "Retry deadline info · info",
+        "Retry deadline info \u00b7 info",
         "esc close",
-        "✓",
+        "\u2713",
         "Backoff stays within time left.",
         "The retry draft is ready.",
-        "› keep this retry draft"
+        "\u203a keep this retry draft"
       ],
       "absent": [
         "Context",
         "unknown of",
         "alt+i info",
         "Filter:",
-        "↑ "
+        "\u2191 "
       ]
     },
     {
@@ -2057,17 +2057,17 @@
           ]
         },
         {
-          "wait": "✓"
+          "wait": "\u2713"
         }
       ],
       "expect": [
         "Model",
         "gpt-6.1-sol",
-        "✓"
+        "\u2713"
       ],
       "absent": [
         "Filter:",
-        "↑ "
+        "\u2191 "
       ]
     },
     {
@@ -2095,7 +2095,7 @@
           ]
         },
         {
-          "wait": "✓"
+          "wait": "\u2713"
         },
         {
           "text": "ter"
@@ -2111,7 +2111,7 @@
       ],
       "absent": [
         "Filter:",
-        "↑ "
+        "\u2191 "
       ]
     },
     {
@@ -2179,13 +2179,13 @@
       ],
       "expect": [
         "Batch job",
-        "↓",
+        "\u2193",
         "more",
         "Settings"
       ],
       "absent": [
-        "↑",
-        "↓ 0 more"
+        "\u2191",
+        "\u2193 0 more"
       ]
     },
     {
@@ -2229,15 +2229,15 @@
         "140x40"
       ],
       "expect": [
-        "↑",
-        "↓",
+        "\u2191",
+        "\u2193",
         "more",
         "Settings",
         "+ New Session"
       ],
       "absent": [
-        "↑ 0 more",
-        "↓ 0 more"
+        "\u2191 0 more",
+        "\u2193 0 more"
       ]
     },
     {
@@ -2265,13 +2265,13 @@
       "expect": [
         "Settings",
         "enter open",
-        "↑",
+        "\u2191",
         "more",
         "+ New Session"
       ],
       "absent": [
-        "↓",
-        "↑ 0 more"
+        "\u2193",
+        "\u2191 0 more"
       ]
     },
     {
@@ -2298,13 +2298,13 @@
       ],
       "expect": [
         "+ New Session",
-        "↑",
+        "\u2191",
         "more",
         "Settings"
       ],
       "absent": [
-        "↓",
-        "↑ 0 more"
+        "\u2193",
+        "\u2191 0 more"
       ]
     },
     {
@@ -2406,12 +2406,12 @@
           ]
         },
         {
-          "wait": "↓"
+          "wait": "\u2193"
         }
       ],
       "theme": "mist",
       "expect": [
-        "↓"
+        "\u2193"
       ]
     },
     {
@@ -2525,6 +2525,9 @@
           "wait": "Copy last answer"
         },
         {
+          "wait": "run without asking"
+        },
+        {
           "keys": [
             "Down",
             "Down",
@@ -2574,6 +2577,9 @@
           "wait": "Copy last answer"
         },
         {
+          "wait": "run without asking"
+        },
+        {
           "mouse": {
             "at": "Copy last answer",
             "do": "click"
@@ -2615,10 +2621,10 @@
       ],
       "expect": [
         "Focus navigation audit",
-        "›"
+        "\u203a"
       ],
       "absent": [
-        "Opening…"
+        "Opening\u2026"
       ],
       "cast": [
         {
@@ -2656,7 +2662,7 @@
         "Settings"
       ],
       "absent": [
-        "Opening…"
+        "Opening\u2026"
       ]
     },
     {
@@ -2682,10 +2688,10 @@
       "expect": [
         "Focus navigation audit",
         "The retry draft is ready.",
-        "›"
+        "\u203a"
       ],
       "absent": [
-        "Opening…"
+        "Opening\u2026"
       ]
     },
     {
@@ -2708,10 +2714,10 @@
       ],
       "expect": [
         "Focus navigation audit",
-        "›"
+        "\u203a"
       ],
       "absent": [
-        "Opening…"
+        "Opening\u2026"
       ],
       "sizes": [
         "140x40"
@@ -2751,13 +2757,12 @@
         }
       ],
       "expect": [
-        "Retained draft audit",
         "The retry draft is ready.",
-        "›"
+        "\u203a"
       ],
       "absent": [
         "do not submit retained draft",
-        "Opening…"
+        "Opening\u2026"
       ],
       "cast": [
         {
@@ -2789,6 +2794,9 @@
         },
         {
           "wait": "Copy last answer"
+        },
+        {
+          "wait": "run without asking"
         },
         {
           "host": "pause"
