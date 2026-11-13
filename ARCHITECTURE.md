@@ -123,7 +123,7 @@ This source map locates the existing owners; file boundaries are not part of the
 | Bash process and output lifetime | `src/bash.zig`: preparation, launch, process-group retirement, capture and cleanup. `src/BashLifecycle.zig` owns the value transitions those handles follow: process phases, pipe terminal reasons, stop reason, signaling facts and resolution. |
 | Temporary storage | `src/ScratchBudget.zig` accounts for bytes; `src/named_scratch.zig` retains failed reclamation; `src/output_retention.zig` owns disposable-output retention and eviction. |
 | Product defaults | `src/product_defaults.zig`: values supplied for omitted settings, namely default Active and intake capacity, fresh-Session tools and permission mode, the recommended model and compaction policy. |
-| Provider facts | `src/provider_name.zig`: one table of what each provider fixes (its codec, the name prose knows it by ("ChatGPT (device code)", "ChatGPT", "OpenAI"), the short label of its sign-in where one is chosen or read beside a model ("Codex", "ChatGPT", "API key"), whether its credential is a sign-in or a key, whether `rui auth login` signs it in, and whether its model list is Rui's catalog or fetched live). Whether a Session may ask for structured output depends on the sign-in source, so `src/providers.zig` answers it. Core asks a provider for a fact and never switches on which provider it is; [provider_locality.py](tests/ci/provider_locality.py) fails CI when core production code imports a sign-in file, names a ChatGPT header, endpoint or OpenAI error code, or names a provider by its tag. |
+| Provider facts | `src/provider_name.zig`: one table of what each provider fixes (its codec, the name prose knows it by ("ChatGPT (device code)", "ChatGPT", "OpenAI"), the short label of its sign-in where one is chosen or read beside a model ("Codex", "ChatGPT", "API key"), whether its credential is a sign-in or a key, the `rui auth login` command that signs it in (`rui auth login chatgpt --device-code`, `rui auth login chatgpt`, `rui auth login openai`), the other provider that signs in to the same account (`codex` and `chatgpt` name each other; `openai` names none), and whether its model list is Rui's catalog or fetched live). Whether a Session may ask for structured output depends on the sign-in source, so `src/providers.zig` answers it. Core asks a provider for a fact and never switches on which provider it is; [provider_locality.py](tests/ci/provider_locality.py) fails CI when core production code imports a sign-in file, names a ChatGPT header, endpoint or OpenAI error code, or names a provider by its tag. |
 | Model capability | `src/model_catalog.zig`: identifier syntax, the reasoning-effort grammar and the shipped models.dev facts; the Store selects saved facts when a source exists, otherwise shipped facts. `src/model_capability.zig` derives capability from the operation's supplied facts (listed efforts and optional context window). |
 | Session work | `src/session_work.zig` derives each Session's work state, a functional core; `src/store/domain/report.zig` reads its inputs under one Store lock. |
 | Session change hint | `src/change_ring.zig`: the fixed in-memory ring of recent (Session, commit, Workspace key) entries behind Session listing's `since`. `src/store/Store.zig` records into it where its commit counter advances. |
@@ -1173,7 +1173,7 @@ The pinned first-party login tests accept opaque tokens without `exp`, so treati
 Account IDs are nonempty opaque exact strings, not UUIDs.
 No independent token/account length quota, JWT verification/JWKS/discovery or generic OAuth framework; bounded credential/encoding owners fail explicitly on exhaustion.
 
-`rui auth login codex` uses the pinned device-code flow and installs one global account in an owner-only `~/.config/rui/codex.json`, or an absolute path selected by `RUI_CODEX_CREDENTIAL_FILE`.
+`rui auth login chatgpt --device-code` (also the unlisted `rui auth login codex`) uses the pinned device-code flow and installs one global account in an owner-only `~/.config/rui/codex.json`, or an absolute path selected by `RUI_CODEX_CREDENTIAL_FILE`.
 `rui host serve --provider codex` activates the fixed HTTPS subscription endpoint; it cannot be combined with a development endpoint or private CA.
 A Host serves only the providers it names; model admission skips Sessions of any other provider, and `host_info` reports each provider's route.
 Configuration and saved-result inspection need no credential.
@@ -1191,14 +1191,14 @@ An auto-started Host adds `--provider openai` whenever a usable key is saved.
 `--provider chatgpt` serves a ChatGPT plan sign-in from an owner-only `~/.config/rui/chatgpt.json`, or the absolute path `RUI_CHATGPT_CREDENTIAL_FILE` names, in the same credential format and custody as Codex; its record carries the issued client id and its account is the ID token's `sub`.
 It speaks `openai-responses/3` and sends the access token as `authorization: Bearer` with user-agent only to `https://api.openai.com/v1/responses` and the model list beside it (`https://api.openai.com/v1/models`), with no account or FedRAMP header; its route is `chatgpt_plan`, and it accepts structured output.
 Its token must carry `exp`, so it refreshes within 300 seconds of expiry and never on the eight-day opaque clock; a 401 forces one refresh over the plan's token wire, as Codex's does over its own.
-Its provider fact names `rui auth login chatgpt`, so the Host line and the overview's notices name that command; an expired sign-in's band names it too when the line holds it whole, and otherwise reads only "ChatGPT sign-in expired." so the 40-column list pane keeps it whole.
+Its provider fact names `rui auth login chatgpt`, and the device-code provider's names `rui auth login chatgpt --device-code`, so the Host line and the overview's notices name the command for the sign-in at hand; an expired sign-in's band names it too when the line holds it whole, and otherwise reads only "ChatGPT sign-in expired." or "ChatGPT (device code) sign-in expired." so the 40-column list pane keeps it whole.
 The Host's one sign-in worker serves both sign-ins; each lease or forced refresh names the sign-in it is for.
 An auto-started Host adds `--provider chatgpt` whenever that credential is usable.
 
 `rui auth login chatgpt` (`src/chatgpt_plan_login.zig`) makes the host id `~/.config/rui/host-id` (owner-only, a version 4 UUID URN, never replaced) before its first authorization.
 It listens on `127.0.0.1:1455`, else any free loopback port, prints the authorization link, opens a browser when there is one, and reads a callback address pasted on stdin at the same time; the first answer that is this attempt's wins, so a machine whose browser cannot reach the listener signs in by pasting.
 A first sign-in names `dynamic_agent_client` and the agent name; a returning one names the saved issued client id and no agent, sends no `id_token_hint` because the link is printed, and refuses an answer for another client.
-The checked record is installed through the same custody and SIGINT gate as a Codex login; it fills an unset provider default and replaces a saved `codex` one, as the provider table says `chatgpt` supersedes `codex`, and a Host already serving `chatgpt` uses it from its next lease.
+The checked record is installed through the same custody and SIGINT gate as a device-code login; it fills an unset provider default and replaces a saved `codex` one, as either ChatGPT sign-in replaces a saved default of the other because the provider table says both sign in to the same account, and a Host already serving `chatgpt` uses it from its next lease.
 `rui auth logout chatgpt` revokes the refresh token as the issued client under the exclusive credential lock, retrying a server failure, then publishes the record `signed_out` at a new generation even when the revocation was not confirmed, which it reports.
 A `signed_out` record holds no tokens and keeps its account and issued client id, which the next sign-in reuses as the issuer's guide asks; every reader treats it as no sign-in, so a lease fails with `provider_sign_in_required` and local status reports it missing.
 `rui auth status` prints each provider's local sign-in, with the ChatGPT account's email and access-token expiry.
@@ -2573,22 +2573,27 @@ Codex owns the local identifier syntax: 1–256 printable non-space ASCII bytes,
 Syntax validation is the only model check: an ID Rui's [list](#supported-model-ids) lacks runs with default limits, as the picker offers it from the provider's live list (Divyansh, 2026-11-01, picker plan "Where the list comes from").
 A bad ID fails at the provider’s first request, whose remedy is the Model field in app settings.
 Old pins remain readable and clearable, never substituted.
-The built-in providers are Codex, OpenAI and ChatGPT; they share one catalog and the recommended model `gpt-6.1-sol`.
+The built-in providers are ChatGPT by device code (`codex`), ChatGPT in a browser (`chatgpt`) and OpenAI (`openai`); they share one catalog and the recommended model `gpt-6.1-sol`.
+A person sees one ChatGPT sign-in with two ways to log in: `rui auth login chatgpt` opens the browser, `--device-code` uses a code instead, new Sessions use whichever was logged in last, open Sessions keep theirs, and saved device-code settings carry over (Divyansh chose this on 2026-11-13, "one ChatGPT sign-in, two ways to log in"). The two stay separate providers on the wire, in the Store and in preferences, so `--provider codex` still selects the device-code route.
+Three places still say "codex": the device-code page `auth.openai.com/codex/device` and ChatGPT's own "device code authorization for Codex" setting, which are OpenAI's names, and `--provider codex`, which scripts use to choose the device-code route.
 `rui defaults inspect` shows the prospective choice, each provider's local Rui-owned credential state (`local_credentials` in JSON) and separately the selected Store's actual readable Host capabilities.
 It never refreshes, contacts a provider, creates a Host/Session or imports another CLI's credentials.
-The bare-entry provider chooser can begin Codex device login or defer; explicit `rui auth login codex` uses the same publication rule.
+The bare-entry provider chooser can begin the device-code login or defer; explicit `rui auth login chatgpt --device-code` uses the same publication rule.
 Authentication remains an explicit shell operation, separate from the conversation.
 Denial/expiry leaves preferences unchanged.
-After secure credential installation, explicit `rui auth login PROVIDER` atomically fills its own provider when no provider default exists, and replaces a saved default only when the provider table says the signed-in provider supersedes it: the same account signed in an older way, so `chatgpt` supersedes `codex`.
-Replacing clears the model saved for the old provider, as any provider replacement does; every other saved choice stays, even an unsupported one, and existing Sessions keep their binding.
-The receipt says which happened; when the default stays on another provider it names `rui defaults configure --provider PROVIDER`, and when a replacement cleared a pin it names `rui defaults configure --model ID`.
-Choosing a provider in the bare-entry chooser saves it as the default, leaving the model unpinned and preserving an existing choice even if unsupported.
+After secure credential installation, explicit `rui auth login PROVIDER` atomically fills its own provider when no provider default exists, and replaces a saved default only when the provider table says it is the other sign-in to the same account, so a browser sign-in replaces a saved `codex` and a device-code sign-in replaces a saved `chatgpt`.
+Replacing keeps the saved model, as any provider change within one account does; every other saved choice stays, even an unsupported one, and existing Sessions keep their binding.
+The receipt says which happened: "New Sessions will use this sign-in." when it filled the default, with "; Sessions already open keep theirs." when it replaced one, and when the default stays on another provider it names `rui defaults configure --provider PROVIDER`.
+A ChatGPT sign-in ends with `Start a conversation with: rui`, or with `rui --provider PROVIDER` when the default stayed on another provider.
+`rui auth logout chatgpt` ends the browser sign-in only; when a usable device-code sign-in remains it says so, and chats that use it keep working.
+`rui auth status` and the setup report give ChatGPT's two ways in one line each, saying nothing of one that is missing unless both are, in which case one line names `rui auth login chatgpt` and its `--device-code` option; setup's `Provider:` and `Next Session:` lines show a known provider by its prose name, while JSON keeps the raw names.
+Choosing a provider in the bare-entry chooser saves it as the default, never pinning a model and keeping a saved one only within the same account, as any provider change does, and preserving an existing choice even if unsupported.
 Failure of that independent preference save is reported without claiming credential rollback.
 Local usability is not proof of remote acceptance.
 Existing Sessions retain their exact saved binding despite changed preferences, recommendations or credentials.
 
 Setup observes local credential readiness once before a save and supplies that capability to provider/model resolution under the preference lock; a model-only update with no saved provider can choose the sole locally usable provider.
-It resolves edits against the original saved provider/model pair, so replacing a provider clears its old model without persisting a recommendation; Store-only edits preserve stale provider/model values without checking current capability support.
+It resolves edits against the original saved provider/model pair, so replacing a provider with one in another account clears its old model without persisting a recommendation, while a change between the two ChatGPT sign-ins keeps it; Store-only edits preserve stale provider/model values without checking current capability support.
 Local inspection opens a credential snapshot without blocking on a private non-file path.
 Configured and renewal-due credentials are locally usable; renewal due does not require fresh login.
 An opaque token becomes renewal due eight days after its last successful exchange, and a token with known expiry becomes renewal due at that timestamp.
@@ -2600,7 +2605,7 @@ Only explicit choices are saved; an absent model inherits the recommendation whe
 Keep retains a pin for the unchanged provider.
 `rui defaults configure --clear-model` and `/setup --clear-model` remove only the saved model; they are mutually exclusive with `--model`, including when flags are repeated or reversed.
 Clear preserves the saved provider, even an unsupported one, unless an explicit `--provider` replaces it; it never discovers a provider or persists a recommended replacement model.
-Login never sets a model pin; it fills an unset provider or replaces only the provider it supersedes, clearing that provider's pin.
+Login never sets a model pin; it fills an unset provider or replaces only the other sign-in to its account, keeping that pin.
 Clear must pass the same HOME, syntax, private-file and atomic-publication checks as other edits, without checking an unused Store's availability.
 Store/provider clearing is outside this unit.
 

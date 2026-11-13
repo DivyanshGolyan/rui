@@ -296,7 +296,7 @@ def help_case():
         assert caller.returncode == 2, (output, errors)
         assert ("rui: `setup` is now `rui defaults inspect|configure`; see rui defaults --help. "
             "Nothing was captured or sent. To start a Session, use rui session start with Message text on stdin.\n").encode() in errors, errors
-        assert b"Provider:" not in output + errors and b"Codex login" not in output + errors, (output, errors)
+        assert b"Provider:" not in output + errors and b"ChatGPT login" not in output + errors, (output, errors)
         assert b"usage:" not in errors and b"rui [PROMPT]" not in errors, errors
         assert list(home.iterdir()) == [], "retired name created runtime state"
         # Bare entry has no inline Message operand, even after --.
