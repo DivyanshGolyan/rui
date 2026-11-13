@@ -4303,7 +4303,7 @@
                                     "type": "string",
                                     "maxLength": 984,
                                     "x-maxBytes": 984,
-                                    "pattern": "^([0-9a-f]{2})*$"
+                                    "pattern": "^([0-9a-f]{2})*(?![\\s\\S])"
                                   }
                                 },
                                 "required": [
@@ -4358,7 +4358,7 @@
                                             "type": "string",
                                             "maxLength": 256,
                                             "x-maxBytes": 256,
-                                            "pattern": "^([0-9a-f]{2})*$"
+                                            "pattern": "^([0-9a-f]{2})*(?![\\s\\S])"
                                           }
                                         },
                                         "required": [
@@ -4381,18 +4381,14 @@
                                   "file": {
                                     "oneOf": [
                                       {
-                                        "type": "string",
-                                        "maxLength": 4095,
-                                        "x-maxBytes": 4095
+                                        "type": "string"
                                       },
                                       {
                                         "type": "object",
                                         "properties": {
                                           "hex": {
                                             "type": "string",
-                                            "maxLength": 8190,
-                                            "x-maxBytes": 8190,
-                                            "pattern": "^([0-9a-f]{2})*$"
+                                            "pattern": "^([0-9a-f]{2})*(?![\\s\\S])"
                                           }
                                         },
                                         "required": [
@@ -4401,7 +4397,8 @@
                                         "additionalProperties": false
                                       }
                                     ],
-                                    "x-rui-kind": "bytes"
+                                    "x-rui-kind": "bytes",
+                                    "x-rui-native-path-limit": true
                                   }
                                 },
                                 "required": [
@@ -4488,18 +4485,14 @@
                           {
                             "oneOf": [
                               {
-                                "type": "string",
-                                "maxLength": 4095,
-                                "x-maxBytes": 4095
+                                "type": "string"
                               },
                               {
                                 "type": "object",
                                 "properties": {
                                   "hex": {
                                     "type": "string",
-                                    "maxLength": 8190,
-                                    "x-maxBytes": 8190,
-                                    "pattern": "^([0-9a-f]{2})*$"
+                                    "pattern": "^([0-9a-f]{2})*(?![\\s\\S])"
                                   }
                                 },
                                 "required": [
@@ -4509,6 +4502,7 @@
                               }
                             ],
                             "x-rui-kind": "bytes",
+                            "x-rui-native-path-limit": true,
                             "format": "absolute-path",
                             "description": "Sign-in file. Default: the Adapter's saved sign-in."
                           },
@@ -4516,7 +4510,8 @@
                             "type": "null"
                           }
                         ],
-                        "x-rui-kind": "bytes"
+                        "x-rui-kind": "bytes",
+                        "x-rui-native-path-limit": true
                       },
                       "unauthenticated": {
                         "type": "boolean",
@@ -4571,7 +4566,7 @@
                                             "type": "string",
                                             "maxLength": 256,
                                             "x-maxBytes": 256,
-                                            "pattern": "^([0-9a-f]{2})*$"
+                                            "pattern": "^([0-9a-f]{2})*(?![\\s\\S])"
                                           }
                                         },
                                         "required": [
@@ -4594,18 +4589,14 @@
                                   "file": {
                                     "oneOf": [
                                       {
-                                        "type": "string",
-                                        "maxLength": 4095,
-                                        "x-maxBytes": 4095
+                                        "type": "string"
                                       },
                                       {
                                         "type": "object",
                                         "properties": {
                                           "hex": {
                                             "type": "string",
-                                            "maxLength": 8190,
-                                            "x-maxBytes": 8190,
-                                            "pattern": "^([0-9a-f]{2})*$"
+                                            "pattern": "^([0-9a-f]{2})*(?![\\s\\S])"
                                           }
                                         },
                                         "required": [
@@ -4614,7 +4605,8 @@
                                         "additionalProperties": false
                                       }
                                     ],
-                                    "x-rui-kind": "bytes"
+                                    "x-rui-kind": "bytes",
+                                    "x-rui-native-path-limit": true
                                   }
                                 },
                                 "required": [
@@ -4696,18 +4688,14 @@
                           {
                             "oneOf": [
                               {
-                                "type": "string",
-                                "maxLength": 4095,
-                                "x-maxBytes": 4095
+                                "type": "string"
                               },
                               {
                                 "type": "object",
                                 "properties": {
                                   "hex": {
                                     "type": "string",
-                                    "maxLength": 8190,
-                                    "x-maxBytes": 8190,
-                                    "pattern": "^([0-9a-f]{2})*$"
+                                    "pattern": "^([0-9a-f]{2})*(?![\\s\\S])"
                                   }
                                 },
                                 "required": [
@@ -4717,6 +4705,7 @@
                               }
                             ],
                             "x-rui-kind": "bytes",
+                            "x-rui-native-path-limit": true,
                             "format": "absolute-path",
                             "description": "Sign-in file. Default: the Adapter's saved sign-in."
                           },
@@ -4724,7 +4713,8 @@
                             "type": "null"
                           }
                         ],
-                        "x-rui-kind": "bytes"
+                        "x-rui-kind": "bytes",
+                        "x-rui-native-path-limit": true
                       },
                       "unauthenticated": {
                         "type": "boolean",
@@ -4752,18 +4742,14 @@
                   {
                     "oneOf": [
                       {
-                        "type": "string",
-                        "maxLength": 4095,
-                        "x-maxBytes": 4095
+                        "type": "string"
                       },
                       {
                         "type": "object",
                         "properties": {
                           "hex": {
                             "type": "string",
-                            "maxLength": 8190,
-                            "x-maxBytes": 8190,
-                            "pattern": "^([0-9a-f]{2})*$"
+                            "pattern": "^([0-9a-f]{2})*(?![\\s\\S])"
                           }
                         },
                         "required": [
@@ -4773,13 +4759,15 @@
                       }
                     ],
                     "x-rui-kind": "bytes",
+                    "x-rui-native-path-limit": true,
                     "description": "Trust only this PEM file; absent uses system trust. Applies to every provider."
                   },
                   {
                     "type": "null"
                   }
                 ],
-                "x-rui-kind": "bytes"
+                "x-rui-kind": "bytes",
+                "x-rui-native-path-limit": true
               }
             },
             "additionalProperties": false,
@@ -4796,18 +4784,14 @@
                       {
                         "oneOf": [
                           {
-                            "type": "string",
-                            "maxLength": 4095,
-                            "x-maxBytes": 4095
+                            "type": "string"
                           },
                           {
                             "type": "object",
                             "properties": {
                               "hex": {
                                 "type": "string",
-                                "maxLength": 8190,
-                                "x-maxBytes": 8190,
-                                "pattern": "^([0-9a-f]{2})*$"
+                                "pattern": "^([0-9a-f]{2})*(?![\\s\\S])"
                               }
                             },
                             "required": [
@@ -4817,13 +4801,15 @@
                           }
                         ],
                         "x-rui-kind": "bytes",
+                        "x-rui-native-path-limit": true,
                         "description": "The Bash executable."
                       },
                       {
                         "type": "null"
                       }
                     ],
-                    "x-rui-kind": "bytes"
+                    "x-rui-kind": "bytes",
+                    "x-rui-native-path-limit": true
                   },
                   "timeoutMs": {
                     "type": "integer",
@@ -4875,7 +4861,7 @@
                                           "type": "string",
                                           "maxLength": 256,
                                           "x-maxBytes": 256,
-                                          "pattern": "^([0-9a-f]{2})*$"
+                                          "pattern": "^([0-9a-f]{2})*(?![\\s\\S])"
                                         }
                                       },
                                       "required": [
@@ -4898,18 +4884,14 @@
                                 "file": {
                                   "oneOf": [
                                     {
-                                      "type": "string",
-                                      "maxLength": 4095,
-                                      "x-maxBytes": 4095
+                                      "type": "string"
                                     },
                                     {
                                       "type": "object",
                                       "properties": {
                                         "hex": {
                                           "type": "string",
-                                          "maxLength": 8190,
-                                          "x-maxBytes": 8190,
-                                          "pattern": "^([0-9a-f]{2})*$"
+                                          "pattern": "^([0-9a-f]{2})*(?![\\s\\S])"
                                         }
                                       },
                                       "required": [
@@ -4918,7 +4900,8 @@
                                       "additionalProperties": false
                                     }
                                   ],
-                                  "x-rui-kind": "bytes"
+                                  "x-rui-kind": "bytes",
+                                  "x-rui-native-path-limit": true
                                 }
                               },
                               "required": [
@@ -4974,7 +4957,7 @@
                   "description": "Named MCP servers whose tools Sessions may use."
                 },
                 "propertyNames": {
-                  "pattern": "^[A-Za-z0-9_-]{1,64}$"
+                  "pattern": "^[A-Za-z0-9_-]{1,64}(?![\\s\\S])"
                 },
                 "maxProperties": 8,
                 "description": "Named MCP servers whose tools Sessions may use."
@@ -5002,7 +4985,7 @@
                             "type": "string",
                             "maxLength": 188,
                             "x-maxBytes": 188,
-                            "pattern": "^([0-9a-f]{2})*$"
+                            "pattern": "^([0-9a-f]{2})*(?![\\s\\S])"
                           }
                         },
                         "required": [
@@ -5058,7 +5041,7 @@
               "description": "Named creation specs held only by this Host."
             },
             "propertyNames": {
-              "pattern": "^[a-z0-9_-]{1,64}$"
+              "pattern": "^[a-z0-9_-]{1,64}(?![\\s\\S])"
             },
             "maxProperties": 64,
             "description": "Named creation specs held only by this Host."
