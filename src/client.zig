@@ -1,4 +1,5 @@
 const std = @import("std");
+const utf8_validation = @import("utf8_validation.zig");
 const socket_os = @import("os/socket.zig");
 const platform = @import("platform.zig");
 const protocol = @import("protocol.zig");
@@ -410,22 +411,10 @@ fn readFirstLine(requests: Requests, fd: std.posix.fd_t, buffer: []u8) !protocol
         if (count == 0) return requests.transportFailure(error.TruncatedResponse);
         if (std.mem.indexOfScalar(u8, buffer[filled..][0..count], '\n')) |index| break buffer[0 .. filled + index];
         filled += count;
-    } else if (wanted < head.content_length) wholeScalars(buffer[0..wanted]) else buffer[0..wanted];
+    } else if (wanted < head.content_length) utf8_validation.completePrefix(buffer[0..wanted]) else buffer[0..wanted];
     const text = std.mem.trimEnd(u8, line, "\r");
     if (!std.unicode.utf8ValidateSlice(text)) return error.InvalidResponse;
     return .{ .line = text };
-}
-
-/// Drops a scalar the limit cut, so the line ends on a whole character.
-fn wholeScalars(bytes: []const u8) []const u8 {
-    var start = bytes.len;
-    while (start != 0 and bytes.len - start < 4) {
-        start -= 1;
-        if (bytes[start] & 0xc0 != 0x80) break;
-    }
-    if (start == bytes.len) return bytes;
-    const length = std.unicode.utf8ByteSequenceLength(bytes[start]) catch return bytes;
-    return if (start + length > bytes.len) bytes[0..start] else bytes;
 }
 
 fn readPublicContentResponse(requests: Requests, fd: std.posix.fd_t, expected: ?protocol_reply.CommandObservation.ContentReference, sink: anytype) !?protocol_reply.ReadFailure {

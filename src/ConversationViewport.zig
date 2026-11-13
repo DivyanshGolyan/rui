@@ -2,6 +2,7 @@
 //! vaxis lays out and draws rows (`Window.print`); this module keeps retained
 //! bytes, trusted styles and which row of which logical line a view starts at.
 const std = @import("std");
+const utf8_validation = @import("utf8_validation.zig");
 const vaxis = @import("vaxis");
 const gwidth = @import("terminal_width");
 const unicode = @import("terminal_unicode");
@@ -372,14 +373,7 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
         }
 
         pub fn text(self: *const Self) []const u8 {
-            var end = self.length;
-            if (end != 0) {
-                var start = end - 1;
-                while (start > 0 and self.bytes[start] & 0xc0 == 0x80) start -= 1;
-                const n = std.unicode.utf8ByteSequenceLength(self.bytes[start]) catch 1;
-                if (end - start < n) end = start;
-            }
-            return self.bytes[0..end];
+            return utf8_validation.completePrefix(self.bytes[0..self.length]);
         }
 
         /// Output has no canonical byte offsets: escape standalone invisible

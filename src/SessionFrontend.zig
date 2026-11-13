@@ -1,6 +1,7 @@
 //! One persistent caller owns drafts, terminal and joined Client borrowers.
 //! No worker writes the terminal; canonical activity supplies live output.
 const std = @import("std");
+const utf8_validation = @import("utf8_validation.zig");
 const session_list = @import("session_list.zig");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
@@ -2570,9 +2571,7 @@ fn statusLines(buffer: *[status_capacity]u8, context: []const u8, base: []const 
     const room = buffer.len - base.len - (if (badge) |text| text.len else 0) - "\n… · ".len;
     var context_line = context;
     if (context_line.len > room) {
-        var end = room;
-        while (end > 0 and (context_line[end] & 0xc0) == 0x80) end -= 1;
-        context_line = context_line[0..end];
+        context_line = context_line[0..utf8_validation.scalarStart(context_line, room)];
     }
     if (context_line.len != 0) {
         status.writeAll(context_line) catch unreachable;

@@ -5,6 +5,7 @@ const session_settings = @import("session_settings.zig");
 const TerminalText = @import("TerminalText.zig");
 const provider_name = @import("provider_name.zig");
 const cli_value = @import("cli_value.zig");
+const utf8_validation = @import("utf8_validation.zig");
 
 pub const Code = enum {
     option_unknown,
@@ -561,8 +562,7 @@ pub const Held = struct {
 /// controls/invalid UTF-8. 96 input bytes cost at most 384 output bytes.
 fn writeHeld(out: *std.Io.Writer, text: []const u8) error{WriteFailed}!void {
     const bound = 96;
-    var end = @min(text.len, bound);
-    if (end < text.len) while (end > 0 and text[end] & 0xc0 == 0x80) : (end -= 1) {};
+    const end = utf8_validation.scalarStart(text, @min(text.len, bound));
     var safe: TerminalText = .{ .mode = .line };
     // TerminalText's internal fixed hexadecimal buffers always fit their
     // two/four digit escapes; only the supplied writer can fail here.

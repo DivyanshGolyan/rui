@@ -1,4 +1,5 @@
 const std = @import("std");
+const utf8_validation = @import("utf8_validation.zig");
 const Editor = @This();
 const termios = @import("posix");
 const vaxis = @import("vaxis");
@@ -847,9 +848,7 @@ fn insert(self: *Editor, byte: u8, pasted_input: bool) KeyOutcome {
         // Inspect the actual renderer's boundary rather than rejecting valid
         // decomposed accents, variation selectors or joined emoji generally.
         var pair: [8]u8 = undefined;
-        var start = insertion -| 1;
-        while (start > 0 and self.buffer[start] & 0xc0 == 0x80) start -= 1;
-        const prefix = self.buffer[start..insertion];
+        const prefix = self.buffer[utf8_validation.scalarStart(self.buffer, insertion -| 1)..insertion];
         @memcpy(pair[0..prefix.len], prefix);
         @memcpy(pair[prefix.len..][0..self.partial_length], self.partial[0..self.partial_length]);
         var clusters = vaxis.unicode.graphemeIterator(pair[0 .. prefix.len + self.partial_length]);

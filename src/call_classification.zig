@@ -186,8 +186,7 @@ fn compose(out: *Description, comptime literals: []const []const u8, values: []c
 fn writeCut(writer: *std.Io.Writer, text: []const u8, width: usize) void {
     if (text.len <= width) return writer.writeAll(text) catch unreachable;
     const ellipsis = "…";
-    var end = width -| ellipsis.len;
-    while (end > 0 and (text[end] & 0xc0) == 0x80) end -= 1;
+    var end = utf8_validation.scalarStart(text, width -| ellipsis.len);
     // A cut after a word reads as the word's end, not a blank before "…".
     while (end > 0 and text[end - 1] == ' ') end -= 1;
     writer.writeAll(text[0..end]) catch unreachable;
