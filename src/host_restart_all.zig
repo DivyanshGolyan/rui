@@ -184,10 +184,12 @@ pub fn discover(init: std.process.Init, allocator: std.mem.Allocator, home: []co
     }
     for (sockets) |socket| {
         try process.check(cancellation);
+        // Reserve first: once an entry owns its strings, adding it cannot fail.
+        try entries.ensureUnusedCapacity(allocator, 1);
         const facts = client.observeHostForUpgradeAtSocket(allocator, init.io, socket, null) catch |err| {
             const path = try allocator.dupe(u8, socket);
             errdefer allocator.free(path);
-            try entries.append(allocator, .{ .socket = path, .state = .{ .failed = try .of(allocator, .discovery, err) } });
+            entries.appendAssumeCapacity(.{ .socket = path, .state = .{ .failed = try .of(allocator, .discovery, err) } });
             continue;
         } orelse continue;
         const path = try allocator.dupe(u8, socket);
@@ -203,7 +205,7 @@ pub fn discover(init: std.process.Init, allocator: std.mem.Allocator, home: []co
                 .managed => .{ .observed = facts },
             };
         };
-        try entries.append(allocator, .{ .socket = path, .store = store, .state = state });
+        entries.appendAssumeCapacity(.{ .socket = path, .store = store, .state = state });
     }
     return .{ .entries = try entries.toOwnedSlice(allocator) };
 }
