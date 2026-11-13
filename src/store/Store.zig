@@ -1141,7 +1141,18 @@ pub const Store = struct {
         // compaction it showed is due.
         const first = admitModelAttemptOnce(&entry, &reader, admission_kind, .weighed, faults, start);
         const due = if (first) |_| false else |err| err == error.CompactionDue;
-        return entry.finishTransaction(Ordinary.none, faults, if (due) admitModelAttemptOnce(&entry, &reader, admission_kind, .over, faults, start) else first);
+        const outcome = if (due) admitModelAttemptOnce(&entry, &reader, admission_kind, .over, faults, start) else first;
+        return entry.finishTransaction(Ordinary.none, faults, idleUnlessAdmitted(&entry, outcome));
+    }
+
+    /// `outcome`, but an admission that selected nothing first checks the
+    /// Store is idle (`CheckIdle`). Never inlined: the checks' rounds run
+    /// beside an admission's, not under it.
+    noinline fn idleUnlessAdmitted(entry: *const Entry, outcome: anytype) !?AttemptAdmission {
+        if (try outcome) |selected| return selected;
+        var checks: model_admission_domain.CheckIdle = .{};
+        try transition.run(entry, model_admission_domain.CheckIdle, &checks, .{});
+        return null;
     }
 
     /// Never inlined: the second admission reuses the first's frame.
