@@ -1,4 +1,5 @@
 test {
+    _ = @import("testing/host_settings.zig");
     _ = @import("relaunch_handoff.zig");
     _ = @import("widgets/Panel.zig");
     _ = @import("app_settings.zig");
@@ -53,6 +54,7 @@ test {
     _ = @import("server_mcp.zig");
     _ = @import("api_key.zig");
     _ = @import("attempt.zig");
+    _ = @import("chatgpt_plan_login.zig");
     _ = @import("codex_auth.zig");
     _ = @import("codex_credentials.zig");
     _ = @import("model_adapter.zig");

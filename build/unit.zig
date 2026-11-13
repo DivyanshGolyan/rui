@@ -114,6 +114,7 @@ pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, pin
         .test_runner = filtered_runner,
     });
     product.configureTerminalEditor(b, logic_tests);
+    logic_tests.root_module.addImport("url", product.addUrl(b));
     const run_logic_tests = ci.run(logic_tests);
     run_logic_tests.has_side_effects = true;
     const logic_test_step = b.step(

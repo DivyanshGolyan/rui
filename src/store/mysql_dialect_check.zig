@@ -846,6 +846,35 @@ test "frozen context window schema 69 MySQL migration pins legacy policy and pre
     writeRecord();
 }
 
+test "schema 72 MySQL migration updates the saved wire label and preserves ordinary rows" {
+    const io = std.testing.io;
+    mutex.lockUncancelable(io);
+    defer mutex.unlock(io);
+    _ = connection() orelse return if (state == .absent) error.SkipZigTest else error.MysqlUnavailable;
+    defer restore("USE " ++ database);
+    try setup("DROP DATABASE IF EXISTS " ++ migrated_database ++ ";CREATE DATABASE " ++ migrated_database);
+    try load(migrated_database, store_testing.baseline_mysql_ddl, false);
+    try load(migrated_database, store_testing.baseline_rows, true);
+    inline for (schema.migrations) |step| {
+        if (step.from < 71) try load(migrated_database, schema.mysqlMigration(step.from), false);
+    }
+    try load(migrated_database, "INSERT INTO store_meta(meta_key,meta_value) VALUES('format','71'),('wire_version','15')", false);
+    try load(migrated_database, schema.mysqlMigration(71), false);
+    try expectSameResults(&.{
+        "SELECT meta_value FROM store_meta WHERE meta_key='wire_version'",
+        "SELECT meta_value FROM store_meta WHERE meta_key='format'",
+        "SELECT count(*) FROM session WHERE session_ref='d8mv7p'",
+    }, &.{
+        "SELECT '16'",
+        "SELECT '71'",
+        "SELECT 1",
+    });
+    try load(migrated_database, schema.mysqlMigrationFrom(71).?, false);
+    try expectCatalog(migrated_database);
+    done.migrations += 1;
+    writeRecord();
+}
+
 test "schema 71 MySQL migration updates the saved wire label and preserves ordinary rows" {
     const io = std.testing.io;
     mutex.lockUncancelable(io);

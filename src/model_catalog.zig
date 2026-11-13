@@ -28,7 +28,7 @@ pub const Entry = struct {
 
 pub const shipped = @import("model_catalog_snapshot.zig").entries(Entry);
 
-/// OpenAI IDs in catalog order: the list for ChatGPT, which has no public list.
+/// OpenAI IDs in catalog order: the list of a provider without a live one.
 pub const openai_ids = blk: {
     @setEvalBranchQuota(20000);
     var count: usize = 0;

@@ -2,19 +2,19 @@
 //! be percent-encoded in the authority, or spelled as an absolute path.
 //! TCP accepts only `ssl-ca=<absolute PEM path>` to replace system trust.
 const std = @import("std");
-const protocol = @import("protocol.zig");
+pub const Value = @import("mysql_url_value.zig").ValueWith(@import("host_settings.zig").max_ca_file_bytes);
+pub const parseInto = @import("mysql_url_value.zig").parseInto;
 const wire = @import("store/wire/mysql_connection.zig");
 const Url = @This();
 
 allocator: std.mem.Allocator,
-user: protocol.Bounded(wire.mysql.max_user_bytes) = .{},
-password: protocol.Bounded(wire.mysql.max_password_bytes) = .{},
-host: protocol.Bounded(253) = .{},
-socket: protocol.Bounded(107) = .{},
-database: protocol.Bounded(64) = .{},
-// Same path bound as the provider launch frame and TLS loader.
-ca_file: protocol.Bounded(std.posix.PATH_MAX - 1) = .{},
-port: u16 = 3306,
+user: @FieldType(Value, "user") = .{},
+password: @FieldType(Value, "password") = .{},
+host: @FieldType(Value, "host") = .{},
+socket: @FieldType(Value, "socket") = .{},
+database: @FieldType(Value, "database") = .{},
+ca_file: @FieldType(Value, "ca_file") = .{},
+port: @FieldType(Value, "port") = Value.default_port,
 
 pub fn create(allocator: std.mem.Allocator, text: []const u8) !*Url {
     const self = try allocator.create(Url);
@@ -24,74 +24,7 @@ pub fn create(allocator: std.mem.Allocator, text: []const u8) !*Url {
     return self;
 }
 
-fn parse(self: *Url, text: []const u8) !void {
-    if (!std.mem.startsWith(u8, text, "mysql://") or std.mem.indexOfAny(u8, text, "#\r\n\x00") != null) return error.InvalidMysqlUrl;
-    const query_start = std.mem.indexOfScalar(u8, text, '?') orelse text.len;
-    if (query_start != text.len) {
-        const query = text[query_start + 1 ..];
-        const key = "ssl-ca=";
-        if (!std.mem.startsWith(u8, query, key) or std.mem.indexOfAny(u8, query, "&?") != null) return error.InvalidMysqlUrl;
-        try decode(&self.ca_file, query[key.len..]);
-        if (self.ca_file.len == 0 or !std.fs.path.isAbsolute(self.ca_file.slice())) return error.InvalidMysqlUrl;
-    }
-    const rest = text["mysql://".len..query_start];
-    const at = std.mem.indexOfScalar(u8, rest, '@') orelse return error.InvalidMysqlUrl;
-    const colon = std.mem.indexOfScalar(u8, rest[0..at], ':') orelse return error.InvalidMysqlUrl;
-    try decode(&self.user, rest[0..colon]);
-    try decode(&self.password, rest[colon + 1 .. at]);
-    if (self.user.len == 0) return error.InvalidMysqlUrl;
-    const target = rest[at + 1 ..];
-    const slash = std.mem.lastIndexOfScalar(u8, target, '/') orelse return error.InvalidMysqlUrl;
-    const address = target[0..slash];
-    try decode(&self.database, target[slash + 1 ..]);
-    if (address.len == 0 or self.database.len == 0 or std.mem.indexOfScalar(u8, self.database.slice(), '/') != null) return error.InvalidMysqlUrl;
-    if (address[0] == '/' or std.mem.startsWith(u8, address, "%2F") or std.mem.startsWith(u8, address, "%2f")) {
-        if (self.ca_file.len != 0) return error.InvalidMysqlUrl;
-        try decode(&self.socket, address);
-        if (!std.fs.path.isAbsolute(self.socket.slice())) return error.InvalidMysqlUrl;
-        return;
-    }
-    var hostname = address;
-    var port: ?[]const u8 = null;
-    if (address[0] == '[') {
-        const end = std.mem.indexOfScalar(u8, address, ']') orelse return error.InvalidMysqlUrl;
-        hostname = address[1..end];
-        if (end + 1 != address.len) {
-            if (address[end + 1] != ':') return error.InvalidMysqlUrl;
-            port = address[end + 2 ..];
-        }
-    } else if (std.mem.indexOfScalar(u8, address, ':')) |end| {
-        hostname = address[0..end];
-        port = address[end + 1 ..];
-    }
-    try decode(&self.host, hostname);
-    if (self.host.len == 0 or std.mem.indexOfAny(u8, self.host.slice(), "/@[] ") != null) return error.InvalidMysqlUrl;
-    if (port) |digits| {
-        if (digits.len == 0) return error.InvalidMysqlUrl;
-        for (digits) |digit| if (!std.ascii.isDigit(digit)) return error.InvalidMysqlUrl;
-        self.port = std.fmt.parseInt(u16, digits, 10) catch return error.InvalidMysqlUrl;
-        if (self.port == 0) return error.InvalidMysqlUrl;
-    }
-}
-
-fn decode(out: anytype, text: []const u8) !void {
-    var at: usize = 0;
-    while (at < text.len) {
-        var byte = text[at];
-        if (byte == '%') {
-            if (text.len - at < 3) return error.InvalidMysqlUrl;
-            const hi = std.fmt.charToDigit(text[at + 1], 16) catch return error.InvalidMysqlUrl;
-            const lo = std.fmt.charToDigit(text[at + 2], 16) catch return error.InvalidMysqlUrl;
-            byte = @as(u8, hi) * 16 + lo;
-            at += 2;
-        }
-        if (byte < 0x20 or byte == 0x7f or out.len == out.bytes.len) return error.InvalidMysqlUrl;
-        out.bytes[out.len] = byte;
-        out.len += 1;
-        at += 1;
-    }
-    if (!std.unicode.utf8ValidateSlice(out.slice())) return error.InvalidMysqlUrl;
-}
+pub const parse = parseInto;
 
 pub fn options(self: *Url) wire.Options {
     return .{

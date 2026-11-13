@@ -252,7 +252,7 @@ test "a read freezes its viewport width method for live and historical answers" 
 fn freeze(self: *Self, phase: ReadPhase) *Job {
     std.debug.assert(self.reader.thread == null);
 
-    self.job = .{ .init = self.init, .home = self.home, .store = self.store, .session = self.session, .files = self.files, .colour = self.colour, .width_method = self.screen.vx.caps.unicode, .command = self.command, .configure = self.app_hooks.configure, .requests = self.requests, .status = self.status, .phase = phase, .cursor = self.scanCursor(), .opening = self.reading.opening, .queued_line = if (self.live.queued_line) |shown| shown.admission else 0, .inspection_kind = self.inspection.kind, .interrupted = self.interrupted, .line_read = self.line.read, .hint_wanted = self.hint == .unread, .opened = self.screen.feed.opened };
+    self.job = .{ .init = self.init, .home = self.home, .store = self.store, .session = self.session, .files = self.files, .colour = self.colour, .width_method = self.screen.vx.caps.unicode, .command = self.command, .configure = self.app_hooks.configure, .requests = self.requests, .status = self.status, .phase = phase, .cursor = self.scanCursor(), .opening = self.reading.opening, .queued_line = if (self.live.queued_line) |shown| shown.admission else 0, .inspection_kind = self.inspection.kind, .interrupted = self.interrupted, .line_read = self.line.read, .provider = self.line.provider, .hint_wanted = self.hint == .unread, .opened = self.screen.feed.opened };
 
     const job = &self.job;
     job.latest_ending = self.live.latest_ending;
@@ -843,13 +843,13 @@ fn appSelectCommand(raw: *anyopaque, ctx: *vxfw.EventContext, pressed: slash_com
     try appKey(raw, ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } }, .{ .under = .main, .pasted = false });
 }
 
-/// The Session's key owner, which Root hands each key, paste mark and
-/// malformed key while the Session is the main pane.
+/// The Session's key owner, which Root hands each key and
+/// paste mark while the Session is the main pane.
 pub fn keyOwner(self: *Self) Root.Keys {
     return .{ .context = self, .take = appKey };
 }
 
-/// Root hands the Session each key, paste mark and malformed key with
+/// Root hands the Session each key and paste mark with
 /// whether it is pasted. `session_keys.step` decides what it means; this
 /// reads the facts other owners hold and applies the answer.
 fn appKey(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event, delivery: @import("app_input.zig").Effects.Delivery) anyerror!void {
@@ -946,7 +946,6 @@ fn sessionKey(event: vxfw.Event) session_keys.Key {
     return switch (event) {
         .paste_start => .paste_start,
         .paste_end => .paste_end,
-        .invalid_key => .invalid,
         .key_press => |key| if (Editor.named(key)) |name| .{ .named = name } else if (Editor.isEnter(key)) .enter else if (key.matchExact(vaxis.Key.tab, .{})) .tab else if (key.matchExact(vaxis.Key.tab, .{ .shift = true })) .shift_tab else if (key.matches('i', .{ .alt = true })) .info else if (key.matches('d', .{ .alt = true })) .details else if (hostStartKey(key)) .host_start else switch (Editor.selectKey(conversation_keys, key)) {
             .left => .left,
             .right => .right,
@@ -1003,7 +1002,7 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
         // Root hands the Session its keys through `appKey`. A key that
         // reaches the widget is the overlay's close action, which the
         // screen sends as Esc, or a Root without the Session's key owner.
-        .key_press, .paste_start, .paste_end, .invalid_key => return appKey(raw, ctx, event, .{ .under = .main, .pasted = false }),
+        .key_press, .paste_start, .paste_end => return appKey(raw, ctx, event, .{ .under = .main, .pasted = false }),
         .mouse => |mouse| switch (mouse.button) {
             .wheel_up, .wheel_down => {
                 try self.scroll(mouse.button == .wheel_down, 1);
@@ -3553,7 +3552,6 @@ const HeldFrontend = struct {
                 .key_release => |key| .{ .key_release = key },
                 .paste_start => .paste_start,
                 .paste_end => .paste_end,
-                .invalid_key => .invalid_key,
                 else => continue,
             };
             try held.deliver(&ctx, event);
@@ -5360,24 +5358,21 @@ test "Alt-J adds no line and keeps the draft; Ctrl-J, Shift-Enter and Alt-Enter 
     }
 }
 
-test "a malformed key sequence rejects its line like malformed text: kept until Enter reports and clears it" {
+test "unknown terminal sequences leave the Session draft usable" {
     const held = try HeldFrontend.create();
     defer held.destroy();
     try held.settle();
-    // Kitty and modifyOtherKeys keys past U+10FFFF: vaxis reports each as
-    // an invalid key.
-    for ([_][]const u8{ "\x1b[1114112u", "\x1b[27;3;1114112~" }) |invalid| {
-        errdefer std.debug.print("invalid={any}\n", .{invalid});
-        try held.keys("kept");
-        try held.keys(invalid);
+    for ([_][]const u8{ "\x1b[1114112u", "\x1b[27;3;1114112~" }) |sequence| {
+        errdefer std.debug.print("sequence={any}\n", .{sequence});
+        held.self.input.clear();
+        try held.keys("one");
+        try held.keys(sequence);
+        try held.keys("two");
         try held.settle();
-        try std.testing.expectEqualStrings("kept", held.self.input.composition().bytes);
-        try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "› kept") != null);
+        try std.testing.expectEqualStrings("onetwo", held.self.input.composition().bytes);
+        try std.testing.expectEqual(null, held.self.input.snapshot().rejected);
+        try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "› onetwo") != null);
         try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "Input rejected") == null);
-        try held.keys("\r");
-        try held.settle();
-        try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "Input rejected; nothing sent.") != null);
-        try std.testing.expectEqualStrings("", held.self.input.composition().bytes);
         try std.testing.expectEqual(null, held.self.input.submitted);
     }
 }
@@ -6714,8 +6709,8 @@ test "SessionFrontend feed latest ending is live state, not window fill state" {
     defer held.destroy();
     const self = &held.self;
     self.reading.phase = .activity;
-    const ending: reads.LatestEnding = .{ .key = .{ .position = 10 }, .cause = @import("marks.zig").cause("provider_http_500") };
-    const newer: reads.LatestEnding = .{ .key = .{ .position = 20 }, .cause = @import("marks.zig").cause("provider_quota") };
+    const ending: reads.LatestEnding = .{ .key = .{ .position = 10 }, .cause = @import("marks.zig").cause("provider_http_500", null) };
+    const newer: reads.LatestEnding = .{ .key = .{ .position = 20 }, .cause = @import("marks.zig").cause("provider_quota", null) };
     for ([_]feed_reads.Read{ .opening, .scan, .fill_above, .fill_below }) |read| {
         self.live.latest_ending = ending;
         self.reading.feed_read = read;
@@ -6750,7 +6745,7 @@ fn stageRetryForTest(self: *Self, completion: reads.RetryCompletion) !void {
 }
 
 fn failedRetryForTest(self: *Self) void {
-    self.live.latest_ending = .{ .key = .{ .position = 3 }, .cause = @import("marks.zig").cause("malformed_provider_output") };
+    self.live.latest_ending = .{ .key = .{ .position = 3 }, .cause = @import("marks.zig").cause("malformed_provider_output", null) };
 }
 
 test "failed reply retry eligibility follows every live work state and admitted queue" {
@@ -7119,7 +7114,7 @@ test "failed reply rejected Message then discard supersedes pending retry but a 
 }
 
 test "failed reply reopening during newer work hides retry tail and ignores Ctrl-R and click" {
-    const ending: reads.LatestEnding = .{ .key = .{ .position = 3 }, .cause = @import("marks.zig").cause("malformed_provider_output") };
+    const ending: reads.LatestEnding = .{ .key = .{ .position = 3 }, .cause = @import("marks.zig").cause("malformed_provider_output", null) };
     for ([_]bool{ false, true }) |queued| {
         const held = try HeldFrontend.create();
         defer held.destroy();
@@ -7266,7 +7261,7 @@ test "failed reply retry tail follows only the latest ending and frontend eligib
     shown = try held.shown();
     try std.testing.expect(std.mem.indexOf(u8, shown, "× Model reply unreadable · ctrl+r retries") == null);
     self.submission.intent = null;
-    self.live.latest_ending.?.cause = @import("marks.zig").cause("provider_quota");
+    self.live.latest_ending.?.cause = @import("marks.zig").cause("provider_quota", null);
     shown = try held.shown();
     try std.testing.expect(std.mem.indexOf(u8, shown, "× Model reply unreadable · ctrl+r retries") == null);
 }

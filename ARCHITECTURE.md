@@ -1189,11 +1189,19 @@ A 401 on the key is final, `provider_api_key_rejected`, with no refresh or resen
 An auto-started Host adds `--provider openai` whenever a usable key is saved.
 
 `--provider chatgpt` serves a ChatGPT plan sign-in from an owner-only `~/.config/rui/chatgpt.json`, or the absolute path `RUI_CHATGPT_CREDENTIAL_FILE` names, in the same credential format and custody as Codex; its record carries the issued client id and its account is the ID token's `sub`.
-It speaks `openai-responses/3` and sends the access token as `authorization: Bearer` with user-agent only to `https://api.openai.com/v1/responses`, with no account or FedRAMP header; its route is `chatgpt_plan`, and it accepts structured output.
+It speaks `openai-responses/3` and sends the access token as `authorization: Bearer` with user-agent only to `https://api.openai.com/v1/responses` and the model list beside it (`https://api.openai.com/v1/models`), with no account or FedRAMP header; its route is `chatgpt_plan`, and it accepts structured output.
 Its token must carry `exp`, so it refreshes within 300 seconds of expiry and never on the eight-day opaque clock; a 401 forces one refresh over the plan's token wire, as Codex's does over its own.
-The terminal cannot sign it in yet: its provider fact has no login, so `rui auth login chatgpt` changes nothing and says so, the Host line and the overview's missing-sign-in notice say the terminal cannot sign in to it instead of naming a command, and its band reads only "ChatGPT sign-in expired." so the list pane keeps it whole.
+Its provider fact names `rui auth login chatgpt`, so the Host line and the overview's notices name that command; an expired sign-in's band names it too when the line holds it whole, and otherwise reads only "ChatGPT sign-in expired." so the 40-column list pane keeps it whole.
 The Host's one sign-in worker serves both sign-ins; each lease or forced refresh names the sign-in it is for.
 An auto-started Host adds `--provider chatgpt` whenever that credential is usable.
+
+`rui auth login chatgpt` (`src/chatgpt_plan_login.zig`) makes the host id `~/.config/rui/host-id` (owner-only, a version 4 UUID URN, never replaced) before its first authorization.
+It listens on `127.0.0.1:1455`, else any free loopback port, prints the authorization link, opens a browser when there is one, and reads a callback address pasted on stdin at the same time; the first answer that is this attempt's wins, so a machine whose browser cannot reach the listener signs in by pasting.
+A first sign-in names `dynamic_agent_client` and the agent name; a returning one names the saved issued client id and no agent, sends no `id_token_hint` because the link is printed, and refuses an answer for another client.
+The checked record is installed through the same custody and SIGINT gate as a Codex login and, like it, fills only an unset provider default; a Host already serving `chatgpt` uses it from its next lease.
+`rui auth logout chatgpt` revokes the refresh token as the issued client under the exclusive credential lock, retrying a server failure, then publishes the record `signed_out` at a new generation even when the revocation was not confirmed, which it reports.
+A `signed_out` record holds no tokens and keeps its account and issued client id, which the next sign-in reuses as the issuer's guide asks; every reader treats it as no sign-in, so a lease fails with `provider_sign_in_required` and local status reports it missing.
+`rui auth status` prints each provider's local sign-in, with the ChatGPT account's email and access-token expiry.
 `subscription_sharing_usage_limit_exceeded` and `subscription_sharing_usage_unavailable` are quota refusals, never retried.
 
 The credential owner serializes mutations across Hosts and login processes.
@@ -2671,7 +2679,8 @@ Shift alone stays text.
 An xterm modifyOtherKeys key (`CSI 27 ; modifier ; code ~`, which Ghostty's legacy table sends for modified Enter without being asked) decodes as the Kitty key with the same modifiers and no associated text, so its bindings mean the same: Shift-Enter adds a line, Ctrl-A moves to the line start, Ctrl-J sends, and an unbound Ctrl, Alt or Super chord is dropped as its Kitty form is.
 Shift with a printable code inserts nothing in this form.
 Ctrl-R recovers in its raw, Kitty and modifyOtherKeys forms alike, never from pasted text; at an Action's choice it is refused, spends freshness and authorizes nothing, and while approval is paused it waits for the Action, keeping the draft.
-A malformed key in a supported form is a key whose meaning was lost, so it fails closed: a Kitty modifier outside 1–256 or event type outside 1–3, a key, alternate key or associated-text value that is not a Unicode scalar, associated text over the decoder's 128 bytes, or a modifyOtherKeys field outside its form rejects the draft at its line end, or is refused at once at an Action's choice, as malformed UTF-8 is, rather than being ignored so that the text typed around it stands.
+libvaxis owns terminal decoding; a sequence it consumes as unknown produces no event for Rui.
+ESC followed by broken UTF-8 arrives as an Alt key with U+FFFD and follows the ordinary unbound-chord path, leaving the draft unchanged.
 A sequence naming a key Rui does not know is still ignored.
 Inside marked paste any ESC other than the end marker rejects the paste, and an end marker beginning at a later ESC, as in ESC ESC `[201~`, still ends it.
 
@@ -2788,7 +2797,8 @@ This keeps 244,800 tokens for large windows but uses 115,200 for a 128,000-token
 Other providers default to 90% of the catalog window, or 115,200 tokens for a missing or null window.
 These client choices do not change existing Sessions, the Host's fixed fallback for stored null thresholds, or frozen Operations.
 
-The only fetched live list is a Host's OpenAI key list behind [`/v1/model-list`](#public-session-activity); ChatGPT uses the selected catalog's OpenAI IDs because it has no public list.
+The fetched live lists are a Host's OpenAI key list and its ChatGPT plan list behind [`/v1/model-list`](#public-session-activity); the ChatGPT device sign-in uses the selected catalog's OpenAI IDs because its backend publishes no list.
+A live list supplies model IDs only: context windows and efforts always come from the selected catalog.
 The Host refreshes the models.dev fact catalog and saves it across Host runs.
 Host Session configuration admission uses operation-scoped selected facts for effort support and known-window bounds; successful refreshes affect later configuration admissions, not existing Session settings or frozen Operations.
 Each new model Operation freezes the selected catalog's effective context window on its own row (D238).
@@ -2911,7 +2921,7 @@ Every page carries `queued`: the field came with wire version 3, and a frontend 
 Wire version 10 makes the refused-send target required and nullable under the [public activity contract](#public-session-activity); non-null peers keep their canonical ID grammar.
 
 Wire version 14 requires the `chatgpt` provider key, and supports the `chatgpt_plan` route, in `host_info`'s `capabilities.providers`; ordinary clients and Hosts on different wire versions refuse each other.
-A wire bump also appends a Store format step because the Store saves its wire label: format 71 moves the saved label from 14 to 15 on SQLite and MySQL, without changing ordinary rows.
+A wire bump also appends a Store format step because the Store saves its wire label: format 72 moves the saved label from 15 to 16 on SQLite and MySQL, without changing ordinary rows.
 The `model_call` Activity rows shipped in v0.69.x under wire version 13 without a bump, although 13 had already shipped in v0.67.x; a 0.69 client asking a 0.67 Host for those rows therefore failed with `InvalidCursor` instead of refusing the incompatible Host.
 `tests/ci/test_wire_version.py` requires a wire version greater than the newest release's whenever generated `openapi.json` changes, ignoring only `info.version` and documentation-only `description`, `summary`, `example` and `examples` annotations (never named schema entries or literal wire data); wire constraints such as `x-rui-*` bounds remain part of the comparison.
 Upgrade and restart-all control recognize wire 13 as a historical Host-info profile: v0.69.1 may omit `chatgpt`, while v0.69.2 reports it. Historical observation never grants ordinary client readiness; exact-instance shutdown uses the observed Host's own executable before the new build starts it.
@@ -3538,14 +3548,17 @@ Search adds no Store format, index or SQL text-matching dependency.
 
 `POST /v1/model-list` takes `kind:"model_list"` and returns `providers`: for each provider the Host serves, in Provider order, its `provider`, `source` and `models`, each an `id` with `known`, whether Rui's model catalog knows its facts.
 A model the catalog does not list runs with default limits (see compaction).
-ChatGPT has no public list, so its `source` is always `catalog` and its models are the catalog's OpenAI IDs in catalog order.
-At Host start and on every model-list request, the execution owner's HTTP/2 Client starts both an OpenAI key's `GET BASE/models` (when served) and an unauthenticated `GET https://models.dev/api.json`, unless that fetch is already in flight.
+The ChatGPT device sign-in (`codex`) has no list, so its `source` is always `catalog` and its models are the catalog's OpenAI IDs in catalog order.
+At Host start and on every model-list request, the execution owner's HTTP/2 Client starts an OpenAI key's `GET BASE/models` (when served), a ChatGPT plan's `GET https://api.openai.com/v1/models` (when served) and an unauthenticated `GET https://models.dev/api.json`, each unless that fetch is already in flight.
 Each has its own endpoint and stream beyond Active Capacity, including a catalog-only Host with no model slots.
-Neither fetch waits behind or reserves a model slot.
-The provider IDs (at most 512, 16 KiB together) stay in Host memory and are replaced on refresh.
-While that fetch runs the source is `pending` with the catalog's OpenAI IDs; after it, `live` with the provider's IDs in its order (IDs Rui cannot select are dropped), or `catalog_fallback` with the catalog's OpenAI IDs when it failed, answered with something else or listed more than that bound.
+No fetch reserves a model slot.
+The plan's GET carries a lease from the Host's one sign-in worker, which serves it only when no model slot waits for that worker, and returns the lease as soon as the GET holds its own copy of the token; it never waits for a refresh, and a 401 on it forces none.
+Without a usable sign-in the lease fails and `/v1/models` is never contacted.
+The plan's list keeps only entries whose `visibility` is `list`, by `slug`, in server order.
+Each provider's IDs (at most 512, 16 KiB together, per provider) stay in Host memory and are replaced on refresh.
+While a provider's fetch runs its source is `pending` with the catalog's OpenAI IDs; after it, `live` with the provider's IDs in its order (IDs Rui cannot select are dropped), or `catalog_fallback` with the catalog's OpenAI IDs when it or its sign-in lease failed, answered with something else or listed more than that bound.
 A refresh keeps the previous provider source while in flight; the initial provider fetch alone starts `pending`.
-The reply signals refresh, then reads one selected fact generation from the Store and renders it with the independently retained provider list; it does not wait for the network.
+The reply signals refresh, then reads one selected fact generation from the Store and renders it with the independently retained provider lists; it does not wait for the network.
 Its operation-owned facts and reply storage are released after the request; the Host retains no fact snapshot between requests.
 Reply capacity derives from that selected generation, not the shipped snapshot's model count or ID bytes; the independent live-provider bounds remain unchanged.
 
@@ -3977,7 +3990,7 @@ A client first probes the existing `host.lock` with a nonblocking shared lock, w
 One absolute probe deadline covers connect, write, first byte, header and full body; ordinary commands retain their separate processing and transfer waits.
 The shared response parser accepts only valid bounded HTTP/1.1 headers with one decimal Content-Length, supported Content-Type and wire version; it rejects malformed field names/values, duplicates of consequential fields and unsupported transfer or content encodings rather than interpreting ambiguous framing.
 A complete compatible reply from that owner means ready and reports the canonical Store selector, wire version, actual allocated Active Capacity, slots in use, the Host's start time, whether it holds new Turns (`paused`), its Bash capability and each built-in provider's route (`unserved`, `endpoint`, `chatgpt_device`, `key_file` or `chatgpt_plan`). **Slots in use** (`custody_occupied`) counts held custody records, including detached cleanup; it is the value Current reports as `execution.custody_occupied`.
-Only the historical wire-13 Host-info profile accepts an absent `chatgpt` route as `unserved`, covering v0.69.1 alongside v0.69.2's complete provider facts. Current wire-15 facts require the provider; the wire-14 profile freezes v0.70.0’s complete provider facts; historical normalization serves upgrade/restart discovery and exact-instance activation, never ordinary status or client readiness.
+Only the historical wire-13 Host-info profile accepts an absent `chatgpt` route as `unserved`, covering v0.69.1 alongside v0.69.2's complete provider facts. Current wire-16 facts require the provider; the wire-15 and wire-14 profiles freeze v0.71.0’s and v0.70.0’s complete provider facts; historical normalization serves upgrade/restart discovery and exact-instance activation, never ordinary status or client readiness.
 Codex, OpenAI and the existing required identity/control fields remain required; unknown, duplicate and malformed fields still fail decoding.
 The start time (`started_at`) is the Host Unix second read once before execution starts; every reply of one Host reports the same value, and like every Host time it orders nothing across clock changes.
 Both are read from Host memory, so the reply still never touches SQLite.
