@@ -2514,6 +2514,12 @@ Below 100 columns no list sits beside the chat, so Left on an empty draft leaves
 While the list has keys, its selected row takes the focused background and the chat's prompt shows a quiet `›` with no caret; while the chat has keys, the open chat's row keeps a dimmed, inactive selection.
 A click on the list gives it keys, and a click in the chat gives keys back to the chat's input, by the same transition as Enter on the open chat's row.
 Divyansh chose this list focus, Left on an empty draft and Esc leaving at every width in November 2026 (PR #1400).
+Tab and Shift-Tab move focus through every focusable thing the last frame drew, in drawn order, and wrap: the list, the Settings row, the chat input, then the chat's drawn buttons (‹ on a narrow chat, Model, Effort, info and the others) by row and column (`app_input.keys`; Root projects the order from the frame).
+A narrow chat's hidden list is not in the order. While a panel shows (chat info, a footer choice, Settings or Keys), Tab stays inside it until Esc closes it, and Tab inside a bracketed paste is text.
+Enter on a focused button or the Settings row does what a click on it does; Esc and Ctrl-G give focus back to the main pane, and any other key gives it back and acts there.
+At 100 columns and wider, Up and Down in the focused list show the highlighted chat beside it once the selection settles (no further list move before the next tick), through the same open as Enter; skipped chats are never read, and each chat keeps its draft.
+The list keeps keys; Enter or Right then moves them into that chat's input. Landing on New Session or Settings opens nothing until Enter, and below 100 columns Up and Down only move the selection.
+Divyansh chose one Tab order everywhere and wide browse-to-open on 2026-11-13.
 The rules table says which work states Ctrl-X may stop: pending, working, retrying, Bash and approval.
 Ctrl-X on such a row opens a confirm prompt in the core's state; a second Ctrl-X returns the `stop` effect, Esc only cancels, and any other input cancels before it acts.
 Every creation and stop is an entry in the core's request ledger (`State.requests`) until a definite answer removes it; a full ledger refuses new requests and evicts nothing, and departure prints every entry still left.
