@@ -42,6 +42,9 @@
         "/result",
         "/configure",
         "/sessions"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -75,6 +78,9 @@
         "/clear",
         "/reload-skills",
         "Type a task"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -110,6 +116,9 @@
         "/copy",
         "/rename",
         "/archive"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -149,6 +158,9 @@
         "/copy",
         "/rename",
         "/archive"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -168,6 +180,10 @@
           "wait": "Type a task"
         },
         {
+          "wait": "○ New Session",
+          "min_columns": 140
+        },
+        {
           "gone": "Old chat remains."
         }
       ],
@@ -180,6 +196,9 @@
         "Old chat remains.",
         "/new",
         "/clear"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -199,6 +218,10 @@
           "wait": "Type a task"
         },
         {
+          "wait": "○ New Session",
+          "min_columns": 140
+        },
+        {
           "gone": "Old chat remains."
         }
       ],
@@ -211,6 +234,9 @@
         "Old chat remains.",
         "/new",
         "/clear"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
