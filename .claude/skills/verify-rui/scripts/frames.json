@@ -295,7 +295,7 @@
           ]
         },
         {
-          "wait": "/review  "
+          "sleep": 1.0
         },
         {
           "keys": [
