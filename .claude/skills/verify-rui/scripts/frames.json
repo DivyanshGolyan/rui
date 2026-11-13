@@ -5,153 +5,182 @@
   ],
   "states": [
     {
-      "name": "appcmds-skill-without-preview",
-      "note": "Whole-line bracketed paste uses normal Message admission, never the suggestion preview",
-      "open": "Skill catalog authority",
+      "name": "quiet-person",
+      "note": "A real person message supplies the sender for peer-seeded quiet specimens",
+      "open": "overview",
       "cast": [
         {
-          "label": "Skill catalog authority",
-          "workspace": "code/appcmds-skill-without-preview",
+          "label": "You wrote",
+          "workspace": "code/quiet",
           "messages": [
-            "Seed a fresh chat."
+            "Ready."
           ],
-          "mode": "bypass",
-          "skills": [
-            "review"
-          ]
+          "mode": "bypass"
         }
       ],
       "steps": [
         {
-          "text": "\u001b[200~/review this change\u001b[201~"
-        },
-        {
-          "keys": [
-            "Enter"
-          ]
-        },
-        {
-          "wait": "The deadline check now runs"
+          "wait": "You wrote"
         }
       ],
       "expect": [
-        "/review this change",
-        "The deadline check now runs"
+        "You wrote"
       ],
       "absent": [
-        "Unknown command",
-        "Usage:"
+        "No Sessions yet."
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
-      "name": "appcmds-unknown-name-message",
-      "note": "Whole-line bracketed paste uses normal Message admission, never the suggestion preview",
-      "open": "Unknown name text",
+      "name": "quiet-overview",
+      "note": "Whole rows, including marks, ages and folders, dim only for never-written finished and working chats; approval stays loud",
+      "open": "overview",
       "cast": [
         {
-          "label": "Unknown name text",
-          "workspace": "code/appcmds-unknown-name-message",
+          "label": "Agent done",
+          "workspace": "code/quiet",
           "messages": [
-            "Seed a fresh chat."
+            "Ready."
           ],
           "mode": "bypass",
-          "skills": []
+          "sender": "You wrote"
+        },
+        {
+          "label": "Agent approval",
+          "workspace": "code/quiet",
+          "messages": [
+            "consent check"
+          ],
+          "mode": "ask",
+          "sender": "You wrote",
+          "settle": "pending"
+        },
+        {
+          "label": "Agent working",
+          "workspace": "code/quiet",
+          "messages": [
+            "hold answer"
+          ],
+          "mode": "bypass",
+          "sender": "You wrote",
+          "settle": "pending"
         }
       ],
       "steps": [
         {
-          "text": "\u001b[200~/genuinely-unknown this change\u001b[201~"
+          "wait": "Agent working"
         },
         {
-          "keys": [
-            "Enter"
-          ]
+          "wait": "Thinking"
         },
         {
-          "wait": "The deadline check now runs"
+          "wait": "set -eu"
         }
       ],
       "expect": [
-        "/genuinely-unknown this change",
-        "The deadline check now runs"
+        "You wrote",
+        "Agent done",
+        "Agent approval",
+        "Agent working",
+        "Thinking"
       ],
       "absent": [
-        "Unknown command",
-        "Usage:"
+        "No Sessions yet.",
+        "Host stopped"
+      ],
+      "expect_dim": [
+        {
+          "text": "✓ Agent done",
+          "dim": true
+        },
+        {
+          "text": "The deadline check",
+          "dim": true
+        },
+        {
+          "text": "⠹ Agent working",
+          "dim": true
+        },
+        {
+          "text": "Thinking",
+          "dim": true
+        },
+        {
+          "text": "Agent approval",
+          "dim": false
+        },
+        {
+          "text": "You wrote",
+          "dim": false
+        }
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
-      "name": "appcmds-hidden-discard-collision",
-      "note": "The complete grammar reserves hidden commands; noncolliding skills still complete",
-      "open": "Hidden discard collision",
-      "cast": [
-        {
-          "label": "Hidden discard collision",
-          "workspace": "code/appcmds-hidden-discard-collision",
-          "messages": [
-            "Seed a fresh chat."
-          ],
-          "mode": "bypass",
-          "skills": [
-            "discard",
-            "discarded"
-          ]
-        }
-      ],
+      "name": "quiet-sidebar",
+      "note": "The shared row owner dims the open-chat sidebar; narrow view naturally shows only the conversation",
+      "open": "You wrote",
       "steps": [
         {
-          "text": "/dis"
+          "wait": "Peer message delivered."
         },
         {
-          "wait": "/discarded"
+          "wait": "Agent done",
+          "min_columns": 140
+        },
+        {
+          "wait": "Thinking",
+          "min_columns": 140
+        },
+        {
+          "wait": "set -eu",
+          "min_columns": 140
         }
       ],
       "expect": [
-        "/discarded"
+        "Peer message delivered."
       ],
-      "absent_regex": [
-        "^\\s*/discard\\s+",
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
-      ]
-    },
-    {
-      "name": "appcmds-hidden-recover-collision",
-      "note": "The complete grammar reserves hidden commands; noncolliding skills still complete",
-      "open": "Hidden recover collision",
-      "cast": [
-        {
-          "label": "Hidden recover collision",
-          "workspace": "code/appcmds-hidden-recover-collision",
-          "messages": [
-            "Seed a fresh chat."
-          ],
-          "mode": "bypass",
-          "skills": [
-            "recover",
-            "recovering"
-          ]
-        }
+      "absent": [
+        "Host stopped"
       ],
-      "steps": [
+      "expect_dim": [
         {
-          "text": "/reco"
+          "text": "✓ Agent done",
+          "dim": true,
+          "min_columns": 140
         },
         {
-          "wait": "/recovering"
+          "text": "The deadline check",
+          "dim": true,
+          "min_columns": 140
+        },
+        {
+          "text": "⠹ Agent working",
+          "dim": true,
+          "min_columns": 140
+        },
+        {
+          "text": "Thinking",
+          "dim": true,
+          "min_columns": 140
+        },
+        {
+          "text": "Agent approval",
+          "dim": false,
+          "min_columns": 140
+        },
+        {
+          "text": "You wrote",
+          "dim": false,
+          "min_columns": 140
         }
       ],
-      "expect": [
-        "/recovering"
-      ],
       "absent_regex": [
-        "^\\s*/recover\\s+",
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -804,34 +833,6 @@
       "absent": [
         "\u203a /effort",
         "enter pick"
-      ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
-      ]
-    },
-    {
-      "name": "draft-chat-misused",
-      "note": "B06: conversation counterpart uses the same draft-ending rule",
-      "open": "Draft lifecycle",
-      "steps": [
-        {
-          "text": "/new unexpected"
-        },
-        {
-          "keys": [
-            "Enter"
-          ]
-        },
-        {
-          "wait": "Usage: /new"
-        }
-      ],
-      "expect": [
-        "Usage: /new",
-        "The deadline check now runs"
-      ],
-      "absent": [
-        "\u203a /new unexpected"
       ],
       "absent_regex": [
         "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
@@ -2753,27 +2754,6 @@
       ]
     },
     {
-      "name": "misused-navigation-command",
-      "note": "Known navigation-command misuse stays local and takes the draft",
-      "open": "Release notes for 0.60",
-      "steps": [
-        {
-          "text": "/new unexpected"
-        },
-        {
-          "keys": [
-            "Enter"
-          ]
-        },
-        {
-          "wait": "Usage: /new"
-        }
-      ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
-      ]
-    },
-    {
       "name": "misused-command",
       "note": "23-misused",
       "open": "Release notes for 0.60",
@@ -3473,6 +3453,205 @@
         "140x40"
       ],
       "expect": "Detached. Host work continues.",
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+      ]
+    },
+    {
+      "name": "appcmds-skill-without-preview",
+      "note": "Whole-line bracketed paste uses normal Message admission, never the suggestion preview",
+      "open": "Skill catalog authority",
+      "cast": [
+        {
+          "label": "Skill catalog authority",
+          "workspace": "code/appcmds-skill-without-preview",
+          "messages": [
+            "Seed a fresh chat."
+          ],
+          "mode": "bypass",
+          "skills": [
+            "review"
+          ]
+        }
+      ],
+      "steps": [
+        {
+          "text": "\u001b[200~/review this change\u001b[201~"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "The deadline check now runs"
+        }
+      ],
+      "expect": [
+        "/review this change",
+        "The deadline check now runs"
+      ],
+      "absent": [
+        "Unknown command",
+        "Usage:"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+      ]
+    },
+    {
+      "name": "appcmds-unknown-name-message",
+      "note": "Whole-line bracketed paste uses normal Message admission, never the suggestion preview",
+      "open": "Unknown name text",
+      "cast": [
+        {
+          "label": "Unknown name text",
+          "workspace": "code/appcmds-unknown-name-message",
+          "messages": [
+            "Seed a fresh chat."
+          ],
+          "mode": "bypass",
+          "skills": []
+        }
+      ],
+      "steps": [
+        {
+          "text": "\u001b[200~/genuinely-unknown this change\u001b[201~"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "The deadline check now runs"
+        }
+      ],
+      "expect": [
+        "/genuinely-unknown this change",
+        "The deadline check now runs"
+      ],
+      "absent": [
+        "Unknown command",
+        "Usage:"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+      ]
+    },
+    {
+      "name": "appcmds-hidden-discard-collision",
+      "note": "The complete grammar reserves hidden commands; noncolliding skills still complete",
+      "open": "Hidden discard collision",
+      "cast": [
+        {
+          "label": "Hidden discard collision",
+          "workspace": "code/appcmds-hidden-discard-collision",
+          "messages": [
+            "Seed a fresh chat."
+          ],
+          "mode": "bypass",
+          "skills": [
+            "discard",
+            "discarded"
+          ]
+        }
+      ],
+      "steps": [
+        {
+          "text": "/dis"
+        },
+        {
+          "wait": "/discarded"
+        }
+      ],
+      "expect": [
+        "/discarded"
+      ],
+      "absent_regex": [
+        "^\\s*/discard\\s+",
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+      ]
+    },
+    {
+      "name": "appcmds-hidden-recover-collision",
+      "note": "The complete grammar reserves hidden commands; noncolliding skills still complete",
+      "open": "Hidden recover collision",
+      "cast": [
+        {
+          "label": "Hidden recover collision",
+          "workspace": "code/appcmds-hidden-recover-collision",
+          "messages": [
+            "Seed a fresh chat."
+          ],
+          "mode": "bypass",
+          "skills": [
+            "recover",
+            "recovering"
+          ]
+        }
+      ],
+      "steps": [
+        {
+          "text": "/reco"
+        },
+        {
+          "wait": "/recovering"
+        }
+      ],
+      "expect": [
+        "/recovering"
+      ],
+      "absent_regex": [
+        "^\\s*/recover\\s+",
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+      ]
+    },
+    {
+      "name": "draft-chat-misused",
+      "note": "B06: conversation counterpart uses the same draft-ending rule",
+      "open": "Draft lifecycle",
+      "steps": [
+        {
+          "text": "/new unexpected"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Usage: /new"
+        }
+      ],
+      "expect": [
+        "Usage: /new",
+        "The deadline check now runs"
+      ],
+      "absent": [
+        "\u203a /new unexpected"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+      ]
+    },
+    {
+      "name": "misused-navigation-command",
+      "note": "Known navigation-command misuse stays local and takes the draft",
+      "open": "Release notes for 0.60",
+      "steps": [
+        {
+          "text": "/new unexpected"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Usage: /new"
+        }
+      ],
       "absent_regex": [
         "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]
