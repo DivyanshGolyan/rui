@@ -653,6 +653,125 @@ def saved_settings(root, env):
           " refusals, ordered sources, unreachable refusal, retired flags", flush=True)
 
 
+def saved_settings_served(root, env):
+    """A Host the starter launches serves saved MCP, preset, CA file and Bash timeout values.
+
+    Each is observed through what the Host already exposes, with the fixtures
+    the owning suites use: the loopback MCP server and its tool-name collision
+    refusal, a preset Session creation, a TLS provider whose self-signed
+    certificate only the saved CA file trusts, and a fixture Bash call that
+    outlives the saved timeout.
+    """
+    import bash_fixture
+    import h2_fixture
+    import model_fixture
+    import ssl
+    import threading
+    from host_status_fixture import socket_path
+    from settings_fixture import WIRE, post
+    from settings_integration import mcp_server
+
+    state = root / "saved-served-state"
+    state.mkdir(mode=0o700)
+
+    def save(store, path, value):
+        saved = host_command(env, "set", "--store", store, path, value)
+        assert saved.returncode == 0, saved
+
+    # MCP: the Host asks every saved server for its tools before it serves.
+    # A saved server that offers the built-in name bash is refused by name.
+    docs, clash = mcp_server(["search"]), mcp_server(["bash"])
+    mcp_store = root / "saved-mcp"
+    try:
+        save(mcp_store, "tools.mcp.docs.url", f"http://127.0.0.1:{docs.server_port}/mcp")
+        save(mcp_store, "tools.mcp.clash.url", f"http://127.0.0.1:{clash.server_port}/mcp")
+        refused = run_start(mcp_store, env)
+        assert refused.returncode != 0 and "[tool_name_collision]" in refused.stderr, refused
+        assert "clash" in refused.stderr and "bash" in refused.stderr, refused.stderr
+        assert host_command(env, "unset", "--store", mcp_store, "tools.mcp.clash").returncode == 0
+        started = run_start(mcp_store, env)
+        assert started.returncode == 0, started.stderr
+    finally:
+        forced_crash_cleanup(mcp_store)
+        for server in (docs, clash):
+            server.shutdown()
+            server.server_close()
+
+    # Preset and Bash timeout: one Host on a plain fixture provider.
+    responses = []
+    bash_fixture.add_exchange(responses, "timeout", "printf before; sleep 30")
+    endpoint = model_fixture.SuccessEndpoint(responses)
+    thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+    thread.start()
+    store = root / "saved-served"
+    preset = {"model": "gpt-6-sol", "effort": "low", "compactAt": 100000,
+              "tools": [], "permissionMode": "ask", "label": "Review"}
+    preset_file = state / "preset.json"
+    preset_file.write_text(json.dumps(preset))
+    try:
+        save(store, "providers.codex.endpoint", f"http://127.0.0.1:{endpoint.server_port}/responses")
+        save(store, "providers.codex.unauthenticated", "true")
+        save(store, "tools.bash.timeoutMs", "500")
+        save(store, "presets.review", f"@{preset_file}")
+        started = run_start(store, env)
+        assert started.returncode == 0, started.stderr
+        sock = socket_path(store)
+        create = {"version": WIRE, "kind": "configure", "store": str(store.resolve()), "key": "preset:create",
+                  "session": "", "preset": "review", "configuration": {"label": None}}
+        created = post(sock, "configure", create)
+        assert created["answer"]["status"] == "accepted", created
+        inspected = post(sock, "inspect-session", {"version": WIRE, "kind": "inspect_session",
+                                                   "store": str(store.resolve()), "session": created["answer"]["session"]})
+        assert inspected["session"]["model"] == "gpt-6-sol" and inspected["session"]["reasoning_effort"] == "low", inspected
+        session = bash_fixture.configure(state, store, "timeout-config")
+        model_fixture.message(state, store, "timeout-message", session, "execute")
+        action = model_fixture.wait_for(lambda: bash_fixture.action_for(store, session), "timeout Action")
+        bash_fixture.allow(state, store, "timeout-allow", session, action["action"])
+        model_fixture.wait_for(lambda: model_fixture.completed_observation(store, "timeout-message"), "timeout continuation")
+        result = bash_fixture.result_text(store, session)
+        assert result.startswith("Bash timed_out.") and "after a 500 ms total budget" in result, result
+    finally:
+        forced_crash_cleanup(store)
+        endpoint.shutdown()
+        endpoint.server_close()
+
+    # CA file: the provider's certificate is self-signed; only the saved file trusts it.
+    tls_root = root / "saved-tls"
+    tls_root.mkdir(mode=0o700)
+    subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                    "-keyout", str(tls_root / "key.pem"), "-out", str(tls_root / "cert.pem"),
+                    "-days", "1", "-subj", "/CN=localhost", "-addext", "subjectAltName=DNS:localhost"],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+    tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    tls.load_cert_chain(tls_root / "cert.pem", tls_root / "key.pem")
+    tls.set_alpn_protocols(["h2"])
+    secure = h2_fixture.Endpoint(tls, 1, sse=True, eager_sse=True)
+    threading.Thread(target=secure.serve_forever, daemon=True).start()
+    tls_store = root / "saved-tls-store"
+    try:
+        save(tls_store, "providers.codex.endpoint", f"https://localhost:{secure.server_address[1]}/responses")
+        save(tls_store, "providers.codex.unauthenticated", "true")
+        save(tls_store, "network.caFile", tls_root / "cert.pem")
+        started = run_start(tls_store, env)
+        assert started.returncode == 0, started.stderr
+        configured = model_fixture.command(
+            "session", "configure", "--store", tls_store, "--record", state / "tls-config.json", "--key", "tls-config",
+            "--workspace", model_fixture.ROOT, "--provider", "codex", "--model", "gpt-6-sol", "--tools", "none")
+        assert configured["answer"]["status"] == "accepted", configured
+        tls_session = configured["answer"]["session"]
+        model_fixture.message(state, tls_store, "tls-message", tls_session, "over-tls")
+        observation, answer, _ = model_fixture.wait_for_result_release(
+            tls_store, "tls-message", tls_session, time.monotonic() + 20)
+        assert observation["result"]["status"] == "completed" and answer == b"answer-over-tls", (observation, answer)
+        assert len(secure.streams) == 1, secure.streams
+    finally:
+        forced_crash_cleanup(tls_store)
+        secure.shutdown()
+        secure.server_close()
+    print("saved settings served: MCP tools listed and a collision refused, preset Session created,"
+          " Bash timed out at the saved 500 ms, provider reached over TLS with the saved CA file", flush=True)
+
+
 def wait_for_terminal_exit(caller, master, output, deadline):
     """Drain output through reap, including a retained slave without EOF."""
     while True:
@@ -774,6 +893,7 @@ def main():
             stop_process(held)
 
         saved_settings(root, env)
+        saved_settings_served(root, env)
 
         unparsed_store = root / "unparsed-capacity"
         unparsed = run_start(unparsed_store, env, "--set", 'execution.activeCapacity=-1')
