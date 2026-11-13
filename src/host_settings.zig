@@ -313,14 +313,19 @@ fn textDefault(comptime capacity: usize, comptime value: []const u8) Text(capaci
 /// Structured JSON Schema facts passed to a visitor. Secret objects are a
 /// choice of exactly one source; literals are pipe-only and never written.
 pub const Schema = struct {
-    type: enum { string, integer, boolean, object },
+    type: enum { string, integer, boolean, object, one_of },
     nullable: bool = false,
     path_accepts_empty: bool = false,
     /// Complete byte-string alternatives; hex is a closed {hex: string}
     /// object with an even lowercase spelling and no additional properties.
     one_of: []const enum { string, hex_object } = &.{},
-    hex_pattern: ?[]const u8 = null,
-    hex_max_length: ?usize = null,
+    hex_object: ?struct {
+        property: []const u8 = "hex",
+        required: bool = true,
+        additional_properties: bool = false,
+        pattern: []const u8 = "^([0-9a-f]{2})*$",
+        max_length: usize,
+    } = null,
     source_paths_are_bytes: bool = false,
     source_env_is_bytes: bool = false,
     min: ?u64 = null,
@@ -437,9 +442,9 @@ fn leafFor(comptime T: type, comptime value: T, comptime pattern: []const u8, co
             row.json_schema.max_bytes = T.max_bytes;
             row.json_schema.format = if (T.absolute) "absolute-path" else null;
             row.json_schema.path_accepts_empty = T.allow_empty;
+            row.json_schema.type = .one_of;
             row.json_schema.one_of = &.{ .string, .hex_object };
-            row.json_schema.hex_pattern = "^([0-9a-f]{2})*$";
-            row.json_schema.hex_max_length = 2 * T.max_bytes;
+            row.json_schema.hex_object = .{ .max_length = 2 * T.max_bytes };
             row.json_schema.nullable = true;
             row.sample_json = "\"/tmp/host-settings\"";
             row.sample_text = "/tmp/host-settings";
@@ -2243,8 +2248,11 @@ test "Host settings every Path leaf round trips OS bytes and allowed path rules"
     defer gpa.destroy(b);
     for (leaves) |leaf| {
         if (!std.mem.eql(u8, leaf.kind, "path")) continue;
+        try std.testing.expectEqual(.one_of, leaf.json_schema.type);
         try std.testing.expectEqual(@as(usize, 2), leaf.json_schema.one_of.len);
-        try std.testing.expectEqual(leaf.json_schema.max_bytes.? * 2, leaf.json_schema.hex_max_length.?);
+        try std.testing.expect(leaf.json_schema.hex_object.?.required);
+        try std.testing.expect(!leaf.json_schema.hex_object.?.additional_properties);
+        try std.testing.expectEqual(leaf.json_schema.max_bytes.? * 2, leaf.json_schema.hex_object.?.max_length);
         const at = try concrete(gpa, leaf.pattern);
         defer gpa.free(at);
         const candidates = [_][]const u8{ "/tmp/utf8", "/tmp/\xff", "relative/path", "", "{raw-path", "null" };
