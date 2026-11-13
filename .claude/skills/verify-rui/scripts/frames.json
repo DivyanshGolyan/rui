@@ -41,33 +41,9 @@
         "/unarchive",
         "{session:Archive audit}",
         "Archived Archive audit"
-      ]
-    },
-    {
-      "name": "archived-list",
-      "note": "Archived rows show their name without a redundant archive tag or raw id",
-      "open": "overview",
-      "steps": [
-        {
-          "text": "/sessions archived"
-        },
-        {
-          "keys": [
-            "Enter"
-          ]
-        },
-        {
-          "wait": "Archive audit"
-        }
       ],
-      "expect": [
-        "✓ Archive audit"
-      ],
-      "absent": [
-        "[Archived]",
-        "/unarchive",
-        "{session:Archive audit}",
-        "· archived"
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -95,32 +71,9 @@
         "Archived Archive audit",
         "/unarchive",
         "{session:Archive audit}"
-      ]
-    },
-    {
-      "name": "transient-overview",
-      "note": "An overview command error occupies Footer once, without a separate reply row",
-      "open": "overview",
-      "steps": [
-        {
-          "text": "/nope"
-        },
-        {
-          "keys": [
-            "Enter"
-          ]
-        },
-        {
-          "wait": "Unknown command /nope"
-        }
       ],
-      "expect": [
-        "Unknown command /nope"
-      ],
-      "absent": [
-        "Archived Archive audit",
-        "/unarchive",
-        "{session:Archive audit}"
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -261,14 +214,54 @@
     },
     {
       "name": "start-empty",
-      "note": "01-overview-empty",
+      "note": "01-overview-empty: pinned actions without an editor or copied chat facts",
       "open": "overview",
       "steps": [],
       "expect": [
-        "Type a task",
+        "+ New Session",
         "Settings",
+        "enter open"
+      ],
+      "absent": [
+        "Type a task",
         "enter start",
         "gpt-6.1-sol · low"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
+    },
+    {
+      "name": "chat-empty",
+      "note": "01a-new-empty-chat: New Session opens the only input and its Session footer facts",
+      "open": "overview",
+      "steps": [
+        {
+          "keys": [
+            "Home",
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Type a task"
+        },
+        {
+          "wait": "○ New Session",
+          "min_columns": 140
+        }
+      ],
+      "expect": [
+        "Type a task",
+        "gpt-6.1-sol · low",
+        "code/rui",
+        "alt+i info"
+      ],
+      "absent": [
+        "enter start",
+        "Configured."
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -309,88 +302,9 @@
       "absent": [
         "› /effort",
         "enter pick"
-      ]
-    },
-    {
-      "name": "all-sessions",
-      "note": "Mixed archive states retain a quiet archived suffix; the archived-only list does not",
-      "open": "overview",
-      "steps": [
-        {
-          "text": "/sessions all"
-        },
-        {
-          "keys": [
-            "Enter"
-          ]
-        },
-        {
-          "wait": "Archive audit · archived"
-        }
       ],
-      "expect": [
-        "Archive audit · archived",
-        "Draft lifecycle"
-      ],
-      "absent": [
-        "[Archived]",
-        "Draft lifecycle · archived",
-        "{session:Archive audit}",
-        "{session:Draft lifecycle}"
-      ]
-    },
-    {
-      "name": "draft-overview-choice-escape",
-      "note": "B05: overview shares command choice cancellation",
-      "open": "overview",
-      "steps": [
-        {
-          "text": "/configure --permission-mode "
-        },
-        {
-          "wait": "bypass"
-        },
-        {
-          "keys": [
-            "Esc"
-          ]
-        },
-        {
-          "sleep": 0.5
-        }
-      ],
-      "expect": [
-        "Settings",
-        "Draft lifecycle"
-      ],
-      "absent": [
-        "› /configure",
-        "enter pick"
-      ]
-    },
-    {
-      "name": "draft-overview-unknown",
-      "note": "B06: an unknown command reports its error without retaining its draft",
-      "open": "overview",
-      "steps": [
-        {
-          "text": "/nope"
-        },
-        {
-          "keys": [
-            "Enter"
-          ]
-        },
-        {
-          "wait": "Unknown command /nope"
-        }
-      ],
-      "expect": [
-        "Unknown command /nope",
-        "Settings"
-      ],
-      "absent": [
-        "› /nope"
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -416,6 +330,9 @@
       ],
       "absent": [
         "› /nope"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -442,6 +359,12 @@
         "Sign-in",
         "Version",
         "Keys"
+      ],
+      "absent": [
+        "Type a task"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -469,7 +392,7 @@
           ]
         },
         {
-          "wait": "\u2713"
+          "wait": "✓"
         }
       ],
       "expect": [
@@ -481,7 +404,11 @@
       ],
       "absent": [
         "Filter:",
-        "\u2191 "
+        "↑ ",
+        "Type a task"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -509,7 +436,7 @@
           ]
         },
         {
-          "wait": "\u2713"
+          "wait": "✓"
         },
         {
           "text": "sol"
@@ -526,8 +453,12 @@
       ],
       "absent": [
         "Filter:",
-        "\u2191 ",
-        "gpt-5.5"
+        "↑ ",
+        "gpt-5.5",
+        "Type a task"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -559,13 +490,32 @@
         "Notifications",
         "Sign-in",
         "Version"
+      ],
+      "absent": [
+        "Type a task"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
       "name": "start-model",
-      "note": "New-chat model word opens the shared Model choice alone above the input",
+      "note": "Empty-chat model word opens the shared Model choice alone above the input",
       "open": "overview",
       "steps": [
+        {
+          "keys": [
+            "Home",
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Type a task"
+        },
+        {
+          "wait": "○ New Session",
+          "min_columns": 140
+        },
         {
           "mouse": {
             "at": "gpt-6.1-sol",
@@ -589,6 +539,9 @@
         "click to change",
         "▾",
         "Filter:"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -596,6 +549,19 @@
       "note": "Tab Tab Enter opens the shared Effort choice alone above the input",
       "open": "overview",
       "steps": [
+        {
+          "keys": [
+            "Home",
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Type a task"
+        },
+        {
+          "wait": "○ New Session",
+          "min_columns": 140
+        },
         {
           "keys": [
             "Tab",
@@ -623,13 +589,29 @@
         "click to change",
         "▾",
         "Filter:"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
       "name": "start-picked",
-      "note": "Picking xhigh in the new-chat Effort choice saves the default and closes the choice",
+      "note": "Picking xhigh in the empty-chat Effort choice saves this Session’s effort and closes the choice",
       "open": "overview",
       "steps": [
+        {
+          "keys": [
+            "Home",
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Type a task"
+        },
+        {
+          "wait": "○ New Session",
+          "min_columns": 140
+        },
         {
           "keys": [
             "Tab",
@@ -652,16 +634,221 @@
       ],
       "expect": [
         "gpt-6.1-sol · xhigh",
-        "Type a task",
-        "enter start"
+        "Type a task"
       ],
       "absent": [
         "gpt-6.1-sol · high",
         "Effort",
-        "✓",
+        "✓ xhigh",
         "click to change",
         "▾"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
+    },
+    {
+      "name": "empty-chat-left",
+      "note": "Creating and leaving without a Message keeps the Session stored but leaves no empty overview row",
+      "open": "overview",
+      "cast": [
+        {
+          "label": "Existing conversation",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "messages": [
+            "Keep this conversation visible."
+          ]
+        }
+      ],
+      "steps": [
+        {
+          "wait": "Existing conversation"
+        },
+        {
+          "keys": [
+            "Home",
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Type a task"
+        },
+        {
+          "keys": [
+            "Esc"
+          ]
+        },
+        {
+          "wait": "enter open"
+        }
+      ],
+      "expect": [
+        "+ New Session",
+        "Settings",
+        "enter open",
+        "Existing conversation"
+      ],
+      "absent": [
+        "Type a task",
+        "enter start"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ],
+      "sizes": [
+        "140x40",
+        "46x30"
+      ],
+      "first_frame": true
+    },
+    {
+      "name": "empty-chat-model-left",
+      "note": "Picking a different model without sending a Message still leaves no empty overview row",
+      "open": "overview",
+      "steps": [
+        {
+          "wait": "Existing conversation"
+        },
+        {
+          "keys": [
+            "Home",
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Type a task"
+        },
+        {
+          "mouse": {
+            "at": "gpt-6.1-sol",
+            "do": "click"
+          }
+        },
+        {
+          "wait": "Model"
+        },
+        {
+          "text": "ter"
+        },
+        {
+          "wait": "ter\n"
+        },
+        {
+          "wait": "gpt-6.1-terra"
+        },
+        {
+          "keys": [
+            "Down",
+            "Enter"
+          ]
+        },
+        {
+          "gone": "Model"
+        },
+        {
+          "wait": "gpt-6.1-terra ·"
+        },
+        {
+          "keys": [
+            "Esc"
+          ]
+        },
+        {
+          "wait": "enter open"
+        }
+      ],
+      "expect": [
+        "+ New Session",
+        "Settings",
+        "enter open",
+        "Existing conversation"
+      ],
+      "absent": [
+        "Type a task",
+        "enter start"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ],
+      "sizes": [
+        "140x40",
+        "46x30"
+      ],
+      "first_frame": true
+    },
+    {
+      "name": "empty-chat-two-left",
+      "note": "Two abandoned empty chats leave both existing conversations visible and no raw-ID rows",
+      "open": "overview",
+      "cast": [
+        {
+          "label": "Existing second conversation",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "messages": [
+            "Keep this second conversation visible."
+          ]
+        }
+      ],
+      "steps": [
+        {
+          "wait": "Existing second conversation"
+        },
+        {
+          "keys": [
+            "Home",
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Type a task"
+        },
+        {
+          "keys": [
+            "Esc"
+          ]
+        },
+        {
+          "wait": "enter open"
+        },
+        {
+          "keys": [
+            "Home",
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Type a task"
+        },
+        {
+          "keys": [
+            "Esc"
+          ]
+        },
+        {
+          "wait": "enter open"
+        }
+      ],
+      "expect": [
+        "+ New Session",
+        "Settings",
+        "enter open",
+        "Existing conversation",
+        "Existing second conversation"
+      ],
+      "absent": [
+        "Type a task",
+        "enter start"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ],
+      "sizes": [
+        "140x40",
+        "46x30"
+      ],
+      "first_frame": true
     },
     {
       "name": "mouse-settings",
@@ -692,6 +879,12 @@
         "Notifications",
         "Sign-in",
         "Version"
+      ],
+      "absent": [
+        "Type a task"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -777,7 +970,13 @@
       "expect": [
         "Schema migration",
         "Settings",
-        "\u25a0"
+        "■"
+      ],
+      "absent": [
+        "Type a task"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -803,6 +1002,12 @@
         "Settings",
         "■",
         "Release notes for 0.60"
+      ],
+      "absent": [
+        "Type a task"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -827,6 +1032,12 @@
         "Schema migration",
         "Settings",
         "■"
+      ],
+      "absent": [
+        "Type a task"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -876,11 +1087,17 @@
         "Docs build",
         "Benchmark idle memory",
         "Settings"
+      ],
+      "absent": [
+        "Type a task"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
       "name": "chat",
-      "note": "10-conversation: tool rows stay folded, with named failed exits",
+      "note": "10-conversation: active chat keeps tool folds and has no sidebar composer",
       "open": "Fix retry deadline",
       "steps": [
         {
@@ -911,7 +1128,12 @@
       "absent": [
         "asks before Bash/MCP",
         "Type a message",
-        "enter sends"
+        "enter sends",
+        "Type a task",
+        "enter start"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -952,6 +1174,9 @@
         "Configured.",
         "click to change",
         "▾"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -997,6 +1222,9 @@
         "enter sends",
         " · exit 127",
         " · exit 1"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -1015,7 +1243,7 @@
           "wait": "    stderr tail:"
         },
         {
-          "gone": "Opening tool output\u2026"
+          "gone": "Opening tool output…"
         },
         {
           "keys": [
@@ -1026,7 +1254,7 @@
           "wait": "    unknown option --help"
         },
         {
-          "gone": "\u25b8"
+          "gone": "▸"
         }
       ],
       "expect": [
@@ -1042,7 +1270,10 @@
         "46x30",
         "140x40"
       ],
-      "note": "10a-tool-open: Ctrl-O selects the lowest tool; output is indented on its band, other rows folded; no extra mark; literal stored envelope in quiet colour"
+      "note": "10a-tool-open: Ctrl-O selects the lowest tool; output is indented on its band, other rows folded; no extra mark; literal stored envelope in quiet colour",
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
     },
     {
       "name": "tool-open-two",
@@ -1087,10 +1318,10 @@
           ]
         },
         {
-          "wait": "\u2713 List project files"
+          "wait": "✓ List project files"
         },
         {
-          "gone": "\u00d7 Fail with exit 127"
+          "gone": "× Fail with exit 127"
         },
         {
           "keys": [
@@ -1114,11 +1345,11 @@
           "wait": "    unknown option --help"
         },
         {
-          "gone": "\u25b8"
+          "gone": "▸"
         }
       ],
       "expect": [
-        "\u2713 List project files",
+        "✓ List project files",
         "    Bash succeeded. Exit code: 0.",
         "    stdout tail:",
         "    README.md",
@@ -1138,6 +1369,9 @@
       "absent": [
         " · exit 127",
         " · exit 1"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -1166,24 +1400,27 @@
           "wait": "more lines"
         },
         {
-          "gone": "Opening tool output\u2026"
+          "gone": "Opening tool output…"
         },
         {
-          "gone": "\u25b8"
+          "gone": "▸"
         }
       ],
       "expect": [
-        "\u2713 Print thirty-two lines",
+        "✓ Print thirty-two lines",
         "    Bash succeeded. Exit code: 0.",
         "    stdout tail:",
         "    output line 18",
-        "    \u2026 14 more lines"
+        "    … 14 more lines"
       ],
       "sizes": [
         "46x30",
         "140x40"
       ],
-      "note": "10c-tool-open-long: twenty quiet stored-result rows, including status and label, then fourteen remaining lines"
+      "note": "10c-tool-open-long: twenty quiet stored-result rows, including status and label, then fourteen remaining lines",
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
     },
     {
       "name": "tool-open-nocolor",
@@ -1204,7 +1441,7 @@
           "wait": "    stderr tail:"
         },
         {
-          "gone": "Opening tool output\u2026"
+          "gone": "Opening tool output…"
         },
         {
           "keys": [
@@ -1215,7 +1452,7 @@
           "wait": "    unknown option --help"
         },
         {
-          "gone": "\u25b8"
+          "gone": "▸"
         }
       ],
       "expect": [
@@ -1231,7 +1468,10 @@
         "46x30",
         "140x40"
       ],
-      "note": "10d-tool-open-nocolor: the same open tool is indented without selection or output backgrounds; no extra mark; literal stored envelope in quiet colour"
+      "note": "10d-tool-open-nocolor: the same open tool is indented without selection or output backgrounds; no extra mark; literal stored envelope in quiet colour",
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
     },
     {
       "name": "chat-draft-kept",
@@ -1249,7 +1489,7 @@
           ]
         },
         {
-          "wait": "Type a task"
+          "wait": "enter open"
         },
         {
           "keys": [
@@ -1260,7 +1500,10 @@
           "wait": "Keep this chat draft"
         }
       ],
-      "expect": "Keep this chat draft"
+      "expect": "Keep this chat draft",
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
     },
     {
       "name": "chat-scrolled",
@@ -1273,11 +1516,14 @@
           ]
         },
         {
-          "wait": "\u2193"
+          "wait": "↓"
         }
       ],
       "expect": [
-        "\u2193"
+        "↓"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -1299,7 +1545,10 @@
       ],
       "expect": [
         "The retry loop waits",
-        "\u2193"
+        "↓"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -1331,8 +1580,11 @@
       ],
       "expect": [
         "The retry loop waits",
-        "\u2193",
+        "↓",
         "new"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -1361,6 +1613,9 @@
         "pub fn next",
         "Late request  waits 30 s  fails at once",
         "retry policy notes"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -1384,6 +1639,9 @@
         "expired",
         "Late request  waits 30 s  fails at once",
         "retry policy notes"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -1423,6 +1681,9 @@
       ],
       "absent": [
         "Waiting"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -1461,6 +1722,9 @@
       ],
       "absent": [
         "No code block in the last answer."
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -1490,7 +1754,7 @@
           ]
         },
         {
-          "wait": "\u25cc and one more thing"
+          "wait": "◌ and one more thing"
         }
       ],
       "cast": [
@@ -1506,11 +1770,14 @@
       ],
       "absent": [
         "Waiting"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
       "name": "tools-running",
-      "note": "14-tools-running: \u2839 marks active tool calls; owns its parallel jobs, leaving the retry transcript unchanged",
+      "note": "14-tools-running: ⠹ marks active tool calls; owns its parallel jobs, leaving the retry transcript unchanged",
       "open": "Run parallel checks",
       "steps": [
         {
@@ -1531,7 +1798,7 @@
         }
       ],
       "expect": [
-        "\u2839 Build the docs",
+        "⠹ Build the docs",
         "Run the slow tests",
         "ctrl+x stop"
       ],
@@ -1545,6 +1812,9 @@
             "Ready."
           ]
         }
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -1571,7 +1841,7 @@
           }
         },
         {
-          "wait": "\u2839 Sleep eight seconds"
+          "wait": "⠹ Sleep eight seconds"
         },
         {
           "keys": [
@@ -1579,7 +1849,7 @@
           ]
         },
         {
-          "wait": "\u25a0 Stopped",
+          "wait": "■ Stopped",
           "timeout": 60
         }
       ],
@@ -1596,7 +1866,10 @@
       "first_frame": true,
       "expect_next": {
         "■ Stop the slow job": "   Stopped"
-      }
+      },
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
     },
     {
       "name": "stop-narrow",
@@ -1642,31 +1915,40 @@
       "sizes": [
         "46x30"
       ],
-      "first_frame": true
+      "first_frame": true,
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
     },
     {
       "name": "stopped",
-      "note": "14d-stopped: one \u25a0 Stopped line, without continuation advice; independently seeded with settle: stop",
+      "note": "14d-stopped: one ■ Stopped line, without continuation advice; independently seeded with settle: stop",
       "open": "Profile the Host under load",
       "steps": [
         {
-          "wait": "\u25a0 Stopped"
+          "wait": "■ Stopped"
         }
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
       "name": "chat-failed",
-      "note": "16-conversation-failed: \u00d7 Model reply unreadable, without a saved code or provider report",
+      "note": "16-conversation-failed: × Model reply unreadable, without a saved code or provider report",
       "open": "Flaky upload test",
       "steps": [
         {
-          "wait": "\u00d7 Model reply unreadable \u00b7 ctrl+r retries"
+          "wait": "× Model reply unreadable · ctrl+r retries"
         }
       ],
       "absent": [
         "asks before Bash/MCP",
         "Type a message",
         "enter sends"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -1688,7 +1970,10 @@
         "asks before Bash/MCP",
         "Type a message",
         "enter sends",
-        "more lines \u00b7 shift+\u2193"
+        "more lines · shift+↓"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -1717,6 +2002,9 @@
       ],
       "expect": [
         "Deny"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -1739,7 +2027,10 @@
         "approving it."
       ],
       "absent": [
-        "more lines \u00b7 shift+\u2193"
+        "more lines · shift+↓"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -1761,11 +2052,14 @@
         {
           "wait": "Allow once"
         }
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
       "name": "keys",
-      "note": "20-keys: eleven entries, aligned pairs at 140 and one column at 46",
+      "note": "20-keys: thirteen entries, aligned pairs at 140 and one column at 46",
       "open": "overview",
       "steps": [
         {
@@ -1793,7 +2087,7 @@
         }
       ],
       "expect": [
-        "enter    send",
+        "enter    open / send",
         "esc      back",
         "⇧enter   new line",
         "ctrl+x   stop",
@@ -1827,7 +2121,11 @@
         "scroll / select",
         "/status",
         "/configure",
-        "/model"
+        "/model",
+        "Type a task"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -1858,6 +2156,9 @@
         "/status",
         "/configure",
         "/model"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -1885,32 +2186,52 @@
         "/copy",
         "code · file",
         "/effort"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
-      "name": "slash-overview",
-      "note": "Overview slash list: names only with quiet fixed-choice words",
+      "name": "overview-printable-ignored",
+      "note": "The list ignores printable input and has no command path",
       "open": "overview",
       "steps": [
         {
-          "text": "/"
+          "text": "/nope"
         },
         {
-          "wait": "/sessions"
+          "keys": [
+            "End",
+            "Enter"
+          ]
         },
         {
-          "gone": "/configure [OPTIONS]"
+          "wait": "Notifications"
+        },
+        {
+          "keys": [
+            "Esc"
+          ]
+        },
+        {
+          "wait": "enter open"
         }
       ],
       "expect": [
-        "/archive",
-        "/sessions",
-        "unarchived · archived · all",
-        "/unarchive"
+        "+ New Session",
+        "Settings",
+        "enter open"
       ],
       "absent": [
-        "/help",
-        "/model"
+        "Type a task",
+        "/nope",
+        "Unknown command",
+        "/sessions",
+        "/archive",
+        "/configure"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -1924,6 +2245,9 @@
         {
           "wait": "/copy"
         }
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -1942,6 +2266,9 @@
         {
           "wait": "Unknown command /nope"
         }
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -1971,6 +2298,9 @@
         {
           "wait": "Usage: /requests"
         }
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -2000,12 +2330,12 @@
         "Folder",
         "Model",
         "Copy last answer",
-        "Retry deadline info \u00b7 info",
+        "Retry deadline info · info",
         "esc close",
         "~/code/rui",
         "Backoff stays within time left.",
         "The retry draft is ready.",
-        "\u203a keep this retry draft"
+        "› keep this retry draft"
       ],
       "absent": [
         "Context",
@@ -2022,6 +2352,9 @@
             "Give a chat info specimen summarizing the retry deadline fix."
           ]
         }
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -2052,25 +2385,28 @@
           ]
         },
         {
-          "wait": "\u2713"
+          "wait": "✓"
         }
       ],
       "expect": [
         "Model",
         "gpt-6.1-sol",
-        "Retry deadline info \u00b7 info",
+        "Retry deadline info · info",
         "esc close",
-        "\u2713",
+        "✓",
         "Backoff stays within time left.",
         "The retry draft is ready.",
-        "\u203a keep this retry draft"
+        "› keep this retry draft"
       ],
       "absent": [
         "Context",
         "unknown of",
         "alt+i info",
         "Filter:",
-        "\u2191 "
+        "↑ "
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -2098,17 +2434,21 @@
           ]
         },
         {
-          "wait": "\u2713"
+          "wait": "✓"
         }
       ],
       "expect": [
         "Model",
         "gpt-6.1-sol",
-        "\u2713"
+        "✓"
       ],
       "absent": [
         "Filter:",
-        "\u2191 "
+        "↑ ",
+        "Type a task"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -2136,7 +2476,7 @@
           ]
         },
         {
-          "wait": "\u2713"
+          "wait": "✓"
         },
         {
           "text": "ter"
@@ -2152,24 +2492,43 @@
       ],
       "absent": [
         "Filter:",
-        "\u2191 "
+        "↑ ",
+        "Type a task"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
       "name": "start-draft",
-      "note": "48-overview-draft",
+      "note": "48-new-chat-draft: task typing happens only after New Session opens",
       "open": "overview",
       "steps": [
+        {
+          "keys": [
+            "Home",
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Type a task"
+        },
         {
           "text": "Add a --json flag to rui session list"
         },
         {
-          "wait": "enter start"
+          "wait": "Add a --json flag"
         }
       ],
       "expect": [
-        "Settings",
+        "Add a --json flag",
+        "gpt-6.1-sol · low"
+      ],
+      "absent": [
         "enter start"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -2195,6 +2554,12 @@
       "expect": [
         "Migrate the billing",
         "Settings"
+      ],
+      "absent": [
+        "Type a task"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -2220,13 +2585,17 @@
       ],
       "expect": [
         "Batch job",
-        "\u2193",
+        "↓",
         "more",
         "Settings"
       ],
       "absent": [
         "↑",
-        "↓ 0 more"
+        "↓ 0 more",
+        "Type a task"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -2278,7 +2647,11 @@
       ],
       "absent": [
         "↑ 0 more",
-        "↓ 0 more"
+        "↓ 0 more",
+        "Type a task"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -2312,7 +2685,11 @@
       ],
       "absent": [
         "↓",
-        "↑ 0 more"
+        "↑ 0 more",
+        "Type a task"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -2330,7 +2707,10 @@
           ]
         },
         {
-          "wait": "Settings"
+          "wait": "↑"
+        },
+        {
+          "gone": "↓"
         }
       ],
       "sizes": [
@@ -2345,7 +2725,11 @@
       ],
       "absent": [
         "↓",
-        "↑ 0 more"
+        "↑ 0 more",
+        "Type a task"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -2382,6 +2766,9 @@
           "mode": "bypass",
           "effort": "high"
         }
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -2405,6 +2792,9 @@
       "expect_last": "alt+i info",
       "absent": [
         "+ New Session"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -2414,8 +2804,17 @@
       "steps": [],
       "theme": "day",
       "expect": [
+        "+ New Session",
+        "Settings",
+        "enter open"
+      ],
+      "absent": [
         "Type a task",
-        "Settings"
+        "enter start",
+        "gpt-6.1-sol · low"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -2434,6 +2833,9 @@
         "pub fn next",
         "Late request  waits 30 s  fails at once",
         "retry policy notes"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -2447,12 +2849,15 @@
           ]
         },
         {
-          "wait": "\u2193"
+          "wait": "↓"
         }
       ],
       "theme": "mist",
       "expect": [
-        "\u2193"
+        "↓"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -2473,6 +2878,9 @@
         "pub fn next",
         "Late request  waits 30 s  fails at once",
         "retry policy notes"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -2486,6 +2894,12 @@
         {
           "wait": "Host stopped"
         }
+      ],
+      "absent": [
+        "Type a task"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -2510,7 +2924,10 @@
         "46x30",
         "140x40"
       ],
-      "expect": "Host stopped"
+      "expect": "Host stopped",
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
     },
     {
       "name": "host-back",
@@ -2524,7 +2941,13 @@
           "gone": "Host stopped"
         }
       ],
-      "expect": "Batch job"
+      "expect": "Batch job",
+      "absent": [
+        "Type a task"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
     },
     {
       "name": "exit",
@@ -2547,7 +2970,10 @@
         "46x30",
         "140x40"
       ],
-      "expect": "Detached. Host work continues."
+      "expect": "Detached. Host work continues.",
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
     }
   ]
 }
