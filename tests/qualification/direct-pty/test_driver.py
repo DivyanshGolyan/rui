@@ -150,22 +150,25 @@ class OverviewTests(unittest.TestCase):
             def wait(self, predicate, *, label):
                 assert predicate(), label
 
-        frame = "  + New Session\n  ○ a1b2c3\n  Settings\nenter open"
-        escaped_overview(Terminal(frame), "a1b2c3")
-        for marker in ("+ New Session", "○ a1b2c3", "Settings", "enter open"):
+        frame = "  + New Session\n  ✓ TD4 saved conversation\n  Settings\nenter open"
+        escaped_overview(Terminal(frame), "TD4 saved conversation")
+        for marker in ("+ New Session", "TD4 saved conversation", "Settings", "enter open"):
             with self.subTest(missing=marker), self.assertRaisesRegex(AssertionError, "overview after expired standalone Esc"):
-                escaped_overview(Terminal(frame.replace(marker, "missing")), "a1b2c3")
+                escaped_overview(Terminal(frame.replace(marker, "missing")), "TD4 saved conversation")
+        with self.assertRaisesRegex(AssertionError, "overview after expired standalone Esc"):
+            escaped_overview(Terminal(frame.replace("✓ TD4 saved conversation", "○ a1b2c3")),
+                             "TD4 saved conversation")
         for editor, failure in (("Type a task", "overview has an editor"),
                                 (" › ab", "overview has a composer"),
                                 (" > ab", "overview has a composer"),
                                 ("sidebar │ › ab", "overview has a composer")):
             with self.subTest(editor=editor), self.assertRaisesRegex(AssertionError, failure):
-                escaped_overview(Terminal(frame + "\n" + editor), "a1b2c3")
+                escaped_overview(Terminal(frame + "\n" + editor), "TD4 saved conversation")
 
 
     def test_editor_reopen_waits_for_restored_draft_not_empty_chat_reference(self):
         from types import SimpleNamespace
-        from unittest.mock import Mock
+        from unittest.mock import Mock, call
         with patch.object(sys, "argv", [sys.argv[0], sys.executable]):
             import scenarios
 
@@ -177,13 +180,37 @@ class OverviewTests(unittest.TestCase):
         with patch.object(scenarios, "chunks"), patch.object(scenarios, "escaped_overview") as overview, \
                 patch.object(scenarios, "assert_submitted") as submitted, patch.object(scenarios, "leave"):
             scenarios.editor(fixture, row)
-        overview.assert_called_once_with(tty, fixture.session)
-        tty.send.assert_called_once_with(b"\r")
-        tty.draft.assert_any_call("ab", 4)
-        tty.draft.assert_any_call("", 2)
-        tty.marker.assert_called_once_with("TD4 exact answer")
-        self.assertEqual(submitted.call_count, 2)
-        submitted.assert_called_with(fixture.endpoint.requests, ["abZ"])
+        fixture.answer.assert_has_calls([call("TD4 saved conversation answer"), call("TD4 exact answer")])
+        overview.assert_called_once_with(tty, "TD4 saved conversation")
+        self.assertEqual(tty.send.call_args_list, [call(b"TD4 saved conversation\r"), call(b"\x1b[H\x1b[B\r")])
+        self.assertEqual(tty.draft.call_args_list, [call("", 2), call("ab", 4), call("", 2)])
+        self.assertEqual(tty.marker.call_args_list, [call("TD4 saved conversation answer"), call("TD4 exact answer")])
+        self.assertEqual(submitted.call_args_list, [
+            call(fixture.endpoint.requests, ["TD4 saved conversation"]),
+            call(fixture.endpoint.requests, ["TD4 saved conversation", "abZ"]),
+            call(fixture.endpoint.requests, ["TD4 saved conversation", "abZ"]),
+        ])
+
+
+    def test_editor_without_reopen_keeps_single_exact_message(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock, call
+        with patch.object(sys, "argv", [sys.argv[0], sys.executable]):
+            import scenarios
+
+        tty = Mock()
+        fixture = SimpleNamespace(answer=Mock(), terminal=lambda: tty,
+                                  endpoint=SimpleNamespace(requests=[]))
+        row = next(row for row in inventory() if row["name"] == "ctrl-u")
+        with patch.object(scenarios, "chunks") as sent, patch.object(scenarios, "escaped_overview") as overview, \
+                patch.object(scenarios, "assert_submitted") as submitted, patch.object(scenarios, "leave"):
+            scenarios.editor(fixture, row)
+        fixture.answer.assert_called_once_with("TD4 exact answer")
+        sent.assert_called_once_with(tty, row["chunks"])
+        overview.assert_not_called()
+        tty.send.assert_not_called()
+        tty.draft.assert_called_once_with("", 2)
+        self.assertEqual(submitted.call_args_list, [call(fixture.endpoint.requests, ["keep"])] * 2)
 
 
 class ExitTests(unittest.TestCase):
