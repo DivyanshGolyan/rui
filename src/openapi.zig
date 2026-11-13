@@ -1406,14 +1406,14 @@ fn checkSettingsPreset(gpa: std.mem.Allocator, spec: ObjectMap) error{OutOfMemor
 fn applySettingsSample(d: *Document, pattern: []const u8, value: Value, accepted: bool) !void {
     const sample = if (pattern.len == 0) value else try settingsSample(d, pattern, value);
     const schema = d.schemas.get("HostSettings").?;
-    try std.testing.expectEqual(accepted, conforms(d.schemas, schema, sample));
     const text = try std.json.Stringify.valueAlloc(d.arena, sample, .{});
+    errdefer std.debug.print("settings schema witness {s}: {s}\n", .{ pattern, text });
+    try std.testing.expectEqual(accepted, conforms(d.schemas, schema, sample));
     const settings = try std.testing.allocator.create(host_settings.Settings);
     defer std.testing.allocator.destroy(settings);
     settings.* = .{};
     defer settings.deinit();
     var failure: start_report.Failure = undefined;
-    errdefer std.debug.print("settings schema witness {s}: {s}\n", .{ pattern, text });
     if (accepted) {
         try host_settings.apply(settings, d.arena, text, .pipe, checkSettingsPreset, &failure);
         var output: std.Io.Writer.Allocating = .init(d.arena);
