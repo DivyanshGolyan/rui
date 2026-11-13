@@ -94,7 +94,7 @@ def prove_fragmented_request():
 def start(store, capacity, *options):
     return start_ready_process(
         [RUI, "host", "serve", "--store", store, "--active-capacity", str(capacity), *options],
-        required_fields={"activeCapacity": str(capacity)},
+        required_fields={"active_capacity": str(capacity)},
         observations="status" if "--test-phase-trace" in options else None,
     )
 
@@ -553,10 +553,10 @@ def main():
                 stale.unlink()
             noncanonical = json.dumps({
                 "version": host_process.WIRE_VERSION, "type": "host_info", "store": str(store.resolve()),
-                "instance": "0" * 32, "activeCapacity": "01", "started_at": "1792918800", "custody_occupied": "1",
+                "instance": "0" * 32, "active_capacity": "01", "started_at": "1792918800", "custody_occupied": "1",
                 "paused": False, "capabilities": {"bash": True, "providers": {"codex": "unserved", "openai": "unserved", "chatgpt": "unserved"}},
             }).encode()
-            valid_body = noncanonical.replace(b'"activeCapacity": "01"', b'"activeCapacity": "1"')
+            valid_body = noncanonical.replace(b'"active_capacity": "01"', b'"active_capacity": "1"')
             ambiguous_bodies = (
                 valid_body.replace(b'"store": ', b'"store": "/wrong", "store": ', 1),
                 valid_body.replace(b'"bash": true', b'"bash": false, "bash": true'),
@@ -692,7 +692,7 @@ def main():
             selected = exchange("host_info", lambda: cli_status(home))
             assert selected == {
                 "version": host_process.WIRE_VERSION, "type": "host_status", "status": "ready", "store": str(store.resolve()),
-                "instance": match.group(1), "activeCapacity": "3", "intake_capacity": "100",
+                "instance": match.group(1), "active_capacity": "3", "intake_capacity": "100",
                 "descriptor_limit": fields["descriptor_limit"], "started_at": started_at, "custody_occupied": "0",
                 "paused": False, "capabilities": {"bash": True, "providers": {"codex": "chatgpt_device", "openai": "unserved", "chatgpt": "unserved"}},
                 "diagnostics": f"{store.resolve()}/diagnostics",
@@ -711,7 +711,7 @@ def main():
             assert "innodb_doublewrite" not in json.loads(body), body
             assert json.loads(body) == {
                 "version": host_process.WIRE_VERSION, "type": "host_info", "store": str(store.resolve()),
-                "instance": match.group(1), "activeCapacity": "3",
+                "instance": match.group(1), "active_capacity": "3",
                 "intake_capacity": "100", "descriptor_limit": fields["descriptor_limit"],
                 "started_at": started_at, "custody_occupied": "0", "paused": False,
                 "capabilities": {"bash": True, "providers": {"codex": "chatgpt_device", "openai": "unserved", "chatgpt": "unserved"}},
