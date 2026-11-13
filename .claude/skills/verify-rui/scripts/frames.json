@@ -5,6 +5,82 @@
   ],
   "states": [
     {
+      "name": "appcmds-skill-without-preview",
+      "note": "Whole-line bracketed paste uses normal Message admission, never the suggestion preview",
+      "open": "Catalog authority",
+      "cast": [
+        {
+          "label": "Catalog authority",
+          "workspace": "code/rui",
+          "messages": [
+            "Seed a fresh chat."
+          ],
+          "mode": "bypass",
+          "skills": [
+            "review"
+          ]
+        }
+      ],
+      "steps": [
+        {
+          "text": "\u001b[200~/review this change\u001b[201~"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "The deadline check now runs"
+        }
+      ],
+      "expect": [
+        "/review this change",
+        "The deadline check now runs"
+      ],
+      "absent": [
+        "Unknown command",
+        "Usage:"
+      ]
+    },
+    {
+      "name": "appcmds-unknown-name-message",
+      "note": "Whole-line bracketed paste uses normal Message admission, never the suggestion preview",
+      "open": "Catalog authority",
+      "cast": [
+        {
+          "label": "Catalog authority",
+          "workspace": "code/rui",
+          "messages": [
+            "Seed a fresh chat."
+          ],
+          "mode": "bypass",
+          "skills": []
+        }
+      ],
+      "steps": [
+        {
+          "text": "\u001b[200~/genuinely-unknown this change\u001b[201~"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "The deadline check now runs"
+        }
+      ],
+      "expect": [
+        "/genuinely-unknown this change",
+        "The deadline check now runs"
+      ],
+      "absent": [
+        "Unknown command",
+        "Usage:"
+      ]
+    },
+    {
       "name": "appcmds-conversation",
       "note": "All chat commands are listed beside skills with their descriptions",
       "open": "App command replacements",
@@ -564,12 +640,12 @@
       ]
     },
     {
-      "name": "draft-chat-unknown",
+      "name": "draft-chat-misused",
       "note": "B06: conversation counterpart uses the same draft-ending rule",
       "open": "Draft lifecycle",
       "steps": [
         {
-          "text": "/nope"
+          "text": "/new unexpected"
         },
         {
           "keys": [
@@ -577,15 +653,15 @@
           ]
         },
         {
-          "wait": "Unknown command /nope"
+          "wait": "Usage: /new"
         }
       ],
       "expect": [
-        "Unknown command /nope",
+        "Usage: /new",
         "Draft lifecycle"
       ],
       "absent": [
-        "\u203a /nope"
+        "\u203a /new unexpected"
       ],
       "absent_regex": [
         "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
@@ -2507,12 +2583,12 @@
       ]
     },
     {
-      "name": "unknown-command",
-      "note": "25-unknown-command",
+      "name": "misused-navigation-command",
+      "note": "Known navigation-command misuse stays local and takes the draft",
       "open": "Release notes for 0.60",
       "steps": [
         {
-          "text": "/nope"
+          "text": "/new unexpected"
         },
         {
           "keys": [
@@ -2520,7 +2596,7 @@
           ]
         },
         {
-          "wait": "Unknown command /nope"
+          "wait": "Usage: /new"
         }
       ],
       "absent_regex": [

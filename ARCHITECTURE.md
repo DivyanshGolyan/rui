@@ -3085,11 +3085,11 @@ Typed chat info configuration and the `/setup` and `/result KEY` commands run on
 The slash commands’ unchanged CLI owners write complete stdout and stderr to the inspection scratch file.
 Output of up to two lines becomes a notice under the input without the CLI's `Rui: ` prefix, with `rui: ` diagnostics marked `!`; longer output opens as an inspection page under the `Browsing · Esc returns` heading.
 The Session screen stays in place and no command reads terminal input.
-`/discard` and `/recover KEY` answer with a notice; an unknown command shows `! Unknown command /NAME`, and a known one given an argument it does not take shows its usage, as `! Usage: /copy [code|file]`.
+`/discard` and `/recover KEY` answer with a notice; a known command given an argument it does not take shows its usage, as `! Usage: /copy [code|file]`. A line outside the local command grammar uses ordinary Message admission, unchanged. The Host resolves skill references against the Session's complete saved catalog; a name absent from that catalog stays literal agent text, not an unknown-command notice.
 
 `/new` and `/clear` are identical no-argument navigation commands: retain the old chat, retire its frontend normally, then invoke the same overview New Session transition and captured Configure creation owner. Neither creates a Message or deletes history. Both list as `start a new chat`.
 `/model` is a no-argument request for the same model choice that the footer button opens. Its semantic footer admission and choice preparation are shared; the existing tick/read boundary opens it once Current and the borrowed model source are ready. Choosing a model calls chat info’s existing typed Configure edit and re-reads Current for the footer; no model CLI path or second worker is added.
-The bounded list holds the twelve listed commands plus the loaded skill preview. A leading loaded skill is Message text; command names take precedence over same-named skills.
+The bounded list holds the twelve listed commands plus the loaded skill preview. Suggestion reads, including absent, failed and truncated previews, never decide whether a line is a Message. The Session catalog alone owns skill membership; command names take precedence over same-named skills.
 
 A command list appears when you type "/", built from the same table the command parser uses. /effort and /rename submit the corresponding Session configuration edits. (Divyansh approved this on 2026-10-31, front-end plan row 6.)
 

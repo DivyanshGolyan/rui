@@ -1972,6 +1972,54 @@ test "a Session lists the skills it saved for the caret's /word, and Tab or Ente
     try std.testing.expectEqualStrings("/review this change", try held.self.input.message(held.self.submission.intent.?.message));
 }
 
+test "Message routing ignores absent pending failed complete truncated and replaced skill previews" {
+    const Preview = enum { absent, pending, failed, complete, truncated, replaced };
+    const review = [_]skill_suggestions.Entry{.{ .name = "review", .description = "Review" }};
+    const other = [_]skill_suggestions.Entry{.{ .name = "unrelated", .description = "Other" }};
+    for (std.enums.values(Preview)) |preview| {
+        for ([_][]const u8{ "/review this change", "/genuinely-unknown this change" }) |text| {
+            const held = try HeldFrontend.create();
+            defer held.destroy();
+            const self = &held.self;
+            // These pages borrow the test's arrays, not heap allocations.
+            defer _ = self.skills.reset();
+            switch (preview) {
+                .absent => {},
+                .pending => _ = self.skills.ask(""),
+                .failed => self.skills.fail(self.skills.ask("").?.read),
+                .complete, .truncated, .replaced => {
+                    const first = self.skills.ask("").?;
+                    const page: skill_suggestions.Page = if (preview == .truncated)
+                        .{ .entries = @constCast(&other), .total = skill_suggestions.capacity + 1 }
+                    else
+                        .{ .entries = @constCast(&review), .total = if (preview == .complete) review.len else skill_suggestions.capacity + 1 };
+                    try std.testing.expect(self.skills.answer(first.read, page, "") == null);
+                    if (preview == .replaced) {
+                        // Another useful page replaced one containing review.
+                        const next = self.skills.ask("unrelated").?;
+                        try std.testing.expect(self.skills.answer(next.read, .{ .entries = @constCast(&other), .total = other.len }, "unrelated") != null);
+                    }
+                },
+            }
+            // A whole-line bracketed paste ends outside the skill word.
+            try held.keys("\x1b[200~");
+            try held.keys(text);
+            try held.keys("\x1b[201~");
+            try std.testing.expect(skill_completion.skillWordAt(self.input.composition().bytes, self.input.composition().cursor) == null);
+            try held.keys("\r");
+            try std.testing.expect(self.submission.intent != null);
+            try std.testing.expect(self.submission.intent.? == .message);
+            try std.testing.expectEqualStrings(text, try self.input.message(self.submission.intent.?.message));
+            try std.testing.expectEqualStrings("", self.input.composition().bytes);
+            // The ordinary Message hold preserves a second leading-slash draft.
+            _ = self.input.append(text);
+            try self.commandLine();
+            try std.testing.expectEqualStrings(text, self.input.composition().bytes);
+            try std.testing.expectEqualStrings(text, try self.input.message(self.submission.intent.?.message));
+        }
+    }
+}
+
 test "a Session's /reload-skills drops the skills it listed, and the next read lists the reloaded catalog" {
     const Fake = struct {
         var reloaded = false;
@@ -2823,7 +2871,11 @@ fn commandLine(self: *Self) !void {
             .refused => |why| self.notice = refusedNotice(why),
             else => if (taken.runs) try self.runLine(),
         }
-    } else if (slash_commands.parse(self.input.composition().bytes) == .unknown and self.skills.startsSkill(self.input.composition().bytes)) {
+    } else if (slash_commands.parse(self.input.composition().bytes) == .unknown) {
+        // Only the app grammar owns local commands. The Host binds skill
+        // references against this Session's complete catalog; suggestion
+        // pages are presentation, never Message-routing authority. Unknown
+        // /names remain literal agent text, even before any preview arrives.
         if (!self.admitsMessage()) return self.sayBusy(null, false);
         const ticket = self.input.submitText(self.input.composition().bytes);
         try self.beginMessage(.{ .message = ticket });
@@ -4116,14 +4168,20 @@ test "Esc at the latest view returns to the overview unless unsent text or a cho
 test "Up, Down and Enter take a row only from a list the latest frame drew" {
     const held = try HeldFrontend.create();
     defer held.destroy();
-    const self = &held.self;
     try held.settle();
     // The latest frame drew no list: Down scrolls rather than move a
     // highlight never seen, and Enter runs the line as typed.
     try stepKeys(held, "/\x1b[B");
     try std.testing.expectEqual(@as(usize, 0), held.screen.commands.?.highlight);
     try stepKeys(held, "\x15/un\r");
-    try std.testing.expectEqualStrings("! Unknown command /un", try barShows(held));
+    try std.testing.expect(held.self.submission.intent.? == .message);
+    try std.testing.expectEqualStrings("/un", try held.self.input.message(held.self.submission.intent.?.message));
+}
+
+test "Enter takes a drawn command through its existing conversation action" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
     // Drawn: Enter takes the highlighted /unarchive, through its existing conversation action.
     try stepKeys(held, "/un");
     try held.settle();
@@ -4193,7 +4251,14 @@ test "a key before a new Session's first frame finds no list the previous Sessio
     try std.testing.expectEqual(.drawn, held.screen.commands.?.seen);
     self.startInput();
     try stepKeys(held, "/set\r");
-    try std.testing.expectEqualStrings("! Unknown command /set", try barShows(held));
+    try std.testing.expect(self.submission.intent.? == .message);
+    try std.testing.expectEqualStrings("/set", try self.input.message(self.submission.intent.?.message));
+}
+
+test "a fresh Session draws its own command list after the first frame" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
     try stepKeys(held, "/set\t");
     try std.testing.expectEqualStrings("/set", self.input.composition().bytes);
     try std.testing.expectEqual(session_chrome.FooterFocus.model, self.footer.focus);

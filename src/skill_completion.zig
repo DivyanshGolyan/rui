@@ -145,18 +145,6 @@ pub const Reads = struct {
         return if (held) |kept| kept.page else null;
     }
 
-    /// Whether the first word names a skill in the held catalog preview.
-    /// Screens give known commands precedence and send this text unchanged.
-    pub fn startsSkill(self: *const Reads, draft: []const u8) bool {
-        if (draft.len == 0 or draft[0] != '/') return false;
-        const end = std.mem.indexOfAny(u8, draft, " \t\r\n") orelse draft.len;
-        const word = atCaret(draft, end) orelse return false;
-        if (word.slash != 0) return false;
-        const held = self.held orelse return false;
-        for (held.page.entries) |entry| if (std.mem.eql(u8, word.name(draft), entry.name)) return true;
-        return false;
-    }
-
     /// The Palette's rows for the draft at `revision`, with the caret at
     /// `caret`, after `previous`. In a `/word`: `commands` (the draft's own
     /// command list) when the word starts the draft, then the held page's
@@ -370,7 +358,6 @@ test "chat table lists all commands with descriptions plus every loaded skill" {
             try std.testing.expectEqualStrings(skill.name, std.mem.trimEnd(u8, entry.word, " "));
             try std.testing.expect(!entry.runs);
         }
-        try std.testing.expect(reads.startsSkill("/skill-00 task") == (count != 0));
     }
     inline for (.{ "/discard", "/recover", "/configurex", "/status", "/configure" }) |name| {
         const list = slash_commands.conversation.suggest(name, .{}).?;
