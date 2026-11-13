@@ -12,6 +12,7 @@ const client_defaults = @import("client_defaults.zig");
 const tools = @import("built_in_tool.zig");
 const ModelChoice = @import("model_choice.zig");
 const keymap = @import("keymap.zig");
+const keypress = @import("keypress.zig");
 const Editor = @import("DraftEditor.zig");
 const panel_editor = @import("panel_editor.zig");
 const TerminalText = @import("TerminalText.zig");
@@ -375,7 +376,7 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
     defer if (input == .paste_end) {
         self.pasting = false;
     };
-    if (input == .key_press and (keymap.named(input.key_press) == .escape or keymap.named(input.key_press) == .ctrl_g) and (self.hasChoice() or self.standalone != null) and !self.pasting) {
+    if (input == .key_press and (keypress.named(input.key_press) == .escape or keypress.named(input.key_press) == .ctrl_g) and (self.hasChoice() or self.standalone != null) and !self.pasting) {
         if (self.standalone != null) self.closeStandaloneChoice() else self.cancelChoice();
         ctx.consumeAndRedraw();
         return;

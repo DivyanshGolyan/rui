@@ -9,6 +9,7 @@ const picker_view = @import("model_picker_view.zig");
 const catalog = @import("model_catalog.zig");
 const Editor = @import("DraftEditor.zig");
 const keymap = @import("keymap.zig");
+const keypress = @import("keypress.zig");
 const panel_editor = @import("panel_editor.zig");
 const Panel = @import("widgets/Panel.zig");
 const Hover = @import("widgets/Hover.zig");
@@ -99,7 +100,7 @@ pub fn validate(self: *Self) bool {
 
 /// Named application actions remain the caller's; arrows and text filter.
 pub fn takesKey(key: vaxis.Key) bool {
-    return keymap.named(key) == null or key.matches(vaxis.Key.up, .{}) or key.matches(vaxis.Key.down, .{});
+    return keypress.named(key) == null or key.matches(vaxis.Key.up, .{}) or key.matches(vaxis.Key.down, .{});
 }
 
 pub fn cancel(self: *Self) void {

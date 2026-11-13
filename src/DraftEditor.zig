@@ -8,6 +8,7 @@ const std = @import("std");
 const vaxis = @import("vaxis");
 const TextArea = vaxis.vxfw.TextArea;
 const keymap = @import("keymap.zig");
+const keypress = @import("keypress.zig");
 const Key = keymap.Key;
 const Editor = @This();
 
@@ -200,7 +201,7 @@ fn settle(self: *Editor, result: TextArea.Result, at_end: bool) KeyOutcome {
 fn key(self: *Editor, value: vaxis.Key) KeyOutcome {
     // Root's paste ended without reaching this editor: close its own.
     if (self.pasting()) _ = self.finishPaste(.explicit);
-    const press = keymap.classify(value);
+    const press = keypress.classify(value);
     switch (press) {
         .key => |key_name| return self.edit(key_name) orelse .{ .action = key_name },
         .enter => return if (self.rejected) |why| .{ .refused = why } else .submit,

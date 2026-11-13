@@ -27,6 +27,7 @@ const Task = @import("ClientTask.zig");
 const Screen = @import("SessionScreen.zig");
 const Editor = @import("DraftEditor.zig");
 const keymap = @import("keymap.zig");
+const keypress = @import("keypress.zig");
 const overview_view = @import("overview_view.zig");
 const test_poll = @import("test_poll");
 const View = @import("session_view.zig");
@@ -954,7 +955,7 @@ fn sessionKey(event: vxfw.Event) session_keys.Key {
     return switch (event) {
         .paste_start => .paste_start,
         .paste_end => .paste_end,
-        .key_press => |key| if (keymap.named(key)) |name| .{ .named = name } else if (keymap.isEnter(key)) .enter else if (key.matchExact(vaxis.Key.tab, .{})) .tab else if (key.matchExact(vaxis.Key.tab, .{ .shift = true })) .shift_tab else if (key.matches('i', .{ .alt = true })) .info else if (key.matches('d', .{ .alt = true })) .details else if (hostStartKey(key)) .host_start else switch (keymap.selectKey(conversation_keys, key)) {
+        .key_press => |key| if (keypress.named(key)) |name| .{ .named = name } else if (keypress.isEnter(key)) .enter else if (key.matchExact(vaxis.Key.tab, .{})) .tab else if (key.matchExact(vaxis.Key.tab, .{ .shift = true })) .shift_tab else if (key.matches('i', .{ .alt = true })) .info else if (key.matches('d', .{ .alt = true })) .details else if (hostStartKey(key)) .host_start else switch (keypress.selectKey(conversation_keys, key)) {
             .left => .left,
             .right => .right,
             .text => .text,

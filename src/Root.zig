@@ -194,7 +194,7 @@ pub fn closeSession(self: *Self, ctx: *vxfw.EventContext) !void {
 fn capture(raw: *anyopaque, ctx: *vxfw.EventContext, routed: vxfw.Event) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     const input: app_input.Input = switch (routed) {
-        .key_press => |key| .{ .key = .{ .named = @import("keymap.zig").named(key) } },
+        .key_press => |key| .{ .key = .{ .named = @import("keypress.zig").named(key) } },
         .paste_start => .paste_start,
         .paste_end => .paste_end,
         .mouse => |mouse| .{ .mouse = switch (mouse.button) {

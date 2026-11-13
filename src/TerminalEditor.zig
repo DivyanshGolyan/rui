@@ -5,7 +5,6 @@ const std = @import("std");
 const termios = @import("posix");
 const keymap = @import("keymap.zig");
 
-
 // libc's termios is not the Linux kernel ABI used by std.posix.termios.
 // Keep the native type at this boundary, including speeds and all cc entries.
 pub const Attributes = termios.struct_termios;
