@@ -1485,10 +1485,7 @@ pub fn settleModelSuccess(a: anytype, io: std.Io, binding: AttemptBinding, outpu
     a.readInto(success_facts, .{ .operation_id = binding.operation_id }, &success, &success_found);
     a.read(pending_messages, .{ .operation_id = binding.operation_id }, &pending);
     // BEGIN IMMEDIATE ran when the first read was queued.
-    if (a.failure == null) if (faults.settlement_trace) |trace| {
-        std.debug.assert(a.store.engine.inWriteTransaction());
-        trace.mark(.transaction_active);
-    };
+    if (faults.settlement_trace) |trace| if (a.transactionOpen()) trace.mark(.transaction_active);
     collectItems(batch, output, io, 0);
     try batch.queueReads(a, binding.operation_id, output, io);
     try runSettlement(a);

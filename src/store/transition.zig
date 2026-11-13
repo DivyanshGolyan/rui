@@ -286,6 +286,14 @@ fn RoundOf(comptime R: type, comptime commit: Commit, comptime Guards: type, com
             return r.get().writer.attemptTimings(operation);
         }
 
+        /// Whether the transaction is open with no failure, once the step
+        /// queued a statement from `begin` on (`Access.transactionOpen`).
+        /// Before `begin` nothing opens it, so it is false.
+        pub fn transactionOpen(r: *Self) bool {
+            transacts("opens a transaction");
+            return r.get().writer.transactionOpen();
+        }
+
         /// The faults this run injects; a step checks its own.
         pub fn faults(r: *Self) Faults {
             return r.get().faults;

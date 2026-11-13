@@ -1794,6 +1794,69 @@ test "a transition with a wide pass steps twenty statements a pass, an ordinary 
     }.run);
 }
 
+/// Asks whether its transaction is open before and after its first step
+/// queues a read, then ends done. `.outside` has no `begin`, so its read
+/// runs outside the transaction; `.failed` also queues an insert of a
+/// content id the Store holds, which fails in the pass that twelve more
+/// statements force.
+fn TestingTransactionOpen(comptime path: enum { outside, inside, failed }) type {
+    return struct {
+        const Self = @This();
+        pub const rounds = transition.rounds(.{ .head = .{.always} });
+        pub const round_budget = 2;
+        pub const commit: transition.Commit = .transaction;
+        pub const begin: ?rounds.At = if (path == .outside) null else .head;
+        pub const Input = struct { session: []const u8, taken: u64 };
+        pub const Result = [3]bool;
+        pub const Ordinary = error{};
+        pub const Declined = error{};
+        pub const Guards = Declined;
+
+        input: Input,
+        loaded: TestingRound.head.Result = undefined,
+        open: [3]bool = @splat(false),
+
+        pub fn step(t: *Self, r: *transition.Round(Self), ran: ?rounds.At) !transition.Next(Self) {
+            if (ran != null) {
+                t.open[2] = r.transactionOpen();
+                return .{ .done = t.open };
+            }
+            t.open[0] = r.transactionOpen();
+            r.read(TestingRound.head, .{ .session_ref = t.input.session }, &t.loaded);
+            if (path == .failed) {
+                for (0..13) |_| r.write(TestingRound.insert_content, .{ .content_id = t.input.taken, .digest = @splat(0), .length = 0 });
+                t.open[1] = r.transactionOpen();
+                return .{ .done = t.open };
+            }
+            t.open[1] = r.transactionOpen();
+            return .{ .round = .head };
+        }
+
+        pub fn committed(t: *const Self) Result {
+            return t.open;
+        }
+    };
+}
+
+test "a step sees its transaction open once it queues from begin on, and never before begin" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try configureTestSession(&storage, "transition-open");
+            const taken = try store_testing.queryU64(&storage, "SELECT min(content_id) FROM content", .{});
+            const input: TestingTransactionOpen(.inside).Input = .{ .session = session.slice(), .taken = taken };
+            try std.testing.expectEqual([3]bool{ false, true, true }, try transition.apply(&storage, TestingTransactionOpen(.inside), input, .{}));
+            try std.testing.expectEqual([3]bool{ false, false, false }, try transition.apply(&storage, TestingTransactionOpen(.outside), input, .{}));
+            try std.testing.expectEqual([3]bool{ false, false, false }, try transition.apply(&storage, TestingTransactionOpen(.failed), input, .{}));
+            try std.testing.expect(!storage.isFenced());
+        }
+    }.run);
+}
+
 /// Counts Sessions a page of one at a time, in a `.paged` round that runs
 /// again until a page finds none.
 const TestingSessionPages = struct {
