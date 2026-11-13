@@ -23,8 +23,12 @@ An item is SQLite-only when, after those rewrites, its code outside strings
 and comments matches `SQLITE_CODE`, or it names an item that is. tests.zig's
 own `testingStore` is the exception: conformance tests call the fixture's.
 
-`check` is the rule: tests.zig's code names nothing `SQLITE_CODE` matches,
-and does not import sqlite.zig.
+The per-domain split now keeps shared helpers in tests.zig and
+sqlite_tests.zig, with tests in tests/*.zig and sqlite_tests/*.zig.
+`check` is the placement rule for tests.zig and every tests/**/*.zig file:
+their code names nothing `SQLITE_CODE` matches and imports no SQLite
+module or SQLite test helper. SQLite mechanisms belong in the SQLite
+test files under src/store/sqlite_tests/.
 
     python3 tests/ci/store_conformance.py rewrite <pre-split tests.zig>
     python3 tests/ci/store_conformance.py table <pre-split tests.zig>
@@ -509,13 +513,26 @@ def table(pre_split):
 
 
 def check(text):
-    """Why tests.zig is not engine-neutral, or None."""
-    if SQLITE_IMPORT in text:
-        return "tests.zig imports sqlite.zig; SQLite-only tests belong in sqlite_tests.zig"
-    for number, line in enumerate(code_only(text).split("\n"), 1):
-        match = SQLITE_CODE.search(line)
-        if match:
-            return f"tests.zig:{number} names {match.group()!r}, a SQLite mechanism; move the test to sqlite_tests.zig"
+    """Why the supplied helper text or a conformance test file is not neutral.
+
+    Keep the historical codemod's text argument, but include every domain
+    file in the placement rule so existing callers also check moved tests.
+    SQLite helpers and tests live in sqlite_tests.zig and sqlite_tests/;
+    neither is part of this engine-neutral source set.
+    """
+    sources = [(TESTS, text)]
+    directory = ROOT / Path(TESTS).with_suffix("")
+    sources.extend((path.relative_to(ROOT).as_posix(), path.read_text())
+                   for path in sorted(directory.rglob("*.zig")))
+    sqlite_import = re.compile(r'@import\("(?:\.\./)*(?:sqlite(?:_tests)?\.zig|sqlite_tests/[^"\n]+\.zig)"\)')
+    destination = "the SQLite test files under src/store/sqlite_tests/"
+    for name, source in sources:
+        if sqlite_import.search(source):
+            return f"{name} imports a SQLite module; SQLite-only tests belong in {destination}"
+        for number, line in enumerate(code_only(source).split("\n"), 1):
+            match = SQLITE_CODE.search(line)
+            if match:
+                return f"{name}:{number} names {match.group()!r}, a SQLite mechanism; move the test to {destination}"
     return None
 
 

@@ -340,6 +340,7 @@ pub fn stageObligationUpgrade(storage: *Store) !void {
 /// Words a fixture's SQL may not hold outside string literals, matched
 /// whole and ignoring case: each names a SQLite setting, schema change,
 /// transaction or connection mechanism. A test that needs one belongs in
+/// the SQLite test files under sqlite_tests/. Shared SQLite helpers stay in
 /// sqlite_tests.zig. tests/ci/store_conformance.py reads this list.
 pub const fixture_sqlite_words = [_][]const u8{
     "PRAGMA", "temp",      "CREATE", "ALTER",  "DROP",     "TRIGGER", "VIEW",
