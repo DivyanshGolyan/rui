@@ -831,7 +831,8 @@ fn newReference(io: std.Io, reference: *[session_id.bytes]u8) !void {
 /// them when both the instructions and an output schema need one and name
 /// different rows. When they name one row, the schema shares the
 /// instructions' value, so the first import's insert is the second's row.
-pub fn prepareConfiguration(a: anytype, host_tool_set: *const tool_defs.HostToolSet, session: []const u8, configuration: *const content_custody.Configuration, reads: *ConfigurationReads) void {
+/// noinline, as `queueConfiguredCommand`.
+pub noinline fn prepareConfiguration(a: anytype, host_tool_set: *const tool_defs.HostToolSet, session: []const u8, configuration: *const content_custody.Configuration, reads: *ConfigurationReads) void {
     const creating = session.len == 0;
     if (!creating) readSaved(a, session, &reads.next, &reads.found);
     if (creating and configuration.parent.state == .value) prepareParent(a, configuration.parent.value.slice(), reads);
@@ -1064,8 +1065,9 @@ pub fn validateStep(a: anytype, request: *const Request, reads: *ConfigurationRe
     }
 }
 
-/// `validateStep` in rounds its caller runs.
-pub fn validateConfiguration(
+/// `validateStep` in rounds its caller runs. noinline: its request and
+/// visitor stay off its caller's frame.
+pub noinline fn validateConfiguration(
     a: anytype,
     io: std.Io,
     session: []const u8,
@@ -1234,8 +1236,8 @@ pub fn applyStep(a: anytype, request: *const Request, faults: Faults, reads: *Co
 }
 
 /// `applyStep` in rounds its caller runs, after `validateConfiguration`
-/// readied `reads.validated`.
-pub fn applyValidatedConfiguration(a: anytype, io: std.Io, session: []const u8, configuration: *const content_custody.Configuration, initial_skills: ?*const skills_domain.Initial, faults: Faults, reads: *ConfigurationReads) !Application {
+/// readied `reads.validated`. noinline, as `validateConfiguration`.
+pub noinline fn applyValidatedConfiguration(a: anytype, io: std.Io, session: []const u8, configuration: *const content_custody.Configuration, initial_skills: ?*const skills_domain.Initial, faults: Faults, reads: *ConfigurationReads) !Application {
     // Application reads no saved set.
     const request: Request = .of(a.store, io, session, configuration, initial_skills, undefined);
     var ran: ?ApplyRound = null;
@@ -1395,7 +1397,9 @@ pub fn servesProviderOf(served: anytype, configuration: ?*const content_custody.
 
 /// Queues saving the command that carries `applied`, then the Session's
 /// revision row, which references it. Every argument outlives the round.
-pub fn queueConfiguredCommand(
+/// noinline: its locals stay off configure's frame on the engine's
+/// deepest chain.
+pub noinline fn queueConfiguredCommand(
     a: anytype,
     applied: *const Applied,
     key: []const u8,
