@@ -1574,6 +1574,9 @@ fn conforms(schemas: ObjectMap, schema: Value, json: Value) bool {
         for (names.array.items) |name| if (equal(name, json)) return true;
         return false;
     }
+    // JSON Schema patterns constrain strings even when no explicit type is present
+    // (for example propertyNames, whose instance is always a string).
+    if (json == .string) if (rules.get("pattern")) |pattern| if (!matches(pattern.string, json.string)) return false;
     const type_rule = rules.get("type") orelse return true;
     if (type_rule == .array) {
         for (type_rule.array.items) |kind| if (conformsKind(schemas, rules, kind.string, json)) return true;
@@ -1595,7 +1598,6 @@ fn conformsKind(schemas: ObjectMap, rules: ObjectMap, kind: []const u8, json: Va
     if (std.mem.eql(u8, kind, "string")) {
         if (json != .string) return false;
         if (rules.get("maxLength")) |limit| if (@as(f128, @floatFromInt(std.unicode.utf8CountCodepoints(json.string) catch return false)) > numeric(limit)) return false;
-        if (rules.get("pattern")) |pattern| return matches(pattern.string, json.string);
         return true;
     }
     if (std.mem.eql(u8, kind, "array")) {
