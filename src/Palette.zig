@@ -247,7 +247,7 @@ test "Palette description clipping ends with the list row ellipsis at every widt
                 var palette: Self = .{ .shown = &shown, .caps = .{ .unicode = unicode, .width = .unicode } };
                 var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
                 defer arena.deinit();
-                const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = @intCast(width), .height = 2 }, .cell_size = .{} };
+                const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = @intCast(width), .height = 2 }, .cell_size = .{} };
                 const surface = try palette.widget().draw(ctx);
                 try std.testing.expect(surface.size.width <= width);
                 const column = shown.list.descriptionColumn();
@@ -295,7 +295,7 @@ test "Palette description fitting keeps whole wide and combining clusters" {
             var palette: Self = .{ .shown = &shown, .caps = .{ .unicode = case.unicode, .width = method } };
             var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
             defer arena.deinit();
-            const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 1 }, .cell_size = .{} };
+            const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 1 }, .cell_size = .{} };
             const surface = try palette.widget().draw(ctx);
             var text: std.Io.Writer.Allocating = .init(arena.allocator());
             var col = column;
