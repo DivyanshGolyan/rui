@@ -96,7 +96,7 @@ def main():
             env = dict(base, RUI_ALLOCATOR_PROBE=str(log), RUI_ALLOCATOR_STORE=str(store),
                        RUI_ALLOCATOR_REMOVE_EXECUTABLE=str(removed))
             result = subprocess.run(
-                [removed, "host", "serve", "--store", store, "--set", 'execution.activeCapacity=1'],
+                [removed, "host", "serve", "--store", store, "--set", 'execution.activeCapacity=1', "--set", "providers={}"],
                 env=env, capture_output=True, timeout=10,
             )
             assert result.returncode != 0 and b"ready" not in result.stdout, result

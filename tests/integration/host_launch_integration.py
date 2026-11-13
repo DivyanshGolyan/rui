@@ -1055,7 +1055,7 @@ def main():
         # Unflagged serve uses the shared default. Its descriptor admission
         # runs before the lease/diagnostic writer, so rejection creates no Store.
         rejected_store = root / "default-capacity-rejected"
-        rejected = subprocess.run([RUI, "host", "serve", "--store", rejected_store],
+        rejected = subprocess.run([RUI, "host", "serve", "--store", rejected_store, "--set", "providers={}"],
             env=clean_env, preexec_fn=lower_descriptor_limit,
             capture_output=True, text=True, timeout=COMMAND_TIMEOUT)
         assert rejected.returncode == 1, rejected
@@ -1076,7 +1076,7 @@ def main():
         # Capacity 8 is the existing desktop profile. Admit this child so the
         # disconnected pipe exercises readiness output, not pre-lease refusal.
         disconnected_store = root / "disconnected-stdout"
-        disconnected = subprocess.Popen([RUI, "host", "serve", "--store", disconnected_store, "--set", 'execution.activeCapacity=8'],
+        disconnected = subprocess.Popen([RUI, "host", "serve", "--store", disconnected_store, "--set", 'execution.activeCapacity=8', "--set", "providers={}"],
             env=clean_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         try:
             disconnected.stdout.close()

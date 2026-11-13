@@ -114,7 +114,7 @@ def control_closed_while_host_alive(host, store, session):
 
 def competing_host_is_rejected(store):
     completed = subprocess.run(
-        [str(fixture.RUI), "host", "serve", "--store", str(store), "--set", 'execution.activeCapacity=1'],
+        [str(fixture.RUI), "host", "serve", "--store", str(store), "--set", 'execution.activeCapacity=1', "--set", "providers={}"],
         check=False,
         capture_output=True,
         text=True,

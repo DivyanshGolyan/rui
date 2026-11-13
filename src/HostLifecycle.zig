@@ -739,9 +739,10 @@ test "upgrade activation refuses cwd-dependent or stdin-bound settings before an
         .{ .argv = &.{ "rui", "host", "serve", "--settings", path }, .document = "{\"interface\":{\"lifetime\":\"stdin\"}}", .admitted = false },
         // Unreadable or refused documents cannot be replayed either.
         .{ .argv = &.{ "rui", "host", "serve", "--settings", path }, .document = "{\"unknown\":true}", .admitted = false },
-        // Fully absolute configurations replay; replay pins --store itself.
+        // Fully absolute configurations replay. A relative Store directory would
+        // override the pinned --store with a path under `/`.
         .{ .argv = &.{ "rui", "host", "serve", "--settings", path }, .document = "{\"network\":{\"caFile\":\"/private/ca.pem\"},\"tools\":{\"bash\":{\"path\":\"/bin/bash\"}}}", .admitted = true },
-        .{ .argv = &.{ "rui", "host", "serve", "--settings", path }, .document = "{\"store\":{\"sqlite\":{\"dir\":\"relative/store\"}}}", .admitted = true },
+        .{ .argv = &.{ "rui", "host", "serve", "--settings", path }, .document = "{\"store\":{\"sqlite\":{\"dir\":\"relative/store\"}}}", .admitted = false },
         .{ .argv = &.{ "rui", "host", "serve", "--settings", path, "--set", "network.caFile=/private/ca.pem" }, .document = "{}", .admitted = true },
         // --set layers replay from `/` too.
         .{ .argv = &.{ "rui", "host", "serve", "--set", "network.caFile=relative.pem" }, .document = "{}", .admitted = false },

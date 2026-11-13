@@ -272,6 +272,21 @@ fn defaultProviders(init: std.process.Init, settings: *hs.Settings, failure: *st
     }
 }
 
+/// RUI_OPENAI_BASE_URL moves an explicitly served `openai` that names no
+/// endpoint, as it moved `--provider openai`. An explicit provider cannot be
+/// silently dropped, so an invalid base stops the Host.
+fn explicitBaseUrl(init: std.process.Init, settings: *hs.Settings, failure: *start_report.Failure) !void {
+    const entry = settings.providers.entries.openai orelse return;
+    if (entry.endpoint != null) return;
+    const base = init.environ_map.get(providers.openai_base_url_variable) orelse return;
+    const endpoint = providers.endpointUnder(init.gpa, base) catch |err| {
+        if (err == error.InvalidBaseUrl) stderr.diagnostic(@import("host_launch.zig").invalid_base_url ++ "; the Host did not start.\n", .{});
+        return err;
+    };
+    defer init.gpa.free(endpoint);
+    try text(settings, init.gpa, "providers.openai.endpoint", endpoint, failure);
+}
+
 pub fn fillAt(init: std.process.Init, parsed: *const cli_args.Parsed, dir: []const u8, settings: *hs.Settings, fixtures: *providers.Fixtures, failure: *start_report.Failure) !void {
     if (parsed.get("test-codex-fixture-endpoint") != null and init.environ_map.get("RUI_CODEX_CREDENTIAL_FILE") == null) return error.FixtureCredentialPathRequired;
     if (parsed.get("test-chatgpt-fixture-endpoint") != null and init.environ_map.get("RUI_CHATGPT_CREDENTIAL_FILE") == null) return error.FixtureCredentialPathRequired;
@@ -291,7 +306,7 @@ pub fn fillAt(init: std.process.Init, parsed: *const cli_args.Parsed, dir: []con
         try input(init, settings, path, assignment[equals + 1 ..], failure);
         if (selects_providers) explicit_providers = true;
     }
-    if (!explicit_providers) try defaultProviders(init, settings, failure);
+    if (!explicit_providers) try defaultProviders(init, settings, failure) else try explicitBaseUrl(init, settings, failure);
     try fixtureInputs(init, parsed, settings, fixtures, failure);
     // --store is an interface anchor for MySQL, never a SQLite Adapter override.
     if (settings.store == .mysql and settings.interface.dir.anchored and parsed.get("store") != null) {
@@ -956,6 +971,18 @@ test "Host start explicit providers replace automatic defaults and MySQL keeps i
             try std.testing.expectEqual(wanted, served);
         }
     }
+    // RUI_OPENAI_BASE_URL moves an explicit openai that names no endpoint,
+    // as it moved --provider openai; a named endpoint wins.
+    try environment.put(providers.openai_base_url_variable, "https://example.test/custom/v1/");
+    for ([_][]const u8{ "providers.openai={}", "providers.openai.endpoint=https://named.test/responses" }, [_][]const u8{ "https://example.test/custom/v1/responses", "https://named.test/responses" }) |assignment, endpoint| {
+        settings.* = .{};
+        defer settings.deinit();
+        const parsed = try parseForTest(arena.allocator(), &.{ "--set", assignment });
+        var fixtures: providers.Fixtures = .{};
+        try fillAt(init, &parsed, dir, settings, &fixtures, &failure);
+        try std.testing.expectEqualStrings(endpoint, settings.providers.entries.openai.?.endpoint.?.slice());
+    }
+    _ = environment.swapRemove(providers.openai_base_url_variable);
     settings.* = .{};
     defer settings.deinit();
     const parsed = try parseForTest(arena.allocator(), &.{ "--store", dir, "--set", "store.mysql.url=env:MYSQL_TEST_URL" });
@@ -1150,7 +1177,7 @@ fn anchorAssignment(gpa: std.mem.Allocator, cwd: []const u8, assignment: []const
 /// Read every layer a detached launch applies and refuse what cannot run in
 /// `/` without stdin: a stdin or relative --settings, a relative @FILE, any
 /// relative path or `file:` source in any layer, and the stdin lifetime. The
-/// Store is exempt: the starter checks it against DIR and replay pins it.
+/// Host directory itself is the anchored default, never relative.
 fn readDetached(init: std.process.Init, request: Spawn, settings: *hs.Settings, failure: *start_report.Failure) !void {
     if (request.settings_file) |file| {
         if (std.mem.eql(u8, file, "-")) return invalid(failure, "settings", "a Host started by bare rui or rui host start has no stdin; pass a document on stdin with rui host serve --settings -");
@@ -1164,17 +1191,11 @@ fn readDetached(init: std.process.Init, request: Spawn, settings: *hs.Settings, 
     try readLaunch(init, request, settings, failure);
     if (settings.interface.lifetime.value == .stdin) return invalid(failure, "interface.lifetime", "a Host started by bare rui or rui host start has no stdin; use detached, or run rui host serve");
     var name: LeafName = .{};
-    inline for (@typeInfo(hs.Settings).@"struct".field_names, @typeInfo(hs.Settings).@"struct".field_types) |field, Field| {
-        if (comptime !std.mem.eql(u8, field, "store")) {
-            name.len = 0;
-            name.push(comptime hs.camel(field));
-            if (relativeLeaf(Field, &@field(settings, field), &name)) {
-                var buffer: [start_report.max_refusal_message_bytes]u8 = undefined;
-                const message = std.fmt.bufPrint(&buffer, "{s}: {s}", .{ name.slice(), relative }) catch "settings: " ++ relative;
-                failure.* = .init(.settings_invalid, message);
-                return error.SettingsInvalid;
-            }
-        }
+    if (relativeLeaf(hs.Settings, settings, &name)) {
+        var buffer: [start_report.max_refusal_message_bytes]u8 = undefined;
+        const message = std.fmt.bufPrint(&buffer, "{s}: {s}", .{ name.slice(), relative }) catch "settings: " ++ relative;
+        failure.* = .init(.settings_invalid, message);
+        return error.SettingsInvalid;
     }
 }
 
@@ -1263,7 +1284,6 @@ pub fn checkStart(init: std.process.Init, request: Spawn, failure: *start_report
     if (settings.store == .mysql) return invalid(failure, "store.mysql", moved);
     if (!settings.interface.dir.anchored) return invalid(failure, "interface.dir", moved);
     if (!settings.store.sqlite.dir.anchored) {
-        if (!std.fs.path.isAbsolute(settings.store.sqlite.dir.slice())) return invalid(failure, "store.sqlite.dir", relative);
         var host: [protocol.max_store_bytes]u8 = undefined;
         var chosen: [protocol.max_store_bytes]u8 = undefined;
         const a = try platform.canonicalStoreDestination(init.io, request.dir, &host);

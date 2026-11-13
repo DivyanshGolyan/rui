@@ -501,7 +501,7 @@ def main(report_source):
         controls = []
         try:
             controls.append(subprocess.Popen(["rui", "60"], executable="/bin/sleep"))
-            controls.append(subprocess.Popen(["renamed-copy", "host", "serve", "--store", str(state / "leak-store")],
+            controls.append(subprocess.Popen(["renamed-copy", "host", "serve", "--store", str(state / "leak-store"), "--set", "providers={}"],
                 executable=installed, env={"PATH": os.environ["PATH"], "HOME": str(state / "leak-home"), "RUI_TEST_MODELS_DEV_URL": ""},
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
             # Darwin's census (lsof) can miss a copy spawned just now; the

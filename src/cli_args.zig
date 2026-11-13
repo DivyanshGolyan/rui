@@ -839,7 +839,12 @@ test "every retired Host flag rejects and renders its generated replacement" {
                 try std.testing.expect(std.mem.indexOf(u8, text, "[host_option_retired]") != null);
                 try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, "\n"));
                 if (value_text) |value_bytes| {
-                    if (std.mem.indexOf(u8, value_bytes, "\n") == null) try std.testing.expect(std.mem.indexOf(u8, text, "=1000") != null or std.mem.indexOf(u8, text, "\"1000\"") != null);
+                    if (std.mem.indexOf(u8, value_bytes, "\n") == null) {
+                        var substituted: [256]u8 = undefined;
+                        const at = std.mem.indexOf(u8, old.replacement, "VALUE").?;
+                        const expected = try std.fmt.bufPrint(&substituted, "{s}1000{s}", .{ old.replacement[0..at], old.replacement[at + "VALUE".len ..] });
+                        try std.testing.expect(std.mem.indexOf(u8, text, expected) != null);
+                    }
                 } else try std.testing.expect(std.mem.indexOf(u8, text, old.replacement) != null);
             }
         }
