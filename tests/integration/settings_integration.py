@@ -170,7 +170,7 @@ def source_modes(root, good):
                     "interface": {"dir": str(runtime)}, "execution": {"activeCapacity": 1}}
         if source == "file":
             document["interface"]["lifetime"] = "stdin"
-            process = file_host(document, "--active-capacity", "3")
+            process = file_host(document, "--set", 'execution.activeCapacity=3')
         else:
             process = launch(frame(document))
             host_process.close_stdin(process)

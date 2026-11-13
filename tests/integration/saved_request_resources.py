@@ -138,7 +138,7 @@ def main():
             for repetition in range(3):
                 for label, binary in (("baseline", baseline), ("candidate", candidate)):
                     print(json.dumps(capture(state, binary, label, size, repetition)), flush=True)
-        host, _ = start_ready_process([baseline, "serve", "--store", state / "live-store", "--active-capacity", "1"])
+        host, _ = start_ready_process([baseline, "serve", "--store", state / "live-store", "--set", 'execution.activeCapacity=1'])
         try:
             cli.fixture.RUI = baseline
             cli.fixture.command("configure", "--store", state / "live-store", "--session", "resources/original",

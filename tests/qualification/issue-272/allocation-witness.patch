@@ -123,7 +123,7 @@ index 4f33622..c12fea4 100644
          # The device code is shown directly to the operator, never captured in
          # an artifact or included in the payload-free qualification report.
 @@ -113,8 +119,8 @@ def run(model, external_credential=None):
-                 [caller.RUI, "serve", "--store", store, "--active-capacity", "2", "--codex"],
+                 [caller.RUI, "serve", "--store", store, "--set", "execution.activeCapacity=2", "--codex"],
                  required_fields={"execution": "enabled"}, timeout=20,
              )
 -            records, thread = observations(process)

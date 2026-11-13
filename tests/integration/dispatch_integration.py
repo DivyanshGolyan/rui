@@ -4232,8 +4232,7 @@ def main(mode="all", correlation_case="all"):
         backlog_host = start_host(
             backlog_store,
             f"http://127.0.0.1:{backlog_endpoint.server_port}/responses",
-            "--active-capacity",
-            "101",
+            "--set", 'execution.activeCapacity=101',
             "--test-retry-waits-ms",
             "2000,60000,60000",
         )
@@ -4310,8 +4309,7 @@ def main(mode="all", correlation_case="all"):
         recovery_host = start_host(
             recovery_store,
             f"http://127.0.0.1:{recovery_endpoint.server_port}/responses",
-            "--active-capacity",
-            "2",
+            "--set", 'execution.activeCapacity=2',
             "--test-retry-waits-ms",
             "60000,60000,60000",
         )
@@ -4400,8 +4398,7 @@ def main(mode="all", correlation_case="all"):
         recovery_host = start_host(
             recovery_store,
             f"http://127.0.0.1:{recovery_endpoint.server_port}/responses",
-            "--active-capacity",
-            "101",
+            "--set", 'execution.activeCapacity=101',
             "--test-retry-recovery-gate-path",
             str(recovery_gate.path),
             "--test-before-launch-delay-ms",
@@ -4631,8 +4628,7 @@ def main(mode="all", correlation_case="all"):
         host = start_host(
             capacity_store,
             f"http://127.0.0.1:{capacity_endpoint.server_port}/responses",
-            "--active-capacity",
-            "101",
+            "--set", 'execution.activeCapacity=101',
         )
         processes.append(host)
         capacity_a_session = configure(state, capacity_store, "capacity-config-a", None, "gpt-6-sol")
@@ -4680,8 +4676,7 @@ def main(mode="all", correlation_case="all"):
         mcs1_host = start_host(
             mcs1_store,
             f"http://127.0.0.1:{mcs1_endpoint.server_port}/responses",
-            "--active-capacity",
-            "2",
+            "--set", 'execution.activeCapacity=2',
         )
         processes.append(mcs1_host)
         mcs1_first_session = configure(state, mcs1_store, "mcs1-config-first", None, "gpt-6-sol")
@@ -5249,7 +5244,9 @@ def main(mode="all", correlation_case="all"):
         deceptive = subprocess.run(
             [
                 str(RUI), "host", "serve", "--store", str(state / "deceptive-store"),
-                "--provider-endpoint", f"http://127.0.0.1:80@127.0.0.1:{endpoint.server_port}/responses",
+                "--set", "providers={}",
+                    "--set", "providers.codex.endpoint=" + str(f"http://127.0.0.1:80@127.0.0.1:{endpoint.server_port}/responses"),
+                    "--set", "providers.codex.unauthenticated=true",
             ],
             text=True,
             capture_output=True,
@@ -5505,8 +5502,7 @@ def main(mode="all", correlation_case="all"):
                 "host", "serve",
                 "--store",
                 str(report_unlink_store),
-                "--active-capacity",
-                "1",
+                "--set", 'execution.activeCapacity=1',
                 "--fault",
                 "startup-cleanup",
             ],
@@ -5576,8 +5572,7 @@ def main(mode="all", correlation_case="all"):
                     "host", "serve",
                     "--store",
                     str(owned_store),
-                    "--active-capacity",
-                    "1",
+                    "--set", 'execution.activeCapacity=1',
                     "--fault",
                     "startup-cleanup",
                 ],

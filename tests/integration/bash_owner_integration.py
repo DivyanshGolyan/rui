@@ -64,7 +64,7 @@ def prove_timeout_feedback(state):
     host = None
     try:
         thread.start()
-        host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses", "--bash-timeout-ms", "500")
+        host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses", "--set", 'tools.bash.timeoutMs=500')
         for index, (name, _, effective) in enumerate(cases):
             session = bash_fixture.configure(state, store, f"{name}-config", workspace=workspace)
             fixture.message(state, store, f"{name}-message", session, "execute")

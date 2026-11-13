@@ -269,7 +269,7 @@ def run():
 
         # A Host serving the sign-in uses it.
         host, _ = start_ready_process(
-            [fixture.RUI, "host", "serve", "--store", store, "--active-capacity", "2", "--test-chatgpt-fixture-endpoint", url],
+            [fixture.RUI, "host", "serve", "--store", store, "--set", 'execution.activeCapacity=2', "--test-chatgpt-fixture-endpoint", url],
             required_fields={"execution": "enabled"},
         )
         configured = fixture.command(

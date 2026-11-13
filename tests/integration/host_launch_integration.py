@@ -661,7 +661,7 @@ def main():
         # A held lease is attached, not replaced or reconfigured.
         held_store = root / "held-store"
         held, _ = start_ready_process(
-            [RUI, "host", "serve", "--store", held_store, "--active-capacity", "3"],
+            [RUI, "host", "serve", "--store", held_store, "--set", 'execution.activeCapacity=3'],
             required_fields={"active_capacity": "3"},
         )
         try:
@@ -678,15 +678,15 @@ def main():
             # One Host keeps one start time, and holds no custody while idle.
             assert reported["started_at"] == later["started_at"] == first["started_at"], (first, later)
             assert later["custody_occupied"] == "0", later
-            same = run_start(held_store, env, "--active-capacity", "3")
-            assert same.returncode == 0 and "--active-capacity" not in same.stderr, same
+            same = run_start(held_store, env, "--set", 'execution.activeCapacity=3')
+            assert same.returncode == 0 and "--set assignments apply only to a new Host" in same.stderr, same
             assert instance(json.loads(same.stdout), 3) == before, same
-            # A differing request is reported, not silently dropped or applied.
-            differing = run_start(held_store, env, "--active-capacity", "7")
+            # Explicit overrides are reported, never applied to the running Host.
+            differing = run_start(held_store, env, "--set", 'execution.activeCapacity=7')
             assert differing.returncode == 0, differing.stderr
             assert instance(json.loads(differing.stdout), 3) == before, differing
-            assert ("rui: the running Host keeps active capacity 3; --active-capacity 7 applies only to a new Host. "
-                    f"Changing it means pausing this Host and all its work: rui host pause --store $'{held_store.resolve()}'\n"
+            assert ("rui: the running Host keeps its settings; --set assignments apply only to a new Host. "
+                    f"Changing settings means pausing this Host and all its work: rui host pause --store $'{held_store.resolve()}'\n"
                     ) in differing.stderr, differing.stderr
             assert instance(status(held_store, env), 3) == before
             assert wait_for_processes(held_store, 1) == [held.pid]
@@ -694,12 +694,12 @@ def main():
             stop_process(held)
 
         unparsed_store = root / "unparsed-capacity"
-        unparsed = run_start(unparsed_store, env, "--active-capacity", "-1")
+        unparsed = run_start(unparsed_store, env, "--set", 'execution.activeCapacity=-1')
         assert unparsed.returncode != 0 and not unparsed.stdout, unparsed
         assert not unparsed_store.exists(), "unparsed capacity created a candidate Store"
         sized_store = root / "sized-store"
         try:
-            sized = run_start(sized_store, env, "--active-capacity", "5")
+            sized = run_start(sized_store, env, "--set", 'execution.activeCapacity=5')
             assert sized.returncode == 0, sized.stderr
             assert instance(json.loads(sized.stdout), 5) == instance(status(sized_store, env), 5)
             assert len(wait_for_processes(sized_store, 1)) == 1
@@ -853,7 +853,7 @@ def main():
         # Capacity 8 is the existing desktop profile. Admit this child so the
         # disconnected pipe exercises readiness output, not pre-lease refusal.
         disconnected_store = root / "disconnected-stdout"
-        disconnected = subprocess.Popen([RUI, "host", "serve", "--store", disconnected_store, "--active-capacity", "8"],
+        disconnected = subprocess.Popen([RUI, "host", "serve", "--store", disconnected_store, "--set", 'execution.activeCapacity=8'],
             env=clean_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         try:
             disconnected.stdout.close()

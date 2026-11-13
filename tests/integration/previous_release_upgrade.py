@@ -163,6 +163,7 @@ class Dialect:
 
     def __init__(self, binary):
         self.resource_first = bool(help_text(binary, "request", "inspect"))
+        self.host_settings = "--set" in help_text(binary, *self.serve())
         send_help = (help_text(binary, "session", "send") if self.resource_first
                      else help_text(binary))
         assert send_help, f"No command help from {binary}"
@@ -175,8 +176,14 @@ class Dialect:
         return ("host", "serve") if self.resource_first else ("serve",)
 
     def host_arguments(self, store, endpoint, *, retry_waits=True):
-        return [str(fixture.RUI), *self.serve(), "--store", str(store), "--active-capacity", "1",
-                "--provider-endpoint", endpoint,
+        # Actual previous releases retain their installed grammar. Only the
+        # candidate dialect uses generic settings; never teach an old binary
+        # new flags or silently stop exercising the historical release.
+        settings = (["--set", "execution.activeCapacity=1", "--set", "providers={}",
+                     "--set", f"providers.codex.endpoint={endpoint}",
+                     "--set", "providers.codex.unauthenticated=true"] if self.host_settings else
+                    ["--active-capacity", "1", "--provider-endpoint", endpoint])
+        return [str(fixture.RUI), *self.serve(), "--store", str(store), *settings,
                 *(["--test-retry-waits-ms", "50,100,150"] if retry_waits else [])]
 
     def host_status(self, binary, store, timeout):
@@ -328,7 +335,7 @@ def main():
             seed, ready = start_ready_process(
                 dialect.host_arguments(store, f"http://127.0.0.1:{endpoint.server_port}/responses",
                                        retry_waits=not args.running_host),
-                required_fields={"execution": "enabled"},
+                required_fields={"execution": "enabled"}, isolate_providers=False,
             )
             session = dialect.configure(root, store, "upgrade-configure", "upgrade/session", "gpt-6-sol")
             dialect.message(root, store, "upgrade-message", session, "Save this real work.")
@@ -422,7 +429,7 @@ def main():
                 dialect = previous_cli
                 seed, _ = start_ready_process(
                     dialect.host_arguments(store, f"http://127.0.0.1:{endpoint.server_port}/responses"),
-                    required_fields={"execution": "enabled"},
+                    required_fields={"execution": "enabled"}, isolate_providers=False,
                 )
             recovered = dialect.observe(store, "upgrade-message")
             assert recovered["result"]["status"] == "completed", recovered

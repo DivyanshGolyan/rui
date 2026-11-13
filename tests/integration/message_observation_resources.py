@@ -139,7 +139,10 @@ def main():
             home = state / "capture-home"
             home.mkdir()
             host, _ = start_ready_process([baseline, "serve", "--store", state / "store",
-                "--active-capacity", "1", "--provider-endpoint", f"http://127.0.0.1:{endpoint.server_port}/responses"])
+                "--set", 'execution.activeCapacity=1',
+                    "--set", "providers={}",
+                    "--set", "providers.codex.endpoint=" + str(f"http://127.0.0.1:{endpoint.server_port}/responses"),
+                    "--set", "providers.codex.unauthenticated=true"])
             try:
                 cli.run(home, "configure", "--store", state / "store", "--session", "resources/message",
                     "--workspace", state, "--provider", "codex", "--model", "gpt-6-sol")

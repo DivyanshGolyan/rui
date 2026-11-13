@@ -349,10 +349,10 @@ def prove_bash_spawn_with_full_client_population(state, required):
                 "host", "serve",
                 "--store",
                 store,
-                "--active-capacity",
-                "2",
-                "--provider-endpoint",
-                f"http://127.0.0.1:{endpoint.server_port}/responses",
+                "--set", 'execution.activeCapacity=2',
+                "--set", "providers={}",
+                    "--set", "providers.codex.endpoint=" + str(f"http://127.0.0.1:{endpoint.server_port}/responses"),
+                    "--set", "providers.codex.unauthenticated=true",
                 "--test-phase-trace",
                 "--test-transition",
                 "action-attempt-admitted",
@@ -582,8 +582,10 @@ def prove_accept_pressure(state):
             pressure_limit = 1024
             host, ready = start_ready_process([sys.executable, "-c",
                 "import os, resource, sys; limit=int(sys.argv[1]); resource.setrlimit(resource.RLIMIT_NOFILE, (limit, limit)); os.execv(sys.argv[2], sys.argv[2:])",
-                str(pressure_limit), str(RUI), "host", "serve", "--store", str(store), "--active-capacity", "2",
-                "--provider-endpoint", f"http://127.0.0.1:{endpoint.server_port}/responses"], env=env)
+                str(pressure_limit), str(RUI), "host", "serve", "--store", str(store), "--set", 'execution.activeCapacity=2',
+                "--set", "providers={}",
+                    "--set", "providers.codex.endpoint=" + str(f"http://127.0.0.1:{endpoint.server_port}/responses"),
+                    "--set", "providers.codex.unauthenticated=true"], env=env)
             diagnostics = HostDiagnostics(host)
             assert int(ready["intake_capacity"]) == DEFAULTS.intake_capacity, ready
             session = configure(root, store, 0)
@@ -715,8 +717,11 @@ os.execv('/bin/bash', ['/bin/bash', *sys.argv[1:]])
         env = {**os.environ, os_semantics.PRELOAD: str(library),
                "RUI_ACCEPT_LOG": str(root / "accept.log"), "RUI_ACCEPT_ARM": str(root / "unused"),
                "RUI_ACCEPT_HOLD": str(hold), "RUI_ACCEPT_READY": str(ready), "RUI_ACCEPT_RELEASE": str(release)}
-        host, fields = start_ready_process([str(RUI), "host", "serve", "--store", str(store), "--active-capacity", "2",
-            "--provider-endpoint", f"http://127.0.0.1:{endpoint.server_port}/responses", "--bash-path", str(wrapper),
+        host, fields = start_ready_process([str(RUI), "host", "serve", "--store", str(store), "--set", 'execution.activeCapacity=2',
+            "--set", "providers={}",
+                "--set", "providers.codex.endpoint=" + str(f"http://127.0.0.1:{endpoint.server_port}/responses"),
+                "--set", "providers.codex.unauthenticated=true",
+                "--set", "tools.bash.path=" + str(wrapper),
             "--test-transition", "prepared-before-handoff", "--test-transition-gate-path", str(gate)], env=env)
         diagnostics = HostDiagnostics(host)
         session = bash.configure(root, store, "configure", permission="bypass")
@@ -783,10 +788,10 @@ def main():
                 "host", "serve",
                 "--store",
                 rejected_store,
-                "--active-capacity",
-                "2",
-                "--provider-endpoint",
-                f"http://127.0.0.1:{endpoint.server_port}/responses",
+                "--set", 'execution.activeCapacity=2',
+                "--set", "providers={}",
+                    "--set", "providers.codex.endpoint=" + str(f"http://127.0.0.1:{endpoint.server_port}/responses"),
+                    "--set", "providers.codex.unauthenticated=true",
             ),
             text=True,
             capture_output=True,
@@ -807,8 +812,10 @@ def main():
         if fields["inherited"] != 3:
             rejected = subprocess.run(
                 limited_host(required - clients + 10 * 5 + 3 - 1, "host", "serve", "--store", rejected_store,
-                    "--active-capacity", "2", "--provider-endpoint",
-                    f"http://127.0.0.1:{endpoint.server_port}/responses"),
+                    "--set", 'execution.activeCapacity=2',
+                        "--set", "providers={}",
+                        "--set", "providers.codex.endpoint=" + str(f"http://127.0.0.1:{endpoint.server_port}/responses"),
+                        "--set", "providers.codex.unauthenticated=true"),
                 text=True, capture_output=True, timeout=10)
             assert rejected.returncode != 0 and "descriptor capacity insufficient" in rejected.stderr, rejected
             assert not rejected.stdout.startswith("ready "), rejected.stdout
@@ -823,10 +830,10 @@ def main():
                 "host", "serve",
                 "--store",
                 store,
-                "--active-capacity",
-                "2",
-                "--provider-endpoint",
-                f"http://127.0.0.1:{endpoint.server_port}/responses",
+                "--set", 'execution.activeCapacity=2',
+                "--set", "providers={}",
+                    "--set", "providers.codex.endpoint=" + str(f"http://127.0.0.1:{endpoint.server_port}/responses"),
+                    "--set", "providers.codex.unauthenticated=true",
             ),
             required_fields={
                 "descriptor_requirement": str(required),
@@ -869,8 +876,7 @@ def main():
                 "host", "serve",
                 "--store",
                 documented_store,
-                "--active-capacity",
-                "8",
+                "--set", 'execution.activeCapacity=8',
             ),
             required_fields={"active_capacity": "8", "descriptor_limit": "1024"},
         )

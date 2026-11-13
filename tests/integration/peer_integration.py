@@ -317,7 +317,11 @@ def main(report_source):
         url = f"http://127.0.0.1:{endpoint.server_address[1]}/responses"
         host_env = {"PATH": os.environ["PATH"], "HOME": str(home), "RUI_TEST_MODELS_DEV_URL": "", **SECRETS}
         host, _ = start_ready_process(
-            [installed, "host", "serve", "--store", store, "--active-capacity", "2", "--provider-endpoint", url],
+            [installed, "host", "serve", "--store", store,
+                "--set", 'execution.activeCapacity=2',
+                "--set", "providers={}",
+                "--set", "providers.codex.endpoint=" + str(url),
+                "--set", "providers.codex.unauthenticated=true"],
             env=host_env, required_fields={"execution": "enabled"},
         )
         instance = run(installed, "host", "status", "--store", store, home=home)["instance"]
@@ -770,8 +774,10 @@ def concurrent_peers():
         endpoint = CohortModel(workspace)
         threading.Thread(target=endpoint.serve_forever, daemon=True).start()
         host, _ = start_ready_process([installed, "host", "serve", "--store", store,
-            "--active-capacity", "12", "--provider-endpoint",
-            f"http://127.0.0.1:{endpoint.server_address[1]}/responses"],
+            "--set", 'execution.activeCapacity=12',
+                "--set", "providers={}",
+                "--set", "providers.codex.endpoint=" + str(f"http://127.0.0.1:{endpoint.server_address[1]}/responses"),
+                "--set", "providers.codex.unauthenticated=true"],
             env=environment, required_fields={"execution": "enabled"})
         run(installed, "defaults", "configure", "--store", store, home=home)
         parent = allocated(run(installed, "session", "configure", "--store", store,
