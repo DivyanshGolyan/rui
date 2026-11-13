@@ -1226,7 +1226,6 @@ test "Host socket Store hint proves absence only with trusted mapping and free l
     try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().statFile(io, socket.slice(), .{ .follow_symlinks = false }));
 }
 
-
 test "runtime socket storage preserves every non-NUL OS byte" {
     var paths: Paths = .{};
     for (1..256) |value| {
