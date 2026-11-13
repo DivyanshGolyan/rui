@@ -55,14 +55,15 @@ runs:
       if: ${{ inputs.cold != 'true' && inputs.compiled != 'true' }}
       shell: bash
       env:
-        DEPS: rui-build-v2-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ steps.tools.outputs.identity }}-${{ hashFiles('build.zig.zon', 'screen-emulator/build.zig.zon', 'src/build_*') }}-
-        SOURCES: ${{ hashFiles('build.zig', 'build/**', 'src/**', 'tests/integration/**') }}-
+        PREFIX: rui-build-v2-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ steps.tools.outputs.identity }}-
+        DEPS: ${{ hashFiles('build.zig.zon', 'screen-emulator/build.zig.zon', 'src/build_*') }}
+        SOURCES: ${{ hashFiles('build.zig', 'build/**', 'src/**', 'tests/integration/**') }}
         CHECK_PART: ${{ inputs.check-part }}
       run: |
         {
-          echo "key=$DEPS$SOURCES$CHECK_PART"
-          echo "prefix-sources=$DEPS$SOURCES"
-          echo "prefix-deps=$DEPS"
+          echo "key=$PREFIX$CHECK_PART-$DEPS-$SOURCES"
+          echo "prefix-deps=$PREFIX$CHECK_PART-$DEPS-"
+          echo "prefix-part=$PREFIX$CHECK_PART-"
         } >> "$GITHUB_OUTPUT"
     - name: Name the build runner cache keys
       id: runner-keys
@@ -101,8 +102,8 @@ runs:
           screen-emulator/zig-pkg
         key: ${{ steps.build-keys.outputs.key }}
         restore-keys: |
-          ${{ steps.build-keys.outputs.prefix-sources }}
           ${{ steps.build-keys.outputs.prefix-deps }}
+          ${{ steps.build-keys.outputs.prefix-part }}
     - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       id: build-cache-restore
       if: ${{ inputs.publish-caches != 'true' && inputs.cold != 'true' && inputs.compiled != 'true' }}
@@ -114,8 +115,8 @@ runs:
           screen-emulator/zig-pkg
         key: ${{ steps.build-keys.outputs.key }}
         restore-keys: |
-          ${{ steps.build-keys.outputs.prefix-sources }}
           ${{ steps.build-keys.outputs.prefix-deps }}
+          ${{ steps.build-keys.outputs.prefix-part }}
     # Package pair: pinned package sources depend only on build.zig.zon, so a
     # tool, image or build-input change that misses every build snapshot reads
     # them here instead of from codeberg.org and GitHub, whose 504s and stalls

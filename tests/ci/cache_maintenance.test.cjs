@@ -65,6 +65,24 @@ test('prune every PR snapshot and old main snapshots without crossing platform o
   assert.deepEqual(result.ids, [3, 7, 8, 9, 10, 14, 15, 16, 18, 20, 21]);
 });
 
+test('build layouts share partition groups across repins without crossing parts', async () => {
+  const main = 'refs/heads/main';
+  const reordered = (id, part, platform = 'Linux-X64') => ({
+    ...cache(id, main, platform, part),
+    key: `rui-build-v2-${platform}-0.17.1-${'a'.repeat(64)}-${part}-${id.toString(16).padStart(64, '0')}-${'c'.repeat(64)}`,
+  });
+  const entries = [
+    cache(1, main, 'Linux-X64', 'compiled'),
+    reordered(2, 'compiled'), reordered(3, 'compiled'),
+    reordered(4, 'baseline'), cache(5, main, 'Linux-X64', 'baseline'),
+    reordered(6, 'compiled', 'macOS-ARM64'),
+    {...reordered(7, 'compiled'), key: reordered(7, 'compiled').key + '-extra'},
+  ];
+  const result = await run(entries);
+  assert.ifError(result.error);
+  assert.deepEqual(result.ids, [3, 5, 6, 7]);
+});
+
 test('main keeps the newest build runner per CPU model and the newest package set', async () => {
   const main = 'refs/heads/main';
   const runner = (id, platform, cpu, ref = main) => ({
