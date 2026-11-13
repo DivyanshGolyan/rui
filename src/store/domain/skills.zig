@@ -11,6 +11,8 @@ const configuration_admission = @import("../../configuration_admission.zig");
 const content = @import("content.zig");
 const rsql = @import("../rsql.zig");
 const store_core = @import("../Store.zig");
+const transition = @import("../transition.zig");
+const action_domain = @import("action.zig");
 
 /// Captured outside the Store writer. Borrowed until the synchronous mutation
 /// finishes. A failed scan is explicit rather than an empty catalog.
@@ -135,23 +137,6 @@ pub const Appending = struct {
     }
 };
 
-/// A writer reads its actual current catalog, not the shell's earlier guess.
-/// Concurrent same-candidate reloads therefore append at most one delta.
-/// `Reloading` in rounds its caller runs.
-pub fn reload(a: anytype, allocator: std.mem.Allocator, session: rsql.SessionHead, candidate: catalog.Catalog, faults: store_core.Faults) !Result {
-    var reloading: Reloading = .init(session, candidate, allocator);
-    defer reloading.deinit();
-    var ran: ?ReloadRound = null;
-    while (true) switch (try reloading.step(a, faults, ran)) {
-        // `readRaw` read its window when the step asked for it.
-        .round => |at| {
-            if (at != .window) try a.run();
-            ran = at;
-        },
-        .reloaded => |result| return result,
-    };
-}
-
 /// `Reading` in rounds its caller runs. noinline: its value stays off
 /// its caller's frame, which sits on the main thread's deepest chain.
 pub noinline fn read(a: anytype, allocator: std.mem.Allocator, session: []const u8) !catalog.Catalog {
@@ -244,7 +229,9 @@ pub const ReloadRound = enum { latest, window, append };
 
 /// Reloads a Session's catalog one round at a time: reads the saved one,
 /// and appends the candidate and its delta's instruction when they
-/// differ. A transition keeps it in its value; `deinit` frees its scratch
+/// differ. A writer reads its actual current catalog, not the shell's
+/// earlier guess, so concurrent same-candidate reloads append at most one
+/// delta. A transition keeps it in its value; `deinit` frees its scratch
 /// on any path. Built in place (`init`), as its read binds its Session.
 pub const Reloading = struct {
     session: rsql.SessionHead,
@@ -417,33 +404,109 @@ pub const MessageFailure = struct {
 
 pub const Result = struct { bytes: []const u8, succeeded: bool, reload_status: ?mutation_answer.SkillsReloadStatus = null };
 
-pub fn apply(a: anytype, allocator: std.mem.Allocator, session: rsql.SessionHead, captured: *const Capture, faults: store_core.Faults) !Result {
-    return switch (captured.*) {
-        .invocation => |bytes| .{ .bytes = bytes, .succeeded = true },
-        .failed => |failure| .{ .bytes = failure.bytes, .succeeded = false },
-        .reload => |candidate| try reload(a, allocator, session, candidate, faults),
+/// Settles a model `skill` tool call with what the Host captured for it,
+/// in one transaction: an invocation's text, a failure's diagnostic, or
+/// a catalog reload's result. A call whose Turn a stop selected ends with
+/// false.
+///
+/// Round `.facts` reads the call's Action. A reload reads the Session's
+/// catalog in `.skills`, then its bytes one `.skills_window` each, and
+/// appends a changed one in `.skills_append` (`Reloading`). `.outcome`
+/// looks the result's row up, and the commit round resolves the call.
+pub const SettleTool = struct {
+    pub const rounds = transition.rounds(.{
+        .facts = .{.always},
+        .skills = .{.branch},
+        .skills_window = .{.raw},
+        .skills_append = .{.branch},
+        .outcome = .{.always},
+    });
+    pub const round_budget = 3;
+    pub const commit: transition.Commit = .transaction;
+    pub const begin: ?rounds.At = .facts;
+    /// `captured` is the caller's, which outlives the transition.
+    pub const Input = struct {
+        binding: action_domain.ActionAttemptBinding,
+        /// What a reload allocates from inside the write; running out of
+        /// it rolls back cleanly and is the caller's to retry.
+        allocator: std.mem.Allocator,
+        captured: *const Capture,
     };
-}
+    pub const Result = bool;
+    pub const Ordinary = store_core.Ordinary.action_attempt || error{OutOfMemory};
+    pub const Guards = store_core.Ordinary.action_attempt;
+    pub const Declined = error{};
 
-pub fn runTool(a: anytype, allocator: std.mem.Allocator, binding: @import("action.zig").ActionAttemptBinding, captured: *const Capture, faults: store_core.Faults) !bool {
-    const action = @import("action.zig");
-    var facts: action.core_facts.Result = undefined;
-    const names: action.CoreNames = .of();
-    a.read(action.core_facts, names.args(.{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id }), &facts);
-    try a.run();
-    const found = facts orelse return error.StaleActionAttemptBinding;
-    if (found.stopped) {
-        try a.abandon(.{});
-        return false;
+    input: Input,
+    facts: action_domain.core_facts.Result = undefined,
+    /// A reload's step state, once it starts; `deinit` frees its scratch.
+    reloading: ?Reloading = null,
+    /// The call's result text, the caller's or the reload's, and whether
+    /// it succeeded.
+    bytes: []const u8 = &.{},
+    succeeded: bool = false,
+    outcome: content.Import = undefined,
+
+    pub fn step(t: *SettleTool, r: *transition.Round(SettleTool), ran: ?rounds.At) !transition.Next(SettleTool) {
+        const at = ran orelse {
+            const binding = t.input.binding;
+            const names: action_domain.CoreNames = .of();
+            r.read(action_domain.core_facts, names.args(.{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id }), &t.facts);
+            return .{ .round = .facts };
+        };
+        switch (at) {
+            .facts => {
+                const found = t.facts orelse return error.StaleActionAttemptBinding;
+                if (found.stopped) return .{ .done = false };
+                switch (t.input.captured.*) {
+                    .invocation => |bytes| return t.lookupOutcome(r, bytes, true),
+                    .failed => |failure| return t.lookupOutcome(r, failure.bytes, false),
+                    .reload => |candidate| {
+                        t.reloading = .init(found.session, candidate, t.input.allocator);
+                        return t.reload(r, null);
+                    },
+                }
+            },
+            .skills => return t.reload(r, .latest),
+            .skills_window => return t.reload(r, .window),
+            .skills_append => return t.reload(r, .append),
+            .outcome => {
+                if (r.faults().content_import) return error.InjectedContentImportFailure;
+                const outcome_id = try content.importBytes(r, &t.outcome, t.bytes);
+                try action_domain.queueResolution(r, t.input.binding, t.facts.?.session, if (t.succeeded) .succeeded else .failed, outcome_id);
+                if (r.faults().before_commit) return error.InjectedCommitFailure;
+                return .commit;
+            },
+        }
     }
-    const result = try apply(a, allocator, found.session, captured, faults);
-    var outcome: content.Import = .ofBytes(result.bytes, false);
-    content.lookup(a, &outcome);
-    try a.run();
-    if (faults.content_import) return error.InjectedContentImportFailure;
-    const outcome_id = try content.importBytes(a, &outcome, result.bytes);
-    try action.queueResolution(a, binding, found.session, if (result.succeeded) .succeeded else .failed, outcome_id);
-    if (faults.before_commit) return error.InjectedCommitFailure;
-    try a.commit();
-    return true;
-}
+
+    /// The reload's next round; once reloaded, its result's lookup.
+    /// noinline: the reload's frame stays off the step's.
+    noinline fn reload(t: *SettleTool, r: *transition.Round(SettleTool), ran: ?ReloadRound) !transition.Next(SettleTool) {
+        const result = switch (try t.reloading.?.step(r, r.faults(), ran)) {
+            .round => |round| return .{ .round = switch (round) {
+                .latest => .skills,
+                .window => .skills_window,
+                .append => .skills_append,
+            } },
+            .reloaded => |value| value,
+        };
+        return t.lookupOutcome(r, result.bytes, result.succeeded);
+    }
+
+    fn lookupOutcome(t: *SettleTool, r: *transition.Round(SettleTool), bytes: []const u8, succeeded: bool) transition.Next(SettleTool) {
+        t.bytes = bytes;
+        t.succeeded = succeeded;
+        t.outcome = .ofBytes(bytes, false);
+        content.lookup(r, &t.outcome);
+        return .{ .round = .outcome };
+    }
+
+    pub fn committed(_: *const SettleTool) bool {
+        return true;
+    }
+
+    pub fn deinit(t: *SettleTool) void {
+        if (t.reloading) |*reloading| reloading.deinit();
+    }
+};

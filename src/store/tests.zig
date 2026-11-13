@@ -16266,6 +16266,55 @@ test "find_tools and the skill tool leave a call whose Session owes a stop to th
     }.run);
 }
 
+test "the skill tool resolves an invocation or a failed capture with its text, and a fault saves nothing" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            var opened = true;
+            defer if (opened) storage.close() catch unreachable;
+            var path: [protocol.max_workspace_bytes]u8 = undefined;
+            var create = try completeConfiguration("skill-tool", "", try canonicalCwd(std.testing.io, &path), "model-a");
+            create.configuration.tools = try .of(&.{"skill"});
+            const session = (try storage.configure(&create, .{})).accepted.session;
+            try submitTestMessage(&storage, &tmp, "skill-tool-input", "skill-tool-key", session.slice(), "invoke");
+            const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            var calls: [2]TestingCall = undefined;
+            for (&calls, [_][]const u8{ "invoke", "fail" }) |*call, name| call.* = .{ .item_id = name, .name = "skill", .encoded_call_id = name, .decoded_call_id = name, .encoded_arguments = "{\\\"operation\\\":\\\"reload\\\"}", .decoded_arguments = "{\"operation\":\"reload\"}" };
+            try settleCallsForTesting(&storage, &tmp, model, "skill-tool-calls", &calls);
+            var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer arena.deinit();
+            const invocation: skills_fixture_domain.Capture = .{ .invocation = "the skill's own text" };
+            const failed: skills_fixture_domain.Capture = .{ .failed = .{ .code = .skill_file_unavailable, .bytes = "Rui could not read the skill's file." } };
+            const Expected = struct { captured: *const skills_fixture_domain.Capture, code: []const u8, text: []const u8 };
+            for ([_]Expected{
+                .{ .captured = &invocation, .code = "succeeded", .text = "the skill's own text" },
+                .{ .captured = &failed, .code = "failed", .text = "Rui could not read the skill's file." },
+            }) |expected| {
+                const pending = (try storage.nextCoreWork()).?.action;
+                // An injected fault rolls back the result and resolution.
+                for ([_]struct { Faults, anyerror }{
+                    .{ .{ .content_import = true }, error.InjectedContentImportFailure },
+                    .{ .{ .before_commit = true }, error.InjectedCommitFailure },
+                }) |fault| {
+                    try std.testing.expectError(fault[1], storage.settleSkillTool(pending.binding, arena.allocator(), expected.captured, fault[0]));
+                    try storage.close();
+                    opened = false;
+                    try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                    opened = true;
+                    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE action_id=?1 AND resolution_code IS NULL", .{pending.binding.action_id}));
+                }
+                try std.testing.expect(try storage.settleSkillTool(pending.binding, arena.allocator(), expected.captured, .{}));
+                const result_id = try store_testing.queryU64(&storage, "SELECT resolution_content_id FROM action_operation WHERE action_id=?1 AND resolution_code=?2", .{ pending.binding.action_id, expected.code });
+                try expectContent(&storage, try testingContentReference(&storage, result_id), expected.text);
+            }
+            try std.testing.expect(!storage.isFenced());
+        }
+    }.run);
+}
+
 test "MCP read-only ordering uses frozen offers and admits read waves between writes" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
