@@ -2,7 +2,7 @@
 """Keep CLI-owned failures classified without exposing Zig error names.
 
 Inventory only src/cli.zig, src/cli_args.zig, src/cli_grammar.zig, src/client.zig,
-src/preferences.zig and root-level src/caller_*.zig. The same predicate selects
+src/preferences.zig, the host_start.zig compatibility shell and root-level src/caller_*.zig. The same predicate selects
 candidate coverage and trusted bootstrap sources. Pending can only shrink from
 the trusted origin/main merge base; before that tuple existed, bootstrap from
 those trusted CLI sources and the pinned Zig standard library, never from the
@@ -27,7 +27,7 @@ from typing import NamedTuple
 ROOT = Path(__file__).resolve().parents[2]
 CATALOG = "src/caller_error.zig"
 CALLER = {"src/cli.zig", "src/cli_args.zig", "src/cli_grammar.zig"}
-INVENTORY = CALLER | {"src/client.zig", "src/preferences.zig"}
+INVENTORY = CALLER | {"src/client.zig", "src/preferences.zig", "src/host_start.zig"}
 TOKEN = re.compile(
     r'//[^\n]*|\\\\[^\n]*|@"(?:\\.|[^"\\])*"|"(?:\\.|[^"\\])*"|'
     r"'(?:\\.|[^'\\])*'|@?[A-Za-z_][A-Za-z_0-9]*|=>|[^\s]"

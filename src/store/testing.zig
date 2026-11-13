@@ -238,6 +238,7 @@ pub fn stageEndingMessageUpgrade(storage: *Store, keep_pending_forward: bool) !v
     };
     // K10 is the 66 -> 67 transition, even after later formats append steps.
     const from: u32 = 66;
+    try dropObligationFrontier(storage);
     // Reconstruct the historical row width from its owning CREATE, not a
     // hand-maintained list of every column later formats append. Both engines
     // must replay the pending chain from format 66's actual Operation shape.
@@ -299,6 +300,40 @@ pub fn stageEndingMessageUpgrade(storage: *Store, keep_pending_forward: bool) !v
             for (step.mysql) |sql| try Native.exec(storage, sql);
         }
         try Native.exec(storage, comptime std.fmt.comptimePrint("UPDATE store_meta SET meta_value='{d}' WHERE meta_key='format'", .{schema.schema_version}));
+    }
+}
+
+/// Remove only format 73's derived representation; keep canonical input and
+/// forwarding facts so the production migration must reconstruct the frontier.
+fn dropObligationFrontier(storage: *Store) !void {
+    const Native = struct {
+        fn exec(store: *Store, sql: [:0]const u8) !void {
+            if (store.engine == .mysql) return mysql_testing.rawExec(store, sql);
+            return sqlite.exec(store.sqliteDatabase(), sql);
+        }
+    };
+    if (storage.engine == .mysql) {
+        try Native.exec(storage, "ALTER TABLE session DROP INDEX session_obligation_parent, DROP COLUMN session_obligation_parent_lead, DROP COLUMN obligation_since");
+        try Native.exec(storage, "DROP INDEX session_forward_owed_message ON session_forward");
+    } else {
+        try Native.exec(storage, "DROP INDEX session_obligation_parent");
+        try Native.exec(storage, "ALTER TABLE session DROP COLUMN obligation_since");
+        try Native.exec(storage, "DROP INDEX session_forward_owed_message");
+    }
+}
+
+/// Reopen SQLite through its production upgrader; MySQL's operator applies the
+/// same published step before the runtime opens its SELECT/INSERT/UPDATE Store.
+pub fn stageObligationUpgrade(storage: *Store) !void {
+    const schema = @import("schema.zig");
+    try dropObligationFrontier(storage);
+    if (storage.engine == .mysql) {
+        try mysql_testing.rawExec(storage, "UPDATE store_meta SET meta_value='72' WHERE meta_key='format'");
+        for (schema.migrations[72 - schema.migration_baseline].mysql) |sql| try mysql_testing.rawExec(storage, sql);
+        try mysql_testing.rawExec(storage, "UPDATE store_meta SET meta_value='73' WHERE meta_key='format'");
+    } else {
+        try sqlite.exec(storage.sqliteDatabase(), "UPDATE store_meta SET meta_value='72' WHERE meta_key='format'");
+        try sqlite.exec(storage.sqliteDatabase(), "PRAGMA user_version=72");
     }
 }
 

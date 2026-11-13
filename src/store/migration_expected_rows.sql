@@ -73,3 +73,5 @@ INSERT INTO action_operation(action_id,parent_operation_id,call_ordinal,session_
 (2,2,1,'brhkcj',1,1,0,0,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,5);
 INSERT INTO permission_decision_command(command_key,action_id,decision) VALUES
 ('fixture-allow','1','allow_once');
+
+UPDATE session SET obligation_since=1793781720 WHERE session_ref='brhkcj';
