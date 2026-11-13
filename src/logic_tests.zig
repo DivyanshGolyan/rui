@@ -75,6 +75,7 @@ const cores = .{
     .{ "message_admission.zig", @import("message_admission.zig") },
     .{ "message_agent_arguments.zig", @import("message_agent_arguments.zig") },
     .{ "message_observation.zig", @import("message_observation.zig") },
+    .{ "memory_text.zig", @import("memory_text.zig") },
     .{ "model_capability.zig", @import("model_capability.zig") },
     .{ "model_catalog.zig", @import("model_catalog.zig") },
     .{ "model_catalog_snapshot.zig", @import("model_catalog_snapshot.zig") },

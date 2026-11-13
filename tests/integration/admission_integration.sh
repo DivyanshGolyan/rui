@@ -1003,41 +1003,41 @@ if [ "$status" -ne 6 ]; then
 fi
 contains "$(cat "$state/insecure.err")" "[store_unavailable]"
 
-wire_store="$state/wire-store"
-wire_ready="$state/wire-ready"
-wire_error="$state/wire-error"
-"$rui" host serve --store "$wire_store" >"$wire_ready" 2>"$wire_error" &
+format_store="$state/format-store"
+format_ready="$state/format-ready"
+format_error="$state/format-error"
+"$rui" host serve --store "$format_store" >"$format_ready" 2>"$format_error" &
 extra_pid=$!
 attempts=0
-while ! grep -q '^ready ' "$wire_ready"; do
+while ! grep -q '^ready ' "$format_ready"; do
     if ! kill -0 "$extra_pid" 2>/dev/null; then
-        cat "$wire_error" >&2
+        cat "$format_error" >&2
         exit 1
     fi
     attempts=$((attempts + 1))
     if [ "$attempts" -gt 500 ]; then
-        echo "wire-version fixture Host did not become ready" >&2
+        echo "format fixture Host did not become ready" >&2
         exit 1
     fi
     sleep 0.01
 done
-wire_socket=$(sed -n 's/.* socket=\([^ ]*\).*/\1/p' "$wire_ready")
+format_socket=$(sed -n 's/.* socket=\([^ ]*\).*/\1/p' "$format_ready")
 kill -9 "$extra_pid"
 wait "$extra_pid" 2>/dev/null || true
 extra_pid=
-require_test 'wire-version Host crash leaves its Unix socket' -S "$wire_socket"
-python3 - "$wire_store/rui.sqlite3" <<'PY'
+require_test 'format fixture Host crash leaves its Unix socket' -S "$format_socket"
+python3 - "$format_store/rui.sqlite3" <<'PY'
 import sqlite3, sys
 database = sqlite3.connect(sys.argv[1])
-database.execute("UPDATE store_meta SET meta_value='future' WHERE meta_key='wire_version'")
+database.execute("UPDATE store_meta SET meta_value='future' WHERE meta_key='format'")
 database.commit()
 database.close()
 PY
 status=0
-"$rui" host serve --store "$wire_store" >"$state/wrong-wire.out" 2>"$state/wrong-wire.err" || status=$?
+"$rui" host serve --store "$format_store" >"$state/wrong-format.out" 2>"$state/wrong-format.err" || status=$?
 if [ "$status" -ne 1 ]; then
-    echo "expected wrong-wire failure with exit 1, got $status" >&2
+    echo "expected wrong-format failure with exit 1, got $status" >&2
     exit 1
 fi
-contains "$(cat "$state/wrong-wire.err")" "[internal_unexpected]"
-require_test 'wrong wire version refuses before reclaiming stale socket' -S "$wire_socket"
+contains "$(cat "$state/wrong-format.err")" "[internal_unexpected]"
+require_test 'wrong saved format refuses before reclaiming stale socket' -S "$format_socket"

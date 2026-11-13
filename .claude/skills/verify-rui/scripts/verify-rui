@@ -168,6 +168,9 @@ def store_arg(run):
 
 
 def cmd_build(args):
+    jobs = os.environ.get("RUI_BUILD_JOBS", "2")
+    if not re.fullmatch(r"[0-9]+", jobs) or int(jobs) < 1:
+        die("RUI_BUILD_JOBS must be a positive integer")
     sha = args.sha
     if not re.fullmatch(r"[0-9a-f]{40}", sha):
         die("build needs a full 40-hex commit SHA")
@@ -195,11 +198,11 @@ def cmd_build(args):
     log = build / "build.log"
     started = time.monotonic()
     with open(log, "w") as handle:
-        result = subprocess.run(["zig", "build", "-Doptimize=ReleaseSafe", "-j2", "--summary", "all"], cwd=source,
+        result = subprocess.run(["zig", "build", "-Doptimize=ReleaseSafe", f"-j{jobs}", "--summary", "all"], cwd=source,
                                 env=env, stdout=handle, stderr=subprocess.STDOUT)
         if result.returncode == 0 and not args.no_screen:
             # The committed-screen observer's terminal emulator, for the tap.
-            result = subprocess.run(["zig", "build", "screen-emulator", "-j2", "--prefix", str(build / "screen"), "--summary", "all"],
+            result = subprocess.run(["zig", "build", "screen-emulator", f"-j{jobs}", "--prefix", str(build / "screen"), "--summary", "all"],
                                     cwd=source, env=env, stdout=handle, stderr=subprocess.STDOUT)
     if result.returncode != 0:
         die(f"zig build failed (rc={result.returncode}); see {log}")
@@ -292,6 +295,8 @@ See the [retry policy notes](https://example.com/docs/retry-policy) for the reas
     return "The deadline check now runs before the backoff sleep, and the test suite passes (214 tests). I did not touch `fetch.zig`."
 
 def fixture_summary(text, n, tool_count, answers="echo"):
+    if answers == "realistic" and re.search(r"relay to [0-9a-z]{6}", text):
+        return "Peer message delivered."
     if answers == "realistic" and "long tool output" in text:
         return "Printed thirty-two numbered lines."
     if answers == "realistic":
@@ -318,7 +323,9 @@ def fixture_main(args):
       * text containing "long bash": one Bash command that sleeps 8 s
       * text containing "show environment": one Bash call that prints CLIENT_MARK, HOST_SECRET, `command -v brew` and PATH
       * text containing "start a child": one Bash call that starts Session "child" with "show environment"
-      * text containing "relay to ID": one Bash call that sends "show environment" to Session ID as a peer
+      * text containing "relay to ID": one Bash call that sends the text after the first ": " to Session ID as a peer,
+        or "show environment" when there is none ("show environment" in the text itself wins first)
+      * text containing "hold answer": no reply until the fixture closes at run cleanup, so the Turn stays working
       * text containing "parallel bash": two Bash commands that sleep 12 s and 20 s, issued together
       * text containing "slow": the echo answer streamed slowly (~10 s in flight)
       * text containing "invalid output": a stream that is not JSON, so the Turn fails
@@ -419,11 +426,17 @@ def fixture_main(args):
             elif user_text and (relay := re.search(r"relay to ([0-9a-z]{6})", user_text)):
                 kind = "relay"
                 payload = fixture.sse_tool_calls(f"r{n}", [bash(f"c{n}",
-                    f"printf 'show environment' | rui session send --to {relay.group(1)}", "Relay to a peer")])
+                    "printf %s " + shlex.quote(user_text.partition(": ")[2] or "show environment") +
+                    f" | rui session send --to {relay.group(1)}", "Relay to a peer")])
             elif user_text and "start a child" in user_text:
                 kind = "start-child"
                 payload = fixture.sse_tool_calls(f"r{n}", [bash(f"c{n}",
                     "printf 'show environment' | rui session start --label child --permission-mode bypass", "Start a child Session")])
+            elif user_text and "hold answer" in user_text:
+                # The fixture process owns this held reply until run cleanup;
+                # no elapsed-time race can turn a working specimen into done.
+                fixture.hold(self.server, threading.Event(), "held frame answer")
+                return
             elif user_text and "long bash" in user_text:
                 kind = "long-bash"
                 payload = fixture.sse_tool_calls(f"r{n}", [bash(f"c{n}", "sleep 8; echo slept", "Sleep eight seconds")])
@@ -471,7 +484,10 @@ def fixture_main(args):
 
     # Rui's client speaks HTTP/2; the integration fixture's server answers both.
     from host_process import TestHTTPServer
-    server = TestHTTPServer(("127.0.0.1", 0), Handler)
+    class Endpoint(fixture.HeldReplies, TestHTTPServer):
+        pass
+
+    server = Endpoint(("127.0.0.1", 0), Handler)
     atomic_write(run.scratch / "fixture.port", str(server.server_port))
     server.serve_forever()
 
@@ -2095,6 +2111,13 @@ def validate_scenario(data, sizes=None):
                                              and isinstance(v, str) and "\0" not in v for k, v in env.items()), f"{name}: invalid env")
         require("note" not in state or isinstance(state["note"], str) and "\n" not in state["note"], f"{name}: note must be one line")
         require(type(state.get("first_frame", False)) is bool, f"{name}: first_frame must be a boolean")
+        styles = state.get("expect_dim", [])
+        require(isinstance(styles, list) and all(isinstance(rule, dict)
+                and set(rule) <= {"text", "dim", "min_columns"}
+                and isinstance(rule.get("text"), str) and rule["text"] and "\n" not in rule["text"]
+                and type(rule.get("dim")) is bool
+                and type(rule.get("min_columns", 1)) is int and rule.get("min_columns", 1) > 0
+                for rule in styles), f"{name}: expect_dim requires text, dim and optional positive min_columns")
         adjacent = state.get("expect_next", {})
         require(isinstance(adjacent, dict) and all(isinstance(row, str) and row and "\n" not in row
                 and isinstance(detail, str) and detail and "\n" not in detail for row, detail in adjacent.items()),
@@ -2113,11 +2136,18 @@ def validate_scenario(data, sizes=None):
             require(isinstance(label, str) and bool(label) and "\n" not in label, f"{name}: invalid cast label")
             require(isinstance(workspace, str) and bool(workspace) and not pathlib.PurePath(workspace).is_absolute()
                     and ".." not in pathlib.PurePath(workspace).parts, f"{name}: workspace must be relative to HOME")
+            require("sender" not in entry or isinstance(entry["sender"], str) and entry["sender"] in labels,
+                    f"{name}: sender must name an earlier cast")
+            require("sender" not in entry or entry.get("settle", "answered") != "stop",
+                    f"{name}: sender cast supports answered or pending settlement")
             require(entry.get("mode") in ("bypass", "ask"), f"{name}: invalid cast mode")
             require(entry.get("settle", "answered") in ("answered", "pending", "stop"), f"{name}: invalid settle")
             require(type(entry.get("count", 1)) is int and entry.get("count", 1) > 0, f"{name}: count must be positive")
             require("count" not in entry or "{n}" in label, f"{name}: counted label must contain {{n}}")
             require(all(isinstance(entry.get(k, ""), str) for k in ("model", "effort")), f"{name}: invalid model/effort")
+            skills = entry.get("skills", [])
+            require(isinstance(skills, list) and all(isinstance(skill, str) and re.fullmatch(r"[a-z][a-z0-9-]{0,63}", skill) for skill in skills)
+                    and len(set(skills)) == len(skills), f"{name}: invalid cast skills")
             messages = entry.get("messages")
             require(isinstance(messages, list) and bool(messages) and all(isinstance(m, str) and m for m in messages), f"{name}: messages must be nonempty strings")
         for entry in cast_entries(cast):
@@ -2228,19 +2258,23 @@ def seed_cast(run, entries):
         workspace.mkdir(parents=True, exist_ok=True)
         (workspace / "README.md").write_text("verify-rui project\n")
         (workspace / "src").mkdir(exist_ok=True)
+        for skill in entry.get("skills", []):
+            folder = workspace / ".agents" / "skills" / skill
+            folder.mkdir(parents=True, exist_ok=True)
+            (folder / "SKILL.md").write_text(f"---\nname: {skill}\ndescription: Verify the project and review the implementation\n---\nReview the project.\n")
         sid = None
         for i, text in enumerate(entry["messages"]):
             if sid is None:
                 model = entry.get("model", "gpt-6.1-sol")
-                argv = ["session", "start", "--store", run.store, "--workspace", workspace, "--provider", "codex",
+                argv = ["session", "configure" if entry.get("sender") else "start", "--store", run.store, "--workspace", workspace, "--provider", "codex",
                         "--model", model, "--permission-mode", entry["mode"], "--label", entry["label"]]
                 if entry.get("effort"):
                     argv += ["--reasoning-effort", entry["effort"]]
-                result = run.rui_cmd(*argv, input=text)
+                result = run.rui_cmd(*argv, input=None if entry.get("sender") else text)
                 if result.returncode and model != "gpt-5.5" and "[selection_model_unsupported]" in result.stderr:
                     refusal = result.stderr
                     argv[argv.index("--model") + 1] = "gpt-5.5"
-                    result = run.rui_cmd(*argv, input=text)
+                    result = run.rui_cmd(*argv, input=None if entry.get("sender") else text)
                     print(f"verify-rui: {entry['label']}: {model} refused; using gpt-5.5", file=sys.stderr)
                     append_jsonl(run.evidence / "frames-model-fallback.jsonl", {"label": entry["label"], "requested": model,
                                                                              "used": "gpt-5.5", "refusal": refusal})
@@ -2248,10 +2282,25 @@ def seed_cast(run, entries):
                 sid = json.loads(result.stdout)["context"]["session"]
                 run.meta["sessions"][entry["label"]] = sid
                 atomic_write(run.root / "run.json", json.dumps(run.meta, indent=1) + "\n")
-            else:
+            elif not entry.get("sender"):
                 result = run.rui_cmd("session", "send", "--store", run.store, "--to", sid, input=text)
             settle = entry.get("settle", "answered") if i == len(entry["messages"]) - 1 else "answered"
-            frame_request(run, result, settle, sid)
+            if entry.get("sender"):
+                relay = run.rui_cmd("session", "send", "--store", run.store, "--to", run.sid(entry["sender"]),
+                                    input=f"relay to {sid}: {text}")
+                frame_request(run, relay, "answered", run.sid(entry["sender"]))
+                # Read canonical Session work, not the sender's completed relay.
+                sys.path.insert(0, str(HERE.parents[4] / "tests/integration"))
+                from host_process import wait_for
+                def settled():
+                    report = frame_command(run.rui_cmd("session", "inspect", "--store", run.store,
+                                                      "--session", sid, timeout=2, log=False), "inspect peer")
+                    kind = json.loads(report.stdout)["work"]["state"]["kind"]
+                    return kind in (("finished", "failed", "stopped") if settle == "answered"
+                                    else ("approval", "working", "bash"))
+                wait_for(settled, f"peer {entry['label']} {settle}", timeout=40)
+            else:
+                frame_request(run, result, settle, sid)
 
 
 class FrameTerminal:
@@ -2503,6 +2552,31 @@ def frame_row_failure(state, plain):
     return None
 
 
+def frame_dim_failure(state, frame):
+    """Assert actual committed cell attributes, independent of theme colours."""
+    for rule in state.get("expect_dim", []):
+        if frame.columns < rule.get("min_columns", 1):
+            continue
+        text = rule["text"]
+        for row in frame.cells:
+            line = "".join(cell.data for cell in row)
+            start = line.find(text)
+            if start < 0:
+                continue
+            offset, matched = 0, []
+            for cell in row:
+                end = offset + len(cell.data)
+                if end > start and offset < start + len(text):
+                    matched.append(cell)
+                offset = end
+            if matched and all(cell.faint == rule["dim"] for cell in matched):
+                break
+            return f"{text!r} must have dim={rule['dim']}"
+        else:
+            return f"missing dim specimen {text!r}"
+    return None
+
+
 def frame_ready(terminal, state, allow_exit=False, sessions=None):
     # Transitions are asserted at the frame their last wait observed, not
     # polled until a later frame happens to satisfy the regression oracle.
@@ -2531,7 +2605,7 @@ def frame_capture(run, target, out, state, size, reason):
     if unexpected is not None and reason is None:
         reason = f"unexpected on screen: {unexpected}"
     if reason is None:
-        reason = frame_row_failure(state, plain)
+        reason = frame_row_failure(state, plain) or frame_dim_failure(state, frame)
     (out / files["txt"]).write_text(plain)
     (out / files["ansi"]).write_text(ansi)
     (out / files["html"]).write_text(page)
@@ -2555,13 +2629,19 @@ def frames_index(out, frames, png):
                                     'img{max-width:100%}iframe{width:100%;height:900px;border:0}</style>' + "\n".join(sections))
 
 
+def frame_capture_selected(state, selected):
+    """Only selected states produce and compare saved captures."""
+    return state["name"] in selected
+
+
 def cmd_frames(args):
     try:
         scenario = load_scenario(args.scenario, args.sizes)
         selected = set(args.only.split(",")) if args.only else {s["name"] for s in scenario["states"]}
         unknown = selected - {s["name"] for s in scenario["states"]}
         if unknown:
-            raise ValueError("unknown states: " + ", ".join(sorted(unknown)))
+            raise ValueError("unknown states: " + ", ".join(sorted(unknown)) +
+                             "; valid states: " + ", ".join(s["name"] for s in scenario["states"]))
     except (OSError, ValueError, TypeError) as error:
         die(str(error))
     build = load_build(args.sha)
@@ -2618,33 +2698,35 @@ def cmd_frames(args):
             opened = False
             failure_capture = None
             first_record = len(records)
+            is_selected = frame_capture_selected(state, selected)
             try:
                 seed_cast(run, state.get("cast", []))
+                steps = state["steps"]
                 target = FrameTerminal(run, state, state_sizes[0])
                 opened = True
                 # Initial readiness is a committed Rui frame, not elapsed wall
                 # time or a terminal query. State-specific waits own later readiness.
                 stopped_marker = next((step["wait"] for step in state["steps"]
                                        if "The Host stopped." in step.get("wait", "")), None)
-                first_wait = state["steps"][0].get("wait") if state["steps"] else None
+                first_wait = steps[0].get("wait") if steps else None
                 frame_initial_ready(target, first_wait, allow_exit=bool(stopped_marker))
-                exiting = frame_steps(run, target, state["steps"], exiting=bool(stopped_marker))
+                exiting = frame_steps(run, target, steps, exiting=bool(stopped_marker))
                 frame_ready(target, state, allow_exit=exiting, sessions=run.meta.get("sessions", {}))
             except (Exception, SystemExit) as error:
                 reason = str(error)
-                if state["name"] in selected:
+                if is_selected:
                     failed = True
                     print(f"verify-rui: {state['name']}: {reason}", file=sys.stderr)
                 else:
                     print(f"verify-rui: warning: {state['name']}: {reason} "
                           "(not selected; its failure does not fail this run)", file=sys.stderr)
-                if opened and state["name"] in selected:
+                if opened and is_selected:
                     try:
                         failure_capture = frame_capture(run, target, out, state, state_sizes[0], reason)
                     except (Exception, SystemExit):
                         pass  # The capture error below retains the primary state failure.
             try:
-                if state["name"] in selected:
+                if is_selected:
                     for index, size in enumerate(state_sizes):
                         if failure_capture and index == 0:
                             records.append(failure_capture)
@@ -2671,7 +2753,7 @@ def cmd_frames(args):
                     try:
                         target.close()
                     except (Exception, SystemExit) as error:
-                        if state["name"] in selected:
+                        if is_selected:
                             failed = True
                             # Disposal can discover an error after the last
                             # capture. Keep its files, but never publish ok.
@@ -2681,7 +2763,7 @@ def cmd_frames(args):
                         else:
                             print(f"verify-rui: warning: {state['name']}: disposal failed: {error} "
                                   "(not selected; its failure does not fail this run)", file=sys.stderr)
-                if state["name"] in selected:
+                if is_selected:
                     frames_index(out, records, False)
         if not args.no_png:
             movies = []

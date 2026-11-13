@@ -2367,8 +2367,8 @@ pub const Caps = struct {
     /// answer.
     background: ?Rgb = null,
 
-    /// `none` under NO_COLOR draws in the terminal's own colours with bold
-    /// and reverse only; `indexed` uses the nearest 256-colour entries;
+    /// `none` under NO_COLOR draws in the terminal's own colours with bold,
+    /// dim, reverse and underline; `indexed` uses the nearest 256-colour entries;
     /// `direct` uses 24-bit colour.
     pub const Depth = enum { none, indexed, direct };
 
@@ -2480,8 +2480,8 @@ fn topRows(state: *const State) usize {
 
 /// One line's spans, placed left to right at their columns, its text made
 /// terminal-safe and clipped to the room it has. Each span keeps the role
-/// it was given, as `plain` leaves it without colour; the widget that
-/// draws the line makes the role a colour through `widget_style`.
+/// it was given; only `widget_style.of` normalizes that role for terminal
+/// capabilities when the widget draws it.
 const Spans = struct {
     arena: Allocator,
     caps: Caps,
@@ -2514,8 +2514,7 @@ const Spans = struct {
     fn pad(self: *Spans, column: usize, wanted: Style) error{OutOfMemory}!void {
         const to = @min(column, self.width);
         if (to <= self.column) return;
-        const drawn = plain(self.caps, wanted);
-        if (drawn.reverse or drawn.background != .ground) {
+        if (wanted.reverse or wanted.background != .ground) {
             const blank = try self.arena.alloc(u8, to - self.column);
             @memset(blank, ' ');
             self.push(blank, to - self.column, wanted);
@@ -2525,7 +2524,7 @@ const Spans = struct {
 
     fn push(self: *Spans, bytes: []const u8, cells: usize, wanted: Style) void {
         if (self.count == self.spans.len or cells == 0) return;
-        self.spans[self.count] = .{ .column = @intCast(self.column), .cells = @intCast(cells), .text = bytes, .style = plain(self.caps, wanted) };
+        self.spans[self.count] = .{ .column = @intCast(self.column), .cells = @intCast(cells), .text = bytes, .style = wanted };
         self.count += 1;
         self.column += cells;
     }
@@ -2545,7 +2544,7 @@ const Spans = struct {
         try self.pad(column, wanted);
         const room = @min(limit, self.width -| self.column);
         if (room == 0) return 0;
-        const shown = try fitted(self.arena, self.caps, self.glyphs, bytes, room, keep);
+        const shown = try fitted(self.arena, self.caps, bytes, room, keep);
         self.push(shown.bytes, shown.cells, wanted);
         return shown.cells;
     }
@@ -2562,23 +2561,14 @@ const Spans = struct {
     }
 };
 
-const Keep = enum { head, tail };
-
-/// `wanted` as a terminal without colour shows it: only bold and reverse
-/// remain, the band and the selection reverse, and every other ground is
-/// the terminal's own.
-fn plain(caps: Caps, wanted: Style) Style {
-    if (caps.depth != .none) return wanted;
-    return .{
-        .bold = wanted.bold or wanted.background == .band,
-        .reverse = wanted.reverse or wanted.background == .band or wanted.background == .selection,
-    };
-}
+pub const Keep = enum { head, tail };
 
 /// `bytes` made terminal-safe and clipped to `room` cells, as `Pieces`
 /// shows it, with an ellipsis where it was cut: at the end, or at the
 /// start when keeping the tail.
-fn fitted(arena: Allocator, caps: Caps, glyphs: Glyphs, bytes: []const u8, room: usize, keep: Keep) error{OutOfMemory}!Piece {
+pub fn fitted(arena: Allocator, caps: Caps, bytes: []const u8, room: usize, keep: Keep) error{OutOfMemory}!Piece {
+    if (room == 0) return .{ .bytes = "", .cells = 0 };
+    const glyphs = if (caps.unicode) unicode_glyphs else ascii_glyphs;
     const total = measured(caps, glyphs, bytes);
     const ellipsis = glyphs.ellipsis;
     const budget = if (total <= room) total else room - 1;
@@ -2628,7 +2618,7 @@ fn standIn(caps: Caps, glyphs: Glyphs, codepoint: u21) ?[]const u8 {
     return null;
 }
 
-const Piece = struct { bytes: []const u8, cells: usize };
+pub const Piece = struct { bytes: []const u8, cells: usize };
 
 /// Text as the terminal draws it: whole grapheme clusters, measured as the
 /// terminal measures them, with a one-cell stand-in for each code point
@@ -2811,6 +2801,7 @@ pub fn listItem(state: *const State, line: usize) ?Item {
 pub fn rowSegments(arena: Allocator, state: *const State, at: usize, width: u16, caps: Caps, frame: u64) error{OutOfMemory}![]const Segment {
     var built: Spans = .of(arena, caps, width);
     const row = &state.rows.items[state.order.items[at]];
+    const quiet = rowQuiet(state, row);
     const rule = rules.get(shownKind(state, row));
     built.begin();
     const mark = marks.get(rule.mark);
@@ -2822,7 +2813,7 @@ pub fn rowSegments(arena: Allocator, state: *const State, at: usize, width: u16,
         .quiet => Colour.quiet,
         .attention => Colour.attention,
     } else rule.colour;
-    _ = try built.put(1, glyph, 1, .{ .colour = colour });
+    _ = try built.put(1, glyph, 1, .{ .colour = colour, .dim = quiet });
     const named = title(state, row);
     const name = switch (row.archive_state) {
         .active, .archived => named.text,
@@ -2840,10 +2831,10 @@ pub fn rowSegments(arena: Allocator, state: *const State, at: usize, width: u16,
     else
         "";
     const name_room: usize = name_end -| 3;
-    const name_cells = try built.put(3, name, name_room -| built.measure(archived), .{ .colour = if (selected) .strong else .normal, .bold = selected });
-    _ = try built.put(3 + name_cells, archived, name_room -| name_cells, .{ .colour = .quiet });
-    _ = try built.put(end -| age_cells, age, age_cells, .{ .colour = .quiet });
-    return segmentsOf(arena, try built.finish(), width, .{});
+    const name_cells = try built.put(3, name, name_room -| built.measure(archived), .{ .colour = if (selected) .strong else .normal, .bold = selected, .dim = quiet });
+    _ = try built.put(3 + name_cells, archived, name_room -| name_cells, .{ .colour = .quiet, .dim = quiet });
+    _ = try built.put(end -| age_cells, age, age_cells, .{ .colour = .quiet, .dim = quiet });
+    return segmentsOf(arena, try built.finish(), width, .{ .dim = quiet });
 }
 
 /// Second line: terminal-safe detail, then a non-overlapping folder and gap.
@@ -2851,14 +2842,15 @@ pub fn rowSecondSegments(arena: Allocator, state: *const State, at: usize, width
     var built: Spans = .of(arena, caps, width);
     built.begin();
     const row = &state.rows.items[state.order.items[at]];
+    const quiet = rowQuiet(state, row);
     const folder = folderOf(state, row);
     const end = width -| 1;
     const folder_cells = @min(built.measure(folder), end -| 3);
     const folder_start = end -| folder_cells;
     var buffer: [max_second_line_bytes]u8 = undefined;
-    _ = try built.put(3, secondLine(state, row, &buffer), folder_start -| 1 -| 3, .{ .colour = .quiet });
-    _ = try built.putTail(folder_start, folder, folder_cells, .{ .colour = .quiet });
-    return segmentsOf(arena, try built.finish(), width, .{});
+    _ = try built.put(3, secondLine(state, row, &buffer), folder_start -| 1 -| 3, .{ .colour = .quiet, .dim = quiet });
+    _ = try built.putTail(folder_start, folder, folder_cells, .{ .colour = .quiet, .dim = quiet });
+    return segmentsOf(arena, try built.finish(), width, .{ .dim = quiet });
 }
 
 /// Whether `item`'s mark turns with the frame. Your own Session at work
@@ -2868,7 +2860,23 @@ pub fn rowSecondSegments(arena: Allocator, state: *const State, at: usize, width
 pub fn markSpins(state: *const State, item: Item, caps: Caps) bool {
     if (item != .row or state.list_stale or !caps.unicode or caps.depth == .none) return false;
     const row = &state.rows.items[state.order.items[item.row]];
-    return row.from_person_at != null and rules.get(shownKind(state, row)).spins;
+    return yours(row) and rules.get(shownKind(state, row)).spins;
+}
+
+/// The person wrote in this chat. The open empty chat is theirs even before
+/// its first Message is admitted.
+fn yours(row: *const Row) bool {
+    return row.first == null or row.from_person_at != null;
+}
+
+/// The row needs the person: it sorts under Needs you, or its work failed.
+fn needsPerson(state: *const State, row: *const Row) bool {
+    return orderClass(state, row) == .needs_you or row.state == .failed;
+}
+
+/// A chat you never wrote in recedes unless it needs you.
+fn rowQuiet(state: *const State, row: *const Row) bool {
+    return !yours(row) and !needsPerson(state, row);
 }
 
 /// Provider recovery bands above the list. Archive views remain reachable
@@ -3357,7 +3365,8 @@ test "every work state follows the rules table, in Unicode and ASCII" {
         state.selected = .new_session;
         var unselected = try Frame.of(&state, 80, 24, .{}, 0);
         defer unselected.deinit();
-        try std.testing.expectEqual(Style{ .colour = case.colour }, unselected.styleAt(2, 1).?);
+        // The sender/work domain below owns whole-row dim expectations.
+        try std.testing.expectEqual(case.colour, unselected.styleAt(2, 1).?.colour);
         try std.testing.expectEqual(Colour.quiet, unselected.styleAt(3, 79 - "rui".len).?.colour);
     }
 }
@@ -3385,7 +3394,8 @@ test "a retry that has fallen due reads as queued in its group, mark and colour"
     try std.testing.expect(std.mem.indexOf(u8, text, " Active ·") == null);
     var screen = try Frame.of(&state, 80, 24, .{ .depth = .none }, 0);
     defer screen.deinit();
-    try std.testing.expectEqual(Style{ .colour = .normal }, screen.styleAt(2, 1).?);
+    // The core retains the pending mark's role, even without colour.
+    try std.testing.expectEqual(Style{ .colour = .quiet, .dim = true }, screen.styleAt(2, 1).?);
 }
 
 test "overview rows draw a flat order without headings" {
@@ -4816,7 +4826,7 @@ test "the overview's rows draw twenty mixed rows" {
     }
 }
 
-test "the overview's rows draw ASCII without colour" {
+test "the overview's rows stay ASCII and keep semantic roles without colour" {
     var state = try opened(&mixed);
     defer state.deinit();
     _ = try step(&state, .{ .first_line = .{ .reference = "h8q2mz".*, .admission = 4, .line = "résumé the naïve café ☕ notes" } });
@@ -4827,7 +4837,9 @@ test "the overview's rows draw ASCII without colour" {
         defer std.testing.allocator.free(text);
         for (text) |byte| try std.testing.expect(byte < 0x80 and (byte >= 0x20 or byte == '\n'));
         try std.testing.expect(std.mem.indexOf(u8, text, "r?sum? the na?ve caf? ? notes") != null);
-        for (shown.list) |line| for (line) |segment| try std.testing.expectEqual(Colour.normal, segment.style.colour);
+        var direct = try Frame.of(&state, width, 60, .{ .unicode = false }, 0);
+        defer direct.deinit();
+        try std.testing.expectEqualDeep(direct.list, shown.list);
     }
 }
 
@@ -4879,16 +4891,6 @@ test "overview idle rows never fold" {
     defer std.testing.allocator.free(text);
     try std.testing.expectEqual(@as(usize, 8), std.mem.count(u8, text, "○ Wait for review"));
     try std.testing.expect(std.mem.indexOf(u8, text, " more") == null);
-}
-
-test "overview sender does not change ended title styling" {
-    var state = try opened(&.{ session("k7m2qx", .{ .finished = ago(60) }, .{ .label = "Fix it", .yours = true }), session("r4t9vw", .{ .finished = ago(90) }, .{ .label = "Map it" }) });
-    defer state.deinit();
-    state.selected = .new_session;
-    var screen = try Frame.of(&state, 80, 24, .{}, 0);
-    defer screen.deinit();
-    try std.testing.expectEqual(Style{ .colour = .normal }, screen.styleAt(2, 4).?);
-    try std.testing.expectEqual(Style{ .colour = .normal }, screen.styleAt(4, 4).?);
 }
 
 test "the overview indexed palettes retain every colour" {
@@ -5396,6 +5398,62 @@ test "overview second line queues due retries and uses waiting Bash commands fir
     try std.testing.expectEqualStrings("", secondLine(&state, state.find(bash.reference).?, &buffer));
     _ = try step(&state, .{ .command = .{ .reference = bash.reference, .action = 7, .text = "echo allowed" } });
     try std.testing.expectEqualStrings("echo allowed", secondLine(&state, state.find(bash.reference).?, &buffer));
+}
+
+test "overview quiet rows: a chat never written in recedes unless it needs you, in every kind, stop, selection, width and depth" {
+    // Independent expectations from the approved mock: a chat the person
+    // never wrote in recedes unless it waits for approval or failed. A stop
+    // asked of an awaited decision, pending or unconfirmed, leaves the row
+    // under Needs you as main sorts it, so it stays loud.
+    const Stop = enum { none, pending, unconfirmed };
+    const cases = .{
+        .{ kind_cases[0].state, false },
+        .{ kind_cases[1].state, false },
+        .{ kind_cases[2].state, false },
+        .{ kind_cases[3].state, false },
+        .{ kind_cases[4].state, false },
+        .{ kind_cases[5].state, true },
+        .{ kind_cases[6].state, false },
+        .{ kind_cases[7].state, false },
+        .{ kind_cases[8].state, true },
+        .{ kind_cases[9].state, false },
+        .{ WorkState{ .bash = .{ .since = test_now_s, .call = 0, .description = null, .running = 1, .approvals = 1 } }, true },
+    };
+    comptime std.debug.assert(cases.len == std.enums.values(Kind).len + 1);
+    inline for (cases) |case| for (std.enums.values(Stop)) |stop| for ([_]bool{ false, true }) |wrote| for ([_]bool{ false, true }) |selected| for ([_]u16{ 46, 140 }) |width| for ([_]Caps.Depth{ .direct, .indexed, .none }) |depth| {
+        const caps: Caps = .{ .depth = depth };
+        const listed = session("k7m2qx", case[0], .{ .label = "Quiet row", .yours = wrote });
+        var state = try opened(&.{listed});
+        defer state.deinit();
+        const stoppable_kind = rules.get(std.meta.activeTag(case[0])).stoppable;
+        if (stop != .none) {
+            if (!stoppable_kind) continue;
+            state.selected = .{ .session = listed.reference };
+            try expectEffects(&.{.{ .stop = listed.reference }}, try press(&state, .stop));
+            if (stop == .unconfirmed) _ = try step(&state, .{ .stop = .{ .reference = listed.reference, .outcome = .{ .unconfirmed = "stop-handle" } } });
+            try std.testing.expect(state.openStop(listed.reference) != null);
+        }
+        state.selected = if (selected) .{ .session = listed.reference } else .new_session;
+        const quiet = !wrote and !case[1];
+        try std.testing.expectEqual(quiet, rowQuiet(&state, state.find(listed.reference).?));
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const first = try listSegments(arena.allocator(), &state, .{ .row = 0 }, width, caps, 0);
+        const name = try styleOf(first.segments, "Quiet row");
+        try std.testing.expectEqual(selected, first.selected);
+        try std.testing.expectEqual(selected, name.bold);
+        try std.testing.expectEqual(if (selected) Colour.strong else Colour.normal, name.colour);
+        const second = try rowSecondSegments(arena.allocator(), &state, 0, width, caps);
+        // Quiet rows add dim without replacing the folder's muted role.
+        try std.testing.expectEqual(Style{ .colour = .quiet, .dim = quiet }, try styleOf(second, "rui"));
+        // The mark, name, age, detail, folder and padding all recede together.
+        for (first.segments) |segment| try std.testing.expectEqual(quiet, segment.style.dim);
+        for (second) |segment| try std.testing.expectEqual(quiet, segment.style.dim);
+    };
+    var empty = try opened(&.{session("newone", .{ .idle = ago(0) }, .{ .first = null })});
+    defer empty.deinit();
+    _ = try step(&empty, .{ .conversation = "newone".* });
+    try std.testing.expect(!rowQuiet(&empty, empty.find("newone".*).?));
 }
 
 // PR3: independent layout expectations for the two-line list contract.
@@ -6243,4 +6301,14 @@ test "semantic list admission owns covered Settings paste creation and Upgrade p
             },
         }
     };
+}
+
+test "the shared row fitter handles no description cells without allocating or underflowing" {
+    for ([_]Keep{ .head, .tail }) |keep| {
+        var storage: [0]u8 = .{};
+        var fixed: std.heap.FixedBufferAllocator = .init(&storage);
+        const shown = try fitted(fixed.allocator(), .{}, "description", 0, keep);
+        try std.testing.expectEqualStrings("", shown.bytes);
+        try std.testing.expectEqual(@as(usize, 0), shown.cells);
+    }
 }

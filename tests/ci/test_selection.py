@@ -876,7 +876,8 @@ class SelectionTest(unittest.TestCase):
                                                  'NATIVE_RESULT': native, 'TYPECHECK_RESULT': typecheck,
                                                  'TYPECHECK': typecheck_selected,
                                                  'SPLIT': split, 'UNIT_RESULT': unit,
-                                                 'CODEGEN': codegen, 'CODEGEN_RESULT': codegen_result})
+                                                 'CODEGEN': codegen, 'CODEGEN_RESULT': codegen_result,
+                                                 'COMPILE_ONLY': 'false'})
                     actual = 'success' if result.returncode == 0 else 'failure'
                 self.assertEqual(actual, expected)
 
@@ -1682,7 +1683,7 @@ fi
         self.assertFalse(cache(".github/workflows/check.yml", check, check.replace(actionlint, actionlint + "-2")))
         self.assertFalse(cache("build/new.zig", None, 'const std = @import("std");\n'))
         # A value inside a cache step or input counts, though the line names no cache.
-        deps = re.search(r"(?m)^\s+DEPS: rui-build-v2-", caches)[0]
+        deps = re.search(r"(?m)^\s+PREFIX: rui-build-v2-", caches)[0]
         self.assertTrue(cache(".github/actions/setup/caches/action.yml", caches, caches.replace(deps, deps.replace("v2", "v3"))))
         default = re.search(r"(?ms)^  publish-caches:\n.*?default: (.*?)$", action)
         self.assertTrue(cache(".github/actions/setup/action.yml", action,

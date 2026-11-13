@@ -159,6 +159,7 @@ fn selection(style: vaxis.Style, selected: vaxis.Style) vaxis.Style {
     var result = style;
     result.bg = selected.bg;
     result.reverse = selected.reverse;
+    result.dim = false;
     return result;
 }
 
@@ -590,8 +591,8 @@ test "List wheel scrolls without changing selection and presses match the visibl
 
 test "List preserves each segment foreground while selecting every line and blank cell" {
     const rows: []const Row = &.{.{ .lines = &.{
-        &.{ .{ .text = "!", .style = .{ .fg = .{ .index = 1 }, .bold = true } }, .{ .text = " name", .style = .{ .fg = .{ .index = 3 } } } },
-        &.{.{ .text = "detail", .style = .{ .fg = .{ .index = 4 } } }},
+        &.{ .{ .text = "!", .style = .{ .fg = .{ .index = 1 }, .bold = true } }, .{ .text = " name", .style = .{ .fg = .{ .index = 3 }, .dim = true } } },
+        &.{.{ .text = "detail", .style = .{ .fg = .{ .index = 4 }, .dim = true } }},
         &.{},
     }, .target = 1 }};
     var list: Self = .{ .rows = .of(&rows), .selected = 0, .selection_style = .{ .bg = .{ .index = 2 } } };
@@ -606,7 +607,12 @@ test "List preserves each segment foreground while selecting every line and blan
     try std.testing.expectEqual(vaxis.Color{ .index = 4 }, cells.readCell(0, 1).style.fg);
     try std.testing.expect(cells.readCell(0, 0).style.bold);
     try std.testing.expect(!cells.readCell(2, 0).style.bold);
-    for (cells.buffer) |cell| try std.testing.expectEqual(vaxis.Color{ .index = 2 }, cell.style.bg);
+    for (cells.buffer) |cell| {
+        try std.testing.expectEqual(vaxis.Color{ .index = 2 }, cell.style.bg);
+        try std.testing.expect(!cell.style.dim);
+    }
+    try std.testing.expect(!hovering(.{ .dim = true }, .{}).dim);
+    try std.testing.expect(hovering(.{ .dim = true }, .{}).ul_style == .off);
     list.selection_style = .{ .reverse = true };
     const plain = try list.widget().draw(ctx);
     for (plain.children[0].surface.buffer) |cell| try std.testing.expect(cell.style.reverse);

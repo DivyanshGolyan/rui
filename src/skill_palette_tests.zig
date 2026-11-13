@@ -26,7 +26,7 @@ test "the Palette draws a /word's skill rows with their descriptions" {
     _ = reads.answer(1, .{ .entries = &entries, .total = entries.len }, "rev");
     var rows: skill_completion.Rows = .{};
     const draft = "please /rev this";
-    var shown = reads.shown(&rows, draft, "please /rev".len, 1, null, null).?;
+    var shown = reads.shown(&rows, draft, "please /rev".len, 1, .{}, null).?;
     var palette: Palette = .{ .shown = &shown };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -40,7 +40,7 @@ test "the Palette draws a /word's skill rows with their descriptions" {
     try std.testing.expect(surface.readCell(9, 0).style.dim);
     // Backing up to `/re` lists all three from the same page; descriptions
     // start two columns past the widest name, `/rewrite`.
-    shown = reads.shown(&rows, "please /re this", "please /re".len, 2, null, shown).?;
+    shown = reads.shown(&rows, "please /re this", "please /re".len, 2, .{}, shown).?;
     const wider = try palette.widget().draw(ctx);
     try std.testing.expectEqual(@as(u16, 3), wider.size.height);
     try std.testing.expectEqualStrings("/recap    Summarise", rowText(wider, 0, &text));
