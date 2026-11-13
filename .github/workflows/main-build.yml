@@ -3,7 +3,8 @@ name: Main build
 # the macOS type-check, through Selected checks' own producers, with no test
 # run. PRs need no up-to-date base, so two green alone can break main together
 # (#1410). A red build keeps one ci-red issue naming the PRs merged since the
-# last green build; the next green build closes it. Never a required check.
+# last green build; the next green build closes it. Only a build of main HEAD
+# reports: a rerun of an older run changes nothing. Never a required check.
 on:
   push:
     branches: [main]

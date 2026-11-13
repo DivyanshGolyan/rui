@@ -5,7 +5,10 @@ No check runs on `main` after a merge, and PRs need no up-to-date base, so two
 PRs green alone can break `main` together (#1410). main-build.yml compiles
 `main` after every push. A red build files, or updates and comments on, one open
 issue naming each PR merged since the last green main build; the next green
-build comments on it and closes it. The revert of the later crossing PR is the
+build comments on it and closes it. Only a build of the SHA `main` is at now
+speaks for `main`: a rerun of an older run describes a past `main` and changes
+nothing, and the last green build is the nearest green first-parent ancestor,
+not the newest green run. The revert of the later crossing PR is the
 fast fix (docs/agents/landing.md, "CI failures").
 
 Unlike report_issue.py's per-signature issues, this one tracks a state of
@@ -56,13 +59,20 @@ def crossing(green, head, cwd=None):
     return commits, known
 
 
-def decide(result, issue):
-    """What a finished build does to the open issue: create, update, close or nothing."""
+def decide(result, issue, current):
+    """What a finished build does to the open issue: create, update, close, nothing or stale.
+
+    current says whether the build's SHA is still main's head. A build of an
+    older SHA (a rerun of a past run) describes a past main, so it is stale and
+    changes nothing whatever its result.
+    """
+    if result not in ("success", "failure"):
+        raise ValueError(f"A main build result is success or failure, not {result!r}")
+    if not current:
+        return "stale"
     if result == "failure":
         return "update" if issue is not None else "create"
-    if result == "success":
-        return "close" if issue is not None else "none"
-    raise ValueError(f"A main build result is success or failure, not {result!r}")
+    return "close" if issue is not None else "none"
 
 
 def plain(text):
@@ -101,11 +111,28 @@ def open_issue(repository):
     return numbers[0] if numbers else None
 
 
-def last_green(repository):
-    """The head SHA of the newest successful main build, or None."""
+def main_head(repository):
+    """The SHA main is at now."""
+    return json.loads(gh("api", f"repos/{repository}/git/ref/heads/main"))["object"]["sha"]
+
+
+def nearest_green(greens, head, cwd=None):
+    """The nearest first-parent ancestor of head, head excluded, among the green SHAs, or None.
+
+    Ranked by history, not by when a run finished, so a rerun of an old run
+    that turns green does not move the range back.
+    """
+    if not greens:
+        return None
+    ancestors = git("rev-list", "--first-parent", "--skip=1", head, cwd=cwd).split()
+    return next((sha for sha in ancestors if sha in greens), None)
+
+
+def last_green(repository, head, cwd=None):
+    """The SHA of the last green main build before head, or None."""
     runs = json.loads(gh("api", f"repos/{repository}/actions/workflows/{WORKFLOW}/runs"
-                                "?branch=main&status=success&per_page=1"))["workflow_runs"]
-    return runs[0]["head_sha"] if runs else None
+                                "?branch=main&status=success&per_page=100"))["workflow_runs"]
+    return nearest_green({run["head_sha"] for run in runs}, head, cwd)
 
 
 def failed_jobs(repository, run_id):
@@ -122,12 +149,17 @@ def main():
     repository = os.environ["GITHUB_REPOSITORY"]
     url = f"https://github.com/{repository}/actions/runs/{args.run_id}"
     issue = open_issue(repository)
-    action = decide(args.result, issue)
+    head = main_head(repository)
+    action = decide(args.result, issue, args.sha == head)
+    if action == "stale":
+        print(f"Main build {args.result} on `{args.sha}` is stale: main is now at `{head}`, whose own build "
+              "reports; the issue is left as it is.")
+        return
     if action == "close":
         gh("issue", "close", str(issue), "--repo", repository, "--reason", "completed",
            "--comment", f"The main build is green on `{args.sha}`: {url}")
     elif action in ("create", "update"):
-        green = last_green(repository)
+        green = last_green(repository, args.sha)
         commits, known = crossing(green, args.sha)
         body = render(repository, commits, known, green, args.sha, url, failed_jobs(repository, args.run_id))
         if action == "create":

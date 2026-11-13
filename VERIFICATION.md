@@ -116,7 +116,7 @@ GitHub must require pull requests and the GitHub Actions `admission` check on `m
 Use squash merges under linear history.
 A PR's checks qualify its merge with the base they ran on, so a green PR merges without rerunning after `main` moves.
 The [main build](.github/workflows/main-build.yml) compiles `main` after every merge without running a test (each gate, every unit root, ReleaseSmall and `typecheck-macos`), so two PRs that pass alone but no longer compile together turn it red within one build.
-While it is red it keeps one open `ci-red` issue naming the PRs merged since its last green build, and its next green build closes that issue; it is never a required check.
+While it is red it keeps one open `ci-red` issue naming the PRs merged since its last green build, and its next green build of main HEAD closes that issue (a rerun of an older build changes nothing); it is never a required check.
 Two PRs that break only a test together are caught by promotion, which qualifies main HEAD and bisects to the commit that broke it.
 A changed head requires current candidate checks before merge.
 

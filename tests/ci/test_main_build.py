@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import patch
 
 import main_build
-from main_build import MARKER, Commit, crossing, decide, render
+from main_build import MARKER, Commit, crossing, decide, nearest_green, render
 from report_issue import LABEL
 
 
@@ -77,18 +77,47 @@ class CrossingTest(unittest.TestCase):
             self.assertTrue(crossing(base, head, cwd=repo.path)[1])
 
 
+class NearestGreenTest(unittest.TestCase):
+    def test_nearest_green_first_parent_ancestor_not_the_newest_green_run(self):
+        with Repo() as repo:
+            old = repo.commit('Old green (#1)')
+            newer = repo.commit('Newer green (#2)')
+            repo.git('checkout', '-q', '-b', 'side')
+            side = repo.commit('Side work (#7)')
+            repo.git('checkout', '-q', 'main')
+            repo.git('merge', '-q', '--no-ff', '-m', 'Merge side (#8)', 'side')
+            red = repo.commit('Red (#3)')
+            head = repo.commit('Head (#4)')
+            # A rerun of the old run turning green does not move the range back past a newer green.
+            self.assertEqual(nearest_green({old, newer}, head, cwd=repo.path), newer)
+            # A green branch commit is not on main's first-parent history.
+            self.assertEqual(nearest_green({old, side}, head, cwd=repo.path), old)
+            # Head's own green attempt is not the range's start.
+            self.assertEqual(nearest_green({head, old}, head, cwd=repo.path), old)
+            # A green descendant says nothing about an older SHA.
+            self.assertIsNone(nearest_green({head}, red, cwd=repo.path))
+            self.assertIsNone(nearest_green(set(), head, cwd=repo.path))
+            self.assertIsNone(nearest_green({'0' * 40}, head, cwd=repo.path))
+
+
 class DecideTest(unittest.TestCase):
-    def test_every_result_and_issue_state(self):
-        expected = {('failure', None): 'create', ('failure', 41): 'update',
-                    ('success', None): 'none', ('success', 41): 'close'}
-        for (result, issue), action in expected.items():
-            with self.subTest(result=result, issue=issue):
-                self.assertEqual(decide(result, issue), action)
+    def test_every_result_issue_state_and_currency(self):
+        expected = {('failure', None, True): 'create', ('failure', 41, True): 'update',
+                    ('success', None, True): 'none', ('success', 41, True): 'close',
+                    # A rerun of an older run describes a past main: it neither closes the issue
+                    # for a newer red head nor reopens one after main went green.
+                    ('failure', None, False): 'stale', ('failure', 41, False): 'stale',
+                    ('success', None, False): 'stale', ('success', 41, False): 'stale'}
+        for (result, issue, current), action in expected.items():
+            with self.subTest(result=result, issue=issue, current=current):
+                self.assertEqual(decide(result, issue, current), action)
         # A cancelled or skipped build is superseded or never ran; it says nothing about main.
         for result in ('cancelled', 'skipped', '', 'timed_out'):
             for issue in (None, 41):
-                with self.subTest(result=result, issue=issue), self.assertRaises(ValueError):
-                    decide(result, issue)
+                for current in (True, False):
+                    with self.subTest(result=result, issue=issue, current=current), \
+                            self.assertRaises(ValueError):
+                        decide(result, issue, current)
 
 
 class RenderTest(unittest.TestCase):
@@ -110,18 +139,21 @@ class RenderTest(unittest.TestCase):
 class FakeGitHub:
     """`gh` for one repository: open main-build issues, the last green run and the writes."""
 
-    def __init__(self, issues=(), green='c' * 40):
+    def __init__(self, issues=(), greens=('c' * 40,), head='d' * 40):
         self.issues = list(issues)
-        self.green = green
+        self.greens = list(greens)
+        self.head = head
         self.writes = []
 
     def __call__(self, *args):
         if args[:2] == ('issue', 'list'):
             assert ('--label', LABEL) == args[args.index('--label'):args.index('--label') + 2]
             return json.dumps(self.issues)
+        if args[:2] == ('api', 'repos/o/r/git/ref/heads/main'):
+            return json.dumps({'object': {'sha': self.head}})
         if args[0] == 'api':
             assert '/actions/workflows/main-build.yml/runs?branch=main&status=success' in args[1]
-            return json.dumps({'workflow_runs': [{'head_sha': self.green}] if self.green else []})
+            return json.dumps({'workflow_runs': [{'head_sha': sha} for sha in self.greens]})
         self.writes.append(args)
         return 'https://github.com/o/r/issues/50\n' if args[:2] == ('issue', 'create') else ''
 
@@ -129,11 +161,19 @@ class FakeGitHub:
 class MainTest(unittest.TestCase):
     commits = [Commit('a' * 40, 'Sessions list (#1379)', 1379), Commit('b' * 40, 'Screen test (#1403)', 1403)]
 
+    # main's first-parent history before the build's SHA, newest first.
+    history = ['b' * 40, 'a' * 40, 'c' * 40, 'e' * 40]
+
     def run_main(self, result, fake):
         jobs = [{'name': 'build / linux_build', 'html_url': 'https://job', 'conclusion': 'failure'},
                 {'name': 'report', 'html_url': 'https://report', 'conclusion': None}]
         argv = ['main_build.py', '--run-id', '7', '--sha', 'd' * 40, '--result', result]
+        def git(*args, cwd=None):
+            assert args == ('rev-list', '--first-parent', '--skip=1', 'd' * 40), args
+            return '\n'.join(self.history) + '\n'
+
         with patch.object(main_build, 'gh', fake), patch.object(main_build, 'run_jobs', return_value=jobs), \
+                patch.object(main_build, 'git', git), \
                 patch.object(main_build, 'crossing', return_value=(self.commits, True)) as ranged, \
                 patch('sys.argv', argv), patch.dict('os.environ', GITHUB_REPOSITORY='o/r'), \
                 patch('builtins.print'):
@@ -176,9 +216,24 @@ class MainTest(unittest.TestCase):
         self.assertEqual(fake.writes, [])
 
     def test_first_ever_red_build_has_no_green_to_range_from(self):
-        fake = FakeGitHub(green=None)
+        fake = FakeGitHub(greens=())
         ranged = self.run_main('failure', fake)
         ranged.assert_called_once_with(None, 'd' * 40)
+
+    def test_range_starts_at_the_nearest_green_ancestor_not_the_newest_green_run(self):
+        # The newest green run is of an older SHA ('e', a rerun turned green); 'c' is nearer head.
+        fake = FakeGitHub(greens=['e' * 40, 'c' * 40])
+        ranged = self.run_main('failure', fake)
+        ranged.assert_called_once_with('c' * 40, 'd' * 40)
+
+    def test_build_of_a_sha_main_has_moved_past_changes_nothing(self):
+        for result in ('success', 'failure'):
+            for issues in ([], [{'number': 43, 'body': MARKER}]):
+                with self.subTest(result=result, issues=issues):
+                    fake = FakeGitHub(issues=issues, head='f' * 40)
+                    ranged = self.run_main(result, fake)
+                    ranged.assert_not_called()
+                    self.assertEqual(fake.writes, [])
 
 
 if __name__ == '__main__':
