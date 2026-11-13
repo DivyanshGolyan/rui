@@ -10,10 +10,14 @@
 //! id the issuer gives it, and the policy reads such a record's account from
 //! its ID token's `sub`, since these tokens carry no ChatGPT account claim. The issuer is the one Codex login uses, so its
 //! token fields and refresh rejections are read by `codex_token_wire.zig`.
+//!
+//! Also reads the plan's model list, the IDs a person signed in this way can
+//! pick, under `model_list.zig`'s bounds.
 const std = @import("std");
 const policy = @import("codex_credential_policy.zig");
 const codex = @import("codex_token_wire.zig");
 const json_scalar = @import("json_scalar.zig");
+const model_list = @import("model_list.zig");
 
 pub const Request = codex.Request;
 pub const issuer = codex.issuer;
@@ -422,6 +426,55 @@ pub fn validateHostId(text: []const u8) !void {
         else => if (!std.ascii.isDigit(byte) and !(byte >= 'a' and byte <= 'f')) return error.InvalidHostId,
     };
     if (uuid[14] != '4' or std.mem.indexOfScalar(u8, "89ab", uuid[19]) == null) return error.InvalidHostId;
+}
+
+/// The model IDs a plan's list (`{"models":[{"slug":...,"visibility":...},...]}`)
+/// offers for picking, in the server's order, written to `out` under
+/// `model_list`'s bounds. Only an entry whose `visibility` is `"list"` is
+/// offered; every entry names its `slug`. `scratch` holds the parse and is
+/// freed by the caller.
+pub fn parseModels(scratch: std.mem.Allocator, body: []const u8, out: *model_list.IdBuffer) !model_list.Ids {
+    // A token walk, as `model_list.parseOpenAi`'s: other members are skipped
+    // unread, so no number is ever converted.
+    var scanner: std.json.Scanner = .initCompleteInput(scratch, body);
+    var kept: model_list.Kept = .{ .out = out };
+    var models_seen = false;
+    if (try model_list.nextToken(&scanner, scratch) != .object_begin) return error.InvalidModelList;
+    while (try model_list.objectKey(&scanner, scratch)) |key| {
+        if (!std.mem.eql(u8, key, "models")) {
+            scanner.skipValue() catch return error.InvalidModelList;
+            continue;
+        }
+        models_seen = true;
+        if (try model_list.nextToken(&scanner, scratch) != .array_begin) return error.InvalidModelList;
+        while (true) {
+            switch (try model_list.nextToken(&scanner, scratch)) {
+                .array_end => break,
+                .object_begin => {},
+                else => return error.InvalidModelList,
+            }
+            var slug: ?[]const u8 = null;
+            var listed = false;
+            while (try model_list.objectKey(&scanner, scratch)) |member| {
+                const field: enum { slug, visibility } = if (std.mem.eql(u8, member, "slug")) .slug else if (std.mem.eql(u8, member, "visibility")) .visibility else {
+                    scanner.skipValue() catch return error.InvalidModelList;
+                    continue;
+                };
+                const text = switch (try model_list.nextToken(&scanner, scratch)) {
+                    .string, .allocated_string => |text| text,
+                    else => return error.InvalidModelList,
+                };
+                switch (field) {
+                    .slug => slug = text,
+                    .visibility => listed = std.mem.eql(u8, text, "list"),
+                }
+            }
+            const entry = slug orelse return error.InvalidModelList;
+            if (listed) try kept.keep(entry);
+        }
+    }
+    if (!models_seen or try model_list.nextToken(&scanner, scratch) != .end_of_document) return error.InvalidModelList;
+    return kept.ids();
 }
 
 const test_host_id = "urn:uuid:00010203-0405-4607-8809-0a0b0c0d0e0f";
@@ -851,4 +904,64 @@ test "a host id is a lowercase version 4 UUID URN" {
         "urn:uuid:0001020g-0405-4607-8809-0a0b0c0d0e0f",
         "URN:UUID:00010203-0405-4607-8809-0a0b0c0d0e0f",
     }) |text| try std.testing.expectError(error.InvalidHostId, validateHostId(text));
+}
+
+test "a plan's model list offers listed slugs in the server's order and skips other members unread" {
+    var out: model_list.IdBuffer = undefined;
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // Shaped like the server's: nested objects and arrays, numbers and
+    // fields in any order.
+    const body =
+        \\{"models":[
+        \\{"slug":"gpt-6-sol","display_name":"Sol","visibility":"list","context_window":400000,"supported_reasoning_levels":[{"effort":"low"},{"effort":"high"}],"auto_compact_token_limit":1.5e5},
+        \\{"visibility":"hide","slug":"gpt-6-hidden"},
+        \\{"slug":"gpt-6-quiet"},
+        \\{"visibility":"list","slug":"gpt-5.5","extra":{"slug":"nested-not-kept","visibility":"list","models":[]}},
+        \\{"slug":"has space","visibility":"list"},
+        \\{"slug":"a\/b","visibility":"list"},
+        \\{"slug":"gpt-6-luna","visibility":"LIST"}
+        \\],"etag":"made-up"}
+    ;
+    try std.testing.expectEqualStrings("gpt-6-sol\ngpt-5.5\na/b\n", (try parseModels(a, body, &out)).bytes);
+    try std.testing.expectEqualStrings("", (try parseModels(a, "{\"models\":[]}", &out)).bytes);
+    for ([_][]const u8{
+        // The OpenAI API's shape is not a plan's.
+        "{\"object\":\"list\",\"data\":[{\"id\":\"gpt-6-sol\"}]}",
+        "{\"models\":[{\"slug\":7,\"visibility\":\"list\"}]}",
+        "{\"models\":[{\"slug\":null,\"visibility\":\"list\"}]}",
+        "{\"models\":[{\"slug\":\"gpt-6-sol\",\"visibility\":true}]}",
+        "{\"models\":[{\"visibility\":\"list\"}]}",
+        "{\"models\":[\"gpt-6-sol\"]}",
+        "{\"models\":{}}",
+        "{\"models\":[]} {}",
+        "{\"models\":[]}x",
+        "[]",
+        "<html>",
+        "",
+    }) |refused| try std.testing.expectError(error.InvalidModelList, parseModels(a, refused, &out));
+}
+
+test "a plan's model list past either bound is refused, not cut" {
+    var out: model_list.IdBuffer = undefined;
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var body: std.Io.Writer.Allocating = .init(arena.allocator());
+    try body.writer.writeAll("{\"models\":[");
+    for (0..model_list.max_live_models) |index| try body.writer.print("{s}{{\"slug\":\"m{d}\",\"visibility\":\"list\"}}", .{ if (index == 0) "" else ",", index });
+    // Hidden entries do not count toward the bound.
+    try body.writer.writeAll(",{\"slug\":\"hidden\",\"visibility\":\"hide\"}]}");
+    try std.testing.expectEqual(@as(usize, model_list.max_live_models), std.mem.count(u8, (try parseModels(arena.allocator(), body.written(), &out)).bytes, "\n"));
+    const one_more = try std.mem.concat(arena.allocator(), u8, &.{ body.written()[0 .. body.written().len - 2], ",{\"slug\":\"x\",\"visibility\":\"list\"}]}" });
+    try std.testing.expectError(error.ModelListTooLarge, parseModels(arena.allocator(), one_more, &out));
+
+    // Exactly the byte bound fits: 64 IDs of 256 bytes are 16 KiB.
+    body.clearRetainingCapacity();
+    try body.writer.writeAll("{\"models\":[");
+    for (0..64) |index| try body.writer.print("{s}{{\"visibility\":\"list\",\"slug\":\"{d:0>256}\"}}", .{ if (index == 0) "" else ",", index });
+    try body.writer.writeAll("]}");
+    try std.testing.expectEqual(@as(usize, 64 * 257), (try parseModels(arena.allocator(), body.written(), &out)).bytes.len);
+    const more = try std.mem.concat(arena.allocator(), u8, &.{ body.written()[0 .. body.written().len - 2], ",{\"slug\":\"x\",\"visibility\":\"list\"}]}" });
+    try std.testing.expectError(error.ModelListTooLarge, parseModels(arena.allocator(), more, &out));
 }

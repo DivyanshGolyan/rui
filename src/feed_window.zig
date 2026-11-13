@@ -1138,7 +1138,7 @@ test "feed_window rows answer positionAtWith for every screen row from every fir
         empty,
         testEntry(40, "× Provider unreachable\n"),
     });
-    const presentation: Presentation = .{ .latest_ending = .{ .key = .{ .position = 40 }, .cause = @import("marks.zig").cause("provider_http_500") }, .retry_actionable = true };
+    const presentation: Presentation = .{ .latest_ending = .{ .key = .{ .position = 40 }, .cause = @import("marks.zig").cause("provider_http_500", null) }, .retry_actionable = true };
     for ([_]u16{ 1, 3, 7, 16, 80 }) |width| {
         const layout: viewport.Layout = .{ .width = width, .method = .unicode };
         const entries = window.heightsWith(layout, presentation);

@@ -17,6 +17,7 @@ import bash_fixture as bash
 import model_fixture as fixture
 import host_process
 from host_process import retain_failure_state, start_ready_process
+from control_fixture import raw_request
 from codex_fixture import expected_user_agent
 
 
@@ -25,6 +26,16 @@ CLIENT = "rui-test-plan-client"
 SUBJECT = "plan-subject"
 PLAN_SCOPE = "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct"
 FAR = 4102444800
+# The plan's list as OpenAI's API answers it: a hidden entry is not offered,
+# and the rest keep the server's order.
+PLAN_MODELS = json.dumps({"models": [
+    {"slug": "gpt-6-terra", "display_name": "Terra", "visibility": "list", "context_window": 1,
+     "supported_reasoning_levels": [{"effort": "minimal"}]},
+    {"slug": "plan-hidden", "visibility": "hide"},
+    {"slug": "gpt-6-sol", "visibility": "list"},
+]}).encode()
+QUOTA = fixture.encode_sse([{"type": "response.failed", "response": {"status": "failed", "error": {
+    "code": "subscription_sharing_usage_limit_exceeded", "message": "Plan limit reached."}}}])
 
 
 def compact(claims, signature):
@@ -53,8 +64,25 @@ def credential_facts(path):
 
 
 class PlanHandler(fixture.SuccessHandler):
-    """Responses at BASE/responses, as the fixture endpoint; the token
-    endpoint at BASE/oauth/token, which the Host derives from it."""
+    """Responses at BASE/responses, as the fixture endpoint; the model list
+    beside it at BASE/models; the token endpoint at BASE/oauth/token, which
+    the Host derives from it."""
+
+    def do_GET(self):
+        with self.server.lock:
+            self.server.model_gets.append({
+                "path": self.path,
+                "authorization": self.headers.get("Authorization"),
+                "user_agent": self.headers.get("User-Agent"),
+            })
+            status, payload = self.server.models
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(payload)
+        self.close_connection = True
 
     def do_POST(self):
         if self.path.endswith("/oauth/token"):
@@ -91,6 +119,22 @@ def start(store, endpoint):
     return host
 
 
+def plan_list(host, store):
+    """The chatgpt entry of a model-list reply; each request also asks the
+    Host to fetch the list again."""
+    head, body = raw_request(host.rui_ready_fields["socket"], "/v1/model-list", json.dumps({
+        "version": host_process.WIRE_VERSION, "kind": "model_list", "store": str(store),
+    }).encode())
+    assert b" 200 " in head, (head, body)
+    return next(entry for entry in json.loads(body)["providers"] if entry["provider"] == "chatgpt")
+
+
+def settled_list(host, store, source, description):
+    return fixture.wait_for(
+        lambda: (entry if (entry := plan_list(host, store))["source"] == source else None),
+        description, timeout=20, interval=0.1)
+
+
 def run():
     state = pathlib.Path(tempfile.mkdtemp(prefix="rui-chatgpt.")).resolve()
     credential_dir = state / "private"
@@ -106,9 +150,12 @@ def run():
         fixture.sse_answer("plan-2", "plan-r2", "plan-m2", "second plan answer")[0],
         fixture.ResponseSpec(b"stale token", {"X-Request-Id": "stale"}, 401),
         fixture.sse_answer("plan-3", "plan-r3", "plan-m3", "refreshed plan answer")[0],
+        QUOTA,
     ])
     endpoint.RequestHandlerClass = PlanHandler
     endpoint.observed = []
+    endpoint.model_gets = []
+    endpoint.models = (200, PLAN_MODELS)
     endpoint.token_requests = []
     endpoint.tokens = [
         {"access_token": second, "refresh_token": "plan-refresh-2", "token_type": "Bearer", "scope": PLAN_SCOPE},
@@ -150,6 +197,16 @@ def run():
             "user_agent": expected_user_agent(),
         }, endpoint.observed[0]
 
+        # The plan's live list, fetched beside the Responses path with the
+        # same bearer: listed entries only, in the server's order. Whichever
+        # of the list and the first message leased first refreshed the token.
+        listed = settled_list(host, store, "live", "the plan's live model list")
+        assert [model["id"] for model in listed["models"]] == ["gpt-6-terra", "gpt-6-sol"], listed
+        assert endpoint.model_gets and all(get == {
+            "path": "/v1/models", "authorization": "Bearer " + second, "user_agent": expected_user_agent(),
+        } for get in endpoint.model_gets), endpoint.model_gets
+        assert len(endpoint.token_requests) == 1, endpoint.token_requests
+
         # openai-responses/3: an effort change goes on top of the next
         # request, never as a configuration_update item.
         changed = fixture.command(
@@ -176,20 +233,48 @@ def run():
         assert endpoint.requests[2] == endpoint.requests[3], "the replacement changed the model request"
         assert credential_facts(credential_file)["generation"] == "3"
 
+        # A plan limit is a quota refusal, answered once and never retried.
+        fixture.message(state, store, "quota", session, "past the plan's limit")
+        limited = fixture.wait_for(lambda: fixture.observe(store, "quota").get("result") and fixture.observe(store, "quota"), "plan quota refusal")
+        assert limited["result"] == {"status": "failed", "code": "provider_quota"}, limited
+        assert limited["binding"]["attempt"] == "1" and len(endpoint.requests) == 5, (limited, len(endpoint.requests))
+
+        # A failed or refused list falls back to the catalog; a 401 on it
+        # forces no refresh.
+        for status, body in ((500, b'{"error":"unavailable"}'), (401, b"stale token")):
+            endpoint.models = (200, PLAN_MODELS)
+            settled_list(host, store, "live", "the plan's live list again")
+            endpoint.models = (status, body)
+            fallback = settled_list(host, store, "catalog_fallback", f"catalog fallback after {status}")
+            assert fallback["models"] and all(model["known"] for model in fallback["models"]), fallback
+        assert len(endpoint.token_requests) == 2, endpoint.token_requests
+
         # A record from another client never reaches the fixture.
         fixture.stop_host(host)
         host = None
         assert bash.rows(store, "SELECT provider, codec FROM session WHERE session_ref=?", (session,)) == [("chatgpt", "openai-responses/3")]
         credentials(credential_file, token=access(FAR, "b3RoZXI"), expires_at=FAR, client="another-client")
+        gets = len(endpoint.model_gets)
         host = start(store, url)
         fixture.message(state, store, "foreign", session, "another client's record")
         fixture.wait_for(lambda: fixture.observe(store, "foreign").get("result"), "fixture refusal")
-        assert len(endpoint.requests) == 4 and len(endpoint.token_requests) == 2, "another client's record reached the fixture"
+        settled_list(host, store, "catalog_fallback", "catalog fallback for another client's record")
+        assert len(endpoint.requests) == 5 and len(endpoint.token_requests) == 2, "another client's record reached the fixture"
+        assert len(endpoint.model_gets) == gets, "another client's record reached the model list"
+        fixture.stop_host(host)
+        host = None
+
+        # With no sign-in, the list falls back without asking for one.
+        credential_file.unlink()
+        host = start(store, url)
+        settled_list(host, store, "catalog_fallback", "catalog fallback without a sign-in")
+        assert len(endpoint.model_gets) == gets, "the model list was asked for without a sign-in"
         fixture.stop_host(host)
         host = None
         for secret in (second.encode(), third.encode(), b"plan-refresh-3"):
             assert not bash.rows(store, "SELECT 1 FROM content WHERE instr(payload, ?) > 0", (secret,))
-        print("chatgpt plan passed: bearer only, codec 3, refresh at expiry and on a 401 over the plan wire")
+        print("chatgpt plan passed: bearer only, codec 3, refresh at expiry and on a 401 over the plan wire, "
+              "a plan limit refused once, and a live model list that falls back without retrying")
         complete = True
     finally:
         incoming_error = sys.exc_info()[1]
