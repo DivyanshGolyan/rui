@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import patch
 
 import fixture_user
-from fixture_user import Install, TRUST, VENV
+from fixture_user import Install, VENV
 
 
 def lane_reads(path, gid):
@@ -43,27 +43,69 @@ class FixtureUserTest(unittest.TestCase):
             with self.subTest(lane=lane), self.assertRaises(SystemExit):
                 fixture_user.user_for(lane)
 
-    def test_the_run_sees_only_its_own_variables_with_trust_pointed_at_the_copy(self):
+    def test_the_run_sees_only_its_own_variables_with_trust_pointed_at_the_copies(self):
         caller = {
             "SSL_CERT_FILE": "/root/.ccr/ca-bundle.crt", "GIT_SSL_CAINFO": "/root/.ccr/ca-bundle.crt",
-            "HTTPS_PROXY": "http://127.0.0.1:1", "NO_PROXY": "localhost", "LANG": "C.UTF-8", "TERM": "xterm",
-            "HOME": "/root", "PATH": "/root/.local/bin:/usr/bin", "GH_TOKEN": "secret", "RUI_TEST_X": "1",
+            "SSL_CERT_DIR": "/root/certs", "HTTPS_PROXY": "http://u:p@127.0.0.1:1", "https_proxy": "http://127.0.0.1:1",
+            "NO_PROXY": "localhost", "LANG": "C.UTF-8", "TERM": "xterm", "HOME": "/root",
+            "PATH": "/root/.local/bin:/usr/bin", "GH_TOKEN": "secret", "RUI_TEST_X": "1",
             "ZIG_GLOBAL_CACHE_DIR": "/root/.cache/zig",
         }
-        home, bundle = Path("/home/rui-a"), Path("/home/rui-a/ca.crt")
+        home = Path("/home/rui-a")
+        trust = {"SSL_CERT_FILE": Path("/t/SSL_CERT_FILE"), "GIT_SSL_CAINFO": Path("/t/SSL_CERT_FILE")}
         expected = {
             "HOME": "/home/rui-a", "USER": "rui-a", "LOGNAME": "rui-a", "SHELL": "/bin/bash", "PATH": "/p",
-            "ZIG_GLOBAL_CACHE_DIR": "/home/rui-a/.cache/zig", "HTTPS_PROXY": "http://127.0.0.1:1",
-            "NO_PROXY": "localhost", "LANG": "C.UTF-8", "TERM": "xterm", **dict.fromkeys(TRUST, str(bundle)),
+            "ZIG_GLOBAL_CACHE_DIR": "/home/rui-a/.cache/zig", "HTTPS_PROXY": "http://u:p@127.0.0.1:1",
+            "https_proxy": "http://127.0.0.1:1", "NO_PROXY": "localhost", "LANG": "C.UTF-8", "TERM": "xterm",
+            "SSL_CERT_FILE": "/t/SSL_CERT_FILE", "GIT_SSL_CAINFO": "/t/SSL_CERT_FILE",
         }
-        self.assertEqual(fixture_user.environment("rui-a", home, "/p", bundle, caller), expected)
-        self.assertEqual(fixture_user.environment("rui-a", home, "/p", bundle, caller, ("RUI_TEST_X",)),
+        self.assertEqual(fixture_user.environment("rui-a", home, "/p", trust, caller), expected,
+                         "a trust name with no copy, here SSL_CERT_DIR, stays unset rather than naming /root")
+        self.assertEqual(fixture_user.environment("rui-a", home, "/p", trust, caller, ("RUI_TEST_X",)),
                          {**expected, "RUI_TEST_X": "1"})
-        without = fixture_user.environment("rui-a", home, "/p", None, caller)
-        self.assertFalse(set(TRUST) & set(without), "no copy leaves trust to the system store, never /root")
-        for name in ("HOME", "PATH", "SSL_CERT_FILE"):
+        without = fixture_user.environment("rui-a", home, "/p", {}, caller)
+        self.assertFalse({"SSL_CERT_FILE", "SSL_CERT_DIR", "GIT_SSL_CAINFO"} & set(without))
+        for name in ("HOME", "PATH", "SSL_CERT_FILE", "SSL_CERT_DIR", "PIP_CERT"):
             with self.subTest(keep=name), self.assertRaises(SystemExit):
-                fixture_user.environment("rui-a", home, "/p", bundle, caller, (name,))
+                fixture_user.environment("rui-a", home, "/p", trust, caller, (name,))
+
+    def test_no_value_the_lane_is_given_appears_on_any_command_line(self):
+        """Other lanes can read every command line while it runs, so values travel only in the environment."""
+        secrets = {"HTTPS_PROXY": "http://user:proxy-secret@127.0.0.1:1", "RUI_TOKEN": "kept-secret"}
+        checkout = self.root / "home/rui-a/rui"
+        for requirement in fixture_user.REQUIREMENTS:
+            (checkout / requirement).parent.mkdir(parents=True, exist_ok=True)
+            (checkout / requirement).write_text("h2==1\n")
+        bundle = self.root / "trust/SSL_CERT_FILE"
+        inputs = fixture_user.Inputs("0" * 40, self.root / "source", "", {}, {})
+        placed = fixture_user.Placed(self.root / "source.git", {"SSL_CERT_FILE": bundle},
+                                     {fixture_user.PYTHON: self.root / "python/bin/python3.12"})
+        started = []
+
+        def start(argv, **options):
+            started.append((argv, options))
+            return subprocess.CompletedProcess(argv, 0)
+
+        with patch.object(fixture_user, "HOMES", self.root / "home"), \
+                patch.object(fixture_user, "read_inputs", return_value=inputs), \
+                patch.object(fixture_user, "place", return_value=placed), \
+                patch.object(fixture_user, "lock"), \
+                patch.object(fixture_user.Lane, "ensure_user", return_value=1234), \
+                patch.object(fixture_user.subprocess, "run", side_effect=start), \
+                patch.dict(os.environ, {**secrets, "PATH": "/usr/bin"}, clear=True), \
+                redirect_stderr(io.StringIO()):
+            self.assertEqual(fixture_user.run("a", "HEAD", ("RUI_TOKEN",), ["python3", "case.py"]), 0)
+
+        # The checkout, the environment's interpreter and pip, the stamp, then COMMAND: every one as the lane.
+        self.assertGreaterEqual(len(started), 6)
+        for argv, options in started:
+            self.assertEqual(options.get("user"), "rui-a", argv)
+            for value in (*secrets.values(), str(bundle)):
+                self.assertFalse(any(value in str(word) for word in argv), f"{value!r} is on the command line {argv}")
+        self.assertEqual(started[-1][0], ["python3", "case.py"])
+        command_env = started[-1][1]["env"]
+        self.assertEqual({name: command_env.get(name) for name in secrets}, secrets)
+        self.assertEqual(command_env["SSL_CERT_FILE"], str(bundle))
 
     def test_path_starts_with_the_environment_and_keeps_only_directories_others_can_search(self):
         closed, open_ = self.root / "closed", self.root / "open"
@@ -79,12 +121,30 @@ class FixtureUserTest(unittest.TestCase):
                                                   f"{closed / 'bin'}:{open_}::{open_}"),
                          f"/venv/bin:/tools/zig:{open_}")
 
-    def test_the_bundle_comes_from_the_first_trust_variable_that_names_a_file(self):
-        bundle = self.root / "ca.crt"
+    def test_trust_keeps_each_variable_that_names_a_file_or_directory_and_gives_tools_the_bundle(self):
+        bundle, other, directory = self.root / "ca.crt", self.root / "other.crt", self.root / "certs"
         bundle.write_text("certificate")
-        self.assertEqual(fixture_user.source_bundle({"SSL_CERT_FILE": str(self.root / "missing"),
-                                                     "CURL_CA_BUNDLE": str(bundle)}), bundle)
-        self.assertIsNone(fixture_user.source_bundle({"PATH": "/usr/bin"}))
+        other.write_text("other")
+        directory.mkdir()
+        missing = self.root / "missing"
+        tools = ("REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "GIT_SSL_CAINFO", "PIP_CERT", "NODE_EXTRA_CA_CERTS")
+        cases = {
+            # The caller's variables: the run's trust, each variable and what it names.
+            "a bundle": ({"SSL_CERT_FILE": bundle}, {"SSL_CERT_FILE": bundle, **dict.fromkeys(tools, bundle)}),
+            "a directory": ({"SSL_CERT_DIR": directory}, {"SSL_CERT_DIR": directory}),
+            "both": ({"SSL_CERT_FILE": bundle, "SSL_CERT_DIR": directory},
+                     {"SSL_CERT_FILE": bundle, "SSL_CERT_DIR": directory, **dict.fromkeys(tools, bundle)}),
+            "a tool's bundle": ({"CURL_CA_BUNDLE": bundle}, dict.fromkeys(tools, bundle)),
+            "the owner's bundle first": ({"PIP_CERT": other, "SSL_CERT_FILE": bundle},
+                                         {"SSL_CERT_FILE": bundle, **dict.fromkeys(tools, bundle)}),
+            "a missing bundle": ({"SSL_CERT_FILE": missing, "CURL_CA_BUNDLE": bundle}, dict.fromkeys(tools, bundle)),
+            "a missing directory": ({"SSL_CERT_DIR": missing}, {}),
+            "none": ({}, {}),
+        }
+        for name, (caller, expected) in cases.items():
+            with self.subTest(name), redirect_stderr(io.StringIO()):
+                environ = {"PATH": "/usr/bin", **{key: str(value) for key, value in caller.items()}}
+                self.assertEqual(fixture_user.trust_sources(environ), expected)
 
     def test_an_environment_is_built_once_and_reinstalls_only_changed_pins(self):
         venv = self.root / "venv"
@@ -204,36 +264,63 @@ class FixtureUserTest(unittest.TestCase):
                           "zig": install(parent / "tools", "zig", "zig", "lib/std/std.zig"),
                           "go": install(parent / "tools", "go", "bin/go", "src/runtime/runtime.go")}
                  for parent in (public, private)}
+        (private / "share").mkdir()
+        (private / "share/linked.pem").write_text("linked certificate\n")
         for parent in (public, private):
             (parent / "ca.crt").write_text(f"{parent.name} certificate\n")
+            # A hashed directory, as /etc/ssl/certs: mostly links into another directory.
+            (parent / "certs").mkdir()
+            (parent / "certs/abcd1234.0").write_text(f"{parent.name} hashed certificate\n")
+            (parent / "certs/efgh5678.0").symlink_to(private / "share/linked.pem")
+        bundle_names = {"SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "GIT_SSL_CAINFO", "PIP_CERT",
+                        "NODE_EXTRA_CA_CERTS"}
         cases = {
-            # The checkout root reads, and the directory that holds its CA bundle and installs.
-            "public checkout": (public / "checkout", public),
-            "private checkout": (private / "checkout", private),
-            "linked worktree": (public / "linked", private),
+            # The checkout root reads, the directory that holds its trust and installs, and its trust variables.
+            "public checkout": (public / "checkout", public, ("SSL_CERT_FILE", "SSL_CERT_DIR")),
+            "private checkout": (private / "checkout", private, ("SSL_CERT_DIR",)),
+            "linked worktree": (public / "linked", private, ("SSL_CERT_FILE",)),
         }
+        trust_files = {"SSL_CERT_FILE": "ca.crt", "SSL_CERT_DIR": "certs"}
         tools_dir = self.root / "placed/tools"
         gid = os.getgid()
 
-        def provision(source, inputs_at, lane_dir):
+        def provision(source, inputs_at, trust, lane_dir):
             caller_path = os.pathsep.join(str(program.parent) for program in tools[inputs_at].values())
-            inputs = fixture_user.read_inputs("HEAD", caller_path, {"SSL_CERT_FILE": str(inputs_at / "ca.crt")},
-                                              root=source)
+            environ = {variable: str(inputs_at / trust_files[variable]) for variable in trust}
             with redirect_stderr(io.StringIO()):
+                inputs = fixture_user.read_inputs("HEAD", caller_path, environ, root=source)
                 return inputs, fixture_user.place(inputs._replace(origin=str(origin)), lane_dir, tools_dir, gid)
 
-        for index, (name, (source, inputs_at)) in enumerate(cases.items()):
+        for index, (name, (source, inputs_at, trust)) in enumerate(cases.items()):
             with self.subTest(name):
                 lane_dir = self.root / "placed/lanes" / f"lane{index}"
                 head = self.commit(source, f"work {index}")
-                inputs, placed = provision(source, inputs_at, lane_dir)
+                inputs, placed = provision(source, inputs_at, trust, lane_dir)
 
                 # Every path the lane reads, and everything under it, is readable through other or the lane's group.
-                for path in (placed.source, placed.bundle, *placed.binaries.values()):
+                for path in (placed.source, *placed.trust.values(), *placed.binaries.values()):
                     self.assertFalse(path.is_relative_to(private), f"the lane reads {path}, inside root's own state")
                     for item in (path, *(path.rglob("*") if path.is_dir() else ())):
+                        self.assertFalse(item.is_symlink(), f"{item} leads back to where root keeps it")
                         self.assertTrue(lane_reads(item, gid), f"the lane cannot read {item}")
-                self.assertEqual(placed.bundle.read_text(), f"{inputs_at.name} certificate\n")
+
+                # Each trust variable the caller set names its copy in the lane's directory, and so does
+                # each tool's bundle name when the caller's trust has a bundle; the run sets exactly those.
+                expected = {*trust, *(bundle_names if "SSL_CERT_FILE" in trust else ())}
+                self.assertEqual(set(placed.trust), expected)
+                env = fixture_user.environment("rui-x", Path("/home/rui-x"), "/p", placed.trust, {})
+                every = bundle_names | {"SSL_CERT_DIR"}
+                self.assertEqual({variable: env.get(variable) for variable in every},
+                                 {variable: str(placed.trust[variable]) if variable in expected else None
+                                  for variable in every})
+                for variable, copy in placed.trust.items():
+                    self.assertTrue(copy.is_relative_to(lane_dir))
+                    if variable == "SSL_CERT_DIR":
+                        self.assertEqual({entry.name: entry.read_text() for entry in copy.iterdir()},
+                                         {"abcd1234.0": f"{inputs_at.name} hashed certificate\n",
+                                          "efgh5678.0": "linked certificate\n"})
+                    else:
+                        self.assertEqual(copy.read_text(), f"{inputs_at.name} certificate\n")
                 self.assertEqual(set(placed.binaries), set(tools[inputs_at]))
                 for tool, program in tools[inputs_at].items():
                     binary = placed.binaries[tool]
@@ -261,7 +348,7 @@ class FixtureUserTest(unittest.TestCase):
                 # Reuse: a new commit arrives in the same export, and no install is copied again.
                 copies = sorted(tools_dir.iterdir())
                 later = self.commit(source, f"more {index}")
-                self.assertEqual(provision(source, inputs_at, lane_dir)[1], placed)
+                self.assertEqual(provision(source, inputs_at, trust, lane_dir)[1], placed)
                 self.assertEqual(sorted(tools_dir.iterdir()), copies)
                 self.assertEqual(self.git("--git-dir", str(placed.source), "rev-parse", "refs/heads/fixture"), later)
 

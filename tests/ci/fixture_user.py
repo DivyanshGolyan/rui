@@ -10,14 +10,15 @@ run as root. `.agents/as-fixture-user` runs this module as root:
 The first run for LANE creates the user `rui-LANE` with the home /home/rui-LANE.
 Root reads its own state and places what the lane needs where the lane can
 read it; the lane reads nothing else, so where root keeps its checkout,
-interpreter, toolchains and CA bundle never matters. Every run, under that
+interpreter, toolchains and trust files never matters. Every run, under that
 lane's lock:
   - root reads `Inputs`: the commit REF (default HEAD) names, this checkout's
-    common git directory, origin's URL, the caller's CA bundle and the
-    python3.12, zig and go the caller would run;
+    common git directory, origin's URL, the file or directory each of the
+    caller's trust variables names (network_variables.TRUST and the tools'
+    bundle names) and the python3.12, zig and go the caller would run;
   - root places them (`place`): it fetches REF, origin/main and the v* tags
     (this repository's, then origin's) into a bare repository in
-    /var/lib/rui-fixture/lanes/LANE, copies the CA bundle there, and uses each
+    /var/lib/rui-fixture/lanes/LANE, copies the trust files there, and uses each
     install in place when every user can reach it, otherwise a hard-linked copy
     under /var/lib/rui-fixture/tools. The lane's directory is root's and only
     the lane's group reads it, so the lane cannot change what root reads next
@@ -27,8 +28,10 @@ lane's lock:
   - keeps the Python 3.12 environment at ~/.local/share/rui/venv-3.12 current
     with the placed interpreter and with tests/ci/requirements.txt and
     tests/integration/requirements.txt at REF, rebuilding nothing unchanged;
-  - runs COMMAND in ~/rui as that user under `env -i`, with only the
-    variables `environment` names, and exits with its status.
+  - runs COMMAND in ~/rui as that user with only the variables `environment`
+    names, and exits with its status. Every process the lane runs gets its
+    values through its environment (`as_lane`), never its command line,
+    which other users can read.
 Lanes never share a user, home, checkout, Zig cache or environment. The user and
 home are kept for the next run; --remove stops the user's processes and deletes
 them and the lane's placed directory.
@@ -56,6 +59,9 @@ import tempfile
 from typing import NamedTuple
 
 ROOT = Path(__file__).resolve().parents[2]
+# network_variables owns the caller's proxy and trust names; it needs no fixture package.
+sys.path.insert(0, str(ROOT / "tests/integration"))
+import network_variables  # noqa: E402
 COMMAND = ".agents/as-fixture-user"
 # useradd takes names of at most 32 bytes; "rui-" leaves 28 for the lane.
 LANE = re.compile(r"[a-z0-9][a-z0-9-]{0,27}\Z")
@@ -67,15 +73,15 @@ MARKER = ".rui-fixture-user"
 CHECKOUT = "rui"
 # Everything root places for lanes: tools/ every user reads, lanes/LANE/ only that lane's group reads.
 PLACED = Path("/var/lib/rui-fixture")
+HOMES = Path("/home")
 SOURCE = "source.git"
-BUNDLE = "ca-bundle.crt"
-# The caller's trust variables, read in this order for the bundle to copy; each
-# points at the copy in the run.
-TRUST = ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "GIT_SSL_CAINFO", "PIP_CERT",
-         "NODE_EXTRA_CA_CERTS")
+TRUST_COPIES = "trust"
+# Tools' own names for a CA bundle file. When the caller's trust names a bundle,
+# each of these points at its copy too, so pip, git, curl and node trust it.
+TOOL_BUNDLES = ("REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "GIT_SSL_CAINFO", "PIP_CERT", "NODE_EXTRA_CA_CERTS")
 # Passed through unchanged when the caller sets them: the proxy, which listens
 # on loopback for every user, and the terminal and text decoding.
-PASSED = ("HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy", "TERM", "LANG", "LC_ALL", "LC_CTYPE")
+PASSED = (*network_variables.PROXY, "TERM", "LANG", "LC_ALL", "LC_CTYPE")
 # Each toolchain's install root, as directories above its binary.
 TOOLS = {"zig": 1, "go": 2}
 BASE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -201,12 +207,25 @@ def reexec_pinned(argv):
         os.execv(python, [str(python), *argv])
 
 
-def source_bundle(environ):
-    """The caller's CA bundle: the first trust variable that names a file."""
-    for name in TRUST:
-        if environ.get(name) and Path(environ[name]).is_file():
-            return Path(environ[name])
-    return None
+def trust_sources(environ):
+    """The caller's trust, as each variable the run sets and the file or directory it names.
+
+    Each of network_variables.TRUST that names an existing file or directory
+    keeps it. The first CA bundle file among those and TOOL_BUNDLES is also
+    every tool's bundle. A variable naming nothing is dropped, with a notice.
+    """
+    named = {name: Path(environ[name]) for name in (*network_variables.TRUST, *TOOL_BUNDLES) if environ.get(name)}
+    for name, path in named.items():
+        if not path.exists():
+            say(f"{name} names {path}, which does not exist; the run leaves {name} unset")
+    trust = {name: path for name, path in named.items() if name in network_variables.TRUST and path.exists()}
+    bundle = next((path for path in named.values() if path.is_file()), None)
+    if bundle is not None:
+        trust.update(dict.fromkeys(TOOL_BUNDLES, bundle))
+    if not trust:
+        say("no CA bundle or certificate directory in the caller's trust variables; the run uses the system "
+            "trust store")
+    return trust
 
 
 class Inputs(NamedTuple):
@@ -214,14 +233,14 @@ class Inputs(NamedTuple):
     sha: str
     source: Path  # the repository's common git directory, shared by every worktree
     origin: str  # origin's URL, or "" without one
-    bundle: Path | None
+    trust: dict  # trust variable -> the CA bundle file or certificate directory it names
     installs: dict  # name -> Install
 
 
 class Placed(NamedTuple):
     """Every path a lane reads that root provided; nothing else root has reaches the lane."""
     source: Path
-    bundle: Path | None
+    trust: dict  # trust variable -> the lane's copy of what it names
     binaries: dict  # name -> the binary the lane runs
 
 
@@ -246,7 +265,7 @@ def read_inputs(ref, caller_path, environ, root=ROOT):
         found = find_tool(tool, caller_path)
         if found is not None:
             installs[tool] = found
-    return Inputs(sha, source, origin, source_bundle(environ), installs)
+    return Inputs(sha, source, origin, trust_sources(environ), installs)
 
 
 def share(path, gid):
@@ -288,20 +307,46 @@ def export(inputs, repository, gid):
     share(repository, gid)
 
 
-def place_bundle(source, lane_dir, gid):
-    """Copy the CA bundle `source` into `lane_dir` for the lane's group; the copy, or None without one."""
-    if source is None:
-        say("no CA bundle in SSL_CERT_FILE or its peers; the run uses the system trust store")
-        return None
-    copy, content = lane_dir / BUNDLE, source.read_bytes()
-    if not copy.is_file() or copy.read_bytes() != content:
-        handle, staging = tempfile.mkstemp(dir=lane_dir)
-        with os.fdopen(handle, "wb") as file:
-            file.write(content)
-        os.chown(staging, -1, gid)
-        os.chmod(staging, 0o640)
-        os.replace(staging, copy)
-    return copy
+def contents(path):
+    """A trust file's bytes, or a certificate directory's files by name, links followed; None when absent."""
+    if path.is_dir():
+        return {entry.name: entry.read_bytes() for entry in sorted(path.iterdir()) if entry.is_file()}
+    return path.read_bytes() if path.is_file() else None
+
+
+def place_trust(trust, trust_dir, gid):
+    """Copy each file or directory `trust` names into `trust_dir` for group `gid`; each variable's copy.
+
+    A hashed certificate directory is mostly links into other directories, so
+    its copy holds their contents. A copy whose contents are unchanged stays.
+    """
+    trust_dir.mkdir(exist_ok=True)
+    copies = {}
+    for name, source in trust.items():
+        if source not in copies:
+            copies[source] = trust_dir / name
+            wanted = contents(source)
+            if contents(copies[source]) != wanted:
+                staging = Path(tempfile.mkdtemp(dir=trust_dir))
+                copy = staging / "copy"
+                if isinstance(wanted, dict):
+                    copy.mkdir()
+                    for entry, data in wanted.items():
+                        (copy / entry).write_bytes(data)
+                else:
+                    copy.write_bytes(wanted)
+                share(staging, gid)
+                if copies[source].exists() or copies[source].is_symlink():
+                    copies[source].rename(staging / "old")
+                copy.rename(copies[source])
+                shutil.rmtree(staging)
+    for stale in set(trust_dir.iterdir()) - set(copies.values()):
+        if stale.is_dir() and not stale.is_symlink():
+            shutil.rmtree(stale)
+        else:
+            stale.unlink()
+    share(trust_dir, gid)
+    return {name: copies[source] for name, source in trust.items()}
 
 
 def place_install(install, tools_dir):
@@ -341,10 +386,10 @@ def public_dir(path):
 def place(inputs, lane_dir, tools_dir, gid):
     """Root's one provisioning step: put each input where group `gid` reads it, and return those paths.
 
-    The git objects and the CA bundle always go to `lane_dir`, which stays the
-    caller's and only `gid` reads, so the lane never changes what root reads
-    next. An install every user reaches is used in place; any other is copied
-    under `tools_dir`, which every user reads.
+    The git objects and the trust files and directories always go to
+    `lane_dir`, which stays the caller's and only `gid` reads, so the lane
+    never changes what root reads next. An install every user reaches is used
+    in place; any other is copied under `tools_dir`, which every user reads.
     """
     public_dir(lane_dir.parent)
     public_dir(tools_dir)
@@ -352,9 +397,9 @@ def place(inputs, lane_dir, tools_dir, gid):
     os.chown(lane_dir, -1, gid)
     os.chmod(lane_dir, 0o750)
     export(inputs, lane_dir / SOURCE, gid)
-    bundle = place_bundle(inputs.bundle, lane_dir, gid)
+    trust = place_trust(inputs.trust, lane_dir / TRUST_COPIES, gid)
     binaries = {name: place_install(install, tools_dir) for name, install in inputs.installs.items()}
-    return Placed(lane_dir / SOURCE, bundle, binaries)
+    return Placed(lane_dir / SOURCE, trust, binaries)
 
 
 def search_path(venv_bin, placed_dirs, caller_path):
@@ -364,15 +409,16 @@ def search_path(venv_bin, placed_dirs, caller_path):
     return os.pathsep.join(dict.fromkeys(entries))
 
 
-def environment(user, home, path, bundle, environ, keep=()):
-    """Everything COMMAND sees: `env -i` starts from nothing."""
+def environment(user, home, path, trust, environ, keep=()):
+    """Everything COMMAND sees, starting from nothing: `trust` maps each trust variable to the lane's copy."""
     fixed = {
         "HOME": str(home), "USER": user, "LOGNAME": user, "SHELL": "/bin/bash", "PATH": path,
         "ZIG_GLOBAL_CACHE_DIR": str(home / ".cache/zig"),
+        **{name: str(copy) for name, copy in trust.items()},
     }
-    if bundle is not None:
-        fixed.update(dict.fromkeys(TRUST, str(bundle)))
-    refused = sorted(set(keep) & set(fixed))
+    # The caller's trust names the run does not set stay unset, never pointing into root's state.
+    withheld = (*network_variables.TRUST, *TOOL_BUNDLES)
+    refused = sorted(set(keep) & {*fixed, *withheld})
     if refused:
         raise SystemExit(f"{COMMAND}: --keep cannot override the run's own {', '.join(refused)}")
     result = {name: environ[name] for name in (*PASSED, *keep) if name in environ}
@@ -380,8 +426,13 @@ def environment(user, home, path, bundle, environ, keep=()):
     return result
 
 
-def env_command(user, env, argv):
-    return ["runuser", "-u", user, "--", "env", "-i", *(f"{name}={value}" for name, value in env.items()), *argv]
+def as_lane(user, env, argv, **options):
+    """Run `argv` as `user` with exactly the environment `env`.
+
+    The values go only into the child's environment, which other users cannot
+    read; a command line is world-readable while it runs, so it holds no value.
+    """
+    return subprocess.run(argv, env=env, user=user, group=user, extra_groups=[], **options)
 
 
 class Lane:
@@ -390,14 +441,14 @@ class Lane:
     def __init__(self, lane):
         self.lane = lane
         self.user = user_for(lane)
-        self.home = Path("/home") / self.user
+        self.home = HOMES / self.user
         self.checkout = self.home / CHECKOUT
         self.venv = self.home / VENV
         self.placed = PLACED / "lanes" / lane
         self.env = {"HOME": str(self.home), "USER": self.user, "LOGNAME": self.user, "PATH": BASE_PATH}
 
     def run(self, argv, *, check=True, **options):
-        return subprocess.run(env_command(self.user, self.env, argv), cwd=self.home, check=check, **options)
+        return as_lane(self.user, self.env, argv, cwd=self.home, check=check, **options)
 
     def write(self, path, text):
         self.run(["mkdir", "-p", str(Path(path).parent)])
@@ -458,15 +509,15 @@ def run(lane, ref, keep, command):
     # The environment carries Python; the toolchains' own directories come before the caller's.
     tools = [binary.parent for name, binary in placed.binaries.items() if name != PYTHON]
     path = search_path(lane.venv / "bin", tools, caller_path)
-    network = environment(lane.user, lane.home, path, placed.bundle, os.environ)
+    network = environment(lane.user, lane.home, path, placed.trust, os.environ)
     lane.ensure_checkout(placed.source, inputs.sha)
     say(f"{lane.user} at {inputs.sha[:12]} in {lane.checkout}")
     built = ensure_venv(lane.venv, placed.binaries[PYTHON], [lane.checkout / path for path in REQUIREMENTS],
-                        lambda argv: subprocess.run(env_command(lane.user, network, argv), cwd=lane.home, check=True),
+                        lambda argv: as_lane(lane.user, network, argv, cwd=lane.home, check=True),
                         lane.write)
     say(f"{'installed' if built else 'reusing'} {lane.venv}")
-    env = environment(lane.user, lane.home, path, placed.bundle, os.environ, keep)
-    status = subprocess.run(env_command(lane.user, env, command), cwd=lane.checkout).returncode
+    env = environment(lane.user, lane.home, path, placed.trust, os.environ, keep)
+    status = as_lane(lane.user, env, command, cwd=lane.checkout).returncode
     held.close()
     return status
 
@@ -539,11 +590,7 @@ def main(argv):
     try:
         return remove(lane) if action == "remove" else run(lane, ref, keep, command)
     except subprocess.CalledProcessError as error:
-        # Name the command, not the environment env_command gives it.
-        words = error.cmd[error.cmd.index("-i") + 1:] if "-i" in error.cmd else error.cmd
-        while words and "=" in words[0]:
-            words = words[1:]
-        raise SystemExit(f"{COMMAND}: exit {error.returncode} from {' '.join(words)}")
+        raise SystemExit(f"{COMMAND}: exit {error.returncode} from {' '.join(map(str, error.cmd))}")
 
 
 if __name__ == "__main__":
