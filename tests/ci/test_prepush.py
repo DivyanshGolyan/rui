@@ -233,36 +233,52 @@ class PrepushTest(unittest.TestCase):
         self.assertIn("RUI_TEST_MYSQL_SOCKET", without["live MySQL"].reason)
         self.assertTrue(without["live MySQL"].reason.endswith("so CI runs test-store"))
 
-    def test_full_runs_only_the_server_targets_that_read_the_local_mysql(self):
-        for path, live in (("src/request_encoding.zig", None), ("src/store/wire/pg.zig", None),
-                           ("src/store/wire/mysql_connection.zig", ["test-store"]), ("src/store/rsql.zig", ["test-store"]),
-                           ("src/store/mysql.zig", ["test-store"]),
-                           ("tests/integration/launch_frame_integration.py", ["launch-frame-integration"])):
+    def test_full_runs_a_live_need_only_through_its_own_root_and_skips_every_other(self):
+        no_root = "no target runs only these tests"
+        # path: (roots the live MySQL step runs, text each CI-only skip names, or None for no such skip)
+        cases = {
+            "src/request_encoding.zig": (None, None),
+            "src/store/rsql.zig": (["test-store"], None),
+            "src/store/mysql.zig": (["test-store"], None),
+            "src/store/Store.zig": (["test-store"], None),
+            "tests/integration/launch_frame_integration.py": (["launch-frame-integration"], None),
+            # forEachEngine tests in the native root: no root runs only them.
+            "src/find_tools_tests.zig": (None, [no_root]),
+            "src/read_transcript.zig": (None, [no_root]),
+            "src/launch_frame.zig": (["launch-frame-integration"], [no_root]),
+            # Roots that need Postgres, or start their own MySQL in Docker.
+            "src/store/wire/pg.zig": (None, ["(test-pg)"]),
+            "src/store/wire/mysql_connection.zig": (["test-store"], ["(mysql-wire-integration)"]),
+        }
+        for path, (live, left) in cases.items():
             with self.subTest(path=path):
                 self.file(path)
                 full = dict(prepush.checks([path], AVAILABLE, "BASE", "full", mysql=True))
                 command = full.get("live MySQL")
                 self.assertEqual(command and command[4:-2], live)
-                self.assertNotIn("live MySQL", dict(prepush.checks([path], AVAILABLE, "BASE")))
+                skipped = full.get("live, CI only")
+                if left is None:
+                    self.assertIsNone(skipped)
+                else:
+                    self.assertIsInstance(skipped, prepush.Skipped, "recorded as skipped, never as passed")
+                    self.assertTrue(skipped.reason.endswith("CI runs it"))
+                    for text in left:
+                        self.assertIn(text, skipped.reason)
+                default = dict(prepush.checks([path], AVAILABLE, "BASE"))
+                self.assertFalse({"live MySQL", "live, CI only"} & set(default))
 
     def test_the_live_mysql_step_never_runs_a_whole_suite(self):
-        # Every path whose development selection names a live server target.
+        # Every path a live rule names, and every native forEachEngine file.
         candidates = {path for patterns, *_ in select_tests.LIVE_RULES for path in patterns if "*" not in path and not path.startswith("!")}
         candidates |= {"src/store/rsql.zig", "src/store/Store.zig", "src/store/schema.zig", "src/store.zig"}
+        candidates |= select_tests.tree_graph().live_conformance
         for path in sorted(candidates):
             with self.subTest(path=path):
                 self.file(path)
                 command = dict(prepush.checks([path], AVAILABLE, "BASE", "full", mysql=True)).get("live MySQL")
                 if command:
-                    self.assertFalse(set(command) & {"test", "check", "check-full"}, command)
+                    self.assertFalse(set(command) & {"test", "test-native", "check", "check-full"}, command)
                     self.assertFalse(any(word.startswith("-Dtest-filter") for word in command))
-        # Whatever whole suite a selection names live, only its live owners run.
-        self.file("src/store/rsql.zig")
-        selection = {"targets": ["check", "check-full", "test", "test-store", "launch-frame-integration"], "mysql_suites": ["launch-frame-integration"],
-                     "server_targets": ["check", "check-full", "launch-frame-integration", "test", "test-store"]}
-        with patch.object(prepush, "select", return_value=selection):
-            command = dict(prepush.checks(["src/store/rsql.zig"], AVAILABLE, "BASE", "full", mysql=True))["live MySQL"]
-        self.assertEqual(command[4:-2], ["launch-frame-integration", "test-store"])
 
     def test_mysql_is_reachable_only_through_a_listening_named_socket_with_a_password(self):
         path = str(self.root / "m.sock")
@@ -386,6 +402,11 @@ class PrepushTest(unittest.TestCase):
         self.commit("a", "2\n", "change")
         self.assertFalse(push(head)[0], "pushing the old commit still matches its tree and base")
         self.assertTrue(push(self.git("rev-parse", "HEAD"))[0], "a new tree runs the checks")
+        self.git("checkout", "-q", "--orphan", "unrelated")
+        orphan = self.commit("c", "1\n", "no history shared with main")
+        self.git("checkout", "-q", "feature")
+        self.assertIsNone(prepush.pushed_key(orphan, "main"))
+        self.assertTrue(push(orphan)[0], "a commit with no merge base is not covered: --quick runs")
 
     def test_whitespace_in_committed_lines_is_fixed_in_the_working_tree_and_still_fails(self):
         self.git("init", "-q")

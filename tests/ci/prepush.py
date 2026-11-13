@@ -9,9 +9,10 @@ do not select checks. GitHub CI owns review-phase acceptance.
 When history since the merge base holds a merge of --base, the unit binaries
 are also compiled unfiltered, as CI's unit producer compiles them (#1415).
 --full adds that compile, stack-frames at the baseline CPU and, when
-RUI_TEST_MYSQL_* name a reachable server, the selected targets that read it
-(test-store for test, never a whole suite);
-without one it says so and skips only that part (#1422).
+RUI_TEST_MYSQL_* name a reachable server, each selected live need whose own
+target reads it; without one it says so and skips only that part. A live need
+with no target of its own, or whose target needs another server, is recorded
+as skipped for CI, never as passed (#1422).
 
 --quick leaves out the Zig builds and is what the git pre-push hook runs;
 --install-hook installs that hook. Whitespace errors in committed lines and
@@ -131,9 +132,6 @@ UNIT_COMPILE = ["zig", "build", "ci-build", "-Dci-targets=test", "-Dci-part=unit
 # check.yml's linux_codegen gate, one compile at a time.
 STACK_FRAMES = ["zig", "build", "-j1", "stack-frames", "-Dcpu=baseline", "--summary", "line"]
 RECEIPT = "rui-prepush-receipt.json"
-# The live MySQL step runs the Store root for `test`, and no whole suite.
-LIVE_OWNER = {"test": "test-store"}
-WHOLE_SUITES = frozenset({"test", "check", "check-full"})
 
 
 class Skipped(NamedTuple):
@@ -196,18 +194,21 @@ def checks(paths, available, base, mode="default", merged_base=False, mysql=Fals
     if mode != "full":
         return
     yield "stack frames", STACK_FRAMES
-    # The server targets that read RUI_TEST_MYSQL_*; test-pg needs Postgres and
-    # mysql-wire-integration starts its own server in Docker, so both stay with CI.
-    # The selector names `test` live when `test-store` is; the live run takes
-    # that owner alone, never an unfiltered whole suite (CODING_STANDARDS#evidence).
+    # A live need runs here only through the one target that runs just its tests
+    # and reads RUI_TEST_MYSQL_*. Every other need is recorded as skipped, never
+    # as passed: one with no such target (its tests sit inside a whole suite),
+    # or one whose target needs Postgres or starts its own MySQL in Docker.
     reads_mysql = LIVE_MYSQL_DIALECT_TARGETS | set(development["mysql_suites"])
-    live = sorted({LIVE_OWNER.get(target, target) for target in development["server_targets"]
-                   if target in reads_mysql} - WHOLE_SUITES)
+    live = sorted({root for root, _ in development["live_needs"] if root in reads_mysql})
     if live and mysql:
         yield "live MySQL", ["env", f"{live_engines.REQUIRE}=mysql", "zig", "build", *live, "--summary", "line"]
     elif live:
         yield "live MySQL", Skipped(f"no reachable MySQL in {live_engines.MYSQL_SOCKET} and "
                                     f"{live_engines.MYSQL_ROOT_PASSWORD}, so CI runs {' '.join(live)}")
+    left = [f"{reason} ({root or 'no target runs only these tests'})"
+            for root, reason in development["live_needs"] if root not in reads_mysql]
+    if left:
+        yield "live, CI only", Skipped("; ".join(left) + ": CI runs it")
 
 
 def mysql_reachable(environ):
@@ -253,10 +254,17 @@ def read_receipt():
         return None
 
 
+def pushed_key(sha, ref):
+    """The pushed commit's (tree, merge base with `ref`), or None when the two share no history."""
+    base = subprocess.run(["git", "merge-base", sha, ref], cwd=ROOT, capture_output=True, text=True)
+    return None if base.returncode else (git("rev-parse", f"{sha}^{{tree}}"), base.stdout.strip())
+
+
 def receipt_covers(receipt, pushes):
     """Whether the receipt records a run on every (tree, merge base) of `pushes` that ran a command and all passed.
 
-    The tree and the merge base together fix the diff a run selected its checks from.
+    The tree and the merge base together fix the diff a run selected its checks
+    from; a push with no merge base (None) is never covered.
     """
     if receipt is None or receipt.get("tree") is None or set(pushes) != {(receipt["tree"], receipt.get("base"))}:
         return False
@@ -378,7 +386,7 @@ def main():
     pushed = os.environ.pop(PUSHED, "").split()
     if pushed:
         receipt = read_receipt()
-        if receipt_covers(receipt, [(git("rev-parse", f"{sha}^{{tree}}"), git("merge-base", sha, args.base)) for sha in pushed]):
+        if receipt_covers(receipt, [pushed_key(sha, args.base) for sha in pushed]):
             print(f"prepush: the {receipt['mode']} run on tree {receipt['tree']} against {receipt['base']} passed; "
                   "not running it again.")
             raise SystemExit(0)
