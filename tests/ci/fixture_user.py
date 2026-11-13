@@ -26,9 +26,13 @@ Lanes never share a user, home, checkout, Zig cache or environment. The user and
 home are kept for the next run; --remove stops the user's processes and deletes both.
 
   python3 tests/ci/fixture_user.py --venv
+  python3 tests/ci/fixture_user.py --python
 
-creates or refreshes the caller's own environment at the same home-relative path;
-.agents/setup runs it, and tests/ci/prepush.py re-executes itself in it.
+--venv creates or refreshes the caller's own environment at the same
+home-relative path; .agents/setup runs it, and tests/ci/prepush.py re-executes
+itself in it. --python prints the Python 3.12 those environments are built from
+and fails when there is none; as root it names only one a fixture user can run,
+and .agents/setup installs one when it fails.
 """
 import fcntl
 import hashlib
@@ -88,6 +92,34 @@ def reachable(path):
         return False
 
 
+def usable_python(search, public):
+    """The first python3.12 on `search` that can build a venv, resolved; None when there is none.
+
+    With `public`, only an interpreter every user can run counts: a lane's user
+    cannot follow a name on root's PATH into /root (a pyenv shim, uv's default
+    install), even through a link in a directory it can search.
+    """
+    for entry in search.split(os.pathsep):
+        candidate = Path(entry) / PYTHON if entry else None
+        if candidate is None or not candidate.is_file() or not os.access(candidate, os.X_OK):
+            continue
+        interpreter = candidate.resolve()
+        if public and not reachable(interpreter):
+            continue
+        if subprocess.run([str(interpreter), "-c", "import ensurepip, venv"], capture_output=True).returncode == 0:
+            return interpreter
+    return None
+
+
+def fixture_python(caller_path, system_path=BASE_PATH):
+    """The Python 3.12 a lane's environment is built from: the caller's first one every user can run."""
+    python = usable_python(os.pathsep.join(filter(None, (caller_path, system_path))), public=True)
+    if python is None:
+        raise SystemExit(f"{COMMAND}: no {PYTHON} that a fixture user can run; .agents/setup installs one "
+                         "under /usr/local")
+    return python
+
+
 def requirement_stamp(texts):
     """What an environment's packages were installed from: the interpreter and the pinned requirements."""
     digest = hashlib.sha256(PYTHON.encode())
@@ -96,8 +128,8 @@ def requirement_stamp(texts):
     return digest.hexdigest()
 
 
-def ensure_venv(venv, requirements, run, write):
-    """Create or refresh the Python 3.12 environment `venv`; True when it ran pip.
+def ensure_venv(venv, interpreter, requirements, run, write):
+    """Create or refresh the Python 3.12 environment `venv` from `interpreter`; True when it ran pip.
 
     `run(argv)` and `write(path, text)` act as the environment's owner. An
     environment whose stamp matches `requirements` is reused untouched; one
@@ -108,7 +140,7 @@ def ensure_venv(venv, requirements, run, write):
     if python.exists() and stamp.is_file() and stamp.read_text().strip() == want:
         return False
     if not python.exists():
-        run([PYTHON, "-m", "venv", str(venv)])
+        run([str(interpreter), "-m", "venv", str(venv)])
     run([str(python), "-m", "pip", "install", "--quiet", "--disable-pip-version-check",
          *(argument for path in requirements for argument in ("-r", str(path)))])
     write(stamp, want + "\n")
@@ -296,6 +328,8 @@ def lock(lane):
 
 def run(lane, ref, keep, command):
     lane = Lane(lane)
+    caller_path = os.environ.get("PATH", BASE_PATH)
+    interpreter = fixture_python(caller_path)
     sha = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
                          capture_output=True, text=True).stdout.strip()
     if not sha:
@@ -303,12 +337,11 @@ def run(lane, ref, keep, command):
     held = lock(lane.lane)
     lane.ensure_user()
     bundle = lane.ensure_bundle(os.environ)
-    caller_path = os.environ.get("PATH", BASE_PATH)
     path = search_path(lane.venv / "bin", lane.ensure_tools(caller_path), caller_path)
     network = environment(lane.user, lane.home, path, bundle, os.environ)
     lane.ensure_checkout(sha, network)
     say(f"{lane.user} at {sha[:12]} in {lane.checkout}")
-    built = ensure_venv(lane.venv, [lane.checkout / path for path in REQUIREMENTS],
+    built = ensure_venv(lane.venv, interpreter, [lane.checkout / path for path in REQUIREMENTS],
                         lambda argv: subprocess.run(env_command(lane.user, network, argv), cwd=lane.home, check=True),
                         lane.write)
     say(f"{'installed' if built else 'reusing'} {lane.venv}")
@@ -334,14 +367,15 @@ def remove(lane):
 
 USAGE = f"""usage: {COMMAND} LANE [--ref REF] [--keep NAME]... -- COMMAND...
        {COMMAND} --remove LANE
-       python3 tests/ci/fixture_user.py --venv"""
+       python3 tests/ci/fixture_user.py --venv
+       python3 tests/ci/fixture_user.py --python"""
 
 
 def parse(argv):
     """(action, lane, ref, keep, command) from the arguments; COMMAND follows `--`."""
     options, command = (argv[:argv.index("--")], argv[argv.index("--") + 1:]) if "--" in argv else (argv, [])
-    if options == ["--venv"] and not command:
-        return "venv", None, None, (), []
+    if options in (["--venv"], ["--python"]) and not command:
+        return options[0][2:], None, None, (), []
     if len(options) == 2 and options[0] == "--remove" and not command:
         return "remove", options[1], None, (), []
     lane, ref, keep, rest = None, "HEAD", [], list(options)
@@ -365,9 +399,22 @@ def parse(argv):
 
 def main(argv):
     action, lane, ref, keep, command = parse(argv)
+    if action == "python":
+        # .agents/setup's question: root's interpreter must serve fixture users too.
+        search = os.pathsep.join(filter(None, (os.environ.get("PATH"), BASE_PATH)))
+        python = usable_python(search, public=os.geteuid() == 0)
+        if python is None:
+            print(f"No {PYTHON} that can build a venv{' for a fixture user' if os.geteuid() == 0 else ''}.",
+                  file=sys.stderr)
+            return 1
+        print(python)
+        return 0
     if action == "venv":
         home = Path.home()
-        built = ensure_venv(home / VENV, [ROOT / path for path in REQUIREMENTS],
+        interpreter = usable_python(os.environ.get("PATH", BASE_PATH), public=False)
+        if interpreter is None:
+            raise SystemExit(f"No {PYTHON} that can build a venv; .agents/setup installs one.")
+        built = ensure_venv(home / VENV, interpreter, [ROOT / path for path in REQUIREMENTS],
                             lambda argv: subprocess.run(argv, check=True), lambda path, text: path.write_text(text))
         print(f"{'Installed' if built else 'Reusing'} {home / VENV}.")
         return 0

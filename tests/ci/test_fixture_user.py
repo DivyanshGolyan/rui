@@ -1,5 +1,5 @@
 """The fixture user's names, environment and reuse, without creating a user."""
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 import io
 import os
 from pathlib import Path
@@ -75,16 +75,19 @@ class FixtureUserTest(unittest.TestCase):
         requirements[0].write_text("ruff==1\n")
         requirements[1].write_text("h2==1\n")
         ran = []
+        interpreter = Path("/opt/python/bin/python3.12")
 
         def run(argv):
             ran.append(argv[1:3])
             if argv[1:3] == ["-m", "venv"]:
+                self.assertEqual(argv[0], str(interpreter), "the environment comes from the chosen interpreter")
                 (venv / "bin").mkdir(parents=True)
                 (venv / "bin/python").touch()
 
         def ensure():
             ran.clear()
-            return fixture_user.ensure_venv(venv, requirements, run, lambda path, text: path.write_text(text))
+            return fixture_user.ensure_venv(venv, interpreter, requirements, run,
+                                            lambda path, text: path.write_text(text))
 
         self.assertTrue(ensure())
         self.assertEqual(ran, [["-m", "venv"], ["-m", "pip"]])
@@ -94,6 +97,61 @@ class FixtureUserTest(unittest.TestCase):
         self.assertTrue(ensure())
         self.assertEqual(ran, [["-m", "pip"]], "changed pins keep the interpreter")
         self.assertFalse(ensure())
+
+    def interpreter(self, directory, *, builds_venv=True, mode=0o755):
+        """A python3.12 in `directory` (made with `mode`) that can or cannot import venv."""
+        directory.mkdir(parents=True, exist_ok=True)
+        os.chmod(directory, mode)
+        python = directory / fixture_user.PYTHON
+        python.write_text(f"#!/bin/sh\nexit {0 if builds_venv else 1}\n")
+        python.chmod(0o755)
+        return python
+
+    def test_a_lane_builds_its_environment_only_from_an_interpreter_its_user_can_run(self):
+        os.chmod(self.root, 0o755)
+        private = self.interpreter(self.root / "private/.pyenv/bin", mode=0o755)
+        os.chmod(self.root / "private", 0o700)
+        public = self.interpreter(self.root / "public/bin")
+        system = self.interpreter(self.root / "system/bin")
+        linked = self.root / "links"
+        linked.mkdir()
+        (linked / fixture_user.PYTHON).symlink_to(private)
+        broken = self.interpreter(self.root / "broken/bin", builds_venv=False)
+        cases = {
+            # (caller's PATH, system fallback): the interpreter the lane uses, or None to refuse.
+            "public": ((public.parent,), (), public),
+            "public before the system one": ((public.parent,), (system.parent,), public),
+            "root-private only": ((private.parent,), (), None),
+            "root-private with a system fallback": ((private.parent,), (system.parent,), system),
+            "public link into root's home": ((linked,), (), None),
+            "public link with a system fallback": ((linked,), (system.parent,), system),
+            "public but without venv": ((broken.parent,), (system.parent,), system),
+        }
+        for name, (caller, fallback, expected) in cases.items():
+            with self.subTest(name):
+                caller_path = os.pathsep.join(map(str, caller))
+                system_path = os.pathsep.join(map(str, fallback))
+                if expected is None:
+                    with self.assertRaises(SystemExit) as refusal:
+                        fixture_user.fixture_python(caller_path, system_path)
+                    self.assertIn(".agents/setup installs one", str(refusal.exception.code))
+                else:
+                    self.assertEqual(fixture_user.fixture_python(caller_path, system_path), expected.resolve())
+        self.assertEqual(fixture_user.usable_python(str(private.parent), public=False), private.resolve(),
+                         "the caller's own environment may use its private interpreter")
+
+    def test_setup_installs_a_shared_interpreter_when_roots_is_private(self):
+        os.chmod(self.root, 0o755)
+        private = self.interpreter(self.root / "private/bin")
+        os.chmod(self.root / "private", 0o700)
+        public = self.interpreter(self.root / "public/bin")
+        for euid, search, fallback, status in ((0, private.parent, "", 1), (0, private.parent, public.parent, 0),
+                                               (1000, private.parent, "", 0)):
+            with self.subTest(euid=euid, fallback=str(fallback)), \
+                    patch.dict(os.environ, PATH=str(search)), patch.object(fixture_user, "BASE_PATH", str(fallback)), \
+                    patch.object(fixture_user.os, "geteuid", return_value=euid), \
+                    redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                self.assertEqual(fixture_user.main(["--python"]), status)
 
     def test_prepush_reexecutes_only_outside_an_existing_environment(self):
         python = self.root / VENV / "bin/python"
@@ -125,6 +183,7 @@ class FixtureUserTest(unittest.TestCase):
         self.assertEqual(fixture_user.parse(["a", "--", "true"]), ("run", "a", "HEAD", (), ["true"]))
         self.assertEqual(fixture_user.parse(["--remove", "a"])[:2], ("remove", "a"))
         self.assertEqual(fixture_user.parse(["--venv"])[0], "venv")
+        self.assertEqual(fixture_user.parse(["--python"])[0], "python")
         for argv in (["a"], ["a", "--"], ["--", "true"], ["a", "b", "--", "true"], ["A", "--", "true"],
                      ["a", "--ref"], ["--remove"]):
             with self.subTest(argv=argv), self.assertRaises(SystemExit):

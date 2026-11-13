@@ -176,8 +176,11 @@ install_go() (
 )
 
 install_python312() {
-    if python3.12 -c 'import ensurepip, venv' >/dev/null 2>&1; then
-        printf 'Python 3.12 already installed: %s\n' "$(command -v python3.12)"
+    local found
+    # tests/ci/fixture_user.py owns the question: for root, the interpreter must
+    # also be one .agents/as-fixture-user's users can run, not one under /root.
+    if found=$(python3 "$repo_root/tests/ci/fixture_user.py" --python); then
+        printf 'Python 3.12 already installed: %s\n' "$found"
         return
     fi
     command -v uv >/dev/null || python3 -m pip install --user --quiet --disable-pip-version-check uv
@@ -189,7 +192,8 @@ install_python312() {
     fi
     UV_PYTHON_INSTALL_DIR=$destination uv python install --no-bin 3.12
     ln -sfn "$(UV_PYTHON_INSTALL_DIR=$destination uv python find --managed-python 3.12)" "$link"
-    printf 'Python 3.12 installed: %s\n' "$link"
+    found=$(python3 "$repo_root/tests/ci/fixture_user.py" --python)
+    printf 'Python 3.12 installed: %s\n' "$found"
 }
 
 persist_path() {
