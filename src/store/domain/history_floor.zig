@@ -5,7 +5,7 @@
 //! A drop unit is a host Message after the Session's first, or a model
 //! Operation with its tool results; it begins at the Message's position or
 //! the Operation's admission position, and a floor drops every unit that
-//! begins at or below it (`historical.HistoricalView.Floor`). A floor once
+//! begins at or below it (`historical.RequestPage.Floor`). A floor once
 //! reached stays: every later compaction keeps its base's floor or goes
 //! deeper (`InheritedFloor`). Each level
 //! aims at a quarter of the room the level before it did: level 1 at the

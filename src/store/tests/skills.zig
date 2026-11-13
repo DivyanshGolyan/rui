@@ -16,7 +16,7 @@ const AttemptBinding = store_core.AttemptBinding;
 const ActionExecutionInput = action_domain.ActionExecutionInput;
 const ContentReader = content_domain.ContentReader;
 const Faults = store_core.Faults;
-const HistoricalView = historical_domain.HistoricalView;
+const TestingPage = store_testing.TestingPage;
 const canonicalCwd = store_testing.canonicalCwd;
 const completeConfiguration = store_testing.completeConfiguration;
 const completeMessage = store_testing.completeMessage;
@@ -127,8 +127,8 @@ test "skills start_agent imports six distinct contents atomically and retries af
 test "skills catalog provenance fences readSkills history and full reports" {
     try store_testing.forEachEngine(struct {
         fn scan(storage: *Store, binding: AttemptBinding) !void {
-            var view: HistoricalView = undefined;
-            storage.openHistoricalView(binding, &view);
+            var view: TestingPage = undefined;
+            view.open(storage, binding);
             defer view.close();
             var position: u64 = 0;
             while (try view.nextEntry(position)) |entry| position = entry.position;

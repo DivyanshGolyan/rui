@@ -26,6 +26,226 @@ const OutputItemKind = historical_domain.OutputItemKind;
 const ValidatedOutput = model_settlement_domain.ValidatedOutput;
 
 pub const OutputMetadataWriter = output_format.OutputMetadataWriter;
+
+/// A request page with the Store that reads what it asks, for a test that
+/// reads a page itself: each call the page answers with `PageRead` is made
+/// again once the Store has read it, as a preparation's shell does.
+pub const TestingPage = struct {
+    page: historical_domain.RequestPage,
+    store: *Store,
+
+    const RequestPage = historical_domain.RequestPage;
+
+    pub fn open(self: *TestingPage, store: *Store, binding: AttemptBinding) void {
+        self.store = store;
+        self.page.open(binding);
+    }
+
+    /// The page an admission opens (`historical.Start.view`), read through
+    /// `store`.
+    pub fn pageFor(self: *TestingPage, store: *Store) *RequestPage {
+        self.store = store;
+        return &self.page;
+    }
+
+    /// `err` itself, or nothing once the Store read what the page asked.
+    fn answer(self: *TestingPage, err: anytype) !void {
+        if (err != error.PageRead) return err;
+        return self.store.readRequestPage(&self.page);
+    }
+
+    pub fn settings(self: *TestingPage, out: *historical_domain.HistoricalSettings) !void {
+        while (true) return self.page.settings(out) catch |err| {
+            try self.answer(err);
+            continue;
+        };
+    }
+
+    pub fn validateOutputsStep(self: *TestingPage) !bool {
+        while (true) return self.page.validateOutputsStep() catch |err| {
+            try self.answer(err);
+            continue;
+        };
+    }
+
+    /// Validates the outputs first, as the request's validation stage does.
+    pub fn coverage(self: *TestingPage) !RequestPage.Coverage {
+        while (!try self.validateOutputsStep()) {}
+        while (true) return self.page.coverage() catch |err| {
+            try self.answer(err);
+            continue;
+        };
+    }
+
+    pub fn nextEntryStep(self: *TestingPage, after_position: u64, bytes_left: *usize, items_left: *usize) !RequestPage.EntryProgress {
+        const bytes = bytes_left.*;
+        const items = items_left.*;
+        while (true) return self.page.nextEntryStep(after_position, bytes_left, items_left) catch |err| {
+            try self.answer(err);
+            // As a preparation's step that asked: its charges are taken again.
+            bytes_left.* = bytes;
+            items_left.* = items;
+            continue;
+        };
+    }
+
+    /// The entry after `after_position`, outputs validated first, under an
+    /// allowance no entry runs out of.
+    pub fn nextEntry(self: *TestingPage, after_position: u64) !?historical_domain.HistoricalEntry {
+        while (!try self.validateOutputsStep()) {}
+        while (true) {
+            var bytes: usize = 64 * 1024;
+            var items: usize = 1024;
+            switch (try self.nextEntryStep(after_position, &bytes, &items)) {
+                .pending => {},
+                .ready => |entry| return if (entry) |value| value.* else null,
+            }
+        }
+    }
+
+    pub fn nextDeclaredTool(self: *TestingPage, declaration: *historical_domain.Declaration, out: *historical_domain.HistoricalTool) !bool {
+        while (true) return self.page.nextDeclaredTool(declaration, out) catch |err| {
+            try self.answer(err);
+            continue;
+        };
+    }
+
+    pub fn nextProviderTool(self: *TestingPage, out: *historical_domain.HistoricalTool) !bool {
+        while (true) return self.page.nextProviderTool(out) catch |err| {
+            try self.answer(err);
+            continue;
+        };
+    }
+
+    pub fn nextTool(self: *TestingPage, out: *historical_domain.HistoricalTool) !bool {
+        while (true) return self.page.nextTool(out) catch |err| {
+            try self.answer(err);
+            continue;
+        };
+    }
+
+    pub fn prefixSeal(self: *TestingPage) !?historical_domain.PrefixSeal {
+        while (true) return self.page.prefixSeal() catch |err| {
+            try self.answer(err);
+            continue;
+        };
+    }
+
+    pub fn recordPrefixSeal(self: *TestingPage, seal: *const historical_domain.PrefixSeal) !void {
+        while (true) return self.page.recordPrefixSeal(seal) catch |err| {
+            try self.answer(err);
+            continue;
+        };
+    }
+
+    pub fn openOutput(self: *TestingPage, position: u64) !historical_domain.HistoricalOutput {
+        while (true) return self.page.openOutput(position) catch |err| {
+            try self.answer(err);
+            continue;
+        };
+    }
+
+    pub fn replayOutput(self: *TestingPage, entry: *const historical_domain.HistoricalEntry, model: []const u8) !?historical_domain.HistoricalOutput {
+        while (true) return self.page.replayOutput(entry, model) catch |err| {
+            try self.answer(err);
+            continue;
+        };
+    }
+
+    pub fn nextOutputPart(self: *TestingPage) !?historical_domain.HistoricalPart {
+        while (true) return self.page.nextOutputPart() catch |err| {
+            try self.answer(err);
+            continue;
+        };
+    }
+
+    pub fn nextToolResult(self: *TestingPage) !?historical_domain.HistoricalToolResult {
+        while (true) return self.page.nextToolResult() catch |err| {
+            try self.answer(err);
+            continue;
+        };
+    }
+
+    pub fn openContent(self: *TestingPage, reference: historical_domain.HistoricalContent, out: *TestingReader) !void {
+        out.store = self.store;
+        return self.page.openContent(reference, &out.reader);
+    }
+
+    pub fn expectTools(self: *TestingPage, ahead: RequestPage.ToolsAhead) void {
+        self.page.expectTools(ahead);
+    }
+
+    pub fn currentDeclaration(self: *const TestingPage) historical_domain.Declaration {
+        return self.page.currentDeclaration();
+    }
+
+    pub fn admissionPosition(self: *const TestingPage) u64 {
+        return self.page.admissionPosition();
+    }
+
+    pub fn toolGroupCursor(self: *const TestingPage) u64 {
+        return self.page.toolGroupCursor();
+    }
+
+    pub fn resumeToolGroups(self: *TestingPage, cursor: u64) void {
+        self.page.resumeToolGroups(cursor);
+    }
+
+    pub fn resumeKeys(self: *const TestingPage) historical_domain.Keys {
+        return self.page.resumeKeys();
+    }
+
+    pub fn outstandingReaders(self: *const TestingPage) usize {
+        return self.page.outstandingReaders();
+    }
+
+    pub fn isActive(self: *const TestingPage) bool {
+        return self.page.isActive();
+    }
+
+    pub fn ownsContent(self: *TestingPage, content: historical_domain.HistoricalContent) bool {
+        return self.page.ownsContent(content);
+    }
+
+    pub fn bindingMatches(self: *const TestingPage, expected: AttemptBinding) bool {
+        return self.page.bindingMatches(expected);
+    }
+
+    pub fn ownsSettings(self: *TestingPage, frozen: *const historical_domain.HistoricalSettings) bool {
+        return self.page.ownsSettings(frozen);
+    }
+
+    pub fn close(self: *TestingPage) void {
+        self.page.close();
+    }
+};
+
+/// A request page's content reader with the Store that reads its bytes
+/// (`TestingPage`).
+pub const TestingReader = struct {
+    reader: historical_domain.HistoricalReader,
+    store: *Store,
+
+    pub fn read(self: *TestingReader, start: u64, destination: []u8) !usize {
+        while (true) return self.reader.read(start, destination) catch |err| {
+            if (err != error.PageRead) return err;
+            try self.store.readRequestPage(self.reader.view);
+            continue;
+        };
+    }
+
+    pub fn usable(self: *const TestingReader) bool {
+        return self.reader.usable();
+    }
+
+    pub fn ownedBy(self: *const TestingReader, page: *TestingPage) bool {
+        return self.reader.ownedBy(&page.page);
+    }
+
+    pub fn close(self: *TestingReader) void {
+        self.reader.close();
+    }
+};
 /// The domain's offered-set expression for portable fixture queries.
 pub const offeredSetSql = @import("domain/tool_set.zig").offeredSetSql;
 

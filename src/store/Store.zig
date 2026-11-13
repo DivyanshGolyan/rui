@@ -72,7 +72,7 @@ const Found = @import("access.zig").Found;
 const ContentLocation = content_domain.ContentLocation;
 const ContentReference = content_domain.ContentReference;
 const CurrentConfiguration = configuration_domain.CurrentConfiguration;
-const HistoricalView = historical_domain.HistoricalView;
+const RequestPage = historical_domain.RequestPage;
 const MessageReply = command_domain.MessageReply;
 const ModelAdmissionKind = model_admission_domain.ModelAdmissionKind;
 const DispatchWork = model_admission_domain.DispatchWork;
@@ -1156,7 +1156,7 @@ pub const Store = struct {
         const entry = try enter(self, .none);
         defer entry.release();
         // Only a network engine's commit carries the request's reads.
-        const starting: ?model_admission_domain.AdmitModel.Starting = if (start) |into| if (self.engine.batches()) .{ .start = into, .store = self } else null else null;
+        const starting: ?model_admission_domain.AdmitModel.Starting = if (start) |into| if (self.engine.batches()) .{ .start = into, .selector = &self.selector } else null else null;
         // An admission whose purpose rests on its context's size writes as
         // an assistant response under a guard on that size, and so reads no
         // size. Only the guard's failure, rolled back, admits again as the
@@ -1498,11 +1498,10 @@ pub const Store = struct {
         return transition.apply(self, model_admission_domain.AdmitRetry, .{ .io = self.io, .active = active, .scheduled = scheduled }, faults);
     }
 
-    /// Opens the view in `out`, where it stays until it closes: a view
-    /// borrows its own buffers, so it never moves. Opening reads nothing:
-    /// the view's `settings` round checks that the binding is current.
-    pub fn openHistoricalView(self: *Store, binding: AttemptBinding, out: *HistoricalView) void {
-        out.* = .{ .store = self, .binding = binding };
+    /// Reads what a request page asked for (`RequestPage.read`) and keeps
+    /// the answer in the page, through the entry point that reads it.
+    pub fn readRequestPage(self: *Store, page: *RequestPage) !void {
+        return historical_domain.readPage(self, page);
     }
 
     pub fn modelOperationKind(self: *Store, binding: AttemptBinding) !ModelOperationKind {

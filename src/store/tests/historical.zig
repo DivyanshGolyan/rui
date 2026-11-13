@@ -10,9 +10,9 @@ const historical_domain = @import("../domain/historical.zig");
 const store_testing = @import("../testing.zig");
 const AttemptBinding = store_core.AttemptBinding;
 const HistoricalEntry = historical_domain.HistoricalEntry;
-const HistoricalReader = historical_domain.HistoricalReader;
+const TestingReader = store_testing.TestingReader;
 const HistoricalSettings = historical_domain.HistoricalSettings;
-const HistoricalView = historical_domain.HistoricalView;
+const TestingPage = store_testing.TestingPage;
 const ModelOperationKind = historical_domain.ModelOperationKind;
 const canonicalCwd = store_testing.canonicalCwd;
 const completeConfiguration = store_testing.completeConfiguration;
@@ -90,8 +90,8 @@ test "missing canonical call outcome rows fence history and inspection" {
                 }
 
                 if (corruption == .action) {
-                    var view: HistoricalView = undefined;
-                    storage.openHistoricalView(continuation, &view);
+                    var view: TestingPage = undefined;
+                    view.open(&storage, continuation);
                     defer view.close();
                     var position: u64 = 0;
                     while (true) {
@@ -137,8 +137,8 @@ test "historical tool-result EOF revalidates complete canonical coverage" {
             };
             try settleCallsForTesting(&storage, &tmp, source, "eof-coverage-metadata", &calls);
             const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-            var view: HistoricalView = undefined;
-            storage.openHistoricalView(continuation, &view);
+            var view: TestingPage = undefined;
+            view.open(&storage, continuation);
             defer view.close();
             var position: u64 = 0;
             while (true) {
@@ -175,8 +175,8 @@ test "a view's page holds the outputs its entries name under no floor, a deeper 
     try store_testing.forEachEngine(struct {
         /// The view's entries in order, each rendered and joined by `;`.
         fn walk(storage: *Store, binding: AttemptBinding, buffer: []u8) ![]const u8 {
-            var view: HistoricalView = undefined;
-            storage.openHistoricalView(binding, &view);
+            var view: TestingPage = undefined;
+            view.open(storage, binding);
             defer view.close();
             var out = std.Io.Writer.fixed(buffer);
             var cursor: TestingHistoryCursor = .{};
@@ -292,13 +292,13 @@ test "an admission closes the request's view it opened when its commit fails or 
             defer storage.close() catch unreachable;
             const session = try configureTestSession(&storage, "closed-view-config");
             try submitTestMessage(&storage, &tmp, "closed-view-one", "closed-view-one", session.slice(), "one");
-            var view: HistoricalView = undefined;
+            var view: TestingPage = undefined;
             var settings: HistoricalSettings = undefined;
 
             // Every answer of the commit's message is lost, its settings
             // round's with them: the admission stands, its request unread.
             storage.engine.mysql.state.testing_drop = .after_commit;
-            const unread = (try storage.admitModelAttemptInto(.message, .{}, .{ .view = &view, .settings = &settings })).?;
+            const unread = (try storage.admitModelAttemptInto(.message, .{}, .{ .view = view.pageFor(&storage), .settings = &settings })).?;
             try std.testing.expect(!unread.request_started);
             try std.testing.expect(!view.isActive());
             try settleItemsForTesting(&storage, &tmp, unread.permit.binding, &.{"{\"type\":\"message\",\"id\":\"m0\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"answer\"}]}"}, "answer");
@@ -307,7 +307,7 @@ test "an admission closes the request's view it opened when its commit fails or 
             try submitTestMessage(&storage, &tmp, "closed-view-two", "closed-view-two", session.slice(), "two");
             try mysql_testing.rawExec(&storage, "CREATE TRIGGER refuse_operation BEFORE INSERT ON model_operation FOR EACH ROW SIGNAL SQLSTATE '45000'");
             defer mysql_testing.rawExec(&storage, "DROP TRIGGER refuse_operation") catch @panic("cannot restore Operation inserts");
-            if (storage.admitModelAttemptInto(.message, .{}, .{ .view = &view, .settings = &settings })) |_| return error.TestUnexpectedResult else |_| {}
+            if (storage.admitModelAttemptInto(.message, .{}, .{ .view = view.pageFor(&storage), .settings = &settings })) |_| return error.TestUnexpectedResult else |_| {}
             try std.testing.expect(!view.isActive());
         }
     }.run);
@@ -328,14 +328,14 @@ test "a request reads its settings in one round and its history and tools in one
 
             // Each Operation's request, as a codec that declares tools in
             // the history (`declared`) or after it (`all`) reads it.
-            for ([_]HistoricalView.ToolsAhead{ .declared, .all }, [_]AttemptBinding{ first, undefined }) |ahead, binding| {
+            for ([_]historical_domain.RequestPage.ToolsAhead{ .declared, .all }, [_]AttemptBinding{ first, undefined }) |ahead, binding| {
                 const attempt = if (ahead == .declared) binding else later: {
                     try settleItemsForTesting(&storage, &tmp, first, &items, "answer");
                     try submitTestMessage(&storage, &tmp, "request-two", "request-two", session.slice(), "follow-up");
                     break :later (try storage.admitNextModelAttempt(.{})).?.permit.binding;
                 };
-                var view: HistoricalView = undefined;
-                storage.openHistoricalView(attempt, &view);
+                var view: TestingPage = undefined;
+                view.open(&storage, attempt);
                 defer view.close();
                 const rounds = ViewRounds.start(&storage);
                 var settings: HistoricalSettings = undefined;
@@ -378,8 +378,8 @@ test "a request reads its settings in one round and its history and tools in one
 test "the tool-group scan refuses a source with a call past its call items or one missing, wherever a page ends" {
     try store_testing.forEachEngine(struct {
         fn walk(storage: *Store, binding: AttemptBinding) !usize {
-            var view: HistoricalView = undefined;
-            storage.openHistoricalView(binding, &view);
+            var view: TestingPage = undefined;
+            view.open(storage, binding);
             defer view.close();
             var settings: HistoricalSettings = undefined;
             try view.settings(&settings);
@@ -466,8 +466,8 @@ test "the tool-group scan reads sixteen sources and sixty-four of their calls a 
                 try settleCallsForTesting(&storage, &tmp, binding, try std.fmt.bufPrint(&prefix, "group-pages-{d}", .{i}), calls[0..size]);
                 binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             }
-            var view: HistoricalView = undefined;
-            storage.openHistoricalView(binding, &view);
+            var view: TestingPage = undefined;
+            view.open(&storage, binding);
             defer view.close();
             var settings: HistoricalSettings = undefined;
             try view.settings(&settings);
@@ -563,9 +563,9 @@ test "a tool walk longer than a page reads the rest from its next member, in ord
             try submitTestMessage(&storage, &tmp, "many-tools-input", "many-tools-key", configured.accepted.session.slice(), "work");
             const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
 
-            for ([_]HistoricalView.ToolsAhead{ .declared, .all }) |ahead| {
-                var view: HistoricalView = undefined;
-                storage.openHistoricalView(binding, &view);
+            for ([_]historical_domain.RequestPage.ToolsAhead{ .declared, .all }) |ahead| {
+                var view: TestingPage = undefined;
+                view.open(&storage, binding);
                 defer view.close();
                 var settings: HistoricalSettings = undefined;
                 try view.settings(&settings);
@@ -621,8 +621,8 @@ test "a history batch's items, parts and small contents cost no round after its 
             try submitTestMessage(&storage, &tmp, "page-two", "page-two", session.slice(), "follow-up");
             const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
 
-            var view: HistoricalView = undefined;
-            storage.openHistoricalView(next, &view);
+            var view: TestingPage = undefined;
+            view.open(&storage, next);
             defer view.close();
             var cursor: TestingHistoryCursor = .{};
             var rendered: [256]u8 = undefined;
@@ -658,8 +658,8 @@ test "an output item with more parts than a page holds reads the rest from its n
             try submitTestMessage(&storage, &tmp, "parts-two", "parts-two", session.slice(), "follow-up");
             const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
 
-            var view: HistoricalView = undefined;
-            storage.openHistoricalView(next, &view);
+            var view: TestingPage = undefined;
+            view.open(&storage, next);
             defer view.close();
             var cursor: TestingHistoryCursor = .{};
             var rendered: [4096]u8 = undefined;
@@ -700,8 +700,8 @@ test "a content the page's rows cannot carry reads through its reader, and both 
             }
             const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
 
-            var view: HistoricalView = undefined;
-            storage.openHistoricalView(next, &view);
+            var view: TestingPage = undefined;
+            view.open(&storage, next);
             defer view.close();
             const rendered = try std.testing.allocator.alloc(u8, 16 * 1024 + 1);
             defer std.testing.allocator.free(rendered);
@@ -747,13 +747,13 @@ test "a reader that borrows the page's bytes keeps them when the next batch is r
             }
             const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
 
-            var view: HistoricalView = undefined;
-            storage.openHistoricalView(next, &view);
+            var view: TestingPage = undefined;
+            view.open(&storage, next);
             defer view.close();
             var cursor: TestingHistoryCursor = .{};
             var sixteenth: HistoricalEntry = undefined;
             for (0..16) |_| sixteenth = (try cursor.next(&view)).?;
-            var reader: HistoricalReader = undefined;
+            var reader: TestingReader = undefined;
             try view.openContent(sixteenth.content.?, &reader);
             var rendered: [400]u8 = undefined;
             // The next batch is read while the reader is open.
@@ -779,8 +779,8 @@ test "a prefix seal is recorded only while its Attempt is current" {
             try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
             defer storage.close() catch unreachable;
             const attempt = try TestingAttempt.admit(&storage, &tmp);
-            var view: HistoricalView = undefined;
-            storage.openHistoricalView(attempt.binding, &view);
+            var view: TestingPage = undefined;
+            view.open(&storage, attempt.binding);
             defer view.close();
             var seal = TestingAttempt.seal;
             seal.admission_position = try store_testing.queryU64(&storage, "SELECT admission_position FROM model_operation WHERE operation_id=?1", .{attempt.binding.operation_id});
@@ -805,8 +805,8 @@ test "an Attempt check reads no Session, and a prefix seal's Session read answer
             try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
             defer storage.close() catch unreachable;
             const attempt = try TestingAttempt.admit(&storage, &tmp);
-            var view: HistoricalView = undefined;
-            storage.openHistoricalView(attempt.binding, &view);
+            var view: TestingPage = undefined;
+            view.open(&storage, attempt.binding);
             defer view.close();
             // Main touched the Session in each check, so a faulted session row
             // answered SessionReadFailed there; only the seal's write reads it now.
@@ -872,8 +872,8 @@ test "complete historical tool-result traversal scales with groups and calls, in
                 binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             }
             const counter = TwinRounds.start(&storage);
-            var view: HistoricalView = undefined;
-            storage.openHistoricalView(binding, &view);
+            var view: TestingPage = undefined;
+            view.open(&storage, binding);
             defer view.close();
             var position: u64 = 0;
             var groups_seen: usize = 0;
@@ -916,8 +916,8 @@ test "historical accepted output selection work excludes failed Operation popula
             const current = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             try store_testing.exec(&storage, "UPDATE model_operation SET admission_position=100000 WHERE resolution_code IS NULL", .{});
             try store_testing.exec(&storage, failed_operations_sql, .{ population, current.operation_id });
-            var view: HistoricalView = undefined;
-            storage.openHistoricalView(current, &view);
+            var view: TestingPage = undefined;
+            view.open(&storage, current);
             defer view.close();
             const counter = TwinRounds.start(&storage);
             while (!try view.validateOutputsStep()) {}
@@ -951,8 +951,8 @@ test "historical context selection work excludes nonmatching Operation populatio
             }
             try store_testing.exec(&storage, "UPDATE model_operation SET admission_position=100000 WHERE resolution_code IS NULL", .{});
             try store_testing.exec(&storage, failed_purpose_operations_sql, .{ population, current.operation_id });
-            var view: HistoricalView = undefined;
-            storage.openHistoricalView(current, &view);
+            var view: TestingPage = undefined;
+            view.open(&storage, current);
             defer view.close();
             const counter = TwinRounds.start(&storage);
             while (!try view.validateOutputsStep()) {}

@@ -53,7 +53,7 @@ DOMAIN_REACH = {
     ("content.zig", "Store.fence"): 1,
     ("historical.zig", ".queue()"): 8,
     ("historical.zig", "Store.enter"): 8,
-    ("historical.zig", "Store.fence"): 8,
+    ("historical.zig", "Store.fence"): 1,
     ("model_settlement.zig", ".queue()"): 1,
     ("model_settlement.zig", "Store.enter"): 1,
     ("reads.zig", "Store.fence"): 3,
