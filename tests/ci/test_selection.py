@@ -549,7 +549,7 @@ class SelectionTest(unittest.TestCase):
 
     def test_installer_owners_select_standalone_fixture_in_both_phases(self):
         paths = ("tests/integration/installer_integration.py", "tests/ci/fake_rui.py",
-                 "tests/ci/test_install.py", "tests/ci/test_installer_boundary.py", "tests/ci/test_release.py", "tests/ci/release.py",
+                 "tests/ci/test_install.py", "tests/ci/test_installer_boundary.py", "tests/ci/test_release.py", "tests/ci/release.py", "tests/ci/git_command.py",
                  "tests/ci/release_numbers.py", "tests/ci/qualification.py", "src/Installation.zig", "src/installation_path.zig",
                  "src/release_candidate.zig", "src/cli.zig", "src/cli_args.zig", "src/store/schema.zig",
                  "src/fetch_dependencies.sh", "release/publish.sh", "release/install.sh",

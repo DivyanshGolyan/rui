@@ -461,9 +461,7 @@ const PrivateLaunch = struct {
     }
 
     fn wipeAllocation(comptime T: type, allocator: std.mem.Allocator, allocation: []T) void {
-        const bytes = std.mem.sliceAsBytes(allocation);
-        std.crypto.secureZero(u8, bytes);
-        allocator.rawFree(bytes, .of(T), @returnAddress());
+        @import("secret_value.zig").wipeAndFree(allocator, std.mem.sliceAsBytes(allocation), .of(T), @returnAddress());
     }
 
     fn deinit(self: *PrivateLaunch, allocator: std.mem.Allocator) void {
