@@ -33,6 +33,7 @@ const transition = @import("../transition.zig");
 const forward_domain = @import("forward.zig");
 const turn_domain = @import("turn.zig");
 const failure_class = @import("../../failure_class.zig");
+const pages = @import("../../os/pages.zig");
 const ActiveOperationFilter = action_domain.ActiveOperationFilter;
 const AttemptBinding = store_core.AttemptBinding;
 const Faults = store_core.Faults;
@@ -770,24 +771,6 @@ const pending_messages = rsql.Read(.{
     .cardinality = .one,
 });
 
-/// Ends a settlement round, mapping a failed step to the name main gave
-/// that read: the Attempt and the facts read beside it
-/// `OperationReadFailed` (main's operation read joined the revision), the
-/// pending Messages `SessionStopReadFailed`, and the output's content and
-/// duplicate reads `OutputReadFailed`. A write's failed step stays
-/// `StatementFailed`.
-fn runSettlement(a: anytype) !void {
-    a.run() catch |err| {
-        if (err != error.StatementFailed) return err;
-        if (a.failedOn(attempt_facts) or a.failedOn(success_facts)) return error.OperationReadFailed;
-        if (a.failedOn(pending_messages)) return error.SessionStopReadFailed;
-        if (a.failedOn(content_batch) or a.failedOn(content_batch_wide) or a.failedOn(content_domain.lookup_content) or
-            a.failedOn(duplicate_items) or a.failedOn(duplicate_items_wide) or
-            a.failedOn(duplicate_calls) or a.failedOn(duplicate_calls_wide) or a.failedOn(historical_names)) return error.OutputReadFailed;
-        return err;
-    };
-}
-
 /// "?k,?k+1,...": `count` parameters from `first`.
 fn parameters(comptime first: usize, comptime count: usize) []const u8 {
     comptime {
@@ -1151,9 +1134,12 @@ pub const Batch = struct {
     lookup_count: u8,
     duplicates: DuplicateVisitor,
 
-    /// Names are needed only while binding history's fixed-value Args.
-    /// Noinline keeps this 4.6 KB window off the import frame; Access copies
-    /// every Bounded argument before returning, so none borrows this frame.
+    /// Names are needed only while binding history's fixed-value Args, a
+    /// 4.6 KB window in pages of its own for the call (`pages.Mapped`): the
+    /// read runs only for a call batch with a name the Operation did not
+    /// offer, and its queueing sits on the engine thread's deepest chain.
+    /// Access copies every Bounded argument before returning, so none
+    /// borrows the pages once they are unmapped.
     noinline fn queueHistory(batch: *Batch, a: anytype, operation_id: u64, output: *const ValidatedOutput, io: std.Io) !void {
         @setEvalBranchQuota(20_000);
         const Name = Bounded(tool_record.max_name_bytes);
@@ -1163,10 +1149,12 @@ pub const Batch = struct {
                 std.debug.assert(@offsetOf(historical_names.Args, std.fmt.comptimePrint("n{d}", .{index})) == @offsetOf(historical_names.Args, "n0") + index * @sizeOf(Name));
             }
         }
-        var args: historical_names.Args = undefined;
+        const mapped = try pages.Mapped(historical_names.Args).map();
+        defer mapped.unmap();
+        const args = mapped.value;
         args.operation_id = operation_id;
+        // Zeroed pages: every name starts empty.
         const names: *[batch_items]Name = @ptrCast(&args.n0);
-        for (names) |*name| name.len = 0;
         var reader = try OutputMetadataReader.init(io, output.metadata, output.item_count);
         reader.offset = batch.start;
         var index: usize = 0;
@@ -1182,7 +1170,7 @@ pub const Batch = struct {
             }
         }
         batch.history_visitor = .{ .batch = batch };
-        a.readEachFrom(historical_names, &args, batch_items, &batch.history_visitor);
+        a.readEachFrom(historical_names, args, batch_items, &batch.history_visitor);
     }
 
     fn reset(batch: *Batch, kind: @FieldType(Batch, "kind"), start: u64) void {
@@ -1213,6 +1201,16 @@ pub const Batch = struct {
             if (identity.length == value.length and identity.row.private == value.private and std.mem.eql(u8, digest, &value.digest)) return identity;
         }
         return null;
+    }
+
+    /// When the batch's first item outgrows it, keeps only what that item
+    /// collected through `boundary`, after its last part that fit, and
+    /// cuts the item there (`collectItems`).
+    fn cutFirst(batch: *Batch, boundary: ?PartBoundary, cut: *?u64) void {
+        if (batch.digest_count != 0) return;
+        const at = boundary orelse return;
+        batch.identity_count = at.identities;
+        cut.* = at.offset;
     }
 
     /// Adds an identity unless the batch has it; false when it is full.
@@ -1320,18 +1318,26 @@ fn recordImport(record: *const OutputMetadataRecord) ?content_domain.Import {
 }
 
 /// Collects the next items from `start`: whole items, at most
-/// `batch_items`, while their identities fit, an empty answer's included. A first item whose identities do not all fit
-/// is taken alone; the rest are looked up when written
-/// (`Settlement.content`). Never fails: a metadata read failure stops the
+/// `batch_items`, while their identities fit, an empty answer's included.
+/// A first item whose identities do not all fit is taken alone and cut
+/// after its last part whose identities fit (`cut`): the write walk pauses
+/// there, and the next batch, `resuming` the item, collects from the cut
+/// to the item's own record, cut again where its identities do not fit. An
+/// item with no part to cut at is taken as it fits, and its write walk
+/// fails where main's did. Never fails: a metadata read failure stops the
 /// batch there, for the write walk to return. Keep scan scratch off the
 /// orchestration frame that later queues SQL.
-noinline fn collectItems(batch: *Batch, output: *const ValidatedOutput, io: std.Io, start: u64) void {
+noinline fn collectItems(batch: *Batch, output: *const ValidatedOutput, io: std.Io, start: u64, resuming: bool, cut: *?u64) void {
     batch.reset(.items, start);
+    cut.* = null;
     var reader = OutputMetadataReader.init(io, output.metadata, output.item_count) catch |err| return batch.stop(err, start);
     reader.offset = start;
     var unit_start = start;
     var unit_identities = batch.identity_count;
     var unfit = false;
+    // Where the first item can be cut: after its last part so far, with
+    // the identities collected through it.
+    var boundary: ?PartBoundary = null;
     while (true) {
         const record_start = reader.offset;
         const record = (reader.next() catch |err| return batch.stop(err, record_start)) orelse {
@@ -1342,20 +1348,26 @@ noinline fn collectItems(batch: *Batch, output: *const ValidatedOutput, io: std.
         // The usage record imports nothing but still closes the last item.
         if (record.tag == .item or record.tag == .usage) {
             if (record.tag == .item and !unfit and output.answer_length == 0 and output.answer_item_ordinal == record.ordinal and
-                !batch.add(content_domain.empty_content)) unfit = true;
+                !batch.add(content_domain.empty_content))
+            {
+                unfit = true;
+                batch.cutFirst(boundary, cut);
+            }
             if (unfit and batch.digest_count != 0) {
                 batch.identity_count = unit_identities;
                 batch.end = unit_start;
                 return;
             }
-            if (record.tag == .item) {
+            // A resumed item's id was read with its first batch.
+            if (record.tag == .item and !resuming) {
                 batch.ids.digests[batch.digest_count] = record.id_digest;
                 batch.digest_count += 1;
             }
             unit_start = reader.offset;
             unit_identities = batch.identity_count;
-            // A unit taken unfit is a first item too big for a batch.
-            if (unfit or batch.digest_count == batch_items) {
+            // A unit taken unfit is a first item too big for a batch, and
+            // a resumed one ends at its own record.
+            if (unfit or resuming or batch.digest_count == batch_items) {
                 batch.end = reader.offset;
                 return;
             }
@@ -1363,9 +1375,19 @@ noinline fn collectItems(batch: *Batch, output: *const ValidatedOutput, io: std.
         }
         if (record.tag == .name or record.tag == .call_id or record.tag == .arguments) continue;
         const value = recordImport(&record) orelse continue;
-        if (!unfit and !batch.add(value)) unfit = true;
+        if (unfit) continue;
+        if (!batch.add(value)) {
+            unfit = true;
+            batch.cutFirst(boundary, cut);
+            continue;
+        }
+        if (record.tag == .extras and record.scope == .part) boundary = .{ .offset = reader.offset, .identities = batch.identity_count };
     }
 }
+
+/// The record after a part's bag, and the identities a batch collected
+/// through it.
+const PartBoundary = struct { offset: u64, identities: u16 };
 
 /// Collects the next calls from `start`, as `collectItems` does items:
 /// each call's name, call_id and arguments, and, when the tool set rejects
@@ -1453,499 +1475,632 @@ fn validateCandidate(io: std.Io, output: *const ValidatedOutput, purpose: ModelO
     } else if (compaction_count != 0) return error.InvalidProviderEnvelope;
 }
 
-/// Round 1 opens the transaction and reads the Attempt, the settling
-/// facts, and the first batch's content and duplicate item ids. Then Zig
-/// checks the binding and the candidate output against the Operation's
-/// purpose, as main does before any import. Each later round writes one
-/// batch, its new content streamed into its rows in process, and reads
-/// the next batch's (`importBatches`). The last round resolves the
-/// Operation, closes its Turn or records its continuation, and commits.
+/// Settles a model's validated output as its Attempt's success.
+/// The `.facts` round opens the transaction and reads the Attempt, the
+/// settling facts, and the first batch's content and duplicate item ids.
+/// Then Zig checks the binding and the candidate output against the
+/// Operation's purpose, as main does before any import. Each `.batch`
+/// round writes one batch, its new content streamed into its rows in
+/// process, and reads the next batch's (`Settlement.advance`). The commit
+/// resolves the Operation and closes its Turn or records its continuation.
 /// An item batch closes at 64 items or before the item whose identities
-/// would pass 256, a call batch at 64 calls, which always fit, so the
+/// would pass 257, a call batch at 64 calls, which always fit, so the
 /// rounds are the item batches plus the call batches plus one: a reply of
 /// at most 64 items whose identities fit settles in 2 rounds, and in 3
-/// when it proposes calls. A call batch whose historical membership read
-/// reveals rejections adds one content lookup round for their result texts,
-/// independent of the number of calls. An identity not collected (a first
-/// item with more than 256) adds a lookup round, and a second when it
-/// inserts.
-pub fn settleModelSuccess(a: anytype, io: std.Io, binding: AttemptBinding, output: *const ValidatedOutput, faults: Faults) !void {
-    const batch = a.store.settlementBatch();
-    var facts: attempt_facts.Result = undefined;
-    var success: success_facts.Row = .{ .tool_names = &batch.offered_names };
-    var success_found: store_access.Found = .missing;
-    var pending: pending_messages.Result = undefined;
-    a.read(attempt_facts, .{ .operation_id = binding.operation_id, .closes = true }, &facts);
-    a.readInto(success_facts, .{ .operation_id = binding.operation_id }, &success, &success_found);
-    a.read(pending_messages, .{ .operation_id = binding.operation_id }, &pending);
-    // BEGIN IMMEDIATE ran when the first read was queued.
-    if (a.failure == null) if (faults.settlement_trace) |trace| {
-        std.debug.assert(a.store.engine.inWriteTransaction());
-        trace.mark(.transaction_active);
+/// when it proposes calls. Both possible results of a call whose name the
+/// Operation did not offer are collected before the history read, so
+/// deciding withdrawn versus unknown adds no round. A first item whose
+/// identities pass 257 is cut after its last part that fits, and each cut
+/// adds one `.batch` round, which writes the parts before it and reads the
+/// identities after it (`collectItems`).
+pub const SettleSuccess = struct {
+    /// The names main gave a failed read's step: the Attempt and the facts
+    /// read beside it `OperationReadFailed` (main's operation read joined
+    /// the revision), the pending Messages `SessionStopReadFailed`, and the
+    /// output's content and duplicate reads `OutputReadFailed`. A write's
+    /// failed step stays `StatementFailed`.
+    const named = .{
+        .{ attempt_facts, error.OperationReadFailed },
+        .{ success_facts, error.OperationReadFailed },
+        .{ pending_messages, error.SessionStopReadFailed },
+        .{ content_batch, error.OutputReadFailed },
+        .{ content_batch_wide, error.OutputReadFailed },
+        .{ duplicate_items, error.OutputReadFailed },
+        .{ duplicate_items_wide, error.OutputReadFailed },
+        .{ duplicate_calls, error.OutputReadFailed },
+        .{ duplicate_calls_wide, error.OutputReadFailed },
+        .{ historical_names, error.OutputReadFailed },
     };
-    collectItems(batch, output, io, 0);
-    try batch.queueReads(a, binding.operation_id, output, io);
-    try runSettlement(a);
-    const row = try currentAttempt(&facts, binding);
-    // The Operation was found, so only its revision row can be missing.
-    if (!success_found.get()) return error.CorruptStore;
-    const settling = success;
-    if (settling.frozen_revision == null) return error.StaleAttemptBinding;
-    if (settling.invalid_owner) return error.CorruptStore;
-    const purpose: ModelOperationKind = if (row.compaction) .compaction else .assistant_response;
-    // Main checked the candidate before any output read.
-    try validateCandidate(io, output, purpose);
-    try batch.checkReads();
-
-    const positions = try a.positions(row.session);
-    var settlement: Settlement(@TypeOf(a)) = .{
-        .a = a,
-        .io = io,
-        .binding = binding,
-        .output = output,
-        .faults = faults,
-        .session = row.session,
-        .positions = positions,
-        .first_item_position = try positions.take(output.item_count),
-        .purpose = purpose,
-        .tools = .{ .names = batch.offered_names.slice(), .historical_digests = &batch.identity_digests, .withdrawn = &batch.withdrawn },
-        .settling = settling,
-        .call_items = try OutputMetadataReader.init(io, output.metadata, output.item_count),
-    };
-    settlement.call_item = try settlement.call_items.nextItem();
-    try settlement.importBatches(batch);
-
-    const output_fact = turn_policy.outputFact(purpose, output.call_count);
-    const usage = settlement.usage;
-    resolve_success.queue(a, .{
-        .operation_id = binding.operation_id,
-        .resolution = @tagName(turn_policy.Resolution.of(output_fact)),
-        .content_id = settlement.answer_id,
-        .response_id = optionalText(output.response_id.slice()),
-        .model_evidence = .{ .bytes = output.model_evidence.slice() },
-        .request_id = optionalText(output.request_id.slice()),
-        .item_count = output.item_count,
-        // The provider parser admits only counts that fit an SQLite integer.
-        .uncached = if (usage) |counts| counts.uncached else null,
-        .cache_read = if (usage) |counts| counts.cache_read else null,
-        .cache_write = if (usage) |counts| counts.cache_write else null,
-        .output = if (usage) |counts| counts.output else null,
-        .attempt_ordinal = binding.attempt_ordinal,
-        .session = row.session,
+    pub const rounds = transition.rounds(.{
+        .facts = .{ .always, error.StatementFailed, named },
+        .batch = .{ .paged, error.StatementFailed, named },
     });
-    if (turn_policy.completesTurn(output_fact, pending.pending)) {
-        if (!row.turn_open) return error.StaleAttemptBinding;
-        const answer = settlement.answer_id orelse return error.CorruptOutputMetadata;
-        try turn_domain.queueCloseOr(a, positions, binding.turn_id, .{ .completed = @intCast(answer) }, error.StaleAttemptBinding);
-    } else turn_domain.queueContinuation(a, binding.turn_id, row.session);
-    if (faults.output_commit) return error.InjectedOutputCommitFailure;
-    try a.commit();
-}
+    pub const round_budget = 2;
+    pub const commit: transition.Commit = .transaction;
+    /// A batch's rows outnumber a write's twelve-statement pass.
+    pub const pass: transition.Pass = .wide;
+    /// The facts read opens the transaction, as main's first statement did.
+    pub const begin: ?rounds.At = .facts;
+    pub const Input = struct {
+        io: std.Io,
+        binding: AttemptBinding,
+        output: *const ValidatedOutput,
+        faults: Faults,
+        /// The Store's settlement scratch (`Store.settlementBatch`).
+        batch: *Batch,
+    };
+    pub const Result = void;
+    pub const Ordinary = store_core.Ordinary.model_success;
+    pub const Guards = store_core.Ordinary.model_success;
+    pub const Declined = error{};
+
+    input: Input,
+    facts: attempt_facts.Result = undefined,
+    success: success_facts.Row = undefined,
+    success_found: store_access.Found = .missing,
+    pending: pending_messages.Result = undefined,
+    oversized: Oversized = .{},
+    settlement: Settlement = undefined,
+
+    pub fn step(t: *SettleSuccess, r: *transition.Round(SettleSuccess), ran: ?rounds.At) !transition.Next(SettleSuccess) {
+        switch (ran orelse return t.queueFacts(r)) {
+            .facts => try t.settleFacts(r),
+            .batch => try t.input.batch.checkReads(),
+        }
+        if (try t.settlement.advance(r, t.input.batch, &t.oversized)) return .{ .round = .batch };
+        return t.finish(r);
+    }
+
+    pub fn committed(_: *const SettleSuccess) Result {}
+
+    noinline fn queueFacts(t: *SettleSuccess, r: *transition.Round(SettleSuccess)) !transition.Next(SettleSuccess) {
+        const batch = t.input.batch;
+        const operation_id = t.input.binding.operation_id;
+        t.success = .{ .tool_names = &batch.offered_names };
+        r.read(attempt_facts, .{ .operation_id = operation_id, .closes = true }, &t.facts);
+        r.readInto(success_facts, .{ .operation_id = operation_id }, &t.success, &t.success_found);
+        r.read(pending_messages, .{ .operation_id = operation_id }, &t.pending);
+        // BEGIN IMMEDIATE ran when the first read was queued.
+        if (t.input.faults.settlement_trace) |trace| if (r.transactionOpen()) trace.mark(.transaction_active);
+        collectItems(batch, t.input.output, t.input.io, 0, false, &t.oversized.cut);
+        try batch.queueReads(r, operation_id, t.input.output, t.input.io);
+        return .{ .round = .facts };
+    }
+
+    /// After the facts round: the checks main made before any import, then
+    /// the settlement's state for its batches.
+    noinline fn settleFacts(t: *SettleSuccess, r: *transition.Round(SettleSuccess)) !void {
+        const io = t.input.io;
+        const output = t.input.output;
+        const binding = t.input.binding;
+        const row = try currentAttempt(&t.facts, binding);
+        // The Operation was found, so only its revision row can be missing.
+        if (!t.success_found.get()) return error.CorruptStore;
+        if (t.success.frozen_revision == null) return error.StaleAttemptBinding;
+        if (t.success.invalid_owner) return error.CorruptStore;
+        const purpose: ModelOperationKind = if (row.compaction) .compaction else .assistant_response;
+        // Main checked the candidate before any output read.
+        try validateCandidate(io, output, purpose);
+        try t.input.batch.checkReads();
+
+        const batch = t.input.batch;
+        const positions = try r.positions(row.session);
+        const first_item_position = try positions.take(output.item_count);
+        const call_items = try OutputMetadataReader.init(io, output.metadata, output.item_count);
+        t.settlement = .{
+            .io = io,
+            .binding = binding,
+            .output = output,
+            .faults = t.input.faults,
+            .session = row.session,
+            .positions = positions,
+            .first_item_position = first_item_position,
+            .purpose = purpose,
+            .tools = .{ .names = batch.offered_names.slice(), .historical_digests = &batch.identity_digests, .withdrawn = &batch.withdrawn },
+            .settling = t.success,
+            .call_items = call_items,
+        };
+        t.settlement.call_item = try t.settlement.call_items.nextItem();
+    }
+
+    /// Once every batch is written: resolves the Operation, closes its Turn
+    /// or records its continuation, and commits.
+    noinline fn finish(t: *SettleSuccess, r: *transition.Round(SettleSuccess)) !transition.Next(SettleSuccess) {
+        const s = &t.settlement;
+        const row = &t.facts.?;
+        const binding = s.binding;
+        const output = s.output;
+        const output_fact = turn_policy.outputFact(s.purpose, output.call_count);
+        const usage = s.usage;
+        resolve_success.queue(r, .{
+            .operation_id = binding.operation_id,
+            .resolution = @tagName(turn_policy.Resolution.of(output_fact)),
+            .content_id = s.answer_id,
+            .response_id = optionalText(output.response_id.slice()),
+            .model_evidence = .{ .bytes = output.model_evidence.slice() },
+            .request_id = optionalText(output.request_id.slice()),
+            .item_count = output.item_count,
+            // The provider parser admits only counts that fit an SQLite integer.
+            .uncached = if (usage) |counts| counts.uncached else null,
+            .cache_read = if (usage) |counts| counts.cache_read else null,
+            .cache_write = if (usage) |counts| counts.cache_write else null,
+            .output = if (usage) |counts| counts.output else null,
+            .attempt_ordinal = binding.attempt_ordinal,
+            .session = row.session,
+        });
+        if (turn_policy.completesTurn(output_fact, t.pending.pending)) {
+            if (!row.turn_open) return error.StaleAttemptBinding;
+            const answer = s.answer_id orelse return error.CorruptOutputMetadata;
+            try turn_domain.queueCloseOr(r, s.positions, binding.turn_id, .{ .completed = @intCast(answer) }, error.StaleAttemptBinding);
+        } else turn_domain.queueContinuation(r, binding.turn_id, row.session);
+        if (s.faults.output_commit) return error.InjectedOutputCommitFailure;
+        return .commit;
+    }
+};
+
+/// An item whose identities pass a batch's, written a batch at a time:
+/// where the current batch cuts it (`collectItems`), and the item paused
+/// there, if any.
+const Oversized = struct {
+    cut: ?u64 = null,
+    paused: ?Paused = null,
+
+    const Paused = struct {
+        /// The metadata offset of the item's own record.
+        item_at: u64,
+        /// Where its records start.
+        region_start: u64,
+        progress: ItemProgress,
+    };
+};
+
+/// How far an item's import walked: the record it resumes at, and what
+/// the parts before it set. Only a part's bag ends a cut, so only an
+/// item with parts (a message or a reasoning item) pauses, before its
+/// item bag; a hosted call's action and pattern records follow its item
+/// bag, and its import never pauses.
+const ItemProgress = struct {
+    offset: u64,
+    part_count: u64 = 0,
+    text_length: u64 = 0,
+};
 
 /// A content row a settlement value imports: found, or inserted by this
 /// settlement, when `fresh` says its bytes are still to stream.
 const ContentRow = struct { id: u64, fresh: bool };
 
-/// One success settlement's state across its batches.
-fn Settlement(comptime A: type) type {
-    return struct {
-        const Self = @This();
+/// One success settlement's state across its batches. Its methods queue on
+/// the round handle `a` they are given.
+const Settlement = struct {
+    io: std.Io,
+    binding: AttemptBinding,
+    output: *const ValidatedOutput,
+    faults: Faults,
+    session: rsql.SessionHead,
+    positions: *store_access.Positions,
+    first_item_position: u64,
+    purpose: ModelOperationKind,
+    tools: tool_record.Offered,
+    settling: success_facts.Row,
+    imported_items: u64 = 0,
+    imported_calls: u64 = 0,
+    entries: u64 = 0,
+    answer_id: ?u64 = null,
+    usage_seen: bool = false,
+    usage: ?output_format.Usage = null,
+    /// The function_call items, walked beside the calls' records.
+    call_items: OutputMetadataReader,
+    call_item: ?OutputMetadataRecord = null,
 
-        a: A,
-        io: std.Io,
-        binding: AttemptBinding,
-        output: *const ValidatedOutput,
-        faults: Faults,
-        session: rsql.SessionHead,
-        positions: *store_access.Positions,
-        first_item_position: u64,
-        purpose: ModelOperationKind,
-        tools: tool_record.Offered,
-        settling: success_facts.Row,
-        imported_items: u64 = 0,
-        imported_calls: u64 = 0,
-        entries: u64 = 0,
-        answer_id: ?u64 = null,
-        usage_seen: bool = false,
-        usage: ?output_format.Usage = null,
-        /// The function_call items, walked beside the calls' records.
-        call_items: OutputMetadataReader,
-        call_item: ?OutputMetadataRecord = null,
-
-        /// Writes each batch and reads the next in one round, the items
-        /// first, then the calls, as main's second pass imports them. The
-        /// written batch's rows bind their values by value, so the next
-        /// batch is collected into the same table before they step.
-        fn importBatches(s: *Self, batch: *Batch) !void {
-            while (true) {
-                switch (batch.kind) {
-                    .items => {
-                        try s.writeItems(batch);
-                        if (batch.last) {
-                            try s.itemsDone();
-                            collectCalls(batch, s.output, s.io, 0, &s.tools);
-                        } else collectItems(batch, s.output, s.io, batch.end);
-                    },
-                    .calls => {
-                        try s.writeCalls(batch);
-                        if (batch.last) break;
-                        collectCalls(batch, s.output, s.io, batch.end, &s.tools);
-                    },
-                }
-                // A batch with nothing to read has nothing to write.
-                if (batch.identity_count != 0 or batch.digest_count != 0) {
-                    try batch.queueReads(s.a, s.binding.operation_id, s.output, s.io);
-                    try runSettlement(s.a);
-                    try batch.checkReads();
-                }
+    /// Writes the batch the last round read and collects the next one,
+    /// the items first, then the calls, as main's second pass imports
+    /// them, until a batch has reads to queue: true once it queued them
+    /// for a `.batch` round, false once every batch is written. The
+    /// written batch's rows bind their values by value, so the next batch
+    /// is collected into the same table before they step.
+    fn advance(s: *Settlement, a: anytype, batch: *Batch, oversized: *Oversized) !bool {
+        while (true) {
+            switch (batch.kind) {
+                .items => {
+                    try s.writeItems(a, batch, oversized);
+                    if (oversized.paused) |paused| {
+                        collectItems(batch, s.output, s.io, paused.progress.offset, true, &oversized.cut);
+                    } else if (batch.last) {
+                        try s.itemsDone();
+                        oversized.cut = null;
+                        collectCalls(batch, s.output, s.io, 0, &s.tools);
+                    } else collectItems(batch, s.output, s.io, batch.end, false, &oversized.cut);
+                },
+                .calls => {
+                    try s.writeCalls(a, batch);
+                    if (batch.last) break;
+                    collectCalls(batch, s.output, s.io, batch.end, &s.tools);
+                },
             }
-            if (s.imported_calls != s.output.call_count) return error.CorruptOutputMetadata;
-        }
-
-        fn itemsDone(s: *Self) !void {
-            if (s.imported_items != s.output.item_count) return error.CorruptOutputMetadata;
-            if (s.purpose == .assistant_response and s.output.answer_length != 0 and s.answer_id == null) return error.CorruptOutputMetadata;
-        }
-
-        /// The row of an identity: the batch's, inserting it at its first
-        /// use when the lookup found none. An identity the batch did not
-        /// collect (a first item too big for one) costs its own lookup
-        /// round; its insert joins the next.
-        fn content(s: *Self, batch: *Batch, imported: content_domain.Import) !ContentRow {
-            if (batch.find(&imported)) |identity| {
-                if (identity.row.content_id != 0) return .{ .id = identity.row.content_id, .fresh = false };
-                const id = try content_domain.insertRow(s.a, &imported);
-                identity.row.content_id = @intCast(id);
-                return .{ .id = id, .fresh = true };
+            // A batch with nothing to read has nothing to write.
+            if (batch.identity_count != 0 or batch.digest_count != 0) {
+                try batch.queueReads(a, s.binding.operation_id, s.output, s.io);
+                return true;
             }
-            var value = imported;
-            content_domain.lookup(s.a, &value);
-            try runSettlement(s.a);
-            if (value.found) |found| return .{ .id = found.content_id.get(), .fresh = false };
-            const id = try content_domain.insertRow(s.a, &value);
-            return .{ .id = id, .fresh = true };
         }
+        if (s.imported_calls != s.output.call_count) return error.CorruptOutputMetadata;
+        return false;
+    }
 
-        /// A sink for a fresh row with bytes, else null.
-        fn sinkFor(s: *Self, row: ContentRow, length: u64) !?store_access.ContentSink {
-            if (!row.fresh or length == 0) return null;
-            return try s.a.contentSink(row.id, length);
-        }
+    fn itemsDone(s: *Settlement) !void {
+        if (s.imported_items != s.output.item_count) return error.CorruptOutputMetadata;
+        if (s.purpose == .assistant_response and s.output.answer_length != 0 and s.answer_id == null) return error.CorruptOutputMetadata;
+    }
 
-        /// Walks the batch's records in main's order: each item's ordinal,
-        /// its duplicate check, its parts and bags, its row, and a visible
-        /// message's entry; the usage record where it lies. Keep import scratch
-        /// separate from the next batch's read-argument construction.
-        noinline fn writeItems(s: *Self, batch: *Batch) !void {
-            var reader = try OutputMetadataReader.init(s.io, s.output.metadata, s.output.item_count);
-            reader.offset = batch.start;
-            var region_start = batch.start;
-            var index: u8 = 0;
-            while (reader.offset < batch.end) {
-                const record = try reader.next() orelse break;
-                if (record.tag == .usage) {
-                    // Only the four counts are kept; the provider's report is not.
-                    if (s.usage_seen) return error.CorruptOutputMetadata;
-                    s.usage_seen = true;
-                    s.usage = record.usage;
-                    continue;
-                }
-                if (record.tag != .item) continue;
-                defer region_start = reader.offset;
-                if (record.ordinal != s.imported_items) return error.CorruptOutputMetadata;
-                if (index == batch.digest_count) return error.CorruptOutputMetadata;
-                if (batch.duplicate(index)) return error.InvalidProviderEnvelope;
-                var description: tool_record.Description = .{};
-                const neutral = try s.importItem(batch, record, region_start, reader.offset, &description);
-                s.a.write(insert_item, .{
-                    .operation_id = s.binding.operation_id,
-                    .item_ordinal = record.ordinal,
-                    .session = s.session,
-                    .position = s.first_item_position + s.imported_items,
-                    .kind = @backingInt(record.kind),
-                    .attempt_ordinal = s.binding.attempt_ordinal,
-                    .id_digest = batch.ids.digests[index],
-                    .omits_reasoning_text = record.omit_reasoning_text,
-                    .phase = @backingInt(record.phase),
-                    .extras_content_id = neutral.bag,
-                    .part_count = neutral.part_count,
-                    .message_content_id = neutral.text,
-                    .description = if (neutral.described and description.len != 0) description else null,
-                    .call_failed = neutral.call_failed,
-                });
-                index += 1;
-                s.imported_items += 1;
-                // Items own stream positions. Each visible message is a
-                // Conversation entry at its own item's position, so text
-                // remains before/among calls, not after the complete call
-                // group. Only the selected message is the result.
-                if (s.purpose != .assistant_response or record.kind != .message) continue;
-                const text = neutral.text.?;
-                if (s.output.answer_item_ordinal == record.ordinal) {
-                    // The selected result can be empty while the exact message
-                    // text (including whitespace) remains in Conversation.
-                    const empty = &content_domain.empty_content;
-                    const answer: ContentRow = if (s.output.answer_length == 0) try s.content(batch, empty.*) else .{ .id = text, .fresh = false };
-                    const length, const digest = if (s.output.answer_length == 0) .{ empty.length, &empty.digest } else .{ neutral.text_length, &neutral.text_digest };
-                    if (length != s.output.answer_length or !std.mem.eql(u8, digest, &s.output.answer_digest)) return error.OutputSourceChanged;
-                    s.answer_id = answer.id;
-                }
-                s.entries += 1;
-                s.a.write(insert_entry, .{
-                    .session = s.session,
-                    .ordinal = s.settling.entry_base + s.entries,
-                    .position = s.first_item_position + record.ordinal,
-                    .turn_id = s.binding.turn_id,
-                    .operation_id = s.binding.operation_id,
-                    .item_ordinal = record.ordinal,
-                    .content_id = text,
-                });
+    /// The row of an identity the batch collected, inserting it at its
+    /// first use when the lookup found none. Every identity a batch's
+    /// records import was collected from the same records, so one missing
+    /// means the output changed under the settlement.
+    fn content(a: anytype, batch: *Batch, imported: content_domain.Import) !ContentRow {
+        const identity = batch.find(&imported) orelse return error.OutputSourceChanged;
+        if (identity.row.content_id != 0) return .{ .id = identity.row.content_id, .fresh = false };
+        const id = try content_domain.insertRow(a, &imported);
+        identity.row.content_id = @intCast(id);
+        return .{ .id = id, .fresh = true };
+    }
+
+    /// A sink for a fresh row with bytes, else null.
+    fn sinkFor(a: anytype, row: ContentRow, length: u64) !?store_access.ContentSink {
+        if (!row.fresh or length == 0) return null;
+        return try a.contentSink(row.id, length);
+    }
+
+    /// Walks the batch's records in main's order: each item's ordinal,
+    /// its duplicate check, its parts and bags, its row, and a visible
+    /// message's entry; the usage record where it lies. An item cut in
+    /// this batch pauses at its cut (`Oversized`), and the next batch
+    /// resumes it. Keep import scratch separate from the next batch's
+    /// read-argument construction.
+    noinline fn writeItems(s: *Settlement, a: anytype, batch: *Batch, oversized: *Oversized) !void {
+        if (oversized.paused != null) return s.resumeItem(a, batch, oversized);
+        var reader = try OutputMetadataReader.init(s.io, s.output.metadata, s.output.item_count);
+        reader.offset = batch.start;
+        var region_start = batch.start;
+        var index: u8 = 0;
+        while (reader.offset < batch.end) {
+            const record_start = reader.offset;
+            const record = try reader.next() orelse break;
+            if (record.tag == .usage) {
+                // Only the four counts are kept; the provider's report is not.
+                if (s.usage_seen) return error.CorruptOutputMetadata;
+                s.usage_seen = true;
+                s.usage = record.usage;
+                continue;
             }
-            if (batch.stopped) |err| return err;
-        }
-
-        /// Saves one accepted item in Rui's own form from its metadata
-        /// records in `[metadata_start, metadata_end)`: its parts, its
-        /// provider bags and, for a message, its text (every text part's
-        /// decoded text back to back, one row its parts are lengths of).
-        /// A hosted call's description goes to `description`.
-        fn importItem(s: *Self, batch: *Batch, item: OutputMetadataRecord, metadata_start: u64, metadata_end: u64, description: *tool_record.Description) !ImportedNeutral {
-            var metadata = try OutputMetadataReader.init(s.io, s.output.metadata, s.output.item_count);
-            metadata.offset = metadata_start;
-            metadata.length = metadata_end;
-            var item_bag: ?u64 = null;
-            var text: ?u64 = null;
-            var text_record: ?OutputMetadataRecord = null;
-            var text_length: u64 = 0;
-            var part_count: u64 = 0;
-            // The open part: its record's offset and its own text row. Every
-            // part closes with its bag, so one INSERT writes the whole row.
-            var part: ?struct { record: OutputMetadataRecord, start: u64, text: ?u64 } = null;
-            // A hosted call's action record, and its pattern record if any.
-            var action: ?OutputMetadataRecord = null;
-            var pattern: ?OutputMetadataRecord = null;
-            while (try metadata.next()) |record| {
-                if (record.tag == .item) break;
-                if (record.ordinal != item.ordinal or record.kind != item.kind) return error.CorruptOutputMetadata;
-                switch (record.tag) {
-                    .part => {
-                        if (part != null or item_bag != null) return error.CorruptOutputMetadata;
-                        const own_text = switch (record.part_kind) {
-                            .opaque_block => null,
-                            .output_text, .refusal => own: {
-                                if (item.kind != .message) return error.CorruptOutputMetadata;
-                                text_length = try std.math.add(u64, text_length, record.decoded_length);
-                                break :own null;
-                            },
-                            .summary_text, .reasoning_text => if (item.kind != .reasoning)
-                                return error.CorruptOutputMetadata
-                            else
-                                try s.importDecoded(batch, record),
-                        };
-                        part = .{ .record = record, .start = metadata.offset, .text = own_text };
-                    },
-                    .extras => switch (record.scope) {
-                        .part => {
-                            const pending = part orelse return error.CorruptOutputMetadata;
-                            const bag = try s.importBag(batch, record, pending.start, metadata.offset);
-                            s.a.write(insert_part, .{
-                                .operation_id = s.binding.operation_id,
-                                .item_ordinal = item.ordinal,
-                                .part_ordinal = part_count,
-                                .part_array = @backingInt(pending.record.part_array),
-                                .part_kind = @backingInt(pending.record.part_kind),
-                                .text_length = switch (pending.record.part_kind) {
-                                    .output_text, .refusal => pending.record.decoded_length,
-                                    .opaque_block, .summary_text, .reasoning_text => null,
-                                },
-                                .text_content_id = pending.text,
-                                .extras_content_id = bag,
-                            });
-                            part_count += 1;
-                            part = null;
-                        },
-                        .item => {
-                            if (part != null or item_bag != null) return error.CorruptOutputMetadata;
-                            item_bag = try s.importBag(batch, record, metadata_start, metadata.offset);
-                        },
-                    },
-                    .text => {
-                        if (item_bag == null or text != null or record.decoded_length != text_length) return error.CorruptOutputMetadata;
-                        text = try s.importMessageText(batch, record, metadata_start, metadata.offset);
-                        text_record = record;
-                    },
-                    .action => {
-                        if (item.kind != .web_search_call or action != null) return error.CorruptOutputMetadata;
-                        action = record;
-                    },
-                    .pattern => {
-                        if (action == null or pattern != null) return error.CorruptOutputMetadata;
-                        pattern = record;
-                    },
-                    .member, .name, .call_id, .arguments => {},
-                    .usage => return error.CorruptOutputMetadata,
-                    .item => unreachable,
-                }
-            }
-            if (part != null or (text != null) != (item.kind == .message) or
-                (action != null) != (item.kind == .web_search_call)) return error.CorruptOutputMetadata;
-            if (action) |call| description.* = try describeWebSearch(s.io, s.output.source, call, pattern);
-            return .{
-                .bag = item_bag orelse return error.CorruptOutputMetadata,
-                .part_count = part_count,
-                .text = text,
-                .text_length = if (text_record) |record| record.decoded_length else 0,
-                .text_digest = if (text_record) |record| record.content_digest else @splat(0),
-                .described = action != null,
-                .call_failed = if (action) |call| call.call_failed else false,
-            };
-        }
-
-        /// Decodes a message's text parts among the records in
-        /// `[start, end)` into one public row, checked against the
-        /// message's `text` record. A row with the same bytes is shared.
-        fn importMessageText(s: *Self, batch: *Batch, text: OutputMetadataRecord, start: u64, end: u64) !u64 {
-            const row = try s.content(batch, recordImport(&text).?);
-            const sink = try s.sinkFor(row, text.decoded_length) orelse return row.id;
-            defer sink.close();
-            try streamMessageText(s.io, s.output, text, start, end, sink, s.faults);
-            return row.id;
-        }
-
-        /// Copies one bag, the `member` records of `trailer`'s scope in
-        /// `[start, end)` joined by commas, into a private row, verifying
-        /// a found one.
-        fn importBag(s: *Self, batch: *Batch, trailer: OutputMetadataRecord, start: u64, end: u64) !u64 {
-            const row = try s.content(batch, recordImport(&trailer).?);
-            const sink = try s.sinkFor(row, trailer.decoded_length);
-            defer if (sink) |value| value.close();
-            try streamBag(s.io, s.output, trailer, start, end, sink, s.faults);
-            return row.id;
-        }
-
-        /// Decodes one saved string (a part's text or a call field) into
-        /// its own row. A row with the same bytes is shared.
-        fn importDecoded(s: *Self, batch: *Batch, part: OutputMetadataRecord) !u64 {
-            const row = try s.content(batch, recordImport(&part).?);
-            const sink = try s.sinkFor(row, part.decoded_length) orelse return row.id;
-            defer sink.close();
-            try streamDecoded(s.io, s.output, part, sink, s.faults);
-            return row.id;
-        }
-
-        /// Walks the batch's records for calls in main's order: each
-        /// call's fields, its duplicate check, its classification, its
-        /// row and, when runnable, its Action. Keep call scratch separate
-        /// from the next batch's read-argument construction.
-        noinline fn writeCalls(s: *Self, batch: *Batch) !void {
-            var reader = try OutputMetadataReader.init(s.io, s.output.metadata, s.output.item_count);
-            reader.offset = batch.start;
-            var name_record: ?OutputMetadataRecord = null;
-            var call_id_record: ?OutputMetadataRecord = null;
-            var index: u8 = 0;
-            while (reader.offset < batch.end) {
-                const record = try reader.next() orelse break;
-                switch (record.tag) {
-                    .name => name_record = record,
-                    .call_id => call_id_record = record,
-                    .arguments => {
-                        const name = name_record orelse return error.CorruptOutputMetadata;
-                        const call_id = call_id_record orelse return error.CorruptOutputMetadata;
-                        if (name.ordinal != record.ordinal or call_id.ordinal != record.ordinal or record.kind != .function_call)
-                            return error.CorruptOutputMetadata;
-                        while (s.call_item != null and s.call_item.?.ordinal < record.ordinal) s.call_item = try s.call_items.nextItem();
-                        const owner = s.call_item orelse return error.CorruptOutputMetadata;
-                        if (owner.ordinal != record.ordinal or owner.kind != .function_call) return error.CorruptOutputMetadata;
-                        if (index == batch.digest_count) return error.CorruptOutputMetadata;
-                        try s.importCall(batch, index, .{ name, call_id, record });
-                        name_record = null;
-                        call_id_record = null;
-                        index += 1;
-                        s.imported_calls += 1;
-                    },
-                    else => {},
-                }
-            }
-            if (batch.stopped) |err| return err;
-            // A batch ends before a call's first field, so fields left open
-            // at the last batch's end belong to no call.
-            if (batch.last and (name_record != null or call_id_record != null)) return error.CorruptOutputMetadata;
-        }
-
-        /// Imports one accepted call: its fields, its classification and,
-        /// when it is runnable, its Action.
-        fn importCall(s: *Self, batch: *Batch, index: u8, fields: [3]OutputMetadataRecord) !void {
-            const name, const call_id, const record = fields;
-            const name_content_id = try s.importDecoded(batch, name);
-            const call_id_content_id = try s.importDecoded(batch, call_id);
-            const arguments_content_id = try s.importDecoded(batch, record);
+            if (record.tag != .item) continue;
+            defer region_start = reader.offset;
+            if (record.ordinal != s.imported_items) return error.CorruptOutputMetadata;
+            if (index == batch.digest_count) return error.CorruptOutputMetadata;
             if (batch.duplicate(index)) return error.InvalidProviderEnvelope;
-            const call_facts = try inspectOutputCall(s.io, s.output.source, name, record, &s.tools);
-            const rejection_code = tool_defs.classifyCall(&call_facts);
-            const rejection_content_id: ?u64 = if (rejection_code) |code| id: {
-                var buffer: [192]u8 = undefined;
-                const text = try rejectionText(s.io, s.output, code, &call_facts, name, &buffer);
-                if (s.faults.output_import) return error.InjectedContentImportFailure;
-                const value: content_domain.Import = .ofBytes(text, false);
-                const row = try s.content(batch, value);
-                if (try s.sinkFor(row, value.length)) |sink| {
-                    defer sink.close();
-                    try sink.write(text, 0);
-                }
-                break :id row.id;
-            } else null;
-            try s.recordCall(&fields, .{ name_content_id, call_id_content_id, arguments_content_id }, &call_facts, rejection_code, rejection_content_id);
+            var description: tool_record.Description = .{};
+            var progress: ItemProgress = .{ .offset = region_start };
+            const neutral = try s.importItem(a, batch, record, region_start, reader.offset, &progress, oversized.cut, &description) orelse {
+                // Cut, so the batch's only item.
+                oversized.paused = .{ .item_at = record_start, .region_start = region_start, .progress = progress };
+                return;
+            };
+            try s.recordItem(a, batch, record, batch.ids.digests[index], neutral, &description);
+            index += 1;
         }
+        if (batch.stopped) |err| return err;
+    }
 
-        /// All content sinks have closed before saving the certificate and
-        /// line. Keep their bounded row-binding scratch off those sink paths.
-        noinline fn recordCall(s: *Self, fields: *const [3]OutputMetadataRecord, content_ids: [3]u64, call_facts: *const tool_defs.CallFacts, rejection_code: ?tool_proposal.Rejection, rejection_content_id: ?u64) !void {
-            const record = fields[2];
-            const name_content_id, const call_id_content_id, const arguments_content_id = content_ids;
-            // The call's certificate: (little-endian length, SHA-256) for its
-            // name, call_id and arguments, in ProposalField order.
-            var field_metadata: [120]u8 = undefined;
-            for (fields.*, 0..) |field, at| {
-                std.mem.writeInt(u64, field_metadata[at * 40 ..][0..8], field.decoded_length, .little);
-                @memcpy(field_metadata[at * 40 + 8 ..][0..32], &field.content_digest);
+    /// Imports the rest of the paused item, from where it paused to its
+    /// next cut or its own record, which ends the batch.
+    fn resumeItem(s: *Settlement, a: anytype, batch: *Batch, oversized: *Oversized) !void {
+        if (batch.stopped) |err| return err;
+        const paused = &oversized.paused.?;
+        var reader = try OutputMetadataReader.init(s.io, s.output.metadata, s.output.item_count);
+        reader.offset = paused.item_at;
+        const record = try reader.next() orelse return error.CorruptOutputMetadata;
+        var description: tool_record.Description = .{};
+        const neutral = try s.importItem(a, batch, record, paused.region_start, reader.offset, &paused.progress, oversized.cut, &description) orelse return;
+        oversized.paused = null;
+        try s.recordItem(a, batch, record, record.id_digest, neutral, &description);
+    }
+
+    /// The row of an imported item, and a visible message's Conversation
+    /// entry.
+    fn recordItem(s: *Settlement, a: anytype, batch: *Batch, record: OutputMetadataRecord, id_digest: [32]u8, neutral: ImportedNeutral, description: *const tool_record.Description) !void {
+        a.write(insert_item, .{
+            .operation_id = s.binding.operation_id,
+            .item_ordinal = record.ordinal,
+            .session = s.session,
+            .position = s.first_item_position + s.imported_items,
+            .kind = @backingInt(record.kind),
+            .attempt_ordinal = s.binding.attempt_ordinal,
+            .id_digest = id_digest,
+            .omits_reasoning_text = record.omit_reasoning_text,
+            .phase = @backingInt(record.phase),
+            .extras_content_id = neutral.bag,
+            .part_count = neutral.part_count,
+            .message_content_id = neutral.text,
+            .description = if (neutral.described and description.len != 0) description.* else null,
+            .call_failed = neutral.call_failed,
+        });
+        s.imported_items += 1;
+        // Items own stream positions. Each visible message is a
+        // Conversation entry at its own item's position, so text
+        // remains before/among calls, not after the complete call
+        // group. Only the selected message is the result.
+        if (s.purpose != .assistant_response or record.kind != .message) return;
+        const text = neutral.text.?;
+        if (s.output.answer_item_ordinal == record.ordinal) {
+            // The selected result can be empty while the exact message
+            // text (including whitespace) remains in Conversation.
+            const empty = &content_domain.empty_content;
+            const answer: ContentRow = if (s.output.answer_length == 0) try content(a, batch, empty.*) else .{ .id = text, .fresh = false };
+            const length, const digest = if (s.output.answer_length == 0) .{ empty.length, &empty.digest } else .{ neutral.text_length, &neutral.text_digest };
+            if (length != s.output.answer_length or !std.mem.eql(u8, digest, &s.output.answer_digest)) return error.OutputSourceChanged;
+            s.answer_id = answer.id;
+        }
+        s.entries += 1;
+        a.write(insert_entry, .{
+            .session = s.session,
+            .ordinal = s.settling.entry_base + s.entries,
+            .position = s.first_item_position + record.ordinal,
+            .turn_id = s.binding.turn_id,
+            .operation_id = s.binding.operation_id,
+            .item_ordinal = record.ordinal,
+            .content_id = text,
+        });
+    }
+
+    /// Saves one accepted item in Rui's own form from its metadata
+    /// records in `[metadata_start, metadata_end)`: its parts, its
+    /// provider bags and, for a message, its text (every text part's
+    /// decoded text back to back, one row its parts are lengths of).
+    /// It walks from `progress.offset`: the item's first record, or where
+    /// an earlier batch paused it. At `cut`, which follows a part's bag,
+    /// it records how far it walked in `progress` and answers null. A
+    /// hosted call's description goes to `description`.
+    fn importItem(s: *Settlement, a: anytype, batch: *Batch, item: OutputMetadataRecord, metadata_start: u64, metadata_end: u64, progress: *ItemProgress, cut: ?u64, description: *tool_record.Description) !?ImportedNeutral {
+        var metadata = try OutputMetadataReader.init(s.io, s.output.metadata, s.output.item_count);
+        metadata.offset = progress.offset;
+        metadata.length = metadata_end;
+        var item_bag: ?u64 = null;
+        var text: ?u64 = null;
+        var text_record: ?OutputMetadataRecord = null;
+        var text_length = progress.text_length;
+        var part_count = progress.part_count;
+        // The open part: its record's offset and its own text row. Every
+        // part closes with its bag, so one INSERT writes the whole row.
+        var part: ?struct { record: OutputMetadataRecord, start: u64, text: ?u64 } = null;
+        // A hosted call's action record, and its pattern record if any.
+        var action: ?OutputMetadataRecord = null;
+        var pattern: ?OutputMetadataRecord = null;
+        while (true) {
+            if (cut) |at| if (metadata.offset == at) {
+                // A cut follows a part's bag, which closed the part, and
+                // no bag, text, action or pattern closes the item before
+                // its last part.
+                std.debug.assert(part == null and item_bag == null and text == null and action == null);
+                progress.* = .{ .offset = at, .part_count = part_count, .text_length = text_length };
+                return null;
+            };
+            const record = try metadata.next() orelse break;
+            if (record.tag == .item) break;
+            if (record.ordinal != item.ordinal or record.kind != item.kind) return error.CorruptOutputMetadata;
+            switch (record.tag) {
+                .part => {
+                    if (part != null or item_bag != null) return error.CorruptOutputMetadata;
+                    const own_text = switch (record.part_kind) {
+                        .opaque_block => null,
+                        .output_text, .refusal => own: {
+                            if (item.kind != .message) return error.CorruptOutputMetadata;
+                            text_length = try std.math.add(u64, text_length, record.decoded_length);
+                            break :own null;
+                        },
+                        .summary_text, .reasoning_text => if (item.kind != .reasoning)
+                            return error.CorruptOutputMetadata
+                        else
+                            try s.importDecoded(a, batch, record),
+                    };
+                    part = .{ .record = record, .start = metadata.offset, .text = own_text };
+                },
+                .extras => switch (record.scope) {
+                    .part => {
+                        const pending = part orelse return error.CorruptOutputMetadata;
+                        const bag = try s.importBag(a, batch, record, pending.start, metadata.offset);
+                        a.write(insert_part, .{
+                            .operation_id = s.binding.operation_id,
+                            .item_ordinal = item.ordinal,
+                            .part_ordinal = part_count,
+                            .part_array = @backingInt(pending.record.part_array),
+                            .part_kind = @backingInt(pending.record.part_kind),
+                            .text_length = switch (pending.record.part_kind) {
+                                .output_text, .refusal => pending.record.decoded_length,
+                                .opaque_block, .summary_text, .reasoning_text => null,
+                            },
+                            .text_content_id = pending.text,
+                            .extras_content_id = bag,
+                        });
+                        part_count += 1;
+                        part = null;
+                    },
+                    .item => {
+                        if (part != null or item_bag != null) return error.CorruptOutputMetadata;
+                        item_bag = try s.importBag(a, batch, record, metadata_start, metadata.offset);
+                    },
+                },
+                .text => {
+                    if (item_bag == null or text != null or record.decoded_length != text_length) return error.CorruptOutputMetadata;
+                    text = try s.importMessageText(a, batch, record, metadata_start, metadata.offset);
+                    text_record = record;
+                },
+                .action => {
+                    if (item.kind != .web_search_call or action != null) return error.CorruptOutputMetadata;
+                    action = record;
+                },
+                .pattern => {
+                    if (action == null or pattern != null) return error.CorruptOutputMetadata;
+                    pattern = record;
+                },
+                .member, .name, .call_id, .arguments => {},
+                .usage => return error.CorruptOutputMetadata,
+                .item => unreachable,
             }
-            // A Bash call keeps its valid line even when not offered; malformed
-            // Bash arguments have none. MCP uses its saved line or tool name.
-            const description = try callDescription(call_facts, s.io, s.output.source, record);
-
-            s.a.write(insert_call, .{
-                .operation_id = s.binding.operation_id,
-                .call_ordinal = s.imported_calls,
-                .item_ordinal = record.ordinal,
-                .name_content_id = name_content_id,
-                .call_id_content_id = call_id_content_id,
-                .arguments_content_id = arguments_content_id,
-                .rejection_code = rejection_code,
-                .rejection_content_id = rejection_content_id,
-                .acceptance_position = if (rejection_code != null) try s.positions.take(1) else null,
-                .action_kind = if (rejection_code == null) 1 else null,
-                .description = description,
-                .field_metadata = field_metadata,
-                .session = s.session,
-            });
-            if (rejection_code != null) return;
-            // A core tool acts only on the Store, so no person decides it.
-            const authorized = call_facts.tool.?.runner() == .core or s.settling.permission_mode;
-            const action_id = try s.a.identity(.action_id);
-            s.a.write(insert_action, .{
-                .action_id = action_id,
-                .operation_id = s.binding.operation_id,
-                .call_ordinal = s.imported_calls,
-                .session = s.session,
-                .revision = s.settling.revision.get(),
-                .authorized = authorized,
-                .timeout_ms = if (call_facts.bashArguments()) |arguments| arguments.timeout_ms else null,
-                .approval_position = if (authorized) null else s.first_item_position + record.ordinal,
-            });
-            if (!authorized) try forward_domain.queue(s.a, &s.session.ref, &s.session.ref, .approval, action_id);
         }
-    };
-}
+        if (part != null or (text != null) != (item.kind == .message) or
+            (action != null) != (item.kind == .web_search_call)) return error.CorruptOutputMetadata;
+        if (action) |call| description.* = try describeWebSearch(s.io, s.output.source, call, pattern);
+        return .{
+            .bag = item_bag orelse return error.CorruptOutputMetadata,
+            .part_count = part_count,
+            .text = text,
+            .text_length = if (text_record) |record| record.decoded_length else 0,
+            .text_digest = if (text_record) |record| record.content_digest else @splat(0),
+            .described = action != null,
+            .call_failed = if (action) |call| call.call_failed else false,
+        };
+    }
+
+    fn importMessageText(s: *Settlement, a: anytype, batch: *Batch, text: OutputMetadataRecord, start: u64, end: u64) !u64 {
+        const row = try content(a, batch, recordImport(&text).?);
+        const sink = try sinkFor(a, row, text.decoded_length) orelse return row.id;
+        defer sink.close();
+        try streamMessageText(s.io, s.output, text, start, end, sink, s.faults);
+        return row.id;
+    }
+
+    /// Copies one bag, the `member` records of `trailer`'s scope in
+    /// `[start, end)` joined by commas, into a private row, verifying
+    /// a found one.
+    fn importBag(s: *Settlement, a: anytype, batch: *Batch, trailer: OutputMetadataRecord, start: u64, end: u64) !u64 {
+        const row = try content(a, batch, recordImport(&trailer).?);
+        const sink = try sinkFor(a, row, trailer.decoded_length);
+        defer if (sink) |value| value.close();
+        try streamBag(s.io, s.output, trailer, start, end, sink, s.faults);
+        return row.id;
+    }
+
+    /// Decodes one saved string (a part's text or a call field) into
+    /// its own row. A row with the same bytes is shared.
+    fn importDecoded(s: *Settlement, a: anytype, batch: *Batch, part: OutputMetadataRecord) !u64 {
+        const row = try content(a, batch, recordImport(&part).?);
+        const sink = try sinkFor(a, row, part.decoded_length) orelse return row.id;
+        defer sink.close();
+        try streamDecoded(s.io, s.output, part, sink, s.faults);
+        return row.id;
+    }
+
+    /// Walks the batch's records for calls in main's order: each
+    /// call's fields, its duplicate check, its classification, its
+    /// row and, when runnable, its Action. Keep call scratch separate
+    /// from the next batch's read-argument construction.
+    noinline fn writeCalls(s: *Settlement, a: anytype, batch: *Batch) !void {
+        var reader = try OutputMetadataReader.init(s.io, s.output.metadata, s.output.item_count);
+        reader.offset = batch.start;
+        var name_record: ?OutputMetadataRecord = null;
+        var call_id_record: ?OutputMetadataRecord = null;
+        var index: u8 = 0;
+        while (reader.offset < batch.end) {
+            const record = try reader.next() orelse break;
+            switch (record.tag) {
+                .name => name_record = record,
+                .call_id => call_id_record = record,
+                .arguments => {
+                    const name = name_record orelse return error.CorruptOutputMetadata;
+                    const call_id = call_id_record orelse return error.CorruptOutputMetadata;
+                    if (name.ordinal != record.ordinal or call_id.ordinal != record.ordinal or record.kind != .function_call)
+                        return error.CorruptOutputMetadata;
+                    while (s.call_item != null and s.call_item.?.ordinal < record.ordinal) s.call_item = try s.call_items.nextItem();
+                    const owner = s.call_item orelse return error.CorruptOutputMetadata;
+                    if (owner.ordinal != record.ordinal or owner.kind != .function_call) return error.CorruptOutputMetadata;
+                    if (index == batch.digest_count) return error.CorruptOutputMetadata;
+                    try s.importCall(a, batch, index, .{ name, call_id, record });
+                    name_record = null;
+                    call_id_record = null;
+                    index += 1;
+                    s.imported_calls += 1;
+                },
+                else => {},
+            }
+        }
+        if (batch.stopped) |err| return err;
+        // A batch ends before a call's first field, so fields left open
+        // at the last batch's end belong to no call.
+        if (batch.last and (name_record != null or call_id_record != null)) return error.CorruptOutputMetadata;
+    }
+
+    /// Imports one accepted call: its fields, its classification and,
+    /// when it is runnable, its Action.
+    fn importCall(s: *Settlement, a: anytype, batch: *Batch, index: u8, fields: [3]OutputMetadataRecord) !void {
+        const name, const call_id, const record = fields;
+        const name_content_id = try s.importDecoded(a, batch, name);
+        const call_id_content_id = try s.importDecoded(a, batch, call_id);
+        const arguments_content_id = try s.importDecoded(a, batch, record);
+        if (batch.duplicate(index)) return error.InvalidProviderEnvelope;
+        const call_facts = try inspectOutputCall(s.io, s.output.source, name, record, &s.tools);
+        const rejection_code = tool_defs.classifyCall(&call_facts);
+        const rejection_content_id: ?u64 = if (rejection_code) |code| id: {
+            var buffer: [192]u8 = undefined;
+            const text = try rejectionText(s.io, s.output, code, &call_facts, name, &buffer);
+            if (s.faults.output_import) return error.InjectedContentImportFailure;
+            const value: content_domain.Import = .ofBytes(text, false);
+            const row = try content(a, batch, value);
+            if (try sinkFor(a, row, value.length)) |sink| {
+                defer sink.close();
+                try sink.write(text, 0);
+            }
+            break :id row.id;
+        } else null;
+        try s.recordCall(a, &fields, .{ name_content_id, call_id_content_id, arguments_content_id }, &call_facts, rejection_code, rejection_content_id);
+    }
+
+    /// All content sinks have closed before saving the certificate and
+    /// line. Keep their bounded row-binding scratch off those sink paths.
+    noinline fn recordCall(s: *Settlement, a: anytype, fields: *const [3]OutputMetadataRecord, content_ids: [3]u64, call_facts: *const tool_defs.CallFacts, rejection_code: ?tool_proposal.Rejection, rejection_content_id: ?u64) !void {
+        const record = fields[2];
+        const name_content_id, const call_id_content_id, const arguments_content_id = content_ids;
+        // The call's certificate: (little-endian length, SHA-256) for its
+        // name, call_id and arguments, in ProposalField order.
+        var field_metadata: [120]u8 = undefined;
+        for (fields.*, 0..) |field, at| {
+            std.mem.writeInt(u64, field_metadata[at * 40 ..][0..8], field.decoded_length, .little);
+            @memcpy(field_metadata[at * 40 + 8 ..][0..32], &field.content_digest);
+        }
+        // A Bash call keeps its valid line even when not offered; malformed
+        // Bash arguments have none. MCP uses its saved line or tool name.
+        const description = try callDescription(call_facts, s.io, s.output.source, record);
+
+        a.write(insert_call, .{
+            .operation_id = s.binding.operation_id,
+            .call_ordinal = s.imported_calls,
+            .item_ordinal = record.ordinal,
+            .name_content_id = name_content_id,
+            .call_id_content_id = call_id_content_id,
+            .arguments_content_id = arguments_content_id,
+            .rejection_code = rejection_code,
+            .rejection_content_id = rejection_content_id,
+            .acceptance_position = if (rejection_code != null) try s.positions.take(1) else null,
+            .action_kind = if (rejection_code == null) 1 else null,
+            .description = description,
+            .field_metadata = field_metadata,
+            .session = s.session,
+        });
+        if (rejection_code != null) return;
+        // A core tool acts only on the Store, so no person decides it.
+        const authorized = call_facts.tool.?.runner() == .core or s.settling.permission_mode;
+        const action_id = try a.identity(.action_id);
+        a.write(insert_action, .{
+            .action_id = action_id,
+            .operation_id = s.binding.operation_id,
+            .call_ordinal = s.imported_calls,
+            .session = s.session,
+            .revision = s.settling.revision.get(),
+            .authorized = authorized,
+            .timeout_ms = if (call_facts.bashArguments()) |arguments| arguments.timeout_ms else null,
+            .approval_position = if (authorized) null else s.first_item_position + record.ordinal,
+        });
+        if (!authorized) try forward_domain.queue(a, &s.session.ref, &s.session.ref, .approval, action_id);
+    }
+};
 
 /// An item in Rui's own form; a message's text identity; whether a hosted
 /// call's description was written, and its outcome.
