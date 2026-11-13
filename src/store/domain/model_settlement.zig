@@ -33,6 +33,7 @@ const transition = @import("../transition.zig");
 const forward_domain = @import("forward.zig");
 const turn_domain = @import("turn.zig");
 const failure_class = @import("../../failure_class.zig");
+const pages = @import("../../os/pages.zig");
 const ActiveOperationFilter = action_domain.ActiveOperationFilter;
 const AttemptBinding = store_core.AttemptBinding;
 const Faults = store_core.Faults;
@@ -1151,9 +1152,12 @@ pub const Batch = struct {
     lookup_count: u8,
     duplicates: DuplicateVisitor,
 
-    /// Names are needed only while binding history's fixed-value Args.
-    /// Noinline keeps this 4.6 KB window off the import frame; Access copies
-    /// every Bounded argument before returning, so none borrows this frame.
+    /// Names are needed only while binding history's fixed-value Args, a
+    /// 4.6 KB window in pages of its own for the call (`pages.Mapped`): the
+    /// read runs only for a call batch with a name the Operation did not
+    /// offer, and its queueing sits on the engine thread's deepest chain.
+    /// Access copies every Bounded argument before returning, so none
+    /// borrows the pages once they are unmapped.
     noinline fn queueHistory(batch: *Batch, a: anytype, operation_id: u64, output: *const ValidatedOutput, io: std.Io) !void {
         @setEvalBranchQuota(20_000);
         const Name = Bounded(tool_record.max_name_bytes);
@@ -1163,10 +1167,12 @@ pub const Batch = struct {
                 std.debug.assert(@offsetOf(historical_names.Args, std.fmt.comptimePrint("n{d}", .{index})) == @offsetOf(historical_names.Args, "n0") + index * @sizeOf(Name));
             }
         }
-        var args: historical_names.Args = undefined;
+        const mapped = try pages.Mapped(historical_names.Args).map();
+        defer mapped.unmap();
+        const args = mapped.value;
         args.operation_id = operation_id;
+        // Zeroed pages: every name starts empty.
         const names: *[batch_items]Name = @ptrCast(&args.n0);
-        for (names) |*name| name.len = 0;
         var reader = try OutputMetadataReader.init(io, output.metadata, output.item_count);
         reader.offset = batch.start;
         var index: usize = 0;
@@ -1182,7 +1188,7 @@ pub const Batch = struct {
             }
         }
         batch.history_visitor = .{ .batch = batch };
-        a.readEachFrom(historical_names, &args, batch_items, &batch.history_visitor);
+        a.readEachFrom(historical_names, args, batch_items, &batch.history_visitor);
     }
 
     fn reset(batch: *Batch, kind: @FieldType(Batch, "kind"), start: u64) void {
