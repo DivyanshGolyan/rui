@@ -375,7 +375,7 @@ pub fn configure(a: anytype, io: std.Io, served: anytype, request: *const conten
     reads.* = .{ .next = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } } };
     const saved = &reads.saved_command;
     command_domain.lookupCommand(a, command.key.slice(), saved);
-    prepareConfiguration(a, command.session.slice(), &command.configuration, reads);
+    prepareConfiguration(a, a.store.hostTools().host_tool_set, command.session.slice(), &command.configuration, reads);
     try a.run();
 
     configureDigest(command, preset, saved, &reads.command_digest);
@@ -639,6 +639,12 @@ pub const ConfigurationReads = struct {
     /// The validation-only phase and application borrow this same plan until
     /// settlement; keep its saved Settings off the Host's import call chain.
     validated: ValidatedConfiguration = undefined,
+    /// What validation, then application, keeps between its rounds
+    /// (`validateStep`, `applyStep`): one storage, as validation ends
+    /// before application starts.
+    step: union { validating: Validating, applying: ApplyState } = undefined,
+    /// What application answers.
+    applied: Applied = undefined,
     /// Whether the Session exists: `.missing` for a creation, which reads none.
     found: store_access.Found = .missing,
     reference: [session_id.bytes]u8 = undefined,
@@ -825,12 +831,12 @@ fn newReference(io: std.Io, reference: *[session_id.bytes]u8) !void {
 /// them when both the instructions and an output schema need one and name
 /// different rows. When they name one row, the schema shares the
 /// instructions' value, so the first import's insert is the second's row.
-pub fn prepareConfiguration(a: anytype, session: []const u8, configuration: *const content_custody.Configuration, reads: *ConfigurationReads) void {
+pub fn prepareConfiguration(a: anytype, host_tool_set: *const tool_defs.HostToolSet, session: []const u8, configuration: *const content_custody.Configuration, reads: *ConfigurationReads) void {
     const creating = session.len == 0;
     if (!creating) readSaved(a, session, &reads.next, &reads.found);
     if (creating and configuration.parent.state == .value) prepareParent(a, configuration.parent.value.slice(), reads);
     if (creating or configuration.tools.state == .value) {
-        reads.tools = .of(a.store.hostTools().host_tool_set, requestedNames(configuration));
+        reads.tools = .of(host_tool_set, requestedNames(configuration));
         if (reads.tools) |*tools| tool_set.lookupSelection(a, tools);
     }
     const instructions: ?*content_domain.Import = if (configuration.instructions.state == .value) requested: {
@@ -890,39 +896,63 @@ fn loadedToolsRejection(tools: *const command_input.ToolsField, loaded: *const c
 /// Resolves the loaded set before importing content or changing the Session.
 /// Omitted loaded_tools follows the entire tools set unless it was already a
 /// strict subset; that subset is intersected with a newly requested tools set.
-fn prepareLoadedTools(a: anytype, creating: bool, requested: *const content_custody.Configuration, reads: *ConfigurationReads) !?configuration_admission.Rejection {
-    if (!creating and requested.tools.state != .value and requested.loaded_tools.state != .value) return null;
-    if (requested.loaded_tools.state != .value and (creating or reads.next.loaded_tool_set_id == null)) return null;
+/// After `.model`: the saved configured names, when a request without
+/// tools changes the loaded set, are read in `.saved_tools`.
+fn loadedTools(a: anytype, request: *const Request, reads: *ConfigurationReads) !Validation {
+    const requested = request.configuration;
+    const creating = request.session.len == 0;
+    if (!creating and requested.tools.state != .value and requested.loaded_tools.state != .value) return finishValidation(request, reads);
+    if (requested.loaded_tools.state != .value and (creating or reads.next.loaded_tool_set_id == null)) return finishValidation(request, reads);
+    const v = &reads.step.validating;
+    if (creating or requested.tools.state == .value) {
+        v.tools = requestedNames(requested);
+        return loadedNames(a, request, reads);
+    }
+    reads.saved_tools.state = .value;
+    reads.saved_tools.count = 0;
+    reads.saved_tools.names.len = 0;
+    v.names = .{ .names = &reads.saved_tools };
+    a.readEach(selected_names, .{ .set = reads.next.tool_set_id }, tool_name.max_tools + 1, &v.names);
+    return .{ .round = .saved_tools };
+}
 
-    const tools: *const command_input.ToolsField = if (creating or requested.tools.state == .value) requestedNames(requested) else saved: {
-        reads.saved_tools.state = .value;
-        reads.saved_tools.count = 0;
-        reads.saved_tools.names.len = 0;
-        var names: NameSelection = .{ .names = &reads.saved_tools };
-        a.readEach(selected_names, .{ .set = reads.next.tool_set_id }, tool_name.max_tools + 1, &names);
-        try a.run();
-        if (names.invalid) return error.CorruptStore;
-        break :saved &reads.saved_tools;
-    };
-    const loaded: *const command_input.ToolsField = if (requested.loaded_tools.state == .value) &requested.loaded_tools else saved: {
-        reads.saved_loaded.state = .value;
-        reads.saved_loaded.count = 0;
-        reads.saved_loaded.names.len = 0;
-        var names: NameSelection = .{ .names = &reads.saved_loaded, .filter = tools };
-        a.readEach(selected_names, .{ .set = reads.next.loaded_tool_set_id.? }, tool_name.max_tools + 1, &names);
-        try a.run();
-        if (names.invalid) return error.CorruptStore;
-        break :saved &reads.saved_loaded;
-    };
-    if (loadedToolsRejection(tools, loaded)) |rejection| return rejection;
-    if (loaded.count == tools.count) return null;
-    reads.loaded_tools = if (creating or requested.tools.state == .value)
-        tool_set.Selection.of(a.store.hostTools().host_tool_set, loaded) orelse return error.CorruptStore
-    else
-        try tool_set.Selection.ofSaved(a, reads.next.tool_set_id, loaded);
-    tool_set.lookupSelection(a, &reads.loaded_tools.?);
-    try a.run();
-    return null;
+/// Once the configured names are known: the saved loaded names an omitted
+/// `loaded_tools` keeps, narrowed to them, are read in `.saved_loaded`.
+fn loadedNames(a: anytype, request: *const Request, reads: *ConfigurationReads) !Validation {
+    const v = &reads.step.validating;
+    if (request.configuration.loaded_tools.state == .value) {
+        v.loaded = &request.configuration.loaded_tools;
+        return selectLoaded(a, request, reads);
+    }
+    reads.saved_loaded.state = .value;
+    reads.saved_loaded.count = 0;
+    reads.saved_loaded.names.len = 0;
+    v.names = .{ .names = &reads.saved_loaded, .filter = v.tools };
+    a.readEach(selected_names, .{ .set = reads.next.loaded_tool_set_id.? }, tool_name.max_tools + 1, &v.names);
+    return .{ .round = .saved_loaded };
+}
+
+/// Once both name lists are known: a strict subset is selected from the
+/// Host tool set, or from the saved set in `.loaded_source`, and looked
+/// up in `.loaded`.
+fn selectLoaded(a: anytype, request: *const Request, reads: *ConfigurationReads) !Validation {
+    const v = &reads.step.validating;
+    if (loadedToolsRejection(v.tools, v.loaded)) |rejection| return .{ .rejected = rejection };
+    if (v.loaded.count == v.tools.count) return finishValidation(request, reads);
+    if (request.session.len == 0 or request.configuration.tools.state == .value) {
+        reads.loaded_tools = tool_set.Selection.of(request.tools.host_tool_set, v.loaded) orelse return error.CorruptStore;
+        tool_set.lookupSelection(a, &reads.loaded_tools.?);
+        return .{ .round = .loaded };
+    }
+    request.saved.* = .{ .names = v.loaded };
+    request.saved.queue(a, reads.next.tool_set_id);
+    return .{ .round = .loaded_source };
+}
+
+/// After a round that read saved names: refuses a list the Store could
+/// not hold.
+fn savedNames(reads: *const ConfigurationReads) error{CorruptStore}!void {
+    if (reads.step.validating.names.invalid) return error.CorruptStore;
 }
 
 fn readCreation(a: anytype, reads: *ConfigurationReads) void {
@@ -958,8 +988,83 @@ pub const ValidatedConfiguration = struct {
 };
 pub const ConfigurationValidation = union(enum) { ready: *const ValidatedConfiguration, rejected: configuration_admission.Rejection };
 
-/// Validates without queuing content, tool-set or Session writes. The resulting
-/// plan borrows the same transaction's reads and is applied exactly once.
+/// What applying a configuration reads besides the Store's rows: the
+/// request, and the Host values its shell passes in. Each is the caller's,
+/// which outlives the transaction.
+pub const Request = struct {
+    io: std.Io,
+    tools: *const store_core.HostTools,
+    served: provider_route.Routes,
+    /// Empty for a creation.
+    session: []const u8,
+    configuration: *const content_custody.Configuration,
+    initial_skills: ?*const skills_domain.Initial,
+    /// The visitor of a `.loaded_source` round, the caller's, which
+    /// outlives the round: its hash state is aligned beyond the Store's
+    /// scratch, so `ConfigurationReads` cannot hold it.
+    saved: *tool_set.SavedSelection,
+
+    /// A request with `store`'s Host values, for a caller that holds it.
+    pub fn of(store: *Store, io: std.Io, session: []const u8, configuration: *const content_custody.Configuration, initial_skills: ?*const skills_domain.Initial, saved: *tool_set.SavedSelection) Request {
+        return .{ .io = io, .tools = store.hostTools(), .served = store.served, .session = session, .configuration = configuration, .initial_skills = initial_skills, .saved = saved };
+    }
+};
+
+/// The rounds validating a configuration may ask for after
+/// `prepareConfiguration`'s, in the order they run: the model's facts on
+/// every path that gets that far, then, only when the loaded set changes,
+/// the saved configured names, the saved loaded names, the saved set a
+/// strict subset is selected from, and the lookup of that subset.
+pub const ValidationRound = enum { model, saved_tools, saved_loaded, loaded_source, loaded };
+
+/// What `validateStep` asks for next: a round, or its answer.
+pub const Validation = union(enum) {
+    round: ValidationRound,
+    rejected: configuration_admission.Rejection,
+    ready: *const ValidatedConfiguration,
+};
+
+/// What validation keeps between its rounds, in `ConfigurationReads`.
+const Validating = struct {
+    model: model_facts.Model,
+    default_provider: ?provider_name.Provider,
+    workspace_matches: ?bool,
+    /// The configured and loaded names the loaded set is checked against:
+    /// requested ones, or the saved ones read into `ConfigurationReads`.
+    tools: *const command_input.ToolsField,
+    loaded: *const command_input.ToolsField,
+    /// The visitor of the round reading saved names.
+    names: NameSelection,
+};
+
+/// Validates without queuing content, tool-set or Session writes, one
+/// round at a time: `ran` is the round that just ran, null right after
+/// `prepareConfiguration`'s. The plan it readies borrows the same
+/// transaction's reads and is applied exactly once.
+pub fn validateStep(a: anytype, request: *const Request, reads: *ConfigurationReads, ran: ?ValidationRound) !Validation {
+    const at = ran orelse return validateRequest(a, request, reads);
+    switch (at) {
+        .model => return validateModel(a, request, reads),
+        .saved_tools => {
+            try savedNames(reads);
+            reads.step.validating.tools = &reads.saved_tools;
+            return loadedNames(a, request, reads);
+        },
+        .saved_loaded => {
+            try savedNames(reads);
+            reads.step.validating.loaded = &reads.saved_loaded;
+            return selectLoaded(a, request, reads);
+        },
+        .loaded_source => {
+            reads.loaded_tools = try request.saved.selection();
+            tool_set.lookupSelection(a, &reads.loaded_tools.?);
+            return .{ .round = .loaded };
+        },
+        .loaded => return finishValidation(request, reads),
+    }
+}
+
+/// `validateStep` in rounds its caller runs.
 pub fn validateConfiguration(
     a: anytype,
     io: std.Io,
@@ -968,6 +1073,23 @@ pub fn validateConfiguration(
     initial_skills: ?*const skills_domain.Initial,
     reads: *ConfigurationReads,
 ) !ConfigurationValidation {
+    var saved: tool_set.SavedSelection = undefined;
+    const request: Request = .of(a.store, io, session, configuration, initial_skills, &saved);
+    var ran: ?ValidationRound = null;
+    while (true) switch (try validateStep(a, &request, reads, ran)) {
+        .round => |at| {
+            try a.run();
+            ran = at;
+        },
+        .rejected => |code| return .{ .rejected = code },
+        .ready => |plan| return .{ .ready = plan },
+    };
+}
+
+/// What the request and round 1 decide, then the model's facts read.
+fn validateRequest(a: anytype, request: *const Request, reads: *ConfigurationReads) !Validation {
+    const session = request.session;
+    const configuration = request.configuration;
     const creating = session.len == 0;
     if (targetRejection(session)) |code| return .{ .rejected = code };
     if (configuration.permission_mode.state == .value and
@@ -982,7 +1104,7 @@ pub fn validateConfiguration(
         const valid = if (configuration.output_schema.borrowedBytes()) |bytes|
             try model_settlement_domain.validateJsonBytes(bytes)
         else
-            try model_settlement_domain.validateJsonFile(io, configuration.output_schema.file orelse return error.MissingContentCustody);
+            try model_settlement_domain.validateJsonFile(request.io, configuration.output_schema.file orelse return error.MissingContentCustody);
         if (!valid) return .{ .rejected = .invalid_output_schema };
     }
 
@@ -992,25 +1114,36 @@ pub fn validateConfiguration(
         return .{ .rejected = .unknown_session };
     }
     if (reads.found.get()) try checkSaved(next);
-    const current_configuration: ?*const CurrentConfiguration = if (reads.found.get()) next else null;
     if (!creating and configuration.parent.state != .omitted) return .{ .rejected = .parent_on_update };
-    if (creating) if (try inheritParent(a.store.hostTools().host_tool_set, configuration, reads)) |code| return .{ .rejected = code };
-    const default_provider = if (reads.inherits_parent) reads.next.provider else defaultProvider(a.store.served);
-    var selected: model_facts.Model = .{};
-    selected.read(a, if (configuration.model.state == .value) configuration.model.value.slice() else next.model.slice());
-    try a.run();
-    if (configurationBeforeWorkspace(selected.facts(), a.store.hostTools().host_tool_set, current_configuration, configuration, default_provider)) |rejection| {
+    if (creating) if (try inheritParent(request.tools.host_tool_set, configuration, reads)) |code| return .{ .rejected = code };
+    reads.step = .{ .validating = undefined };
+    const v = &reads.step.validating;
+    v.default_provider = if (reads.inherits_parent) reads.next.provider else defaultProvider(request.served);
+    v.model = .{};
+    v.model.read(a, if (configuration.model.state == .value) configuration.model.value.slice() else next.model.slice());
+    return .{ .round = .model };
+}
+
+/// After `.model`: the checks the model's facts decide, and the Workspace.
+fn validateModel(a: anytype, request: *const Request, reads: *ConfigurationReads) !Validation {
+    const io = request.io;
+    const configuration = request.configuration;
+    const creating = request.session.len == 0;
+    const v = &reads.step.validating;
+    const next = &reads.next;
+    const current_configuration: ?*const CurrentConfiguration = if (reads.found.get()) next else null;
+    if (configurationBeforeWorkspace(v.model.facts(), request.tools.host_tool_set, current_configuration, configuration, v.default_provider)) |rejection| {
         return .{ .rejected = rejection };
     }
 
     // A stated provider is saved by the update plan; configurationBeforeWorkspace
     // refused a creation with neither.
-    if (creating) if (default_provider) |provider| {
+    if (creating) if (v.default_provider) |provider| {
         next.provider = provider;
     };
     // An existing Session's Workspace is only compared, in sameWorkspace's
     // own frame; a created one's was canonicalized into `next`.
-    const workspace_matches: ?bool = if (creating and reads.inherits_parent) inherited: {
+    v.workspace_matches = if (creating and reads.inherits_parent) inherited: {
         validateWorkspace(io, next.workspace.slice(), &next.workspace) catch return .{ .rejected = .invalid_workspace };
         reads.workspace_digest = store_core.workspaceDigest(next.workspace.slice());
         break :inherited null;
@@ -1028,14 +1161,20 @@ pub fn validateConfiguration(
         break :matches true;
     } else null;
 
-    if (try prepareLoadedTools(a, creating, configuration, reads)) |rejection| return .{ .rejected = rejection };
+    return loadedTools(a, request, reads);
+}
 
+/// Once the loaded set is resolved: the update plan.
+fn finishValidation(request: *const Request, reads: *ConfigurationReads) Validation {
+    const configuration = request.configuration;
+    const next = &reads.next;
     const created = !reads.found.get();
+    const current_configuration: ?*const CurrentConfiguration = if (reads.found.get()) next else null;
     reads.validated.before = if (created) null else .of(next);
     const content_actions = switch (planConfigurationUpdate(
         current_configuration,
         configuration,
-        workspace_matches,
+        reads.step.validating.workspace_matches,
         next,
     )) {
         .rejected => |rejection| return .{ .rejected = rejection },
@@ -1044,104 +1183,174 @@ pub fn validateConfiguration(
 
     // Preserve ordinary configuration refusals before considering a failed
     // discovery capture, but reject it before any content or Session writes.
-    if (creating) if (initial_skills) |captured| if (captured.* == .unavailable) return .{ .rejected = .skills_unavailable };
+    if (request.session.len == 0) if (request.initial_skills) |captured| if (captured.* == .unavailable) return .{ .rejected = .skills_unavailable };
 
     reads.validated.content_actions = content_actions;
     return .{ .ready = &reads.validated };
 }
 
 pub fn applyConfiguration(a: anytype, io: std.Io, session: []const u8, configuration: *const content_custody.Configuration, initial_skills: ?*const skills_domain.Initial, faults: Faults, reads: *ConfigurationReads) !Application {
-    const checked = try validateConfiguration(a, io, session, configuration, initial_skills, reads);
-    return switch (checked) {
+    return switch (try validateConfiguration(a, io, session, configuration, initial_skills, reads)) {
         .rejected => |code| .{ .rejected = code },
-        .ready => |plan| try applyValidatedConfiguration(a, io, session, configuration, initial_skills, faults, reads, plan),
+        .ready => try applyValidatedConfiguration(a, io, session, configuration, initial_skills, faults, reads),
     };
 }
 
-pub fn applyValidatedConfiguration(a: anytype, io: std.Io, session: []const u8, configuration: *const content_custody.Configuration, initial_skills: ?*const skills_domain.Initial, faults: Faults, reads: *ConfigurationReads, plan: *const ValidatedConfiguration) !Application {
+/// The rounds applying a validated configuration may ask for, in order:
+/// whether a created Session's drawn reference is free, once for each
+/// draw, then the lookups its first skill catalog needs.
+pub const ApplyRound = enum { creation, catalog };
+
+/// What `applyStep` asks for next: a round, or the settings it applied.
+pub const Applying = union(enum) {
+    round: ApplyRound,
+    accepted: *const Applied,
+};
+
+/// What application keeps between its rounds, in `ConfigurationReads`.
+const ApplyState = struct {
+    created_seq: u64,
+    catalog: skills_domain.Appending,
+};
+
+/// Applies the plan `validateStep` readied, one round at a time: queues
+/// its content and the Session's insert or update. `ran` is the round
+/// that just ran, null for the first step. The answer, in
+/// `ConfigurationReads`, names the Session; the caller records it with
+/// `queueConfiguredCommand`. Creation and its first Message can share
+/// this owner without an intermediate commit.
+pub fn applyStep(a: anytype, request: *const Request, faults: Faults, reads: *ConfigurationReads, ran: ?ApplyRound) !Applying {
+    const at = ran orelse return applyContent(a, request, faults, reads);
+    switch (at) {
+        .creation => {
+            if (reads.creation.taken) return drawReference(a, request.io, reads);
+            return insertCreated(a, request, reads);
+        },
+        .catalog => {
+            try reads.step.applying.catalog.finish(a, faults);
+            return .{ .accepted = &reads.applied };
+        },
+    }
+}
+
+/// `applyStep` in rounds its caller runs, after `validateConfiguration`
+/// readied `reads.validated`.
+pub fn applyValidatedConfiguration(a: anytype, io: std.Io, session: []const u8, configuration: *const content_custody.Configuration, initial_skills: ?*const skills_domain.Initial, faults: Faults, reads: *ConfigurationReads) !Application {
+    // Application reads no saved set.
+    const request: Request = .of(a.store, io, session, configuration, initial_skills, undefined);
+    var ran: ?ApplyRound = null;
+    while (true) switch (try applyStep(a, &request, faults, reads, ran)) {
+        .round => |at| {
+            try a.run();
+            ran = at;
+        },
+        .accepted => |applied| return .{ .accepted = applied.* },
+    };
+}
+
+/// The content, the tool sets and an existing Session's update; a
+/// creation draws its reference.
+fn applyContent(a: anytype, request: *const Request, faults: Faults, reads: *ConfigurationReads) !Applying {
+    const io = request.io;
+    const session = request.session;
+    const configuration = request.configuration;
     const creating = session.len == 0;
     const created = !reads.found.get();
     const next = &reads.next;
-    const before = if (plan.before) |*saved| saved else null;
-    const content_actions = plan.content_actions;
-    var command_instructions_id: ?u64 = null;
+    const content_actions = reads.validated.content_actions;
+    reads.step = .{ .applying = undefined };
+    const applied = &reads.applied;
+    applied.instructions_id = null;
     switch (content_actions.instructions) {
         .preserve => {},
         .import_requested => {
-            command_instructions_id = try content_domain.importSealed(a, io, &configuration.instructions, &reads.instructions, faults);
-            next.instructions_id = @intCast(command_instructions_id.?);
+            applied.instructions_id = try content_domain.importSealed(a, io, &configuration.instructions, &reads.instructions, faults);
+            next.instructions_id = @intCast(applied.instructions_id.?);
         },
         .default_empty => next.instructions_id = @intCast(try content_domain.importBytes(a, &reads.empty, "")),
         .clear => next.instructions_id = null,
     }
-    var command_output_schema_id: ?u64 = null;
+    applied.output_schema_id = null;
     switch (content_actions.output_schema) {
         .preserve => {},
         .import_requested => {
-            command_output_schema_id = try content_domain.importSealed(a, io, &configuration.output_schema, &reads.output_schema, faults);
-            next.output_schema_id = @intCast(command_output_schema_id.?);
+            applied.output_schema_id = try content_domain.importSealed(a, io, &configuration.output_schema, &reads.output_schema, faults);
+            next.output_schema_id = @intCast(applied.output_schema_id.?);
         },
         .clear => next.output_schema_id = null,
     }
     if (creating or configuration.tools.state == .value) {
         // configurationBeforeWorkspace refused a name the Host tool set lacks.
         const tools = &(reads.tools orelse return error.CorruptStore);
-        next.tool_set_id = try tool_set.finishSelection(a, tools, a.store.hostTools().set_id);
+        next.tool_set_id = try tool_set.finishSelection(a, tools, request.tools.set_id);
     }
     if (reads.loaded_tools) |*loaded| {
         next.loaded_tool_set_id = try tool_set.finishSelection(a, loaded, next.tool_set_id);
     } else if (creating or configuration.loaded_tools.state == .value or configuration.tools.state == .value) {
         next.loaded_tool_set_id = null;
     }
-    var target: Bounded(session_id.max_reference_bytes) = .{};
-    var head: rsql.SessionHead = undefined;
     if (created) {
         std.debug.assert(next.revision == 1);
-        const created_seq = try a.identity(.created_seq);
-        // Each drawn reference is checked free in a round of its own, after
-        // the replay check, so a replay draws none; a taken one draws again.
-        reads.creation.taken = true;
-        while (reads.creation.taken) {
-            try newReference(io, &reads.reference);
-            readCreation(a, reads);
-            try a.run();
-        }
-        head = .{
-            .ref = reads.reference,
-            .workspace_key = if (reads.creation.workspace_key) |key| key else .of(created_seq),
-            .next_position = .of(1),
-        };
-        insertSession(a, head, next, &reads.workspace_digest, created_seq, if (reads.parent) |*parent| parent else null);
-        try target.set(&reads.reference);
-        try skills_domain.initialize(a, head, initial_skills, faults);
-    } else {
-        head = .{ .ref = session[0..session_id.bytes].*, .workspace_key = .of(next.workspace_key), .next_position = .of(next.next_position) };
-        a.write(update_session, .{
-            .session = head,
-            .model = next.model.slice(),
-            .instructions_id = if (next.instructions_id) |id| @intCast(id) else null,
-            .tool_set_id = next.tool_set_id,
-            .loaded_tool_set_id = next.loaded_tool_set_id,
-            .permission_mode = next.permission_mode,
-            .output_schema_id = if (next.output_schema_id) |id| @intCast(id) else null,
-            .revision = next.revision,
-            .provider = next.provider,
-            .compaction_trigger = next.compaction_trigger,
-            .output_reservation = next.output_reservation,
-            .reasoning_effort = next.reasoning_effort,
-            .label = if (next.label) |*label| label.slice() else null,
-        });
-        try target.set(session);
+        reads.step.applying.created_seq = try a.identity(.created_seq);
+        return drawReference(a, io, reads);
     }
-    return .{ .accepted = .{
-        .session = target,
-        .head = head,
+    const head: rsql.SessionHead = .{ .ref = session[0..session_id.bytes].*, .workspace_key = .of(next.workspace_key), .next_position = .of(next.next_position) };
+    a.write(update_session, .{
+        .session = head,
+        .model = next.model.slice(),
+        .instructions_id = if (next.instructions_id) |id| @intCast(id) else null,
+        .tool_set_id = next.tool_set_id,
+        .loaded_tool_set_id = next.loaded_tool_set_id,
+        .permission_mode = next.permission_mode,
+        .output_schema_id = if (next.output_schema_id) |id| @intCast(id) else null,
         .revision = next.revision,
-        .instructions_id = command_instructions_id,
-        .output_schema_id = command_output_schema_id,
-        .instructions_updated = created or configuration.instructions.state == .value,
-        .changes = if (before) |saved| saved.changed(next) else .empty,
-    } };
+        .provider = next.provider,
+        .compaction_trigger = next.compaction_trigger,
+        .output_reservation = next.output_reservation,
+        .reasoning_effort = next.reasoning_effort,
+        .label = if (next.label) |*label| label.slice() else null,
+    });
+    try accept(request, reads, head, session);
+    return .{ .accepted = applied };
+}
+
+/// Each drawn reference is checked free in a round of its own, after the
+/// replay check, so a replay draws none; a taken one draws again.
+fn drawReference(a: anytype, io: std.Io, reads: *ConfigurationReads) !Applying {
+    try newReference(io, &reads.reference);
+    readCreation(a, reads);
+    return .{ .round = .creation };
+}
+
+/// Once a drawn reference is free: the Session's insert, then its first
+/// skill catalog, when it starts with one.
+fn insertCreated(a: anytype, request: *const Request, reads: *ConfigurationReads) !Applying {
+    const created_seq = reads.step.applying.created_seq;
+    const head: rsql.SessionHead = .{
+        .ref = reads.reference,
+        .workspace_key = if (reads.creation.workspace_key) |key| key else .of(created_seq),
+        .next_position = .of(1),
+    };
+    insertSession(a, head, &reads.next, &reads.workspace_digest, created_seq, if (reads.parent) |*parent| parent else null);
+    try accept(request, reads, head, &reads.reference);
+    if (try skills_domain.Appending.initial(head, request.initial_skills)) |appending| {
+        reads.step.applying.catalog = appending;
+        reads.step.applying.catalog.queue(a);
+        return .{ .round = .catalog };
+    }
+    return .{ .accepted = &reads.applied };
+}
+
+/// The answer: the Session `head` names, as `target`, with what changed.
+fn accept(request: *const Request, reads: *ConfigurationReads, head: rsql.SessionHead, target: []const u8) !void {
+    const applied = &reads.applied;
+    const created = !reads.found.get();
+    applied.session = .{};
+    try applied.session.set(target);
+    applied.head = head;
+    applied.revision = reads.next.revision;
+    applied.instructions_updated = created or request.configuration.instructions.state == .value;
+    applied.changes = if (reads.validated.before) |*saved| saved.changed(&reads.next) else .empty;
 }
 
 fn saveConfigurationRejection(

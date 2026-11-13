@@ -1765,9 +1765,10 @@ comptime {
     // existing content identities for withdrawn names. Binding transient
     // history arguments avoids retaining a second copy of every call name.
     // Its 19032 bytes are below the previous 19240-byte resident ceiling;
-    // configuration reads reuse saved_tools for parent names and use 15032.
+    // configuration reads reuse saved_tools for parent names and use 15624,
+    // with what validation and application keep between their rounds.
     // Exact, so a change to either size is a decision.
-    if (@sizeOf(configuration_domain.ConfigurationReads) != 15032 or scratch_bytes != 19032)
+    if (@sizeOf(configuration_domain.ConfigurationReads) != 15624 or scratch_bytes != 19032)
         @compileError(std.fmt.comptimePrint("the Store's scratch is {d} bytes and the configure reads {d}; restate them here", .{ scratch_bytes, @sizeOf(configuration_domain.ConfigurationReads) }));
     if (scratch_bytes - 4888 > accepted_settlement_growth) @compileError("the settlement batch outgrew what the owner accepted");
 }
@@ -2346,7 +2347,7 @@ pub const SavedHostToolSet = struct {
 
 /// The tools the Host offers and the id of their saved set, which
 /// configure resolves a Session's tool names against.
-const HostTools = struct {
+pub const HostTools = struct {
     host_tool_set: *const tool_record.HostToolSet,
     set_id: u64,
 };
