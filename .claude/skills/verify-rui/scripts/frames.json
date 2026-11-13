@@ -7,10 +7,10 @@
     {
       "name": "appcmds-skill-without-preview",
       "note": "Whole-line bracketed paste uses normal Message admission, never the suggestion preview",
-      "open": "Catalog authority",
+      "open": "Skill catalog authority",
       "cast": [
         {
-          "label": "Catalog authority",
+          "label": "Skill catalog authority",
           "workspace": "code/rui",
           "messages": [
             "Seed a fresh chat."
@@ -41,15 +41,18 @@
       "absent": [
         "Unknown command",
         "Usage:"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]
     },
     {
       "name": "appcmds-unknown-name-message",
       "note": "Whole-line bracketed paste uses normal Message admission, never the suggestion preview",
-      "open": "Catalog authority",
+      "open": "Unknown name text",
       "cast": [
         {
-          "label": "Catalog authority",
+          "label": "Unknown name text",
           "workspace": "code/rui",
           "messages": [
             "Seed a fresh chat."
@@ -78,15 +81,18 @@
       "absent": [
         "Unknown command",
         "Usage:"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]
     },
     {
       "name": "appcmds-hidden-discard-collision",
       "note": "The complete grammar reserves hidden commands; noncolliding skills still complete",
-      "open": "Catalog authority",
+      "open": "Hidden discard collision",
       "cast": [
         {
-          "label": "Catalog authority",
+          "label": "Hidden discard collision",
           "workspace": "code/rui",
           "messages": [
             "Seed a fresh chat."
@@ -110,16 +116,17 @@
         "/discarded"
       ],
       "absent_regex": [
-        "^\\s*/discard\\s+"
+        "^\\s*/discard\\s+",
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]
     },
     {
       "name": "appcmds-hidden-recover-collision",
       "note": "The complete grammar reserves hidden commands; noncolliding skills still complete",
-      "open": "Catalog authority",
+      "open": "Hidden recover collision",
       "cast": [
         {
-          "label": "Catalog authority",
+          "label": "Hidden recover collision",
           "workspace": "code/rui",
           "messages": [
             "Seed a fresh chat."
@@ -143,7 +150,8 @@
         "/recovering"
       ],
       "absent_regex": [
-        "^\\s*/recover\\s+"
+        "^\\s*/recover\\s+",
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]
     },
     {
