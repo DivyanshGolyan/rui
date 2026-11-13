@@ -670,19 +670,19 @@ pub fn observeHostForUpgradeAtSocket(allocator: std.mem.Allocator, io: std.Io, s
     const pid = try identity.peer(fd);
     var snapshot = try identity.snapshot(allocator, pid);
     defer snapshot.deinit(allocator);
-    if (snapshot.argv.len < 3 or !std.mem.eql(u8, snapshot.argv[1], "host") or !std.mem.eql(u8, snapshot.argv[2], "serve")) return error.InvalidHostInfo;
+    if (snapshot.argv.len < 3 or !std.mem.eql(u8, snapshot.argv[1], "host") or !std.mem.eql(u8, snapshot.argv[2], "serve")) return error.HostPeerNotServing;
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     var problem: @import("cli_grammar.zig").Refusal = undefined;
-    const parsed = @import("serve_grammar.zig").definition.parseSyntax(snapshot.argv[3..], arena.allocator(), &problem) catch return error.InvalidHostInfo;
-    const supplied = parsed.get("store") orelse return error.InvalidHostInfo;
+    const parsed = @import("serve_grammar.zig").definition.parseSyntax(snapshot.argv[3..], arena.allocator(), &problem) catch return error.HostServeArgumentsUnreadable;
+    const supplied = parsed.get("store") orelse return error.HostServeStoreMissing;
     // A relative argv path is not relative to this client. Without a verified
     // canonical identity, report it rather than probing a guessed Store.
-    if (!std.fs.path.isAbsolute(supplied)) return error.InvalidHostInfo;
+    if (!std.fs.path.isAbsolute(supplied)) return error.HostServeStoreRelative;
     const paths = try platform.resolveClientPaths(io, supplied);
-    if (!std.mem.eql(u8, paths.socket.slice(), socket_path)) return error.InvalidHostInfo;
+    if (!std.mem.eql(u8, paths.socket.slice(), socket_path)) return error.HostSocketStoreMismatch;
     const observed = try observeHostForUpgrade(io, paths.store.slice(), until);
-    if (observed.pid != pid) return error.InvalidHostInfo;
+    if (observed.pid != pid) return error.HostPeerPidMismatch;
     return observed;
 }
 
@@ -5422,7 +5422,7 @@ test "socket upgrade discovery never infers absence from missing stale backlog o
         var listener = try address.listen(io, .{ .kernel_backlog = 1 });
         defer listener.deinit(io);
         // A connected peer whose argv is not a Host is unreadable, not absent.
-        try std.testing.expectError(error.InvalidHostInfo, observeHostForUpgradeAtSocket(allocator, io, address.path, null));
+        try std.testing.expectError(error.HostPeerNotServing, observeHostForUpgradeAtSocket(allocator, io, address.path, null));
         const unreadable = try listener.accept(io);
         unreadable.close(io);
 
@@ -5473,7 +5473,7 @@ test "socket upgrade discovery distinguishes stale free Store from refused held 
     }
     var listener = try lease.listen(.{});
     // A connected unreadable peer cannot be made absent by any routing hint.
-    try std.testing.expectError(error.InvalidHostInfo, observeHostForUpgradeAtSocket(allocator, io, socket.slice(), null));
+    try std.testing.expectError(error.HostPeerNotServing, observeHostForUpgradeAtSocket(allocator, io, socket.slice(), null));
     listener.deinit(io);
     // Held lease, nothing listening: a live Host's refusal keeps the whole
     // retry window.
