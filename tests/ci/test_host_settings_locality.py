@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from host_settings_locality import ROOT, facts, scan, surfaces, violations, vocabulary
+from host_settings_locality import ROOT, declaration_members, facts, scan, surfaces, violations, vocabulary
 
 
 class HostSettingsLocalityTest(unittest.TestCase):
@@ -88,7 +88,8 @@ fn start(started: Timestamp, timeout_ms: u64) void { _ = timeout_ms; }
                      'fn f(h: *host_settings.Settings) void { const alias = h; _ = alias.providers; }',
                      'const x = HostSettings["providers"];',
                      'function f(h: HostSettings) { return Object.hasOwn(h, "store"); }',
-                     'function f(h: HostSettings) { return h["store"]; }'):
+                     'function f(h: HostSettings) { return h["store"]; }',
+                     'function f(h: HostSettings) { const {store} = h; }'):
             with self.subTest(code=code):
                 self.assertTrue(self.check(code, "clients/ts/src/client.ts" if 'function' in code or 'HostSettings[' in code else "src/cli.zig"))
 
@@ -110,6 +111,10 @@ fn read(settings: *SessionSettings) void { _ = settings.tools; }
             self.check(table.replace('"--set tools.bash.timeoutMs=VALUE"', 'hidden()'), "src/serve_grammar.zig")
         with self.assertRaises(ValueError):
             self.check(table.replace('.replacement =', '.unexpected ='), "src/serve_grammar.zig")
+
+    def test_independent_domain_members_include_last_uncommaed_tag(self):
+        self.assertEqual(declaration_members("pub const Kind = enum { one, two };", "Kind"), {"one", "two"})
+        self.assertEqual(declaration_members("pub const Args = struct { count: ?u64 = null, };", "Args"), {"count"})
 
     def test_new_schema_leaf_automatically_extends_vocabulary(self):
         schema = {"properties": {"newGroup": {"properties": {"newLeaf": {"type": "string"}}}}}

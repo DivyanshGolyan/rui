@@ -69,8 +69,12 @@ def declaration_members(source, declaration):
             depth += 1
         elif names[i] in ("}", ")", "]"):
             depth -= 1
-        elif depth == 0 and re.fullmatch(r"[A-Za-z_]\w*", names[i]) and names[i + 1] in (":", ","):
-            members.add(names[i])
+        elif depth == 0 and re.fullmatch(r"[A-Za-z_]\w*", names[i]):
+            struct_field = names[start + 4] == "struct" and names[i + 1] == ":"
+            enum_tag = (names[start + 4] == "enum" and names[i - 1] in ("{", ",")
+                        and names[i + 1] in (",", "}", "="))
+            if struct_field or enum_tag:
+                members.add(names[i])
     return members
 
 
@@ -320,6 +324,13 @@ def scan(source, relative="src/cli.zig", derived=None):
                 direct = rhs[:1] == [binding] or rhs[:2] == ["&", binding]
                 normalized = rhs[:2] == ["pipeSettings", "("]
                 if not (direct or normalized):
+                    continue
+                if names[i + 1] == "{":
+                    destructured_end = close_brace(tokens, i + 1)
+                    for j in range(i + 2, destructured_end):
+                        key = unquote(names[j]) or names[j]
+                        if key in keys and names[j + 1] in (":", ",", "}"):
+                            hit(j, "destructures HostSettings key " + key)
                     continue
                 root = (names[i + 1], i, stop)
                 if root not in roots:
