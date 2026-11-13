@@ -90,8 +90,6 @@ pub fn classify(store: Store, err: anyerror) ?Failure {
     if (store == .mysql) if (mysqlRefusal(err)) |refusal| return refusal;
     return switch (err) {
         error.StoreAlreadyOwned => .init(.store_locked, "another Host owns this Store"),
-        error.WrongStoreVersion => .init(.store_schema_behind, "the SQLite Store format or wire metadata is not supported by this build"),
-        error.StoreIdentityMismatch => .init(.store_fenced, "the SQLite Store is not at its saved canonical location"),
         error.RuntimeDirectoryInUse => .init(.runtime_dir_unusable, "another Host owns this runtimeDir"),
         error.RuntimeDirectoryUnusable => .init(.runtime_dir_unusable, "runtimeDir must be a private (mode 0700) directory this Host can lock"),
         else => null,

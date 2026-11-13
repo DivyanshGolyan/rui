@@ -1073,7 +1073,8 @@ test "Host start restart projections preserve path refusals and ordered generic 
 const HostLaunchResult = @import("host_launch.zig").Result;
 extern "c" fn rui_launch_detached_reported(executable: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, argc: usize, startup_read: *c_int, report_read: *c_int) c_int;
 pub const Progress = struct { context: *anyopaque, report: *const fn (*anyopaque, []const u8) void };
-pub const Spawn = struct { dir: []const u8, assignments: []const []const u8 = &.{} };
+/// `settings_file` is an absolute FILE; a pipe document cannot reach a detached child.
+pub const Spawn = struct { dir: []const u8, settings_file: ?[]const u8 = null, assignments: []const []const u8 = &.{} };
 pub const Ops = struct {
     context: ?*anyopaque = null,
     observe: *const fn (?*anyopaque, std.Io, *const platform.Paths, ?i128) @import("protocol_reply.zig").HostStatus = nativeObserve,
@@ -1110,6 +1111,36 @@ pub fn launchReady(result: *HostLaunchResult, ready: @import("protocol_reply.zig
     result.outcome.ready.diagnostics_directory.set(paths.diagnosticsDirectory()) catch unreachable;
 }
 
+const moved = "bare rui and rui host start reach only a Host that listens in its Host directory; start this one with rui host serve --store DIR";
+
+/// Read source descriptions only: no secret is resolved and no login made.
+/// A Host whose settings listen elsewhere could start but never be reached
+/// through `dir`, so the starter refuses it before launching anything.
+pub fn checkReachable(init: std.process.Init, dir: []const u8, request: Spawn, failure: *start_report.Failure) !void {
+    var wiping: secret_value.WipingAllocator = .{ .backing = init.gpa };
+    var memory: std.heap.ArenaAllocator = .init(wiping.allocator());
+    defer memory.deinit();
+    const settings = try init.gpa.create(hs.Settings);
+    defer init.gpa.destroy(settings);
+    settings.* = .{};
+    defer settings.deinit();
+    _ = try saved(init, memory.allocator(), dir, settings, failure);
+    if (request.settings_file) |file| _ = try readDocumentAt(init, file, settings, failure);
+    for (request.assignments) |assignment| {
+        const equals = std.mem.indexOfScalar(u8, assignment, '=') orelse return invalid(failure, "settings", "--set requires PATH=VALUE");
+        try input(init, settings, assignment[0..equals], assignment[equals + 1 ..], failure);
+    }
+    if (settings.store == .mysql) return invalid(failure, "store.mysql", moved);
+    if (!settings.interface.dir.anchored) return invalid(failure, "interface.dir", moved);
+    if (!settings.store.sqlite.dir.anchored) {
+        var host: [protocol.max_store_bytes]u8 = undefined;
+        var chosen: [protocol.max_store_bytes]u8 = undefined;
+        const a = try platform.canonicalStoreDestination(init.io, dir, &host);
+        const b = platform.canonicalStoreDestination(init.io, settings.store.sqlite.dir.slice(), &chosen) catch return invalid(failure, "store.sqlite.dir", moved);
+        if (!std.mem.eql(u8, a, b)) return invalid(failure, "store.sqlite.dir", moved);
+    }
+}
+
 pub noinline fn spawn(init: std.process.Init, request: Spawn, ops: Ops, progress: ?Progress, result: *HostLaunchResult) void {
     const selected = request.dir;
     const io = init.io;
@@ -1129,12 +1160,20 @@ pub noinline fn spawn(init: std.process.Init, request: Spawn, ops: Ops, progress
     var dir = std.Io.Dir.cwd().createDirPathOpen(io, selected, .{ .permissions = .fromMode(0o700) }) catch |err| return launchFailure(result, .setup, err, null);
     dir.close(io);
     const paths = resolved orelse (selection.paths(io) catch |err| return launchFailure(result, .store_access, err, null));
+    var reach_failure: start_report.Failure = .init(.settings_invalid, "settings: could not be read");
+    checkReachable(init, paths.store.slice(), request, &reach_failure) catch |err| {
+        launchFailure(result, .child_refused, if (err == error.SettingsInvalid) error.HostStartupFailed else err, paths.store.slice());
+        result.outcome.failed.refusal = reach_failure;
+        result.outcome.failed.cause.refusal_code = reach_failure.code;
+        return;
+    };
     var executable_buffer: [std.Io.Dir.max_path_bytes + 1]u8 = undefined;
     const length = std.process.executablePath(io, &executable_buffer) catch |err| return launchFailure(result, .setup, err, paths.store.slice());
     if (length == executable_buffer.len) return launchFailure(result, .setup, error.ExecutablePathTooLong, paths.store.slice());
     executable_buffer[length] = 0;
     const gpa = std.heap.c_allocator;
-    const argc = 5 + 2 * request.assignments.len;
+    const first: usize = if (request.settings_file == null) 5 else 7;
+    const argc = first + 2 * request.assignments.len;
     const argv = gpa.allocSentinel(?[*:0]const u8, argc, null) catch |err| return launchFailure(result, .setup, err, paths.store.slice());
     defer gpa.free(argv);
     argv[0] = @ptrCast(&executable_buffer);
@@ -1144,16 +1183,22 @@ pub noinline fn spawn(init: std.process.Init, request: Spawn, ops: Ops, progress
     const directory = gpa.dupeZ(u8, paths.store.slice()) catch |err| return launchFailure(result, .setup, err, paths.store.slice());
     defer gpa.free(directory);
     argv[4] = directory.ptr;
+    const settings_file = if (request.settings_file) |file| gpa.dupeZ(u8, file) catch |err| return launchFailure(result, .setup, err, paths.store.slice()) else null;
+    defer if (settings_file) |file| gpa.free(file);
+    if (settings_file) |file| {
+        argv[5] = "--settings";
+        argv[6] = file.ptr;
+    }
     var owned: usize = 0;
     defer for (0..owned) |index| {
-        const value = std.mem.span(argv[6 + index * 2].?);
+        const value = std.mem.span(argv[first + 1 + index * 2].?);
         std.crypto.secureZero(u8, @constCast(value));
         gpa.free(value[0..value.len :0]);
     };
     for (request.assignments, 0..) |assignment, index| {
-        argv[5 + index * 2] = "--set";
+        argv[first + index * 2] = "--set";
         const value = gpa.dupeZ(u8, assignment) catch |err| return launchFailure(result, .setup, err, paths.store.slice());
-        argv[6 + index * 2] = value.ptr;
+        argv[first + 1 + index * 2] = value.ptr;
         owned += 1;
     }
     var startup_read: c_int = -1;
@@ -1206,6 +1251,10 @@ pub noinline fn spawn(init: std.process.Init, request: Spawn, ops: Ops, progress
                     return;
                 }
                 if (result.startup_len == HostLaunchResult.max_startup_bytes or report_len == report_bytes.len) return launchFailure(result, .startup_full, error.HostReadinessUnconfirmed, paths.store.slice());
+                // SQLite Store refusals are caller errors, not start-report
+                // lines; their stable code ends the child's stderr.
+                if (std.mem.endsWith(u8, result.startup(), "[store_identity_mismatch]\n")) return launchFailure(result, .store_identity, error.StoreIdentityMismatch, paths.store.slice());
+                if (std.mem.endsWith(u8, result.startup(), "[store_format_unsupported]\n")) return launchFailure(result, .store_format, error.HostStartupFailed, paths.store.slice());
                 return launchFailure(result, if (result.startup_len == 0) .child_closed else .child_refused, error.HostStartupFailed, paths.store.slice());
             }
         }

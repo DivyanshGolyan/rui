@@ -1069,7 +1069,11 @@ fn hostSettings(init: std.process.Init, command: cli_args.Command, parsed: *cons
 fn host(init: std.process.Init, command: cli_args.Command, parsed: *const cli_args.Parsed) !void {
     var fallback: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const selected = try selectedStore(init, parsed.get("store"), &fallback);
-    if (command == .host_start) return startHostForTerminal(init, selected, false, parsed.all("set"), null);
+    if (command == .host_start) {
+        var file_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const settings_file = if (parsed.get("settings")) |source| try hostSettingsFile(init, source, &file_buffer) else null;
+        return startHostForTerminal(init, selected, false, settings_file, parsed.all("set"), null);
+    }
     if (command == .host_pause) return pauseHost(init.io, selected, if (parsed.get("instance")) |instance| try protocol.parseInstanceId(instance) else null);
     const paths: ?platform.Paths = platform.resolveClientPaths(init.io, selected) catch |err| switch (err) {
         error.FileNotFound => null,
@@ -1087,6 +1091,18 @@ fn host(init: std.process.Init, command: cli_args.Command, parsed: *const cli_ar
         .access_failure => return error.StoreAccessFailed,
         else => {},
     }
+}
+
+/// A detached Host has no stdin, so host start takes its document from a FILE.
+fn hostSettingsFile(init: std.process.Init, source: []const u8, buffer: *[std.Io.Dir.max_path_bytes]u8) ![]const u8 {
+    if (std.mem.eql(u8, source, "-")) {
+        const failure: start_report.Failure = .init(.settings_invalid, "settings: rui host start reads --settings from a FILE; pass a document on stdin with rui host serve --settings -");
+        return writeRefusal(init.io, &failure, .invalid);
+    }
+    if (std.fs.path.isAbsolute(source)) return source;
+    var cwd: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const base = cwd[0..try std.Io.Dir.cwd().realPath(init.io, &cwd)];
+    return std.fmt.bufPrint(buffer, "{s}/{s}", .{ base, source }) catch error.NameTooLong;
 }
 
 fn writeHostStatus(io: std.Io, status: protocol_reply.HostStatus, diagnostics_directory: ?[]const u8) !void {
@@ -1200,15 +1216,16 @@ fn startOverviewHostUsing(init: std.process.Init, selected: []const u8, readines
     return result.summary();
 }
 
-fn startHostForTerminal(init: std.process.Init, selected: []const u8, quiet: bool, assignments: []const []const u8, readiness: ?*const provider_selection.Readinesses) !void {
-    return startHostForTerminalUsing(init, selected, quiet, assignments, readiness, .{});
+fn startHostForTerminal(init: std.process.Init, selected: []const u8, quiet: bool, settings_file: ?[]const u8, assignments: []const []const u8, readiness: ?*const provider_selection.Readinesses) !void {
+    return startHostForTerminalUsing(init, selected, quiet, settings_file, assignments, readiness, .{});
 }
 
-fn startHostForTerminalUsing(init: std.process.Init, selected: []const u8, quiet: bool, assignments: []const []const u8, readiness: ?*const provider_selection.Readinesses, ops: HostLaunchOps) !void {
+fn startHostForTerminalUsing(init: std.process.Init, selected: []const u8, quiet: bool, settings_file: ?[]const u8, assignments: []const []const u8, readiness: ?*const provider_selection.Readinesses, ops: HostLaunchOps) !void {
     var progress: TerminalHostProgress = .{};
     var result: HostLaunchResult = .failed(.setup, error.HostLaunchFailed);
-    startHost(init, selected, assignments, readiness, ops, .{ .context = &progress, .report = TerminalHostProgress.report }, &result);
-    try reportHostLaunch(init.io, &result, quiet, assignments.len != 0, progress.shown);
+    _ = readiness; // Credential defaults belong to the child intake owner.
+    host_start.spawn(init, .{ .dir = selected, .settings_file = settings_file, .assignments = assignments }, ops, .{ .context = &progress, .report = TerminalHostProgress.report }, &result);
+    try reportHostLaunch(init.io, &result, quiet, assignments.len != 0 or settings_file != null, progress.shown);
 }
 
 const launchFailure = host_start.launchFailure;
@@ -2623,7 +2640,7 @@ fn resumeSession(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
 /// Reading existing work is not fresh-Session admission: local preferences and
 /// credentials may be unavailable. The Host remains the Session's authority.
 fn openExistingOverview(init: std.process.Init, destination: []const u8, open: ?overview_view.Reference, selectors: new_session_selection.Intent, restoration: ?*const @import("relaunch_handoff.zig").Payload) !void {
-    try startHostForTerminal(init, destination, true, &.{}, null);
+    try startHostForTerminal(init, destination, true, null, &.{}, null);
     if (open) |reference| confirmSessionConfigured(init, .{ .io = init.io }, destination, &reference) catch |err| {
         if (err == error.SessionNotConfigured) stderr.diagnostic("rui: configure this Session before entering it\n", .{});
         return Overview.printFailure(err, destination, reference, null);
@@ -4398,8 +4415,6 @@ const LaunchFixture = struct {
             self.report_reads += 1;
             if (self.report_reads != 1) return 0;
             const failure: ?start_report.Failure = switch (self.scenario) {
-                .refusal => .init(.store_schema_behind, "Store needs a compatible Rui"),
-                .identity => .init(.store_fenced, "Store identity differs"),
                 .competitor => .init(.store_locked, "another Host owns this Store"),
                 else => null,
             };
@@ -4554,7 +4569,7 @@ test "Host launch owner returns one result for terminal and screen across its wh
                     if (case.scenario == .success) try std.testing.expectEqualStrings(LaunchFixture.note, result.startup());
                 },
                 .screen => summary = startOverviewHostUsing(init, store, &readiness, fixture.ops()),
-                .terminal, .quiet => startHostForTerminalUsing(init, store, surface == .quiet, &.{"arbitrary=value"}, &readiness, fixture.ops()) catch |err| {
+                .terminal, .quiet => startHostForTerminalUsing(init, store, surface == .quiet, null, &.{"arbitrary=value"}, &readiness, fixture.ops()) catch |err| {
                     terminal_error = err;
                 },
             }
@@ -5023,7 +5038,7 @@ test "host status and start classify a Host's reply however late it comes" {
         failure_held = .{ .resource = "host", .operation = "status", .not_sent = false };
         newer_status = host(init, .host_status, &parsed);
         failure_held = .{ .resource = "host", .operation = "start", .not_sent = false };
-        newer_start = startHostForTerminal(init, store, false, &.{}, null);
+        newer_start = startHostForTerminal(init, store, false, null, &.{}, null);
         failure_held = .{ .resource = "host", .operation = "status", .not_sent = false };
         fenced_status = host(init, .host_status, &parsed);
     }

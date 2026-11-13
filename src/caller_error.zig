@@ -40,6 +40,7 @@ pub const Code = enum {
     terminal_required,
     message_empty,
     environment_too_large,
+    proxy_scheme_unsupported,
     internal_unexpected,
     host_not_serving,
     host_incompatible,
@@ -235,7 +236,10 @@ fn mapped(err: anyerror) ?Code {
         error.OutOfMemory => .memory_exhausted,
         error.SavedRequestWireVersionMismatch => .request_wire_incompatible,
         error.HostNotServing => .host_not_serving,
-        error.HostRestartFailed => .host_restart_failed,
+        // Replay preflight normally becomes a per-Host unsupported outcome.
+        // If it escapes, keep the same operational restart repair.
+        error.HostRestartFailed, error.UnsupportedHostConfiguration => .host_restart_failed,
+        error.UnsupportedProxyScheme => .proxy_scheme_unsupported,
         error.IncompatibleHost => .host_incompatible,
         error.InvalidHostInfo, error.HostPeerIdentityUnavailable, error.HostProcessSnapshotUnavailable, error.InvalidHostProcessSnapshot => .host_identity_unconfirmed,
         error.IneligibleInstallation, error.UpgradeIneligible, error.InvalidInstallationHome => .upgrade_ineligible,
@@ -400,6 +404,7 @@ pub fn facts(code: Code) Facts {
         .model_id_malformed => .{ .act = .fix, .input = .model, .accepted = .{ .grammar = "a model ID of 1-256 printable non-space ASCII bytes" }, .says = "The model ID has invalid syntax.", .next = "Supply --model MODEL using a supported ID or a valid unlisted ID with default limits." },
         .terminal_required => .{ .act = .fix, .input = .stdin, .accepted = .{ .grammar = "terminal input and output with cursor addressing" }, .says = "This interactive command needs a terminal.", .next = "Run in a terminal, or use rui session start or rui session send --to ID with Message text on stdin." },
         .message_empty => .{ .act = .fix, .input = .stdin, .accepted = .{ .grammar = "nonempty Message text on stdin" }, .says = "Standard input was empty; provide Message text.", .next = "Pipe or redirect a nonempty Message into this command." },
+        .proxy_scheme_unsupported => .{ .act = .operate, .input = null, .accepted = .{ .grammar = "an http:// proxy URL in https_proxy or HTTPS_PROXY" }, .says = "The Host cannot use the configured proxy scheme.", .next = "Set https_proxy/HTTPS_PROXY to an http:// proxy URL or unset it, then retry." },
         .environment_too_large => .{ .act = .fix, .input = .arguments, .accepted = .{ .grammar = "an inherited environment within the Message byte limit" }, .says = "The inherited environment is too large for a Message.", .next = "Unset or shorten the largest variables, then recover the saved request with rui request recover HANDLE." },
         .internal_unexpected => .{ .act = .report, .input = null, .accepted = .none, .says = "Rui could not complete this operation because of an internal fault.", .next = "Keep the saved request, if any, and report this code with the command to the Rui maintainer." },
         .host_identity_unconfirmed => .{ .act = .operate, .input = null, .accepted = .none, .says = "The Host's exact process/build identity could not be verified.", .next = "Inspect this Store with its owning client. Do not pause a guessed or replacement Host." },
@@ -826,4 +831,12 @@ test "release download failures have their own caller code" {
 
 test "settings admission has a caller refusal fallback outside startup reporting" {
     try std.testing.expectEqual(Code.invocation_invalid, of(error.SettingsInvalid));
+}
+
+test "Host startup proxy and replay failures have contextual caller repairs" {
+    try std.testing.expectEqual(Code.proxy_scheme_unsupported, of(error.UnsupportedProxyScheme));
+    try std.testing.expectEqual(Code.host_restart_failed, of(error.UnsupportedHostConfiguration));
+    const proxy = facts(.proxy_scheme_unsupported);
+    try std.testing.expectEqual(.operate, proxy.act);
+    try std.testing.expect(std.mem.indexOf(u8, proxy.next, "https_proxy/HTTPS_PROXY") != null);
 }
