@@ -4,15 +4,17 @@ These PNGs compare main `62e124645e626ed3d538e97c2e9c0fb69789e0e0` with the cell
 They came from committed terminal frames, using the verify-rui skill's plain PTY and libghostty-vt observer at 120×40, then its HTML/Playwright PNG renderer.
 The two clients shared one isolated fixture Store so Session identities and content matched.
 Only the model provider was mocked.
-The overview, conversation, and settings pairs are byte-identical PNGs; their decoded cells, styles, theme, visible cursor, and re-encoded painted ANSI also match exactly.
+The overview, conversation, and settings pairs are pixel-identical PNGs; their decoded cells, styles, theme, visible cursor, and re-encoded painted ANSI also match exactly.
 The hidden cursor's unused position is not a visible cell and is excluded from the painted comparison.
+PNG provenance (`caBX`) chunks are signed independently by the environment, so whole-file hashes differ even though every decoded RGBA pixel matches.
+The hashes below deliberately cover decoded RGBA bytes, not provenance metadata.
 This is L1 synthetic PTY evidence, not physical keyboard or mouse coverage.
 
-| State | Main PNG | Branch PNG | Shared PNG SHA-256 |
+| State | Main PNG | Branch PNG | Shared decoded RGBA SHA-256 |
 | --- | --- | --- | --- |
-| Overview | [main](main-overview-120x40.png) | [branch](branch-overview-120x40.png) | `0602fce7713d6fca1520f46985dc226d9696cbe3e13969e1d04a9b4ecbb6d8f5` |
-| Conversation | [main](main-conversation-120x40.png) | [branch](branch-conversation-120x40.png) | `155d5470919c67a5c3f2f4a6ba59c6e952ac0f590db3ddcf639f2306a78a1d7f` |
-| Settings | [main](main-settings-120x40.png) | [branch](branch-settings-120x40.png) | `a56b17e52f3408eae20b3b5230f7641f4d370a1acbad42d1d23f9c2e51934db0` |
+| Overview | [main](main-overview-120x40.png) | [branch](branch-overview-120x40.png) | `73288fd528dd5651a21b4e9d540e6dcef0cc739412b4312de11efdf32940ca84` |
+| Conversation | [main](main-conversation-120x40.png) | [branch](branch-conversation-120x40.png) | `a6e553f7a74192e917a30e0cbb2abe30df74e746dba8768f7b6b4f5ae7b0c6d9` |
+| Settings | [main](main-settings-120x40.png) | [branch](branch-settings-120x40.png) | `410ae0f1006b8c6dc8337aee9e825222c50ba83f35a760efc0d1cdac07f31a83` |
 
 The full scripts, manifests, raw cells/ANSI/HTML, memory samples, and logs are saved under `/mnt/project-files/libvaxis-memory/pin-pr/`.
 The accepted frame run was `/home/claude/.cache/verify-rui/runs/20261113T085116-62e1246-27114`; its scratch Store was archived and its owned processes cleaned up.
