@@ -2658,14 +2658,15 @@ def main(selected="all"):
             assert "result: completed\nfirst answer" in conversation_text(result), result
             terminal_step(master, "/requests", "Local recovery handles", composer=True)
             assert not (fresh_home / ".config/rui/requests").exists(), "re-entry should not require saved records"
-            before_unsupported = set(json.loads(run(preferences_home, "request", "list")))
-            for command in ("/upgrade", "/login", "/wait", "/inspect-action", "/exit", "/help"):
-                notice = f"! Unknown command {command}"
+            before_misused = set(json.loads(run(preferences_home, "request", "list")))
+            for command in ("/new", "/clear", "/model", "/archive", "/unarchive", "/requests"):
+                notice = f"! Usage: {command}"
+                command += " unexpected"
                 terminal_step(master, command, notice, composer=True)
-                assert set(json.loads(run(preferences_home, "request", "list"))) == before_unsupported
+                assert set(json.loads(run(preferences_home, "request", "list"))) == before_misused
             terminal_step(master, "/setup", "gpt-6-luna", composer=True)
             chat_info_frame(master)
-            assert not credential.exists(), "unsupported in-session login created credentials"
+            assert not credential.exists(), "local chat commands created credentials"
             terminal_step(master, "/setup --model gpt-6-luna", "Saved defaults for future Sessions", composer=True)
             saved_default(master, "/setup --model gpt-5.5", "Model: gpt-5.5")
             interactive_saved = preferences_home / ".config/rui/preferences"
@@ -2701,10 +2702,10 @@ def main(selected="all"):
             chat_info_frame(master)
             assert fixture.command("session", "inspect", "--store", store,
                 "--session", session)["session"]["model"] == "gpt-6-sol"
-            # Removed commands cannot configure or inspect through a second path.
+            # Misused property commands cannot configure through a second path.
             before_configure = fixture.command("session", "inspect", "--store", store, "--session", session)["session"]
-            for command in ("/status", "/configure --model gpt-5.5", "/model"):
-                terminal_step(master, command, "Unknown command", composer=True)
+            for command in ("/model gpt-5.5", "/new --model gpt-5.5"):
+                terminal_step(master, command, "Usage:", composer=True)
             assert fixture.command("session", "inspect", "--store", store, "--session", session)["session"] == before_configure
             chat_info_open(master)
             model_choice_frame(master, b"\x1b[B\x1b[B\x1b[B\r", query="")

@@ -890,7 +890,8 @@ class SelectionTest(unittest.TestCase):
                                                  'NATIVE_RESULT': native, 'TYPECHECK_RESULT': typecheck,
                                                  'TYPECHECK': typecheck_selected,
                                                  'SPLIT': split, 'UNIT_RESULT': unit,
-                                                 'CODEGEN': codegen, 'CODEGEN_RESULT': codegen_result})
+                                                 'CODEGEN': codegen, 'CODEGEN_RESULT': codegen_result,
+                                                 'COMPILE_ONLY': 'false'})
                     actual = 'success' if result.returncode == 0 else 'failure'
                 self.assertEqual(actual, expected)
 

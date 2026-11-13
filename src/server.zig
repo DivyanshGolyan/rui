@@ -1458,7 +1458,7 @@ noinline fn reportWrongStoreVersion(store_path: []const u8, found_schema_version
     var message: [4 * protocol.max_store_bytes + 512]u8 = undefined;
     var output = std.Io.Writer.fixed(&message);
     const reason = if (found_schema_version == store_module.schema_version)
-        "unsupported or missing Store wire metadata"
+        "unsupported or missing Store format metadata"
     else
         "unsupported Store format";
     try output.print("rui: {s} at ", .{reason});

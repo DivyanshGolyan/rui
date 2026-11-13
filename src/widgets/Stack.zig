@@ -63,7 +63,7 @@ test "Stack reserves natural rows before giving the remainder to one child" {
     } };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 8, .height = 9 }, .cell_size = .{} };
+    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 8, .height = 9 }, .cell_size = .{} };
     const drawn = try stack.widget().draw(ctx);
     try std.testing.expectEqual(@as(i17, 0), drawn.children[0].origin.row);
     try std.testing.expectEqual(@as(i17, 2), drawn.children[1].origin.row);
@@ -92,9 +92,57 @@ test "Stack preserves the requested edge when natural rows compete" {
     defer arena.deinit();
     for ([_]@FieldType(Self, "priority"){ .top, .bottom }) |priority| for (0..3) |height| {
         const stack: Self = .{ .priority = priority, .children = &.{ .{ .widget = top.widget() }, .{ .widget = bottom.widget() } } };
-        const surface = try stack.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 8, .height = @intCast(height) }, .cell_size = .{} });
+        const surface = try stack.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 8, .height = @intCast(height) }, .cell_size = .{} });
         try std.testing.expectEqual(height, surface.size.height);
         try std.testing.expectEqual(@as(u16, @intFromBool(height == 2 or (height == 1 and priority == .top))), surface.children[0].surface.size.height);
         try std.testing.expectEqual(@as(u16, @intFromBool(height == 2 or (height == 1 and priority == .bottom))), surface.children[1].surface.size.height);
     };
+}
+
+// Keep cells and the tree on disjoint allocators: an ordinary draw test that
+// aliases both arenas cannot catch a widget retaining its cells between frames.
+test "Stack keeps every composed cell in cell_arena and metadata in arena" {
+    const vaxis = @import("vaxis");
+    const Footer = @import("Footer.zig");
+    const Split = @import("Split.zig");
+    const footer: Footer = .{ .left = "label", .right = "keys" };
+    const text: vxfw.Text = .{ .text = "body" };
+    const split: Split = .{ .left = footer.widget(), .right = text.widget(), .left_width = 10, .min_width = 20, .narrow = .right };
+    const stack: Self = .{ .children = &.{ .{ .widget = split.widget(), .sizing = .fill }, .{ .widget = footer.widget() } } };
+    var cell_bytes: [8192]u8 align(@alignOf(vaxis.Cell)) = undefined;
+    var cells: std.heap.FixedBufferAllocator = .init(&cell_bytes);
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = cells.allocator(), .min = .{}, .max = .{ .width = 24, .height = 4 }, .cell_size = .{} };
+    const drawn = try stack.widget().draw(ctx);
+    const Check = struct {
+        fn tree(surface: vxfw.Surface, storage: []const u8) !usize {
+            const begin = @intFromPtr(storage.ptr);
+            const end = begin + storage.len;
+            if (surface.buffer.len != 0) {
+                const ptr = @intFromPtr(surface.buffer.ptr);
+                try std.testing.expect(ptr >= begin and ptr + std.mem.sliceAsBytes(surface.buffer).len <= end);
+            }
+            if (surface.children.len != 0) {
+                const ptr = @intFromPtr(surface.children.ptr);
+                try std.testing.expect(ptr < begin or ptr >= end);
+            }
+            var count = surface.buffer.len;
+            for (surface.children) |child| count += try tree(child.surface, storage);
+            return count;
+        }
+    };
+    const count = try Check.tree(drawn, &cell_bytes);
+    try std.testing.expect(count > 24);
+    try std.testing.expectEqual(count * @sizeOf(vaxis.Cell), cells.end_index);
+    // Rendering copies the cells; metadata survives their release. Never read
+    // drawn.buffer (or descendant buffers) after this simulated frame boundary.
+    var screen = try vaxis.Screen.init(std.testing.allocator, .{ .cols = 24, .rows = 4, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(std.testing.allocator);
+    try drawn.render(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 24, .height = 4, .screen = &screen }, footer.widget());
+    cells.reset();
+    @memset(&cell_bytes, 0xaa);
+    try std.testing.expectEqual(@as(usize, 2), drawn.children.len);
+    try std.testing.expectEqual(@as(u16, 24), drawn.children[1].surface.size.width);
+    try std.testing.expectEqualStrings("l", screen.readCell(0, 3).?.char.grapheme);
 }

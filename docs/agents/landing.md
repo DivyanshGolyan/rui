@@ -32,6 +32,9 @@ A green PR squash-merges without waiting for review signoff or a promotion.
 Follow [Review](../../CODING_STANDARDS.md#review) for Codex requests and findings.
 Ship later fixes as follow-up PRs.
 
+The admin bypass in [the main ruleset](../../.github/main-ruleset.json) is a last resort, used only for changes on the critical path.
+Use it only when every red or missing check is a macOS job that GitHub never assigned a runner, every check that ran passed, and an infra-retry also failed to get a runner; state why in the merge commit or a PR comment.
+
 Merge `origin/main` into a PR only when it conflicts with `main`; [Conflict alert](../../.github/workflows/conflict-alert.yml) comments on each PR a move of `main` leaves conflicting.
 After that merge, run `python3 tests/ci/prepush.py` and wait for the new head's CI.
 A PR that merely trails `main` merges as it is.
@@ -62,7 +65,8 @@ Arm auto-merge only on a PR whose base is `main`; on a stacked PR it would merge
 
 Diagnose failures through [rui-ci-triage](../../.claude/skills/rui-ci-triage/SKILL.md) and follow [Evidence](../../CODING_STANDARDS.md#evidence) for reruns, strict-path holds and failure retention.
 A red whose failing file or fixture is outside the PR's diff is first reproduced on `main`; when `main` itself is red, it gets one fix owner, and the PR's owner is not asked to fix it.
-The fastest fix for a red `main` is often a revert of the one merged PR that broke it, which merges on green `admission` alone.
+The fastest fix for a red `main` is often a revert of the one merged PR that broke it.
+The [main build](../../.github/workflows/main-build.yml) names the PRs merged since `main` last compiled in its `ci-red` issue, and when two of them crossed, a revert of the later one is the fast fix.
 A red counts as fixed only when a commit between the red and a later green changed its failing fixture or owner.
 For a recurring fixture-and-assertion signature on SHAs that did not touch its code, update or file one issue for that signature and own the race fix.
 Preserve the assertion's strength.
