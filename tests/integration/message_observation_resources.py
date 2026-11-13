@@ -39,8 +39,8 @@ def retained(state, binary, label, repetition, failed_key):
         samples = [sample(process.pid)]
         for _ in range(4):
             for _ in range(25):
-                result = (cli.terminal_step(master, f"/result {failed_key}", prompt) if label == "baseline"
-                          else cli.saved_result(master, failed_key, "result: failed"))
+                result = cli.terminal_step(master, f"/result {failed_key}",
+                    prompt if label == "baseline" else "result: failed", composer=label != "baseline")
                 assert ("This saved Message failed" in result or "result: failed" in result) and "provider_http_422" in result, result
                 if label != "baseline":
                     # The page stays shown: leave it, so the next read's wait

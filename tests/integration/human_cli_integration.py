@@ -74,7 +74,7 @@ import model_fixture as fixture
 from session_list_fixture import session_values
 import codex_fixture
 import os_semantics
-from human_cli_fixture import chat_info_geometry, model_choice_frame, model_choice_shown, chat_info_frame, chat_info_open, panel_frame, ALLOW, CAPTURE_NOTICE, CHOICE, highlighted, _captures, action_ready, admit, await_screen, chat_content_row, command_frame, composer_ready, chat_footer_row, conversation_text, current_screen, draining, drop_spent_readiness, keyed_frame, next_frame, overview_frame, overview_title, pick_deny, read_terminal, return_to_live, run, settle_screen, shown, saved_result, terminal_capture, terminal_exit, terminal_gate, terminal_step
+from human_cli_fixture import chat_info_geometry, model_choice_frame, model_choice_shown, chat_info_frame, chat_info_open, panel_frame, ALLOW, CAPTURE_NOTICE, CHOICE, highlighted, _captures, action_ready, admit, await_screen, chat_content_row, command_frame, composer_ready, chat_footer_row, conversation_text, current_screen, draining, drop_spent_readiness, keyed_frame, next_frame, overview_frame, overview_title, pick_deny, read_terminal, return_to_live, run, settle_screen, shown, terminal_capture, terminal_exit, terminal_gate, terminal_step
 
 
 def terminal_safe_json(text):
@@ -516,6 +516,14 @@ def info_frame(master, session, timeout=15):
     return chat_info_frame(master, timeout)
 
 
+def saved_default(master, command, line):
+    """The /setup reply that shows `line`. Every such reply opens with the
+    same words and stays shown until the next, so the line this command
+    changed is what tells its reply from the last one."""
+    return command_frame(master, command, lambda frame: "Saved defaults for future Sessions" in conversation_text(frame) and shown(line, conversation_text(frame)))
+
+
+
 def leave_overview(master, timeout=15):
     """Ctrl-D leaves the overview; returns the text
     printed after it, through the notice's Overview line."""
@@ -593,7 +601,7 @@ def command_wait_oracles():
     before Enter: the page still shown would have passed for the reply. A
     later frame that shows the whole command in the composer is not the
     reply either, though the command's own words satisfy the wait."""
-    command = "/configure --model new"
+    command = "/setup --model new"
 
     def frame(page, draft=""):
         composer = " ›" + (" " + draft if draft else "")
@@ -811,7 +819,10 @@ def quiet_output(master, seconds):
 
 
 def persistent_copy_case():
-    """The drawn chat info action streams exact last-answer OSC 52 bytes."""
+    """/copy sends the last answer, and /copy code its last code block, to the
+    clipboard as one OSC 52 sequence of at most 75,000 bytes; /copy file saves
+    the answer where Rui runs, mode 0600 even over an earlier file, and replaces
+    a link at its name without following it."""
     state = screen_fixture_root("rui-copy.")
     home = state / "home"
     home.mkdir(mode=0o700)
@@ -837,10 +848,9 @@ def persistent_copy_case():
                 env={**os.environ, "HOME": str(home)}, cwd=here) as (caller, master):
             read_terminal(master, "› ")
             capture = terminal_capture(master)
-            chat_info_open(master)
-            panel_frame(master, lambda frame: "Copy: couldn't copy" in frame, b"\x1b[B" * 6 + b"\r")
+            terminal_step(master, "/copy", "No answer to copy", composer=True)
+            terminal_step(master, "/copy code", "No answer to copy", composer=True)
             assert capture.clipboard == [] and not any(here.iterdir()), capture.clipboard
-            panel_frame(master, lambda frame: "esc close" not in frame and "Type a task" in frame, b"\x1b")
             terminal_step(master, "Copy request", "Done.", composer=True)
             # A left drag over the answer's last word copies exactly the text
             # it covered, in one OSC 52 sequence, once the button is released.
@@ -853,9 +863,18 @@ def persistent_copy_case():
             command_frame(master, drag, lambda frame: "Copied 1 line" in frame, end="")
             assert capture.clipboard == ["\x1b]52;c;" + base64.b64encode(b"Done.").decode() + "\x1b\\"], capture.clipboard
 
+            def sent(command):
+                before = len(capture.clipboard)
+                frame = terminal_step(master, command, "Sent to clipboard", composer=True)
+                assert frame.split("\n")[chat_footer_row(frame)].endswith("Sent to clipboard"), frame
+                assert frame.count("Sent to clipboard") == 1, frame
+                assert len(capture.clipboard) == before + 1, capture.clipboard
+                return capture.clipboard[-1]
+
             def osc52(text):
                 return "\x1b]52;c;" + base64.b64encode(text.encode()).decode() + "\x1b\\"
 
+            assert sent("/copy") == osc52(answer)
             # The chat info action uses the same last-answer clipboard owner.
             copied = len(capture.clipboard)
             chat_info_open(master)
@@ -863,17 +882,37 @@ def persistent_copy_case():
                         b"\x1b[B" * 6 + b"\r")
             assert capture.clipboard[-1] == osc52(answer), capture.clipboard
             panel_frame(master, lambda frame: "Copy last answer" not in frame, b"\x1b")
+            assert sent("/copy code") == osc52("print('é')")
+            name = f"rui-{session}-answer.md"
+            terminal_step(master, "/copy file", f"Saved to ./{name}", composer=True)
+            saved = here / name
+            assert saved.read_bytes() == answer.encode() and saved.stat().st_mode & 0o777 == 0o600, saved
             terminal_step(master, "Large request", "More — Ctrl-O for whole message", composer=True)
             before = len(capture.clipboard)
-            chat_info_open(master)
-            panel_frame(master, lambda frame: "Copy: couldn't copy" in frame, b"\x1b[B" * 6 + b"\r")
-            panel_frame(master, lambda frame: "esc close" not in frame and "alt+i info" in frame, b"\x1b")
+            terminal_step(master, "/copy", "Too large for the clipboard · /copy file", composer=True)
             assert len(capture.clipboard) == before, "an answer over the limit is never sent"
-            assert not any(here.iterdir()), "clipboard copy creates no export file"
+            assert len(block) == limit
+            started = time.monotonic()
+            assert sent("/copy code") == osc52(block)
+            print(f"persistent copy: /copy code of {limit} bytes took {time.monotonic() - started:.3f}s to its frame", flush=True)
+            saved.chmod(0o644)
+            terminal_step(master, "/copy file", f"Saved to ./{name}", composer=True)
+            assert saved.read_bytes() == large.encode() and saved.stat().st_mode & 0o777 == 0o600, saved
+            # A link at the export name is replaced, never followed.
+            sentinel = state / "sentinel"
+            sentinel.write_bytes(b"sentinel")
+            sentinel.chmod(0o640)
+            saved.unlink()
+            saved.symlink_to(sentinel)
+            terminal_step(master, "/copy file", f"Saved to ./{name}", composer=True)
+            assert sentinel.read_bytes() == b"sentinel" and sentinel.stat().st_mode & 0o777 == 0o640, sentinel
+            assert not saved.is_symlink() and stat.S_ISREG(saved.lstat().st_mode), saved
+            assert saved.read_bytes() == large.encode() and saved.lstat().st_mode & 0o777 == 0o600, saved
+            assert list(here.iterdir()) == [saved], list(here.iterdir())
             terminal_step(master, "\x03", "Detached.")
             assert caller.wait(timeout=5) == 0
         completed = True
-        print("persistent copy: chat info sent exact OSC 52 bytes; oversized answer wrote nothing", flush=True)
+        print("persistent copy: /copy and /copy code sent exact OSC 52 bytes; /copy file saved the exact answer", flush=True)
     finally:
         dispose_all(lambda: fixture.stop_host(host) if host is not None else None,
                     endpoint.shutdown, endpoint.server_close, lambda: thread.join(timeout=5))
@@ -2598,8 +2637,8 @@ def main(selected="all"):
             keyed_frame(master, b"\x1b", lambda screen, x, y: "first answer" in screen and "Rui · settings" not in screen)
             terminal_capture(master).resize(80, 50)
             fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 80, 0, 0))
-            # This HOME has no capture of queued: its answer was checked through
-            # the native reader above. Drawn saved-key reads below use their owning HOME.
+            result = terminal_step(master, f"/result {queued}", "result: completed", composer=True)
+            assert "result: completed\nfirst answer" in conversation_text(result), result
             terminal_step(master, "/requests", "Local recovery handles", composer=True)
             assert not (fresh_home / ".config/rui/requests").exists(), "re-entry should not require saved records"
             before_unsupported = set(json.loads(run(preferences_home, "request", "list")))
@@ -2607,10 +2646,47 @@ def main(selected="all"):
                 notice = f"! Unknown command {command}"
                 terminal_step(master, command, notice, composer=True)
                 assert set(json.loads(run(preferences_home, "request", "list"))) == before_unsupported
+            terminal_step(master, "/setup", "gpt-6-luna", composer=True)
+            chat_info_frame(master)
             assert not credential.exists(), "unsupported in-session login created credentials"
+            terminal_step(master, "/setup --model gpt-6-luna", "Saved defaults for future Sessions", composer=True)
+            saved_default(master, "/setup --model gpt-5.5", "Model: gpt-5.5")
+            interactive_saved = preferences_home / ".config/rui/preferences"
+            saved_default(master, "/setup --clear-model", "Model: not selected")
+            assert interactive_saved.read_text().endswith("provider=codex\nmodel=\n")
+            cleared_preferences = interactive_saved.read_bytes()
+            # Neighbours differ: an identical rejection draws no new frame.
+            for command, error in (("/setup --clear-model --model gpt-6-luna", "model_excludes_clear_model"),
+                                   ('/setup --model ""', 'preference_model_invalid'),
+                                   ("/setup --model gpt-6-luna --clear-model", "model_excludes_clear_model")):
+                rejected = terminal_step(master, command, error, composer=True)
+                if error == "preference_model_invalid":
+                    assert "a model ID is 1–256 printable non-space ASCII bytes" in rejected, rejected
+                    assert "active Session unchanged" not in rejected, rejected
+                assert interactive_saved.read_bytes() == cleared_preferences
+            chat_info_frame(master)
+            active = fixture.command("session", "inspect", "--store", store, "--session", session)["session"]
+            assert active["model"] == "gpt-6-sol" and active["permission_mode"] == "ask", active
+            terminal_step(master, "/setup --model gpt-6-luna", "Saved defaults for future Sessions", composer=True)
+            spaced_store = state / "spaced store"
+            spaced_store.mkdir(mode=0o700)
+            saved_default(master, f'/setup --store "{spaced_store}"', f"Store: {spaced_store.resolve()} (saved)")
+            assert defaults(preferences_home)["store"] == str(spaced_store.resolve())
+            quoted_store = state / 'quoted "store"'
+            quoted_store.mkdir(mode=0o700)
+            escaped_store = str(quoted_store).replace('"', r'\"')
+            shown_store = str(quoted_store.resolve()).replace('"', r'\"')
+            saved_default(master, f'/setup --store "{escaped_store}"', f"Store: {shown_store} (saved)")
+            assert defaults(preferences_home)["store"] == str(quoted_store.resolve())
+            terminal_step(master, '/setup --store "unfinished', "Usage: /setup", composer=True)
+            assert defaults(preferences_home)["store"] == str(quoted_store.resolve())
+            terminal_step(master, f'/setup --store "{store}"', "Saved defaults for future Sessions", composer=True)
+            chat_info_frame(master)
+            assert fixture.command("session", "inspect", "--store", store,
+                "--session", session)["session"]["model"] == "gpt-6-sol"
             # Removed commands cannot configure or inspect through a second path.
             before_configure = fixture.command("session", "inspect", "--store", store, "--session", session)["session"]
-            for command in ("/status", "/configure --model gpt-5.5", "/model", "/archive", "/unarchive", "/rename chat", "/copy", "/effort high", "/setup", "/result bogus"):
+            for command in ("/status", "/configure --model gpt-5.5"):
                 terminal_step(master, command, "Unknown command", composer=True)
             assert fixture.command("session", "inspect", "--store", store, "--session", session)["session"] == before_configure
             chat_info_open(master)
@@ -2618,6 +2694,7 @@ def main(selected="all"):
             model_choice_frame(master, b"gpt-6-sol", query="gpt-6-sol", more=False)
             configured = panel_frame(master, lambda frame: not model_choice_shown(frame) and "saving" not in frame, b"\r")
             assert "gpt-6-sol" in configured and "request:" not in configured, configured
+            # The natural body leaves the previous /setup result in the feed.
             # A typed Configure adds no CLI receipt to the info body itself.
             geometry = chat_info_geometry(configured)
             configured_body = "\n".join(geometry["rows"][geometry["top"]:geometry["input"] - 1])
@@ -2733,10 +2810,10 @@ def main(selected="all"):
             "--", failure_session], env={**os.environ, "HOME": str(home)},
         ) as (entered, master):
             read_terminal(master, "› ")
-            failed = saved_result(master, failed_key, "result: failed")
+            failed = terminal_step(master, f"/result {failed_key}", "result: failed", composer=True)
             assert "result: failed" in failed, failed
             assert "code: provider_http_422" in failed and "successor done" not in failed, failed
-            result = saved_result(master, queued_key, "result: completed")
+            result = terminal_step(master, f"/result {queued_key}", "result: completed", composer=True)
             assert "result: completed\nsuccessor done" in conversation_text(result), result
             terminal_step(master, "\x03", "Detached.")
             assert entered.wait(timeout=5) == 0

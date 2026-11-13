@@ -85,7 +85,7 @@ pub fn archiveBadge(state: ArchiveState) ?[]const u8 {
     return switch (state) {
         .active => null,
         .archiving => "Stopping and archiving",
-        .archived => "Archived · Restore",
+        .archived => "Archived · /unarchive",
     };
 }
 
@@ -131,7 +131,7 @@ pub fn sample(session: *Session) void {
 test "archive badges name pending and completed archive independently of work" {
     try std.testing.expect(archiveBadge(.active) == null);
     try std.testing.expectEqualStrings("Stopping and archiving", archiveBadge(.archiving).?);
-    try std.testing.expectEqualStrings("Archived · Restore", archiveBadge(.archived).?);
+    try std.testing.expectEqualStrings("Archived · /unarchive", archiveBadge(.archived).?);
     var session: Session = undefined;
     sample(&session);
     var other = session;

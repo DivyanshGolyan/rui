@@ -279,7 +279,7 @@ test "a release copies the shown text with its line count, within the clipboard 
     try std.testing.expectEqual(TerminalText.clipboard_limit, whole.text.bytes.len);
     const over = try copy(gpa, document, .{ .from = 0, .to = TerminalText.clipboard_limit + 1 });
     try std.testing.expectEqual(Copy.too_large, over);
-    try std.testing.expectEqualStrings("Too large for the clipboard", notice(over, &buffer).?);
+    try std.testing.expectEqualStrings("Too large for the clipboard · /copy file", notice(over, &buffer).?);
 }
 
 test "only a click on a peer's name opens its Session" {

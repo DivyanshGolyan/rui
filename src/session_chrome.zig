@@ -321,12 +321,12 @@ fn words(out: *std.Io.Writer, text: []const u8, room: usize, method: Method) voi
 test "the facts row ends with the archive badge, which stays when the row is short" {
     var buffer: [facts_bytes]u8 = undefined;
     try std.testing.expectEqualStrings("k7m2qx", factsRow(&buffer, null, "k7m2qx", null, 78, .unicode));
-    try std.testing.expectEqualStrings("k7m2qx · Archived · Restore", factsRow(&buffer, null, "k7m2qx", "Archived · Restore", 78, .unicode));
+    try std.testing.expectEqualStrings("k7m2qx · Archived · /unarchive", factsRow(&buffer, null, "k7m2qx", "Archived · /unarchive", 78, .unicode));
     const facts: session_line.Facts = .{ .name = "Fix flaky store test", .model = "gpt-6.1-sol" };
-    const wide = factsRow(&buffer, facts, "k7m2qx", "Archived · Restore", 78, .unicode);
-    try std.testing.expectEqualStrings("Fix flaky store test · gpt-6.1-sol · Archived · Restore", wide);
-    const short = factsRow(&buffer, facts, "k7m2qx", "Archived · Restore", 40, .unicode);
-    try std.testing.expect(std.mem.endsWith(u8, short, " · Archived · Restore"));
+    const wide = factsRow(&buffer, facts, "k7m2qx", "Archived · /unarchive", 78, .unicode);
+    try std.testing.expectEqualStrings("Fix flaky store test · gpt-6.1-sol · Archived · /unarchive", wide);
+    const short = factsRow(&buffer, facts, "k7m2qx", "Archived · /unarchive", 40, .unicode);
+    try std.testing.expect(std.mem.endsWith(u8, short, " · Archived · /unarchive"));
     try std.testing.expect(session_line.cells(short, .unicode) <= 40);
 }
 

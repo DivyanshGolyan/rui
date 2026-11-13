@@ -200,9 +200,9 @@ test "Palette hover is transient and clicks activate only visible command rows" 
     try std.testing.expect(selected.index == null);
 }
 
-test "Palette renders the names-only conversation slash list" {
+test "Palette renders every chat command with its quiet description" {
     const cases = .{
-        .{ commands.conversation, &[_][]const u8{ "/clear", "/new", "/reload-skills" } },
+        .{ commands.conversation, &[_][]const u8{ "/archive", "/clear", "/copy", "/effort", "/model", "/new", "/reload-skills", "/rename", "/requests", "/result", "/setup", "/unarchive" } },
     };
     inline for (cases) |case| {
         var shown = commands.Shown.next(null, 1, case[0].suggest("/", .{})).?;
@@ -221,9 +221,11 @@ test "Palette renders the names-only conversation slash list" {
                 used += cell.char.grapheme.len;
             }
             const line = std.mem.trimEnd(u8, text[0..used], " ");
-            try std.testing.expectEqualStrings(expected, line);
+            try std.testing.expect(std.mem.startsWith(u8, line, expected));
+            try std.testing.expect(shown.list.entries[row].description.len != 0);
+            try std.testing.expect(std.mem.indexOf(u8, line, shown.list.entries[row].description[0..@min(20, shown.list.entries[row].description.len)]) != null);
             std.debug.print("{s}\n", .{line});
-            if (std.mem.indexOf(u8, expected, " · ") != null) {
+            if (shown.list.entries[row].description.len != 0) {
                 try std.testing.expect(!surface.readCell(0, @intCast(row)).style.dim);
                 try std.testing.expect(surface.readCell(@intCast(shown.list.descriptionColumn()), @intCast(row)).style.dim);
             }
