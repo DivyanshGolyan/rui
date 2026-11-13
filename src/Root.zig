@@ -193,10 +193,6 @@ pub fn focusList(self: *Self, ctx: *vxfw.EventContext, draft_empty: bool) !bool 
 
 /// The Session has settled its borrowers before calling this. No terminal
 /// leaves raw mode and no input stream is transferred between screens.
-pub fn focusChat(self: *Self, ctx: *vxfw.EventContext) !void {
-    try self.navigate(ctx, .focus_chat);
-}
-
 pub fn closeSession(self: *Self, ctx: *vxfw.EventContext) !void {
     self.closeMainPresentation();
     self.session = null;
@@ -1074,7 +1070,7 @@ test "App root hands list activation unchanged to its one core" {
         try std.testing.expect(target.eql(root.widget()));
         try root.widget().captureEvent(&ctx, .{ .key_press = .{ .codepoint = key } });
         try std.testing.expect(root.input.list_focused);
-        try root.focusChat(&ctx);
+        try root.showMain(&ctx);
         try std.testing.expect(!root.input.list_focused);
     }
     try std.testing.expectEqual(@as(usize, 2), selection.calls);

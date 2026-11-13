@@ -80,7 +80,6 @@ pub const Input = union(enum) {
     other,
     back_to_list: bool,
     session_closed,
-    focus_chat,
     open_settings,
     /// Show the main pane: close settings, keeping any sign-in over it.
     show_main,
@@ -173,10 +172,6 @@ pub fn step(state: *State, facts: Facts, input: Input) Effects {
             if (!draft_empty or !facts.wide or !facts.session_open or state.layer != .main) return .{};
             state.list_focused = true;
             return .{ .focus = .list, .redraw = true };
-        },
-        .focus_chat => {
-            state.list_focused = false;
-            return .{ .focus = .main, .redraw = true };
         },
         .session_closed => {
             state.list_focused = true;
@@ -535,7 +530,7 @@ test "App input list activation routes unchanged to its semantic owner" {
             try std.testing.expectEqual(Effects.Route{ .overview = .{ .under = .main, .pasted = false, .list_focus = true } }, result.route);
             try std.testing.expect(state.list_focused);
         }
-        const resumed = step(&state, .{ .session_open = true, .wide = wide }, .focus_chat);
+        const resumed = step(&state, .{ .session_open = true, .wide = wide }, .show_main);
         try std.testing.expectEqual(@as(?Effects.Focus, .main), resumed.focus);
         try std.testing.expect(!state.list_focused);
     }

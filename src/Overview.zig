@@ -769,7 +769,7 @@ fn appNext(self: *Self, ctx: *vxfw.EventContext, next: ?Next) !void {
             ctx.quit = true;
         },
         .open_settings => try self.root.openSettings(ctx),
-        .focus_chat => try self.root.focusChat(ctx),
+        .focus_chat => try self.root.showMain(ctx),
         .open_choice => |field| {
             try self.root.settings_page.openStandaloneChoice(ctx, switch (field) {
                 .model => .model,
