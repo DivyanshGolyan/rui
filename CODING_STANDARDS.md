@@ -165,8 +165,8 @@ Review parity and failure paths as well as the diff:
   Route each to the main path's failure boundary, or justify it beside the code.
 - **In-flight effects.** Each effect the change emits has one record from emission to a definite answer.
   On every exit (return, error, cancel), the owner reports each still-open record to the caller's failure boundary.
-- **Consumers.** When the change alters a shared value (a label, status text, column, step list, exit convention or file list), search for the old form and update every consumer in the same change: tests, fixtures, helper scripts and skills.
-- **Runnable instructions.** A command in a skill, doc or script runs as written, unattended, on the platforms it names: required inputs are supplied and nothing depends on one machine's paths or permissions.
+- **Consumers.** When the change alters a shared value (a label, status text, column, step list, exit convention or file list), search for the old form. A test or fixture that restates it reads it from its owner instead ([Evidence](#evidence)); a consumer that cannot (a skill, helper script or document) changes in the same change.
+- **Runnable instructions.** A command in a skill, doc or script runs as written on the platforms it names: required inputs are supplied, nothing depends on one machine's paths or permissions, and a step that needs a person (such as a hardware check at the Mac) says so.
 - **Design.** Check the change against the approved design, not only the issue derived from it.
   An edit to a contract document that makes it match the change's own code is a finding, and so is a "by design" that cites text the same change added.
 
