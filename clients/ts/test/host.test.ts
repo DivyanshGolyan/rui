@@ -128,9 +128,15 @@ test("an explicit interface never adopts a competing Host for either Store", { s
 	}
 });
 
-test("a caller's OS-byte interface directory reaches the Host without lossy decoding", { skip }, async () => {
+// A Buffer directory travels as hex bytes. Only invalid UTF-8 (0xff) can show
+// lossy text decoding, and APFS refuses such names (EILSEQ), as #1419 found
+// for credential files; macOS keeps the byte route with a name it accepts.
+for (const [name, suffix, platformSkip] of [
+	["OS-byte", Buffer.of(255), process.platform === "darwin" ? "APFS refuses non-UTF-8 file names" : false],
+	["non-ASCII UTF-8 byte", Buffer.from("\u00e9"), false],
+] as const) test(`a caller's ${name} interface directory reaches the Host byte-exact`, { skip: skip || platformSkip }, async () => {
 	const root = realpathSync(mkdtempSync(join(tmpdir(), "rui-ts-byte-interface-")));
-	const dir = Buffer.concat([Buffer.from(`${root}/run-`), Buffer.of(255)]);
+	const dir = Buffer.concat([Buffer.from(`${root}/run-`), suffix]);
 	mkdirSync(dir, { mode: 0o700 });
 	let rui: Rui | undefined;
 	try {
