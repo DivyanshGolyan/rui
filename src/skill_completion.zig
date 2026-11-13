@@ -156,9 +156,11 @@ pub const Reads = struct {
         const held = if (self.held) |*kept| (if (std.mem.startsWith(u8, typed, kept.prefix.slice())) kept else null) else null;
         const none: skill_suggestions.Page = .{};
         const page = if (held) |kept| &kept.page else &none;
-        // The read in the high half, the word's `/` in the low: a draft
-        // holds far fewer than 2^32 bytes, and reads count from 1.
-        const source = if (held) |kept| (kept.read << 32) | @as(u32, @intCast(word.slash)) else 0;
+        // What the rows come from besides the draft: the caret's word and
+        // the page read for it. The held read, else none, in the high half;
+        // one past the word's `/` in the low, so no word's list is ever the
+        // grammar's own, which is 0. A draft holds far fewer than 2^32 bytes.
+        const source = ((if (held) |kept| kept.read else 0) << 32) | (@as(u32, @intCast(word.slash)) + 1);
         const skills = rows.list(typed, page);
         if (word.slash != 0) return slash_commands.Shown.nextOf(previous, revision, source, skills);
         // Both kinds of row start the one name the caret's word holds. A
@@ -504,6 +506,47 @@ test "every list row starts the word the list was built for, at every caret of e
                         try std.testing.expect(std.mem.endsWith(u8, after, std.mem.trimEnd(u8, entry.word, " ")));
                     },
                     .edit => try std.testing.expect(std.mem.indexOf(u8, after, std.mem.trimEnd(u8, entry.word, " ")) != null),
+                }
+            }
+        }
+    }
+}
+
+test "a list stays the drawn one only while its rows are the same, across every caret move and preview" {
+    const entries = [_]skill_suggestions.Entry{
+        .{ .name = "review", .description = "Skill" },
+        .{ .name = "setup-report", .description = "Skill" },
+    };
+    const Preview = enum { absent, pending, failed, held };
+    const drafts = [_][]const u8{ "/setup --permission-mode b", "/setup ", "/copy c", "/effort hi", "/re", "/review this /re", "use /re and /se", "/se /se", "/arch.foo" };
+    for (std.enums.values(Preview)) |preview| {
+        var reads: Reads = .{};
+        var rows: Rows = .{};
+        var other: Rows = .{};
+        switch (preview) {
+            .absent => {},
+            .pending => _ = reads.ask("").?,
+            .failed => reads.fail(reads.ask("").?.read),
+            .held => _ = reads.answer(reads.ask("").?.read, testPage(&entries), ""),
+        }
+        for (drafts) |draft| {
+            for (0..draft.len + 1) |from| {
+                // A frame drew the list for the caret at `from`.
+                var drawn = reads.shown(&rows, draft, from, 1, .{ .model = "gpt-5.5" }, null) orelse continue;
+                drawn.drew(true);
+                for (0..draft.len + 1) |to| {
+                    // The caret moves; the draft and its revision do not.
+                    const next = reads.shown(&other, draft, to, 1, .{ .model = "gpt-5.5" }, drawn) orelse continue;
+                    if (next.seen != .drawn) continue;
+                    // Enter and a click act on it, so it is the list drawn.
+                    try std.testing.expectEqual(drawn.source, next.source);
+                    try std.testing.expectEqualStrings(drawn.list.typed, next.list.typed);
+                    try std.testing.expectEqual(drawn.list.count, next.list.count);
+                    for (drawn.list.shown(), next.list.shown()) |before, after| {
+                        try std.testing.expectEqualStrings(before.word, after.word);
+                        try std.testing.expectEqual(before.runs, after.runs);
+                    }
+                    try std.testing.expectEqualDeep(enter(draft, from, &drawn), enter(draft, to, &next));
                 }
             }
         }
