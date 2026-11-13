@@ -9152,6 +9152,137 @@ test "a view's page holds the outputs its entries name under no floor, a deeper 
     }.run);
 }
 
+test "a compaction that makes no room is admitted with its base's floor" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try configureTestSession(&storage, "inherited-floor-config");
+            try submitTestMessage(&storage, &tmp, "inherited-floor-one", "inherited-floor-one", session.slice(), "first");
+            const overflowed = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try std.testing.expectEqual(ModelOperationKind.assistant_response, try storage.modelOperationKind(overflowed));
+            try storage.settleModelAttemptFailure(overflowed, .{ .uncorrelated = "provider_context_overflow" }, .context_overflow, .{});
+            // A base whose floor drops the first input.
+            const base = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try std.testing.expectEqual(ModelOperationKind.compaction, try storage.modelOperationKind(base));
+            try store_testing.setHistoryFloorForTesting(&storage, base.operation_id, "first", 1);
+            const floor = try store_testing.queryU64(&storage, "SELECT history_floor FROM model_operation WHERE operation_id=?1", .{base.operation_id});
+            try settleCompactionForTesting(&storage, &tmp, base, &.{.compaction});
+            const answered = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try settleItemsForTesting(&storage, &tmp, answered, &.{"{\"type\":\"message\",\"id\":\"m0\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"answer\"}]}"}, "answer");
+            // The next Turn's request overflows: the compaction after it
+            // follows a request, not a compaction that overflowed, so it
+            // walks no deeper and keeps the base's floor.
+            try submitTestMessage(&storage, &tmp, "inherited-floor-two", "inherited-floor-two", session.slice(), "second");
+            const request = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try std.testing.expectEqual(ModelOperationKind.assistant_response, try storage.modelOperationKind(request));
+            try storage.settleModelAttemptFailure(request, .{ .uncorrelated = "provider_context_overflow" }, .context_overflow, .{});
+            const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try std.testing.expectEqual(ModelOperationKind.compaction, try storage.modelOperationKind(next));
+            try std.testing.expectEqual(floor, try store_testing.queryU64(&storage, "SELECT history_floor FROM model_operation WHERE operation_id=?1", .{next.operation_id}));
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_operation WHERE operation_id=?1 AND history_level IS NULL", .{next.operation_id}));
+            try std.testing.expect(!storage.isFenced());
+        }
+    }.run);
+}
+
+test "a model admission freezes an offer the Host's tool set no longer holds, and a later one reuses the set it saved" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            const records = comptime testingHostToolRecords(&.{
+                .{ .name = "read_page", .owner = .mcp, .server = "docs", .read_only = true, .description = "Read a page.", .input_schema = "{\"type\":\"object\"}" },
+                .{ .name = "write_page", .owner = .mcp, .server = "docs", .description = "Write a page.", .input_schema = "{\"type\":\"object\"}" },
+            });
+            const digests = comptime blk: {
+                @setEvalBranchQuota(1_000_000);
+                var out: [records.len][32]u8 = undefined;
+                for (&records, &out) |*record, *digest| digest.* = tool_defs.recordDigest(record);
+                break :blk out;
+            };
+            const host_tool_set: tool_defs.HostToolSet = .{ .records = &records, .digests = &digests };
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStoreWith(case, &storage, &tmp, std.testing.io, .{ .host_tool_set = &host_tool_set });
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            var configure = try completeConfiguration("stale-offer-one", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
+            configure.configuration.tools = try .of(&.{ "read_page", "write_page" });
+            const one = (try storage.configure(&configure, .{})).accepted.session;
+            try configure.key.set("stale-offer-two");
+            const two = (try storage.configure(&configure, .{})).accepted.session;
+            try submitTestMessage(&storage, &tmp, "stale-offer-input-one", "stale-offer-message-one", one.slice(), "one");
+            try submitTestMessage(&storage, &tmp, "stale-offer-input-two", "stale-offer-message-two", two.slice(), "two");
+            const offered = try store_testing.queryU64(&storage, "SELECT tool_set_id FROM session WHERE session_ref=?1", .{one.slice()});
+            // The Host withdraws one of the tools both Sessions offer.
+            const kept = comptime testingHostToolRecords(&.{
+                .{ .name = "read_page", .owner = .mcp, .server = "docs", .read_only = true, .description = "Read a page.", .input_schema = "{\"type\":\"object\"}" },
+            });
+            const kept_digests = comptime blk: {
+                @setEvalBranchQuota(1_000_000);
+                var out: [kept.len][32]u8 = undefined;
+                for (&kept, &out) |*record, *digest| digest.* = tool_defs.recordDigest(record);
+                break :blk out;
+            };
+            const withdrawn: tool_defs.HostToolSet = .{ .records = &kept, .digests = &kept_digests };
+            try storage.saveHostToolSet(&withdrawn);
+            const sets = try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_set", .{});
+
+            // The first admission projects the offer, finds no saved set
+            // and saves one without the withdrawn tool.
+            const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try std.testing.expectEqual(sets + 1, try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_set", .{}));
+            const frozen = try store_testing.queryU64(&storage, "SELECT tool_set_id FROM model_operation WHERE operation_id=?1", .{first.operation_id});
+            try std.testing.expect(frozen != offered);
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_set_member m JOIN tool_record t ON t.tool_record_id=m.tool_record_id WHERE m.tool_set_id=?1 AND t.name='read_page'", .{frozen}));
+            try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_set_member m JOIN tool_record t ON t.tool_record_id=m.tool_record_id WHERE m.tool_set_id=?1 AND t.name='write_page'", .{frozen}));
+
+            // The second finds the set the first saved.
+            const second = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try std.testing.expectEqual(sets + 1, try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_set", .{}));
+            try std.testing.expectEqual(frozen, try store_testing.queryU64(&storage, "SELECT tool_set_id FROM model_operation WHERE operation_id=?1", .{second.operation_id}));
+            try std.testing.expect(!storage.isFenced());
+        }
+    }.run);
+}
+
+test "an admission closes the request's view it opened when its commit fails or its settings do not settle" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            // Only a network engine's commit carries the request's reads.
+            if (case.engine != .mysql or case.rerun) return;
+            const mysql_testing = @import("mysql_testing.zig");
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try configureTestSession(&storage, "closed-view-config");
+            try submitTestMessage(&storage, &tmp, "closed-view-one", "closed-view-one", session.slice(), "one");
+            var view: HistoricalView = undefined;
+            var settings: HistoricalSettings = undefined;
+
+            // Every answer of the commit's message is lost, its settings
+            // round's with them: the admission stands, its request unread.
+            storage.engine.mysql.state.testing_drop = .after_commit;
+            const unread = (try storage.admitModelAttemptInto(.message, .{}, .{ .view = &view, .settings = &settings })).?;
+            try std.testing.expect(!unread.request_started);
+            try std.testing.expect(!view.isActive());
+            try settleItemsForTesting(&storage, &tmp, unread.permit.binding, &.{"{\"type\":\"message\",\"id\":\"m0\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"answer\"}]}"}, "answer");
+
+            // The server refuses the Operation the commit inserts.
+            try submitTestMessage(&storage, &tmp, "closed-view-two", "closed-view-two", session.slice(), "two");
+            try mysql_testing.rawExec(&storage, "CREATE TRIGGER refuse_operation BEFORE INSERT ON model_operation FOR EACH ROW SIGNAL SQLSTATE '45000'");
+            defer mysql_testing.rawExec(&storage, "DROP TRIGGER refuse_operation") catch @panic("cannot restore Operation inserts");
+            if (storage.admitModelAttemptInto(.message, .{}, .{ .view = &view, .settings = &settings })) |_| return error.TestUnexpectedResult else |_| {}
+            try std.testing.expect(!view.isActive());
+        }
+    }.run);
+}
+
 test "a request reads its settings in one round and its history and tools in one more" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
