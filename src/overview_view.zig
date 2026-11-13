@@ -532,8 +532,6 @@ pub const ModelsRead = union(enum) {
 
 const ReasoningEffort = model_capability.ReasoningEffort;
 
-/// A saved effort as the lines that name the next Session's model show it
-/// after the model, as a conversation's status line does.
 /// A read the open conversation of `reference` applied, which showed its
 /// work as `work`; `opening` when it is the read the conversation opened on.
 pub const Observed = struct { read_version: Token, reference: Reference, work: session_work.Work, last_line: ?session_list.SavedLastLine = null, opening: bool };
@@ -614,11 +612,10 @@ pub const Effect = union(enum) {
 
 pub const Provider = provider_name.Provider;
 
-/// The provider, model and saved effort prospective Sessions get.
+/// The provider and model prospective Sessions get.
 pub const Default = struct {
     provider: Provider,
     model: Bounded(model_capability.max_model_bytes),
-    effort: ?ReasoningEffort = null,
 
     pub fn of(provider: ?[]const u8, model: ?[]const u8) ?Default {
         var binding: Default = .{ .provider = std.meta.stringToEnum(Provider, provider orelse return null) orelse return null, .model = .{} };
@@ -627,7 +624,7 @@ pub const Default = struct {
     }
 
     pub fn eql(self: *const Default, other: *const Default) bool {
-        return self.provider == other.provider and self.model.eql(other.model.slice()) and self.effort == other.effort;
+        return self.provider == other.provider and self.model.eql(other.model.slice());
     }
 };
 
@@ -918,7 +915,7 @@ pub const State = struct {
     pub fn nextBinding(self: *const State) Binding {
         return .{ .provider = if (self.default) |binding| @tagName(binding.provider) else null, .model = if (self.default) |*binding| binding.model.slice() else null };
     }
-    /// The prospective default, copied for creation or read by shared settings.
+    /// The prospective provider/model, copied into an admitted creation intent.
     pub fn nextStart(self: *const State) ?Default {
         return self.default;
     }
@@ -5571,8 +5568,12 @@ test "New Session Enter and click create exactly once with a copied default" {
         const input: Event = if (click) .{ .clicked = .{ .target = .new_session } } else .{ .input = .{ .key = .enter } };
         const effects = try step(&state, input);
         try expectEffects(&.{.{ .create = state.default }}, effects);
-        state.default = null;
+        // The effect owns its bounded binding, not the mutable defaults slot.
+        state.default.?.model.set("changed-after-admission") catch unreachable;
+        state.default.?.provider = .codex;
+        try std.testing.expectEqual(Provider.openai, effects.slice()[0].create.?.provider);
         try std.testing.expectEqualStrings("gpt-6-sol", effects.slice()[0].create.?.model.slice());
+        state.default = null;
         try std.testing.expect(state.creating());
         try expectEffects(&.{}, try step(&state, .{ .input = .{ .key = .enter } }));
         try expectEffects(&.{}, try step(&state, .{ .clicked = .{ .target = .new_session } }));

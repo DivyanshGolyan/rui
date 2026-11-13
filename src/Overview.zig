@@ -332,6 +332,27 @@ const DefaultsEdit = struct {
     }
 };
 
+/// Saved settings captured once while interpreting an admitted creation effect.
+const CreationSettings = struct {
+    effort: ?model_capability.ReasoningEffort = null,
+    permission: ?protocol.PermissionMode = null,
+};
+
+/// The native creation effect owns its binding and its preference observation,
+/// including a failed read. The worker never resamples these inputs.
+const CreationSnapshot = struct {
+    binding: ?view.Default,
+    settings: anyerror!CreationSettings,
+
+    fn read(binding: ?view.Default, home: []const u8, inherit_effort: bool, load: *const fn ([]const u8) anyerror!preferences.Values) CreationSnapshot {
+        const saved: preferences.Values = if (home.len == 0) .{} else load(home) catch |err| return .{ .binding = binding, .settings = err };
+        return .{ .binding = binding, .settings = .{
+            .effort = if (inherit_effort and binding != null) saved.reasoning_effort else null,
+            .permission = saved.permission_mode,
+        } };
+    }
+};
+
 const Job = union(enum) {
     /// host-info, read as each listing starts.
     host,
@@ -341,7 +362,7 @@ const Job = union(enum) {
     lines: view.Reads,
     commands: view.Commands,
     /// A value snapshot, independent of later preference reads or key presses.
-    create: ?view.Default,
+    create: CreationSnapshot,
     stop: view.Reference,
     archive: view.ArchiveRequest,
     models,
@@ -528,8 +549,8 @@ pub fn run(init: std.process.Init, options: Options, hooks: Hooks) !?Relaunch {
 /// Stops the open Session's workers and the overview's before App releases
 /// the terminal. A Session that failed to open has no frontend to stop.
 fn stopApp(self: *Self) void {
-    self.root.settings_page.closeStandaloneChoice();
     self.root.closeMainPresentation();
+    self.root.settings_page.cancelChoice();
     self.sign_in.cancel();
     if (self.app_session) |left| if (left.frontend) |frontend| frontend.stop();
     self.worker.cancel();
@@ -668,8 +689,8 @@ fn appClick(raw: *anyopaque, ctx: *vxfw.EventContext, click: view.Click) anyerro
 fn appNext(self: *Self, ctx: *vxfw.EventContext, next: ?Next) !void {
     switch (next orelse return) {
         .leave => {
-            self.root.settings_page.closeStandaloneChoice();
             self.root.closeMainPresentation();
+            self.root.settings_page.cancelChoice();
             ctx.quit = true;
         },
         .open_settings => try self.root.openSettings(ctx),
@@ -729,11 +750,6 @@ fn appSessionLeft(raw: *anyopaque, ctx: *vxfw.EventContext, outcome: SessionFron
         .ended => |ended| left.ended = ended,
         .overview => |recovery| {
             if (recovery != .none) _ = try self.event(.{ .unconfirmed = .{ .reference = left.session, .recovery = recovery } });
-            if (self.options.selectors.needsPreferences()) {
-                if (self.savedEffort()) |effort| {
-                    if (self.state.default) |*binding| binding.effort = effort;
-                } else |_| {}
-            }
             try self.retired.append(self.init.gpa, .{ .left = left.*, .frame = self.root.frames });
             self.app_session = null;
             _ = try self.event(.{ .conversation = null });
@@ -1156,7 +1172,6 @@ fn create(init: std.process.Init, options: Options, hooks: Hooks, ops: Operation
     self.app_sessions.on_press = .{ .userdata = self, .pressed = appClick };
     try self.state.init(init.gpa, .{ .cwd = options.workspace, .home = options.home, .login_at = options.login_at, .default = .of(options.provider, options.model) });
     errdefer self.state.deinit();
-    if (self.state.default) |*binding| binding.effort = self.savedEffort() catch null;
     return self;
 }
 
@@ -1193,7 +1208,6 @@ fn closeSignIn(raw: *anyopaque, ctx: *vxfw.EventContext) !void {
 
 fn signedIn(raw: *anyopaque, ctx: *vxfw.EventContext, activation: SignIn.Activation) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
-    const effort = try self.savedEffort();
     if (!std.mem.eql(u8, self.options.store, activation.store.slice())) {
         // Only first-run selection can change the Store. Settings pins the
         // current Store, whose ongoing readers retain their borrowed path.
@@ -1201,8 +1215,7 @@ fn signedIn(raw: *anyopaque, ctx: *vxfw.EventContext, activation: SignIn.Activat
         self.signed_in_store = activation.store;
         self.options.store = self.signed_in_store.slice();
     }
-    var saved = view.Default.of(activation.binding.provider.slice(), activation.binding.model.slice());
-    if (saved) |*value| value.effort = effort;
+    const saved = view.Default.of(activation.binding.provider.slice(), activation.binding.model.slice());
     try self.appNext(ctx, try self.event(.{ .defaults_saved = saved }));
     self.state.login_at = self.realMs() / 1000;
     self.state.next_list_ms = 0;
@@ -1317,7 +1330,7 @@ fn eventResult(self: *Self, value: view.Event) !EventResult {
         },
         .read_first_lines => |reads| self.queue(.{ .lines = reads }),
         .read_commands => |reads| self.queue(.{ .commands = reads }),
-        .create => |binding| self.queue(.{ .create = binding }),
+        .create => |binding| self.queue(.{ .create = self.creationSnapshot(binding) }),
         .stop => |reference| self.queue(.{ .stop = reference }),
         .cancel_upgrade => self.upgrade_job.cancel(),
         .archive => |request| self.queue(.{ .archive = request }),
@@ -1434,9 +1447,9 @@ fn runJob(self: *Self, context: client.ReadContext) !void {
                 command.answered = true;
             }
         },
-        .create => |*binding| {
+        .create => |*snapshot| {
             var compaction_buffer: [20]u8 = undefined;
-            const input = self.creationInput(binding, &compaction_buffer) catch |err| {
+            const input = self.creationInput(snapshot, &compaction_buffer) catch |err| {
                 self.answer = .{ .reply = .refused(@errorName(err)) };
                 return;
             };
@@ -1591,24 +1604,21 @@ fn resolveDefault(state: *const view.State, saved: new_session_selection.Snapsho
     var snapshot = saved;
     snapshot.intent.provider = state.savedProvider(snapshot.intent.provider, if (snapshot.defaults.provider.len != 0) snapshot.defaults.provider.slice() else null);
     const binding = (snapshot.resolve(&.initFill(.configured)) catch return null) orelse return null;
-    var result = view.Default.of(binding.provider.slice(), binding.model.slice()) orelse return null;
-    result.effort = snapshot.defaults.reasoning_effort;
-    return result;
+    return view.Default.of(binding.provider.slice(), binding.model.slice());
 }
 
-/// The effort the saved defaults hold, as a start reads it: none when the
-/// launch named its Store, provider and model, so it reads no saved
-/// defaults, or has no home.
-fn savedEffort(self: *const Self) !?model_capability.ReasoningEffort {
-    if (!self.options.selectors.needsPreferences() or self.options.home.len == 0) return null;
-    return (try preferences.load(self.options.home)).reasoning_effort;
+/// Materialize the admitted core intent before queueing the native effect.
+/// Explicit selectors and a missing binding retain their saved-effort opt-out;
+/// permission inherits from the same observation regardless of those choices.
+fn creationSnapshot(self: *const Self, binding: ?view.Default) CreationSnapshot {
+    return .read(binding, self.options.home, self.options.selectors.needsPreferences(), preferences.load);
 }
 
 /// The captured empty-Session configuration, completed by the shared
 /// creation owner before Configure admission.
-fn creationInput(self: *const Self, binding: *const ?view.Default, compaction_buffer: *[20]u8) !configure_input.ConfigureInput {
-    const saved_effort = if (binding.*) |value| value.effort else null;
-    const saved_permission = if (self.options.home.len == 0) null else (try preferences.load(self.options.home)).permission_mode;
+fn creationInput(self: *const Self, snapshot: *const CreationSnapshot, compaction_buffer: *[20]u8) !configure_input.ConfigureInput {
+    const saved = try snapshot.settings;
+    const binding = &snapshot.binding;
     var configuration: configure_input.ConfigureInput = .{
         .store = self.options.store,
         .session = .create,
@@ -1617,7 +1627,7 @@ fn creationInput(self: *const Self, binding: *const ?view.Default, compaction_bu
         .provider = if (binding.*) |value| .{ .present = true, .value = @tagName(value.provider) } else .{},
         .model = if (binding.*) |*value| .{ .present = true, .value = value.model.slice() } else .{},
     };
-    configuration.completeCreation(if (binding.*) |value| value.provider else .codex, if (binding.*) |*value| value.model.slice() else product_defaults.recommended_model, saved_effort, saved_permission, compaction_buffer);
+    configuration.completeCreation(if (binding.*) |value| value.provider else .codex, if (binding.*) |*value| value.model.slice() else product_defaults.recommended_model, saved.effort, saved.permission, compaction_buffer);
     return configuration;
 }
 
@@ -2617,7 +2627,8 @@ test "returning from a Session refreshes saved effort in facts and app settings"
     var ctx = rig.context();
     defer ctx.cmds.deinit(std.testing.allocator);
     try appSessionLeft(rig.overview, &ctx, .returned);
-    try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, .high), rig.overview.state.default.?.effort);
+    const next_creation = rig.overview.creationSnapshot(rig.overview.state.default);
+    try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, .high), (try next_creation.settings).effort);
     const values = try rig.overview.root.settings_page.backend.?.read(rig.overview);
     try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, .high), values.reasoning_effort);
 }
@@ -6515,7 +6526,8 @@ test "Sign-in completion applies the core default and restores only a visible fo
         }
         try std.testing.expectEqual(protocol.Provider.openai, overview.state.default.?.provider);
         try std.testing.expectEqualStrings(activation.binding.model.slice(), overview.state.default.?.model.slice());
-        try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, .low), overview.state.default.?.effort);
+        const next_creation = overview.creationSnapshot(overview.state.default);
+        try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, .low), (try next_creation.settings).effort);
         try std.testing.expect(overview.state.login_at != null);
         try std.testing.expect(!overview.root.input.layer.signInOpen() and !overview.root.input.layer.settingsOpen());
         const expected = if (session_open) session.widget() else (overview.root.session orelse overview.widget());
@@ -6981,25 +6993,42 @@ test "a command read shows the bytes its operation returned" {
     try std.testing.expectEqualStrings("zig build test-store", overview.state.lines.items[shown.command.read].slice());
 }
 
-test "empty creation keeps admitted binding effort when saved defaults change before its worker runs" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const home = home_buffer[0..try tmp.dir.realPath(std.testing.io, &home_buffer)];
-    try pin(home, "codex", "gpt-6-luna");
-    _ = try preferences.update(home, .{ .reasoning_effort = .{ .set = .low } }, &.initFill(.configured));
-    var cancellation: client.Cancellation = .{};
-    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = home, .directory = "/requests", .provider = "codex", .model = "gpt-6-luna" }, fake_operations, &cancellation);
-    defer rig.close();
-    try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, .low), rig.overview.state.default.?.effort);
-    try std.testing.expect(try rig.press("\r") == null);
-    try std.testing.expect(rig.overview.state.creating());
-    _ = try preferences.update(home, .{ .reasoning_effort = .{ .set = .high } }, &.initFill(.configured));
-    try std.testing.expect(try rig.settle() == null);
-    try std.testing.expectEqual(@as(usize, 1), Seen.now.creates);
-    try std.testing.expectEqualStrings("low", Seen.now.creation.reasoning_effort.?.slice());
-    try std.testing.expectEqualStrings("n3w5es", &Seen.now.conversed);
-    try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, .high), (try preferences.load(home)).reasoning_effort);
+test "empty creation captures fresh effort and permission at admitted Enter or click before its worker runs" {
+    for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |click| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const home = home_buffer[0..try tmp.dir.realPath(std.testing.io, &home_buffer)];
+        try pin(home, "codex", "gpt-6-luna");
+        _ = try preferences.update(home, .{ .reasoning_effort = .{ .set = .low }, .permission_mode = .{ .set = .ask } }, &.initFill(.configured));
+        var cancellation: client.Cancellation = .{};
+        const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = home, .directory = "/requests", .provider = "codex", .model = "gpt-6-luna" }, fake_operations, &cancellation);
+        defer rig.close();
+        // A change after startup but BEFORE admission must be observed.
+        _ = try preferences.update(home, .{ .reasoning_effort = .{ .set = .high }, .permission_mode = .{ .set = .bypass } }, &.initFill(.configured));
+        if (click) try std.testing.expect(try rig.click(3, 0, width, 24) == null) else try std.testing.expect(try rig.press("\r") == null);
+        try std.testing.expect(rig.overview.state.creating());
+        try std.testing.expectEqual(@as(usize, 1), rig.overview.job_count);
+        const queued = &rig.overview.jobs[0].create;
+        try std.testing.expectEqualStrings("gpt-6-luna", queued.binding.?.model.slice());
+        try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, .high), (try queued.settings).effort);
+        try std.testing.expectEqual(@as(?protocol.PermissionMode, .bypass), (try queued.settings).permission);
+        // A later external save and duplicate gestures cannot resample it.
+        _ = try preferences.update(home, .{ .reasoning_effort = .{ .set = .xhigh }, .permission_mode = .{ .set = .ask } }, &.initFill(.configured));
+        try std.testing.expect(try rig.press("\r") == null);
+        try std.testing.expect(try rig.click(3, 0, width, 24) == null);
+        try std.testing.expectEqual(@as(usize, 1), rig.overview.job_count);
+        try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, .high), (try queued.settings).effort);
+        try std.testing.expectEqual(@as(?protocol.PermissionMode, .bypass), (try queued.settings).permission);
+        try std.testing.expect(try rig.settle() == null);
+        try std.testing.expectEqual(@as(usize, 1), Seen.now.creates);
+        try std.testing.expectEqualStrings("high", Seen.now.creation.reasoning_effort.?.slice());
+        try std.testing.expectEqualStrings("bypass", Seen.now.creation.permission_mode.slice());
+        try std.testing.expectEqualStrings("n3w5es", &Seen.now.conversed);
+        const after = try preferences.load(home);
+        try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, .xhigh), after.reasoning_effort);
+        try std.testing.expectEqual(@as(?protocol.PermissionMode, .ask), after.permission_mode);
+    };
 }
 
 /// Real Overview/SessionFrontend owners over canonical read-boundary fixtures.
@@ -7620,4 +7649,127 @@ test "App list selection consumes the core projection through arrivals covered S
     try fixture.leave();
     try std.testing.expect(overview.state.conversing == null);
     try Check.draw(rig);
+}
+
+test "creation snapshot reads one owned preference pair with explicit null binding absent home and errors" {
+    const Load = struct {
+        var calls: usize = 0;
+        var fail: bool = false;
+        var values: preferences.Values = .{ .reasoning_effort = .high, .permission_mode = .bypass };
+        fn read(home: []const u8) !preferences.Values {
+            calls += 1;
+            try std.testing.expectEqualStrings("/snapshot-home", home);
+            if (fail) return error.CreationPreferencesUnavailable;
+            return values;
+        }
+    };
+    Load.calls = 0;
+    Load.fail = false;
+    Load.values = .{ .reasoning_effort = .high, .permission_mode = .bypass };
+    const binding = view.Default.of("codex", "gpt-6-luna").?;
+    const captured = CreationSnapshot.read(binding, "/snapshot-home", true, Load.read);
+    try std.testing.expectEqual(@as(usize, 1), Load.calls);
+    Load.values = .{ .reasoning_effort = .low, .permission_mode = .ask };
+    try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, .high), (try captured.settings).effort);
+    try std.testing.expectEqual(@as(?protocol.PermissionMode, .bypass), (try captured.settings).permission);
+
+    // Explicit launch selectors opt out only of saved effort, not permission.
+    const explicit = CreationSnapshot.read(binding, "/snapshot-home", false, Load.read);
+    try std.testing.expectEqual(@as(usize, 2), Load.calls);
+    try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, null), (try explicit.settings).effort);
+    try std.testing.expectEqual(@as(?protocol.PermissionMode, .ask), (try explicit.settings).permission);
+    const unbound = CreationSnapshot.read(null, "/snapshot-home", true, Load.read);
+    try std.testing.expectEqual(@as(usize, 3), Load.calls);
+    try std.testing.expect(unbound.binding == null);
+    try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, null), (try unbound.settings).effort);
+    try std.testing.expectEqual(@as(?protocol.PermissionMode, .ask), (try unbound.settings).permission);
+
+    const absent = CreationSnapshot.read(binding, "", true, Load.read);
+    try std.testing.expectEqual(@as(usize, 3), Load.calls);
+    try std.testing.expectEqual(CreationSettings{}, try absent.settings);
+    Load.fail = true;
+    const failed_snapshot = CreationSnapshot.read(binding, "/snapshot-home", true, Load.read);
+    try std.testing.expectEqual(@as(usize, 4), Load.calls);
+    try std.testing.expectError(error.CreationPreferencesUnavailable, failed_snapshot.settings);
+    const explicit_failed = CreationSnapshot.read(binding, "/snapshot-home", false, Load.read);
+    try std.testing.expectEqual(@as(usize, 5), Load.calls);
+    try std.testing.expectError(error.CreationPreferencesUnavailable, explicit_failed.settings);
+
+    // The ordinary worker input consumes copied settings and never invents
+    // a missing provider/model merely to attach a saved effort.
+    const rig = try openOverview();
+    defer rig.close();
+    var buffer: [20]u8 = undefined;
+    const input = try rig.overview.creationInput(&unbound, &buffer);
+    try std.testing.expect(input.require_model);
+    try std.testing.expect(!input.provider.present and !input.model.present);
+    try std.testing.expectEqualStrings("ask", input.permission_mode.value);
+    const defaults = try rig.overview.creationInput(&absent, &buffer);
+    try std.testing.expectEqualStrings(product_defaults.permission_mode, defaults.permission_mode.value);
+    try std.testing.expectError(error.CreationPreferencesUnavailable, rig.overview.creationInput(&failed_snapshot, &buffer));
+    try std.testing.expectEqual(@as(usize, 5), Load.calls);
+}
+
+test "creation preference read failure is retained through repair and ordinary refusal then retry" {
+    const File = struct {
+        fn write(dir: std.Io.Dir, bytes: []const u8) !void {
+            const file = try dir.createFile(std.testing.io, ".config/rui/preferences", .{ .permissions = .fromMode(0o600) });
+            defer file.close(std.testing.io);
+            try file.writePositionalAll(std.testing.io, bytes, 0);
+        }
+        const valid = "version=4\nstore=\nprovider=codex\nmodel=gpt-6-luna\nnotifications=on\nreasoning_effort=high\npermission_mode=bypass\n";
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const home = path[0..try tmp.dir.realPath(std.testing.io, &path)];
+    try pin(home, "codex", "gpt-6-luna");
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = home, .directory = "/requests", .provider = "codex", .model = "gpt-6-luna" }, fake_operations, &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+    try File.write(tmp.dir, "version=unreadable\n");
+    // Unrelated open, unknown bytes, covered Enter and pasted Enter never
+    // materialize a creation effect merely because preferences are broken.
+    try std.testing.expect(try rig.next(try overview.event(.{ .open = "k7m2qx".* })) == null);
+    try std.testing.expect(try rig.press("unknown\x1b[1114112u") == null);
+    var ctx = rig.context();
+    defer ctx.cmds.deinit(std.testing.allocator);
+    const enter: vxfw.Event = .{ .key_press = .{ .codepoint = vaxis.Key.enter } };
+    try appKey(overview, &ctx, enter, .{ .under = .settings, .pasted = false });
+    try appKey(overview, &ctx, enter, .{ .under = .main, .pasted = true });
+    // Opening legitimately requests the shared model menu, not creation
+    // settings. Settle that independent read before inspecting admission.
+    for (overview.jobs[0..overview.job_count]) |job| try std.testing.expect(job != .create);
+    try std.testing.expectEqual(@as(usize, 0), overview.state.request_count);
+    try std.testing.expect(try rig.settle() == null);
+    const opened = Seen.now.conversations;
+
+    try std.testing.expect(try rig.press("\x1b[H\r") == null);
+    try std.testing.expectEqual(@as(usize, 1), overview.job_count);
+    try std.testing.expectError(error.UnsupportedPreferencesVersion, overview.jobs[0].create.settings);
+    // Repair does not replace the failed observation already owned by this
+    // admitted effect. Pending duplicate keys cannot observe the repair.
+    try File.write(tmp.dir, File.valid);
+    try std.testing.expect(try rig.press("\r") == null);
+    try std.testing.expect(try rig.click(3, 0, 140, 24) == null);
+    try std.testing.expectEqual(@as(usize, 1), overview.job_count);
+    try std.testing.expectError(error.UnsupportedPreferencesVersion, overview.jobs[0].create.settings);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqual(@as(usize, 0), Seen.now.creates);
+    try std.testing.expectEqual(opened, Seen.now.conversations);
+    try std.testing.expect(!overview.state.creating());
+    // The ordinary on-screen refusal retires its ledger entry, allowing a
+    // fresh intent; only an unknown answer would retain creation custody.
+    try std.testing.expectEqual(@as(usize, 0), overview.state.request_count);
+    try std.testing.expect(std.mem.indexOf(u8, overview.state.notice.?.text(), "Not created") != null);
+    try std.testing.expect(std.mem.indexOf(u8, overview.state.notice.?.text(), "UnsupportedPreferencesVersion") != null);
+
+    try std.testing.expect(try rig.press("\r") == null);
+    try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, .high), (try overview.jobs[0].create.settings).effort);
+    try std.testing.expectEqual(@as(?protocol.PermissionMode, .bypass), (try overview.jobs[0].create.settings).permission);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqual(@as(usize, 1), Seen.now.creates);
+    try std.testing.expectEqualStrings("high", Seen.now.creation.reasoning_effort.?.slice());
+    try std.testing.expectEqualStrings("bypass", Seen.now.creation.permission_mode.slice());
 }

@@ -2519,7 +2519,7 @@ Each frame clears every line to the skin's ground, draws its spans in 24-bit col
 `NO_COLOR` frames carry no colour at all: the band and the selection are reverse video.
 
 Enter on the pinned `+ New Session` row (Home then Enter), or one click on it, captures Configure only, creates an empty Session with zero Messages and opens that reference through the existing `SessionFrontend`, with its chat input focused.
-`configure_input.ConfigureInput.completeCreation` completes the copied prospective binding with the Workspace, provider/model, saved effort and permission mode; captured Configure and `Requests.sendCaptured` use the existing request ledger.
+The core admits creation and emits its copied provider/model binding. While interpreting that effect, the native owner reads saved preferences once and copies effort and permission mode (or the read failure) into the queued creation snapshot; neither a default-state effort cache nor the worker rereads them. `configure_input.ConfigureInput.completeCreation` completes that snapshot with the Workspace and provider/model; captured Configure and `Requests.sendCaptured` use the existing request ledger.
 No Message or Turn receipt is synthesized. Only sending text from the chat admits a Message.
 The single pure list projection in `overview_view.visible` omits a listed row whose `first_message` is null, except when it names the currently open Session.
 The shared `overview_view.title` names that current empty row `New Session`, using the pinned control’s words rather than its raw reference; first Message admission restores the normal Label/first-line/reference naming precedence.
@@ -2552,7 +2552,7 @@ Every successful pick saves the default for future Sessions through the same pre
 Esc closes the choice before app settings, and leaving without a pick writes nothing.
 A pending or failed save is shown on the Model field; a failed save is not silently retried.
 The prospective binding comes from the launch selectors and saved defaults, without an overview per-start override.
-`Overview.savedEffort` supplies saved effort only when the launch reads defaults; `ConfigureInput.completeCreation` completes the new empty Session’s captured configuration.
+The admitted creation snapshot supplies saved effort only when the launch uses defaults and has a resolved binding; `ConfigureInput.completeCreation` completes the new empty Session’s captured configuration. Saved permission and effort are copied from the same admission-time preference observation. App Settings reads its saved page values directly; the removed overview footer has no standalone Settings choice or cached creation-effort projection. Per-Session footer choices remain owned by Chat Info.
 A start the Host refuses for want of the start's sign-in (`model_capability_unavailable`) says which sign-in is missing and its login command.
 Scripts use `session start` with stdin.
 A first word naming a former top-level command (for example `configure`, `message` or `recover`) is refused with its resource-first replacement before capture, Host contact or terminal entry.

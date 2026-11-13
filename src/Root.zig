@@ -104,7 +104,7 @@ pub fn openSettings(self: *Self, ctx: *vxfw.EventContext) !void {
 /// The sign-in page covers the main pane or settings until it closes back.
 pub fn openSignIn(self: *Self, ctx: *vxfw.EventContext) !void {
     self.closeMainPresentation();
-    self.settings_page.closeStandaloneChoice();
+    self.settings_page.cancelChoice();
     try self.navigate(ctx, .open_sign_in);
 }
 
@@ -147,7 +147,7 @@ fn apply(self: *Self, ctx: *vxfw.EventContext, effects: app_input.Effects, route
         .cancel_choice => self.settings_page.cancelChoice(),
         .reset => {
             self.closeMainPresentation();
-            self.settings_page.closeStandaloneChoice();
+            self.settings_page.cancelChoice();
             self.settings_page.keys_open = false;
         },
     }
@@ -185,7 +185,7 @@ pub fn closeSession(self: *Self, ctx: *vxfw.EventContext) !void {
     self.closeMainPresentation();
     self.session = null;
     self.session_keys = null;
-    if (!self.input.layer.settingsOpen()) self.settings_page.closeStandaloneChoice();
+    if (!self.input.layer.settingsOpen()) self.settings_page.cancelChoice();
     if (self.input.layer == .main) try ctx.requestFocus(self.overview);
     ctx.redraw = true;
 }
