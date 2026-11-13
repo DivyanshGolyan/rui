@@ -3512,9 +3512,20 @@ test "real SQLite full during import publishes no canonical prefix" {
         configure: {
             const entry = try store_core.enter(&storage, .none);
             defer entry.release();
-            var a: store_access.Access(.write, error{SessionUpdateFailed}) = .open(&entry);
-            defer a.deinit();
-            break :configure a.end(.{}, configuration_domain.configure(&a, storage.io, storage.served, &command, null, null, null, std.heap.c_allocator, null, .{}));
+            var reply: configuration_domain.ConfigureReply = undefined;
+            var configuring: command_domain.Configure = .{ .input = .{
+                .io = storage.io,
+                .served = storage.served,
+                .tools = storage.hostTools(),
+                .command = &command,
+                .preset = null,
+                .initial_skills = null,
+                .reload_capture = null,
+                .allocator = std.heap.c_allocator,
+                .committed = null,
+                .reply = &reply,
+            } };
+            break :configure transition.run(&entry, command_domain.Configure, &configuring, .{});
         },
     );
     try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.sqliteDatabase()));

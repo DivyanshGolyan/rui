@@ -700,15 +700,21 @@ pub const Store = struct {
         committed: ?CreationCommitted,
         faults: Faults,
     ) error{OutOfMemory}!ConfigureReply {
-        const entry = enter(self, .none) catch return .infrastructure_failure;
-        defer entry.release();
-        var access: Access(.write, error{SessionUpdateFailed}) = .open(&entry);
-        defer access.deinit();
-        // Running out of memory, the caller's for a reload or the engine's,
-        // rolls the write back cleanly and is the caller's to answer.
-        var reply = entry.finishTransaction(error{OutOfMemory}, faults, access.end(faults, configuration_domain.configure(&access, self.io, self.served, command, preset, initial_skills, reload_capture, allocator, committed, faults))) catch |err| switch (err) {
+        var reply: ConfigureReply = undefined;
+        transition.apply(self, command_domain.Configure, .{
+            .io = self.io,
+            .served = self.served,
+            .tools = self.hostTools(),
+            .command = command,
+            .preset = preset,
+            .initial_skills = initial_skills,
+            .reload_capture = reload_capture,
+            .allocator = allocator,
+            .committed = committed,
+            .reply = &reply,
+        }, faults) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            else => .infrastructure_failure,
+            else => reply = .infrastructure_failure,
         };
         if (reply == .rejected)
             reply.rejected.message = configuration_domain.missingToolMessage(self.hostTools().host_tool_set, reply.rejected.code, &command.configuration.tools);

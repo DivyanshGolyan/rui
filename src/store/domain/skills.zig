@@ -83,19 +83,11 @@ const insert_instruction = rsql.Write(.{
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
-/// Appends both immutable metadata and ordinary instruction bytes in the caller's
-/// transaction. The caller settles its command/tool result in that transaction.
-pub fn append(a: anytype, session: rsql.SessionHead, encoded: []const u8, instruction: ?[]const u8, faults: store_core.Faults) !void {
-    var appending: Appending = .{ .session = session, .encoded = encoded, .instruction = instruction };
-    appending.queue(a);
-    try a.run();
-    try appending.finish(a, faults);
-}
-
-/// `append` as one round its caller runs: `queue` queues the lookup of
-/// both values' rows and, with an instruction, the Session's last entry
-/// ordinal; `finish`, after that round, queues the snapshot and the
-/// instruction. A transition keeps it in its value, so the round's rows
+/// Appends both immutable metadata and ordinary instruction bytes in the
+/// caller's transaction, which settles its command or tool result, in one
+/// round its caller runs: `queue` queues the lookup of both values' rows
+/// and, with an instruction, the Session's last entry ordinal; `finish`,
+/// after that round, queues the snapshot and the instruction. A transition keeps it in its value, so the round's rows
 /// land there and its reads bind the Session's reference in place.
 pub const Appending = struct {
     session: rsql.SessionHead,
@@ -145,47 +137,164 @@ pub const Appending = struct {
 
 /// A writer reads its actual current catalog, not the shell's earlier guess.
 /// Concurrent same-candidate reloads therefore append at most one delta.
+/// `Reloading` in rounds its caller runs.
 pub fn reload(a: anytype, allocator: std.mem.Allocator, session: rsql.SessionHead, candidate: catalog.Catalog, faults: store_core.Faults) !Result {
-    const previous = try read(a, allocator, &session.ref);
-    const delta = try catalog.diff(allocator, previous, candidate);
-    if (delta.isEmpty()) return .{ .bytes = "Skills are unchanged.", .succeeded = true, .reload_status = .unchanged };
-    const encoded = try catalog.encodeCatalog(allocator, candidate);
-    const instruction = try catalog.deltaInstruction(allocator, delta);
-    try append(a, session, encoded, instruction, faults);
-    return .{ .bytes = "Skills catalog reloaded.", .succeeded = true, .reload_status = .reloaded };
+    var reloading: Reloading = .init(session, candidate, allocator);
+    defer reloading.deinit();
+    var ran: ?ReloadRound = null;
+    while (true) switch (try reloading.step(a, faults, ran)) {
+        // `readRaw` read its window when the step asked for it.
+        .round => |at| {
+            if (at != .window) try a.run();
+            ran = at;
+        },
+        .reloaded => |result| return result,
+    };
 }
 
-pub fn read(a: anytype, allocator: std.mem.Allocator, session: []const u8) !catalog.Catalog {
-    const workspace = try allocator.create(Bounded(workspace_path.max_bytes));
-    var row: latest.Row = .{ .workspace = workspace, .session = undefined, .catalog_content_id = null, .byte_length = null, .digest = null };
-    const access = @import("../access.zig");
-    var found: access.Found = .missing;
-    a.readInto(latest, .{ .session = session }, &row, &found);
-    try a.run();
-    if (!found.get()) return error.SessionNotFound;
-    const id = row.catalog_content_id orelse return .{ .entries = &.{} };
-    if (row.private != false or !row.source_consistent) return error.CorruptStore;
-    const position = row.catalog_position orelse return error.CorruptStore;
-    const length = row.byte_length orelse return error.CorruptStore;
-    const digest = row.digest orelse return error.CorruptStore;
-    if (length > catalog.max_catalog_bytes) return error.CorruptStore;
-    // Encoded JSON is parse scratch, not another request-arena catalog.
-    const bytes = try std.heap.c_allocator.alloc(u8, @intCast(length));
-    defer std.heap.c_allocator.free(bytes);
-    var offset: usize = 0;
-    while (offset < bytes.len) {
-        const end = @min(offset + content.verified_window_bytes, bytes.len);
-        try a.readRaw(id.get(), offset, bytes[offset..end]);
-        offset = end;
-    }
-    if (!std.mem.eql(u8, &content_string.digest(bytes), &digest)) return error.CorruptStore;
-    const decoded = catalog.decodeCatalog(allocator, bytes) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => return error.CorruptStore,
+/// `Reading` in rounds its caller runs. noinline: its value stays off
+/// its caller's frame, which sits on the main thread's deepest chain.
+pub noinline fn read(a: anytype, allocator: std.mem.Allocator, session: []const u8) !catalog.Catalog {
+    var reading: Reading = .{ .session = session, .allocator = allocator };
+    defer reading.deinit();
+    var ran: ?ReadRound = null;
+    while (true) switch (try reading.step(a, ran)) {
+        // `readRaw` read its window when the step asked for it.
+        .round => |at| {
+            if (at != .window) try a.run();
+            ran = at;
+        },
+        .read => |value| return value,
     };
-    if (position == 0 and decoded.entries.len != 0) return error.CorruptStore;
-    return decoded;
 }
+
+/// The rounds reading a Session's latest catalog asks for, in order: its
+/// snapshot's row, then its bytes, one `readRaw` window a round.
+pub const ReadRound = enum { latest, window };
+
+/// Reads a Session's latest catalog one round at a time: `ran` is the
+/// round that just ran, null for the first step. A transition keeps it in
+/// its value, so the row lands there; `deinit` frees its scratch on any
+/// path.
+pub const Reading = struct {
+    /// The caller's, which outlives the rounds: the read binds it in place.
+    session: []const u8,
+    /// The catalog's, and the row's Workspace's.
+    allocator: std.mem.Allocator,
+    row: latest.Row = undefined,
+    found: @import("../access.zig").Found = .missing,
+    /// The snapshot's encoded JSON: parse scratch, not another
+    /// request-arena catalog.
+    bytes: []u8 = &.{},
+    /// How much of `bytes` the windows so far asked for.
+    offset: usize = 0,
+
+    pub const Step = union(enum) { round: ReadRound, read: catalog.Catalog };
+
+    pub fn step(reading: *Reading, a: anytype, ran: ?ReadRound) !Step {
+        const at = ran orelse {
+            const workspace = try reading.allocator.create(Bounded(workspace_path.max_bytes));
+            reading.row = .{ .workspace = workspace, .session = undefined, .catalog_content_id = null, .byte_length = null, .digest = null };
+            a.readInto(latest, .{ .session = reading.session }, &reading.row, &reading.found);
+            return .{ .round = .latest };
+        };
+        if (at == .latest) {
+            if (!reading.found.get()) return error.SessionNotFound;
+            const row = &reading.row;
+            if (row.catalog_content_id == null) return .{ .read = .{ .entries = &.{} } };
+            if (row.private != false or !row.source_consistent) return error.CorruptStore;
+            if (row.catalog_position == null) return error.CorruptStore;
+            const length = row.byte_length orelse return error.CorruptStore;
+            if (row.digest == null) return error.CorruptStore;
+            if (length > catalog.max_catalog_bytes) return error.CorruptStore;
+            reading.bytes = try std.heap.c_allocator.alloc(u8, @intCast(length));
+        }
+        return reading.nextWindow(a);
+    }
+
+    /// The next window, or the catalog once every byte is read.
+    fn nextWindow(reading: *Reading, a: anytype) !Step {
+        const bytes = reading.bytes;
+        const row = &reading.row;
+        if (reading.offset < bytes.len) {
+            const end = @min(reading.offset + content.verified_window_bytes, bytes.len);
+            try a.readRaw(row.catalog_content_id.?.get(), reading.offset, bytes[reading.offset..end]);
+            reading.offset = end;
+            return .{ .round = .window };
+        }
+        defer reading.deinit();
+        if (!std.mem.eql(u8, &content_string.digest(bytes), &row.digest.?)) return error.CorruptStore;
+        const decoded = catalog.decodeCatalog(reading.allocator, bytes) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.CorruptStore,
+        };
+        if (row.catalog_position.? == 0 and decoded.entries.len != 0) return error.CorruptStore;
+        return .{ .read = decoded };
+    }
+
+    pub fn deinit(reading: *Reading) void {
+        std.heap.c_allocator.free(reading.bytes);
+        reading.bytes = &.{};
+    }
+};
+
+/// The rounds reloading a catalog asks for, in order: reading the saved
+/// one (`ReadRound`), then, when it changed, appending the candidate.
+pub const ReloadRound = enum { latest, window, append };
+
+/// Reloads a Session's catalog one round at a time: reads the saved one,
+/// and appends the candidate and its delta's instruction when they
+/// differ. A transition keeps it in its value; `deinit` frees its scratch
+/// on any path. Built in place (`init`), as its read binds its Session.
+pub const Reloading = struct {
+    session: rsql.SessionHead,
+    /// The caller's, which outlive the transaction, as `allocator`'s
+    /// encoded catalog and instruction do.
+    candidate: catalog.Catalog,
+    allocator: std.mem.Allocator,
+    phase: union(enum) { reading: Reading, appending: Appending },
+
+    pub const Step = union(enum) { round: ReloadRound, reloaded: Result };
+
+    pub fn init(session: rsql.SessionHead, candidate: catalog.Catalog, allocator: std.mem.Allocator) Reloading {
+        return .{ .session = session, .candidate = candidate, .allocator = allocator, .phase = .{ .reading = .{ .session = &.{}, .allocator = allocator } } };
+    }
+
+    pub fn step(reloading: *Reloading, a: anytype, faults: store_core.Faults, ran: ?ReloadRound) !Step {
+        const read_ran: ?ReadRound = if (ran) |at| switch (at) {
+            .latest => .latest,
+            .window => .window,
+            .append => {
+                try reloading.phase.appending.finish(a, faults);
+                return .{ .reloaded = .{ .bytes = "Skills catalog reloaded.", .succeeded = true, .reload_status = .reloaded } };
+            },
+        } else null;
+        const reading = &reloading.phase.reading;
+        reading.session = &reloading.session.ref;
+        const previous = switch (try reading.step(a, read_ran)) {
+            .round => |at| return .{ .round = switch (at) {
+                .latest => .latest,
+                .window => .window,
+            } },
+            .read => |value| value,
+        };
+        const allocator = reloading.allocator;
+        const delta = try catalog.diff(allocator, previous, reloading.candidate);
+        if (delta.isEmpty()) return .{ .reloaded = .{ .bytes = "Skills are unchanged.", .succeeded = true, .reload_status = .unchanged } };
+        const encoded = try catalog.encodeCatalog(allocator, reloading.candidate);
+        const instruction = try catalog.deltaInstruction(allocator, delta);
+        reloading.phase = .{ .appending = .{ .session = reloading.session, .encoded = encoded, .instruction = instruction } };
+        reloading.phase.appending.queue(a);
+        return .{ .round = .append };
+    }
+
+    pub fn deinit(reloading: *Reloading) void {
+        switch (reloading.phase) {
+            .reading => |*reading| reading.deinit(),
+            .appending => {},
+        }
+    }
+};
 
 pub const Failure = struct {
     code: enum { unknown_session, unknown_skill, skill_file_unavailable, skill_file_too_large, skill_text_invalid, skills_unavailable },
@@ -203,19 +312,10 @@ pub const Failure = struct {
     }
 };
 
-/// Ordinary immutable rejected-command outcome; its typed code, not wording,
-/// controls the native caller's repair guidance and survives keyed replay.
-/// noinline: its value stays off its caller's frame, which sits on the
-/// engine thread's deepest chain under configure.
-pub noinline fn importFailure(a: anytype, bytes: []const u8, faults: store_core.Faults) !u64 {
-    var importing: ImportingFailure = .{ .bytes = bytes };
-    importing.lookup(a);
-    try a.run();
-    return importing.import(a, faults);
-}
-
-/// `importFailure` as one round its caller runs: `lookup` queues the
-/// lookup of the outcome's row, and `import`, after that round, its id.
+/// Ordinary immutable rejected-command outcome, in one round its caller
+/// runs: `lookup` queues the lookup of the outcome's row, and `import`,
+/// after that round, its id. Its typed code, not wording, controls the
+/// native caller's repair guidance and survives keyed replay.
 pub const ImportingFailure = struct {
     /// The caller's, which outlive the transaction.
     bytes: []const u8,

@@ -15186,6 +15186,63 @@ test "skills native reload validates targets after replay without changing ordin
     }.run);
 }
 
+test "a skills reload is refused when it carries settings or has no catalog, and saves a failed capture's diagnostic" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try store_testing.configureTestSession(&storage, "reload-failed-create");
+            var command: wire_request.ConfigureCommand = .{ .session = session, .reload_skills = true };
+            try command.key.set("reload-failed");
+            const diagnostic = "Rui could not reload skills: the scan failed. The previous catalog is unchanged.";
+            const failed: skills_fixture_domain.Capture = .{ .failed = .{ .code = .skills_unavailable, .bytes = diagnostic } };
+            const refused = try storage.configureWithCapturedSkills(&command, null, null, &failed, std.testing.allocator, .{});
+            try std.testing.expect(refused == .rejected and !refused.rejected.replayed);
+            try std.testing.expectEqual(protocol.ConfigurationRejection.skills_unavailable, refused.rejected.code);
+            const diagnostic_id = try store_testing.queryU64(&storage, "SELECT primary_content_id FROM core_command WHERE command_key=?1 AND accepted=0 AND code='skills_unavailable'", .{command.key.slice()});
+            var reader: ContentReader = undefined;
+            reader.open(try storage.openContent(try testingContentReference(&storage, diagnostic_id)));
+            defer reader.close();
+            var bytes: [diagnostic.len]u8 = undefined;
+            try std.testing.expectEqual(bytes.len, try reader.read(0, &bytes));
+            try std.testing.expectEqualStrings(diagnostic, &bytes);
+            // A replay answers the saved refusal, whatever the Host captures now.
+            const replay = try storage.configureWithCapturedSkills(&command, null, null, null, std.testing.allocator, .{});
+            try std.testing.expect(replay == .rejected and replay.rejected.replayed);
+            try std.testing.expectEqual(protocol.ConfigurationRejection.skills_unavailable, replay.rejected.code);
+            try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_skill_catalog", .{}));
+            // A reload changes nothing else: one that carries a setting, or
+            // requires a model, is refused before its capture is read.
+            const empty: skills_fixture_domain.Capture = .{ .reload = .{ .entries = &.{} } };
+            for (0..2) |index| {
+                var mixed: wire_request.ConfigureCommand = .{ .session = session, .reload_skills = true };
+                try mixed.key.set(if (index == 0) "reload-with-label" else "reload-requiring-model");
+                if (index == 0) {
+                    mixed.configuration.label.state = .value;
+                    try mixed.configuration.label.value.set("renamed");
+                } else mixed.require_model = true;
+                const answer = try storage.configureWithCapturedSkills(&mixed, null, null, &empty, std.testing.allocator, .{});
+                try std.testing.expect(answer == .rejected and !answer.rejected.replayed);
+                try std.testing.expectEqual(protocol.ConfigurationRejection.incomplete_initial_configuration, answer.rejected.code);
+            }
+            // Without a catalog to reload, the skills are unavailable.
+            const invocation: skills_fixture_domain.Capture = .{ .invocation = "a model tool's capture" };
+            for ([_]?*const skills_fixture_domain.Capture{ null, &invocation }, 0..) |captured, index| {
+                var uncaptured: wire_request.ConfigureCommand = .{ .session = session, .reload_skills = true };
+                try uncaptured.key.set(if (index == 0) "reload-uncaptured" else "reload-invocation");
+                const answer = try storage.configureWithCapturedSkills(&uncaptured, null, null, captured, std.testing.allocator, .{});
+                try std.testing.expect(answer == .rejected and !answer.rejected.replayed);
+                try std.testing.expectEqual(protocol.ConfigurationRejection.skills_unavailable, answer.rejected.code);
+            }
+            try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_skill_catalog", .{}));
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_revision", .{}));
+        }
+    }.run);
+}
+
 test "skills saved catalog read retains only decoded result metadata" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
