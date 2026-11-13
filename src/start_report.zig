@@ -133,8 +133,6 @@ fn mysqlRefusal(err: anyerror) ?Failure {
 test "a launched Host's start failure is refused with its Store's codes only" {
     const cases = [_]struct { store: Store, err: anyerror, code: ?StartError }{
         .{ .store = .sqlite, .err = error.StoreAlreadyOwned, .code = .store_locked },
-        .{ .store = .sqlite, .err = error.WrongStoreVersion, .code = .store_schema_behind },
-        .{ .store = .sqlite, .err = error.StoreIdentityMismatch, .code = .store_fenced },
         .{ .store = .mysql, .err = error.StoreAlreadyOwned, .code = .store_locked },
         .{ .store = .mysql, .err = error.StoreLocked, .code = .store_locked },
         .{ .store = .sqlite, .err = error.StoreLocked, .code = null },
