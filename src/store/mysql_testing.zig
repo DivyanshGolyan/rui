@@ -672,8 +672,9 @@ test "store.mysql live admission refuses statement binlogging" {
 }
 
 const store_core = @import("Store.zig");
-const store_access = @import("access.zig");
 const transition = @import("transition.zig");
+const TestingAsk = @import("tests.zig").TestingAsk;
+const TestingScript = @import("tests.zig").TestingScript;
 const Mysql = @import("engine/Mysql.zig");
 const live_noop = rsql.Write(.{
     .sql = "UPDATE store_owner SET epoch=epoch WHERE owner_key=1",
@@ -859,20 +860,35 @@ test "store.mysql live first Access guard survives a later duplicate and keeps f
     defer storage.close() catch unreachable;
     const duplicate: live_insert.Args = .{ .id = 9000010, .digest = protocol.contentDigest("duplicate-after-guard") };
     _ = try liveWrite(&storage, live_insert, duplicate);
-    const entry = try store_core.enter(&storage, .none);
-    defer entry.release();
-    var access: store_access.Access(.write, error{LiveGuard}) = .open(&entry);
-    defer access.deinit();
-    const queries_before = storage.engine.mysql.state.connection.queries;
-    access.write(live_guard, .{});
-    access.write(live_insert, duplicate);
-    try std.testing.expectError(error.LiveGuard, access.run());
-    // Distinct SQL pointers attribute the first client guard, not the
-    // duplicate-key ERR drained from the second statement in the batch.
-    try std.testing.expect(access.failedOn(live_guard));
-    try std.testing.expect(!access.failedOn(live_insert));
-    try std.testing.expectEqual(@as(u64, 1), storage.engine.mysql.state.connection.queries - queries_before);
-    try access.abandon(.{});
+    const Guarded = struct {
+        pub const Guards = error{LiveGuard};
+        storage: *Store,
+        duplicate: live_insert.Args,
+        queries: u64 = 0,
+        sent: ?u64 = null,
+
+        pub fn step(b: *@This(), r: anytype, ran: u32) !TestingAsk {
+            if (ran != 0) return .done;
+            b.queries = b.storage.engine.mysql.state.connection.queries;
+            r.write(live_guard, .{});
+            r.write(live_insert, b.duplicate);
+            return .round;
+        }
+
+        /// The round's one message, before the rollback.
+        pub fn failed(b: *@This()) void {
+            b.sent = b.storage.engine.mysql.state.connection.queries - b.queries;
+        }
+    };
+    {
+        const entry = try store_core.enter(&storage, .none);
+        defer entry.release();
+        var guarded: Guarded = .{ .storage = &storage, .duplicate = duplicate };
+        // The first client guard, not the duplicate-key ERR drained from
+        // the second statement in the batch, is the round's failure.
+        try std.testing.expectError(error.LiveGuard, TestingScript(Guarded).run(&entry, &guarded));
+        try std.testing.expectEqual(@as(?u64, 1), guarded.sent);
+    }
     try std.testing.expect(!storage.engine.inTransaction());
     try std.testing.expect(storage.engine.mysql.state.connection.isReady());
     try std.testing.expectEqual(@as(u64, 1), try liveWrite(&storage, live_noop, .{}));
@@ -886,10 +902,6 @@ test "store.mysql live abandoning an Access drains an already-sent large content
         var storage: Store = undefined;
         try openLive(&storage, &tmp);
         defer storage.close() catch unreachable;
-        const entry = try store_core.enter(&storage, .none);
-        defer entry.release();
-        var access: store_access.Access(.write, error{LiveGuard}) = .open(&entry);
-        defer access.deinit();
         // A batch as small as a server with small packets leaves, so a
         // chunk's INSERT streams as a statement of its own.
         const wire_connection = &storage.engine.mysql.state.connection;
@@ -899,20 +911,39 @@ test "store.mysql live abandoning an Access drains an already-sent large content
         const bytes = try std.testing.allocator.alloc(u8, 32 * 1024);
         defer std.testing.allocator.free(bytes);
         @memset(bytes, 'x');
-        access.write(live_insert, .{ .id = 9000030, .digest = protocol.contentDigest(bytes), .length = bytes.len });
-        try access.run();
-        access.writeContent(9000030, bytes);
-        if (duplicate) {
-            // Resolve the first insert, then leave a duplicate-key ERR unread.
-            // Discarding that ordinary statement error must still allow rollback.
-            try access.run();
-            access.writeContent(9000030, bytes);
+        const Chunks = struct {
+            pub const Guards = error{LiveGuard};
+            storage: *Store,
+            bytes: []const u8,
+            duplicate: bool,
+
+            pub fn step(b: *@This(), r: anytype, ran: u32) !TestingAsk {
+                switch (ran) {
+                    0 => {
+                        r.write(live_insert, .{ .id = 9000030, .digest = protocol.contentDigest(b.bytes), .length = b.bytes.len });
+                        return .round;
+                    },
+                    1 => {
+                        r.writeContent(9000030, b.bytes);
+                        // Resolve the first insert, then leave a duplicate-key ERR unread.
+                        // Discarding that ordinary statement error must still allow rollback.
+                        if (b.duplicate) return .round;
+                    },
+                    else => r.writeContent(9000030, b.bytes),
+                }
+                // No pass after writeContent: bind has already sent the oversized query,
+                // but the writer has not read its response when the step ends done.
+                try std.testing.expect(b.storage.engine.mysql.state.long_query);
+                try std.testing.expect(!b.storage.engine.mysql.state.connection.isReady());
+                return .done;
+            }
+        };
+        {
+            const entry = try store_core.enter(&storage, .none);
+            defer entry.release();
+            var chunks: Chunks = .{ .storage = &storage, .bytes = bytes, .duplicate = duplicate };
+            try TestingScript(Chunks).run(&entry, &chunks);
         }
-        // No pass after writeContent: bind has already sent the oversized query,
-        // but Access has not read its response when the caller abandons the work.
-        try std.testing.expect(storage.engine.mysql.state.long_query);
-        try std.testing.expect(!storage.engine.mysql.state.connection.isReady());
-        try access.abandon(.{});
         try std.testing.expect(!storage.engine.inTransaction());
         try std.testing.expect(storage.engine.mysql.state.connection.isReady());
         try std.testing.expectEqual(@as(u64, 0), try queryU64(&storage, "SELECT count(*) FROM content WHERE content_id=9000030", .{}));
@@ -932,34 +963,49 @@ test "store.mysql live content chunks ride the round of their row, and a stop mi
     const bytes = try std.testing.allocator.alloc(u8, length);
     defer std.testing.allocator.free(bytes);
     @memset(bytes, 'y');
+    const Streamed = struct {
+        pub const Guards = error{LiveGuard};
+        storage: *Store,
+        bytes: []const u8,
+        stopped: bool,
+        id: u64 = 0,
+        shape: @TypeOf(@as(Mysql.State, undefined).testing_shape) = undefined,
+
+        pub fn step(b: *@This(), r: anytype, _: u32) !TestingAsk {
+            b.id = try r.identity(.content_id);
+            r.write(live_insert, .{ .id = b.id, .digest = protocol.contentDigest(b.bytes), .length = b.bytes.len });
+            r.recordContentRow(b.id);
+            const sink = try r.contentSink(b.id, b.bytes.len);
+            if (!b.stopped) {
+                try sink.write(b.bytes, 0);
+                sink.close();
+                return .commit;
+            }
+            // The source stops here: close pads the chunk begun, and the
+            // abandoned batch is never sent.
+            try sink.write(b.bytes[0..7], 0);
+            sink.close();
+            b.shape = b.storage.engine.mysql.state.testing_shape;
+            return .done;
+        }
+    };
     for ([_]bool{ false, true }) |stopped| {
         const entry = try store_core.enter(&storage, .none);
         defer entry.release();
-        var access: store_access.Access(.write, error{LiveGuard}) = .open(&entry);
-        defer access.deinit();
         const before = storage.engine.mysql.state.connection.queries;
-        const id = try access.identity(.content_id);
-        access.write(live_insert, .{ .id = id, .digest = protocol.contentDigest(bytes), .length = length });
-        access.recordContentRow(id);
-        const sink = try access.contentSink(id, length);
+        var streamed: Streamed = .{ .storage = &storage, .bytes = bytes, .stopped = stopped };
+        try TestingScript(Streamed).run(&entry, &streamed);
+        const id = streamed.id;
         if (stopped) {
-            // The source stops here: close pads the chunk begun, and the
-            // abandoned batch is never sent.
-            try sink.write(bytes[0..7], 0);
-            sink.close();
-            const shape = storage.engine.mysql.state.testing_shape;
-            try access.abandon(.{});
             // No batch and no ROLLBACK went out: only the identity reload
             // a rolled-back transaction that took ids costs.
+            const shape = streamed.shape;
             const after = storage.engine.mysql.state.testing_shape;
             try std.testing.expectEqual(shape.access_passes, after.access_passes);
             try std.testing.expectEqual(shape.controls, after.controls);
             try std.testing.expectEqual(before + 1, storage.engine.mysql.state.connection.queries);
             try std.testing.expectEqual(@as(u64, 0), try queryU64(&storage, "SELECT count(*) FROM content_chunk WHERE content_id=?1", .{id}));
         } else {
-            try sink.write(bytes, 0);
-            sink.close();
-            try access.commit();
             // The row, both chunks and the position checks in one round,
             // then COMMIT.
             try std.testing.expectEqual(before + 2, storage.engine.mysql.state.connection.queries);
@@ -996,24 +1042,31 @@ test "store.mysql live content chunks keep each batch within a small max_allowed
     const length = 64 * 1024;
     const bytes = try std.testing.allocator.alloc(u8, length);
     defer std.testing.allocator.free(bytes);
+    const Values = struct {
+        pub const Guards = error{LiveGuard};
+        bytes: []u8,
+        ids: [2]u64 = undefined,
+
+        pub fn step(b: *@This(), r: anytype, _: u32) !TestingAsk {
+            for (&b.ids, 0..) |*id, i| {
+                // Distinct values: content rows are unique by digest.
+                @memset(b.bytes, 'a' + @as(u8, @intCast(i)));
+                id.* = try r.identity(.content_id);
+                r.write(live_insert, .{ .id = id.*, .digest = protocol.contentDigest(b.bytes), .length = b.bytes.len });
+                r.recordContentRow(id.*);
+                const sink = try r.contentSink(id.*, b.bytes.len);
+                try sink.write(b.bytes, 0);
+                sink.close();
+            }
+            return .commit;
+        }
+    };
     const entry = try store_core.enter(&storage, .none);
     defer entry.release();
-    var access: store_access.Access(.write, error{LiveGuard}) = .open(&entry);
-    defer access.deinit();
-    errdefer access.abandon(.{}) catch {};
     const before = storage.engine.mysql.state.connection.queries;
-    var ids: [2]u64 = undefined;
-    for (&ids, 0..) |*id, i| {
-        // Distinct values: content rows are unique by digest.
-        @memset(bytes, 'a' + @as(u8, @intCast(i)));
-        id.* = try access.identity(.content_id);
-        access.write(live_insert, .{ .id = id.*, .digest = protocol.contentDigest(bytes), .length = length });
-        access.recordContentRow(id.*);
-        const sink = try access.contentSink(id.*, length);
-        try sink.write(bytes, 0);
-        sink.close();
-    }
-    try access.commit();
+    var values: Values = .{ .bytes = bytes };
+    try TestingScript(Values).run(&entry, &values);
+    const ids = values.ids;
     // The first row and chunk, then the second row and chunk, then COMMIT.
     try std.testing.expectEqual(before + 3, storage.engine.mysql.state.connection.queries);
     for (ids) |id| try std.testing.expectEqual(@as(u64, length), try queryU64(&storage, "SELECT sum(length(bytes)) FROM content_chunk WHERE content_id=?1", .{id}));
@@ -1059,19 +1112,29 @@ const Drop = @TypeOf(@as(@import("engine/Mysql.zig").State, undefined).testing_d
 /// Commits one content row in a write Access whose COMMIT loses its
 /// connection at `drop`, and returns the row's id with the commit's result.
 fn commitLosing(storage: *Store, drop: Drop) !struct { id: u64, result: anyerror!void } {
+    const Losing = struct {
+        pub const Guards = error{LiveGuard};
+        storage: *Store,
+        drop: Drop,
+        id: ?u64 = null,
+
+        pub fn step(b: *@This(), r: anytype, _: u32) !TestingAsk {
+            b.id = try r.identity(.content_id);
+            r.write(live_insert, .{ .id = b.id.?, .digest = protocol.contentDigest("lost commit"), .length = 0 });
+            b.storage.engine.mysql.state.testing_drop = b.drop;
+            return .commit;
+        }
+    };
     const entry = try store_core.enter(storage, .none);
     defer entry.release();
-    var access: store_access.Access(.write, error{LiveGuard}) = .open(&entry);
-    defer access.deinit();
-    errdefer access.abandon(.{}) catch {};
-    const id = try access.identity(.content_id);
-    access.write(live_insert, .{ .id = id, .digest = protocol.contentDigest("lost commit"), .length = 0 });
-    storage.engine.mysql.state.testing_drop = drop;
-    access.commit() catch |err| {
-        access.abandon(.{}) catch {};
-        return .{ .id = id, .result = err };
+    var losing: Losing = .{ .storage = storage, .drop = drop };
+    const result = TestingScript(Losing).run(&entry, &losing);
+    // Only a failure before the commit leaves no id.
+    const id = losing.id orelse {
+        try result;
+        unreachable;
     };
-    return .{ .id = id, .result = {} };
+    return .{ .id = id, .result = result };
 }
 
 test "store.mysql live a connection lost around COMMIT reconnects and reports what landed" {
@@ -1086,9 +1149,12 @@ test "store.mysql live a connection lost around COMMIT reconnects and reports wh
         const got = try commitLosing(&storage, drop);
         const rows_saved = try queryU64(&storage, "SELECT count(*) FROM content WHERE content_id=?1", .{got.id});
         switch (drop) {
-            // COMMIT never left: nothing landed, and that is known.
+            // COMMIT never left: nothing landed, and that is known. The
+            // engine keeps the loss, so the rollback after it cannot run
+            // and takes its place in what the runner answers.
             .before_commit => {
-                try std.testing.expectError(error.StoreConnectionLost, got.result);
+                try std.testing.expectEqual(@as(?anyerror, error.StoreConnectionLost), state.failure);
+                try std.testing.expectError(error.CanonicalRollbackFailed, got.result);
                 try std.testing.expectEqual(@as(u64, 0), rows_saved);
             },
             // The server committed and only its OK was lost: success.
@@ -1134,8 +1200,11 @@ test "store.mysql live a reconnect onto a server admission refuses does not resu
     }
     const got = try commitLosing(&storage, .after_commit);
     // Its counters are not trusted, so the outcome stays unknown, and no
-    // write follows on that server.
-    try std.testing.expectError(error.CommitOutcomeUnknown, got.result);
+    // write follows on that server. The engine keeps the unknown outcome,
+    // so the rollback after it cannot run and takes its place in what the
+    // runner answers.
+    try std.testing.expectEqual(@as(?anyerror, error.CommitOutcomeUnknown), storage.engine.mysql.state.failure);
+    try std.testing.expectError(error.CanonicalRollbackFailed, got.result);
     try std.testing.expectEqual(@as(u64, 0), storage.engine.mysql.state.testing_shape.reconnects);
 }
 
@@ -1161,9 +1230,14 @@ test "store.mysql live a reconnect never ends a session that does not hold the S
     // Whether the lost session's lock had gone yet decides between resuming
     // and leaving the outcome unknown; either way the answer is true.
     const rows_saved = try queryU64(&storage, "SELECT count(*) FROM content WHERE content_id=?1", .{got.id});
+    // An unknown outcome is the engine's, and the rollback that cannot run
+    // after it is the runner's answer.
     if (got.result) |_| {
         try std.testing.expectEqual(@as(u64, 1), rows_saved);
-    } else |err| try std.testing.expectEqual(error.CommitOutcomeUnknown, err);
+    } else |err| {
+        try std.testing.expectEqual(@as(?anyerror, error.CommitOutcomeUnknown), storage.engine.mysql.state.failure);
+        try std.testing.expectEqual(error.CanonicalRollbackFailed, err);
+    }
 }
 
 const live_count = rsql.Read(.{
@@ -1304,11 +1378,51 @@ test "store.mysql live a COMMIT lost with reads after it answers them once it la
 fn insertHeld(storage: *Store, id: u64) !void {
     const entry = try store_core.enter(storage, .none);
     defer entry.release();
-    var access: store_access.Access(.write, error{LiveGuard}) = .open(&entry);
-    defer access.deinit();
-    access.write(live_insert, .{ .id = id, .digest = protocol.contentDigest(std.mem.asBytes(&id)), .length = 0 });
-    return entry.finishTransaction(store_core.Ordinary.none, .{}, access.end(.{}, access.commit()));
+    var insert: LiveInsert = .{ .storage = storage, .id = id };
+    return insert.run(&entry, store_core.Ordinary.none);
 }
+
+/// A `TestingScript` body that inserts content row `id` and, where
+/// `touch` names one, touches that row in the same round; with `round`, it
+/// steps the insert and a read of it in a round of their own first. Where
+/// `room` is set, it binds its last write into a batch with that many
+/// bytes left, by shrinking the batch limit, which `limit` keeps for its
+/// caller to restore once the run ends.
+const LiveInsert = struct {
+    pub const Guards = error{LiveGuard};
+    storage: *Store,
+    id: u64,
+    touch: ?u64 = null,
+    round: bool = false,
+    room: ?usize = null,
+    limit: ?usize = null,
+    count: live_count.Result = undefined,
+
+    pub fn step(b: *@This(), r: anytype, ran: u32) !TestingAsk {
+        if (ran == 0) {
+            r.write(live_insert, .{ .id = b.id, .digest = protocol.contentDigest(std.mem.asBytes(&b.id)), .length = 0 });
+            if (b.round) {
+                r.read(live_count, .{ .id = b.id }, &b.count);
+                return .round;
+            }
+        }
+        if (b.room) |room| {
+            const wire_connection = &b.storage.engine.mysql.state.connection;
+            b.limit = wire_connection.batch_limit;
+            wire_connection.batch_limit = b.limit.? - (wire_connection.batchRoom() - room);
+        }
+        if (b.touch) |other| r.write(live_touch, .{ .id = other });
+        return .commit;
+    }
+
+    /// Runs it under `entry`, restoring the batch limit it shrank.
+    fn run(b: *@This(), entry: *const store_core.Entry, comptime Expected: type) !void {
+        defer if (b.limit) |limit| {
+            b.storage.engine.mysql.state.connection.batch_limit = limit;
+        };
+        return entry.finishTransaction(Expected, .{}, TestingScript(LiveInsert).run(entry, b));
+    }
+};
 
 test "store.mysql live a write whose connection was lost with nothing saved runs again, unseen" {
     for ([_]Drop{ .next_pass, .before_commit }) |drop| {
@@ -1336,11 +1450,8 @@ test "store.mysql live a write whose connection was lost with nothing saved runs
 fn insertTouching(storage: *Store, id: u64, other: u64) !void {
     const entry = try store_core.enter(storage, .none);
     defer entry.release();
-    var access: store_access.Access(.write, error{LiveGuard}) = .open(&entry);
-    defer access.deinit();
-    access.write(live_insert, .{ .id = id, .digest = protocol.contentDigest(std.mem.asBytes(&id)), .length = 0 });
-    access.write(live_touch, .{ .id = other });
-    return entry.finishTransaction(error{LiveGuard}, .{}, access.end(.{}, access.commit()));
+    var insert: LiveInsert = .{ .storage = storage, .id = id, .touch = other };
+    return insert.run(&entry, error{LiveGuard});
 }
 
 test "store.mysql live a lone write sends its transaction, its writes and its COMMIT as one message" {
@@ -1376,18 +1487,8 @@ test "store.mysql live a lone write sends its transaction, its writes and its CO
 fn insertThenTouch(storage: *Store, id: u64, other: u64, room: usize) !void {
     const entry = try store_core.enter(storage, .none);
     defer entry.release();
-    var access: store_access.Access(.write, error{LiveGuard}) = .open(&entry);
-    defer access.deinit();
-    access.write(live_insert, .{ .id = id, .digest = protocol.contentDigest(std.mem.asBytes(&id)), .length = 0 });
-    var count: live_count.Result = undefined;
-    access.read(live_count, .{ .id = id }, &count);
-    try entry.finishTransaction(error{LiveGuard}, .{}, access.end(.{}, access.run()));
-    const wire_connection = &storage.engine.mysql.state.connection;
-    const limit = wire_connection.batch_limit;
-    defer wire_connection.batch_limit = limit;
-    wire_connection.batch_limit = limit - (wire_connection.batchRoom() - room);
-    access.write(live_touch, .{ .id = other });
-    return entry.finishTransaction(error{LiveGuard}, .{}, access.end(.{}, access.commit()));
+    var insert: LiveInsert = .{ .storage = storage, .id = id, .touch = other, .round = true, .room = room };
+    return insert.run(&entry, error{LiveGuard});
 }
 
 test "store.mysql live a write the batch cannot guard never shares its message with COMMIT" {
@@ -1504,14 +1605,8 @@ test "store.mysql live a lone write's message carries the dispatch survey the Ho
 fn insertWithRoom(storage: *Store, id: u64, room: usize) !void {
     const entry = try store_core.enter(storage, .none);
     defer entry.release();
-    var access: store_access.Access(.write, error{LiveGuard}) = .open(&entry);
-    defer access.deinit();
-    access.write(live_insert, .{ .id = id, .digest = protocol.contentDigest(std.mem.asBytes(&id)), .length = 0 });
-    const wire_connection = &storage.engine.mysql.state.connection;
-    const limit = wire_connection.batch_limit;
-    defer wire_connection.batch_limit = limit;
-    wire_connection.batch_limit = limit - (wire_connection.batchRoom() - room);
-    return entry.finishTransaction(store_core.Ordinary.none, .{}, access.end(.{}, access.commit()));
+    var insert: LiveInsert = .{ .storage = storage, .id = id, .room = room };
+    return insert.run(&entry, store_core.Ordinary.none);
 }
 
 test "store.mysql live a write saves in its one message whether or not the batch has room for the survey" {
@@ -1699,20 +1794,39 @@ test "store.mysql live deadlock victim keeps no sent transaction evidence for th
     defer peer.close();
     try peer.query("START TRANSACTION;INSERT INTO content(content_id,digest,byte_length,private) WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<32) SELECT 9000100+i,UNHEX(SHA2(i,256)),0,0 FROM n;UPDATE content SET private=private WHERE content_id=9000040");
     try drain(peer, null);
+    const Touches = struct {
+        pub const Guards = error{LiveGuard};
+        storage: *Store,
+        peer: *wire.Connection,
+        /// The rows it touches, a round each; none touches only the last
+        /// and ends before any round.
+        rows: []const u64,
+        ended: ?bool = null,
+
+        pub fn step(t: *@This(), r: anytype, ran: u32) !TestingAsk {
+            if (t.rows.len == 1) {
+                r.write(live_touch, .{ .id = t.rows[0] });
+                return .done;
+            }
+            if (ran == t.rows.len) return .done;
+            // The peer waits on row b, then the Store waits on row a.
+            if (ran == 1) try t.peer.query("UPDATE content SET private=private WHERE content_id=9000041");
+            r.write(live_touch, .{ .id = t.rows[ran] });
+            return .round;
+        }
+
+        /// Before the rollback: only a deadlock (1213) or lost savepoint
+        /// (1305) ends its transaction here.
+        pub fn failed(t: *@This()) void {
+            t.ended = !t.storage.engine.inTransaction();
+        }
+    };
     {
         const entry = try store_core.enter(&storage, .none);
         defer entry.release();
-        var access: store_access.Access(.write, error{LiveGuard}) = .open(&entry);
-        defer access.deinit();
-        access.write(live_touch, .{ .id = b });
-        try access.run();
-        // The peer waits on row b, then the Store waits on row a.
-        try peer.query("UPDATE content SET private=private WHERE content_id=9000041");
-        access.write(live_touch, .{ .id = a });
-        try std.testing.expectError(error.StatementFailed, access.run());
-        // Only a deadlock (1213) or lost savepoint (1305) ends it here.
-        try std.testing.expect(!storage.engine.inTransaction());
-        try access.abandon(.{});
+        var touches: Touches = .{ .storage = &storage, .peer = peer, .rows = &.{ b, a } };
+        try std.testing.expectError(error.StatementFailed, TestingScript(Touches).run(&entry, &touches));
+        try std.testing.expectEqual(@as(?bool, true), touches.ended);
     }
     try drain(peer, null);
     try peer.query("ROLLBACK");
@@ -1724,10 +1838,8 @@ test "store.mysql live deadlock victim keeps no sent transaction evidence for th
     {
         const entry = try store_core.enter(&storage, .none);
         defer entry.release();
-        var access: store_access.Access(.write, error{LiveGuard}) = .open(&entry);
-        defer access.deinit();
-        access.write(live_touch, .{ .id = a });
-        try access.abandon(.{});
+        var touch: Touches = .{ .storage = &storage, .peer = peer, .rows = &.{a} };
+        try TestingScript(Touches).run(&entry, &touch);
     }
     try std.testing.expectEqual(@as(u64, 0), storage.engine.mysql.state.connection.queries - before);
     try std.testing.expect(!storage.engine.inTransaction());
@@ -1899,34 +2011,50 @@ test "store.mysql live buffered payloads keep streamed query budgets under queue
     const chunk = schema.content_chunk_bytes;
     const bytes = try std.testing.allocator.alloc(u8, 13 * chunk + 17);
     defer std.testing.allocator.free(bytes);
+    // One content row of `value`, buffered or streamed, and where `noop`
+    // a row write after its bytes.
+    const Value = struct {
+        pub const Guards = error{LiveGuard};
+        storage: *Store,
+        value: []const u8,
+        digest: [32]u8,
+        buffered: bool,
+        noop: bool,
+        id: u64 = 0,
+        /// The queries sent before its first write.
+        before: u64 = 0,
+
+        pub fn step(v: *@This(), r: anytype, _: u32) !TestingAsk {
+            v.id = try r.identity(.content_id);
+            v.before = v.storage.engine.mysql.state.connection.queries;
+            r.write(live_insert, .{ .id = v.id, .digest = v.digest, .length = v.value.len });
+            if (v.buffered) {
+                r.writeContent(v.id, v.value);
+            } else {
+                r.recordContentRow(v.id);
+                const sink = try r.contentSink(v.id, v.value.len);
+                defer sink.close();
+                try sink.write(v.value, 0);
+            }
+            if (v.noop) r.write(live_noop, .{});
+            return .commit;
+        }
+    };
     // Reused source, never mutated until both kinds of queued borrow end.
     for ([_]usize{ 0, 1, chunk - 1, chunk, chunk + 1, 3 * chunk + 17, bytes.len }) |length| {
         for ([_]bool{ false, true }) |buffered| {
             const entry = try store_core.enter(&storage, .none);
             defer entry.release();
-            var access: store_access.Access(.write, error{LiveGuard}) = .open(&entry);
-            defer access.deinit();
-            errdefer access.abandon(.{}) catch {};
             @memset(bytes, if (buffered) 'b' else 's');
             // Distinct fixture keys even for empty content and catalog rows.
             var key: [64]u8 = undefined;
             const digest = protocol.contentDigest(try std.fmt.bufPrint(&key, "budget-{d}-{any}", .{ length, buffered }));
-            const id = try access.identity(.content_id);
-            const before = storage.engine.mysql.state.connection.queries;
-            access.write(live_insert, .{ .id = id, .digest = digest, .length = length });
-            if (buffered) {
-                access.writeContent(id, bytes[0..length]);
-            } else {
-                access.recordContentRow(id);
-                const sink = try access.contentSink(id, length);
-                defer sink.close();
-                try sink.write(bytes[0..length], 0);
-            }
             // A row write after the bytes shares the last data pass.
-            access.write(live_noop, .{});
-            try access.commit();
+            var value: Value = .{ .storage = &storage, .value = bytes[0..length], .digest = digest, .buffered = buffered, .noop = true };
+            try TestingScript(Value).run(&entry, &value);
+            const id = value.id;
             const queries: u64 = if (length > 12 * chunk) 3 else 2;
-            try std.testing.expectEqual(before + queries, storage.engine.mysql.state.connection.queries);
+            try std.testing.expectEqual(value.before + queries, storage.engine.mysql.state.connection.queries);
             const chunks: u64 = @intCast((length + chunk - 1) / chunk);
             try std.testing.expectEqual(chunks, try queryU64(&storage, "SELECT count(*) FROM content_chunk WHERE content_id=?1", .{id}));
         }
@@ -1942,22 +2070,9 @@ test "store.mysql live buffered payloads keep streamed query budgets under queue
     for ([_]bool{ false, true }) |buffered| {
         const entry = try store_core.enter(&storage, .none);
         defer entry.release();
-        var access: store_access.Access(.write, error{LiveGuard}) = .open(&entry);
-        defer access.deinit();
-        errdefer access.abandon(.{}) catch {};
-        const id = try access.identity(.content_id);
-        const before = connection_state.queries;
-        access.write(live_insert, .{ .id = id, .digest = protocol.contentDigest(if (buffered) "packet-buffered" else "packet-streamed"), .length = 2 * chunk });
-        if (buffered) {
-            access.writeContent(id, bytes[0 .. 2 * chunk]);
-        } else {
-            access.recordContentRow(id);
-            const sink = try access.contentSink(id, 2 * chunk);
-            defer sink.close();
-            try sink.write(bytes[0 .. 2 * chunk], 0);
-        }
-        try access.commit();
-        try std.testing.expectEqual(before + 3, connection_state.queries);
+        var value: Value = .{ .storage = &storage, .value = bytes[0 .. 2 * chunk], .digest = protocol.contentDigest(if (buffered) "packet-buffered" else "packet-streamed"), .buffered = buffered, .noop = false };
+        try TestingScript(Value).run(&entry, &value);
+        try std.testing.expectEqual(value.before + 3, connection_state.queries);
     }
 }
 
@@ -2155,24 +2270,30 @@ test "store.mysql live lone single writes guard their shared COMMIT and payload 
     try std.testing.expect(!storage.engine.inTransaction());
 
     const Payload = struct {
-        fn write(s: *Store, bytes: []const u8, buffered: bool) !void {
+        pub const Guards = error{LiveGuard};
+        value: []const u8,
+        buffered: bool,
+
+        pub fn step(p: *@This(), r: anytype, _: u32) !TestingAsk {
+            const id = try r.identity(.content_id);
+            r.write(live_insert, .{ .id = id, .digest = protocol.contentDigest(std.mem.asBytes(&id)), .length = p.value.len });
+            if (p.buffered) {
+                r.writeContent(id, p.value);
+            } else {
+                r.recordContentRow(id);
+                const sink = try r.contentSink(id, p.value.len);
+                defer sink.close();
+                try sink.write(p.value, 0);
+            }
+            r.write(live_touch, .{ .id = id });
+            return .commit;
+        }
+
+        fn write(s: *Store, value: []const u8, buffered: bool) !void {
             const entry = try store_core.enter(s, .none);
             defer entry.release();
-            var access: store_access.Access(.write, error{LiveGuard}) = .open(&entry);
-            defer access.deinit();
-            errdefer access.abandon(.{}) catch {};
-            const id = try access.identity(.content_id);
-            access.write(live_insert, .{ .id = id, .digest = protocol.contentDigest(std.mem.asBytes(&id)), .length = bytes.len });
-            if (buffered) {
-                access.writeContent(id, bytes);
-            } else {
-                access.recordContentRow(id);
-                const sink = try access.contentSink(id, bytes.len);
-                defer sink.close();
-                try sink.write(bytes, 0);
-            }
-            access.write(live_touch, .{ .id = id });
-            return entry.finishTransaction(error{LiveGuard}, .{}, access.end(.{}, access.commit()));
+            var payload: @This() = .{ .value = value, .buffered = buffered };
+            return entry.finishTransaction(error{LiveGuard}, .{}, TestingScript(@This()).run(&entry, &payload));
         }
     };
     const bytes = try std.testing.allocator.alloc(u8, schema.content_chunk_bytes + 1);

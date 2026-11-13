@@ -258,12 +258,15 @@ const y = @import("after.zig");
         def tests(*listings):
             return "".join(scan.format(name, text) for name, text in zip(names, listings))
 
+        # The writer scan also reads the Store's test files.
+        with_tests = listing.replace("};", '@embedFile("tests.zig") };')
+
         with tempfile.TemporaryDirectory() as directory:
             root = self.store_tree(directory, {
                 "src/store.zig": 'pub const Store = @import("store/Store.zig").Store; // fn',
                 "src/store/Store.zig": "pub fn enter() void {}",
                 "src/store/domain/a.zig": "pub fn f() void {}",
-                "src/store/tests.zig": tests(listing, listing),
+                "src/store/tests.zig": tests(with_tests, listing),
                 "src/store/wire/mysql.zig": "pub fn decode() void {}",
             })
             store_access_sources(root)
@@ -272,15 +275,17 @@ const y = @import("after.zig");
                 store_access_sources(root)
             (root / "src/store/domain/b.zig").unlink()
             short = listing.replace('@embedFile("domain/a.zig")', "")
-            for listings, which in (((short, listing), "queue and fence"), ((listing, short), "round budget")):
+            short_tests = short.replace("};", '@embedFile("tests.zig") };')
+            for listings, which in (((short_tests, listing), "queue and fence"), ((with_tests, short), "round budget"),
+                                    ((listing, listing), "queue and fence"), ((with_tests, with_tests), "round budget")):
                 with self.subTest(which=which):
                     (root / "src/store/tests.zig").write_text(tests(*listings))
                     with self.assertRaisesRegex(ValueError, f"{which}.*the Store's files are"):
                         store_access_sources(root)
-            (root / "src/store/tests.zig").write_text(tests(listing))
+            (root / "src/store/tests.zig").write_text(tests(with_tests))
             with self.assertRaisesRegex(ValueError, "has no test"):
                 store_access_sources(root)
-            (root / "src/store/tests.zig").write_text(tests(listing, listing))
+            (root / "src/store/tests.zig").write_text(tests(with_tests, listing))
             (root / "src/store.zig").write_text("pub fn helper() void {}")
             with self.assertRaisesRegex(ValueError, "declares a function"):
                 store_access_sources(root)
@@ -290,17 +295,26 @@ const y = @import("after.zig");
         listing = '    const sources = .{ @embedFile("../Store.zig"), @embedFile("../domain/a.zig") };'
         names = ("Store entry points queue and fence only through canonical access",
                  "every function that enters the Store has a round budget")
+        # The writer scan also reads the Store's test files, these per-domain ones included.
+        with_tests = listing.replace("};", '@embedFile("../tests.zig"), @embedFile("access_rules.zig"), '
+                                     '@embedFile("round_budget.zig"), @embedFile("../sqlite_tests/schema.zig") };')
         with tempfile.TemporaryDirectory() as directory:
             root = self.store_tree(directory, {
                 "src/store.zig": 'pub const Store = @import("store/Store.zig").Store;',
                 "src/store/Store.zig": "pub fn enter() void {}",
                 "src/store/domain/a.zig": "pub fn f() void {}",
                 "src/store/tests.zig": "pub fn fixture() void {}",
-                "src/store/tests/access_rules.zig": scan.format(names[0], listing),
+                "src/store/tests/access_rules.zig": scan.format(names[0], with_tests),
                 "src/store/tests/round_budget.zig": scan.format(names[1], listing),
                 "src/store/sqlite_tests/schema.zig": "test {}",
             })
             store_access_sources(root)
+            # The writer scan reads every per-domain test file as well.
+            (root / "src/store/tests/access_rules.zig").write_text(
+                scan.format(names[0], with_tests.replace('@embedFile("../sqlite_tests/schema.zig")', "")))
+            with self.assertRaisesRegex(ValueError, "queue and fence.*the Store's files are"):
+                store_access_sources(root)
+            (root / "src/store/tests/access_rules.zig").write_text(scan.format(names[0], with_tests))
             (root / "src/store/tests/round_budget.zig").write_text(scan.format(names[1], listing.replace("../", "")))
             with self.assertRaisesRegex(ValueError, "round budget.*the Store's files are"):
                 store_access_sources(root)

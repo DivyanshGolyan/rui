@@ -12,6 +12,8 @@ const configuration_domain = @import("../domain/configuration.zig");
 const store_testing = @import("../testing.zig");
 const canonicalCwd = store_testing.canonicalCwd;
 const completeConfiguration = store_testing.completeConfiguration;
+const TestingAsk = shared_fixtures.TestingAsk;
+const TestingScript = shared_fixtures.TestingScript;
 const completeSessionStop = shared_fixtures.completeSessionStop;
 const testingBytesContent = shared_fixtures.testingBytesContent;
 
@@ -143,16 +145,23 @@ test "Store distinguishes noncanonical Session references from canonical unknown
 /// Runs the production INSERT of a created Session under `ref`, then rolls
 /// it back, so a test sees what the schema accepts without keeping it.
 fn insertSessionForTesting(storage: *Store, current: *const configuration_domain.CurrentConfiguration, ref: *const [protocol.session_id_bytes]u8) !void {
+    const Insert = struct {
+        pub const Guards = error{};
+        current: *const configuration_domain.CurrentConfiguration,
+        ref: *const [protocol.session_id_bytes]u8,
+
+        pub fn step(b: *@This(), r: anytype, ran: u32) !TestingAsk {
+            if (ran != 0) return .done;
+            const head: rsql.SessionHead = .{ .ref = b.ref.*, .workspace_key = .of(b.current.workspace_key), .next_position = .of(1) };
+            const digest = store_core.workspaceDigest(b.current.workspace.slice());
+            configuration_domain.insertSession(r, head, b.current, &digest, 1_000_000, null);
+            return .round;
+        }
+    };
     const entry = try store_core.enter(storage, .none);
     defer entry.release();
-    var a: store_access.Access(.write, error{}) = .open(&entry);
-    defer a.deinit();
-    const head: rsql.SessionHead = .{ .ref = ref.*, .workspace_key = .of(current.workspace_key), .next_position = .of(1) };
-    const digest = store_core.workspaceDigest(current.workspace.slice());
-    configuration_domain.insertSession(&a, head, current, &digest, 1_000_000, null);
-    const ran = a.run();
-    try a.abandon(.{});
-    return ran;
+    var insert: Insert = .{ .current = current, .ref = ref };
+    return TestingScript(Insert).run(&entry, &insert);
 }
 
 test "existing Store rejects a different canonical identity" {

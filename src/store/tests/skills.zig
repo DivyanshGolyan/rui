@@ -24,6 +24,8 @@ const configureTestSession = store_testing.configureTestSession;
 const submitTestMessage = store_testing.submitTestMessage;
 const skills_fixture_domain = @import("../domain/skills.zig");
 const TestingCall = shared_fixtures.TestingCall;
+const TestingConfiguring = shared_fixtures.TestingConfiguring;
+const TestingScript = shared_fixtures.TestingScript;
 const completeSessionStop = shared_fixtures.completeSessionStop;
 const expectContent = shared_fixtures.expectContent;
 const settleCallsForTesting = shared_fixtures.settleCallsForTesting;
@@ -884,7 +886,7 @@ test "inline skills initial failure preserves all ordinary configuration refusal
 }
 
 test "inline skills configuration validation borrows one Store-owned plan through content imports" {
-    const Ready = @FieldType(configuration_domain.ConfigurationValidation, "ready");
+    const Ready = @FieldType(configuration_domain.Validation, "ready");
     // The validation-only phase must not return another Settings value onto
     // the Host's creation/import chain. This is an ownership API contract.
     try std.testing.expect(Ready == *const configuration_domain.ValidatedConfiguration);
@@ -906,31 +908,33 @@ test "inline skills configuration validation borrows one Store-owned plan throug
                 update.configuration.permission_mode.state = .value;
                 try update.configuration.permission_mode.value.set("ask");
                 {
+                    const Check = struct {
+                        original_instructions: ?@FieldType(configuration_domain.CurrentConfiguration, "instructions_id") = null,
+                        checked: u8 = 0,
+
+                        pub fn ready(check: *@This(), plan: *const configuration_domain.ValidatedConfiguration, reads: *configuration_domain.ConfigurationReads) !void {
+                            try std.testing.expect(plan == &reads.validated);
+                            check.original_instructions = plan.before.?.instructions_id;
+                            try std.testing.expect(plan.before.?.label == null);
+                            check.checked += 1;
+                        }
+
+                        pub fn applied(check: *@This(), plan: *const configuration_domain.ValidatedConfiguration, reads: *configuration_domain.ConfigurationReads, answer: *const configuration_domain.Applied) !void {
+                            try std.testing.expect(plan == &reads.validated);
+                            try std.testing.expectEqual(check.original_instructions.?, plan.before.?.instructions_id);
+                            try std.testing.expect(reads.next.instructions_id != check.original_instructions.?);
+                            try std.testing.expect(plan.before.?.label == null);
+                            try std.testing.expectEqualStrings("retained", reads.next.label.?.slice());
+                            const expected: std.EnumSet(protocol.SessionField) = .initMany(&.{ .instructions, .permission_mode, .label });
+                            try std.testing.expectEqual(expected, answer.changes);
+                            check.checked += 1;
+                        }
+                    };
                     const entry = try store_core.enter(&storage, .none);
                     defer entry.release();
-                    var a: store_access.Access(.write, error{SessionUpdateFailed}) = .open(&entry);
-                    defer a.deinit();
-                    const reads = storage.configurationReads();
-                    reads.* = .{ .next = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } } };
-                    configuration_domain.prepareConfiguration(&a, storage.hostTools().host_tool_set, session.slice(), &update.configuration, reads);
-                    try a.run();
-                    const checked = try configuration_domain.validateConfiguration(&a, storage.io, session.slice(), &update.configuration, null, reads);
-                    try std.testing.expect(checked == .ready);
-                    const plan = checked.ready;
-                    try std.testing.expect(plan == &reads.validated);
-                    const original_instructions = plan.before.?.instructions_id;
-                    try std.testing.expect(plan.before.?.label == null);
-                    const applied = try configuration_domain.applyValidatedConfiguration(&a, storage.io, session.slice(), &update.configuration, null, .{}, reads);
-                    try std.testing.expect(applied == .accepted);
-                    try std.testing.expect(plan == &reads.validated);
-                    try std.testing.expectEqual(original_instructions, plan.before.?.instructions_id);
-                    try std.testing.expect(reads.next.instructions_id != original_instructions);
-                    try std.testing.expect(plan.before.?.label == null);
-                    try std.testing.expectEqualStrings("retained", reads.next.label.?.slice());
-                    const expected: std.EnumSet(protocol.SessionField) = .initMany(&.{ .instructions, .permission_mode, .label });
-                    try std.testing.expectEqual(expected, applied.accepted.changes);
-                    try a.run();
-                    try a.abandon(.{});
+                    var updating: TestingConfiguring(Check) = .{ .storage = &storage, .session = session.slice(), .configuration = &update.configuration };
+                    try TestingScript(@TypeOf(updating)).run(&entry, &updating);
+                    try std.testing.expectEqual(@as(u8, 2), updating.check.checked);
                 }
                 const saved = (try store_core.readSessionForTesting(&storage, session.slice())).?;
                 try std.testing.expectEqual(@as(u64, 1), saved.revision);

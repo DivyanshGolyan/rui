@@ -19,8 +19,10 @@ const completeConfiguration = store_testing.completeConfiguration;
 const configureTestSession = store_testing.configureTestSession;
 const submitTestMessage = store_testing.submitTestMessage;
 const TestingCall = shared_fixtures.TestingCall;
+const TestingConfiguring = shared_fixtures.TestingConfiguring;
 const TestingListReply = shared_fixtures.TestingListReply;
 const TestingListing = shared_fixtures.TestingListing;
+const TestingScript = shared_fixtures.TestingScript;
 const TwinRounds = shared_fixtures.TwinRounds;
 const completeSessionStop = shared_fixtures.completeSessionStop;
 const configureTestSessionAsk = shared_fixtures.configureTestSessionAsk;
@@ -267,15 +269,8 @@ test "a Session creation that rolls back never reaches a since listing" {
                 const create = try completeConfiguration("rollback-create", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
                 const entry = try store_core.enter(&storage, .none);
                 defer entry.release();
-                var a: store_access.Access(.write, error{SessionUpdateFailed}) = .open(&entry);
-                defer a.deinit();
-                const reads = storage.configurationReads();
-                reads.* = .{ .next = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } } };
-                configuration_domain.prepareConfiguration(&a, storage.hostTools().host_tool_set, "", &create.configuration, reads);
-                try a.run();
-                try std.testing.expect(try configuration_domain.applyConfiguration(&a, storage.io, "", &create.configuration, null, .{}, reads) == .accepted);
-                try a.run();
-                try a.abandon(.{});
+                var creating: TestingConfiguring(struct {}) = .{ .storage = &storage, .session = "", .configuration = &create.configuration };
+                try TestingScript(@TypeOf(creating)).run(&entry, &creating);
             }
             // The rolled-back insert still moved the commit counter. The hint
             // forgot instead of naming a Session that does not exist.

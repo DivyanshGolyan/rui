@@ -13,9 +13,11 @@ const c = sqlite.c;
 const completeConfiguration = store_testing.completeConfiguration;
 const configureTestSession = store_testing.configureTestSession;
 const submitTestMessage = store_testing.submitTestMessage;
+const TestingAsk = tests.TestingAsk;
 const TestingCall = tests.TestingCall;
 const TestingListing = tests.TestingListing;
 const TestingRound = tests.TestingRound;
+const TestingScript = tests.TestingScript;
 const configureTestSessionAsk = tests.configureTestSessionAsk;
 const settleCallsForTesting = tests.settleCallsForTesting;
 const testingStore = store_testing.testingSqliteStore;
@@ -143,21 +145,36 @@ test "claiming Session positions stops at the largest position, and fails when i
 
     const session = try configureTestSessionAsk(&storage, "claim-config");
     const last: u64 = std.math.maxInt(i64);
+    const Claim = struct {
+        pub const Guards = error{};
+        session: []const u8,
+        /// Claims up to the largest position, or one position.
+        to_last: bool,
+        loaded: TestingRound.head.Result = undefined,
+
+        pub fn step(b: *@This(), r: anytype, ran: u32) !TestingAsk {
+            if (ran == 0) {
+                r.read(TestingRound.head, .{ .session_ref = b.session }, &b.loaded);
+                return .round;
+            }
+            const positions = try r.positions(b.loaded.head);
+            if (!b.to_last) {
+                _ = try positions.take(1);
+                return .commit;
+            }
+            try std.testing.expectEqual(last - 2, try positions.take(2));
+            try std.testing.expectError(error.SessionPositionExhausted, positions.take(1));
+            try std.testing.expectEqual(last, try positions.take(0));
+            try std.testing.expectError(error.SessionPositionExhausted, positions.take(last + 1));
+            return .commit;
+        }
+    };
     try store_testing.sqlite_only.exec(&storage, "UPDATE session SET next_position=9223372036854775805 WHERE session_ref=?1", .{session.slice()});
     {
         const entry = try store_core.enter(&storage, .none);
         defer entry.release();
-        var a: store_access.Access(.write, error{}) = .open(&entry);
-        defer a.deinit();
-        var loaded: TestingRound.head.Result = undefined;
-        a.read(TestingRound.head, .{ .session_ref = session.slice() }, &loaded);
-        try a.run();
-        const positions = try a.positions(loaded.head);
-        try std.testing.expectEqual(last - 2, try positions.take(2));
-        try std.testing.expectError(error.SessionPositionExhausted, positions.take(1));
-        try std.testing.expectEqual(last, try positions.take(0));
-        try std.testing.expectError(error.SessionPositionExhausted, positions.take(last + 1));
-        try a.commit();
+        var claim: Claim = .{ .session = session.slice(), .to_last = true };
+        try TestingScript(Claim).run(&entry, &claim);
     }
     try std.testing.expectEqual(last, try store_testing.sqlite_only.queryU64(&storage, "SELECT next_position FROM session", .{}));
 
@@ -166,14 +183,8 @@ test "claiming Session positions stops at the largest position, and fails when i
     {
         const entry = try store_core.enter(&storage, .none);
         defer entry.release();
-        var a: store_access.Access(.write, error{}) = .open(&entry);
-        defer a.deinit();
-        var loaded: TestingRound.head.Result = undefined;
-        a.read(TestingRound.head, .{ .session_ref = session.slice() }, &loaded);
-        try a.run();
-        _ = try (try a.positions(loaded.head)).take(1);
-        try std.testing.expectError(error.CorruptStore, a.commit());
-        try a.abandon(.{});
+        var claim: Claim = .{ .session = session.slice(), .to_last = false };
+        try std.testing.expectError(error.CorruptStore, TestingScript(Claim).run(&entry, &claim));
     }
 }
 

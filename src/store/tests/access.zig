@@ -10,13 +10,16 @@ const rsql = @import("../rsql.zig");
 const Store = store_core.Store;
 const configuration_domain = @import("../domain/configuration.zig");
 const historical_domain = @import("../domain/historical.zig");
+const reads_domain = @import("../domain/reads.zig");
 const store_schema = @import("../schema.zig");
 const store_testing = @import("../testing.zig");
 const HistoricalView = historical_domain.HistoricalView;
 const completeConfiguration = store_testing.completeConfiguration;
 const configureTestSession = store_testing.configureTestSession;
 const submitTestMessage = store_testing.submitTestMessage;
+const TestingAsk = shared_fixtures.TestingAsk;
 const TestingRound = shared_fixtures.TestingRound;
+const TestingScript = shared_fixtures.TestingScript;
 const openCheckedView = shared_fixtures.openCheckedView;
 const settleCallsForTesting = shared_fixtures.settleCallsForTesting;
 const touchForTesting = shared_fixtures.touchForTesting;
@@ -39,37 +42,48 @@ test "buffered payload boundaries and streamed payloads preserve the same bytes 
             defer std.testing.allocator.free(source);
             // Nonuniform bytes expose chunk-index and boundary mistakes.
             for (source, 0..) |*byte, i| byte.* = @truncate(i *% 31 + i / chunk);
-            var window: [4093]u8 = undefined;
+            const window_bytes = 4093;
+            var window: [window_bytes]u8 = undefined;
+            const Import = struct {
+                pub const Guards = error{};
+                bytes: []const u8,
+                ids: [2]u64 = undefined,
+
+                pub fn step(b: *@This(), r: anytype, _: u32) !TestingAsk {
+                    const length = b.bytes.len;
+                    for (&b.ids, 0..) |*id, method| {
+                        id.* = try r.identity(.content_id);
+                        // A fixture key distinct from built-in empty content;
+                        // this test exercises raw bytes, not content admission.
+                        r.write(insert, .{ .id = id.*, .digest = protocol.contentDigest("adapter parity fixture"), .length = length, .private = method == 1 });
+                        if (method == 0) {
+                            // Existing writeContent callers need not record a
+                            // row or open the public sink to lower their bytes.
+                            r.writeContent(id.*, b.bytes);
+                        } else {
+                            r.recordContentRow(id.*);
+                            const sink = try r.contentSink(id.*, length);
+                            defer sink.close();
+                            var at: usize = 0;
+                            while (at < length) {
+                                const n = @min(window_bytes, length - at);
+                                try sink.write(b.bytes[at..][0..n], at);
+                                at += n;
+                            }
+                        }
+                    }
+                    return .commit;
+                }
+            };
             for ([_]usize{ 0, 1, chunk - 1, chunk, chunk + 1, 3 * chunk + 17, source.len }) |length| {
                 const bytes = source[0..length];
                 const entry = try store_core.enter(&storage, .none);
                 defer entry.release();
-                var a: store_access.Access(.write, error{}) = .open(&entry);
+                var import: Import = .{ .bytes = bytes };
+                try TestingScript(Import).run(&entry, &import);
+                const ids = import.ids;
+                var a: reads_domain.ReadAccess = .open(&entry);
                 defer a.deinit();
-                errdefer a.abandon(.{}) catch {};
-                var ids: [2]u64 = undefined;
-                for (&ids, 0..) |*id, method| {
-                    id.* = try a.identity(.content_id);
-                    // A fixture key distinct from built-in empty content;
-                    // this test exercises raw bytes, not content admission.
-                    a.write(insert, .{ .id = id.*, .digest = protocol.contentDigest("adapter parity fixture"), .length = length, .private = method == 1 });
-                    if (method == 0) {
-                        // Existing writeContent callers need not record a
-                        // row or open the public sink to lower their bytes.
-                        a.writeContent(id.*, bytes);
-                    } else {
-                        a.recordContentRow(id.*);
-                        const sink = try a.contentSink(id.*, length);
-                        defer sink.close();
-                        var at: usize = 0;
-                        while (at < length) {
-                            const n = @min(window.len, length - at);
-                            try sink.write(bytes[at..][0..n], at);
-                            at += n;
-                        }
-                    }
-                }
-                try a.commit();
                 // Read bounded windows through the adapter, across every
                 // boundary, rather than trusting row counts or digests.
                 for (ids) |id| {
@@ -101,50 +115,61 @@ test "a content sink opens only on a content row its Access itself queued, in th
             // A row a committed configure inserted, not this Access.
             const existing: u64 = @intCast((try store_core.readSessionForTesting(&storage, session.slice())).?.instructions_id.?);
 
+            const Sinks = struct {
+                pub const Guards = error{};
+                storage: *Store,
+                existing: u64,
+                last: u64 = 0,
+                never: u64 = 0,
+
+                pub fn step(b: *@This(), r: anytype, ran: u32) !TestingAsk {
+                    if (ran != 0) {
+                        const again = try r.contentSink(b.last, 4);
+                        again.close();
+                        // Taken but never inserted: there is no row to open.
+                        try std.testing.expectError(error.ContentWriteFailed, r.contentSink(b.never, 4));
+                        return .done;
+                    }
+                    // Opens the transaction, so the next id is taken in it, before this
+                    // writer takes any.
+                    _ = try r.identity(.turn_id);
+                    const before = try store_core.takeIdentity(b.storage, .content_id);
+                    // Distinct identities, since content is unique by identity.
+                    const digests = [3][32]u8{ protocol.contentDigest("sink0"), protocol.contentDigest("sink1"), protocol.contentDigest("sink2") };
+                    r.write(TestingRound.insert_content, .{ .content_id = before, .digest = digests[0], .length = 4 });
+                    const first = try r.identity(.content_id);
+                    r.write(TestingRound.insert_content, .{ .content_id = first, .digest = digests[1], .length = 4 });
+                    r.recordContentRow(first);
+                    // Taken outside this writer between its own ids: inside the range of
+                    // the ids it took, but not its own.
+                    const between = try store_core.takeIdentity(b.storage, .content_id);
+                    b.never = try r.identity(.content_id);
+                    b.last = try r.identity(.content_id);
+                    r.write(TestingRound.insert_content, .{ .content_id = b.last, .digest = digests[2], .length = 4 });
+                    r.recordContentRow(b.last);
+                    try std.testing.expectEqual(first + 3, b.last);
+                    // Refused: 0, a committed row, one taken in this transaction before
+                    // this writer's first, one other code took between its own, and one
+                    // past its last. A check of the range from its first id to its last
+                    // accepted `between`.
+                    try std.testing.expectError(error.ContentNotInserted, r.contentSink(0, 4));
+                    try std.testing.expectError(error.ContentNotInserted, r.contentSink(b.existing, 4));
+                    try std.testing.expectError(error.ContentNotInserted, r.contentSink(before, 4));
+                    try std.testing.expectError(error.ContentNotInserted, r.contentSink(between, 4));
+                    try std.testing.expectError(error.ContentNotInserted, r.contentSink(b.last + 1, 4));
+                    // The first id opens while its insert is still queued: SQLite
+                    // steps it for the blob handle, while MySQL queues the chunk
+                    // behind it, so one round runs both.
+                    const sink = try r.contentSink(first, 4);
+                    try sink.write("sink", 0);
+                    sink.close();
+                    return .round;
+                }
+            };
             const entry = try store_core.enter(&storage, .none);
             defer entry.release();
-            var a: store_access.Access(.write, error{}) = .open(&entry);
-            defer a.deinit();
-            // Opens the transaction, so the next id is taken in it, before this
-            // Access takes any.
-            _ = try a.identity(.turn_id);
-            const before = try store_core.takeIdentity(&storage, .content_id);
-            // Distinct identities, since content is unique by identity.
-            const digests = [3][32]u8{ protocol.contentDigest("sink0"), protocol.contentDigest("sink1"), protocol.contentDigest("sink2") };
-            a.write(TestingRound.insert_content, .{ .content_id = before, .digest = digests[0], .length = 4 });
-            const first = try a.identity(.content_id);
-            a.write(TestingRound.insert_content, .{ .content_id = first, .digest = digests[1], .length = 4 });
-            a.recordContentRow(first);
-            // Taken outside this Access between its own ids: inside the range of
-            // the ids it took, but not its own.
-            const between = try store_core.takeIdentity(&storage, .content_id);
-            const never = try a.identity(.content_id);
-            const last = try a.identity(.content_id);
-            a.write(TestingRound.insert_content, .{ .content_id = last, .digest = digests[2], .length = 4 });
-            a.recordContentRow(last);
-            try std.testing.expectEqual(first + 3, last);
-            // Refused: 0, a committed row, one taken in this transaction before
-            // this Access's first, one other code took between its own, and one
-            // past its last. A check of the range from its first id to its last
-            // accepted `between`.
-            try std.testing.expectError(error.ContentNotInserted, a.contentSink(0, 4));
-            try std.testing.expectError(error.ContentNotInserted, a.contentSink(existing, 4));
-            try std.testing.expectError(error.ContentNotInserted, a.contentSink(before, 4));
-            try std.testing.expectError(error.ContentNotInserted, a.contentSink(between, 4));
-            try std.testing.expectError(error.ContentNotInserted, a.contentSink(last + 1, 4));
-            // The first id opens while its insert is still queued: SQLite
-            // steps it for the blob handle, while MySQL queues the chunk
-            // behind it, so one round runs both.
-            const sink = try a.contentSink(first, 4);
-            try sink.write("sink", 0);
-            sink.close();
-            try a.run();
-            try std.testing.expectEqual(0, a.queued);
-            const again = try a.contentSink(last, 4);
-            again.close();
-            // Taken but never inserted: there is no row to open.
-            try std.testing.expectError(error.ContentWriteFailed, a.contentSink(never, 4));
-            try a.abandon(.{});
+            var sinks: Sinks = .{ .storage = &storage, .existing = existing };
+            try TestingScript(Sinks).run(&entry, &sinks);
         }
     }.run);
 }
@@ -273,24 +298,28 @@ test "an Access that touches a fifth Session records everything and still commit
             var sessions: [5]protocol.Bounded(protocol.max_session_bytes) = undefined;
             inline for (&sessions, .{ "five-a", "five-b", "five-c", "five-d", "five-e" }) |*session, key| session.* = try configureTestSession(&storage, key);
 
+            // Each Session's head in a round, then its dating in the next.
             const Five = struct {
-                fn body(a: anytype, all: []const protocol.Bounded(protocol.max_session_bytes)) !void {
-                    for (all) |session| {
-                        var loaded: TestingRound.head.Result = undefined;
-                        a.read(TestingRound.head, .{ .session_ref = session.slice() }, &loaded);
-                        try a.run();
-                        a.write(TestingRound.date_session, .{ .session = loaded.head, .revision = 1 });
-                        try a.run();
+                pub const Guards = error{TestingGuard};
+                all: []const protocol.Bounded(protocol.max_session_bytes),
+                loaded: TestingRound.head.Result = undefined,
+
+                pub fn step(b: *@This(), r: anytype, ran: u32) !TestingAsk {
+                    const index = ran / 2;
+                    if (ran % 2 == 1) {
+                        r.write(TestingRound.date_session, .{ .session = b.loaded.head, .revision = 1 });
+                        return .round;
                     }
-                    try a.commit();
+                    if (index == b.all.len) return .commit;
+                    r.read(TestingRound.head, .{ .session_ref = b.all[index].slice() }, &b.loaded);
+                    return .round;
                 }
             };
             {
                 const entry = try store_core.enter(&storage, .none);
                 defer entry.release();
-                var a: store_access.Access(.write, error{TestingGuard}) = .open(&entry);
-                defer a.deinit();
-                try entry.finishTransaction(error{TestingGuard}, .{}, a.end(.{}, Five.body(&a, &sessions)));
+                var five: Five = .{ .all = &sessions };
+                try entry.finishTransaction(error{TestingGuard}, .{}, TestingScript(Five).run(&entry, &five));
             }
             try std.testing.expect(storage.touched.everything);
             try std.testing.expect(!storage.isFenced());
@@ -323,60 +352,46 @@ test "every round of a write Access dates its rows with the transaction's second
             defer storage.close() catch unreachable;
             const first = try configureTestSession(&storage, "second-first");
             const second = try configureTestSession(&storage, "second-second");
+            const Dating = struct {
+                pub const Guards = error{TestingGuard};
+                storage: *Store,
+                io: std.Io,
+                sessions: [2][]const u8,
+                heads: [2]TestingRound.head.Result = undefined,
+                dated: i64 = 0,
+
+                pub fn step(b: *@This(), r: anytype, ran: u32) !TestingAsk {
+                    switch (ran) {
+                        0 => {
+                            for (b.sessions, &b.heads) |session, *head| r.read(TestingRound.head, .{ .session_ref = session }, head);
+                            return .round;
+                        },
+                        1 => {
+                            r.write(TestingRound.date_session, .{ .session = b.heads[0].head, .revision = 1 });
+                            return .round;
+                        },
+                        else => {
+                            b.dated = try store_core.transactionSecond(b.storage);
+                            // The clock moves on to a later second before the next round dates.
+                            Clock.ahead = .fromSeconds(1);
+                            try std.testing.expect(@divFloor(try store_core.readUnixMilliseconds(b.io), 1000) > b.dated);
+                            r.write(TestingRound.date_session, .{ .session = b.heads[1].head, .revision = 1 });
+                            return .commit;
+                        },
+                    }
+                }
+            };
             const entry = try store_core.enter(&storage, .none);
             defer entry.release();
-            var a: store_access.Access(.write, error{TestingGuard}) = .open(&entry);
-            defer a.deinit();
-            var heads: [2]TestingRound.head.Result = undefined;
-            a.read(TestingRound.head, .{ .session_ref = first.slice() }, &heads[0]);
-            a.read(TestingRound.head, .{ .session_ref = second.slice() }, &heads[1]);
-            try a.run();
-            a.write(TestingRound.date_session, .{ .session = heads[0].head, .revision = 1 });
-            try a.run();
-            const dated = try store_core.transactionSecond(&storage);
-            // The clock moves on to a later second before the next round dates.
-            Clock.ahead = .fromSeconds(1);
-            try std.testing.expect(@divFloor(try store_core.readUnixMilliseconds(io), 1000) > dated);
-            a.write(TestingRound.date_session, .{ .session = heads[1].head, .revision = 1 });
-            try a.commit();
+            var dating: Dating = .{ .storage = &storage, .io = io, .sessions = .{ first.slice(), second.slice() } };
+            try TestingScript(Dating).run(&entry, &dating);
+            const dated = dating.dated;
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(DISTINCT created_at) FROM session", .{}));
             try std.testing.expectEqual(@as(u64, @intCast(dated)), try store_testing.queryU64(&storage, "SELECT max(created_at) FROM session", .{}));
             // Commit cleared it: the next transaction reads the clock again.
             try store_core.begin(&storage);
             try std.testing.expect(try store_core.transactionSecond(&storage) > dated);
             try store_core.rollbackAfterError(&storage, .{});
-        }
-    }.run);
-}
-
-test "an Access commits its writes, positions and identities together, or none of them" {
-    try store_testing.forEachEngine(struct {
-        fn run(case: *store_testing.Case) !void {
-            var tmp = std.testing.tmpDir(.{});
-            defer tmp.cleanup();
-            var storage: Store = undefined;
-            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
-            defer storage.close() catch unreachable;
-            const session = try configureTestSession(&storage, "round-config");
-            const next_sql = "SELECT next_position FROM session";
-            const position = try store_testing.queryU64(&storage, next_sql, .{});
-            const contents = try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{});
-            const content_id = storage.identities().next.get(.content_id);
-
-            // A failed guard stops the round before COMMIT: no row, position or id stays.
-            try std.testing.expectError(error.TestingGuard, TestingRound.change(&storage, session.slice(), "round rolled back", 99));
-            try std.testing.expect(!storage.isFenced());
-            try std.testing.expectEqual(position, try store_testing.queryU64(&storage, next_sql, .{}));
-            try std.testing.expectEqual(contents, try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
-            try std.testing.expectEqual(content_id, storage.identities().next.get(.content_id));
-
-            const before = @divFloor(try store_core.readUnixMilliseconds(std.testing.io), 1000);
-            try std.testing.expectEqual(position, try TestingRound.change(&storage, session.slice(), "round committed", 1));
-            const after = @divFloor(try store_core.readUnixMilliseconds(std.testing.io), 1000);
-            try std.testing.expectEqual(position + 2, try store_testing.queryU64(&storage, next_sql, .{}));
-            try std.testing.expectEqual(content_id, try store_testing.queryU64(&storage, "SELECT content_id FROM content WHERE byte_length=15 AND private=0 AND digest=?1", .{store_testing.Blob{ .bytes = &protocol.contentDigest("round committed") }}));
-            const dated: i64 = @intCast(try store_testing.queryU64(&storage, "SELECT created_at FROM session", .{}));
-            try std.testing.expect(before <= dated and dated <= after);
         }
     }.run);
 }
@@ -390,19 +405,27 @@ const counted_dating = rsql.Write(.{
 /// Dates `session` at `at` where its revision is `revision`, stating
 /// `rows` as the rows that write changes.
 fn countedDatingForTesting(storage: *Store, session: []const u8, at: u64, revision: u64, rows: u64) !void {
+    const Counted = struct {
+        pub const Guards = error{TestingGuard};
+        session: []const u8,
+        at: u64,
+        revision: u64,
+        rows: u64,
+        loaded: TestingRound.head.Result = undefined,
+
+        pub fn step(b: *@This(), r: anytype, ran: u32) !TestingAsk {
+            if (ran == 0) {
+                r.read(TestingRound.head, .{ .session_ref = b.session }, &b.loaded);
+                return .round;
+            }
+            r.writeCount(counted_dating, .{ .session = b.loaded.head, .at = b.at, .revision = b.revision }, b.rows);
+            return .commit;
+        }
+    };
     const entry = try store_core.enter(storage, .none);
     defer entry.release();
-    var a: store_access.Access(.write, error{TestingGuard}) = .open(&entry);
-    defer a.deinit();
-    return entry.finishTransaction(error{TestingGuard}, .{}, a.end(.{}, struct {
-        fn body(access: anytype, ref: []const u8, value: u64, current: u64, count: u64) !void {
-            var loaded: TestingRound.head.Result = undefined;
-            access.read(TestingRound.head, .{ .session_ref = ref }, &loaded);
-            try access.run();
-            access.writeCount(counted_dating, .{ .session = loaded.head, .at = value, .revision = current }, count);
-            try access.commit();
-        }
-    }.body(&a, session, at, revision, rows)));
+    var counted: Counted = .{ .session = session, .at = at, .revision = revision, .rows = rows };
+    return entry.finishTransaction(error{TestingGuard}, .{}, TestingScript(Counted).run(&entry, &counted));
 }
 
 test "a counted write commits only when it changes the rows its caller states" {

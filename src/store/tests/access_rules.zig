@@ -35,7 +35,9 @@ test "the Store prepares only typed statements, its transaction control and test
 test "Store entry points queue and fence only through canonical access" {
     // Every entry point classifies its errors through `Entry`; a new path
     // cannot take a lock beside the Store's queue, read or set the fence
-    // beside it, or enter without returning through a classifier.
+    // beside it, or enter without returning through a classifier. Only the
+    // transition runner opens a writing Access: every other Store file,
+    // tests included, opens a read or survey one.
     const sources = .{
         @embedFile("../Store.zig"),
         @embedFile("../access.zig"),
@@ -77,6 +79,97 @@ test "Store entry points queue and fence only through canonical access" {
         @embedFile("../queue.zig"),
         @embedFile("../transition.zig"),
     };
+    // The Store's test files, the per-domain ones beside tests.zig and
+    // sqlite_tests.zig included, which hold no entry point but may open an
+    // Access; import_architecture.py checks this list too.
+    const test_sources = .{
+        @embedFile("../mysql_dialect_check.zig"),
+        @embedFile("../mysql_session_tests.zig"),
+        @embedFile("../mysql_testing.zig"),
+        @embedFile("../sqlite_tests.zig"),
+        @embedFile("../sqlite_tests/access.zig"),
+        @embedFile("../sqlite_tests/action.zig"),
+        @embedFile("../sqlite_tests/activity.zig"),
+        @embedFile("../sqlite_tests/agent.zig"),
+        @embedFile("../sqlite_tests/allocation.zig"),
+        @embedFile("../sqlite_tests/archive.zig"),
+        @embedFile("../sqlite_tests/cache.zig"),
+        @embedFile("../sqlite_tests/compaction.zig"),
+        @embedFile("../sqlite_tests/configuration.zig"),
+        @embedFile("../sqlite_tests/constraints.zig"),
+        @embedFile("../sqlite_tests/content.zig"),
+        @embedFile("../sqlite_tests/context_window.zig"),
+        @embedFile("../sqlite_tests/context_window_migration.zig"),
+        @embedFile("../sqlite_tests/controls.zig"),
+        @embedFile("../sqlite_tests/conversation.zig"),
+        @embedFile("../sqlite_tests/effort.zig"),
+        @embedFile("../sqlite_tests/forwarding.zig"),
+        @embedFile("../sqlite_tests/full.zig"),
+        @embedFile("../sqlite_tests/historical.zig"),
+        @embedFile("../sqlite_tests/mcp.zig"),
+        @embedFile("../sqlite_tests/message.zig"),
+        @embedFile("../sqlite_tests/migration.zig"),
+        @embedFile("../sqlite_tests/model_admission.zig"),
+        @embedFile("../sqlite_tests/model_facts.zig"),
+        @embedFile("../sqlite_tests/model_settlement.zig"),
+        @embedFile("../sqlite_tests/obligation.zig"),
+        @embedFile("../sqlite_tests/observation.zig"),
+        @embedFile("../sqlite_tests/open.zig"),
+        @embedFile("../sqlite_tests/report.zig"),
+        @embedFile("../sqlite_tests/retry.zig"),
+        @embedFile("../sqlite_tests/schema.zig"),
+        @embedFile("../sqlite_tests/search_activity.zig"),
+        @embedFile("../sqlite_tests/session_list.zig"),
+        @embedFile("../sqlite_tests/skills_migration.zig"),
+        @embedFile("../sqlite_tests/tool_set.zig"),
+        @embedFile("../sqlite_tests/tool_set_migration.zig"),
+        @embedFile("../tests.zig"),
+        @embedFile("access.zig"),
+        @embedFile("access_rules.zig"),
+        @embedFile("action.zig"),
+        @embedFile("activity.zig"),
+        @embedFile("agent.zig"),
+        @embedFile("compaction.zig"),
+        @embedFile("configuration.zig"),
+        @embedFile("content.zig"),
+        @embedFile("context_window.zig"),
+        @embedFile("controls.zig"),
+        @embedFile("conversation.zig"),
+        @embedFile("effort.zig"),
+        @embedFile("fixtures.zig"),
+        @embedFile("full.zig"),
+        @embedFile("historical.zig"),
+        @embedFile("mcp.zig"),
+        @embedFile("message.zig"),
+        @embedFile("model_admission.zig"),
+        @embedFile("model_call.zig"),
+        @embedFile("model_facts.zig"),
+        @embedFile("model_settlement.zig"),
+        @embedFile("obligation.zig"),
+        @embedFile("observation.zig"),
+        @embedFile("preset.zig"),
+        @embedFile("report.zig"),
+        @embedFile("retry.zig"),
+        @embedFile("round_budget.zig"),
+        @embedFile("session.zig"),
+        @embedFile("session_list.zig"),
+        @embedFile("skills.zig"),
+        @embedFile("tool_set.zig"),
+        @embedFile("transition.zig"),
+        @embedFile("turn.zig"),
+    };
+    inline for (sources ++ test_sources) |source| {
+        // access.zig, which defines it, and transition.zig, the runner.
+        if (source.ptr == sources[1].ptr or source.ptr == sources[sources.len - 1].ptr) continue;
+        var at: usize = 0;
+        while (std.mem.indexOfPos(u8, source, at, "Access" ++ "(")) |index| : (at = index + 1) {
+            if (index > 0 and (std.ascii.isAlphanumeric(source[index - 1]) or source[index - 1] == '_')) continue;
+            const mode = source[index + "Access".len + 1 ..];
+            if (std.mem.startsWith(u8, mode, ".read,") or std.mem.startsWith(u8, mode, ".survey,")) continue;
+            std.debug.print("an Access opened outside the transition runner: {s}\n", .{source[index..][0..@min(48, source.len - index)]});
+            return error.WriterOutsideRunner;
+        }
+    }
     var locks: usize = 0;
     var fence_stores: usize = 0;
     var fence_loads: usize = 0;

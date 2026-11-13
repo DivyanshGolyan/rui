@@ -669,6 +669,132 @@ pub fn testingIdLess(_: void, left: change_ring.Id, right: change_ring.Id) bool 
     return std.mem.order(u8, &left, &right) == .lt;
 }
 
+/// What a `TestingScript` body asks for after a step.
+pub const TestingAsk = enum { round, commit, done };
+
+/// A test's own steps on the runner's writer, inside one transaction:
+/// `Body.step(body, r, ran)` queues on `r`, the step's `transition.Round`,
+/// and asks for another round, the commit, or the end, which rolls back;
+/// `ran` counts the rounds run before it. A test that holds what the writer
+/// does within and between rounds reaches it as a production step does: it
+/// never opens a writer itself, and only the runner runs or commits.
+/// `Body` declares `Guards`, and optionally `pass` and `failed(body)`,
+/// which the runner calls on an error before its transaction rolls back.
+pub fn TestingScript(comptime Body: type) type {
+    return struct {
+        const Self = @This();
+        /// One round, which runs as often as the body asks.
+        pub const rounds = transition.rounds(.{ .round = .{.paged} });
+        pub const round_budget = 1;
+        pub const commit: transition.Commit = .transaction;
+        pub const pass: transition.Pass = if (@hasDecl(Body, "pass")) Body.pass else .ordinary;
+        pub const begin: ?rounds.At = .round;
+        pub const Input = *Body;
+        pub const Result = void;
+        pub const Ordinary = error{};
+        pub const Guards = Body.Guards;
+        pub const Declined = error{};
+
+        input: Input,
+        ran: u32 = 0,
+
+        pub fn step(t: *Self, r: *transition.Round(Self), ran: ?rounds.At) !transition.Next(Self) {
+            if (ran != null) t.ran += 1;
+            return switch (try t.input.step(r, t.ran)) {
+                .round => .{ .round = .round },
+                .commit => .commit,
+                .done => .{ .done = {} },
+            };
+        }
+
+        pub fn committed(_: *const Self) Result {}
+
+        pub fn failed(t: *Self) void {
+            if (comptime @hasDecl(Body, "failed")) t.input.failed();
+        }
+
+        /// Runs `body`'s steps under `entry`'s lock.
+        pub fn run(entry: *const store_core.Entry, body: *Body) !void {
+            var t: Self = .{ .input = body };
+            return transition.run(entry, Self, &t, .{});
+        }
+    };
+}
+
+/// A `TestingScript` body that prepares, validates and applies
+/// `configuration` as Configure's steps do, one round at a time, then runs
+/// the round its writes queued and ends, rolling them back. `Check`, held
+/// as `check`, may declare `ready(check, plan, reads)`, called once
+/// validation readied `plan`, and `applied(check, plan, reads, applied)`,
+/// called once application accepted it, both in the transaction.
+pub fn TestingConfiguring(comptime Check: type) type {
+    return struct {
+        const Self = @This();
+        pub const Guards = error{SessionUpdateFailed};
+
+        storage: *Store,
+        /// Empty for a creation.
+        session: []const u8,
+        configuration: *const @FieldType(wire_request.ConfigureCommand, "configuration"),
+        check: Check = .{},
+        reads: *configuration_domain.ConfigurationReads = undefined,
+        saved: tool_set_domain.SavedSelection = undefined,
+        /// What validation readied.
+        plan: *const configuration_domain.ValidatedConfiguration = undefined,
+        at: union(enum) {
+            prepare,
+            validate: ?configuration_domain.ValidationRound,
+            apply: ?configuration_domain.ApplyRound,
+            written,
+        } = .prepare,
+
+        pub fn step(b: *Self, r: anytype, _: u32) !TestingAsk {
+            const request: configuration_domain.Request = .{
+                .io = b.storage.io,
+                .tools = b.storage.hostTools(),
+                .served = b.storage.served,
+                .session = b.session,
+                .configuration = b.configuration,
+                .initial_skills = null,
+                .saved = &b.saved,
+            };
+            while (true) switch (b.at) {
+                .prepare => {
+                    b.reads = r.configurationReads();
+                    b.reads.* = .{ .next = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } } };
+                    configuration_domain.prepareConfiguration(r, b.storage.hostTools().host_tool_set, b.session, b.configuration, b.reads);
+                    b.at = .{ .validate = null };
+                    return .round;
+                },
+                .validate => |ran| switch (try configuration_domain.validateStep(r, &request, b.reads, ran)) {
+                    .round => |next| {
+                        b.at = .{ .validate = next };
+                        return .round;
+                    },
+                    .rejected => return error.TestUnexpectedResult,
+                    .ready => |plan| {
+                        b.plan = plan;
+                        if (comptime @hasDecl(Check, "ready")) try b.check.ready(plan, b.reads);
+                        b.at = .{ .apply = null };
+                    },
+                },
+                .apply => |ran| switch (try configuration_domain.applyStep(r, &request, r.faults(), b.reads, ran)) {
+                    .round => |next| {
+                        b.at = .{ .apply = next };
+                        return .round;
+                    },
+                    .accepted => |applied| {
+                        if (comptime @hasDecl(Check, "applied")) try b.check.applied(b.plan, b.reads, applied);
+                        b.at = .written;
+                        return .round;
+                    },
+                },
+                .written => return .done,
+            };
+        }
+    };
+}
+
 pub const TestingRound = struct {
     pub const head = rsql.Read(.{
         .sql = "SELECT session_ref,workspace_key,next_position FROM session WHERE session_ref=?1",
@@ -686,31 +812,6 @@ pub const TestingRound = struct {
         .Args = struct { session: rsql.SessionHead, revision: u64 },
         .expect = .{ .exact = .{ .rows = 1, .otherwise = error.TestingGuard } },
     });
-
-    /// Reads `session`'s head, imports `text` and claims two positions,
-    /// then dates the Session where its revision is `revision`.
-    pub fn change(storage: *Store, session: []const u8, text: []const u8, revision: u64) !u64 {
-        const entry = try store_core.enter(storage, .none);
-        defer entry.release();
-        var a: store_access.Access(.write, error{TestingGuard}) = .open(&entry);
-        defer a.deinit();
-        return entry.finishTransaction(error{TestingGuard}, .{}, a.end(.{}, body(&a, session, text, revision)));
-    }
-
-    pub fn body(a: anytype, session: []const u8, text: []const u8, revision: u64) !u64 {
-        var loaded: head.Result = undefined;
-        a.read(head, .{ .session_ref = session }, &loaded);
-        try a.run();
-        const positions = try a.positions(loaded.head);
-        const first = try positions.take(2);
-        const content_id = try a.identity(.content_id);
-        const digest = protocol.contentDigest(text);
-        a.write(insert_content, .{ .content_id = content_id, .digest = digest, .length = text.len });
-        a.writeContent(content_id, text);
-        a.write(date_session, .{ .session = loaded.head, .revision = revision });
-        try a.commit();
-        return first;
-    }
 };
 
 /// One Session's listed row, from one unfiltered page.
@@ -786,25 +887,30 @@ pub fn refreshFrontierForTesting(storage: *Store, session: []const u8) !void {
 
 pub fn refreshFrontiersForTesting(storage: *Store, sessions: []const []const u8) !void {
     std.debug.assert(sessions.len > 0 and sessions.len <= 4);
+    const Refresh = struct {
+        pub const Guards = error{};
+        const head = rsql.Read(.{
+            .sql = "SELECT session_ref,workspace_key,next_position FROM session WHERE session_ref=?1",
+            .Args = struct { session: []const u8 },
+            .Row = struct { session: rsql.SessionHead },
+            .cardinality = .optional,
+        });
+        refs: []const []const u8,
+        rows: [4]head.Result = undefined,
+
+        pub fn step(b: *@This(), r: anytype, ran: u32) !TestingAsk {
+            if (ran == 0) {
+                for (b.refs, b.rows[0..b.refs.len]) |ref, *row| r.read(head, .{ .session = ref }, row);
+                return .round;
+            }
+            for (b.rows[0..b.refs.len]) |row| r.obligationsChanged((row orelse return error.CorruptStore).session);
+            return .commit;
+        }
+    };
     const entry = try store_core.enter(storage, .none);
     defer entry.release();
-    var a: store_access.Access(.write, error{}) = .open(&entry);
-    defer a.deinit();
-    return entry.finishTransaction(store_core.Ordinary.none, .{}, a.end(.{}, struct {
-        fn run(access: *store_access.Access(.write, error{}), refs: []const []const u8) !void {
-            const head = rsql.Read(.{
-                .sql = "SELECT session_ref,workspace_key,next_position FROM session WHERE session_ref=?1",
-                .Args = struct { session: []const u8 },
-                .Row = struct { session: rsql.SessionHead },
-                .cardinality = .optional,
-            });
-            var rows: [4]head.Result = undefined;
-            for (refs, rows[0..refs.len]) |ref, *row| access.read(head, .{ .session = ref }, row);
-            try access.run();
-            for (rows[0..refs.len]) |row| access.obligationsChanged((row orelse return error.CorruptStore).session);
-            try access.commit();
-        }
-    }.run(&a, sessions)));
+    var refresh: Refresh = .{ .refs = sessions };
+    return entry.finishTransaction(store_core.Ordinary.none, .{}, TestingScript(Refresh).run(&entry, &refresh));
 }
 
 /// `count` message items, each its own id and text unless `same_text`,

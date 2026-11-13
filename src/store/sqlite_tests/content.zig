@@ -19,6 +19,8 @@ const canonicalCwd = store_testing.canonicalCwd;
 const completeConfiguration = store_testing.completeConfiguration;
 const configureTestSession = store_testing.configureTestSession;
 const testingPublicProjection = store_testing.testingPublicProjection;
+const TestingAsk = tests.TestingAsk;
+const TestingScript = tests.TestingScript;
 const testingContent = tests.testingContent;
 const testingStore = store_testing.testingSqliteStore;
 const busyStatements = shared_fixtures.busyStatements;
@@ -26,15 +28,24 @@ const busyStatements = shared_fixtures.busyStatements;
 /// Imports `bytes` as public content in a transaction of its own, as
 /// identities are taken only inside one.
 fn importCommittedForTesting(storage: *Store, bytes: []const u8) !void {
+    const Import = struct {
+        pub const Guards = error{};
+        bytes: []const u8,
+        value: content_domain.Import,
+
+        pub fn step(b: *@This(), r: anytype, ran: u32) !TestingAsk {
+            if (ran == 0) {
+                content_domain.lookup(r, &b.value);
+                return .round;
+            }
+            _ = try content_domain.importBytes(r, &b.value, b.bytes);
+            return .commit;
+        }
+    };
     const entry = try store_core.enter(storage, .none);
     defer entry.release();
-    var a: store_access.Access(.write, error{}) = .open(&entry);
-    defer a.deinit();
-    var value: content_domain.Import = .ofBytes(bytes, false);
-    content_domain.lookup(&a, &value);
-    try a.run();
-    _ = try content_domain.importBytes(&a, &value, bytes);
-    try a.commit();
+    var import: Import = .{ .bytes = bytes, .value = .ofBytes(bytes, false) };
+    return TestingScript(Import).run(&entry, &import);
 }
 
 test "interleaved large content readers bound repeated SQLite page reads" {

@@ -174,8 +174,11 @@ test "a transition with a wide pass steps twenty statements a pass, an ordinary 
             var passes: [2]u64 = undefined;
             inline for (.{ transition.Pass.wide, transition.Pass.ordinary }, &passes) |width, *taken| {
                 const before = RoundMeter.QueryShape.snapshot(&storage);
+                const rounds = storage.testing_content_work.rounds;
                 try transition.apply(&storage, TestingPassWidth(width), .{}, .{});
                 taken.* = RoundMeter.QueryShape.snapshot(&storage).since(before).access_passes;
+                // However many passes a full queue takes, the round counts once.
+                if (!case.rerun) try std.testing.expectEqual(rounds + 1, storage.testing_content_work.rounds);
             }
             try std.testing.expect(!storage.isFenced());
             // Only a batching engine sends passes, and a rerun repeats them.
