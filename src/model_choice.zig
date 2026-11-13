@@ -122,7 +122,7 @@ pub fn field(self: *Self, index: usize) Panel.CustomChoice {
 fn drawInput(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const self: *Self = @ptrCast(@alignCast(raw));
     const size = ctx.max.size();
-    var surface = try vxfw.Surface.init(ctx.arena, self.widget(), size);
+    var surface = try vxfw.Surface.init(ctx.cell_arena, self.widget(), size);
     @memset(surface.buffer, .{ .style = self.ground });
     if (!self.validate() or size.width == 0 or size.height == 0) return surface;
     const original = self.editor.buffer[0..self.editor.length];
@@ -240,7 +240,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     self.hits = &.{};
     self.hover.targets = &.{};
     const limit = ctx.max.size();
-    if (!self.validate()) return vxfw.Surface.init(ctx.arena, self.widget(), .{ .width = limit.width, .height = 0 });
+    if (!self.validate()) return vxfw.Surface.init(ctx.cell_arena, self.widget(), .{ .width = limit.width, .height = 0 });
     var indices: std.array_list.Managed(usize) = .init(ctx.arena);
     var selected_row: usize = 0;
     for (self.menu.entries, 0..) |entry, at| if (self.row(entry) != null) {
@@ -248,7 +248,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         try indices.append(at);
     };
     const size: vxfw.Size = .{ .width = limit.width, .height = @intCast(@min(limit.height, indices.items.len)) };
-    var surface = try vxfw.Surface.init(ctx.arena, self.widget(), size);
+    var surface = try vxfw.Surface.init(ctx.cell_arena, self.widget(), size);
     @memset(surface.buffer, .{ .style = self.ground });
     if (size.width == 0 or size.height == 0) return surface;
     var capacity = size.height - @intFromBool(self.show_more and indices.items.len > size.height and size.height > 1);
@@ -327,7 +327,7 @@ test "Model choice shares picker rows filters never empty and picks only its pro
     defer arena.deinit();
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
     for ([_]u16{ 99, 46 }) |width| {
-        const drawn = try choice.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 8 }, .cell_size = .{} });
+        const drawn = try choice.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 8 }, .cell_size = .{} });
         try std.testing.expectEqual(@as(usize, 2), choice.hits.len);
         try std.testing.expectEqualStrings("g", drawn.readCell(5, 0).char.grapheme);
         var text: std.Io.Writer.Allocating = .init(arena.allocator());
@@ -366,7 +366,7 @@ test "Model choice bounds scrolling and mouse picking use the visible list" {
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
     for (0..8) |_| try press(&choice, &ctx, vaxis.Key.down);
     const wanted = choice.menu.entries[choice.selected.?].id;
-    const drawn = try choice.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 99, .height = 3 }, .cell_size = .{} });
+    const drawn = try choice.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 99, .height = 3 }, .cell_size = .{} });
     try std.testing.expectEqual(@as(u16, 99), drawn.size.width);
     try std.testing.expect(choice.scroll > 0);
     try choice.widget().handleEvent(&ctx, .{ .mouse = .{ .button = .left, .type = .press, .mods = .{}, .row = 2, .col = 20 } });
@@ -374,7 +374,7 @@ test "Model choice bounds scrolling and mouse picking use the visible list" {
     try choice.widget().handleEvent(&ctx, .{ .mouse = .{ .button = .left, .type = .press, .mods = .{}, .row = @intCast(choice.hits.len - 1), .col = 20 } });
     try std.testing.expectEqualStrings(wanted, fixture.picked.?);
     for (0..9) |width| for (0..5) |height| {
-        _ = try choice.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = @intCast(width), .height = @intCast(height) }, .cell_size = .{} });
+        _ = try choice.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = @intCast(width), .height = @intCast(height) }, .cell_size = .{} });
     };
 }
 
@@ -404,7 +404,7 @@ test "Model choice invalidates every replaced or released source before keys mou
         choice.openSource(.{ .context = &live, .read = Live.read }, .codex, "old-b");
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
-        const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 8 }, .cell_size = .{} };
+        const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 8 }, .cell_size = .{} };
         _ = try choice.widget().draw(draw_ctx);
         try std.testing.expectEqual(@as(usize, 2), choice.hits.len);
         live.revision += 1;
@@ -462,7 +462,7 @@ fn expectFilterRecovery(failure: RejectedInput) !void {
     try std.testing.expectEqual(cursor, choice.editor.cursor);
     try std.testing.expectEqual(@as(?keymap.Refusal, null), choice.editor.rejected);
     for ([_]u16{ 99, 46 }) |width| {
-        const shown = try choice.field(0).value_widget.?.draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 1 }, .cell_size = .{} });
+        const shown = try choice.field(0).value_widget.?.draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 1 }, .cell_size = .{} });
         var line: std.Io.Writer.Allocating = .init(arena.allocator());
         for (shown.buffer[0..width]) |cell| try line.writer.writeAll(cell.char.grapheme);
         try std.testing.expect(std.mem.indexOf(u8, line.written(), "text couldn't be entered") != null);
@@ -473,7 +473,7 @@ fn expectFilterRecovery(failure: RejectedInput) !void {
     try std.testing.expectEqual(retained.len, choice.editor.length);
     try std.testing.expectEqual(@as(?[]const u8, null), choice.failure);
     try std.testing.expect(!choice.no_match);
-    _ = try choice.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 8 }, .cell_size = .{} });
+    _ = try choice.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 8 }, .cell_size = .{} });
     try std.testing.expectEqual(@as(usize, 2), choice.hits.len);
     try press(&choice, &ctx, vaxis.Key.down);
     try press(&choice, &ctx, vaxis.Key.enter);
@@ -513,7 +513,7 @@ test "Model choice Panel field keeps its input visible and compacts indented mat
         const fields = [_]Panel.Field{ .{ .label = "One", .value = "1" }, .{ .label = "Two", .value = "2" }, .{ .label = "Three", .value = "3" }, .{ .label = "Four", .value = "4" }, .{ .label = "Model", .value = "saved model" }, .{ .label = "After", .value = "next" } };
         var panel: Panel = .{ .title = "Title", .fields = &fields, .selected = 4 };
         if (choice.active) panel.custom_choice = choice.field(4);
-        const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = height }, .cell_size = .{} };
+        const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = height }, .cell_size = .{} };
         const drawn = try panel.widget().draw(draw_ctx);
         for (drawn.children) |child| {
             try std.testing.expect(child.origin.row >= 0 and child.origin.col >= 0);
@@ -528,7 +528,7 @@ test "Model choice Panel field keeps its input visible and compacts indented mat
         }
         if (count == 0 or width <= 20 or height != 20) continue;
         var screen = try vaxis.Screen.init(arena.allocator(), .{ .cols = width, .rows = height, .x_pixel = 0, .y_pixel = 0 });
-        drawn.render(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = height, .screen = &screen }, panel.widget());
+        try drawn.render(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = height, .screen = &screen }, panel.widget());
         try std.testing.expect(screen.cursor_vis);
         try std.testing.expectEqual(@as(u16, 6), screen.cursor.row);
         try std.testing.expectEqual(@as(u16, 19), screen.cursor.col);
@@ -579,7 +579,7 @@ test "Model choice input scrolls by grapheme and reserves refusal without a labe
     for ([_]?[]const u8{ null, " · text couldn't be entered" }) |failure| for ([_]usize{ 0, 4, 7, 8, query.len }) |caret| for (0..51) |width| {
         choice.failure = failure;
         choice.editor.cursor = caret;
-        const drawn = try choice.field(0).value_widget.?.draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = @intCast(width), .height = 1 }, .cell_size = .{} });
+        const drawn = try choice.field(0).value_widget.?.draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = @intCast(width), .height = 1 }, .cell_size = .{} });
         errdefer std.debug.print("input width={d} caret={d} failure={any} cursor={any}\n", .{ width, caret, failure != null, drawn.cursor });
         const tail_width = @min(width, if (failure != null) 27 else @as(usize, 0));
         if (width > tail_width) {
@@ -611,7 +611,7 @@ test "Model choice size column follows only the longest shown name across widths
         choice.open(&menu, .codex, "gpt-6.1-terra");
         var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
         if (filtered) try choice.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = 's', .text = "sol" } });
-        const drawn = try choice.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = @intCast(width), .height = height }, .cell_size = .{} });
+        const drawn = try choice.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = @intCast(width), .height = height }, .cell_size = .{} });
         // The hidden long names above/below never set this column. With sol,
         // the two visible names are shorter again, at every terminal width.
         const column: u16 = if (filtered) 18 else 20; // name starts at 5, then 11/13 cells and a two-cell gap.
@@ -634,7 +634,7 @@ test "Model choice shared ASCII inline input and compact matches preserve PR4 ge
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     for ([_]u16{ 46, 99 }) |width| {
-        const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 8 }, .cell_size = .{} };
+        const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 8 }, .cell_size = .{} };
         const drawn = try choice.widget().draw(ctx);
         try std.testing.expectEqual(@as(u16, 1), drawn.size.height);
         for (drawn.buffer) |cell| for (cell.char.grapheme) |byte| try std.testing.expect(byte < 0x80);
@@ -649,7 +649,7 @@ test "Model choice shared ASCII inline input and compact matches preserve PR4 ge
         try std.testing.expect(input_surface.cursor != null);
     }
     choice.open(null, .codex, "");
-    const overflow = try choice.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 3 }, .cell_size = .{} });
+    const overflow = try choice.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 3 }, .cell_size = .{} });
     try std.testing.expectEqualStrings("v", overflow.readCell(3, 2).char.grapheme);
     for (overflow.buffer) |cell| for (cell.char.grapheme) |byte| try std.testing.expect(byte < 0x80);
 }
@@ -683,7 +683,7 @@ test "Model choice ASCII cursor projection stays bounded across Unicode prefixes
         // failure or no-match feedback reserves the field's available room.
         for (0..40) |width| {
             errdefer std.debug.print("ASCII cursor query={s} caret={d} projected={d} state={s} width={d}\n", .{ case.query, case.caret, case.projected, @tagName(state), width });
-            const drawn = try choice.field(0).value_widget.?.draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = @intCast(width), .height = 1 }, .cell_size = .{} });
+            const drawn = try choice.field(0).value_widget.?.draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = @intCast(width), .height = 1 }, .cell_size = .{} });
             const edit_width = width -| expected_tail.len;
             if (edit_width == 0) {
                 try std.testing.expect(drawn.cursor == null);
@@ -717,7 +717,7 @@ test "Model choice hover and click follow full-width Panel matches without selec
         var choice: Self = .{ .userdata = &fixture, .on_pick = Fixture.pickModel, .ground = .{ .bg = .{ .index = 1 } }, .selection = .{ .bg = .{ .index = 2 } }, .hover_style = .{ .bg = .{ .index = 3 } } };
         choice.open(&menu, .codex, "model-0");
         var panel: Panel = .{ .title = "Title", .fields = &.{.{ .label = "Model", .value = "model-0" }} };
-        const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 8 }, .cell_size = .{} };
+        const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 8 }, .cell_size = .{} };
         _ = try panel.widget().draw(draw_ctx);
         var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
         try panel.widget().handleEvent(&events, .mouse_enter);
@@ -770,7 +770,7 @@ test "Model choice standalone rows use all bounded space without viewport hints"
     choice.open(&menu, .codex, "gpt-6.1-sol");
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 2 }, .cell_size = .{} };
+    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 2 }, .cell_size = .{} };
     _ = try choice.widget().draw(ctx);
     try std.testing.expectEqual(@as(usize, 1), choice.hits.len);
     choice.show_more = false;

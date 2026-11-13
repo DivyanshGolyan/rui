@@ -151,7 +151,7 @@ fn Screen(comptime Body: type) type {
             // Existing screen policy still owns events; these parts change
             // composition without changing how panels or input handle keys.
             surface.widget = own;
-            surface.buffer = try vxfw.Surface.createBuffer(ctx.arena, size);
+            surface.buffer = try vxfw.Surface.createBuffer(ctx.cell_arena, size);
             @memset(surface.buffer, .{ .style = self.style });
             return surface;
         }
@@ -196,7 +196,7 @@ const Marker = struct {
         const self: *Marker = @ptrCast(@alignCast(raw));
         const width = ctx.max.width.?;
         if (width == 0 or ctx.max.height.? == 0) return .empty(self.widget());
-        var row = try vxfw.Surface.init(ctx.arena, self.widget(), .{ .width = width, .height = 1 });
+        var row = try vxfw.Surface.init(ctx.cell_arena, self.widget(), .{ .width = width, .height = 1 });
         @memset(row.buffer, .{ .style = self.style });
         const drawn = try self.child.draw(ctx.withConstraints(.{}, .{ .width = width, .height = 1 }));
         const children = try ctx.arena.alloc(vxfw.SubSurface, 1);
@@ -233,7 +233,7 @@ test "App screens compose content input facts status and an overlay without owni
     var event_context: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
     for ([_]vxfw.Widget{ overview.widget(), session.widget() }) |screen| {
         try screen.handleEvent(&event_context, .tick);
-        const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 24 }, .cell_size = .{} };
+        const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 24 }, .cell_size = .{} };
         const drawn = try screen.draw(ctx);
         try std.testing.expectEqual(@as(usize, 2), drawn.children.len);
         const column = drawn.children[0].surface;
@@ -254,7 +254,7 @@ test "App screens compose content input facts status and an overlay without owni
     session.header = header.widget();
     session.tail = tail.widget();
     session.marker = marker.widget();
-    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 24 }, .cell_size = .{} };
+    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 24 }, .cell_size = .{} };
     const active = try session.widget().draw(ctx);
     try std.testing.expectEqual(@as(usize, 2), active.children.len);
     const column = active.children[0].surface;
@@ -291,7 +291,7 @@ test "App screens render the original composition with painted marker rows" {
         }
         fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
             const self: *@This() = @ptrCast(@alignCast(raw));
-            const surface = try vxfw.Surface.init(ctx.arena, self.widget(), ctx.max.size());
+            const surface = try vxfw.Surface.init(ctx.cell_arena, self.widget(), ctx.max.size());
             @memset(surface.buffer, .{ .char = .{ .grapheme = "c", .width = 1 }, .style = .{ .dim = true } });
             return surface;
         }
@@ -315,14 +315,14 @@ test "App screens render the original composition with painted marker rows" {
         screen.tail = if (flags & 2 != 0) tail.widget() else null;
         screen.marker = if (flags & 4 != 0) marker.widget() else null;
         screen.overlay = if (flags & 8 != 0) overlay.widget() else null;
-        const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = height }, .cell_size = .{} };
+        const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = height }, .cell_size = .{} };
         const surface = try screen.widget().draw(ctx);
         try std.testing.expectEqual(@as(usize, width) * height, surface.buffer.len);
         if (width > 0 and height > 0) try std.testing.expectEqual(screen.style.bg, surface.readCell(width - 1, height - 1).style.bg);
         var terminal: vaxis.Screen = .{ .width = width, .height = height, .width_method = .unicode, .buf = try arena.allocator().alloc(vaxis.Cell, @as(usize, width) * height) };
         @memset(terminal.buf, .{});
         const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = height, .screen = &terminal };
-        surface.render(window, input.composer.widget());
+        try surface.render(window, input.composer.widget());
         if (screen.marker != null and screen.overlay == null and width > 0 and height > 0) {
             const upper = surface.children[0].surface.children[0].surface;
             const lower = upper.children[upper.children.len - 1];
@@ -398,7 +398,7 @@ test "App screens update layout state through exhausted resizes for every option
                 defer arena.deinit();
                 all = rows[0..count];
                 list.rows = .of(&all);
-                const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = height }, .cell_size = .{} };
+                const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = height }, .cell_size = .{} };
                 // InputArea still owns input height. The rest is the original
                 // screen's allocation rule, independent of the Stack tree.
                 const input_height = (try input.widget().draw(ctx)).size.height;
@@ -445,7 +445,7 @@ test "App screens reserve one measured natural panel before feed without shrinki
             const self: *@This() = @ptrCast(@alignCast(raw));
             self.draws += 1;
             self.offered = ctx.max.size();
-            return vxfw.Surface.init(ctx.arena, self.widget(), self.offered);
+            return vxfw.Surface.init(ctx.cell_arena, self.widget(), self.offered);
         }
         fn event(_: *anyopaque, _: *vxfw.EventContext, _: vxfw.Event) !void {}
     };
@@ -458,7 +458,7 @@ test "App screens reserve one measured natural panel before feed without shrinki
         fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
             const self: *@This() = @ptrCast(@alignCast(raw));
             self.draws += 1;
-            return vxfw.Surface.init(ctx.arena, self.widget(), .{ .width = ctx.max.width.?, .height = @min(self.rows, ctx.max.height.?) });
+            return vxfw.Surface.init(ctx.cell_arena, self.widget(), .{ .width = ctx.max.width.?, .height = @min(self.rows, ctx.max.height.?) });
         }
     };
     var bytes = "kept\ndraft".*;
@@ -470,7 +470,7 @@ test "App screens reserve one measured natural panel before feed without shrinki
     for ([_]u16{ 1, 2, 46, 140 }) |width| for ([_]u16{ 1, 2, 4, 7, 18, 30, 40 }) |height| {
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
-        const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = height }, .cell_size = .{} };
+        const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = height }, .cell_size = .{} };
         screen.overlay = null;
         const before = try screen.widget().draw(ctx);
         const ordinary_input = before.children[0].surface.children[1];

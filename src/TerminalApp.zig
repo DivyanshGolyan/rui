@@ -214,11 +214,11 @@ test "App memory holds 49152-cell grids and a rendered Unicode widget surface" {
         const text: vaxis.vxfw.Text = .{ .text = "" };
         for ([_]vaxis.vxfw.Size{ .{ .width = 2048, .height = 24 }, .{ .width = 256, .height = 192 } }) |size| {
             try vx.resize(allocator, &output.writer, .{ .cols = size.width, .rows = size.height, .x_pixel = 0, .y_pixel = 0 });
-            var arena: std.heap.ArenaAllocator = .init(allocator);
-            defer arena.deinit();
-            const surface = try vaxis.vxfw.Surface.init(arena.allocator(), text.widget(), size);
+            var cell_arena: std.heap.ArenaAllocator = .init(allocator);
+            defer cell_arena.deinit();
+            const surface = try vaxis.vxfw.Surface.init(cell_arena.allocator(), text.widget(), size);
             @memset(surface.buffer, .{ .char = .{ .grapheme = "e\u{0301}", .width = 1 } });
-            surface.render(vx.window(), text.widget());
+            try surface.render(vx.window(), text.widget());
             try vx.render(&output.writer);
             std.debug.print("App {d}x{d} Unicode frame: live={d}, peak={d} page-rounded bytes\n", .{ size.width, size.height, memory.used, memory.peak });
             try std.testing.expect(memory.peak <= 32 * 1024 * 1024);
@@ -240,9 +240,9 @@ test "App memory reuses replacement text and links across rendered frames" {
         defer vx.deinit(allocator, &output.writer);
         try vx.resize(allocator, &output.writer, .{ .cols = 256, .rows = 192, .x_pixel = 0, .y_pixel = 0 });
         const text: vaxis.vxfw.Text = .{ .text = "" };
-        var arena: std.heap.ArenaAllocator = .init(allocator);
-        defer arena.deinit();
-        const surface = try vaxis.vxfw.Surface.init(arena.allocator(), text.widget(), .{ .width = 256, .height = 192 });
+        var cell_arena: std.heap.ArenaAllocator = .init(allocator);
+        defer cell_arena.deinit();
+        const surface = try vaxis.vxfw.Surface.init(cell_arena.allocator(), text.widget(), .{ .width = 256, .height = 192 });
         const values = [_]vaxis.Cell{
             .{ .char = .{ .grapheme = "e\u{0301}", .width = 1 }, .link = .{ .uri = "https://x", .params = "id=a" } },
             .{ .char = .{ .grapheme = "A", .width = 1 } },
@@ -252,7 +252,7 @@ test "App memory reuses replacement text and links across rendered frames" {
         for (0..4) |cycle| {
             for (values) |value| {
                 @memset(surface.buffer, value);
-                surface.render(vx.window(), text.widget());
+                try surface.render(vx.window(), text.widget());
                 try vx.render(&output.writer);
                 for (0..192) |row| for (0..256) |col| {
                     const actual = vx.screen_last.readCell(@intCast(col), @intCast(row)).?;

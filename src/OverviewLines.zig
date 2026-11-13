@@ -80,7 +80,7 @@ test "overview header draws no counts view name or Host-stopped band" {
     var header: Header = .{ .state = &state };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 50, .height = 6 }, .cell_size = .{} };
+    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 50, .height = 6 }, .cell_size = .{} };
     const plain = try header.widget().draw(ctx);
     try std.testing.expectEqual(@as(u16, 0), plain.size.height);
     state.archive = .archived;
@@ -120,7 +120,7 @@ pub const Settings = struct {
         const target: Hover.Rect = .{ .row = 1, .width = size.width };
         self.hover.targets = if (height == 2 and size.width > 0) try ctx.arena.dupe(Hover.Rect, &.{target}) else &.{};
         const ground: overview_view.Background = if (self.selected) .selection else if (self.hover.targets.len != 0 and self.hover.contains(target)) .hover else .ground;
-        const surface = try vxfw.Surface.init(ctx.arena, self.widget(), .{ .width = size.width, .height = height });
+        const surface = try vxfw.Surface.init(ctx.cell_arena, self.widget(), .{ .width = size.width, .height = height });
         @memset(surface.buffer, .{ .style = widget_style.of(self.caps, .{}) });
         if (height == 0 or size.width == 0) return surface;
         for (0..size.width) |x| surface.writeCell(@intCast(x), 0, .{ .char = .{ .grapheme = if (self.caps.unicode) "─" else "-", .width = 1 }, .style = widget_style.of(self.caps, .{ .colour = .quiet }) });
@@ -142,7 +142,7 @@ test "overview Settings row is pinned selected and opens only on its second line
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     for ([_]u16{ 40, 140 }) |width| {
-        const surface = try settings.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 8 }, .cell_size = .{} });
+        const surface = try settings.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 8 }, .cell_size = .{} });
         try std.testing.expectEqual(@as(u16, 2), surface.size.height);
         try std.testing.expectEqualStrings("─", surface.readCell(0, 0).char.grapheme);
         const text = try cells(arena.allocator(), surface, 1);
@@ -157,7 +157,7 @@ test "overview Settings row is pinned selected and opens only on its second line
     try std.testing.expectEqual(overview_view.Click.settings, clicks.got.?);
     try std.testing.expect(events.consume_event);
     for (0..4) |height| for (0..12) |width| {
-        const tiny = try settings.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = @intCast(width), .height = @intCast(height) }, .cell_size = .{} });
+        const tiny = try settings.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = @intCast(width), .height = @intCast(height) }, .cell_size = .{} });
         try std.testing.expect(tiny.size.width <= width and tiny.size.height <= height);
     };
 }
@@ -167,7 +167,7 @@ test "overview Settings hover follows only its drawn row without selecting or fo
     var settings: Settings = .{ .selected = false, .caps = .{}, .userdata = &clicks, .on_click = Clicks.take };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 2 }, .cell_size = .{} };
+    const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 2 }, .cell_size = .{} };
     const plain = try settings.widget().draw(draw_ctx);
     var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
     try settings.widget().handleEvent(&events, .mouse_enter);

@@ -652,9 +652,9 @@ test "App settings page text and ground at 99x20 and 46x20" {
     defer arena.deinit();
     for ([_]u16{ 99, 46 }) |width| {
         page.narrow = width == 46;
-        const surface = try page.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
+        const surface = try page.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
         var screen = try vaxis.Screen.init(arena.allocator(), .{ .cols = width, .rows = 20, .x_pixel = 0, .y_pixel = 0 });
-        surface.render(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = 20, .screen = &screen }, page.widget());
+        try surface.render(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = 20, .screen = &screen }, page.widget());
         var dump: std.Io.Writer.Allocating = .init(arena.allocator());
         for (0..20) |row| {
             var line: std.Io.Writer.Allocating = .init(arena.allocator());
@@ -795,7 +795,7 @@ test "App settings Model shares the provider list at full width and preserves ma
     try press(&page, &ctx, vaxis.Key.enter);
     try std.testing.expect(page.hasChoice());
     for ([_]u16{ 99, 46 }) |width| {
-        const drawn = try page.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
+        const drawn = try page.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
         const parts = drawn.children[0].surface.children;
         const choice = parts[parts.len - 1];
         try std.testing.expectEqual(@as(i17, 0), choice.origin.col);
@@ -813,9 +813,9 @@ test "App settings Model shares the provider list at full width and preserves ma
     try std.testing.expect(page.model_choice.no_match);
     try std.testing.expectEqualStrings("future", page.model_choice.editor.buffer[0..page.model_choice.editor.length]);
     for ([_]u16{ 99, 46 }) |width| {
-        const drawn = try page.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
+        const drawn = try page.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
         var screen = try vaxis.Screen.init(arena.allocator(), .{ .cols = width, .rows = 20, .x_pixel = 0, .y_pixel = 0 });
-        drawn.render(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = 20, .screen = &screen }, page.widget());
+        try drawn.render(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = 20, .screen = &screen }, page.widget());
         try std.testing.expect(screen.cursor_vis);
         try std.testing.expectEqual(@as(u16, 25), screen.cursor.col);
         try std.testing.expectEqual(@as(u16, 2), screen.cursor.row);
@@ -855,7 +855,7 @@ test "App settings shared ASCII capability reaches the panel model choice tails 
             }
             fixture.status = .checking;
             page.failures.set(.notifications, " · couldn't save");
-            const surface = try page.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
+            const surface = try page.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
             try Check.ascii(surface);
             try std.testing.expect(!page.panel.unicode and !page.model_choice.unicode);
             try std.testing.expectEqualStrings("-", surface.children[0].surface.readCell(0, 0).char.grapheme);
@@ -902,7 +902,7 @@ test "App settings mouse hover and click use the same field choices as Enter" {
         var page: Self = .{ .backend = fixture.backend() };
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
-        const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 60, .height = 12 }, .cell_size = .{} };
+        const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 60, .height = 12 }, .cell_size = .{} };
         var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
         try page.refresh();
         _ = try page.widget().draw(draw_ctx);
@@ -956,7 +956,7 @@ test "App settings Keys is last and opens by Enter or click without a backend" {
         try std.testing.expectEqualStrings("", page.fields[@backingInt(Row.keys)].value);
         var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
         if (click) {
-            _ = try page.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
+            _ = try page.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
             try page.widget().handleEvent(&ctx, .{ .mouse = .{ .button = .left, .type = .press, .row = 2 + @as(u16, @backingInt(Row.keys)), .col = 4, .mods = .{} } });
         } else {
             page.select(.keys);
@@ -964,7 +964,7 @@ test "App settings Keys is last and opens by Enter or click without a backend" {
         }
         try std.testing.expect(page.keys_open);
         try std.testing.expect(ctx.consume_event);
-        const drawn = try page.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
+        const drawn = try page.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
         try std.testing.expectEqualStrings("e", drawn.readCell(1, 0).char.grapheme);
         try std.testing.expect(drawn.widget.eql(page.widget()));
         // Enter on a reference is inert, not a hidden settings edit.
@@ -983,7 +983,7 @@ test "App settings standalone choices reuse edits hide pending preserve failures
     try page.openStandaloneChoice(&ctx, .effort, null);
     try std.testing.expect(page.standaloneOpen());
     try std.testing.expectEqual(Row.effort, page.standalone.?.row);
-    const drawn = try page.standaloneWidget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 30 }, .cell_size = .{} });
+    const drawn = try page.standaloneWidget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 30 }, .cell_size = .{} });
     try std.testing.expectEqualStrings("E", drawn.readCell(1, 0).char.grapheme);
     try std.testing.expectEqual(@as(u16, @intCast(1 + page.effort_count)), drawn.size.height);
     try press(&page, &ctx, vaxis.Key.enter);
@@ -1001,7 +1001,7 @@ test "App settings standalone choices reuse edits hide pending preserve failures
     try page.openStandaloneChoice(&ctx, .model, null);
     try std.testing.expect(page.model_choice.active);
     for ([_]u16{ 0, 1, 2, 46, 140 }) |width| for (0..12) |height| {
-        const model_surface = try page.standaloneWidget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = @intCast(height) }, .cell_size = .{} });
+        const model_surface = try page.standaloneWidget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = @intCast(height) }, .cell_size = .{} });
         try std.testing.expect(model_surface.size.height <= height);
         for (model_surface.children) |child| {
             try std.testing.expect(child.origin.row + child.surface.size.height <= model_surface.size.height);
@@ -1034,7 +1034,7 @@ test "App settings standalone draw invalidation never falls through to enclosing
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
-    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 30 }, .cell_size = .{} };
+    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 30 }, .cell_size = .{} };
     try page.openStandaloneChoice(&events, .model, null);
     var revision: u64 = 0;
     page.model_choice.source = .{ .context = &revision, .read = Live.read };
@@ -1079,7 +1079,7 @@ test "App settings standalone effort uses the owned next-start projection instea
         const checked: ?usize = if (shown == null) 0 else if (shown == .high) 1 else null;
         try std.testing.expectEqual(checked, page.panel.choice.?.current);
         for ([_]u16{ 46, 140 }) |width| {
-            const drawn = try page.standaloneWidget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
+            const drawn = try page.standaloneWidget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
             for (0..page.effort_count) |row| try std.testing.expectEqualStrings(if (checked == row) "✓" else " ", drawn.readCell(1, @intCast(row + 1)).char.grapheme);
         }
         page.closeStandaloneChoice();
@@ -1125,7 +1125,7 @@ test "App settings standalone model checks and saves the drawn next-start provid
         try std.testing.expectEqual(protocol.Provider.openai, page.model_choice.provider);
         try std.testing.expectEqualStrings("azure/gpt-5-pro", page.model_choice.current);
         try std.testing.expectEqualStrings("azure/gpt-5-pro", page.model_choice.menu.entries[page.model_choice.selected.?].id);
-        const drawn = try page.model_choice.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 20 }, .cell_size = .{} });
+        const drawn = try page.model_choice.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 20 }, .cell_size = .{} });
         var checks: usize = 0;
         for (drawn.buffer) |cell| checks += @intFromBool(std.mem.eql(u8, "✓", cell.char.grapheme));
         try std.testing.expectEqual(@as(usize, 1), checks);
@@ -1216,7 +1216,7 @@ test "App settings standalone Model and Effort retry read and save failures by d
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
-        const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} };
+        const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} };
         const click: vaxis.Mouse = .{ .col = 1, .row = 1, .button = .left, .type = .press, .mods = .{} };
         var current = view.Default.of("openai", "gpt-6.1-sol").?;
         current.effort = .high;
@@ -1289,7 +1289,7 @@ test "App settings standalone without a backend retains only its drawn field unt
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
-        const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 20 }, .cell_size = .{} };
+        const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 20 }, .cell_size = .{} };
         const click: vaxis.Mouse = .{ .col = 1, .row = 1, .button = .left, .type = .press, .mods = .{} };
         try page.refresh();
         try page.openStandaloneChoice(&ctx, field, null);
@@ -1367,7 +1367,7 @@ test "App settings standalone lifetime domain closes every phase without cancell
             }
             try std.testing.expect(page.standaloneField() == null);
             try std.testing.expect(!page.standaloneOpen());
-            const surface = try page.standaloneWidget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 20 }, .cell_size = .{} });
+            const surface = try page.standaloneWidget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 20 }, .cell_size = .{} });
             try std.testing.expectEqual(@as(u16, 0), surface.size.height);
             try std.testing.expectEqual(@as(usize, 0), surface.buffer.len);
             try std.testing.expectEqual(@as(usize, 0), surface.children.len);

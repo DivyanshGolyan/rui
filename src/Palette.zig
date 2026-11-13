@@ -61,7 +61,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     self.hover.targets = &.{};
     self.shown.drew(width > 2 and height != 0);
     if (self.shown.seen != .drawn) return .empty(self.widget());
-    const surface = try vxfw.Surface.init(ctx.arena, self.widget(), .{ .width = width, .height = height });
+    const surface = try vxfw.Surface.init(ctx.cell_arena, self.widget(), .{ .width = width, .height = height });
     @memset(surface.buffer, .{ .style = self.style });
     var screen: vaxis.Screen = .{ .width = width, .height = height, .width_method = self.method, .buf = surface.buffer };
     const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = height, .screen = &screen };
@@ -109,7 +109,7 @@ test "Palette keeps the selected command visible at one row and hides closed or 
     var palette: Self = .{ .shown = &shown };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 1 }, .cell_size = .{} };
+    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 1 }, .cell_size = .{} };
     const surface = try palette.widget().draw(ctx);
     try std.testing.expectEqual(.drawn, shown.seen);
     try std.testing.expectEqual(@as(u16, 1), surface.size.height);
@@ -146,7 +146,7 @@ test "Palette hover is transient and clicks activate only visible command rows" 
     var palette: Self = .{ .shown = &shown, .userdata = &selected, .on_select = Selected.select, .style = .{ .fg = .{ .index = 3 } } };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 3 }, .cell_size = .{} };
+    const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 3 }, .cell_size = .{} };
     const initial = try palette.widget().draw(draw_ctx);
     try std.testing.expect(!initial.readCell(0, 1).style.reverse);
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
@@ -210,7 +210,7 @@ test "Palette renders names-only slash lists on conversation and overview" {
         var palette: Self = .{ .shown = &shown };
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
-        const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 24 }, .cell_size = .{} };
+        const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 24 }, .cell_size = .{} };
         const surface = try palette.widget().draw(ctx);
         try std.testing.expectEqual(case[1].len, surface.size.height);
         std.debug.print("\n{s} / list:\n", .{if (case[0] == commands.conversation) "Conversation" else "Overview"});

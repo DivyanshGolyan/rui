@@ -293,6 +293,7 @@ test "App root switches between overview and Session without retaining the hidde
     defer arena.deinit();
     const draw_context: vxfw.DrawContext = .{
         .arena = arena.allocator(),
+        .cell_arena = arena.allocator(),
         .min = .{},
         .max = .{ .width = 80, .height = 24 },
         .cell_size = .{},
@@ -334,7 +335,7 @@ test "App root places list and compose or the open child at desktop and phone wi
     for ([_]bool{ false, true }) |active| {
         root.session = if (active) opened.widget() else null;
         for ([_]vxfw.Size{ .{ .width = 140, .height = 40 }, .{ .width = 46, .height = 26 }, .{ .width = 0, .height = 1 }, .{ .width = 1, .height = 1 }, .{ .width = 41, .height = 1 }, .{ .width = 99, .height = 1 }, .{ .width = 100, .height = 1 }, .{ .width = 100, .height = 0 } }) |size| {
-            const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = size.width, .height = size.height }, .cell_size = .{} };
+            const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = size.width, .height = size.height }, .cell_size = .{} };
             const surface = try root.widget().draw(ctx);
             try std.testing.expectEqual(size, surface.size);
             const layout = surface.children[0].surface;
@@ -390,7 +391,7 @@ test "App root resizing keeps the open child's draft scroll and focus without an
     try std.testing.expectEqual(@as(usize, 1), events.cmds.items.len);
     try std.testing.expect(events.cmds.items[0].request_focus.eql(opened.widget()));
     for ([_]u16{ 140, 46, 99, 100, 46, 140 }) |width| {
-        const surface = try root.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 26 }, .cell_size = .{} });
+        const surface = try root.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 26 }, .cell_size = .{} });
         try std.testing.expect(root.session.?.eql(opened.widget()));
         try std.testing.expectEqual(@as(usize, 1), events.cmds.items.len);
         try std.testing.expectEqual(@as(usize, 1), opened.inits);
@@ -398,7 +399,7 @@ test "App root resizing keeps the open child's draft scroll and focus without an
         try std.testing.expectEqual(@as(u16, 7), opened.scroll);
         var screen: vaxis.Screen = try .init(arena.allocator(), .{ .cols = width, .rows = 26, .x_pixel = 0, .y_pixel = 0 });
         const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = 26, .screen = &screen };
-        surface.render(window, opened.widget());
+        try surface.render(window, opened.widget());
         try std.testing.expect(screen.cursor_vis);
         try std.testing.expectEqual(@as(u16, if (width >= 100) 41 else 0), screen.cursor.col);
     }
@@ -463,7 +464,7 @@ test "App root opens settings in both layouts and Escape closes the choice, then
             .run = Backend.run,
             .caps = Backend.caps,
         } } };
-        const draw_context: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} };
+        const draw_context: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} };
         var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
         _ = try root.widget().draw(draw_context);
         try root.openSettings(&ctx);
@@ -895,10 +896,10 @@ test "Sign-in frames keep the list at 140 columns and the code link and masked k
             const secret = "sk-secret";
             @memcpy(page.key.bytes[0..secret.len], secret);
             page.key.len = secret.len;
-            const surface = try root.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 12 }, .cell_size = .{} });
+            const surface = try root.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 12 }, .cell_size = .{} });
             try std.testing.expectEqual(width >= split_at, root.listVisible());
             var screen = try vaxis.Screen.init(arena.allocator(), .{ .cols = width, .rows = 12, .x_pixel = 0, .y_pixel = 0 });
-            surface.render(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = 12, .screen = &screen }, root.widget());
+            try surface.render(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = 12, .screen = &screen }, root.widget());
             var dump: std.Io.Writer.Allocating = .init(arena.allocator());
             var linked: usize = 0;
             var titles: usize = 0;

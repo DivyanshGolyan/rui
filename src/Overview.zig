@@ -2777,7 +2777,7 @@ const Rig = struct {
     fn click(rig: *Rig, column: u16, row: u16, width: u16, height: u16) !?Ending {
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
-        const frame = try rig.overview.root.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = height }, .cell_size = .{} });
+        const frame = try rig.overview.root.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = height }, .cell_size = .{} });
         var ctx = rig.context();
         defer ctx.cmds.deinit(std.testing.allocator);
         try app_events.mouse(&ctx, frame, .{ .col = @intCast(column), .row = @intCast(row), .button = .left, .type = .press, .mods = .{} });
@@ -2798,10 +2798,10 @@ const Rig = struct {
     fn shown(rig: *Rig, width: u16, height: u16) !Shown {
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         errdefer arena.deinit();
-        const surface = try rig.overview.root.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = height }, .cell_size = .{} });
+        const surface = try rig.overview.root.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = height }, .cell_size = .{} });
         var screen: vaxis.Screen = try .init(arena.allocator(), .{ .rows = height, .cols = width, .x_pixel = 0, .y_pixel = 0 });
         const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = height, .screen = &screen };
-        surface.render(window, rig.overview.app_input.composer.widget());
+        try surface.render(window, rig.overview.app_input.composer.widget());
         return .{ .arena = arena, .screen = screen };
     }
 
@@ -6156,7 +6156,7 @@ test "App overview schedules spinning rows only while Root shows the list" {
         }) |layout| {
             if (layout.open and overview.root.session == null) try overview.root.openSession(&ctx, session.widget(), null);
             if (!layout.open and overview.root.session != null) try overview.root.closeSession(&ctx);
-            _ = try overview.root.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = layout.width, .height = 24 }, .cell_size = .{} });
+            _ = try overview.root.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = layout.width, .height = 24 }, .cell_size = .{} });
             try std.testing.expectEqual(spinning, overview.listSpins());
             // Force a due animation step without waiting for the clock. A
             // hidden list cannot advance its last frame, even on later ticks.
@@ -6198,7 +6198,7 @@ test "App overview panes prepare rows and compose only at their actual widths" {
     try std.testing.expect(try rig.press("/") == null);
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    const wide = try overview.root.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 140, .height = 40 }, .cell_size = .{} });
+    const wide = try overview.root.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 140, .height = 40 }, .cell_size = .{} });
     const panes = wide.children[0].surface.children;
     try std.testing.expectEqual(@as(u16, 40), overview.state.size.width);
     try std.testing.expectEqual(@as(u16, 40), panes[0].surface.size.width);
@@ -6214,7 +6214,7 @@ test "App overview panes prepare rows and compose only at their actual widths" {
     try std.testing.expectEqual(@as(usize, 1), Find.count(panes[2].surface, palette));
     try std.testing.expect(panes[2].surface.widget.eql(overview.widget()));
     try std.testing.expectEqualStrings("/", overview.composerDraft().bytes);
-    const phone = try overview.root.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 26 }, .cell_size = .{} });
+    const phone = try overview.root.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 26 }, .cell_size = .{} });
     try std.testing.expectEqual(@as(u16, 46), overview.state.size.width);
     try std.testing.expectEqual(@as(usize, 1), Find.count(phone, header));
     try std.testing.expectEqual(@as(usize, 1), Find.count(phone, composer));
@@ -6253,7 +6253,7 @@ test "App overview list stays live beside a focused child and wheels stay in the
     overview.state.selected = .{ .session = "b4n8wd".* };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    const draw: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 140, .height = 4 }, .cell_size = .{} };
+    const draw: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 140, .height = 4 }, .cell_size = .{} };
     const frame = try overview.root.widget().draw(draw);
     const selected = overview.app_sessions.selected.?;
     const target = view.clickOf(&overview.state, view.listItem(&overview.state, selected).?).?;
@@ -6351,7 +6351,7 @@ test "App overview list press follows only after the open child settles and open
     overview.ops.open = Find.open;
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    const frame = try overview.root.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 140, .height = 40 }, .cell_size = .{} });
+    const frame = try overview.root.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 140, .height = 40 }, .cell_size = .{} });
     const origin = Find.origin(frame, overview.app_sessions.widget(), .{ .row = 0, .col = 0 }).?;
     var ctx = rig.context();
     defer ctx.cmds.deinit(std.testing.allocator);
@@ -6391,7 +6391,7 @@ test "App shell divider follows overview locale across layouts and screen select
             for ([_]bool{ false, true }) |open| {
                 if (open) try overview.root.openSession(&events, session.widget(), null) else try overview.root.closeSession(&events);
                 for ([_]u16{ 46, 99, 100, 140 }) |width| {
-                    const surface = try overview.root.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 24 }, .cell_size = .{} });
+                    const surface = try overview.root.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 24 }, .cell_size = .{} });
                     const layout = surface.children[0].surface;
                     if (width >= Root.split_at) {
                         const divider = layout.children[1].surface;
@@ -6400,7 +6400,7 @@ test "App shell divider follows overview locale across layouts and screen select
                     } else try std.testing.expect(layout.widget.eql(if (open) session.widget() else overview.widget()));
                     var screen: vaxis.Screen = try .init(arena.allocator(), .{ .cols = width, .rows = 24, .x_pixel = 0, .y_pixel = 0 });
                     const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = 24, .screen = &screen };
-                    surface.render(window, overview.app_input.composer.widget());
+                    try surface.render(window, overview.app_input.composer.widget());
                     if (!case.unicode) for (screen.buf) |cell| {
                         for (cell.char.grapheme) |byte| try std.testing.expect(byte < 0x80);
                     };
@@ -6471,7 +6471,7 @@ test "App list clicks validate present and removed targets with open and closed 
             overview.ops.open = Click.open;
             var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
             defer arena.deinit();
-            const frame = try overview.root.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 140, .height = 40 }, .cell_size = .{} });
+            const frame = try overview.root.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 140, .height = 40 }, .cell_size = .{} });
             const at = Click.origin(frame, overview.app_sessions.widget(), .{ .row = 0, .col = 0 }).?;
             const row = for (overview.app_sessions.shown_at) |span| {
                 if (span.target) |target| if (target == .open and std.mem.eql(u8, &target.open, "b4n8wd")) break span.row;
@@ -6604,7 +6604,7 @@ test "App root navigation shows and focuses the main pane before every Session s
                         defer ctx.cmds.deinit(std.testing.allocator);
                         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
                         defer arena.deinit();
-                        const draw_context: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 24 }, .cell_size = .{} };
+                        const draw_context: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 24 }, .cell_size = .{} };
                         _ = try overview.root.widget().draw(draw_context);
                         if (settings_open) {
                             try overview.root.openSettings(&ctx);
@@ -6728,7 +6728,7 @@ test "App settings Enter reaches Root at both widths with and without a retained
             defer ctx.cmds.deinit(std.testing.allocator);
             var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
             defer arena.deinit();
-            const draw_context: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 24 }, .cell_size = .{} };
+            const draw_context: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 24 }, .cell_size = .{} };
             _ = try overview.root.widget().draw(draw_context);
             // Real parser/overview handlers select the last list row;
             // do not synthesize a core click or set selected directly.
@@ -7613,7 +7613,7 @@ test "Overview mouse Palette click on a row drawn before the draft changed runs 
     // The same frame, as the widgets a press lands on hold it.
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    const frame = try rig.overview.root.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 24 }, .cell_size = .{} });
+    const frame = try rig.overview.root.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 24 }, .cell_size = .{} });
     // `s` arrives before the next frame: `/s` lists /sessions where /archive was.
     try std.testing.expect(try rig.press("s") == null);
     try std.testing.expectEqualStrings("/s", rig.overview.composerDraft().bytes);
@@ -7707,7 +7707,7 @@ test "Overview mouse Host start and retry hover preserve foreground selection an
         const host_widget = hostNotice(overview).?;
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
-        const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 60, .height = 1 }, .cell_size = .{} };
+        const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 60, .height = 1 }, .cell_size = .{} };
         const plain = try host_widget.draw(draw_ctx);
         const selected = overview.state.selected;
         var events = rig.context();
@@ -7776,7 +7776,7 @@ test "Overview mouse Host line without a start or retry has no hover or click ac
         const host_widget = hostNotice(overview).?;
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
-        const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 60, .height = 1 }, .cell_size = .{} };
+        const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 60, .height = 1 }, .cell_size = .{} };
         const plain = try host_widget.draw(draw_ctx);
         var events = rig.context();
         defer events.cmds.deinit(std.testing.allocator);
@@ -7843,7 +7843,7 @@ test "App settings Sign-in Enter and click use the Overview owner and return to 
         try std.testing.expect(page.backend.?.models != null);
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
-        _ = try overview.root.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 24 }, .cell_size = .{} });
+        _ = try overview.root.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 24 }, .cell_size = .{} });
         if (busy) overview.defaults_save = .pending;
         ctx.cmds.clearRetainingCapacity();
         if (click) {
@@ -8024,7 +8024,7 @@ test "Sign-in keeps the pane through Session and Settings clicks with and withou
         const frontend = if (overview.app_session) |held| held.frontend else null;
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
-        const frame = try overview.root.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 140, .height = 40 }, .cell_size = .{} });
+        const frame = try overview.root.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 140, .height = 40 }, .cell_size = .{} });
         try std.testing.expect(overview.root.listVisible());
         const at: vxfw.RelativePoint = switch (click) {
             .session => session: {
@@ -8251,7 +8251,7 @@ test "Overview footer drawn model and effort cells click and underline at both w
     var ctx = rig.context();
     defer ctx.cmds.deinit(std.testing.allocator);
     for ([_]u16{ 46, 140 }) |width| {
-        const draw: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 1 }, .cell_size = .{} };
+        const draw: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 1 }, .cell_size = .{} };
         const footer = try appFooterDraw(overview, draw);
         try std.testing.expectEqual(@as(usize, 2), footer.children.len);
         for (footer.children, [_]view.FooterField{ .model, .effort }) |child, field| {
@@ -8291,7 +8291,7 @@ test "Overview footer text table covers default explicit effort ask bypass and b
         for ([_]u16{ 140, 46 }) |width| {
             var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
             defer arena.deinit();
-            const footer = try appFooterDraw(rig.overview, .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 1 }, .cell_size = .{} });
+            const footer = try appFooterDraw(rig.overview, .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 1 }, .cell_size = .{} });
             var text: std.Io.Writer.Allocating = .init(arena.allocator());
             for (footer.buffer) |cell| try text.writer.writeAll(cell.char.grapheme);
             const right_at = std.mem.indexOf(u8, text.written(), "enter start").?;
@@ -8540,7 +8540,7 @@ test "Overview standalone footer close clicks match Escape preserve paste and pr
         defer ctx.cmds.deinit(std.testing.allocator);
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
-        const draw: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 1 }, .cell_size = .{} };
+        const draw: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 1 }, .cell_size = .{} };
         for ([_]bool{ false, true }) |retained_failure| {
             try page.openStandaloneChoice(&ctx, row, self.state.nextStart());
             if (retained_failure) {
@@ -8631,7 +8631,7 @@ test "Overview standalone lifetime shared domain closes every phase through real
         if (case.phase == .save_failed) page.backend.?.save = Fault.save;
         try page.openStandaloneChoice(&ctx, row, self.state.nextStart());
         // Retain the actual drawn close target before admission hides pending.
-        const footer = try appFooterDraw(self, .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 1 }, .cell_size = .{} });
+        const footer = try appFooterDraw(self, .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 1 }, .cell_size = .{} });
         const close = for (footer.children) |child| {
             if (child.surface.widget.eql(self.app_choice_close.widget())) break child;
         } else return error.TestExpectedCloseTarget;

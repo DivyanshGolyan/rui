@@ -339,7 +339,7 @@ fn failureText(failure: core.Failure) []const u8 {
 fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const self: *Self = @ptrCast(@alignCast(raw));
     const size = ctx.max.size();
-    var surface = try vxfw.Surface.init(ctx.arena, self.widget(), size);
+    var surface = try vxfw.Surface.init(ctx.cell_arena, self.widget(), size);
     @memset(surface.buffer, .{ .style = self.style });
     if (size.width == 0 or size.height == 0) return surface;
     const header = try ctx.arena.create(vxfw.Text);
@@ -406,7 +406,7 @@ test "Sign-in row drives keys without leaking secrets and refuses overflow" {
     try std.testing.expectEqual(core.Stage.key_invalid, page.state.stage);
     const secret = "sk-test-secret";
     try page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = 's', .text = secret } });
-    const drawn = try page.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 12 }, .cell_size = .{} });
+    const drawn = try page.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 12 }, .cell_size = .{} });
     var masks: usize = 0;
     for (drawn.children[1].surface.buffer) |cell| {
         try std.testing.expect(std.mem.indexOf(u8, secret, cell.char.grapheme) == null or std.mem.eql(u8, cell.char.grapheme, " "));
@@ -544,7 +544,7 @@ test "Sign-in choices use approval background selection with and without colour"
             if (colour) page.style = .{ .fg = .{ .rgb = .{ 200, 210, 220 } }, .bg = .{ .rgb = .{ 20, 30, 40 } } };
             var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
             defer arena.deinit();
-            const surface = try page.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 12 }, .cell_size = .{} });
+            const surface = try page.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 12 }, .cell_size = .{} });
             var text = std.Io.Writer.Allocating.init(arena.allocator());
             for (surface.children[1].surface.buffer, 0..) |cell, column| {
                 try text.writer.writeAll(cell.char.grapheme);
@@ -793,7 +793,7 @@ test "Sign-in device publication after Connecting wakes exactly one frame while 
         page.stop() catch @panic("device publication escaped settlement");
     }
     var ctx: vxfw.EventContext = .{ .io = io, .alloc = arena.allocator(), .cmds = .empty, .redraw = false };
-    const draw_context: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 12 }, .cell_size = .{} };
+    const draw_context: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 12 }, .cell_size = .{} };
     // Guarantee the initial frame and tick precede publication, rather than
     // letting worker scheduling decide which frame the test happened to see.
     const connecting = try page.widget().draw(draw_context);

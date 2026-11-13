@@ -1210,7 +1210,7 @@ test "App Session retains the draft across a permission card arriving during pas
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
-    const draw_context: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 24 }, .cell_size = .{} };
+    const draw_context: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 24 }, .cell_size = .{} };
     try seedFeed(screen, "\x1b[2mtheme witness\x1b[0m");
     for ([_]struct { caps: overview_view.Caps, ground: vaxis.Color, band: vaxis.Color }{
         .{ .caps = .{}, .ground = .{ .rgb = .{ 0x12, 0x19, 0x33 } }, .band = .{ .rgb = .{ 0x1a, 0x22, 0x46 } } },
@@ -1224,7 +1224,7 @@ test "App Session retains the draft across a permission card arriving during pas
         try std.testing.expectEqual(case.ground, surface.readCell(79, 10).style.bg);
         var rendered: vaxis.Screen = try .init(arena.allocator(), .{ .rows = 24, .cols = 80, .x_pixel = 0, .y_pixel = 0 });
         const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 80, .height = 24, .screen = &rendered };
-        surface.render(window, self.app_input.composer.widget());
+        try surface.render(window, self.app_input.composer.widget());
         const user = rendered.readCell(1, @intCast(self.app_content.drawn.pad)).?;
         try std.testing.expectEqualStrings("t", user.char.grapheme);
         try std.testing.expectEqual(style.of(case.caps, .{ .colour = .quiet }).fg, user.style.fg);
@@ -1462,7 +1462,7 @@ test "App Session leaves from a permission card on Ctrl-C or Ctrl-D and keeps th
         self.reading.prepared_action = 17;
         self.live.work.first_action = 17;
         try widget_.handleEvent(&ctx, .tick);
-        _ = try widget_.draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 24 }, .cell_size = .{} });
+        _ = try widget_.draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 24 }, .cell_size = .{} });
         try std.testing.expectEqual(@as(?u64, 17), self.app_consent.request);
         // The key as App decodes it: the focused card first, then the Session.
         var parser: vaxis.Parser = .{};
@@ -1524,7 +1524,7 @@ test "App Session link click leaves for the peer only where Esc would leave" {
     defer arena.deinit();
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = std.testing.allocator, .cmds = .empty };
     defer ctx.cmds.deinit(std.testing.allocator);
-    const draw_context: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 24 }, .cell_size = .{} };
+    const draw_context: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 24 }, .cell_size = .{} };
     try seedFeed(screen, "\x1b[2;8m← Received message from " ++ TerminalText.link_open ++ TerminalText.session_link ++ "m3n4p5" ++ TerminalText.link_end ++ "\x1b[4mPlan" ++ TerminalText.link_close ++ "\x1b[0m\x1b[2;8m\x1b[0m\n");
     _ = try widget_.draw(draw_context);
     const content = self.app_content.widget();
@@ -3563,7 +3563,7 @@ const HeldFrontend = struct {
     }
 
     fn draw(held: *HeldFrontend) !vxfw.Surface {
-        return held.self.widget().draw(.{ .arena = held.arena.allocator(), .min = .{}, .max = held.size, .cell_size = .{} });
+        return held.self.widget().draw(.{ .arena = held.arena.allocator(), .cell_arena = held.arena.allocator(), .min = .{}, .max = held.size, .cell_size = .{} });
     }
 
     /// The latest frame's rows as text, one per line.
@@ -3574,7 +3574,7 @@ const HeldFrontend = struct {
         const surface = try held.draw();
         var screen: vaxis.Screen = try .init(gpa, .{ .rows = height, .cols = width, .x_pixel = 0, .y_pixel = 0 });
         const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = height, .screen = &screen };
-        surface.render(window, held.self.app_input.composer.widget());
+        try surface.render(window, held.self.app_input.composer.widget());
         var text: std.Io.Writer.Allocating = .init(gpa);
         for (0..height) |row| {
             for (0..width) |col| try text.writer.writeAll(screen.readCell(@intCast(col), @intCast(row)).?.char.grapheme);
@@ -3624,7 +3624,7 @@ test "App Session request overflow opens in place with Ctrl-O or a continuation 
                         _ = try held.draw();
                         try preview.widget().handleEvent(&ctx, .mouse_enter);
                         try preview.widget().handleEvent(&ctx, .{ .mouse = .{ .col = 2, .row = row, .button = .none, .type = .motion, .mods = .{} } });
-                        const hovered = try preview.widget().draw(.{ .arena = held.arena.allocator(), .min = .{}, .max = .{ .width = preview.size.width, .height = preview.size.height }, .cell_size = .{} });
+                        const hovered = try preview.widget().draw(.{ .arena = held.arena.allocator(), .cell_arena = held.arena.allocator(), .min = .{}, .max = .{ .width = preview.size.width, .height = preview.size.height }, .cell_size = .{} });
                         const role = style.of(held.self.app_caps, .{ .background = .hover });
                         for (0..hovered.size.width) |col| {
                             const cell = hovered.readCell(@intCast(col), @intCast(row)).style;
@@ -5877,7 +5877,7 @@ const ChromeFixture = struct {
     }
 
     fn draw(fixture: *ChromeFixture) !vxfw.Surface {
-        return fixture.widget.draw(.{ .arena = fixture.arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 24 }, .cell_size = .{} });
+        return fixture.widget.draw(.{ .arena = fixture.arena.allocator(), .cell_arena = fixture.arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 24 }, .cell_size = .{} });
     }
 
     fn press(fixture: *ChromeFixture, key: vaxis.Key) !void {
@@ -5895,7 +5895,7 @@ const ChromeFixture = struct {
         const surface = try fixture.draw();
         var screen: vaxis.Screen = try .init(arena, .{ .rows = 24, .cols = 80, .x_pixel = 0, .y_pixel = 0 });
         const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 80, .height = 24, .screen = &screen };
-        surface.render(window, fixture.self.app_input.composer.widget());
+        try surface.render(window, fixture.self.app_input.composer.widget());
         var result: [24][]const u8 = undefined;
         for (&result, 0..) |*line, row| {
             var out: std.Io.Writer.Allocating = .init(arena);
@@ -5946,10 +5946,10 @@ test "App Session shell gutter and back control follow list visibility through r
     try fixture.root.openSession(&fixture.ctx, fixture.widget, fixture.self.keyOwner());
     const arena = fixture.arena.allocator();
     for ([_]u16{ 140, 46, 100, 99, 140, 46 }) |width| {
-        const frame = try fixture.root.widget().draw(.{ .arena = arena, .min = .{}, .max = .{ .width = width, .height = 26 }, .cell_size = .{} });
+        const frame = try fixture.root.widget().draw(.{ .arena = arena, .cell_arena = arena, .min = .{}, .max = .{ .width = width, .height = 26 }, .cell_size = .{} });
         var screen: vaxis.Screen = try .init(arena, .{ .cols = width, .rows = 26, .x_pixel = 0, .y_pixel = 0 });
         const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = 26, .screen = &screen };
-        frame.render(window, self.app_input.composer.widget());
+        try frame.render(window, self.app_input.composer.widget());
         const wide = width >= 100;
         const start: u16 = if (wide) 41 else 0;
         try std.testing.expectEqual(wide, fixture.root.listVisible());
@@ -5970,7 +5970,7 @@ test "App Session shell gutter and back control follow list visibility through r
     }
     // The inset must remain bounded even when there is no room for feed text.
     for ([_]vxfw.Size{ .{ .width = 0, .height = 0 }, .{ .width = 0, .height = 1 }, .{ .width = 1, .height = 1 }, .{ .width = 1, .height = 26 } }) |size| {
-        const frame = try fixture.root.widget().draw(.{ .arena = arena, .min = .{}, .max = .{ .width = size.width, .height = size.height }, .cell_size = .{} });
+        const frame = try fixture.root.widget().draw(.{ .arena = arena, .cell_arena = arena, .min = .{}, .max = .{ .width = size.width, .height = size.height }, .cell_size = .{} });
         try std.testing.expectEqual(size, frame.size);
     }
 }
@@ -6353,7 +6353,7 @@ test "App Session keeps its real draft browsing anchor and focused composer acro
     try fixture.init();
     defer fixture.deinit();
     try fixture.root.openSession(&fixture.ctx, fixture.widget, fixture.self.keyOwner());
-    const draw: vxfw.DrawContext = .{ .arena = fixture.arena.allocator(), .min = .{}, .max = .{ .width = 140, .height = 26 }, .cell_size = .{} };
+    const draw: vxfw.DrawContext = .{ .arena = fixture.arena.allocator(), .cell_arena = fixture.arena.allocator(), .min = .{}, .max = .{ .width = 140, .height = 26 }, .cell_size = .{} };
     _ = try fixture.root.widget().draw(draw);
     try fixture.press(.{ .codepoint = vaxis.Key.up, .mods = .{ .shift = true } });
     for ("kept") |byte| try fixture.press(.{ .codepoint = byte, .text = &.{byte} });
@@ -6375,7 +6375,7 @@ test "App Session keeps its real draft browsing anchor and focused composer acro
         try std.testing.expectEqual(commands, fixture.ctx.cmds.items.len);
         var screen: vaxis.Screen = try .init(fixture.arena.allocator(), .{ .cols = width, .rows = 26, .x_pixel = 0, .y_pixel = 0 });
         const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = 26, .screen = &screen };
-        surface.render(window, focused);
+        try surface.render(window, focused);
         try std.testing.expect(screen.cursor_vis);
         const col = screen.cursor.col - @as(u16, if (width >= 100) 41 else 0);
         if (caret_col) |expected| try std.testing.expectEqual(expected, col) else caret_col = col;
@@ -6395,11 +6395,11 @@ test "App Session footer takes list visibility from Root across desktop and phon
         .{ .width = 140, .list = true },
     }) |case| {
         const arena = fixture.arena.allocator();
-        const surface = try fixture.root.widget().draw(.{ .arena = arena, .min = .{}, .max = .{ .width = case.width, .height = 30 }, .cell_size = .{} });
+        const surface = try fixture.root.widget().draw(.{ .arena = arena, .cell_arena = arena, .min = .{}, .max = .{ .width = case.width, .height = 30 }, .cell_size = .{} });
         try std.testing.expectEqual(case.list, fixture.root.listVisible());
         var screen: vaxis.Screen = try .init(arena, .{ .rows = 30, .cols = case.width, .x_pixel = 0, .y_pixel = 0 });
         const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = case.width, .height = 30, .screen = &screen };
-        surface.render(window, fixture.self.app_input.composer.widget());
+        try surface.render(window, fixture.self.app_input.composer.widget());
         const chat_col: u16 = if (case.list) Root.list_width + 1 else 0;
         var row: std.Io.Writer.Allocating = .init(arena);
         for (chat_col..case.width) |col| try row.writer.writeAll(screen.readCell(@intCast(col), 29).?.char.grapheme);
@@ -9094,7 +9094,7 @@ test "App Session palette clicks follow Enter for command words options and valu
         // Parent redraws must not replace the widget's pointer state.
         _ = try held.draw();
         try std.testing.expect(held.self.app_palette.hover.pointing);
-        const palette = try widget_.draw(.{ .arena = held.arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 20 }, .cell_size = .{} });
+        const palette = try widget_.draw(.{ .arena = held.arena.allocator(), .cell_arena = held.arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 20 }, .cell_size = .{} });
         const cell = palette.readCell(2, @intCast(row));
         if (selected == index) try std.testing.expect(cell.style.reverse) else {
             try std.testing.expect(!cell.style.reverse);
@@ -9109,7 +9109,7 @@ test "App Session palette clicks follow Enter for command words options and valu
         _ = try held.draw();
         try std.testing.expect(!held.self.app_palette.hover.pointing);
         if (selected != index) {
-            const plain = try widget_.draw(.{ .arena = held.arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 20 }, .cell_size = .{} });
+            const plain = try widget_.draw(.{ .arena = held.arena.allocator(), .cell_arena = held.arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 20 }, .cell_size = .{} });
             try std.testing.expect(!plain.readCell(2, @intCast(row)).style.reverse);
         }
         try widget_.handleEvent(&events, .{ .mouse = .{ .col = 2, .row = row, .button = .left, .type = .press, .mods = .{} } });
@@ -9569,7 +9569,7 @@ test "chat standalone footer close clicks match Escape preserve paste and preser
                 self.app_info.backend.configure = configure;
             }
             _ = try held.draw();
-            const footer = try self.app_screen.input.facts.draw(.{ .arena = held.arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 1 }, .cell_size = .{} });
+            const footer = try self.app_screen.input.facts.draw(.{ .arena = held.arena.allocator(), .cell_arena = held.arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 1 }, .cell_size = .{} });
             const close = for (footer.children) |child| {
                 if (child.surface.widget.eql(self.chrome.close.widget())) break child;
             } else return error.TestExpectedCloseTarget;
@@ -9599,7 +9599,7 @@ test "chat standalone footer close clicks match Escape preserve paste and preser
         }
         try self.app_info.openStandaloneChoice(&ctx, row);
         _ = try held.draw();
-        const stale_footer = try self.app_screen.input.facts.draw(.{ .arena = held.arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 1 }, .cell_size = .{} });
+        const stale_footer = try self.app_screen.input.facts.draw(.{ .arena = held.arena.allocator(), .cell_arena = held.arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 1 }, .cell_size = .{} });
         const close = for (stale_footer.children) |child| {
             if (child.surface.widget.eql(self.chrome.close.widget())) break child;
         } else return error.TestExpectedCloseTarget;
@@ -9648,7 +9648,7 @@ test "chat standalone lifetime shared domain closes every phase through real scr
         if (case.phase == .save_failed) self.app_info.backend.configure = Fault.configure;
         try self.app_info.openStandaloneChoice(&ctx, row);
         _ = try held.draw();
-        const footer = try self.app_screen.input.facts.draw(.{ .arena = held.arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 1 }, .cell_size = .{} });
+        const footer = try self.app_screen.input.facts.draw(.{ .arena = held.arena.allocator(), .cell_arena = held.arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 1 }, .cell_size = .{} });
         const close = for (footer.children) |child| {
             if (child.surface.widget.eql(self.chrome.close.widget())) break child;
         } else return error.TestExpectedCloseTarget;
