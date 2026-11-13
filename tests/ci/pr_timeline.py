@@ -6,14 +6,15 @@
 Release source: published releases API, ordered by published_at, with REST
 compare proving that the release tag contains the merge commit (not merely a
 later date). No checkout, fetch, tag, or GitHub mutation is performed.
-Codex rounds count formal reviews and no-findings receipts; the mutable summary
-is only a fallback for a head without either. Codex-clean is the time of the
-last review outcome before merge when that outcome is clean, on any head:
-landing.md lets test-only fixes, merges of main and stacked heads merge without
-another review, and only a later review with findings revokes it. Outcomes are
-formal Codex reviews (findings), Codex receipt comments (no findings), the
-summary at its Code Review completion time (updated_at in its older format),
-and a maintainer's interim opus-review-state:v1 marker at its updated_at.
+Every review stage (first review, Codex-clean, rounds) derives from one list
+of review outcomes: formal Codex reviews (findings), Codex receipt comments (no
+findings), the mutable summary at its Code Review completion time (updated_at in
+its older format), and a maintainer's interim opus-review-state:v1 marker at its
+updated_at. Rounds count reviews, receipts and interim markers; the summary is
+only a fallback for a head without a review or receipt. Codex-clean is the time
+of the last outcome before merge when it is clean, on any head: landing.md lets
+test-only fixes, merges of main and stacked heads merge without another review,
+and only a later outcome with findings revokes it.
 Pushes include branch creation and subsequent pushes through merge, starting
 at the last creation before opening; missing creation/fork history is unknown.
 Adjacent durations are signed minutes: stages can occur out of the listed order,
@@ -93,47 +94,13 @@ def push_count(pr, activity):
 def stages(pr, timeline, comments, reviews, checks, activity, release=None):
     """Pure projection of recorded API JSON; the PR head is the head merged."""
     head = pr["head"]["sha"]
-    codex = [row for row in comments if row["user"]["login"] == CODEX]
-    # Codex posts findings as a formal review and a clean result as a receipt
-    # comment. verdicts holds (time, clean) for every review outcome.
-    completed, verdicts = [], []
-    for row in reviews:
-        if row["user"]["login"] == CODEX and row.get("submitted_at") and row["state"] != "PENDING":
-            completed.append((row["submitted_at"], row["commit_id"]))
-            verdicts.append((row["submitted_at"], False))
-    for row in codex:
-        if "<!-- codex-review-receipt:v1 -->" in (row.get("body") or ""):
-            match = re.search(r"\*\*Reviewed commit:\*\*\s*`([0-9a-f]+)`", row["body"])
-            completed.append((row["created_at"], match[1] if match else None))
-            verdicts.append((row["created_at"], True))
-    summaries = []
-    for row in codex:
-        match = SUMMARY.search(row.get("body") or "")
-        if not match:
-            continue
-        state = json.loads(html.unescape(match[1]))["code_review"]
-        if state["status"] != "completed":
-            continue
-        when = utc(code_review_time(row))
-        summaries.append((when, state["commit_sha"]))
-        verdicts.append((when, state["has_unresolved_findings"] is False))
-    for row in comments:
-        match = INTERIM.search(row.get("body") or "")
-        if match and row.get("author_association") in MAINTAINERS:
-            state = json.loads(html.unescape(match[1]))
-            verdicts.append((row["updated_at"], state["has_unresolved_findings"] is False))
-    clean = codex_clean(verdicts, pr["merged_at"])
-    # A summary is mutable, so it is not another round when a durable review
-    # or receipt already records its head. Never infer lost historical rounds.
-    for when, sha in summaries:
-        if not any(commit and sha and sha.startswith(commit) for _, commit in completed):
-            completed.append((when, sha))
+    reviewed, clean, rounds = review_stages(review_outcomes(comments, reviews), pr["merged_at"])
     ready = [row["created_at"] for row in timeline if row["event"] == "ready_for_review"]
     if not ready and not pr["draft"] and not any(row["event"] in ("convert_to_draft", "converted_to_draft") for row in timeline):
         ready = [pr["created_at"]]
     values = [pr["created_at"], first(row["created_at"] for row in comments
               if row["user"]["login"] != CODEX and re.search(r"@codex\s+review\b", row.get("body") or "", re.I)),
-              first(when for when, _ in completed), clean, first(ready),
+              reviewed, clean, first(ready),
               first(row["completed_at"] for row in checks if row["name"] == "admission"
                     and row["head_sha"] == head and row["conclusion"] == "success"
                     and row.get("completed_at")),
@@ -141,20 +108,60 @@ def stages(pr, timeline, comments, reviews, checks, activity, release=None):
     result = dict(zip(STAGES, map(utc, values)))
     return {"number": pr["number"], "head": head, "stages": result,
             "minutes": {f"{a}_to_{b}": minutes(result[a], result[b]) for a, b in zip(STAGES, STAGES[1:])},
-            "codex_rounds": len(completed), "pushes": push_count(pr, activity),
+            "codex_rounds": rounds, "pushes": push_count(pr, activity),
             "release_tag": release["tag_name"] if release else None}
 
 
-def codex_clean(verdicts, merged_at):
-    """Time of the last review before merge, if that review was clean.
+def review_outcomes(comments, reviews):
+    """Every review outcome as {when, head, clean, source}; the one review record.
 
-    landing.md lets test-only fixes, merges of main and unchanged stacked heads
-    merge without another review, so the clean head need not be the merged
-    head. Only a later review with findings revokes it.
+    Codex posts findings as a formal review ("review") and a clean result as a
+    receipt comment ("receipt"). Its mutable summary ("summary") holds the
+    latest state at its Code Review completion time. A maintainer's interim
+    opus-review-state:v1 marker ("interim") stands in while Codex is unavailable.
     """
-    before = sorted(((when, clean) for when, clean in verdicts if instant(when) <= instant(merged_at)),
-                    key=lambda verdict: instant(verdict[0]))
-    return utc(before[-1][0]) if before and before[-1][1] else None
+    result = []
+    for row in reviews:
+        if row["user"]["login"] == CODEX and row.get("submitted_at") and row["state"] != "PENDING":
+            result.append({"when": utc(row["submitted_at"]), "head": row["commit_id"], "clean": False, "source": "review"})
+    for row in comments:
+        body = row.get("body") or ""
+        if row["user"]["login"] == CODEX:
+            if "<!-- codex-review-receipt:v1 -->" in body:
+                match = re.search(r"\*\*Reviewed commit:\*\*\s*`([0-9a-f]+)`", body)
+                result.append({"when": utc(row["created_at"]), "head": match[1] if match else None,
+                               "clean": True, "source": "receipt"})
+            match = SUMMARY.search(body)
+            if match:
+                state = json.loads(html.unescape(match[1]))["code_review"]
+                if state["status"] == "completed":
+                    result.append({"when": utc(code_review_time(row)), "head": state["commit_sha"],
+                                   "clean": state["has_unresolved_findings"] is False, "source": "summary"})
+        match = INTERIM.search(body)
+        if match and row.get("author_association") in MAINTAINERS:
+            state = json.loads(html.unescape(match[1]))
+            result.append({"when": utc(row["updated_at"]), "head": state.get("commit_sha"),
+                           "clean": state["has_unresolved_findings"] is False, "source": "interim"})
+    return sorted(result, key=lambda outcome: instant(outcome["when"]))
+
+
+def review_stages(outcomes, merged_at):
+    """First review time, Codex-clean time and round count from review_outcomes.
+
+    A round is a review, receipt or interim outcome. The mutable summary is a
+    round only for a head no review or receipt records: it is overwritten, so
+    lost historical rounds are never inferred.
+    Clean is the time of the last outcome before merge when that outcome is
+    clean, on any head: landing.md lets test-only fixes, merges of main and
+    unchanged stacked heads merge without another review, so the clean head
+    need not be the merged head. Only a later outcome with findings revokes it.
+    """
+    durable = [o["head"] for o in outcomes if o["source"] in ("review", "receipt") and o["head"]]
+    rounds = [o for o in outcomes if o["source"] != "summary"
+              or not any(o["head"] and o["head"].startswith(commit) for commit in durable)]
+    before = [o for o in outcomes if instant(o["when"]) <= instant(merged_at)]
+    clean = before[-1]["when"] if before and before[-1]["clean"] else None
+    return (rounds[0]["when"] if rounds else None), clean, len(rounds)
 
 
 def daily(rows, since, until, main_runs=None):
@@ -292,7 +299,7 @@ def collect(api, since, numbers, read_activity=activities):
 def table(report):
     print("UTC timestamps; signed adjacent durations in minutes; blank = absent, unknown = unavailable")
     print("Release source: releases API published_at + REST compare merge commit...tag (ahead/identical)")
-    print("Rounds = completed reviews/receipts (summary fallback); pushes = branch creation + pushes through merge")
+    print("Rounds = Codex reviews/receipts and interim markers (summary fallback); pushes = branch creation + pushes through merge")
     print("PR | " + " | ".join(STAGES) + " | release_tag | rounds | pushes | adjacent minutes (stage order)")
     for row in report["prs"]:
         print(" | ".join([str(row["number"]), *(row["stages"][stage] or "" for stage in STAGES),

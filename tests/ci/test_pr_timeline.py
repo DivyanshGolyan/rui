@@ -110,27 +110,43 @@ class TimelineTest(unittest.TestCase):
         data["comments"].remove(receipt)
         self.assertIsNone(timeline.stages(**data)["stages"]["codex_clean"])
 
-    def test_interim_review_marker_from_a_maintainer_counts_as_a_review_outcome(self):
+    def interim(self, when, findings=False, association="OWNER"):
+        state = {"commit_sha": "7ba38bdf89613a8cf19174af1cc3dc840f92bfa9", "has_unresolved_findings": findings}
+        return {"user": {"login": "DivyanshGolyan"}, "author_association": association,
+                "created_at": when, "updated_at": when,
+                "body": "## Opus review\n<!-- opus-review-state:v1 " + json.dumps(state) + " -->"}
+
+    def test_interim_only_review_gives_every_review_stage(self):
         data = self.snapshot(1418)
         data["comments"] = [c for c in data["comments"] if c["user"]["login"] != timeline.CODEX]
         data["reviews"] = []
-        marker = {"user": {"login": "DivyanshGolyan"}, "author_association": "OWNER",
-                  "created_at": "2026-11-13T10:50:00Z", "updated_at": "2026-11-13T10:51:00Z",
-                  "body": "## Opus review\n<!-- opus-review-state:v1 "
-                          '{"commit_sha":"7ba38bdf89613a8cf19174af1cc3dc840f92bfa9","has_unresolved_findings":false} -->'}
-        data["comments"].append(marker)
+        data["comments"].append(self.interim("2026-11-13T10:51:00Z"))
         row = timeline.stages(**data)
+        self.assertEqual(row["stages"]["codex_reviewed"], "2026-11-13T10:51:00Z")
         self.assertEqual(row["stages"]["codex_clean"], "2026-11-13T10:51:00Z")
-        self.assertEqual(row["codex_rounds"], 0)  # Not a Codex round.
-        for change in ({"author_association": "NONE"},
-                       {"body": marker["body"].replace(":false", ":true")}):
+        self.assertEqual(row["codex_rounds"], 1)
+        self.assertEqual(row["minutes"]["codex_reviewed_to_codex_clean"], 0)
+        for change in ({"association": "NONE"}, {"findings": True}):
             with self.subTest(change=change):
-                data["comments"][-1] = {**marker, **change}
-                self.assertIsNone(timeline.stages(**data)["stages"]["codex_clean"])
-        # Interim findings after a clean Codex review revoke it.
-        data = self.snapshot(1418)
-        data["comments"].append({**marker, "body": marker["body"].replace(":false", ":true")})
-        self.assertIsNone(timeline.stages(**data)["stages"]["codex_clean"])
+                data["comments"][-1] = self.interim("2026-11-13T10:51:00Z", **change)
+                row = timeline.stages(**data)
+                self.assertIsNone(row["stages"]["codex_clean"])
+                self.assertEqual(row["codex_rounds"], 0 if "association" in change else 1)
+
+    def test_mixed_codex_and_interim_outcomes_share_one_record(self):
+        data = self.snapshot(1418)  # Codex receipt 10:43:48 and summary 10:45:43 on one head.
+        data["comments"].append(self.interim("2026-11-13T10:50:00Z", findings=True))
+        row = timeline.stages(**data)
+        self.assertEqual(row["stages"]["codex_reviewed"], "2026-11-13T10:43:48Z")
+        self.assertIsNone(row["stages"]["codex_clean"])  # Interim findings revoke Codex clean.
+        self.assertEqual(row["codex_rounds"], 2)
+        data["comments"].append(self.interim("2026-11-13T10:55:00Z"))
+        row = timeline.stages(**data)
+        self.assertEqual(row["stages"]["codex_clean"], "2026-11-13T10:55:00Z")
+        self.assertEqual(row["codex_rounds"], 3)
+        self.assertEqual(row["minutes"]["codex_reviewed_to_codex_clean"], 11.2)
+        sources = [o["source"] for o in timeline.review_outcomes(data["comments"], data["reviews"])]
+        self.assertEqual(sources, ["receipt", "summary", "interim", "interim"])
 
     def test_html_escaped_summary_and_updated_at_fallback(self):
         data = self.snapshot(1418)
