@@ -554,9 +554,9 @@ test "App input paste completion routes to the same owner for every focus and pa
             try std.testing.expectEqual(start.route, text.route);
         }
         const end = step(&state, facts, .paste_end);
+        try std.testing.expectEqual(std.meta.activeTag(start.route), std.meta.activeTag(end.route));
         const delivery = if (overview) end.route.overview else end.route.session;
         try std.testing.expect(!delivery.pasted and !state.pasting);
-        try std.testing.expectEqual(std.meta.activeTag(start.route), std.meta.activeTag(end.route));
         try std.testing.expectEqual(list_focused, state.list_focused);
     };
 }
