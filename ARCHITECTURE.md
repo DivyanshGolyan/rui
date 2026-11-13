@@ -4265,7 +4265,7 @@ On Linux with glibc, the execution loop calls `malloc_trim(0)` once each time it
 | Model retries | Startup default 3 after initial try; 2/4/8 s backoff or later valid Retry-After, then positive jitter up to one quarter of backoff; conserved per Operation. |
 | Provider inactivity | Startup default 5 min awaiting first body and between chunks; body/heartbeats reset it, no progressing-stream total deadline. |
 | Bash | Startup default 5 min from process start, output does not reset it; per-call positive finite representable override, no policy maximum. |
-| Tool excerpt | Startup default 10,000 UTF-8 bytes of tail output across the entire Tool Result, no line quota; omission/path metadata additional. |
+| Tool excerpt | Startup default 20,000 UTF-8 bytes across the entire Bash Tool Result, no line quota; fitting Bash streams are complete, truncated streams use one half of their allowance for the head and the rest for the tail; omission/path metadata additional. |
 | Edit copy window | Reusable 16 KiB; not an expected-text/line/replacement/file limit. |
 | Diagnostics | Startup default 128 MiB, at most 16 files, each floor(cap/16), 4 KiB encoded record; exports consume scratch. [Failed-response records](#diagnostic-records-and-export) are separate: first 16 MiB per capture, 64 MiB and 256 records per Store, oldest first. |
 | Qualification acceptance targets | [Verification’s Host qualification targets](VERIFICATION.md#resources-and-accepted-host-qualification-targets) define workload-specific acceptance targets. They are not runtime admission limits or per-module quotas. |
@@ -4344,15 +4344,16 @@ Measure filesystem metadata and cleanup latency separately from logical bytes an
 #### Tool excerpts and full output
 
 Bash output has no per-call total capture cap.
-Short output is complete; larger output saves status, tail excerpt, omission notice and the path of each truncated stream, preserving combined-stream allowance and valid UTF-8 boundaries before provider JSON framing.
+Short output is complete; larger output saves status, head-and-tail excerpts, exact omitted-byte counts and the path of each truncated stream, preserving combined-stream allowance and valid UTF-8 boundaries before provider JSON framing.
 Failed full capture cannot masquerade as successful preservation.
 Full output is read through ordinary Bash permissions/timeouts/excerpts, not a new Read tool or whole-file context injection.
 FIFO or Host exit/crash may remove it; unavailability leaves saved results unchanged.
 Canonical permission, Edit intent and outcome evidence are not disposable spillover.
 
-A Bash result names only what carries information: the outcome line, any warnings, a `stdout tail:` section only when stdout is nonempty and a `stderr tail:` section only when stderr is nonempty.
-When either tail omits earlier bytes, `[earlier output omitted]` follows, then `Full stdout: PATH` or `Full stderr: PATH` for each truncated stream, or `Full output was not retained.` when retention is unavailable.
-An untruncated stream is complete in the result and names no file.
+A Bash result names only what carries information: the unchanged outcome line and warnings, a `stdout:` section only when stdout is nonempty and a `stderr:` section only when stderr is nonempty.
+A fitting stream is complete. A truncated stream shows its head, a separate `[N bytes left out]` line (the exact number of source bytes not shown, without thousands separators), then its tail. The head receives one half of that stream's existing allowance and the tail the rest, both cut on valid UTF-8 boundaries. If a newline lies within the last 256 source bytes of the head, the head ends just after the last such newline; if one lies within the first 256 source bytes of the tail, the tail starts just after the first such newline. Bytes removed by either adjustment count as left out.
+After the stream sections, `Full stdout: PATH` or `Full stderr: PATH` names each truncated stream, or `Full output was not retained.` reports unavailable retention. There is no separate `[earlier output omitted]` line. An untruncated stream names no file.
+Saved results from older Hosts retain their `stdout tail:` / `stderr tail:` sections and `[earlier output omitted]` notice; readers accept both shapes without rewriting stored results.
 
 MCP answers are bounded by the existing 4 MiB per-call answer buffer.
 Their resolution keeps the first 10,000 rendered bytes, cut at a UTF-8 boundary, and the omitted-byte suffix; fitting answers keep their complete existing bytes and create no retained file.

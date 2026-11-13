@@ -291,6 +291,14 @@ See the [retry policy notes](https://example.com/docs/retry-policy) for the reas
         return "Ready. The project has a README and an empty `src` folder."
     return "The deadline check now runs before the backoff sleep, and the test suite passes (214 tests). I did not touch `fetch.zig`."
 
+def fixture_bash_stdout(result):
+    """Read current or historical saved Bash envelopes without changing them."""
+    output = result.get("output", "")
+    sections = [output.find(label) + len(label) for label in ("\nstdout:\n", "\nstdout tail:\n")
+                if label in output]
+    return output[min(sections):].rstrip("\n") if sections else ""
+
+
 def fixture_summary(text, n, tool_count, answers="echo"):
     if answers == "realistic" and "long tool output" in text:
         return "Printed thirty-two numbered lines."
@@ -393,7 +401,7 @@ def fixture_main(args):
                 summary = fixture_summary(user_text, n, len(tool_results), run.meta.get("answers", "echo"))
                 if user_text and ("show environment" in user_text or "start a child" in user_text):
                     # Say what Bash printed, so the conversation shows it.
-                    printed = [r.get("output", "").partition("stdout tail:\n")[2].rstrip("\n") for r in tool_results]
+                    printed = [fixture_bash_stdout(r) for r in tool_results]
                     summary += "\n\nBash printed:\n" + "\n".join(printed)
                 payload = fixture.sse_answer(f"r{n}", f"rs{n}", f"rm{n}", summary)[0]
             elif user_text and "tool demonstration" in user_text:

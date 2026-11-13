@@ -1240,7 +1240,7 @@
           ]
         },
         {
-          "wait": "    stderr tail:"
+          "wait": "    stderr:"
         },
         {
           "gone": "Opening tool output…"
@@ -1262,7 +1262,7 @@
         "× Fail with exit 127 · 127",
         "× Fail with an excerpt · 1",
         "    Bash failed. Exit code: 1.",
-        "    stderr tail:",
+        "    stderr:",
         "    usage: example",
         "    unknown option --help"
       ],
@@ -1288,7 +1288,7 @@
           ]
         },
         {
-          "wait": "    stderr tail:"
+          "wait": "    stderr:"
         },
         {
           "gone": "Opening tool output…"
@@ -1351,13 +1351,13 @@
       "expect": [
         "✓ List project files",
         "    Bash succeeded. Exit code: 0.",
-        "    stdout tail:",
+        "    stdout:",
         "    README.md",
         "    src",
         "× Fail with exit 127 · 127",
         "× Fail with an excerpt · 1",
         "    Bash failed. Exit code: 1.",
-        "    stderr tail:",
+        "    stderr:",
         "    usage: example",
         "    unknown option --help"
       ],
@@ -1409,7 +1409,7 @@
       "expect": [
         "✓ Print thirty-two lines",
         "    Bash succeeded. Exit code: 0.",
-        "    stdout tail:",
+        "    stdout:",
         "    output line 18",
         "    … 14 more lines"
       ],
@@ -1438,7 +1438,7 @@
           ]
         },
         {
-          "wait": "    stderr tail:"
+          "wait": "    stderr:"
         },
         {
           "gone": "Opening tool output…"
@@ -1460,7 +1460,7 @@
         "× Fail with exit 127 · 127",
         "× Fail with an excerpt · 1",
         "    Bash failed. Exit code: 1.",
-        "    stderr tail:",
+        "    stderr:",
         "    usage: example",
         "    unknown option --help"
       ],
