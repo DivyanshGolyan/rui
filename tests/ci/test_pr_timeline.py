@@ -214,31 +214,76 @@ class TimelineTest(unittest.TestCase):
         def api(method, path):
             calls.append(path)
             if "/workflows?" in path:
-                return {"workflows": [{"id": 42, "name": "Build main"}]}
+                return {"workflows": [{"id": 42, "name": "Main build"}]}
             if "/runs?" in path:
                 self.assertIn("branch=main&event=push", path)
                 return {"workflow_runs": [{"id": 7, "status": "completed", "conclusion": "failure"},
                                           {"id": 8, "status": "in_progress"}]}
             return {"jobs": [{"completed_at": "2026-11-12T23:00:00Z"}, {"completed_at": "2026-11-12T23:10:00Z"}]}
-        self.assertEqual(timeline.main_builds(api, "Build main"),
+        self.assertEqual(timeline.main_builds(api, "Main build"),
                          [{"completed_at": "2026-11-12T23:10:00Z", "conclusion": "failure"}])
-        with self.assertRaisesRegex(ValueError, "found 0"):
-            timeline.main_builds(api, "not a workflow")
+        self.assertIsNone(timeline.main_builds(api, "not a workflow"))
+
+    def test_missing_main_workflow_is_unknown_without_error(self):
+        calls = []
+        def api(method, path):
+            calls.append(path)
+            self.assertEqual(method, "GET")
+            self.assertIn("/workflows?", path)
+            return {"workflows": [{"id": 1, "name": "Selected checks"}]}
+        runs = timeline.main_builds(api, "Main build")
+        self.assertIsNone(runs)
+        self.assertEqual(len(calls), 1)
+        days = timeline.daily([], "2026-11-12", "2026-11-13T12:00:00Z", runs)
+        self.assertEqual([day["red_main_minutes"] for day in days], [None, None])
+
+    def test_cancelled_main_run_between_failure_and_success_is_no_signal(self):
+        # Run creation and commit times precede completion: neither starts red.
+        completions = {1: "2026-11-11T23:00:00Z", 2: "2026-11-12T11:00:00Z",
+                       4: "2026-11-12T11:05:00Z", 5: "2026-11-12T11:20:00Z"}
+        jobs_read = []
+        def api(method, path):
+            self.assertEqual(method, "GET")
+            if "/workflows?" in path:
+                return {"workflows": [{"id": 42, "name": "Main build"}]}
+            if "/runs?" in path:
+                return {"workflow_runs": [
+                    {"id": n, "status": "completed", "conclusion": conclusion,
+                     "created_at": "2026-11-11T22:00:00Z",
+                     "head_commit": {"timestamp": "2026-11-11T21:00:00Z"}}
+                    for n, conclusion in ((6, "cancelled"), (5, "success"), (4, "failure"),
+                                          (3, "cancelled"), (2, "failure"), (1, "success"))]}
+            n = int(path.split("/runs/")[1].split("/")[0])
+            self.assertNotIn(n, (3, 6), "Cancelled runs must not even require job timestamps")
+            jobs_read.append(n)
+            return {"jobs": [{"completed_at": completions[n]}]}
+        runs = timeline.main_builds(api, "Main build")
+        self.assertEqual(jobs_read, [5, 4, 2, 1])
+        days = timeline.daily([], "2026-11-12", "2026-11-13T12:00:00Z", runs)
+        self.assertEqual([day["red_main_minutes"] for day in days], [20, 0])
 
     def test_cli_json_and_table_render_absent_stages(self):
         row = timeline.stages(**self.snapshot(1418))
-        for fmt in ("table", "json"):
-            with self.subTest(fmt=fmt), patch.object(timeline, "collect", return_value=[row]), \
-                    patch("sys.argv", ["pr_timeline.py", "--since", "2026-11-12", "--pr", "1418", "--format", fmt]), \
+        for fmt, name in ((fmt, name) for fmt in ("table", "json") for name in ("Main build", "Custom main")):
+            argv = ["pr_timeline.py", "--since", "2026-11-12", "--pr", "1418", "--format", fmt]
+            if name != "Main build":
+                argv += ["--main-workflow", name]
+            with self.subTest(fmt=fmt, name=name), patch.object(timeline, "collect", return_value=[row]), \
+                    patch.object(timeline, "main_builds", return_value=None) as builds, \
+                    patch("sys.argv", argv), \
                     contextlib.redirect_stdout(io.StringIO()) as output:
                 self.assertEqual(timeline.main(), 0)
+                builds.assert_called_once_with(timeline.github, name)
                 if fmt == "json":
                     report = json.loads(output.getvalue())
                     self.assertEqual(report["prs"], [row])
+                    self.assertEqual(report["main_workflow"], name)
+                    self.assertFalse(report["main_workflow_available"])
                     self.assertIsNone(report["days"][0]["red_main_minutes"])
                 else:
                     self.assertIn("unknown", output.getvalue())
-                    self.assertIn("workflow name", output.getvalue())
+                    self.assertIn(name, output.getvalue())
+                    self.assertIn("not found", output.getvalue())
 
 
 if __name__ == "__main__":

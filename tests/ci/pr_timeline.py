@@ -14,11 +14,13 @@ at the last creation before opening; missing creation/fork history is unknown.
 Adjacent durations are signed minutes: stages can occur out of the listed order,
 and a missing endpoint stays blank rather than bridging to a different stage.
 
-Red-main minutes stay unknown without --main-workflow NAME. Supply only the
-workflow that builds every push to main, not PR or manually dispatched Promote
-runs. Its failed-completion -> successful-completion intervals are split at UTC
-midnight; completion comes from job completed_at, not run updated_at. A day
-without known incoming health is unknown. Today's intervals end at report time.
+Red-main minutes use the "Main build" every-push workflow by default; override
+with --main-workflow NAME. A missing workflow is unknown, not an error. Only
+completed success/failure runs signal health; superseded cancelled runs do not.
+Red intervals run from the first failed completion to the next success, split
+at UTC midnight; completion comes from job completed_at, not the head commit's
+time or run updated_at. A day without known incoming health is unknown.
+Today's intervals end at report time.
 """
 import argparse
 from datetime import date, datetime, time, timedelta, timezone
@@ -34,6 +36,8 @@ from conflict_alert import gh, github, pages
 
 REPO = "DivyanshGolyan/rui"
 CODEX = "chatgpt-codex-connector[bot]"
+DEFAULT_MAIN_WORKFLOW = "Main build"
+MAIN_RESULTS = ("success", "failure")
 STAGES = ("opened", "codex_requested", "codex_reviewed", "codex_clean", "ready",
           "admission_green", "merged", "released")
 SUMMARY = re.compile(r"<!--\s*codex-review-state:v1\s+(.*?)\s*-->", re.S)
@@ -131,7 +135,7 @@ def daily(rows, since, until, main_runs=None):
     day = date.fromisoformat(since)
     end = instant(until)
     health = sorted((instant(run["completed_at"]), run["conclusion"]) for run in (main_runs or [])
-                    if run.get("completed_at") and run["conclusion"] in ("success", "failure", "timed_out", "action_required"))
+                    if run.get("completed_at") and run["conclusion"] in MAIN_RESULTS)
     while day <= end.date():
         start = datetime.combine(day, time(), timezone.utc)
         stop = min(start + timedelta(days=1), end)
@@ -222,11 +226,15 @@ def containing_release(api, pr, releases):
 def main_builds(api, name):
     workflows = object_pages(api, f"repos/{REPO}/actions/workflows?", "workflows")
     matches = [workflow for workflow in workflows if workflow["name"] == name]
+    if not matches:
+        return None
     if len(matches) != 1:
         raise ValueError(f"Expected one workflow named {name!r}; found {len(matches)}")
     result = []
     for run in object_pages(api, f"repos/{REPO}/actions/workflows/{matches[0]['id']}/runs?branch=main&event=push", "workflow_runs"):
-        if run["status"] != "completed":
+        # Superseded/cancelled runs are no signal, even if their jobs have no
+        # completion timestamp. Keep the last completed success/failure.
+        if run["status"] != "completed" or run["conclusion"] not in MAIN_RESULTS:
             continue
         jobs = list(object_pages(api, f"repos/{REPO}/actions/runs/{run['id']}/jobs?filter=latest", "jobs"))
         when = max((job["completed_at"] for job in jobs if job.get("completed_at")), key=instant, default=None)
@@ -265,8 +273,8 @@ def table(report):
     for day in report["days"]:
         print(" | ".join(str(value) if value is not None else ("unknown" if key == "red_main_minutes" else "")
                          for key, value in day.items()))
-    if not report["main_workflow"]:
-        print("Red-main source unavailable: what is the workflow name for builds on every push to main? Use --main-workflow NAME.")
+    if not report["main_workflow_available"]:
+        print(f"Red-main source unavailable: workflow {report['main_workflow']!r} not found; red-main minutes are unknown.")
 
 
 def main():
@@ -274,15 +282,17 @@ def main():
     parser.add_argument("--since", required=True, type=date.fromisoformat, metavar="YYYY-MM-DD")
     parser.add_argument("--pr", type=int, action="append", default=[])
     parser.add_argument("--format", choices=("table", "json"), default="table")
-    parser.add_argument("--main-workflow", help="trusted workflow name that builds every push to main")
+    parser.add_argument("--main-workflow", default=DEFAULT_MAIN_WORKFLOW,
+                        help="trusted workflow name that builds every push to main (default: %(default)s)")
     args = parser.parse_args()
     since = args.since.isoformat()
     try:
         rows = collect(github, since, args.pr)
-        runs = main_builds(github, args.main_workflow) if args.main_workflow else None
+        runs = main_builds(github, args.main_workflow)
         until = datetime.now(timezone.utc).isoformat()
         report = {"since": since, "as_of": utc(until), "release_source": "releases API published_at + REST compare ancestry",
-                  "main_workflow": args.main_workflow, "prs": rows, "days": daily(rows, since, until, runs)}
+                  "main_workflow": args.main_workflow, "main_workflow_available": runs is not None,
+                  "prs": rows, "days": daily(rows, since, until, runs)}
     except (subprocess.CalledProcessError, ValueError, KeyError) as error:
         print(f"Cannot build PR timeline: {getattr(error, 'stderr', '') or error}", file=sys.stderr)
         return 1
