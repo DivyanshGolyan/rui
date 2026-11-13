@@ -4385,7 +4385,7 @@ const LaunchFixture = struct {
             else => false,
         });
         if (!ready) return .unavailable;
-        return .{ .ready = .{ .store = paths.store, .instance = @splat(1), .active_capacity = 4, .started_at = 1, .custody_occupied = 0, .paused = false, .capabilities = .{ .bash = true, .providers = .{ .codex = .chatgpt_device, .openai = if (self.openai) .key_file else .unserved, .chatgpt = .unserved } } } };
+        return .{ .ready = .{ .store = paths.store, .instance = @splat(1), .active_capacity = 4, .started_at = 1, .custody_occupied = 0, .paused = false, .capabilities = .{ .bash = true, .providers = .{ .codex = .chatgpt_device, .openai = if (self.openai and self.launches != 0) .key_file else .unserved, .chatgpt = .unserved } } } };
     }
     fn launch(raw: ?*anyopaque, _: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, argc: usize, fd: *c_int, report_fd: *c_int) c_int {
         const self = cast(raw);
@@ -4555,7 +4555,7 @@ test "Host launch owner returns one result for terminal and screen across its wh
             switch (surface) {
                 .owner => {
                     var result: HostLaunchResult = .failed(.setup, error.HostLaunchFailed);
-                    startHost(init, store, &.{"arbitrary=value"}, &readiness, fixture.ops(), null, &result);
+                    startHost(init, store, &.{"tools.bash.timeoutMs=1000"}, &readiness, fixture.ops(), null, &result);
                     summary = result.summary();
                     if (fixture.migrated_deadline != null) {
                         try std.testing.expect(result.wait.?.phase == .migrated);
@@ -4569,7 +4569,7 @@ test "Host launch owner returns one result for terminal and screen across its wh
                     if (case.scenario == .success) try std.testing.expectEqualStrings(LaunchFixture.note, result.startup());
                 },
                 .screen => summary = startOverviewHostUsing(init, store, &readiness, fixture.ops()),
-                .terminal, .quiet => startHostForTerminalUsing(init, store, surface == .quiet, null, &.{"arbitrary=value"}, &readiness, fixture.ops()) catch |err| {
+                .terminal, .quiet => startHostForTerminalUsing(init, store, surface == .quiet, null, &.{"tools.bash.timeoutMs=1000"}, &readiness, fixture.ops()) catch |err| {
                     terminal_error = err;
                 },
             }
