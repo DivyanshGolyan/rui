@@ -23,6 +23,8 @@ const pages = @import("os/pages.zig");
 pub const preferred_port: u16 = 1455;
 /// How long a login waits for the browser or a paste.
 pub const wait_minutes = 30;
+/// The longest link `Shown.link` carries.
+pub const max_link_bytes = 8 * 1024;
 const wait_ns: i96 = wait_minutes * std.time.ns_per_min;
 /// How often the wait wakes to notice cancellation, the deadline and a
 /// paste source without a descriptor.
@@ -108,8 +110,8 @@ const Room = struct {
     saved: credentials.Scratch = undefined,
     attempt: wire.Attempt = undefined,
     callback: wire.Callback = undefined,
-    link: [8 * 1024]u8 = undefined,
-    shown: [8 * 1024]u8 = undefined,
+    link: [max_link_bytes]u8 = undefined,
+    shown: [max_link_bytes]u8 = undefined,
     url: [1024]u8 = undefined,
     form: [32 * 1024]u8 = undefined,
     response: codex_auth.Response = undefined,

@@ -165,6 +165,8 @@ pub const Row = struct {
 /// it, or that offer an effort or sign-in its name begins with; a word that
 /// names one whole sets it on each row that offers it, the last such word
 /// winning. So `/model terra low api` leaves one row, set to save as typed.
+/// Both ways into ChatGPT read "ChatGPT", so a word keeps a row that offers
+/// either: `chatgpt` and `codex` keep a ChatGPT sign-in's rows.
 pub const Query = struct {
     words: []const u8,
     effort: ?ReasoningEffort = null,
@@ -178,7 +180,9 @@ pub const Query = struct {
                 if (std.ascii.eqlIgnoreCase(@tagName(effort), word)) query.effort = effort;
             }
             for (std.enums.values(Provider)) |provider| {
-                if (std.ascii.eqlIgnoreCase(signInWord(provider), word)) query.provider = provider;
+                for (signInWords(provider)) |name| {
+                    if (std.ascii.eqlIgnoreCase(name, word)) query.provider = provider;
+                }
             }
         }
         return query;
@@ -226,20 +230,30 @@ pub const Query = struct {
         };
     }
 
-    /// `word` begins the name of one of `efforts` or `providers`.
+    /// `word` begins the name of one of `efforts`, of `providers`, or of
+    /// the other way into a provider's account.
     fn beginsOne(word: []const u8, efforts: catalog.Efforts, providers: Providers) bool {
         var efforts_offered = efforts.iterator();
         while (efforts_offered.next()) |effort| if (std.ascii.startsWithIgnoreCase(@tagName(effort), word)) return true;
         var providers_offered = providers.iterator();
-        while (providers_offered.next()) |provider| if (std.ascii.startsWithIgnoreCase(signInWord(provider), word)) return true;
+        while (providers_offered.next()) |provider| {
+            for ([_]?Provider{ provider, provider.sameAccount() }) |one| {
+                const named = one orelse continue;
+                for (signInWords(named)) |name| if (std.ascii.startsWithIgnoreCase(name, word)) return true;
+            }
+        }
         return false;
     }
 };
 
-/// The word a sign-in is typed as: its label's first, `codex`, `chatgpt` or `api`.
-fn signInWord(provider: Provider) []const u8 {
-    const name = provider.signIn();
-    return name[0 .. std.mem.indexOfScalar(u8, name, ' ') orelse name.len];
+/// The words a sign-in is typed as: its label's first (`chatgpt`, `api`),
+/// and, for a way into an account with two, its route name (`codex`,
+/// `chatgpt`), as `--provider` takes it. `openai` stays a word of model IDs,
+/// as live lists name models `openai/…`.
+fn signInWords(provider: Provider) [2][]const u8 {
+    const label = provider.signIn();
+    const first = label[0 .. std.mem.indexOfScalar(u8, label, ' ') orelse label.len];
+    return .{ first, if (provider.sameAccount() != null) @tagName(provider) else first };
 }
 
 /// The menu of a `model_list` reply's `providers` array, owned by `gpa`. A

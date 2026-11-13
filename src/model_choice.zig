@@ -357,6 +357,43 @@ test "Model choice shares picker rows filters never empty and picks only its pro
     try std.testing.expect(!choice.active);
 }
 
+test "Model choice keeps a chat on its own way into ChatGPT, and either ChatGPT word finds it" {
+    const entries = [_]picker.Entry{
+        .{ .id = "gpt-6.1-sol", .known = true, .catalogued = true, .providers = .full },
+        .{ .id = "browser-only", .known = false, .catalogued = false, .providers = .initOne(.chatgpt) },
+        .{ .id = "device-only", .known = false, .catalogued = false, .providers = .initOne(.codex) },
+        .{ .id = "key-only", .known = false, .catalogued = false, .providers = .initOne(.openai) },
+    };
+    // Both ways into ChatGPT list models; each chat lists its own way's.
+    const menu: picker.Menu = .{ .entries = &entries };
+    const Case = struct { provider: picker.Provider, own: []const u8, found: [3]bool };
+    const words = [3][]const u8{ "chatgpt", "codex", "api" };
+    for ([_]Case{
+        .{ .provider = .codex, .own = "device-only", .found = .{ true, true, false } },
+        .{ .provider = .chatgpt, .own = "browser-only", .found = .{ true, true, false } },
+        .{ .provider = .openai, .own = "key-only", .found = .{ false, false, true } },
+    }) |case| {
+        var fixture: Fixture = .{};
+        var choice: Self = .{ .userdata = &fixture, .on_pick = Fixture.pickModel };
+        choice.open(&menu, case.provider, case.own);
+        try std.testing.expect(choice.active);
+        try std.testing.expectEqualStrings(case.own, entries[choice.selected.?].id);
+        for (entries) |entry| {
+            const offered = std.mem.eql(u8, entry.id, "gpt-6.1-sol") or std.mem.eql(u8, entry.id, case.own);
+            try std.testing.expectEqual(offered, choice.row(entry) != null);
+        }
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        for (words, case.found) |word, found| {
+            choice.open(&menu, case.provider, case.own);
+            try choice.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = word[0], .text = word } });
+            try std.testing.expectEqual(!found, choice.no_match);
+            try std.testing.expectEqualStrings(case.own, entries[choice.selected.?].id);
+        }
+    }
+}
+
 test "Model choice bounds scrolling and mouse picking use the visible list" {
     var fixture: Fixture = .{};
     var choice: Self = .{ .userdata = &fixture, .on_pick = Fixture.pickModel };
