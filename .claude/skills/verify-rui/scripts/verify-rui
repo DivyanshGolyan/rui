@@ -323,7 +323,9 @@ def fixture_main(args):
       * text containing "long bash": one Bash command that sleeps 8 s
       * text containing "show environment": one Bash call that prints CLIENT_MARK, HOST_SECRET, `command -v brew` and PATH
       * text containing "start a child": one Bash call that starts Session "child" with "show environment"
-      * text containing "relay to ID": one Bash call that sends "show environment" to Session ID as a peer
+      * text containing "relay to ID": one Bash call that sends the text after the first ": " to Session ID as a peer,
+        or "show environment" when there is none ("show environment" in the text itself wins first)
+      * text containing "hold answer": no reply until the fixture closes at run cleanup, so the Turn stays working
       * text containing "parallel bash": two Bash commands that sleep 12 s and 20 s, issued together
       * text containing "slow": the echo answer streamed slowly (~10 s in flight)
       * text containing "invalid output": a stream that is not JSON, so the Turn fails
