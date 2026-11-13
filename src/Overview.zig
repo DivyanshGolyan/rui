@@ -1099,6 +1099,7 @@ fn drawPart(self: *Self, ctx: vxfw.DrawContext, part: AppScreen.Overview.Part) s
     self.app_sessions.aboveFn = SessionRows.above;
     self.app_sessions.belowFn = SessionRows.below;
     self.app_settings_line.selected = self.state.selected == .settings;
+    self.app_settings_line.memory = self.state.memory;
     self.app_settings_line.caps = self.caps;
     self.app_sessions.tail = .{ .widget = self.app_settings_line.widget(), .rows = view.layout(&self.state).settings.len() };
     self.app_sessions.caps = self.caps;
@@ -1285,7 +1286,7 @@ fn settingsBackend(self: *Self) AppSettings.Backend {
             return owner(raw).caps;
         }
     };
-    return .{ .context = self, .read = Callbacks.read, .save = Callbacks.save, .save_state = Callbacks.saveState, .upgrade = Callbacks.upgrade, .run = Callbacks.run, .caps = Callbacks.caps, .models = modelsSnapshot, .sign_in = Callbacks.signIn };
+    return .{ .context = self, .read = Callbacks.read, .save = Callbacks.save, .save_state = Callbacks.saveState, .upgrade = Callbacks.upgrade, .run = Callbacks.run, .caps = Callbacks.caps, .models = modelsSnapshot, .sign_in = Callbacks.signIn, .memory = memoryValue };
 }
 
 fn destroy(self: *Self) void {
@@ -1707,6 +1708,11 @@ fn quiesceUpgrade(self: *Self) !bool {
     return self.worker.thread == null and self.job_count == 0;
 }
 
+fn memoryValue(raw: *anyopaque) ?view.Memory {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    return self.state.memory;
+}
+
 /// One borrowed source for app settings and the open conversation's choices.
 fn modelsSnapshot(raw: *anyopaque) @import("model_choice.zig").Snapshot {
     const self: *Self = @ptrCast(@alignCast(raw));
@@ -1978,11 +1984,11 @@ fn hostFacts(self: *Self) HostRead {
         .incompatible => .incompatible,
         .access_failure => .unreadable,
     };
-    // The same read samples the counts line's memory.
+    // The same read samples live memory.
     return .{ .observation = observation, .memory = self.liveMemory(if (observation.facts()) |host| host.started_at else null) };
 }
 
-/// The counts line's memory: this TUI, the Host that started at
+/// Live memory: this TUI, the Host that started at
 /// `host_started_at` and its tools. With no Host ready it is this TUI alone.
 /// The Host's pid is read once per Host start.
 fn liveMemory(self: *Self, host_started_at: ?u64) view.Memory {
@@ -7868,4 +7874,57 @@ test "creation preference read failure is retained through repair and ordinary r
     try std.testing.expectEqual(@as(usize, 1), Seen.now.creates);
     try std.testing.expectEqualStrings("high", Seen.now.creation.reasoning_effort.?.slice());
     try std.testing.expectEqualStrings("bypass", Seen.now.creation.permission_mode.slice());
+}
+
+test "Overview Settings live memory frame uses quiet role in day and night" {
+    const rig = try openListed();
+    defer rig.close();
+    for ([_]view.Caps{ .{}, .{ .background = .{ 255, 255, 255 } } }) |caps| {
+        rig.overview.caps = caps;
+        var before = try rig.shown(80, 24);
+        defer before.deinit();
+        if (rig.overview.state.memory == null) try std.testing.expect(std.mem.indexOf(u8, try before.text(), "rui 38 MB") == null);
+        _ = try rig.overview.event(.{ .memory = .{ .rui = 38 * view.mib, .tools = 120 * view.mib } });
+        var shown = try rig.shown(80, 24);
+        defer shown.deinit();
+        const row: u16 = for (0..24) |y| {
+            if (std.mem.startsWith(u8, try shown.line(@intCast(y)), "  Settings")) break @intCast(y);
+        } else return error.TestExpectedSettingsRow;
+        const text = try shown.line(row);
+        const memory = std.mem.indexOf(u8, text, "rui 38 MB · tools 120 MB") orelse return error.TestExpectedMemory;
+        const expected = @import("widget_style.zig").of(caps, .{ .colour = .quiet });
+        for (memory..memory + "rui 38 MB".len) |column| try std.testing.expectEqual(expected, shown.screen.readCell(@intCast(column), row).?.style);
+        // The lender returns the same latest shell read, without a second cache.
+        try std.testing.expectEqual(rig.overview.state.memory, memoryValue(rig.overview));
+    }
+}
+
+test "App settings live memory follows Overview readings while chat info stays chat-only" {
+    const rig = try openListed();
+    defer rig.close();
+    const overview = rig.overview;
+    var ctx = rig.context();
+    defer ctx.cmds.deinit(std.testing.allocator);
+    try appClick(overview, &ctx, .settings);
+    try std.testing.expect(overview.root.input.layer.settingsOpen());
+    const backend = overview.root.settings_page.backend.?;
+    const read_memory = backend.memory orelse return error.TestExpectedMemoryReader;
+    try std.testing.expectEqual(@as(?view.Memory, null), read_memory(backend.context));
+    var before = try rig.shown(140, 24);
+    defer before.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, try before.text(), "Memory") == null);
+    const Case = struct { memory: view.Memory, text: []const u8 };
+    for ([_]Case{
+        .{ .memory = .{ .rui = 38 * view.mib, .tools = 120 * view.mib }, .text = "Memory          rui 38 MB · tools 120 MB" },
+        .{ .memory = .{ .rui = 1024 * view.mib, .tools = null }, .text = "Memory          rui 1.0 GB" },
+    }) |case| {
+        _ = try overview.event(.{ .memory = case.memory });
+        try std.testing.expectEqual(@as(?view.Memory, case.memory), read_memory(backend.context));
+        var shown = try rig.shown(140, 24);
+        defer shown.deinit();
+        try std.testing.expect(std.mem.indexOf(u8, try shown.text(), case.text) != null);
+    }
+    // Neither the per-Session facts nor its frontend bridge carries app memory.
+    try std.testing.expect(!@hasField(@import("chat_info.zig").Backend, "memory"));
+    try std.testing.expect(!@hasField(SessionFrontend.Lender, "memory"));
 }

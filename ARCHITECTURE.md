@@ -2480,7 +2480,9 @@ Alt-A leaves the draft, caret and retained original unchanged.
 While a conversation is open the refreshes go on without the screen or input, for [desktop notifications](#desktop-notifications).
 Marks hold still: `?` needs you, in the attention colour, `●` active, `◌` queued, dim, `○` idle, `✓` finished, `×` failed, `■` stopped; moving to its group says a row changed.
 The overview's top line is the counts line: the wordmark, then each mark's count where it is not zero, `? 1  ● 2  ◌ 3 · slots 2/2  × 1`, with only `?` and `×` coloured and the model slots only while a Session waits for one.
-On its right sits live memory in plain text, `rui 42 MB · tools 1.8 GB`: `rui` is this TUI plus its Host (the TUI alone with no Host), and `tools` the processes below the Host, shown only while one runs; a narrow screen drops memory before the counts, `rui` before `tools`.
+Live memory reads `rui 42 MB · tools 1.8 GB`: `rui` is this TUI plus its Host (the TUI alone with no Host), and `tools` the processes below the Host, shown only while one runs.
+It shows quietly on the pinned Settings row, before the version, and as a read-only Memory row on the app Settings page, once the first reading arrives; chat info does not show it.
+Where the whole figure does not fit, `tools` drops first, then the whole figure; the pinned Settings row keeps its label and version first.
 Memory is each process's physical footprint, `phys_footprint` on macOS and `RssAnon + RssShmem + VmSwap` on Linux, summed over the Host's process tree, which one pure core, `process_memory`, walks; a tool that leaves that tree is not counted.
 The counts line replaces the headline and the Host health line; full Host facts remain available through `rui host status`.
 Divyansh chose the counts line and totals-only memory on 2026-11-09 (TUI rework plan, "What changes" O1 to O4 and "Live memory on the overview").
