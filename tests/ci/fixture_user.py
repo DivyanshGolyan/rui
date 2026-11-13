@@ -87,10 +87,12 @@ TRUST_LISTS = ("SSL_CERT_DIR",)
 # Passed through unchanged when the caller sets them: the proxy, which listens
 # on loopback for every user, and the terminal and text decoding.
 PASSED = (*network_variables.PROXY, "TERM", "LANG", "LC_ALL", "LC_CTYPE")
-# Each toolchain's own report of the trees it reads besides its binary: the arguments that ask
-# it, and the pattern that finds each tree in its answer. `zig env` answers in ZON or JSON.
-TOOLS = {"zig": (("env",), re.compile(r'\blib_dir"?\s*[:=]\s*"([^"]+)"')),
-         "go": (("env", "GOROOT"), re.compile(r"^(/.*)$", re.M))}
+# Each toolchain's own report of its binary and the tree it reads: the arguments that ask it, the
+# pattern that finds the tree in its answer, and the pattern that finds the binary, or the binary's
+# place in that tree when the tool names only the tree. `zig env` answers in ZON or JSON.
+TOOLS = {"zig": (("env",), re.compile(r'\blib_dir"?\s*[:=]\s*"([^"]+)"'),
+                 re.compile(r'\bzig_exe"?\s*[:=]\s*"([^"]+)"')),
+         "go": (("env", "GOROOT"), re.compile(r"^(/.*)$", re.M), Path("bin/go"))}
 BASE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 # The system's own places: an install whose binary resolves under one of them serves every user already.
 # /usr holds /usr/local; BASE_PATH adds /bin and /sbin, never all of /.
@@ -149,17 +151,25 @@ def find_python(search):
 
 
 def find_tool(tool, search):
-    """The caller's `tool` as an Install of the trees it reports reading, or None; refuses a tool that reports none."""
+    """The caller's `tool` as the Install it reports, or None; refuses a tool that reports no binary or tree.
+
+    `search` only picks the program that answers; the binary and tree come
+    from its answer, so a shim (asdf, mise) names the toolchain it runs.
+    """
     found = shutil.which(tool, path=search)
     if found is None:
         return None
-    binary = Path(found).resolve()
-    arguments, tree = TOOLS[tool]
-    report = subprocess.run([str(binary), *arguments], capture_output=True, text=True)
-    trees = tuple(Path(match).resolve() for match in tree.findall(report.stdout)) if report.returncode == 0 else ()
-    if not trees:
-        raise SystemExit(f"{COMMAND}: {binary} {' '.join(arguments)} reported no tree to place")
-    return Install(binary, trees)
+    arguments, tree, binary = TOOLS[tool]
+    report = subprocess.run([found, *arguments], capture_output=True, text=True)
+    answer = report.stdout if report.returncode == 0 else ""
+    trees = tuple(Path(match).resolve() for match in tree.findall(answer))
+    if isinstance(binary, Path):
+        binaries = [trees[0] / binary] if trees else []
+    else:
+        binaries = [Path(match) for match in binary.findall(answer)]
+    if not trees or len(binaries) != 1 or not os.access(binaries[0], os.X_OK):
+        raise SystemExit(f"{COMMAND}: {found} {' '.join(arguments)} reported no binary and tree to place")
+    return Install(binaries[0].resolve(), trees)
 
 
 def requirement_stamp(texts):

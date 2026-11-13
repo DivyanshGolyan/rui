@@ -296,21 +296,27 @@ class FixtureUserTest(unittest.TestCase):
             return program
 
         def installs(parent, zig):
+            """The toolchains in `parent`, with a shim for Zig and Go, as asdf or mise installs, in parent/shims."""
             tools = parent / "tools"
-            return {fixture_user.PYTHON: install(tools, fixture_user.PYTHON, "bin/python3.12", "lib/python3.12/os.py",
-                                                 lambda program, home: f"{program}\n{home}"),
-                    "zig": zig(tools),
-                    "go": install(tools, "go", "bin/go", "src/runtime/runtime.go", lambda program, home: str(home))}
+            found = {fixture_user.PYTHON: install(tools, fixture_user.PYTHON, "bin/python3.12", "lib/python3.12/os.py",
+                                                  lambda program, home: f"{program}\n{home}"),
+                     "zig": zig(tools),
+                     "go": install(tools, "go", "bin/go", "src/runtime/runtime.go", lambda program, home: str(home))}
+            (parent / "shims").mkdir()
+            for tool in ("zig", "go"):
+                (parent / "shims" / tool).write_text(f"#!/bin/sh\nexec '{found[tool]}' \"$@\"\n")
+                (parent / "shims" / tool).chmod(0o755)
+            return found
 
         def release_zig(tools):
             """Zig's release archive: the binary beside lib/, reported in ZON as `zig env` does."""
             return install(tools, "zig", "zig", "lib/std/std.zig",
-                           lambda program, home: f'.{{\n    .lib_dir = "{home}/lib",\n}}')
+                           lambda program, home: f'.{{\n    .zig_exe = "{program}",\n    .lib_dir = "{home}/lib",\n}}')
 
         def prefix_zig(tools):
             """Zig installed into a prefix (Nix, Homebrew, cmake): bin/zig and lib/zig/, beside unrelated files."""
             return install(tools, "zig", "bin/zig", "lib/zig/std/std.zig",
-                           lambda program, home: f'{{\n "lib_dir": "{home}/lib/zig"\n}}',
+                           lambda program, home: f'{{\n "zig_exe": "{program}",\n "lib_dir": "{home}/lib/zig"\n}}',
                            beside=("lib/unrelated.so", "share/unrelated/README"))
 
         tools = {public: installs(public, release_zig)}
@@ -355,7 +361,9 @@ class FixtureUserTest(unittest.TestCase):
         gid = os.getgid()
 
         def provision(source, inputs_at, trust, lane_dir):
-            caller_path = os.pathsep.join(str(program.parent) for program in tools[inputs_at].values())
+            # The shims come first, as an asdf or mise PATH has them.
+            caller_path = os.pathsep.join([str(inputs_at / "shims"),
+                                           *(str(program.parent) for program in tools[inputs_at].values())])
             environ = {variable: ":".join(str(inputs_at / entry) for entry in trust_files[variable])
                        for variable in trust}
             with redirect_stderr(io.StringIO()):
@@ -447,35 +455,48 @@ class FixtureUserTest(unittest.TestCase):
         self.assertEqual(list(tools_dir.iterdir()), [])
 
     def test_a_toolchain_is_the_binary_and_the_trees_it_reports(self):
-        """Zig's lib_dir in ZON or JSON, and Go's GOROOT, wherever they lie; a tool that reports none is refused."""
-        def tool(name, answer):
-            directory = self.root / name
-            directory.mkdir()
-            program = directory / name.split("-")[0]
-            program.write_text(f"#!/bin/sh\nprintf '%s\\n' '{answer}'\n")
-            program.chmod(0o755)
-            return program
+        """The binary and tree come from the tool's own answer, so a shim on PATH names the toolchain it runs.
 
-        prefix = self.root.resolve() / "prefix"
+        Zig reports zig_exe and lib_dir in ZON or JSON; Go reports GOROOT, whose bin/go is its binary. A
+        tool that reports no binary or no tree is refused.
+        """
+        def program(path, text):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(f"#!/bin/sh\n{text}\n")
+            path.chmod(0o755)
+            return path
+
+        def answers(path, answer):
+            return program(path, f"printf '%s\\n' '{answer}'")
+
+        def shim(name, tool, real):
+            return program(self.root / name / "shims" / tool, f"exec '{real}' \"$@\"")
+
+        base = self.root.resolve()
+        zon = answers(base / "zon/zig", f'.{{\n    .zig_exe = "{base}/zon/zig",\n    .lib_dir = "{base}/zon/lib",\n}}')
+        json = answers(base / "json/bin/zig", f'{{\n "zig_exe": "{base}/json/bin/zig",\n "lib_dir": "{base}/json/lib/zig"\n}}')
+        go = answers(base / "go/bin/go", f"{base}/go")
         cases = {
-            "zig-zon": ('.{\n    .zig_exe = "/x/zig",\n    .lib_dir = "%s/lib/zig",\n}' % prefix,
-                        (prefix / "lib/zig",)),
-            "zig-json": ('{\n "zig_exe": "/x/zig",\n "lib_dir": "%s/lib/zig"\n}' % prefix, (prefix / "lib/zig",)),
-            "go-goroot": (str(prefix / "go"), (prefix / "go",)),
-            "zig-silent": ("", None),
-            "go-silent": ("", None),
+            # The program on PATH that answers, and the Install its answer names, or None when refused.
+            "zig in ZON": (zon, Install(zon, (base / "zon/lib",))),
+            "zig in JSON from a prefix": (json, Install(json, (base / "json/lib/zig",))),
+            "zig behind a shim": (shim("zig-shim", "zig", json), Install(json, (base / "json/lib/zig",))),
+            "go": (go, Install(go, (base / "go",))),
+            "go behind a shim": (shim("go-shim", "go", go), Install(go, (base / "go",))),
+            "zig without zig_exe": (answers(base / "no-exe/zig", f'.{{ .lib_dir = "{base}/zon/lib" }}'), None),
+            "zig silent": (answers(base / "zig-silent/zig", ""), None),
+            "go silent": (answers(base / "go-silent/go", ""), None),
+            "go whose GOROOT has no bin/go": (answers(base / "go-empty/go", f"{base}/zon"), None),
         }
-        for name, (answer, trees) in cases.items():
+        for name, (found, expected) in cases.items():
             with self.subTest(name):
-                program = tool(name, answer)
-                if trees is None:
+                if expected is None:
                     with self.assertRaises(SystemExit):
-                        fixture_user.find_tool(program.name, str(program.parent))
+                        fixture_user.find_tool(found.name, str(found.parent))
                 else:
-                    self.assertEqual(fixture_user.find_tool(program.name, str(program.parent)),
-                                     Install(program.resolve(), trees))
-        self.assertEqual(Install(prefix / "bin/zig", (prefix / "lib/zig",)).root, prefix)
-        self.assertEqual(Install(prefix / "go/bin/go", (prefix / "go",)).parts, (prefix / "go",))
+                    self.assertEqual(fixture_user.find_tool(found.name, str(found.parent)), expected)
+        self.assertEqual(Install(base / "json/bin/zig", (base / "json/lib/zig",)).root, base / "json")
+        self.assertEqual(Install(go, (base / "go",)).parts, (base / "go",))
 
     def git(self, *args):
         """Run git with a fixed identity and return its output, stripped."""
