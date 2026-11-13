@@ -11,6 +11,7 @@ const max_file_bytes = 1024;
 pub const Values = @import("preference_values.zig").Values;
 pub const directoryPath = @import("preference_values.zig").directoryPath;
 const validateDirectoryPath = @import("preference_values.zig").validateDirectoryPath;
+const validAbsoluteText = @import("preference_values.zig").validAbsoluteText;
 pub const defaultStore = @import("preference_values.zig").defaultStore;
 
 pub const Change = union(enum) { keep, set: []const u8 };
@@ -29,10 +30,7 @@ pub const Edit = struct {
 
 /// Safe fields only: resource availability belongs to the selecting caller.
 pub fn validate(values: *const Values) !void {
-    if (values.store.len != 0) {
-        if (!std.fs.path.isAbsolute(values.store.slice()) or !std.unicode.utf8ValidateSlice(values.store.slice())) return error.InvalidPreferenceStore;
-        for (values.store.slice()) |byte| if (byte < 0x20 or byte == 0x7f) return error.InvalidPreferenceStore;
-    }
+    if (values.store.len != 0 and !validAbsoluteText(values.store.slice())) return error.InvalidPreferenceStore;
     for (values.provider.slice()) |byte| {
         if (!std.ascii.isAlphanumeric(byte) and byte != '-' and byte != '_') return error.InvalidPreferenceProvider;
     }
