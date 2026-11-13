@@ -45,13 +45,9 @@ settings_page: AppSettings = .{},
 sign_in: ?vxfw.Widget = null,
 /// The layer over the main pane and the paste in progress; `app_input.step`
 /// alone changes it.
-/// The overview reads its own selected drawn row, never Root's copy.
-list_selection: ?struct { context: *anyopaque, read: *const fn (*anyopaque) ListSelection } = null,
 input: app_input.State = .{},
 frames: u64 = 0,
 size: vxfw.Size = .{},
-
-pub const ListSelection = struct { session: bool = false, open: bool = false };
 
 pub fn widget(self: *Self) vxfw.Widget {
     return .{ .userdata = self, .captureHandler = capture, .eventHandler = event, .drawFn = draw };
@@ -132,8 +128,7 @@ fn navigate(self: *Self, ctx: *vxfw.EventContext, request: app_input.Input) !voi
 /// the page's answers for this event, read by value.
 fn facts(self: *const Self, key: ?vaxis.Key) app_input.Facts {
     const session_open = self.session != null;
-    const selection = if (self.list_selection) |owner| owner.read(owner.context) else ListSelection{};
-    if (!self.input.layer.settingsOpen()) return .{ .session_open = session_open, .wide = self.size.width >= split_at, .selected_session = selection.session, .selected_open = selection.open };
+    if (!self.input.layer.settingsOpen()) return .{ .session_open = session_open, .wide = self.size.width >= split_at };
     const page = &self.settings_page;
     return .{ .session_open = session_open, .settings = .{
         .keys_open = page.keys_open,
@@ -171,12 +166,6 @@ fn apply(self: *Self, ctx: *vxfw.EventContext, effects: app_input.Effects, route
             try self.sign_in.?.handleEvent(ctx, routed.?);
             ctx.consumeEvent();
         },
-        .overview_enter => {
-            const delivery: app_input.Effects.Delivery = .{ .under = .main, .pasted = false };
-            const enter: vxfw.Event = .{ .key_press = .{ .codepoint = vaxis.Key.enter } };
-            if (self.overview_keys) |keys| try keys.take(keys.context, ctx, enter, delivery) else try self.overview.handleEvent(ctx, enter);
-            ctx.consumeEvent();
-        },
         .overview => |delivery| {
             if (self.overview_keys) |keys| try keys.take(keys.context, ctx, routed.?, delivery) else try self.overview.handleEvent(ctx, routed.?);
             ctx.consumeEvent();
@@ -204,6 +193,10 @@ pub fn focusList(self: *Self, ctx: *vxfw.EventContext, draft_empty: bool) !bool 
 
 /// The Session has settled its borrowers before calling this. No terminal
 /// leaves raw mode and no input stream is transferred between screens.
+pub fn focusChat(self: *Self, ctx: *vxfw.EventContext) !void {
+    try self.navigate(ctx, .focus_chat);
+}
+
 pub fn closeSession(self: *Self, ctx: *vxfw.EventContext) !void {
     self.closeMainPresentation();
     self.session = null;
@@ -1050,17 +1043,13 @@ test "Root navigation closes the composed main presentation before focusing anot
     try std.testing.expectEqual(@as(usize, 7), owner.closes);
 }
 
-test "App root list Right and Enter resume the open row and other Enter routes once" {
+test "App root hands list activation unchanged to its one core" {
     const Selection = struct {
-        open: bool = true,
         calls: usize = 0,
-        fn read(raw: *anyopaque) ListSelection {
+        fn take(raw: *anyopaque, _: *vxfw.EventContext, input: vxfw.Event, delivery: app_input.Effects.Delivery) !void {
             const self: *@This() = @ptrCast(@alignCast(raw));
-            return .{ .session = true, .open = self.open };
-        }
-        fn take(raw: *anyopaque, _: *vxfw.EventContext, input: vxfw.Event, _: app_input.Effects.Delivery) !void {
-            const self: *@This() = @ptrCast(@alignCast(raw));
-            try std.testing.expect(input.key_press.matches(vaxis.Key.enter, .{}));
+            try std.testing.expect(input.key_press.matches(vaxis.Key.enter, .{}) or input.key_press.matches(vaxis.Key.right, .{}));
+            try std.testing.expect(delivery.list_focus);
             self.calls += 1;
         }
     };
@@ -1073,7 +1062,6 @@ test "App root list Right and Enter resume the open row and other Enter routes o
         .compose = overview.widget(),
         .session = session.widget(),
         .size = .{ .width = 140, .height = 40 },
-        .list_selection = .{ .context = &selection, .read = Selection.read },
         .overview_keys = .{ .context = &selection, .take = Selection.take },
     };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
@@ -1085,14 +1073,12 @@ test "App root list Right and Enter resume the open row and other Enter routes o
         try std.testing.expect(target.eventHandler != null);
         try std.testing.expect(target.eql(root.widget()));
         try root.widget().captureEvent(&ctx, .{ .key_press = .{ .codepoint = key } });
+        try std.testing.expect(root.input.list_focused);
+        try root.focusChat(&ctx);
         try std.testing.expect(!root.input.list_focused);
-        try std.testing.expect(ctx.cmds.items[ctx.cmds.items.len - 1].request_focus.eql(session.widget()));
-        try std.testing.expectEqual(@as(usize, 0), selection.calls);
     }
-    selection.open = false;
+    try std.testing.expectEqual(@as(usize, 2), selection.calls);
     _ = try root.focusList(&ctx, true);
-    try root.widget().captureEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
-    try std.testing.expectEqual(@as(usize, 1), selection.calls);
     // Only a left press transfers pane focus; hover, drag releases and
     // context clicks retain the current key owner.
     for ([_]vaxis.Mouse{

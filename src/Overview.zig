@@ -709,6 +709,7 @@ fn appKey(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event, delivery:
         .key = overviewKey(input),
         .pasted = delivery.pasted,
         .under = delivery.under,
+        .list_focus = delivery.list_focus,
         .draft = self.composerDraft(),
         .choice = if (page.standaloneField() != null) .{
             .shown = page.standaloneOpen(),
@@ -740,7 +741,7 @@ fn overviewKey(input: vxfw.Event) view.Key {
     return switch (input) {
         .paste_start => .paste_start,
         .paste_end => .paste_end,
-        .key_press => |key| if (TerminalEditor.named(key)) |name| .{ .named = name } else if (TerminalEditor.isEnter(key)) .enter else if (key.matchExact(vaxis.Key.tab, .{})) .tab else if (key.matchExact(vaxis.Key.tab, .{ .shift = true })) .shift_tab else if (SessionFrontend.hostStartKey(key)) .host_start else if (TerminalEditor.selectKey(view.keys, key) == .text) .text else .other,
+        .key_press => |key| if (key.matches(vaxis.Key.right, .{})) .right else if (TerminalEditor.named(key)) |name| .{ .named = name } else if (TerminalEditor.isEnter(key)) .enter else if (key.matchExact(vaxis.Key.tab, .{})) .tab else if (key.matchExact(vaxis.Key.tab, .{ .shift = true })) .shift_tab else if (SessionFrontend.hostStartKey(key)) .host_start else if (TerminalEditor.selectKey(view.keys, key) == .text) .text else .other,
         // Root routes only these to the overview.
         else => unreachable,
     };
@@ -768,6 +769,7 @@ fn appNext(self: *Self, ctx: *vxfw.EventContext, next: ?Next) !void {
             ctx.quit = true;
         },
         .open_settings => try self.root.openSettings(ctx),
+        .focus_chat => try self.root.focusChat(ctx),
         .open_choice => |field| {
             try self.root.settings_page.openStandaloneChoice(ctx, switch (field) {
                 .model => .model,
@@ -1153,18 +1155,6 @@ fn appComposeDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Erro
     return self.drawPart(ctx, .compose);
 }
 
-/// A visible conversation determines the highlight without changing the
-/// overview's own selection or borrowing a row's storage across frames.
-fn listSelection(raw: *anyopaque) Root.ListSelection {
-    const self: *Self = @ptrCast(@alignCast(raw));
-    if (self.composer.length != 0 or self.state.panel != null or self.state.footer.focus != .input or self.root.settings_page.standaloneField() != null) return .{};
-    const line = view.selectedLine(&self.state) orelse return .{};
-    const item = view.listItem(&self.state, line) orelse return .{};
-    const target = view.clickOf(&self.state, item) orelse return .{};
-    if (target != .open) return .{};
-    return .{ .session = true, .open = if (self.app_session) |shown| std.mem.eql(u8, &target.open, &shown.session) else false };
-}
-
 fn selectedListLine(self: *const Self) ?u32 {
     if (self.root.input.list_focused) return if (view.selectedLine(&self.state)) |line| @intCast(line) else null;
     const open = self.state.conversing orelse return if (view.selectedLine(&self.state)) |line| @intCast(line) else null;
@@ -1418,7 +1408,7 @@ fn create(init: std.process.Init, options: Options, hooks: Hooks, ops: Operation
         .interrupted = interrupted,
     };
     self.composer = self.emptyComposer(0);
-    self.root = .{ .list_selection = .{ .context = self, .read = listSelection }, .main_presentation = .{ .context = self, .close = closeMainPresentation }, .overview = self.widget(), .overview_keys = .{ .context = self, .take = appKey }, .list = self.listWidget(), .compose = self.composeWidget(), .settings_page = .{ .backend = self.settingsBackend(), .version = @import("transport_options").version }, .input = .{ .layer = if (options.sign_in) .{ .sign_in = .{ .over = .main } } else .main } };
+    self.root = .{ .main_presentation = .{ .context = self, .close = closeMainPresentation }, .overview = self.widget(), .overview_keys = .{ .context = self, .take = appKey }, .list = self.listWidget(), .compose = self.composeWidget(), .settings_page = .{ .backend = self.settingsBackend(), .version = @import("transport_options").version }, .input = .{ .layer = if (options.sign_in) .{ .sign_in = .{ .over = .main } } else .main } };
     self.sign_in = .{ .init = init, .selectors = options.selectors, .activate = hooks.activate, .ready = hooks.ready, .userdata = self, .on_done = signedIn, .on_close = closeSignIn, .list_visible = listVisible };
     self.root.sign_in = self.sign_in.widget();
     self.paintDivider();
@@ -1569,7 +1559,7 @@ fn destroy(self: *Self) void {
 const Ending = union(enum) { overview, conversation: Left };
 
 /// What the core asks of the loop: to leave or present a pane under Root.
-const Next = union(enum) { leave, open: view.Reference, open_settings, open_choice: view.FooterField };
+const Next = union(enum) { leave, open: view.Reference, open_settings, focus_chat, open_choice: view.FooterField };
 
 /// Steps the core with one event and queues the jobs it asks for. Presenting
 /// panes and leaving are the loop's to do.
@@ -1593,6 +1583,7 @@ fn eventResult(self: *Self, value: view.Event) !EventResult {
     var refused: ?keymap.Refusal = null;
     for (effects.slice()) |effect| switch (effect) {
         .open_settings => next = .open_settings,
+        .focus_chat => next = .focus_chat,
         .open_choice => |field| next = .{ .open_choice = field },
         .list => |since| {
             self.traversal = .init(since);
@@ -2111,7 +2102,7 @@ fn quiesceUpgrade(self: *Self) !bool {
                 .leave => return error.InteractiveInterrupted,
                 .open => |reference| self.started = reference,
                 // Only direct list input asks for settings, never a worker answer.
-                .open_settings, .open_choice => unreachable,
+                .open_settings, .focus_chat, .open_choice => unreachable,
             };
         }
     }
@@ -8697,4 +8688,26 @@ test "Overview settings and admitted sign-in navigation end deferred footer inte
     try std.testing.expect(self.root.settings_page.standaloneField() == null);
     try std.testing.expect(self.state.footer.pending == null);
     try std.testing.expectEqualStrings("kept draft", self.composerDraft().bytes);
+}
+
+test "App overview list resumes the open chat with a hidden retained draft" {
+    for ([_][]const u8{ "", "retained overview task" }) |draft| for ([_][]const u8{ "\r", "\x1b[C" }) |key| {
+        const rig = try openListed();
+        defer rig.close();
+        const reference = shownRow(rig, 2);
+        const chat: vxfw.Text = .{ .text = "Chat" };
+        rig.overview.root.session = chat.widget();
+        rig.overview.root.size = .{ .width = 140, .height = 40 };
+        _ = try rig.overview.event(.{ .conversation = reference });
+        _ = rig.overview.composer.append(draft);
+        var ctx = rig.context();
+        defer ctx.cmds.deinit(std.testing.allocator);
+        try std.testing.expect(try rig.overview.root.focusList(&ctx, true));
+        try std.testing.expect(try rig.press(key) == null);
+        try std.testing.expect(!rig.overview.root.input.list_focused);
+        try std.testing.expectEqualStrings(draft, rig.overview.composerDraft().bytes);
+        try std.testing.expectEqual(@as(usize, 0), Seen.now.starts);
+        // The fixture borrowed the dummy widget, not an app_session allocation.
+        rig.overview.root.session = null;
+    };
 }

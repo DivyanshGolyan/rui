@@ -52,8 +52,6 @@ pub const Facts = struct {
     session_open: bool = false,
     settings: Settings = .{},
     wide: bool = false,
-    selected_session: bool = false,
-    selected_open: bool = false,
 
     pub const Settings = struct {
         /// The Keys reference is open over the page.
@@ -82,6 +80,7 @@ pub const Input = union(enum) {
     other,
     back_to_list: bool,
     session_closed,
+    focus_chat,
     open_settings,
     /// Show the main pane: close settings, keeping any sign-in over it.
     show_main,
@@ -119,7 +118,7 @@ pub const Effects = struct {
     pub const Focus = enum { main, list, settings, sign_in };
     /// What a key the overview takes arrived under, and whether it is
     /// pasted text.
-    pub const Delivery = struct { under: Layer.Covered, pasted: bool };
+    pub const Delivery = struct { under: Layer.Covered, pasted: bool, list_focus: bool = false };
     pub const Route = union(enum) {
         /// vxfw's own focus or hit-test path delivers it to the shown pane;
         /// Root leaves the event alone. Navigation requests always pass.
@@ -135,8 +134,6 @@ pub const Effects = struct {
         session: Delivery,
         /// Root hands it to the overview, which owns the palette, and stops it.
         colors,
-        /// Activate the selected Session through the overview's existing Enter path.
-        overview_enter,
         /// Root stops it; nothing takes it.
         swallow,
     };
@@ -176,6 +173,10 @@ pub fn step(state: *State, facts: Facts, input: Input) Effects {
             if (!draft_empty or !facts.wide or !facts.session_open or state.layer != .main) return .{};
             state.list_focused = true;
             return .{ .focus = .list, .redraw = true };
+        },
+        .focus_chat => {
+            state.list_focused = false;
+            return .{ .focus = .main, .redraw = true };
         },
         .session_closed => {
             state.list_focused = true;
@@ -257,20 +258,19 @@ pub fn step(state: *State, facts: Facts, input: Input) Effects {
     if (state.layer != .main or input == .mouse) return .{};
     const delivery: Effects.Delivery = .{ .under = .main, .pasted = state.pasting };
     if (state.list_focused) {
+        // In the narrow overview the composer is visible. Typing hands it
+        // focus; list activation itself never consults its retained bytes.
+        if (!facts.session_open and input == .key and input.key.named == null and !input.key.right and !input.key.enter) {
+            state.list_focused = false;
+            return .{ .route = .{ .overview = delivery } };
+        }
         // A wide list has no composer: never edit the hidden overview draft.
         if (facts.session_open and facts.wide) switch (input) {
             .key => |key| if (state.pasting or (key.named == null and !key.right and !key.enter)) return .{ .route = .swallow },
             .paste_start, .paste_end => return .{ .route = .swallow },
             else => {},
         };
-        if (input == .key and !state.pasting) {
-            if (facts.session_open and facts.selected_open and (input.key.right or input.key.enter)) {
-                state.list_focused = false;
-                return .{ .focus = .main, .route = .swallow, .redraw = true };
-            }
-            if (input.key.right) return .{ .route = if (!facts.session_open and facts.selected_session) .overview_enter else .swallow };
-        }
-        return .{ .route = .{ .overview = delivery } };
+        return .{ .route = .{ .overview = .{ .under = .main, .pasted = state.pasting, .list_focus = true } } };
     }
     return .{ .route = if (facts.session_open) .{ .session = delivery } else .{ .overview = delivery } };
 }
@@ -527,29 +527,18 @@ test "App input draft back domain distinguishes empty text from a caret at start
     }
 }
 
-test "App input list focus domain resumes open row and preserves other Enter activation" {
+test "App input list activation routes unchanged to its semantic owner" {
     for ([_]bool{ false, true }) |wide| {
-        var state: State = .{};
-        const facts: Facts = .{ .session_open = true, .wide = wide };
-        const back = step(&state, facts, .{ .back_to_list = true });
-        try std.testing.expectEqual(wide, state.list_focused);
-        if (!wide) _ = step(&state, .{}, .session_closed);
-        try std.testing.expectEqual(if (wide) Pane.session else .overview, mainPane(state, wide, wide));
-        try std.testing.expectEqual(if (wide) @as(?Effects.Focus, .list) else null, back.focus);
-        for ([_]bool{ false, true }) |open| for ([_]bool{ false, true }) |enter| {
-            state.list_focused = true;
-            const result = step(&state, .{ .session_open = true, .selected_session = true, .selected_open = open }, .{ .key = .{ .named = null, .right = !enter, .enter = enter } });
-            if (open) {
-                try std.testing.expectEqual(@as(?Effects.Focus, .main), result.focus);
-                try std.testing.expect(!state.list_focused);
-            } else {
-                try std.testing.expect(state.list_focused);
-                try std.testing.expectEqual(if (enter) Effects.Route{ .overview = .{ .under = .main, .pasted = false } } else .swallow, result.route);
-            }
-        };
+        var state: State = .{ .list_focused = true };
+        for ([_]bool{ false, true }) |enter| {
+            const result = step(&state, .{ .session_open = wide, .wide = wide }, .{ .key = .{ .named = null, .right = !enter, .enter = enter } });
+            try std.testing.expectEqual(Effects.Route{ .overview = .{ .under = .main, .pasted = false, .list_focus = true } }, result.route);
+            try std.testing.expect(state.list_focused);
+        }
+        const resumed = step(&state, .{ .session_open = true, .wide = wide }, .focus_chat);
+        try std.testing.expectEqual(@as(?Effects.Focus, .main), resumed.focus);
+        try std.testing.expect(!state.list_focused);
     }
-    var narrow: State = .{ .list_focused = true };
-    try std.testing.expectEqual(Effects.Route.overview_enter, step(&narrow, .{ .selected_session = true }, .{ .key = .{ .named = null, .right = true } }).route);
 }
 
 test "App input list focus hides no editable draft and mouse hands focus back without changing feed" {
