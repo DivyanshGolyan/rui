@@ -9518,6 +9518,42 @@ test "a page of approval requests costs the same however many calls ran without 
     try std.testing.expectEqual(thousand, try Page.steps(&storage, request));
 }
 
+/// The floor walk as admission and settlement take it: `FloorSearch`'s
+/// facts round, then a round a page, through the transition runner, outside
+/// any transaction.
+const TestingFloorWalk = struct {
+    pub const rounds = transition.rounds(.{
+        .facts = .{ .always, error.CorruptStore },
+        .page = .{ .paged, error.CorruptStore },
+    });
+    pub const round_budget = 1;
+    pub const commit: transition.Commit = .none;
+    pub const begin: ?rounds.At = null;
+    pub const Input = struct { operation: u64 };
+    pub const Result = ?history_floor_domain.Room;
+    pub const Ordinary = store_core.Ordinary.none;
+
+    input: Input,
+    search: history_floor_domain.FloorSearch = undefined,
+
+    pub fn step(t: *TestingFloorWalk, r: *transition.Round(TestingFloorWalk), ran: ?rounds.At) !transition.Next(TestingFloorWalk) {
+        if (ran == null) {
+            t.search = .{ .operation = t.input.operation };
+            t.search.start(r);
+            return .{ .round = .facts };
+        }
+        if (t.search.next(r)) return .{ .round = .page };
+        return .{ .done = t.search.room() };
+    }
+
+    fn deeper(store: *Store, operation: u64) !?history_floor_domain.Room {
+        const entry = try store_core.enter(store, .none);
+        defer entry.release();
+        var walk: TestingFloorWalk = .{ .input = .{ .operation = operation } };
+        return transition.run(&entry, TestingFloorWalk, &walk, .{});
+    }
+};
+
 test "a compaction's floor counts the output bytes a request sends, and none its base covers" {
     // A 200,000-byte answer with no usage passes level 2's 128,000 bytes,
     // unless a compaction base covers it and the request sends none of it.
@@ -9547,11 +9583,7 @@ test "a compaction's floor counts the output bytes a request sends, and none its
         const call = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
         try storage.settleModelAttemptFailure(call, .{ .uncorrelated = "provider_context_overflow" }, .context_overflow, .{});
         const compaction = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-        const entry = try store_core.enter(&storage, .none);
-        defer entry.release();
-        var a: historical_domain.ReadAccess = .open(&entry);
-        defer a.deinit();
-        const room = try history_floor_domain.deeperFloor(&a, compaction.operation_id);
+        const room = try TestingFloorWalk.deeper(&storage, compaction.operation_id);
         if (covered) {
             try std.testing.expect(room == null);
         } else {
@@ -9561,6 +9593,31 @@ test "a compaction's floor counts the output bytes a request sends, and none its
             try std.testing.expect(room.?.choice.floor >= position);
         }
     }
+}
+
+test "a compaction's floor walk reads past its first page to the level that drops least" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try tests.configureTestSessionAsk(&storage, "floor-pages-config");
+    // After the first, twenty 30,000-byte Messages: level 1's 512,000
+    // bytes are past at the eighteenth from the newest, on the second page.
+    const text = try std.testing.allocator.alloc(u8, 30_000);
+    defer std.testing.allocator.free(text);
+    @memset(text, 'p');
+    try submitTestMessage(&storage, &tmp, "floor-pages-first", "floor-pages-first", session.slice(), "first");
+    var key: [32]u8 = undefined;
+    for (0..20) |index| {
+        const name = try std.fmt.bufPrint(&key, "floor-pages-{d}", .{index});
+        try submitTestMessage(&storage, &tmp, name, name, session.slice(), text);
+    }
+    const call = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try storage.settleModelAttemptFailure(call, .{ .uncorrelated = "provider_context_overflow" }, .context_overflow, .{});
+    const compaction = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    const room = (try TestingFloorWalk.deeper(&storage, compaction.operation_id)).?;
+    try std.testing.expectEqual(@as(u8, 1), room.choice.level);
 }
 
 test "a compaction's floor read costs the same however long its Session's history" {
@@ -9590,11 +9647,7 @@ test "a compaction's floor read costs the same however long its Session's histor
             return counter.steps;
         }
         fn deeper(store: *Store, operation: u64) !?history_floor_domain.Room {
-            const entry = try store_core.enter(store, .none);
-            defer entry.release();
-            var a: historical_domain.ReadAccess = .open(&entry);
-            defer a.deinit();
-            return history_floor_domain.deeperFloor(&a, operation);
+            return TestingFloorWalk.deeper(store, operation);
         }
         /// 1,000 more copies of the big Message, older than the rest: the
         /// first Message moves past them, as the walk keeps it either way.

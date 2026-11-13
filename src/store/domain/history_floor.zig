@@ -23,7 +23,6 @@ const output_item = @import("../../output_item.zig");
 const model_capability = @import("../../model_capability.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
 const rsql = @import("../rsql.zig");
-const store_access = @import("../access.zig");
 const store_schema = @import("../schema.zig");
 
 pub const levels = 3;
@@ -206,24 +205,16 @@ pub const InheritedFloor = struct {
 };
 
 /// The floor and level the compaction after compaction Operation
-/// `operation` overflowed goes to, or null when no level drops more: only
-/// kept items remain, or level `levels` overflowed. Settlement asks it to
-/// decide whether the Turn goes on, and admission again for the floor it
-/// writes; nothing they read changes in between, so both get one answer.
-/// Each page is a round; the walk stops at level 1's floor, so it reads
-/// about as many units as fit that target, however long the history.
-/// A failed step is `CorruptStore`.
-pub fn deeperFloor(a: anytype, operation: u64) !?Room {
-    var search: FloorSearch = .{ .operation = operation };
-    search.start(a);
-    try store_access.runAs(a, error.CorruptStore);
-    while (search.next(a)) try store_access.runAs(a, error.CorruptStore);
-    return search.room();
-}
-
-/// `deeperFloor` as rounds its caller runs: `start` queues the facts read
-/// for the first; after each round, `next` queues a page and answers true,
-/// or answers false once the walk is over, when `room` is the answer.
+/// `operation` overflowed goes to, as rounds its caller runs: `start`
+/// queues the facts read for the first; after each round, `next` queues a
+/// page and answers true, or answers false once the walk is over, when
+/// `room` is the answer, null when no level drops more: only kept items
+/// remain, or level `levels` overflowed. Settlement walks it to decide
+/// whether the Turn goes on, and admission again for the floor it writes;
+/// nothing they read changes in between, so both get one answer. Each
+/// page is a round; the walk stops at level 1's floor, so it reads about
+/// as many units as fit that target, however long the history. Its
+/// callers name a failed step `CorruptStore`.
 pub const FloorSearch = struct {
     operation: u64,
     /// The facts round's row, then the walk `next` starts from it: the

@@ -365,15 +365,6 @@ pub const Selection = struct {
         while (each.next()) |name| digest.add(&tool_set.digests[tool_set.find(name) orelse return null]);
         return .{ .names = names, .digest = digest.final() };
     }
-
-    /// Selects from an already saved set, not today's tool_set. The digest
-    /// and finishSelection's inserted members must use the same source.
-    pub fn ofSaved(a: anytype, source_set: u64, names: *const command_input.ToolsField) !Selection {
-        var selected: SavedSelection = .{ .names = names };
-        selected.queue(a, source_set);
-        try a.run();
-        return selected.selection();
-    }
 };
 
 const selection_records = rsql.Read(.{
@@ -393,9 +384,10 @@ const selection_records = rsql.Read(.{
     .cardinality = .each,
 });
 
-/// `Selection.ofSaved` as one round its caller runs: `queue` queues the
-/// source set's records, and `selection`, after that round, is the
-/// selection. A transition keeps it, as the round's visitor, in storage
+/// A selection from an already saved set, not today's tool_set, in one
+/// round its caller runs: `queue` queues the source set's records, and
+/// `selection`, after that round, is the selection. The digest and
+/// finishSelection's inserted members must use the same source. A transition keeps it, as the round's visitor, in storage
 /// that outlives the round.
 pub const SavedSelection = struct {
     names: *const command_input.ToolsField,
