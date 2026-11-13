@@ -1311,10 +1311,10 @@ pub fn testingAgentSpec(tools: []const []const u8, permission_mode: []const u8) 
     return spec;
 }
 
-// The rounds twins of sqlite_tests.zig's work tests. Each test there
+// The rounds twins of the work tests in sqlite_tests/. Each test there
 // holds a population's VM steps or statements still, which only SQLite
-// shows; its twin here holds the rounds of the same work at the same two
-// sizes, which every engine shows.
+// shows; its twin in tests/ holds the rounds of the same work at the same
+// two sizes, which every engine shows.
 
 /// The rounds `store` took since `start`: its Accesses' runs and commits.
 pub const TwinRounds = struct {
