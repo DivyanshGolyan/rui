@@ -14,7 +14,8 @@ const content = @import("content.zig");
 const tool_set = @import("tool_set.zig");
 const configuration = @import("configuration.zig");
 const tool_offer = @import("tool_offer.zig");
-const Faults = @import("../Store.zig").Faults;
+const store_core = @import("../Store.zig");
+const transition = @import("../transition.zig");
 
 const settings = rsql.Read(.{
     .sql = "SELECT revision,tool_set_id,loaded_tool_set_id FROM session WHERE session_ref=?1",
@@ -78,53 +79,6 @@ const SearchScratch = struct {
     matchers: [8]word_search.Matcher = undefined,
 };
 
-fn matchesCandidate(a: anytype, scratch: *SearchScratch, words: *const core.FindTools, row: *const Candidate) !bool {
-    for (words.words[0..words.count], 0..) |word, index| {
-        const matcher = &scratch.matchers[index];
-        matcher.init(word);
-        matcher.feed(row.name.slice());
-        if (matcher.count != 0) return true;
-    }
-    // A word must match one field, never the end of a name plus the start of
-    // its description. init also owns query folding, just as in feed search.
-    for (words.words[0..words.count], 0..) |word, index| scratch.matchers[index].init(word);
-    var reader: content.ContentReader = undefined;
-    reader.open(.{ .store = a.store, .content_id = @intCast(row.content_id.get()), .reference = .{ .length = row.byte_length, .digest = row.digest } });
-    defer reader.close();
-    var offset: u64 = 0;
-    while (offset < row.byte_length) {
-        const count = try reader.readWithAccess(a, offset, &scratch.window);
-        for (scratch.matchers[0..words.count]) |*matcher| {
-            matcher.feed(scratch.window[0..count]);
-            if (matcher.count != 0) return true;
-        }
-        offset += count;
-    }
-    return false;
-}
-
-/// Merge disjoint, ordered loaded intent and new available hits. Preserve
-/// unavailable intended names even when the hits cover all available tools.
-fn includeLoadedNames(a: anytype, arena: std.mem.Allocator, loaded_set: u64, matches: *Matches) !void {
-    const loaded = try arena.create(LoadedNames);
-    loaded.* = .{};
-    a.readEach(loaded_names, .{ .set = loaded_set }, tool_name.max_tools + 1, loaded);
-    try a.run();
-    if (loaded.invalid) return error.CorruptStore;
-    var names = loaded.names.iterator();
-    var saved = names.next();
-    var index: usize = 0;
-    while (saved != null or index < matches.count) {
-        if (index < matches.count and (saved == null or std.mem.lessThan(u8, matches.rows[index].name.slice(), saved.?))) {
-            matches.names.append(matches.rows[index].name.slice()) catch return error.CorruptStore;
-            index += 1;
-        } else {
-            matches.names.append(saved.?) catch return error.CorruptStore;
-            saved = names.next();
-        }
-    }
-}
-
 const update_loaded = rsql.Write(.{
     .sql = "UPDATE session SET loaded_tool_set_id=?2,revision=?3 WHERE session_ref=@session(?1)",
     .Args = struct { session: rsql.SessionHead, loaded: ?u64, revision: u64 },
@@ -143,87 +97,327 @@ const FirstLine = struct {
     }
 };
 
-/// All queued arguments live until the transaction's final round. The arena
-/// belongs to this call's runner, keeping tool-name buffers off Host stacks.
-pub fn run(a: anytype, binding: action.ActionAttemptBinding, arena: std.mem.Allocator, words: *const core.FindTools, refusal: ?[]const u8, faults: Faults) !bool {
-    const key = try std.fmt.allocPrint(arena, "rui.core/find_tools/{d}", .{binding.action_id});
-    var saved: command.saved_command.Result = undefined;
-    command.lookupCommand(a, key, &saved);
-    var facts: action.core_facts.Result = undefined;
-    const names: action.CoreNames = .of();
-    a.read(action.core_facts, names.args(.{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id }), &facts);
-    try a.run();
-    if (saved != null) {
-        try a.abandon(.{});
-        return false;
-    }
-    const found = facts orelse return error.StaleActionAttemptBinding;
-    if (found.stopped) {
-        try a.abandon(.{});
-        return false;
-    }
-    var current: settings.Result = undefined;
-    a.read(settings, .{ .session = &found.session.ref }, &current);
-    try a.run();
-    const configured = current.tool_set_id.get();
-    const loaded_intent: ?u64 = if (current.loaded_tool_set_id) |id| id.get() else null;
-    const matches = try arena.create(Matches);
-    matches.* = .{};
-    if (refusal == null) {
-        const pending = try arena.create(Candidates);
-        pending.* = .{};
-        try tool_offer.project(a, configured, loaded_intent, pending);
-        if (pending.invalid) return error.CorruptStore;
-        matches.remaining = pending.count;
-        if (pending.count > 0) {
-            const scratch = try arena.create(SearchScratch);
-            for (pending.rows[0..pending.count]) |*row| {
-                if (!try matchesCandidate(a, scratch, words, row)) continue;
-                matches.rows[matches.count] = row.*;
-                matches.count += 1;
-                matches.remaining -= 1;
-                if (matches.count == matches.rows.len) break;
-            }
+/// Loads the saved tools that match `words` into the call's Session and
+/// resolves the call, in one transaction: one call-keyed command, revision
+/// and resolution. A call whose key is saved, or whose Turn a stop
+/// selected, ends with false.
+///
+/// Round `.facts` reads the call's Action and its key's saved answer, and
+/// `.settings` the Session's tool sets. Unless the call was refused,
+/// `.offer` reads the tools offered but not loaded, and each one whose
+/// name no word matches is searched one `.search` window of its
+/// description at a time. With matches, `.loaded` reads the names already
+/// loaded, and the result lists each match with its description's first
+/// line, read one `.describe` window at a time. `.outcome` looks the
+/// result's row up; with matches, `.selection` reads the configured set's
+/// records and `.selected` the loaded set they make. The commit round
+/// saves the command, the revision and the call's resolution.
+pub const FindTools = struct {
+    pub const rounds = transition.rounds(.{
+        .facts = .{.always},
+        .settings = .{.always},
+        .offer = .{.branch},
+        .search = .{.raw},
+        .loaded = .{.branch},
+        .describe = .{.raw},
+        .outcome = .{.always},
+        .selection = .{.branch},
+        .selected = .{.branch},
+    });
+    pub const round_budget = 4;
+    pub const commit: transition.Commit = .transaction;
+    pub const begin: ?rounds.At = .facts;
+    /// The caller's, which outlive the transition. `arena` holds the
+    /// call's scratch, which keeps tool-name buffers off Host stacks, and
+    /// its result text.
+    pub const Input = struct {
+        binding: action.ActionAttemptBinding,
+        arena: std.mem.Allocator,
+        words: *const core.FindTools,
+        refusal: ?[]const u8,
+    };
+    pub const Result = bool;
+    pub const Ordinary = store_core.Ordinary.action_attempt;
+    pub const Guards = store_core.Ordinary.action_attempt;
+    pub const Declined = error{};
+
+    input: Input,
+    /// The command key, in `arena`; the writes read it in place.
+    key: []const u8 = &.{},
+    facts: action.core_facts.Result = undefined,
+    current: settings.Result = undefined,
+    matches: *Matches = undefined,
+    pending: *Candidates = undefined,
+    scratch: *SearchScratch = undefined,
+    loaded: *LoadedNames = undefined,
+    /// The candidate searched, or the match described.
+    index: usize = 0,
+    /// What each round keeps, as one path runs them: the key's saved
+    /// answer, then the description a `.search` or `.describe` round
+    /// reads and the first line it writes.
+    early: union {
+        saved: command.saved_command.Result,
+        reading: struct { windows: content.Windows, first: FirstLine },
+    } = undefined,
+    output: std.Io.Writer.Allocating = undefined,
+    outcome: content.Import = undefined,
+    /// What the rounds after `.outcome` keep, which the commit's writes
+    /// read in place.
+    answer: command.StoredAnswer = undefined,
+    digest: [32]u8 = undefined,
+    later: union {
+        saved: tool_set.SavedSelection,
+        selected: tool_set.Selection,
+        /// Once the loaded set's writes are queued, which copied what
+        /// they bind of `selected`.
+        applied: configuration.Applied,
+    } = undefined,
+    outcome_id: u64 = 0,
+
+    pub fn step(t: *FindTools, r: *transition.Round(FindTools), ran: ?rounds.At) !transition.Next(FindTools) {
+        const at = ran orelse return t.start(r);
+        switch (at) {
+            .facts => return t.decide(r),
+            .settings => return t.offer(r),
+            .offer => return t.searchFirst(r),
+            .search => return t.searchWindow(r),
+            .loaded => return t.includeLoaded(r),
+            .describe => return t.describeWindow(r),
+            .outcome => return t.settle(r),
+            .selection => return t.select(r),
+            .selected => return t.load(r),
         }
-        if (matches.count > 0)
-            try includeLoadedNames(a, arena, loaded_intent orelse configured, matches);
     }
 
-    var output: std.Io.Writer.Allocating = .init(arena);
-    const out = &output.writer;
-    if (refusal) |reason| {
-        try out.print("Rui could not find tools: {s}. Nothing was loaded.", .{reason});
-    } else if (matches.count == 0) {
-        try out.print("No tools matched. {d} tools are still not loaded.", .{matches.remaining});
-    } else {
-        try out.writeAll("Loaded these tools; they are available on your next request:\n");
-        for (matches.rows[0..matches.count]) |*row| {
+    // The steps that run a round's work are noinline, so none sits under
+    // another on its thread's chain.
+    noinline fn start(t: *FindTools, r: *transition.Round(FindTools)) !transition.Next(FindTools) {
+        const binding = t.input.binding;
+        t.key = try std.fmt.allocPrint(t.input.arena, "rui.core/find_tools/{d}", .{binding.action_id});
+        t.early = .{ .saved = undefined };
+        command.lookupCommand(r, t.key, &t.early.saved);
+        const names: action.CoreNames = .of();
+        r.read(action.core_facts, names.args(.{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id }), &t.facts);
+        return .{ .round = .facts };
+    }
+
+    /// After `.facts`: a saved or stopped call ends.
+    noinline fn decide(t: *FindTools, r: *transition.Round(FindTools)) !transition.Next(FindTools) {
+        if (t.early.saved != null) return .{ .done = false };
+        const found = if (t.facts) |*row| row else return error.StaleActionAttemptBinding;
+        if (found.stopped) return .{ .done = false };
+        r.read(settings, .{ .session = &found.session.ref }, &t.current);
+        return .{ .round = .settings };
+    }
+
+    fn configured(t: *const FindTools) u64 {
+        return t.current.tool_set_id.get();
+    }
+
+    fn loadedIntent(t: *const FindTools) ?u64 {
+        return if (t.current.loaded_tool_set_id) |id| id.get() else null;
+    }
+
+    /// After `.settings`: a refused call writes its result; any other
+    /// reads the tools it may load.
+    noinline fn offer(t: *FindTools, r: *transition.Round(FindTools)) !transition.Next(FindTools) {
+        const arena = t.input.arena;
+        t.matches = try arena.create(Matches);
+        t.matches.* = .{};
+        if (t.input.refusal != null) return t.writeResult(r);
+        t.pending = try arena.create(Candidates);
+        t.pending.* = .{};
+        tool_offer.project(r, t.configured(), t.loadedIntent(), t.pending);
+        return .{ .round = .offer };
+    }
+
+    /// After `.offer`: searches the first candidate.
+    noinline fn searchFirst(t: *FindTools, r: *transition.Round(FindTools)) !transition.Next(FindTools) {
+        const pending = t.pending;
+        if (pending.invalid) return error.CorruptStore;
+        t.matches.remaining = pending.count;
+        if (pending.count == 0) return t.includeLoadedFirst(r);
+        t.scratch = try t.input.arena.create(SearchScratch);
+        t.index = 0;
+        return t.search(r);
+    }
+
+    /// Searches candidates from `index` on: one whose name a word matches
+    /// matches at once; any other reads its description, a `.search`
+    /// round a window, until a word matches or the description ends.
+    fn search(t: *FindTools, r: *transition.Round(FindTools)) !transition.Next(FindTools) {
+        const words = t.input.words;
+        const scratch = t.scratch;
+        while (t.index < t.pending.count) : (t.index += 1) {
+            const row = &t.pending.rows[t.index];
+            const named = for (words.words[0..words.count], 0..) |word, index| {
+                const matcher = &scratch.matchers[index];
+                matcher.init(word);
+                matcher.feed(row.name.slice());
+                if (matcher.count != 0) break true;
+            } else false;
+            if (named) {
+                if (t.match()) break;
+                continue;
+            }
+            // A word must match one field, never the end of a name plus the start of
+            // its description. init also owns query folding, just as in feed search.
+            for (words.words[0..words.count], 0..) |word, index| scratch.matchers[index].init(word);
+            t.early = .{ .reading = .{ .windows = .{ .content_id = row.content_id.get(), .reference = .{ .length = row.byte_length, .digest = row.digest }, .buffer = &scratch.window }, .first = undefined } };
+            if (try t.early.reading.windows.next(r)) return .{ .round = .search };
+        }
+        return t.includeLoadedFirst(r);
+    }
+
+    /// After a `.search` round: its window, fed to each word's matcher.
+    noinline fn searchWindow(t: *FindTools, r: *transition.Round(FindTools)) !transition.Next(FindTools) {
+        const windows = &t.early.reading.windows;
+        const bytes = try windows.window();
+        for (t.scratch.matchers[0..t.input.words.count]) |*matcher| {
+            matcher.feed(bytes);
+            if (matcher.count != 0) {
+                if (t.match()) return t.includeLoadedFirst(r);
+                t.index += 1;
+                return t.search(r);
+            }
+        }
+        if (try windows.next(r)) return .{ .round = .search };
+        t.index += 1;
+        return t.search(r);
+    }
+
+    /// Records candidate `index` as a match; true when no more fit.
+    fn match(t: *FindTools) bool {
+        const matches = t.matches;
+        matches.rows[matches.count] = t.pending.rows[t.index];
+        matches.count += 1;
+        matches.remaining -= 1;
+        return matches.count == matches.rows.len;
+    }
+
+    /// With matches, reads the names already loaded.
+    fn includeLoadedFirst(t: *FindTools, r: *transition.Round(FindTools)) !transition.Next(FindTools) {
+        if (t.matches.count == 0) return t.writeResult(r);
+        t.loaded = try t.input.arena.create(LoadedNames);
+        t.loaded.* = .{};
+        r.readEach(loaded_names, .{ .set = t.loadedIntent() orelse t.configured() }, tool_name.max_tools + 1, t.loaded);
+        return .{ .round = .loaded };
+    }
+
+    /// After `.loaded`: merges disjoint, ordered loaded intent and new
+    /// available hits. Unavailable intended names stay, even when the hits
+    /// cover all available tools.
+    noinline fn includeLoaded(t: *FindTools, r: *transition.Round(FindTools)) !transition.Next(FindTools) {
+        const loaded = t.loaded;
+        const matches = t.matches;
+        if (loaded.invalid) return error.CorruptStore;
+        var names = loaded.names.iterator();
+        var saved = names.next();
+        var index: usize = 0;
+        while (saved != null or index < matches.count) {
+            if (index < matches.count and (saved == null or std.mem.lessThan(u8, matches.rows[index].name.slice(), saved.?))) {
+                matches.names.append(matches.rows[index].name.slice()) catch return error.CorruptStore;
+                index += 1;
+            } else {
+                matches.names.append(saved.?) catch return error.CorruptStore;
+                saved = names.next();
+            }
+        }
+        return t.writeResult(r);
+    }
+
+    /// Writes the call's result: a refusal, no match, or each match with
+    /// its description's first line.
+    fn writeResult(t: *FindTools, r: *transition.Round(FindTools)) !transition.Next(FindTools) {
+        t.output = .init(t.input.arena);
+        const out = &t.output.writer;
+        const matches = t.matches;
+        if (t.input.refusal) |reason| {
+            try out.print("Rui could not find tools: {s}. Nothing was loaded.", .{reason});
+        } else if (matches.count == 0) {
+            try out.print("No tools matched. {d} tools are still not loaded.", .{matches.remaining});
+        } else {
+            try out.writeAll("Loaded these tools; they are available on your next request:\n");
+            t.index = 0;
+            return t.describe(r);
+        }
+        return t.lookupOutcome(r);
+    }
+
+    /// Describes matches from `index` on, each description read a
+    /// `.describe` round a window.
+    fn describe(t: *FindTools, r: *transition.Round(FindTools)) !transition.Next(FindTools) {
+        const out = &t.output.writer;
+        while (t.index < t.matches.count) : (t.index += 1) {
+            const row = &t.matches.rows[t.index];
             try out.print("- {s}: ", .{row.name.slice()});
-            var first: FirstLine = .{ .writer = out };
-            try content.streamVerified(a, row.content_id.get(), .{ .length = row.byte_length, .digest = row.digest }, &first);
+            t.early = .{ .reading = .{
+                .windows = .{ .content_id = row.content_id.get(), .reference = .{ .length = row.byte_length, .digest = row.digest }, .buffer = t.scratch.window[0..content.verified_window_bytes] },
+                .first = .{ .writer = out },
+            } };
+            if (try t.early.reading.windows.next(r)) return .{ .round = .describe };
             try out.writeAll("\n");
         }
+        return t.lookupOutcome(r);
     }
-    const result = output.written();
-    var outcome: content.Import = .ofBytes(result, false);
-    content.lookup(a, &outcome);
-    try a.run();
-    if (faults.content_import) return error.InjectedContentImportFailure;
-    const outcome_id = try content.importBytes(a, &outcome, result);
-    const revision = current.revision.get() + @as(u64, if (matches.count > 0) 1 else 0);
-    var answer: command.StoredAnswer = .{ .accepted = refusal == null, .revision = revision };
-    if (refusal != null) try answer.code.set("invalid_arguments");
-    // The call's binding uniquely identifies its saved arguments, even on retry.
-    const digest = content_string.digest(key);
-    if (matches.count > 0) {
-        var selected = try tool_set.Selection.ofSaved(a, configured, &matches.names);
-        tool_set.lookupSelection(a, &selected);
-        try a.run();
-        const selected_set = try tool_set.finishSelection(a, &selected, configured);
+
+    /// After a `.describe` round: its window's part of the first line.
+    noinline fn describeWindow(t: *FindTools, r: *transition.Round(FindTools)) !transition.Next(FindTools) {
+        const reading = &t.early.reading;
+        try reading.first.write(try reading.windows.window());
+        if (try reading.windows.next(r)) return .{ .round = .describe };
+        try t.output.writer.writeAll("\n");
+        t.index += 1;
+        return t.describe(r);
+    }
+
+    fn lookupOutcome(t: *FindTools, r: *transition.Round(FindTools)) transition.Next(FindTools) {
+        t.outcome = .ofBytes(t.output.written(), false);
+        content.lookup(r, &t.outcome);
+        return .{ .round = .outcome };
+    }
+
+    /// After `.outcome`: saves the result; with matches, reads the
+    /// configured set's records the loaded set selects.
+    noinline fn settle(t: *FindTools, r: *transition.Round(FindTools)) !transition.Next(FindTools) {
+        if (r.faults().content_import) return error.InjectedContentImportFailure;
+        const refused = t.input.refusal != null;
+        const outcome_id = try content.importBytes(r, &t.outcome, t.output.written());
+        const revision = t.current.revision.get() + @as(u64, if (t.matches.count > 0) 1 else 0);
+        t.answer = .{ .accepted = !refused, .revision = revision };
+        if (refused) try t.answer.code.set("invalid_arguments");
+        // The call's binding uniquely identifies its saved arguments, even on retry.
+        t.digest = content_string.digest(t.key);
+        const found = &t.facts.?;
+        if (t.matches.count > 0) {
+            t.later = .{ .saved = .{ .names = &t.matches.names } };
+            t.later.saved.queue(r, t.configured());
+            t.outcome_id = outcome_id;
+            return .{ .round = .selection };
+        }
+        try command.queueCommand(r, t.key, .configure, &found.session.ref, &t.digest, null, null, &t.answer);
+        return t.resolve(r, outcome_id);
+    }
+
+    /// After `.selection`: looks up the loaded set by its digest.
+    noinline fn select(t: *FindTools, r: *transition.Round(FindTools)) !transition.Next(FindTools) {
+        const selected = try t.later.saved.selection();
+        t.later = .{ .selected = selected };
+        tool_set.lookupSelection(r, &t.later.selected);
+        return .{ .round = .selected };
+    }
+
+    /// After `.selected`: saves the loaded set, if new, and the revision
+    /// that loads it.
+    noinline fn load(t: *FindTools, r: *transition.Round(FindTools)) !transition.Next(FindTools) {
+        const found = &t.facts.?;
+        const configured_set = t.configured();
+        const revision = t.answer.revision;
+        const selected_set = try tool_set.finishSelection(r, &t.later.selected, configured_set);
         // Sets are saved once per membership: loading every configured name
         // is the configured set itself, which the Session saves as NULL.
-        a.write(update_loaded, .{ .session = found.session, .loaded = if (selected_set == configured) null else selected_set, .revision = revision });
-        var applied: configuration.Applied = .{
+        r.write(update_loaded, .{ .session = found.session, .loaded = if (selected_set == configured_set) null else selected_set, .revision = revision });
+        t.later = .{ .applied = .{
             .session = .{},
             .head = found.session,
             .revision = revision,
@@ -231,14 +425,20 @@ pub fn run(a: anytype, binding: action.ActionAttemptBinding, arena: std.mem.Allo
             .output_schema_id = null,
             .instructions_updated = false,
             .changes = .initOne(.loaded_tools),
-        };
+        } };
+        const applied = &t.later.applied;
         try applied.session.set(&found.session.ref);
-        try configuration.queueConfiguredCommand(a, &applied, key, .configure, &digest, null, null, &answer);
-    } else {
-        try command.queueCommand(a, key, .configure, &found.session.ref, &digest, null, null, &answer);
+        try configuration.queueConfiguredCommand(r, applied, t.key, .configure, &t.digest, null, null, &t.answer);
+        return t.resolve(r, t.outcome_id);
     }
-    try action.queueResolution(a, binding, found.session, if (refusal == null) .succeeded else .failed, outcome_id);
-    if (faults.before_commit) return error.InjectedCommitFailure;
-    try a.commit();
-    return true;
-}
+
+    fn resolve(t: *FindTools, r: *transition.Round(FindTools), outcome_id: u64) !transition.Next(FindTools) {
+        try action.queueResolution(r, t.input.binding, t.facts.?.session, if (t.input.refusal == null) .succeeded else .failed, outcome_id);
+        if (r.faults().before_commit) return error.InjectedCommitFailure;
+        return .commit;
+    }
+
+    pub fn committed(_: *const FindTools) Result {
+        return true;
+    }
+};

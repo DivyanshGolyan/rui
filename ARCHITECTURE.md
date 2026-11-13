@@ -2682,7 +2682,8 @@ Shift alone stays text.
 An xterm modifyOtherKeys key (`CSI 27 ; modifier ; code ~`, which Ghostty's legacy table sends for modified Enter without being asked) decodes as the Kitty key with the same modifiers and no associated text, so its bindings mean the same: Shift-Enter adds a line, Ctrl-A moves to the line start, Ctrl-J sends, and an unbound Ctrl, Alt or Super chord is dropped as its Kitty form is.
 Shift with a printable code inserts nothing in this form.
 Ctrl-R recovers in its raw, Kitty and modifyOtherKeys forms alike, never from pasted text; at an Action's choice it is refused, spends freshness and authorizes nothing, and while approval is paused it waits for the Action, keeping the draft.
-A malformed key in a supported form is a key whose meaning was lost, so it fails closed: a Kitty modifier outside 1–256 or event type outside 1–3, a key, alternate key or associated-text value that is not a Unicode scalar, associated text over the decoder's 128 bytes, or a modifyOtherKeys field outside its form rejects the draft at its line end, or is refused at once at an Action's choice, as malformed UTF-8 is, rather than being ignored so that the text typed around it stands.
+libvaxis owns terminal decoding; a sequence it consumes as unknown produces no event for Rui.
+ESC followed by broken UTF-8 arrives as an Alt key with U+FFFD and follows the ordinary unbound-chord path, leaving the draft unchanged.
 A sequence naming a key Rui does not know is still ignored.
 Inside marked paste any ESC other than the end marker rejects the paste, and an end marker beginning at a later ESC, as in ESC ESC `[201~`, still ends it.
 
