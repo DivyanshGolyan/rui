@@ -1156,7 +1156,18 @@ fn appComposeDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Erro
 
 /// A visible conversation determines the highlight without changing the
 /// overview's own selection or borrowing a row's storage across frames.
+fn listSelection(raw: *anyopaque) Root.ListSelection {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    if (self.composer.length != 0 or self.state.panel != null or self.state.footer.focus != .input or self.root.settings_page.standaloneField() != null) return .{};
+    const line = view.selectedLine(&self.state) orelse return .{};
+    const item = view.listItem(&self.state, line) orelse return .{};
+    const target = view.clickOf(&self.state, item) orelse return .{};
+    if (target != .open) return .{};
+    return .{ .session = true, .open = if (self.app_session) |shown| std.mem.eql(u8, &target.open, &shown.session) else false };
+}
+
 fn selectedListLine(self: *const Self) ?u32 {
+    if (self.root.input.list_focused) return if (view.selectedLine(&self.state)) |line| @intCast(line) else null;
     const open = self.state.conversing orelse return if (view.selectedLine(&self.state)) |line| @intCast(line) else null;
     var line: usize = 0;
     while (view.listItem(&self.state, line)) |item| : (line += 1) {
@@ -1197,6 +1208,7 @@ fn drawPart(self: *Self, ctx: vxfw.DrawContext, part: AppScreen.Overview.Part) s
                 const rows = try ctx.arena.create(SessionRows);
                 rows.* = .{ .state = &self.state, .width = size.width, .caps = self.caps, .frame = frame };
                 self.app_sessions.selected = self.selectedListLine();
+                self.app_sessions.selection_background = if (self.root.session != null and !self.root.input.list_focused) .bar else .selection;
                 self.app_sessions.rows = .{ .userdata = rows, .count = @intCast(view.listLength(&self.state)), .rowFn = SessionRows.row, .countFromFn = SessionRows.count };
                 self.app_sessions.aboveFn = SessionRows.above;
                 self.app_sessions.belowFn = SessionRows.below;
@@ -1407,7 +1419,7 @@ fn create(init: std.process.Init, options: Options, hooks: Hooks, ops: Operation
         .interrupted = interrupted,
     };
     self.composer = self.emptyComposer(0);
-    self.root = .{ .main_presentation = .{ .context = self, .close = closeMainPresentation }, .overview = self.widget(), .overview_keys = .{ .context = self, .take = appKey }, .list = self.listWidget(), .compose = self.composeWidget(), .settings_page = .{ .backend = self.settingsBackend(), .version = @import("transport_options").version }, .input = .{ .layer = if (options.sign_in) .{ .sign_in = .{ .over = .main } } else .main } };
+    self.root = .{ .list_selection = .{ .context = self, .read = listSelection }, .main_presentation = .{ .context = self, .close = closeMainPresentation }, .overview = self.widget(), .overview_keys = .{ .context = self, .take = appKey }, .list = self.listWidget(), .compose = self.composeWidget(), .settings_page = .{ .backend = self.settingsBackend(), .version = @import("transport_options").version }, .input = .{ .layer = if (options.sign_in) .{ .sign_in = .{ .over = .main } } else .main } };
     self.sign_in = .{ .init = init, .selectors = options.selectors, .activate = hooks.activate, .ready = hooks.ready, .userdata = self, .on_done = signedIn, .on_close = closeSignIn, .list_visible = listVisible };
     self.root.sign_in = self.sign_in.widget();
     self.paintDivider();

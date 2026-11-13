@@ -74,7 +74,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         const row: u16 = @intCast(index + rule);
         if (prefix != 0) _ = window.child(.{ .y_off = row, .height = 1, .width = prefix }).printSegment(.{
             .text = if (shown.first + index != 0) "   " else if (self.ascii) " > " else " › ",
-            .style = self.style,
+            .style = if (self.caret) self.style else self.quiet,
         }, .{ .wrap = .none });
         _ = window.child(.{ .x_off = prefix, .y_off = row, .height = 1 }).printSegment(.{
             .text = if (draft.len == 0) self.placeholder else draft[line.start..line.end],
@@ -193,4 +193,21 @@ test "Composer empty chat shows only its prompt and rules" {
         for (3..width) |col| try std.testing.expectEqualStrings(" ", shown.readCell(col, 1).char.grapheme);
         try std.testing.expectEqual(@as(u16, 3), shown.cursor.?.col);
     }
+}
+
+test "Composer inactive prompt uses quiet style and no caret without dimming draft text" {
+    var bytes = "draft".*;
+    const editor: Editor = .{ .buffer = &bytes, .length = bytes.len, .cursor = 0 };
+    var composer: Self = .{ .editor = &editor, .style = .{}, .quiet = .{ .dim = true } };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 5 }, .cell_size = .{} };
+    const focused = try composer.widget().draw(ctx);
+    try std.testing.expect(focused.cursor != null);
+    try std.testing.expect(!focused.readCell(1, 1).style.dim);
+    composer.caret = false;
+    const inactive = try composer.widget().draw(ctx);
+    try std.testing.expect(inactive.cursor == null);
+    try std.testing.expect(inactive.readCell(1, 1).style.dim);
+    try std.testing.expect(!inactive.readCell(3, 1).style.dim);
 }

@@ -1721,7 +1721,7 @@
     },
     {
       "name": "keys",
-      "note": "20-keys: eleven entries, aligned pairs at 140 and one column at 46",
+      "note": "20-keys: shared key reference, aligned pairs at 140 and one column at 46",
       "open": "overview",
       "steps": [
         {
@@ -1749,7 +1749,7 @@
         }
       ],
       "expect": [
-        "enter    send",
+        "enter    send / open",
         "esc      back",
         "⇧enter   new line",
         "ctrl+x   stop",
@@ -1759,7 +1759,10 @@
         "ctrl+r   retry",
         "/        skills",
         "alt+a    archive",
-        "ctrl+c   leave"
+        "ctrl+c   leave",
+        "next panel/footer field",
+        "previous panel/footer field",
+        "list/chat \u00b7 info actions"
       ],
       "absent": [
         "/help",
@@ -2529,6 +2532,9 @@
             "Down",
             "Right"
           ]
+        },
+        {
+          "sleep": 0.2
         }
       ],
       "expect": [
@@ -2596,6 +2602,119 @@
             "Give a chat info specimen summarizing the retry deadline fix."
           ]
         }
+      ]
+    },
+    {
+      "name": "focus-chat",
+      "note": "Comparison screen: chat input focused with bright prompt and caret, list selection inactive.",
+      "open": "Focus navigation audit",
+      "steps": [
+        {
+          "wait": "The retry draft is ready."
+        }
+      ],
+      "expect": [
+        "Focus navigation audit",
+        "\u203a"
+      ],
+      "absent": [
+        "Opening\u2026"
+      ],
+      "cast": [
+        {
+          "label": "Focus navigation audit",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "messages": [
+            "Give a chat info specimen summarizing the retry deadline fix."
+          ]
+        }
+      ],
+      "sizes": [
+        "140x40"
+      ]
+    },
+    {
+      "name": "left-to-list",
+      "note": "Left on an empty draft focuses the list; wide keeps feed, narrow is the existing Esc return.",
+      "open": "Focus navigation audit",
+      "steps": [
+        {
+          "wait": "The retry draft is ready."
+        },
+        {
+          "keys": [
+            "Left"
+          ]
+        },
+        {
+          "sleep": 0.2
+        }
+      ],
+      "expect": [
+        "Focus navigation audit",
+        "Settings"
+      ],
+      "absent": [
+        "Opening\u2026"
+      ]
+    },
+    {
+      "name": "focus-list-A",
+      "note": "Ship A: focused list row, no chat caret, quiet prompt, unchanged feed.",
+      "sizes": [
+        "140x40"
+      ],
+      "open": "Focus navigation audit",
+      "steps": [
+        {
+          "wait": "The retry draft is ready."
+        },
+        {
+          "keys": [
+            "Left"
+          ]
+        },
+        {
+          "sleep": 0.2
+        }
+      ],
+      "expect": [
+        "Focus navigation audit",
+        "The retry draft is ready.",
+        "\u203a"
+      ],
+      "absent": [
+        "Opening\u2026"
+      ]
+    },
+    {
+      "name": "list-to-chat",
+      "note": "Right on the open row returns to its retained input, without reopening the feed.",
+      "open": "Focus navigation audit",
+      "steps": [
+        {
+          "wait": "The retry draft is ready."
+        },
+        {
+          "keys": [
+            "Left",
+            "Right"
+          ]
+        },
+        {
+          "sleep": 0.2
+        }
+      ],
+      "expect": [
+        "Focus navigation audit",
+        "\u203a"
+      ],
+      "absent": [
+        "Opening\u2026"
+      ],
+      "sizes": [
+        "140x40"
       ]
     }
   ]

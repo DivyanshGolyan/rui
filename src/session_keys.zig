@@ -340,6 +340,8 @@ pub fn step(state: State, facts: Facts, input: Input) Take {
         .blocked => if (input.key == .enter) .needs_decision else .taken,
         .draft => .consent_draft,
     };
+    const draft_key: @import("app_input.zig").DraftKey = if (input.closes()) .escape else if (input.key == .left and state.footer.focus == .input) .left else .other;
+    if (!input.pasted and @import("app_input.zig").draftKey(facts.draft_empty, draft_key) == .back) return .{ .perform = .close };
     if (input.key == .enter and !input.pasted and facts.shown_row) return .take_row;
     return .{ .edit = .{ .send = facts.send.allowed() } };
 }
@@ -425,19 +427,21 @@ test "every key Root hands the Session means one thing in each Session state" {
     const main = [_]Setup{ .plain, .choice_pending, .host_held, .opening, .preparing, .command_active, .submitting, .shown_row };
     const sends = [_]Setup{ .plain, .choice_pending, .shown_row };
     const held = [_]Setup{ .host_held, .opening, .preparing, .command_active, .submitting };
-    const edits = [_]Pressed{ .printable, .pasted_printable, .pasted_enter, .ctrl_c, .ctrl_d, .left, .right, .paste_start, .paste_end, .invalid };
+    const edits = [_]Pressed{ .printable, .pasted_printable, .pasted_enter, .ctrl_c, .ctrl_d, .right, .paste_start, .paste_end, .invalid };
     const send: Take = .{ .edit = .{ .send = true } };
     const hold: Take = .{ .edit = .{ .send = false } };
     const rows = [_]Expected{
         // The draft takes typing; Enter sends only while nothing holds a
         // Message, and on a shown list's row takes that row.
+        .{ .setups = &.{ .plain, .choice_pending, .host_held, .opening, .preparing, .command_active, .submitting }, .keys = &.{.left}, .take = .{ .perform = .close } },
+        .{ .setups = &.{.shown_row}, .keys = &.{.left}, .take = send },
         .{ .setups = &sends, .keys = &(edits ++ [_]Pressed{ .host_start, .details }), .take = send },
         .{ .setups = &held, .keys = &edits, .take = hold },
         .{ .setups = &.{ .plain, .choice_pending }, .keys = &.{.enter}, .take = send },
         .{ .setups = &.{.shown_row}, .keys = &.{.enter}, .take = .take_row },
         .{ .setups = &held, .keys = &.{.enter}, .take = hold },
-        .{ .setups = &.{ .plain, .shown_row }, .keys = &closing, .take = send },
-        .{ .setups = &held, .keys = &closing, .take = hold },
+        .{ .setups = &.{ .plain, .shown_row }, .keys = &closing, .take = .{ .perform = .close } },
+        .{ .setups = &held, .keys = &closing, .take = .{ .perform = .close } },
         // A footer choice hidden while its save is pending still closes on Esc.
         .{ .setups = &.{.choice_pending}, .keys = &closing, .take = .close_choice },
         // `r` on an empty draft starts a stopped Host; Alt-D shows a
@@ -483,7 +487,7 @@ test "every key Root hands the Session means one thing in each Session state" {
         // which sends nothing, and Esc, which returns to the choice.
         .{ .setups = &.{.draft_row}, .keys = &.{.enter}, .take = .needs_decision },
         .{ .setups = &.{.draft_row}, .keys = &closing, .take = .taken, .row = .selector },
-        .{ .setups = &.{.draft_row}, .keys = &(edits ++ [_]Pressed{ .host_start, .details }), .take = .consent_draft },
+        .{ .setups = &.{.draft_row}, .keys = &(edits ++ [_]Pressed{ .left, .host_start, .details }), .take = .consent_draft },
     };
     const Case = struct {
         fn has(comptime T: type, set: []const T, value: T) bool {

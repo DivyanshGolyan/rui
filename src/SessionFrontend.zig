@@ -661,7 +661,7 @@ fn chromeClick(comptime click: Click) *const fn (*anyopaque, *vxfw.EventContext)
             if (self.leaving != null) return;
             self.shown_notice.dismiss();
             switch (click) {
-                .action => |action| try self.perform(action),
+                .action => |action| try self.perform(ctx, action),
                 .status => try self.openInfo(ctx),
                 .footer => |field| try self.footerClick(ctx, field),
                 .footer_close => try self.closeStandaloneChoice(ctx),
@@ -670,7 +670,7 @@ fn chromeClick(comptime click: Click) *const fn (*anyopaque, *vxfw.EventContext)
                 },
                 .details => try self.showSubmissionFailure(),
                 .needs => if (self.heldOriginal()) |held| if (session_notice.key(held)) |key| switch (key) {
-                    .retry => try self.perform(.recover),
+                    .retry => try self.perform(ctx, .recover),
                     .discard => try self.clickCommand("/discard"),
                     .status => try self.showSubmissionFailure(),
                 },
@@ -889,7 +889,7 @@ fn appKey(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event, delivery:
             try ctx.requestFocus(self.app_input.composer.widget());
             try self.showSubmissionFailure();
         },
-        .perform => |action| try self.perform(action),
+        .perform => |action| try self.perform(ctx, action),
         .open_choice => try self.startFooterChoice(ctx),
         .start_host => {
             const host = self.app_hooks.host.?;
@@ -904,7 +904,7 @@ fn appKey(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event, delivery:
         .consent_draft => switch (self.input.appEvent(conversation_keys, event, delivery.pasted, false)) {
             .busy => self.notice = "Not sent: this Action needs a decision",
             .editor => |outcome| switch (outcome) {
-                .action => |action| try self.perform(action),
+                .action => |action| try self.perform(ctx, action),
                 .refused => |why| if (why != .unbound) {
                     self.notice = refusedNotice(why);
                 },
@@ -923,7 +923,7 @@ fn appKey(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event, delivery:
                 .command => try self.commandLine(),
                 .busy => self.sayBusy(null, false),
                 .editor => |outcome| switch (outcome) {
-                    .action => |action| try self.perform(action),
+                    .action => |action| try self.perform(ctx, action),
                     .refused => |why| if (why != .unbound) {
                         self.notice = refusedNotice(why);
                     },
@@ -1070,7 +1070,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     };
     const facts_style = style.of(self.app_caps, .{ .colour = .quiet, .background = .bar });
     self.app_screen.style = normal;
-    self.app_input.composer.caret = !self.info_open and !self.app_info.standaloneOpen() and self.footer.focus == .input;
+    self.app_input.composer.caret = !self.app_hooks.root.input.list_focused and !self.info_open and !self.app_info.standaloneOpen() and self.footer.focus == .input;
     self.app_input.composer.style = normal;
     self.app_input.composer.quiet = quiet;
     self.app_input.composer.method = self.app_caps.width;
@@ -1802,7 +1802,7 @@ fn slashCommand(self: *Self, text: []const u8) !void {
         return;
     }
     switch (parsed) {
-        .archive => try self.perform(.archive),
+        .archive => _ = try self.archive(),
         .unarchive => try self.converse(.unarchive),
         .inspection => self.input.queueCommand(text),
         .discard => {
@@ -2504,7 +2504,7 @@ fn commandActive(self: *const Self) bool {
 const ConversationAction = session_keys.Action;
 const conversation_keys = session_keys.keys;
 
-fn perform(self: *Self, action: ConversationAction) !void {
+fn perform(self: *Self, ctx: *vxfw.EventContext, action: ConversationAction) !void {
     if (self.upgradeHeld() and (action == .recover or action == .expand)) {
         self.notice = session_upgrade.refusal(self.upgradePhase());
         return;
@@ -2548,6 +2548,7 @@ fn perform(self: *Self, action: ConversationAction) !void {
                 const original: ?Submission.State = if (self.submission.view()) |submission| submission.state else null;
                 switch (session_notice.close(original, self.submission.published(), self.draftSafeToLeave())) {
                     .leave => {
+                        if (try self.app_hooks.root.focusList(ctx, self.input.composition().bytes.len == 0)) return;
                         self.leaving = .returned;
                         return;
                     },
@@ -3820,7 +3821,7 @@ test "App Session draft handoff preserves valid overflow-rejected and malformed-
                 const a = try HeldFrontend.createWithDrafts("aaaaaa", &drafts);
                 defer a.destroy();
                 try a.keys(case.bytes);
-                try a.keys("\x1b[D\x1b[D");
+                if (case.bytes.len != 0) try a.keys("\x1b[D\x1b[D");
                 if (case.rejected) |why| try a.keys(if (why == .overflow) "x" else "\xff");
                 try std.testing.expectEqualStrings(case.bytes, a.self.input.composition().bytes);
                 try std.testing.expectEqual(cursor, a.self.input.composition().cursor);
@@ -9744,4 +9745,35 @@ test "App Session copy button feedback follows clipboard completion and refusal"
     try std.testing.expectError(error.AccessDenied, self.showCopy());
     try std.testing.expectEqual(.failed, self.info_effect);
     try std.testing.expect(!backend.copied(backend.context));
+}
+
+test "App Session Left and Esc reuse guarded empty draft return while nonempty Left edits" {
+    for ([_]u16{ 46, 140 }) |width| for ([_]struct { bytes: []const u8, cursor: usize }{
+        .{ .bytes = "", .cursor = 0 },
+        .{ .bytes = "draft", .cursor = 5 },
+        .{ .bytes = "draft", .cursor = 0 },
+    }) |draft| for ([_][]const u8{ "\x1b[D", "\x07" }) |key| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        held.size = .{ .width = width, .height = 30 };
+        held.root.size = .{ .width = width, .height = 30 };
+        _ = try held.draw();
+        _ = held.self.input.append(draft.bytes);
+        held.self.input.editors[held.self.input.active].cursor = draft.cursor;
+        try held.keys(key);
+        if (draft.bytes.len == 0) {
+            try std.testing.expectEqual(width == 140, held.root.input.list_focused and held.left == null);
+            try std.testing.expectEqual(if (width == 140) @as(?Outcome, null) else .returned, held.left);
+            if (width == 140) {
+                _ = try held.draw();
+                try std.testing.expect(!held.self.app_input.composer.caret);
+                try std.testing.expect(held.root.session != null);
+            }
+        } else {
+            try std.testing.expect(!held.root.input.list_focused);
+            try std.testing.expectEqual(@as(?Outcome, null), held.left);
+            try std.testing.expectEqualStrings(draft.bytes, held.self.input.composition().bytes);
+            try std.testing.expectEqual(if (key[0] == 0x1b) draft.cursor -| 1 else draft.cursor, held.self.input.composition().cursor);
+        }
+    };
 }

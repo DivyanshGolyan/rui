@@ -121,14 +121,14 @@ pub const Reference = struct {
 };
 
 pub const list = [_]Reference{
-    .{ .key = "enter", .meaning = "send" },
+    .{ .key = "enter", .meaning = "send / open" },
     .{ .key = "esc", .meaning = "back", .keys = &.{.escape}, .aliases = &.{.ctrl_g} },
     .{ .key = "⇧enter", .meaning = "new line" },
     .{ .key = "tab", .meaning = "next panel/footer field" },
     .{ .key = "⇧tab", .meaning = "previous panel/footer field" },
     .{ .key = "ctrl+x", .meaning = "stop", .keys = &.{.ctrl_x} },
     .{ .key = "↑↓", .meaning = "scroll", .keys = &.{ .up, .down }, .aliases = &.{ .shift_up, .shift_down, .page_up, .page_down, .home, .end, .ctrl_end } },
-    .{ .key = "←→", .meaning = "info actions" },
+    .{ .key = "←→", .meaning = "list/chat · info actions" },
     .{ .key = "ctrl+o", .meaning = "tool output", .keys = &.{.ctrl_o} },
     .{ .key = "ctrl+p", .meaning = "earlier message", .keys = &.{.ctrl_p}, .aliases = &.{.ctrl_n} },
     .{ .key = "ctrl+r", .meaning = "retry", .keys = &.{.ctrl_r} },

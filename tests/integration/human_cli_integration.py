@@ -2625,8 +2625,10 @@ def main(selected="all"):
             app_settings = keyed_frame(master, gesture, lambda screen, x, y: "Notifications" in screen and "Version" in screen)
             assert any("Sign-in" in row and "Codex" in row for row in app_settings.splitlines()), app_settings
             keys = keyed_frame(master, b"\x1b[B" * 6 + b"\r", lambda screen, x, y: "earlier message" in screen)
-            for expected in ('enter    send', 'esc      back', '⇧enter   new line', 'ctrl+x   stop', '↑↓       scroll', 'ctrl+o   tool output', 'ctrl+p   earlier message', 'ctrl+r   retry', '/        skills', 'alt+a    archive', 'ctrl+c   leave'):
+            for expected in ('enter    send / open', 'esc      back', '⇧enter   new line', 'ctrl+x   stop', '↑↓       scroll', 'ctrl+o   tool output', 'ctrl+p   earlier message', 'ctrl+r   retry', '/        skills', 'alt+a    archive', 'ctrl+c   leave'):
                 assert expected in keys, (expected, keys)
+            for key, meaning in (('tab', 'next panel/footer field'), ('⇧tab', 'previous panel/footer field'), ('←→', 'list/chat · info actions')):
+                assert any(key in row and meaning in row for row in keys.splitlines()), (key, meaning, keys)
             assert all(stale not in keys for stale in ("/help", "Commands", "Marks", "Esc returns", "Ctrl-X twice", "shift+enter or ctrl+j", "‹ Rui · settings", 'ctrl+g', 'ctrl+d', 'ctrl+n', 'ctrl+end', 'ctrl+c/d', 'pgup/pgdn', 'first session', 'latest / last', 'scroll / select')), keys
             settings = keyed_frame(master, b"\x1b", lambda screen, x, y: "Notifications" in screen and "Version" in screen)
             assert "earlier message" not in settings, settings
