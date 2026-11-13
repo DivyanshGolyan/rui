@@ -53,9 +53,9 @@ def wait_for_host(path, store, process):
     host_process.wait_for(ready, "the Host in interface.dir to answer Host info", timeout=20)
 
 
-def refusal(process, forbidden=()):
+def refusal(process, forbidden=(), *, expected_exit=1):
     out, err = output(process)
-    assert process.returncode == 1, (out, err)
+    assert expected_exit != 0 and process.returncode == expected_exit, (process.returncode, expected_exit, out, err)
     assert err.strip(), (out, err)
     assert err.endswith(b"\n") and err.count(b"\n") == 1, (out, err)
     assert len(err.decode().splitlines()) == 1, (out, err)

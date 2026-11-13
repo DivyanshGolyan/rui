@@ -152,11 +152,11 @@ def source_modes(root, good):
     for process in (file_host(private),
                     subprocess.Popen([RUI, "host", "serve", "--store", store],
                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)):
-        assert refusal(process)["code"] == "store_locked"
+        assert refusal(process, expected_exit=6)["code"] == "store_locked"
 
     secret = "sk-file-origin-must-not-appear"
     invalid = dict(private, providers={"openai": {"key": {"value": secret}}})
-    refused = refusal(file_host(invalid), forbidden=(secret,))
+    refused = refusal(file_host(invalid), forbidden=(secret,), expected_exit=2)
     assert refused["code"] == "settings_invalid", refused
     assert "providers.openai.key" in refused["message"], refused
 
@@ -213,7 +213,7 @@ def main(network, ci):
     other = root / "other"
     other.mkdir(mode=0o700)
     second = launch(frame(dict(good, interface=dict(good["interface"], dir=str(other)))))
-    assert refusal(second)["code"] == "store_locked"
+    assert refusal(second, expected_exit=6)["code"] == "store_locked"
 
     # Another Store may not share the runtime directory: the first Host keeps
     # its socket.
@@ -293,7 +293,7 @@ def main(network, ci):
         {"review": {name: value for name, value in preset.items() if name != "effort"}},
         {"review": dict(preset, tools=["bash"])},
     ]:
-        refused = refusal(launch(frame(dict(good, presets=presets))))
+        refused = refusal(launch(frame(dict(good, presets=presets))), expected_exit=2)
         assert refused["code"] == "settings_invalid", refused
         assert "presets" in refused["message"], refused
 
@@ -305,7 +305,7 @@ def main(network, ci):
     ]:
         process = launch(raw)
         host_process.close_stdin(process)
-        refused = refusal(process)
+        refused = refusal(process, expected_exit=2)
         assert refused["code"] == "settings_invalid", refused
         assert message in refused["message"], refused
 

@@ -65,6 +65,17 @@ class SettingsRefusalTest(unittest.TestCase):
                 with self.assertRaises(AssertionError):
                     settings_fixture.refusal(SimpleNamespace(returncode=1), forbidden=("never-print-this-value",))
 
+    def test_expected_failure_status_is_exact_and_never_success(self):
+        _, out, err = self.streams("message", b"message")
+        for expected in (0, 1, 2, 6):
+            for actual in (0, 1, 2, 3, 6, 7):
+                with self.subTest(expected=expected, actual=actual), patch.object(settings_fixture, "output", return_value=(out, err)):
+                    if expected != 0 and actual == expected:
+                        settings_fixture.refusal(SimpleNamespace(returncode=actual), expected_exit=expected)
+                    else:
+                        with self.assertRaises(AssertionError):
+                            settings_fixture.refusal(SimpleNamespace(returncode=actual), expected_exit=expected)
+
     def test_failure_exit_status_is_required(self):
         _, out, err = self.streams("message", b"message")
         with patch.object(settings_fixture, "output", return_value=(out, err)):
