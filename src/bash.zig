@@ -813,7 +813,7 @@ pub const Execution = struct {
         writer: *std.Io.Writer,
         code: store.ActionResolutionCode,
         include_paths: bool,
-        tail: *[excerpt_bytes + 12]u8,
+        tail: *[excerpt_bytes + 14]u8,
     ) !void {
         try writer.print("Bash {s}. ", .{@tagName(code)});
         switch (self.lifecycle.process.gone) {
@@ -849,8 +849,8 @@ pub const Execution = struct {
             stderr_length - stderr_base,
             excerpt_bytes - stderr_base - stdout_take,
         )));
-        const stdout_excerpt = try readExcerpt(self.stdout_capture.file.?, scratch.io, stdout_length, stdout_take, tail[0 .. stdout_take + 6]);
-        const stderr_excerpt = try readExcerpt(self.stderr_capture.file.?, scratch.io, stderr_length, stderr_take, tail[stdout_take + 6 ..][0 .. stderr_take + 6]);
+        const stdout_excerpt = try readExcerpt(self.stdout_capture.file.?, scratch.io, stdout_length, stdout_take, tail[0 .. stdout_take + 7]);
+        const stderr_excerpt = try readExcerpt(self.stderr_capture.file.?, scratch.io, stderr_length, stderr_take, tail[stdout_take + 7 ..][0 .. stderr_take + 7]);
         const stderr_encoded_base = @min(stderr_excerpt.encodedLength(), excerpt_bytes / 2);
         const stdout_allowance = @min(stdout_excerpt.encodedLength(), excerpt_bytes - stderr_encoded_base);
         const stderr_allowance = stderr_encoded_base + @min(
@@ -883,8 +883,9 @@ pub const Outcome = struct {
     code: store.ActionResolutionCode,
     content: [excerpt_bytes + 4096]u8 = undefined,
     content_len: usize = 0,
-    /// Bounded head/tail samples plus UTF-8 boundary lookaround, before encoding.
-    tail: [excerpt_bytes + 12]u8 = undefined,
+    /// Bounded head/tail samples plus UTF-8 boundary lookaround and the byte
+    /// before each tail, before encoding.
+    tail: [excerpt_bytes + 14]u8 = undefined,
 
     pub fn text(self: *const Outcome) []const u8 {
         return self.content[0..self.content_len];
@@ -1878,6 +1879,8 @@ fn validUtf8Length(bytes: []const u8) usize {
 const Excerpt = struct {
     head: []const u8,
     tail: []const u8,
+    /// The source byte before `tail` is a newline, or `tail` starts the source.
+    tail_starts_line: bool,
     source_length: u64,
 
     fn encodedLength(self: Excerpt) usize {
@@ -1899,9 +1902,10 @@ const Excerpt = struct {
         // expansion, rather than source length, exceeds the allowance.
         const tail = if (self.head.len == self.source_length) self.head else self.tail;
         var tail_start = utf8TailStart(tail, allowance - head_allowance);
-        if (std.mem.indexOfScalar(u8, tail[tail_start..][0..@min(256, tail.len - tail_start)], '\n')) |newline| {
+        const tail_starts_line = if (tail_start == 0) self.tail_starts_line else tail[tail_start - 1] == '\n';
+        if (!tail_starts_line) if (std.mem.indexOfScalar(u8, tail[tail_start..][0..@min(256, tail.len - tail_start)], '\n')) |newline| {
             tail_start += newline + 1;
-        }
+        };
         _ = try appendValidUtf8Tail(writer, self.head[0..head_end], head_allowance);
         if (head_end != 0 and self.head[head_end - 1] != '\n') try writer.writeByte('\n');
         try writer.print("[{d} bytes left out]\n", .{self.source_length - head_end - (tail.len - tail_start)});
@@ -1913,7 +1917,7 @@ const Excerpt = struct {
 fn readExcerpt(file: std.Io.File, io: std.Io, length: u64, take: usize, buffer: []u8) !Excerpt {
     if (length <= take) {
         if (try file.readPositionalAll(io, buffer[0..take], 0) != take) return error.ShortCaptureRead;
-        return .{ .head = buffer[0..take], .tail = "", .source_length = length };
+        return .{ .head = buffer[0..take], .tail = "", .tail_starts_line = true, .source_length = length };
     }
     const head_take = take / 2;
     const head_read: usize = @intCast(@min(length, head_take + 3));
@@ -1922,7 +1926,9 @@ fn readExcerpt(file: std.Io.File, io: std.Io, length: u64, take: usize, buffer: 
     while (head_end < head_take) head_end += utf8Unit(buffer[0..head_read], head_end).source_length;
     const tail_take = take - head_take;
     const tail_offset = length - tail_take;
-    const context: usize = @intCast(@min(tail_offset, 3));
+    // Up to three bytes reach back to a UTF-8 boundary, and one more keeps
+    // the byte before the tail for the tail's newline snap.
+    const context: usize = @intCast(@min(tail_offset, 4));
     const tail_read = tail_take + context;
     const tail = buffer[head_read..][0..tail_read];
     if (try file.readPositionalAll(io, tail, tail_offset - context) != tail_read) return error.ShortCaptureRead;
@@ -1932,7 +1938,12 @@ fn readExcerpt(file: std.Io.File, io: std.Io, length: u64, take: usize, buffer: 
         if (next > context) break;
         tail_start = next;
     }
-    return .{ .head = buffer[0..head_end], .tail = tail[tail_start..], .source_length = length };
+    return .{
+        .head = buffer[0..head_end],
+        .tail = tail[tail_start..],
+        .tail_starts_line = if (tail_start == 0) tail_offset - context == 0 else tail[tail_start - 1] == '\n',
+        .source_length = length,
+    };
 }
 
 fn utf8HeadEnd(bytes: []const u8, allowance: usize) usize {
@@ -2014,34 +2025,50 @@ test "Bash excerpts align every multibyte cut and count source bytes" {
 }
 
 test "Bash excerpts snap only inside the 256-byte newline windows" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(std.testing.io, "capture", .{ .read = true });
+    defer file.close(std.testing.io);
     var source: [2048]u8 = undefined;
+    var sample: [1036]u8 = undefined;
     var output: [1152]u8 = undefined;
     var expected: [1152]u8 = undefined;
-    for ([_]struct { newline: usize, head_end: usize, tail_start: usize }{
-        .{ .newline = 255, .head_end = 512, .tail_start = 1536 },
-        .{ .newline = 256, .head_end = 257, .tail_start = 1536 },
-        .{ .newline = 511, .head_end = 512, .tail_start = 1536 },
-        .{ .newline = 1536, .head_end = 512, .tail_start = 1537 },
-        .{ .newline = 1791, .head_end = 512, .tail_start = 1792 },
-        .{ .newline = 1792, .head_end = 512, .tail_start = 1536 },
+    for ([_]struct { newlines: []const usize, head_end: usize, tail_start: usize }{
+        .{ .newlines = &.{255}, .head_end = 512, .tail_start = 1536 },
+        .{ .newlines = &.{256}, .head_end = 257, .tail_start = 1536 },
+        .{ .newlines = &.{511}, .head_end = 512, .tail_start = 1536 },
+        .{ .newlines = &.{1536}, .head_end = 512, .tail_start = 1537 },
+        .{ .newlines = &.{1791}, .head_end = 512, .tail_start = 1792 },
+        .{ .newlines = &.{1792}, .head_end = 512, .tail_start = 1536 },
+        // A cut that already falls on a line boundary keeps its whole line.
+        .{ .newlines = &.{ 1535, 1600 }, .head_end = 512, .tail_start = 1536 },
+        .{ .newlines = &.{ 300, 511 }, .head_end = 512, .tail_start = 1536 },
+        .{ .newlines = &.{ 300, 511, 1535, 1600 }, .head_end = 512, .tail_start = 1536 },
     }) |case| {
         @memset(&source, 'a');
-        source[case.newline] = '\n';
-        const excerpt: Excerpt = .{ .head = &source, .tail = "", .source_length = source.len };
-        var writer = std.Io.Writer.fixed(&output);
-        try std.testing.expect(try excerpt.append(&writer, 1024));
-        var oracle = std.Io.Writer.fixed(&expected);
-        try oracle.writeAll(source[0..case.head_end]);
-        if (source[case.head_end - 1] != '\n') try oracle.writeByte('\n');
-        try oracle.print("[{d} bytes left out]\n", .{case.tail_start - case.head_end});
-        try oracle.writeAll(source[case.tail_start..]);
-        try std.testing.expectEqualStrings(oracle.buffered(), writer.buffered());
+        for (case.newlines) |newline| source[newline] = '\n';
+        try file.writePositionalAll(std.testing.io, &source, 0);
+        // A complete sample and a file read reach the tail's preceding byte
+        // differently; both must snap the same way.
+        for ([_]Excerpt{
+            .{ .head = &source, .tail = "", .tail_starts_line = true, .source_length = source.len },
+            try readExcerpt(file, std.testing.io, source.len, 1024, &sample),
+        }) |excerpt| {
+            var writer = std.Io.Writer.fixed(&output);
+            try std.testing.expect(try excerpt.append(&writer, 1024));
+            var oracle = std.Io.Writer.fixed(&expected);
+            try oracle.writeAll(source[0..case.head_end]);
+            if (source[case.head_end - 1] != '\n') try oracle.writeByte('\n');
+            try oracle.print("[{d} bytes left out]\n", .{case.tail_start - case.head_end});
+            try oracle.writeAll(source[case.tail_start..]);
+            try std.testing.expectEqualStrings(oracle.buffered(), writer.buffered());
+        }
     }
 }
 
 test "Bash excerpts count omitted source bytes under replacement expansion" {
     const source: [512]u8 = @splat(0xff);
-    const excerpt: Excerpt = .{ .head = &source, .tail = "", .source_length = source.len };
+    const excerpt: Excerpt = .{ .head = &source, .tail = "", .tail_starts_line = true, .source_length = source.len };
     var output: [1152]u8 = undefined;
     var writer = std.Io.Writer.fixed(&output);
     try std.testing.expect(try excerpt.append(&writer, 1024));
