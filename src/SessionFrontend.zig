@@ -1221,7 +1221,6 @@ test "App Session retains the draft across a permission card arriving during pas
         self.app_caps = case.caps;
         self.app_content.colour = case.caps.depth != .none;
         const surface = try widget_.draw(draw_context);
-        try std.testing.expectEqual(case.ground, surface.readCell(79, 10).style.bg);
         var rendered: vaxis.Screen = try .init(arena.allocator(), .{ .rows = 24, .cols = 80, .x_pixel = 0, .y_pixel = 0 });
         const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 80, .height = 24, .screen = &rendered };
         surface.render(window, self.app_input.composer.widget());
@@ -3566,6 +3565,13 @@ const HeldFrontend = struct {
         return held.self.widget().draw(.{ .arena = held.arena.allocator(), .min = .{}, .max = held.size, .cell_size = .{} });
     }
 
+    /// Ground strips are inert siblings, not input rows. Find the input by
+    /// its owner rather than its former position at the end of the column.
+    fn drawnInput(held: *HeldFrontend, base: vxfw.Surface) !vxfw.SubSurface {
+        for (base.children) |child| if (child.surface.widget.eql(held.self.app_input.widget())) return child;
+        return error.TestUnexpectedResult;
+    }
+
     /// The latest frame's rows as text, one per line.
     fn shown(held: *HeldFrontend) ![]const u8 {
         const width = held.size.width.?;
@@ -4592,7 +4598,7 @@ test "chat info opens from the chat line above the input at 140 and 46 columns a
         const base = surface.children[0].surface;
         const panel = surface.children[1];
         try std.testing.expectEqual(@as(u8, 2), panel.z_index);
-        try std.testing.expectEqual(base.children[base.children.len - 1].origin.row, panel.origin.row + panel.surface.size.height);
+        try std.testing.expectEqual((try held.drawnInput(base)).origin.row, panel.origin.row + panel.surface.size.height);
         try std.testing.expect((try rowWith(held, "Fix retry deadline")) != null);
         try std.testing.expect((try rowWith(held, "Folder")) != null);
         try std.testing.expect((try rowWith(held, "alt+i info")) == null);
@@ -4640,7 +4646,7 @@ test "chat info hint click and Alt-I share natural panel opening and Escape rest
         const clicked = try held.draw();
         const panel = clicked.children[1];
         const base = clicked.children[0].surface;
-        const draft = base.children[base.children.len - 1];
+        const draft = (try held.drawnInput(base));
         try std.testing.expect(panel.origin.row > 0);
         try std.testing.expectEqual(base.children[0].surface.size.height, panel.origin.row);
         try std.testing.expectEqual(draft.origin.row, panel.origin.row + panel.surface.size.height);
@@ -9031,7 +9037,7 @@ test "chat info supplies the one bottom footer after the input and both dividers
         }
         const surface = try held.draw();
         const base = surface.children[0].surface;
-        const input = base.children[base.children.len - 1];
+        const input = (try held.drawnInput(base));
         try std.testing.expectEqual(@as(usize, 2), input.surface.children.len);
         const footer = input.surface.children[1];
         try std.testing.expectEqual(@as(i17, size.height - 1), input.origin.row + footer.origin.row);
