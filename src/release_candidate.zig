@@ -73,13 +73,24 @@ fn fixtureOrigin(endpoint: []const u8) ![]const u8 {
     return error.InvalidReleaseEndpoint;
 }
 
+/// The curl transport every release download shares: no config file,
+/// failure on an HTTP error, quiet but for errors, redirects followed, and
+/// bounded connect and total time. Callers add their redirect and protocol
+/// bounds, any output, and `--` with the URL.
+const curl_transport = [_][]const u8{ "curl", "--disable", "--fail", "--silent", "--show-error", "--location", "--connect-timeout", "10", "--max-time", "300" };
+
+fn curlArgv(comptime n: usize, tail: [n][]const u8) [curl_transport.len + n][]const u8 {
+    var argv: [curl_transport.len + n][]const u8 = undefined;
+    argv[0..curl_transport.len].* = curl_transport;
+    argv[curl_transport.len..].* = tail;
+    return argv;
+}
+
 pub fn fetch(allocator: std.mem.Allocator, io: std.Io, url: []const u8, cancellation: ?*const client.Cancellation, limit: usize, diagnostic: ?*process.DownloadDiagnostic) ![]u8 {
     const fixture = std.mem.startsWith(u8, url, "http://");
     if (fixture) _ = try fixtureOrigin(url) else if (!std.mem.startsWith(u8, url, "https://")) return error.InvalidReleaseEndpoint;
-    return process.downloadOutput(allocator, io, &.{
-        "curl",         "--disable",               "--fail",  "--silent",                         "--show-error",  "--location", "--connect-timeout", "10", "--max-time", "300",
-        "--max-redirs", if (fixture) "0" else "5", "--proto", if (fixture) "=http" else "=https", "--proto-redir", "=https",     "--",                url,
-    }, cancellation, limit, diagnostic);
+    const argv = curlArgv(8, .{ "--max-redirs", if (fixture) "0" else "5", "--proto", if (fixture) "=http" else "=https", "--proto-redir", "=https", "--", url });
+    return process.downloadOutput(allocator, io, &argv, cancellation, limit, diagnostic);
 }
 
 pub fn discover(allocator: std.mem.Allocator, io: std.Io, endpoint: []const u8, cancellation: ?*const client.Cancellation, diagnostic: ?*process.DownloadDiagnostic) !ReleaseCandidate {
@@ -88,11 +99,8 @@ pub fn discover(allocator: std.mem.Allocator, io: std.Io, endpoint: []const u8, 
     const target = try platform();
     // Follow the whole chain: a future public endpoint may redirect through
     // GitHub's latest page before reaching the tag. Never parse page HTML.
-    const effective = try process.downloadOutput(allocator, io, &.{
-        "curl",         "--disable", "--fail",  "--silent",                         "--show-error",  "--location",                       "--connect-timeout", "10",        "--max-time",  "300",
-        "--max-redirs", "5",         "--proto", if (fixture) "=http" else "=https", "--proto-redir", if (fixture) "=http" else "=https", "--output",          "/dev/null", "--write-out", "%{url_effective}",
-        "--",           endpoint,
-    }, cancellation, 4096, diagnostic);
+    const argv = curlArgv(12, .{ "--max-redirs", "5", "--proto", if (fixture) "=http" else "=https", "--proto-redir", if (fixture) "=http" else "=https", "--output", "/dev/null", "--write-out", "%{url_effective}", "--", endpoint });
+    const effective = try process.downloadOutput(allocator, io, &argv, cancellation, 4096, diagnostic);
     defer allocator.free(effective);
     var result = try fromEffectiveUrl(allocator, effective, if (fixture) origin else tag_origin, origin, target);
     errdefer result.deinit(allocator);
