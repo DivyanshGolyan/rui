@@ -49,6 +49,7 @@ const cores = .{
     .{ "failure_class.zig", @import("failure_class.zig") },
     .{ "feed_reads.zig", @import("feed_reads.zig") },
     .{ "find_tools_words.zig", @import("find_tools_words.zig") },
+    .{ "hex_value.zig", @import("hex_value.zig") },
     .{ "home_path.zig", @import("home_path.zig") },
     .{ "host_reply.zig", @import("host_reply.zig") },
     .{ "host_restart.zig", @import("host_restart.zig") },

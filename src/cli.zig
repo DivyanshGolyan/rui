@@ -32,6 +32,8 @@ const model_adapter = @import("model_adapter.zig");
 const providers = @import("providers.zig");
 const api_key = @import("api_key.zig");
 const launch_frame = @import("launch_frame.zig");
+const host_start = @import("host_start.zig");
+const host_settings = @import("host_settings.zig");
 const start_report = @import("start_report.zig");
 const new_session_selection = @import("new_session_selection.zig");
 const platform = @import("platform.zig");
@@ -1898,17 +1900,6 @@ fn openAiBaseUrlDiagnostic(init: std.process.Init) ?Overview.HostLaunch.Warning 
     return null;
 }
 
-/// The OpenAI key a served `openai` presents; a Host never starts serving
-/// it without one.
-noinline fn readServedKey(init: std.process.Init, key: *api_key.Key) ![]const u8 {
-    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    if (try api_key.read(try openAiKeyPath(init, &path_buffer), key) == null) {
-        stderr.diagnostic("rui: no OpenAI API key; save one with `" ++ comptime protocol.Provider.openai.login().? ++ "`, then start the Host again.\n", .{});
-        return error.ApiKeyMissing;
-    }
-    return key.slice();
-}
-
 const provider_labels = joinedProviders(", ");
 /// The built-in labels as one option argument's alternatives.
 const provider_choices = joinedProviders("|");
@@ -1994,112 +1985,53 @@ test "the Host line names a login only for an unserved provider that has one" {
 
 fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     const io = init.io;
-    // A launched Host reads its Store, key and runtime directory from stdin,
-    // and holds the frame for its life: the provider borrows the key and CA path.
-    const launched: ?*launch_frame.Frame = if (parsed.has("launch-frame")) try readLaunchFrame(init) else null;
-    defer if (launched) |frame| {
-        frame.deinit();
-        std.heap.c_allocator.destroy(frame);
+    try host_start.checkFlags(parsed);
+    const frame: ?*launch_frame.Frame = if (parsed.has("launch-frame")) try readLaunchFrame(init) else null;
+    defer if (frame) |value| {
+        value.deinit();
+        std.heap.c_allocator.destroy(value);
     };
-    var launch_socket: [platform.max_launch_socket_path_bytes]u8 = undefined;
-    const store_path = if (launched) |frame| switch (frame.store) {
-        .sqlite_dir => |*directory| directory.slice(),
-        .mysql_url => frame.runtime_dir.slice(),
-    } else parsed.get("store");
-    const provider_endpoint = parsed.get("provider-endpoint");
-    const provider_ca_file = parsed.get("provider-ca-file");
-    const fixture_endpoint = parsed.get("test-codex-fixture-endpoint");
-    // Test only: a loopback that answers as OpenAI's API and, at
-    // BASE/oauth/token beside BASE/responses, as the plan's token issuer.
+    // Caller-owned final storage: Prepared and the provider table borrow it
+    // until all Host owners drain. Its secrets are wiped on every exit.
+    const settings = try std.heap.c_allocator.create(host_settings.Settings);
+    defer std.heap.c_allocator.destroy(settings);
+    settings.* = .{};
+    defer settings.deinit();
     const chatgpt_fixture = parsed.get("test-chatgpt-fixture-endpoint");
     if (chatgpt_fixture != null and init.environ_map.get("RUI_CHATGPT_CREDENTIAL_FILE") == null)
         return error.FixtureCredentialPathRequired;
-    const bash_path = parsed.get("bash-path") orelse server.default_bash_path;
-    if (bash_path.len == 0) return error.InvalidBashPath;
-    const bash_timeout_ms = try parsed.number(u64, "bash-timeout-ms") orelse server.default_bash_timeout_ms;
-    if (bash_timeout_ms == 0 or bash_timeout_ms > std.math.maxInt(i64)) return error.InvalidBashTimeout;
-    const active_capacity = (if (launched) |frame| frame.active_capacity else try parsed.number(usize, "active-capacity")) orelse product_defaults.active_capacity;
-    const tuning = try server.Tuning.fromOptions(parsed, init.environ_map.get("RUI_TEST_MODELS_DEV_URL"));
-    if (fixture_endpoint != null and init.environ_map.get("RUI_CODEX_CREDENTIAL_FILE") == null)
+    var tuning = try server.Tuning.fromOptions(parsed, init.environ_map.get("RUI_TEST_MODELS_DEV_URL"));
+    tuning.home = init.environ_map.get("HOME");
+    if (parsed.get("test-codex-fixture-endpoint") != null and init.environ_map.get("RUI_CODEX_CREDENTIAL_FILE") == null)
         return error.FixtureCredentialPathRequired;
-    var credential_path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    var chatgpt_path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    // Read once here and borrowed by the Host for its life.
-    var openai_key: api_key.Key = .{ .len = 0 };
-    defer openai_key.wipe();
-    const openai_fixture = parsed.get("test-openai-fixture-endpoint");
-    if (openai_fixture != null and init.environ_map.get(api_key.path_variable) == null)
+    if (parsed.get("test-openai-fixture-endpoint") != null and init.environ_map.get(api_key.path_variable) == null)
         return error.FixtureCredentialPathRequired;
-    var served: providers.Providers = .{ .ca_file = provider_ca_file };
-    for (parsed.all("provider")) |label| {
-        const named = std.meta.stringToEnum(protocol.Provider, label) orelse {
-            // A label is short lowercase text; anything else is not echoed.
-            const printable = label.len <= protocol.max_provider_bytes and for (label) |byte| {
-                if (!std.ascii.isLower(byte) and !std.ascii.isDigit(byte) and byte != '_' and byte != '-') break false;
-            } else true;
-            stderr.diagnostic("rui: --provider {s} is not a built-in provider; they are " ++ provider_labels ++ ".\n", .{if (printable) label else "(unprintable)"});
-            return error.UnsupportedProvider;
-        };
-        if (served.serves(named)) return error.DuplicateArgument;
-        served.table.set(named, switch (named) {
-            .codex => .{ .endpoint = providers.endpoint(.codex), .credential = .{ .chatgpt_device = .{ .path = try credentialPath(init, .codex, &credential_path_buffer, false) } } },
-            .chatgpt => .{ .endpoint = providers.endpoint(.chatgpt), .credential = .{ .chatgpt_plan = .{ .path = try credentialPath(init, .chatgpt, &chatgpt_path_buffer, false) } } },
-            .openai => .{ .endpoint = providers.openAiEndpoint(init.environ_map, init.arena.allocator()) catch |err| {
-                if (err == error.InvalidBaseUrl) stderr.diagnostic(invalid_base_url ++ "; the Host did not start.\n", .{});
-                return err;
-            }, .credential = .{ .key_file = .{ .key = try readServedKey(init, &openai_key) } } },
-        });
-    }
-    if (launched) |frame| {
-        const endpoint = providers.endpointUnder(init.arena.allocator(), frame.base_url.slice()) catch |err| {
-            if (err == error.InvalidBaseUrl) return writeRefusal(io, &.init(.launch_frame_invalid, "provider.baseUrl must be an https URL with a host and no query"));
-            return err;
-        };
-        served.ca_file = if (frame.ca_file.len == 0) null else frame.ca_file.slice();
-        served.table.set(.openai, .{ .endpoint = endpoint, .credential = .{ .key_file = .{ .key = frame.key.slice() } } });
-    }
-    if (openai_fixture) |endpoint| {
-        if (served.serves(.openai)) return error.ConflictingArguments;
-        served.table.set(.openai, .{ .endpoint = endpoint, .credential = .{ .key_file = .{ .key = try readServedKey(init, &openai_key), .fixture = true } } });
-    }
-    if (fixture_endpoint) |endpoint| served.table.set(.codex, .{ .endpoint = endpoint, .credential = .{ .chatgpt_device = .{ .path = try credentialPath(init, .codex, &credential_path_buffer, false), .refresh = .synthetic } } });
-    if (chatgpt_fixture) |endpoint| {
-        if (served.serves(.chatgpt)) return error.ConflictingArguments;
-        const base = providers.responsesBase(endpoint) orelse return error.InvalidArguments;
-        const token = try std.fmt.allocPrint(init.arena.allocator(), "{s}/oauth/token", .{base});
-        served.table.set(.chatgpt, .{ .endpoint = endpoint, .credential = .{ .chatgpt_plan = .{ .path = try credentialPath(init, .chatgpt, &chatgpt_path_buffer, false), .refresh = .{ .fixture_endpoint = token } } } });
-    }
-    if (provider_endpoint) |endpoint| served.table.set(.codex, .{ .endpoint = endpoint, .credential = .none });
-    // The execution thread's fence would report this while startup still
-    // holds stderr, so its cause could be dropped (#1093).
+    var preparation_failure: start_report.Failure = undefined;
+    host_start.fill(init, parsed, frame, settings, &tuning.fixtures, &preparation_failure) catch |err| {
+        if (frame != null and err == error.InvalidBaseUrl) return writeRefusal(io, &preparation_failure);
+        return err;
+    };
+    // Keep the existing environment diagnostic before startup takes stderr.
+    try host_start.resolveProviders(init, settings, tuning.fixtures);
+    const served = providers.fromSettings(settings, tuning.fixtures);
     if (try served.proxyRefusal(std.heap.c_allocator)) |reason| {
         stderr.diagnostic("rui: https_proxy/HTTPS_PROXY {s}; Rui tunnels only through an http:// proxy. The Host did not start.\n", .{reason});
         recordExit(.environment);
         return error.Reported;
     }
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const supplied = if (frame) |value| switch (value.store) {
+        .sqlite_dir => |*directory| directory.slice(),
+        .mysql_url => value.runtime_dir.slice(),
+    } else parsed.get("store");
+    const selected = try selectedStore(init, supplied, &selected_buffer);
+    if (settings.store == .sqlite) host_start.selectStore(init, settings, selected, frame != null, &preparation_failure) catch |err| {
+        if (err == error.LaunchFrameInvalid) return writeRefusal(io, &preparation_failure);
+        return storeFailure(err);
+    };
+    const prepared = try host_start.prepare(init, settings, tuning.fixtures, &preparation_failure);
     var failure: ?start_report.Failure = null;
-    const result = server.serve(
-        io,
-        std.heap.c_allocator,
-        try selectedStore(init, store_path, &selected_buffer),
-        active_capacity,
-        tuning.limits,
-        tuning.hooks,
-        &served,
-        bash_path,
-        bash_timeout_ms,
-        init.environ_map.get("HOME"),
-        if (launched) |frame| .{ .runtime_dir = frame.runtime_dir.slice(), .socket_path = frame.socketPath(&launch_socket), .stdin = 0, .paused = frame.paused, .mcp_servers = frame.mcpServerSlice(), .presets = frame.presets, .mysql_url = switch (frame.store) {
-            .mysql_url => |url| url,
-            .sqlite_dir => null,
-        } } else null,
-        &failure,
-    );
-    return finishServe(io, if (launched) |frame| switch (frame.store) {
-        .sqlite_dir => .sqlite,
-        .mysql_url => .mysql,
-    } else null, &failure, result);
+    return finishServe(io, if (frame != null) (if (settings.store == .mysql) .mysql else .sqlite) else null, &failure, server.serve(io, std.heap.c_allocator, prepared, tuning, &failure));
 }
 
 /// Settle the whole Host outcome before treating stdin closure as a clean end.
