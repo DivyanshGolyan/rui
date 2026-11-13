@@ -6,6 +6,7 @@ from pathlib import Path
 import unittest
 from unittest.mock import patch
 
+import conflict_alert
 import pr_timeline as timeline
 
 
@@ -54,16 +55,16 @@ class TimelineTest(unittest.TestCase):
         self.assertIsNone(row["minutes"]["merged_to_released"])
         self.assertEqual(row["stages"]["codex_reviewed"], "2026-11-13T10:43:48Z")
 
-    def test_clean_requires_trusted_completed_summary_on_merged_head(self):
-        for change in ("wrong_head", "running", "findings", "string_false", "untrusted", "malformed"):
+    def test_clean_requires_trusted_completed_summary(self):
+        for change in ("running", "findings", "string_false", "untrusted", "malformed"):
             with self.subTest(change=change):
                 data = self.snapshot(1418)
+                # Without the receipt, the summary alone decides.
+                data["comments"] = [c for c in data["comments"] if "codex-review-receipt:v1" not in c["body"]]
                 summary = next(c for c in data["comments"] if "codex-review-state:v1" in c["body"])
                 state = json.loads(timeline.SUMMARY.search(summary["body"])[1])
                 review = state["code_review"]
-                if change == "wrong_head":
-                    review["commit_sha"] = "other"
-                elif change == "running":
+                if change == "running":
                     review["status"] = "in_progress"
                 elif change == "findings":
                     review["has_unresolved_findings"] = True
@@ -78,6 +79,58 @@ class TimelineTest(unittest.TestCase):
                         timeline.stages(**data)
                 else:
                     self.assertIsNone(timeline.stages(**data)["stages"]["codex_clean"])
+
+    def test_clean_on_earlier_head_survives_unreviewed_commits_landing_allows(self):
+        # #1316: clean on 22355cf, then a test-only commit merged unreviewed.
+        # #1322: clean on 230e06b, then "Merge main" merged unreviewed.
+        for number, clean_head, clean in ((1316, "22355cf8fe", "2026-11-12T05:05:50.297698Z"),
+                                          (1322, "230e06b86e", "2026-11-12T07:10:33.486335Z")):
+            with self.subTest(number=number):
+                data = self.snapshot(number)
+                self.assertFalse(data["pr"]["head"]["sha"].startswith(clean_head))
+                row = timeline.stages(**data)
+                self.assertEqual(row["stages"]["codex_clean"], clean)
+                self.assertIsNotNone(row["minutes"]["codex_reviewed_to_codex_clean"])
+                self.assertIsNotNone(row["minutes"]["codex_clean_to_ready"])
+
+    def test_later_findings_revoke_clean_and_post_merge_reviews_do_not_count(self):
+        data = self.snapshot(1316)
+        codex = {"login": timeline.CODEX}
+        findings = {"user": codex, "submitted_at": "2026-11-12T05:10:00Z",
+                    "commit_id": data["pr"]["head"]["sha"], "state": "COMMENTED"}
+        data["reviews"].append(findings)
+        self.assertIsNone(timeline.stages(**data)["stages"]["codex_clean"])
+        receipt = {"user": codex, "author_association": "NONE", "created_at": "2026-11-12T05:20:00Z",
+                   "updated_at": "2026-11-12T05:20:00Z",
+                   "body": "<!-- codex-review-receipt:v1 -->\n**Reviewed commit:** `c98448974d`"}
+        data["comments"].append(receipt)
+        self.assertEqual(timeline.stages(**data)["stages"]["codex_clean"], "2026-11-12T05:20:00Z")
+        data["comments"].append({**receipt, "created_at": "2026-11-12T06:00:00Z"})  # After merge.
+        self.assertEqual(timeline.stages(**data)["stages"]["codex_clean"], "2026-11-12T05:20:00Z")
+        data["comments"].remove(receipt)
+        self.assertIsNone(timeline.stages(**data)["stages"]["codex_clean"])
+
+    def test_interim_review_marker_from_a_maintainer_counts_as_a_review_outcome(self):
+        data = self.snapshot(1418)
+        data["comments"] = [c for c in data["comments"] if c["user"]["login"] != timeline.CODEX]
+        data["reviews"] = []
+        marker = {"user": {"login": "DivyanshGolyan"}, "author_association": "OWNER",
+                  "created_at": "2026-11-13T10:50:00Z", "updated_at": "2026-11-13T10:51:00Z",
+                  "body": "## Opus review\n<!-- opus-review-state:v1 "
+                          '{"commit_sha":"7ba38bdf89613a8cf19174af1cc3dc840f92bfa9","has_unresolved_findings":false} -->'}
+        data["comments"].append(marker)
+        row = timeline.stages(**data)
+        self.assertEqual(row["stages"]["codex_clean"], "2026-11-13T10:51:00Z")
+        self.assertEqual(row["codex_rounds"], 0)  # Not a Codex round.
+        for change in ({"author_association": "NONE"},
+                       {"body": marker["body"].replace(":false", ":true")}):
+            with self.subTest(change=change):
+                data["comments"][-1] = {**marker, **change}
+                self.assertIsNone(timeline.stages(**data)["stages"]["codex_clean"])
+        # Interim findings after a clean Codex review revoke it.
+        data = self.snapshot(1418)
+        data["comments"].append({**marker, "body": marker["body"].replace(":false", ":true")})
+        self.assertIsNone(timeline.stages(**data)["stages"]["codex_clean"])
 
     def test_html_escaped_summary_and_updated_at_fallback(self):
         data = self.snapshot(1418)
@@ -133,8 +186,11 @@ class TimelineTest(unittest.TestCase):
                                        if page == 1 else data["checks"])}
             self.fail(path)
 
-        result = timeline.collect(api, "2026-11-12", [], lambda repo, ref: data["activity"])
+        with patch.object(timeline, "pages", wraps=conflict_alert.pages) as pager:
+            result = timeline.collect(api, "2026-11-12", [], lambda repo, ref: data["activity"])
         self.assertEqual(result, [timeline.stages(**data)])
+        # Envelope paging goes through the one shared pager, not a local copy.
+        self.assertIn("check_runs", [call.args[2:] and call.args[2] for call in pager.call_args_list])
         self.assertEqual(sum("page=2" in path for path in calls), 5)
         self.assertTrue(all("per_page=100" in path for path in calls))
 
@@ -220,9 +276,9 @@ class TimelineTest(unittest.TestCase):
                 return {"workflow_runs": [{"id": 7, "status": "completed", "conclusion": "failure"},
                                           {"id": 8, "status": "in_progress"}]}
             return {"jobs": [{"completed_at": "2026-11-12T23:00:00Z"}, {"completed_at": "2026-11-12T23:10:00Z"}]}
-        self.assertEqual(timeline.main_builds(api, "Main build"),
+        self.assertEqual(timeline.main_builds(api, "Main build", "2026-11-12"),
                          [{"completed_at": "2026-11-12T23:10:00Z", "conclusion": "failure"}])
-        self.assertIsNone(timeline.main_builds(api, "not a workflow"))
+        self.assertIsNone(timeline.main_builds(api, "not a workflow", "2026-11-12"))
 
     def test_missing_main_workflow_is_unknown_without_error(self):
         calls = []
@@ -231,7 +287,7 @@ class TimelineTest(unittest.TestCase):
             self.assertEqual(method, "GET")
             self.assertIn("/workflows?", path)
             return {"workflows": [{"id": 1, "name": "Selected checks"}]}
-        runs = timeline.main_builds(api, "Main build")
+        runs = timeline.main_builds(api, "Main build", "2026-11-12")
         self.assertIsNone(runs)
         self.assertEqual(len(calls), 1)
         days = timeline.daily([], "2026-11-12", "2026-11-13T12:00:00Z", runs)
@@ -257,10 +313,37 @@ class TimelineTest(unittest.TestCase):
             self.assertNotIn(n, (3, 6), "Cancelled runs must not even require job timestamps")
             jobs_read.append(n)
             return {"jobs": [{"completed_at": completions[n]}]}
-        runs = timeline.main_builds(api, "Main build")
+        runs = timeline.main_builds(api, "Main build", "2026-11-12")
         self.assertEqual(jobs_read, [5, 4, 2, 1])
         days = timeline.daily([], "2026-11-12", "2026-11-13T12:00:00Z", runs)
         self.assertEqual([day["red_main_minutes"] for day in days], [20, 0])
+
+    def test_main_runs_stop_at_incoming_health_before_since(self):
+        # Newest first: one kept run after since, cancelled noise, then the
+        # incoming health. Neither the older run's jobs nor page 2 is needed.
+        completions = {10: "2026-11-12T03:00:00Z", 9: "2026-11-11T20:00:00Z", 8: "2026-11-11T10:00:00Z"}
+        runs = ([{"id": 10, "status": "completed", "conclusion": "success"}]
+                + [{"id": 100 + n, "status": "completed", "conclusion": "cancelled"} for n in range(97)]
+                + [{"id": 9, "status": "completed", "conclusion": "failure"},
+                   {"id": 8, "status": "completed", "conclusion": "success"}])
+        jobs_read = []
+
+        def api(method, path):
+            if "/workflows?" in path:
+                return {"workflows": [{"id": 42, "name": "Main build"}]}
+            if "/runs?" in path:
+                self.assertTrue(path.endswith("page=1"), f"paged past the cutoff: {path}")
+                return {"workflow_runs": runs}
+            n = int(path.split("/runs/")[1].split("/")[0])
+            jobs_read.append(n)
+            return {"jobs": [{"completed_at": completions[n]}]}
+
+        result = timeline.main_builds(api, "Main build", "2026-11-12")
+        self.assertEqual(result, [{"completed_at": completions[10], "conclusion": "success"},
+                                  {"completed_at": completions[9], "conclusion": "failure"}])
+        self.assertEqual(jobs_read, [10, 9])
+        days = timeline.daily([], "2026-11-12", "2026-11-12T12:00:00Z", result)
+        self.assertEqual([day["red_main_minutes"] for day in days], [180])
 
     def test_cli_json_and_table_render_absent_stages(self):
         row = timeline.stages(**self.snapshot(1418))
@@ -273,7 +356,7 @@ class TimelineTest(unittest.TestCase):
                     patch("sys.argv", argv), \
                     contextlib.redirect_stdout(io.StringIO()) as output:
                 self.assertEqual(timeline.main(), 0)
-                builds.assert_called_once_with(timeline.github, name)
+                builds.assert_called_once_with(timeline.github, name, "2026-11-12")
                 if fmt == "json":
                     report = json.loads(output.getvalue())
                     self.assertEqual(report["prs"], [row])

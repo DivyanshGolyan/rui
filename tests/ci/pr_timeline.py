@@ -7,8 +7,13 @@ Release source: published releases API, ordered by published_at, with REST
 compare proving that the release tag contains the merge commit (not merely a
 later date). No checkout, fetch, tag, or GitHub mutation is performed.
 Codex rounds count formal reviews and no-findings receipts; the mutable summary
-is only a fallback for a head without either. Clean uses the summary's Code
-Review completion time, or updated_at if its older format has no such time.
+is only a fallback for a head without either. Codex-clean is the time of the
+last review outcome before merge when that outcome is clean, on any head:
+landing.md lets test-only fixes, merges of main and stacked heads merge without
+another review, and only a later review with findings revokes it. Outcomes are
+formal Codex reviews (findings), Codex receipt comments (no findings), the
+summary at its Code Review completion time (updated_at in its older format),
+and a maintainer's interim opus-review-state:v1 marker at its updated_at.
 Pushes include branch creation and subsequent pushes through merge, starting
 at the last creation before opening; missing creation/fork history is unknown.
 Adjacent durations are signed minutes: stages can occur out of the listed order,
@@ -20,7 +25,8 @@ completed success/failure runs signal health; superseded cancelled runs do not.
 Red intervals run from the first failed completion to the next success, split
 at UTC midnight; completion comes from job completed_at, not the head commit's
 time or run updated_at. A day without known incoming health is unknown.
-Today's intervals end at report time.
+Today's intervals end at report time. Runs are read newest-first only back to
+the last completed success/failure before --since.
 """
 import argparse
 from datetime import date, datetime, time, timedelta, timezone
@@ -41,6 +47,10 @@ MAIN_RESULTS = ("success", "failure")
 STAGES = ("opened", "codex_requested", "codex_reviewed", "codex_clean", "ready",
           "admission_green", "merged", "released")
 SUMMARY = re.compile(r"<!--\s*codex-review-state:v1\s+(.*?)\s*-->", re.S)
+# Interim stand-in for Codex, posted by a maintainer: same commit_sha and
+# has_unresolved_findings fields as Codex's code_review state.
+INTERIM = re.compile(r"<!--\s*opus-review-state:v1\s+(.*?)\s*-->", re.S)
+MAINTAINERS = ("OWNER", "MEMBER", "COLLABORATOR")
 
 
 def instant(value):
@@ -84,13 +94,19 @@ def stages(pr, timeline, comments, reviews, checks, activity, release=None):
     """Pure projection of recorded API JSON; the PR head is the head merged."""
     head = pr["head"]["sha"]
     codex = [row for row in comments if row["user"]["login"] == CODEX]
-    completed = [(row["submitted_at"], row["commit_id"]) for row in reviews
-                 if row["user"]["login"] == CODEX and row.get("submitted_at") and row["state"] != "PENDING"]
+    # Codex posts findings as a formal review and a clean result as a receipt
+    # comment. verdicts holds (time, clean) for every review outcome.
+    completed, verdicts = [], []
+    for row in reviews:
+        if row["user"]["login"] == CODEX and row.get("submitted_at") and row["state"] != "PENDING":
+            completed.append((row["submitted_at"], row["commit_id"]))
+            verdicts.append((row["submitted_at"], False))
     for row in codex:
         if "<!-- codex-review-receipt:v1 -->" in (row.get("body") or ""):
             match = re.search(r"\*\*Reviewed commit:\*\*\s*`([0-9a-f]+)`", row["body"])
             completed.append((row["created_at"], match[1] if match else None))
-    clean, summaries = [], []
+            verdicts.append((row["created_at"], True))
+    summaries = []
     for row in codex:
         match = SUMMARY.search(row.get("body") or "")
         if not match:
@@ -99,10 +115,14 @@ def stages(pr, timeline, comments, reviews, checks, activity, release=None):
         if state["status"] != "completed":
             continue
         when = utc(code_review_time(row))
-        sha = state["commit_sha"]
-        summaries.append((when, sha))
-        if sha == head and state["has_unresolved_findings"] is False:
-            clean.append(when)
+        summaries.append((when, state["commit_sha"]))
+        verdicts.append((when, state["has_unresolved_findings"] is False))
+    for row in comments:
+        match = INTERIM.search(row.get("body") or "")
+        if match and row.get("author_association") in MAINTAINERS:
+            state = json.loads(html.unescape(match[1]))
+            verdicts.append((row["updated_at"], state["has_unresolved_findings"] is False))
+    clean = codex_clean(verdicts, pr["merged_at"])
     # A summary is mutable, so it is not another round when a durable review
     # or receipt already records its head. Never infer lost historical rounds.
     for when, sha in summaries:
@@ -113,7 +133,7 @@ def stages(pr, timeline, comments, reviews, checks, activity, release=None):
         ready = [pr["created_at"]]
     values = [pr["created_at"], first(row["created_at"] for row in comments
               if row["user"]["login"] != CODEX and re.search(r"@codex\s+review\b", row.get("body") or "", re.I)),
-              first(when for when, _ in completed), first(clean), first(ready),
+              first(when for when, _ in completed), clean, first(ready),
               first(row["completed_at"] for row in checks if row["name"] == "admission"
                     and row["head_sha"] == head and row["conclusion"] == "success"
                     and row.get("completed_at")),
@@ -123,6 +143,18 @@ def stages(pr, timeline, comments, reviews, checks, activity, release=None):
             "minutes": {f"{a}_to_{b}": minutes(result[a], result[b]) for a, b in zip(STAGES, STAGES[1:])},
             "codex_rounds": len(completed), "pushes": push_count(pr, activity),
             "release_tag": release["tag_name"] if release else None}
+
+
+def codex_clean(verdicts, merged_at):
+    """Time of the last review before merge, if that review was clean.
+
+    landing.md lets test-only fixes, merges of main and unchanged stacked heads
+    merge without another review, so the clean head need not be the merged
+    head. Only a later review with findings revokes it.
+    """
+    before = sorted(((when, clean) for when, clean in verdicts if instant(when) <= instant(merged_at)),
+                    key=lambda verdict: instant(verdict[0]))
+    return utc(before[-1][0]) if before and before[-1][1] else None
 
 
 def daily(rows, since, until, main_runs=None):
@@ -160,17 +192,6 @@ def daily(rows, since, until, main_runs=None):
         result.append({"day": day.isoformat(), "merged": len(cohort), **medians, "red_main_minutes": red})
         day += timedelta(days=1)
     return result
-
-
-def object_pages(api, path, key):
-    """REST list envelopes (checks/runs/jobs); pages() owns plain-list paging."""
-    page = 1
-    while True:
-        batch = api("GET", f"{path}&per_page=100&page={page}")[key]
-        yield from batch
-        if len(batch) < 100:
-            return
-        page += 1
 
 
 def activity_page(path):
@@ -223,24 +244,33 @@ def containing_release(api, pr, releases):
     return None
 
 
-def main_builds(api, name):
-    workflows = object_pages(api, f"repos/{REPO}/actions/workflows?", "workflows")
+def main_builds(api, name, since):
+    """Main build health from the last completion before since onward.
+
+    The runs API lists newest-first, and paging stops at the first completed
+    success/failure run that finished before since: the incoming health.
+    Jobs are read only for the runs kept.
+    """
+    start = datetime.combine(date.fromisoformat(since), time(), timezone.utc)
+    workflows = pages(api, f"repos/{REPO}/actions/workflows?", "workflows")
     matches = [workflow for workflow in workflows if workflow["name"] == name]
     if not matches:
         return None
     if len(matches) != 1:
         raise ValueError(f"Expected one workflow named {name!r}; found {len(matches)}")
     result = []
-    for run in object_pages(api, f"repos/{REPO}/actions/workflows/{matches[0]['id']}/runs?branch=main&event=push", "workflow_runs"):
+    for run in pages(api, f"repos/{REPO}/actions/workflows/{matches[0]['id']}/runs?branch=main&event=push", "workflow_runs"):
         # Superseded/cancelled runs are no signal, even if their jobs have no
         # completion timestamp. Keep the last completed success/failure.
         if run["status"] != "completed" or run["conclusion"] not in MAIN_RESULTS:
             continue
-        jobs = list(object_pages(api, f"repos/{REPO}/actions/runs/{run['id']}/jobs?filter=latest", "jobs"))
+        jobs = list(pages(api, f"repos/{REPO}/actions/runs/{run['id']}/jobs?filter=latest", "jobs"))
         when = max((job["completed_at"] for job in jobs if job.get("completed_at")), key=instant, default=None)
         if not when:
             raise ValueError(f"Main build {run['id']} has no job completion time")
         result.append({"completed_at": when, "conclusion": run["conclusion"]})
+        if instant(when) < start:
+            break
     return result
 
 
@@ -253,7 +283,7 @@ def collect(api, since, numbers, read_activity=activities):
         timeline = list(pages(api, f"{prefix}/issues/{n}/timeline?"))
         comments = list(pages(api, f"{prefix}/issues/{n}/comments?"))
         reviews = list(pages(api, f"{prefix}/pulls/{n}/reviews?"))
-        checks = list(object_pages(api, f"{prefix}/commits/{head['sha']}/check-runs?filter=all&check_name=admission", "check_runs"))
+        checks = list(pages(api, f"{prefix}/commits/{head['sha']}/check-runs?filter=all&check_name=admission", "check_runs"))
         activity = list(read_activity(head["repo"]["full_name"], head["ref"])) if head.get("repo") else []
         result.append(stages(pr, timeline, comments, reviews, checks, activity, containing_release(api, pr, releases)))
     return sorted(result, key=lambda row: (row["stages"]["merged"], row["number"]))
@@ -288,7 +318,7 @@ def main():
     since = args.since.isoformat()
     try:
         rows = collect(github, since, args.pr)
-        runs = main_builds(github, args.main_workflow)
+        runs = main_builds(github, args.main_workflow, since)
         until = datetime.now(timezone.utc).isoformat()
         report = {"since": since, "as_of": utc(until), "release_source": "releases API published_at + REST compare ancestry",
                   "main_workflow": args.main_workflow, "main_workflow_available": runs is not None,

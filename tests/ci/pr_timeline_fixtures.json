@@ -1,5 +1,5 @@
 {
-  "_source": "GitHub REST snapshots of PRs #1407 (two durable Codex rounds) and #1418 (unreleased), captured 2026-11-13. Bodies and rows hand-trimmed to consumed facts; edge variants are made explicitly by the tests.",
+  "_source": "GitHub REST snapshots of PRs #1407 (two durable Codex rounds), #1418 (unreleased), #1316 (clean, then a test-only commit merged) and #1322 (clean, then a merge of main merged), captured 2026-11-13. Bodies and rows hand-trimmed to consumed facts; activity omitted for #1316/#1322; edge variants are made explicitly by the tests.",
   "1407": {
     "pr": {
       "number": 1407,
@@ -206,5 +206,207 @@
         "after": "7ca4e43c2a3f411dae375b71e07c51a3b6536235"
       }
     ]
+  },
+  "1316": {
+    "pr": {
+      "number": 1316,
+      "created_at": "2026-11-12T04:49:03Z",
+      "updated_at": "2026-11-12T05:33:30Z",
+      "merged_at": "2026-11-12T05:33:30Z",
+      "merge_commit_sha": "9dd7f0fa7e4df73d31fa2d50fc67e24688ca5149",
+      "draft": false,
+      "head": {
+        "ref": "claude/project-thread-l59gxz-pr2",
+        "sha": "c98448974d02c8145a943b7f60f0c88e2d267111",
+        "repo": {
+          "full_name": "DivyanshGolyan/rui"
+        }
+      }
+    },
+    "timeline": [
+      {
+        "event": "ready_for_review",
+        "created_at": "2026-11-12T05:03:55Z"
+      },
+      {
+        "event": "merged",
+        "created_at": "2026-11-12T05:33:30Z"
+      }
+    ],
+    "comments": [
+      {
+        "user": {
+          "login": "DivyanshGolyan"
+        },
+        "author_association": "OWNER",
+        "created_at": "2026-11-12T04:49:13Z",
+        "updated_at": "2026-11-12T04:49:13Z",
+        "body": "@codex review"
+      },
+      {
+        "user": {
+          "login": "chatgpt-codex-connector[bot]"
+        },
+        "author_association": "NONE",
+        "created_at": "2026-11-12T04:49:32Z",
+        "updated_at": "2026-11-12T05:05:51Z",
+        "body": "<!-- codex-review-state:v1 {\"code_review\":{\"commit_sha\":\"22355cf8fe7f08af0e8ebf68196ccbba2c44ef79\",\"has_any_findings\":false,\"has_unresolved_findings\":false,\"status\":\"completed\"},\"security_review\":{\"commit_sha\":null,\"has_any_findings\":null,\"has_unresolved_findings\":null,\"status\":null}} -->\n| \ud83d\udcdd **Code Review** | \u2705 **Completed** <relative-time datetime=\"2026-11-12T05:05:50.297698Z\">2026-11-12T05:05:50.297698Z</relative-time> | `22355cf` | Draft marked ready |"
+      },
+      {
+        "user": {
+          "login": "DivyanshGolyan"
+        },
+        "author_association": "OWNER",
+        "created_at": "2026-11-12T04:53:12Z",
+        "updated_at": "2026-11-12T04:53:12Z",
+        "body": "@codex review"
+      },
+      {
+        "user": {
+          "login": "chatgpt-codex-connector[bot]"
+        },
+        "author_association": "NONE",
+        "created_at": "2026-11-12T04:54:46Z",
+        "updated_at": "2026-11-12T04:54:46Z",
+        "body": "<!-- codex-review-receipt:v1 -->\n**Reviewed commit:** `08b46d2464`"
+      },
+      {
+        "user": {
+          "login": "DivyanshGolyan"
+        },
+        "author_association": "OWNER",
+        "created_at": "2026-11-12T04:56:42Z",
+        "updated_at": "2026-11-12T04:56:42Z",
+        "body": "@codex review"
+      },
+      {
+        "user": {
+          "login": "DivyanshGolyan"
+        },
+        "author_association": "OWNER",
+        "created_at": "2026-11-12T04:59:29Z",
+        "updated_at": "2026-11-12T04:59:29Z",
+        "body": "@codex review"
+      },
+      {
+        "user": {
+          "login": "DivyanshGolyan"
+        },
+        "author_association": "OWNER",
+        "created_at": "2026-11-12T05:02:36Z",
+        "updated_at": "2026-11-12T05:02:36Z",
+        "body": "@codex review"
+      },
+      {
+        "user": {
+          "login": "chatgpt-codex-connector[bot]"
+        },
+        "author_association": "NONE",
+        "created_at": "2026-11-12T05:03:46Z",
+        "updated_at": "2026-11-12T05:03:46Z",
+        "body": "<!-- codex-review-receipt:v1 -->\n**Reviewed commit:** `22355cf8fe`"
+      }
+    ],
+    "reviews": [
+      {
+        "user": {
+          "login": "chatgpt-codex-connector[bot]"
+        },
+        "submitted_at": "2026-11-12T04:51:27Z",
+        "commit_id": "73b4918e88d831b0dc9d2d0a824159359c48e7f1",
+        "state": "COMMENTED"
+      },
+      {
+        "user": {
+          "login": "chatgpt-codex-connector[bot]"
+        },
+        "submitted_at": "2026-11-12T04:58:56Z",
+        "commit_id": "d89bcafe46d39fc7e93504e0b1dd104fee9081c0",
+        "state": "COMMENTED"
+      },
+      {
+        "user": {
+          "login": "chatgpt-codex-connector[bot]"
+        },
+        "submitted_at": "2026-11-12T05:01:42Z",
+        "commit_id": "f6997e21884bd8142dcfb6b7789f0d3f01728800",
+        "state": "COMMENTED"
+      }
+    ],
+    "checks": [
+      {
+        "name": "admission",
+        "head_sha": "c98448974d02c8145a943b7f60f0c88e2d267111",
+        "conclusion": "success",
+        "completed_at": "2026-11-12T05:33:06Z"
+      }
+    ],
+    "activity": []
+  },
+  "1322": {
+    "pr": {
+      "number": 1322,
+      "created_at": "2026-11-12T07:00:44Z",
+      "updated_at": "2026-11-12T07:33:46Z",
+      "merged_at": "2026-11-12T07:33:45Z",
+      "merge_commit_sha": "6dac05bda78d7e0f8f424f11b83944b1095a6c2b",
+      "draft": false,
+      "head": {
+        "ref": "claude/project-thread-rg7cov-keys",
+        "sha": "eead35035bb97851ada96b1aa5a5c6530f02d15e",
+        "repo": {
+          "full_name": "DivyanshGolyan/rui"
+        }
+      }
+    },
+    "timeline": [
+      {
+        "event": "ready_for_review",
+        "created_at": "2026-11-12T07:06:48Z"
+      },
+      {
+        "event": "merged",
+        "created_at": "2026-11-12T07:33:45Z"
+      }
+    ],
+    "comments": [
+      {
+        "user": {
+          "login": "DivyanshGolyan"
+        },
+        "author_association": "OWNER",
+        "created_at": "2026-11-12T07:00:47Z",
+        "updated_at": "2026-11-12T07:00:47Z",
+        "body": "@codex review"
+      },
+      {
+        "user": {
+          "login": "chatgpt-codex-connector[bot]"
+        },
+        "author_association": "NONE",
+        "created_at": "2026-11-12T07:01:04Z",
+        "updated_at": "2026-11-12T07:10:34Z",
+        "body": "<!-- codex-review-state:v1 {\"code_review\":{\"commit_sha\":\"230e06b86e36b90fbec720e9ee37f9e2a7e5abdd\",\"has_any_findings\":false,\"has_unresolved_findings\":false,\"status\":\"completed\"},\"security_review\":{\"commit_sha\":null,\"has_any_findings\":null,\"has_unresolved_findings\":null,\"status\":null}} -->\n| \ud83d\udcdd **Code Review** | \u2705 **Completed** <relative-time datetime=\"2026-11-12T07:10:33.486335Z\">2026-11-12T07:10:33.486335Z</relative-time> | `230e06b` | Draft marked ready |"
+      },
+      {
+        "user": {
+          "login": "chatgpt-codex-connector[bot]"
+        },
+        "author_association": "NONE",
+        "created_at": "2026-11-12T07:06:39Z",
+        "updated_at": "2026-11-12T07:06:39Z",
+        "body": "<!-- codex-review-receipt:v1 -->\n**Reviewed commit:** `230e06b86e`"
+      }
+    ],
+    "reviews": [],
+    "checks": [
+      {
+        "name": "admission",
+        "head_sha": "eead35035bb97851ada96b1aa5a5c6530f02d15e",
+        "conclusion": "success",
+        "completed_at": "2026-11-12T07:32:59Z"
+      }
+    ],
+    "activity": []
   }
 }
