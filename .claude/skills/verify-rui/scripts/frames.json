@@ -2028,6 +2028,9 @@
       "expect": [
         "First line of a multi-line draft",
         "third"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
