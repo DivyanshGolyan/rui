@@ -1,10 +1,21 @@
-//! Shared live-memory text, widest first; drop tools before rui.
+//! Live-memory text and the one rule for which form fits: the full figure,
+//! then rui alone (tools drops first), then nothing.
 const std = @import("std");
 const Memory = @import("process_memory.zig").Memory;
 const mib = 1024 * 1024;
 
-/// Returned strings belong to arena. Null memory draws nothing before the first read.
-pub fn choices(arena: std.mem.Allocator, memory: ?Memory, unicode: bool) error{OutOfMemory}![3][]const u8 {
+/// The widest form of the memory figure that fits `columns`, or "" when none
+/// does. Null memory draws nothing before the first read. The result belongs to arena.
+pub fn fit(arena: std.mem.Allocator, memory: ?Memory, unicode: bool, columns: u16) error{OutOfMemory}![]const u8 {
+    for (try choices(arena, memory, unicode)) |text| {
+        // Every character the figure uses is one column wide.
+        if (std.unicode.utf8CountCodepoints(text) catch unreachable <= columns) return text;
+    }
+    return "";
+}
+
+/// Widest first; the last is always empty.
+fn choices(arena: std.mem.Allocator, memory: ?Memory, unicode: bool) error{OutOfMemory}![3][]const u8 {
     const live = memory orelse return .{ "", "", "" };
     var buffer: [16]u8 = undefined;
     const rui = try std.fmt.allocPrint(arena, "rui {s}", .{sizeText(&buffer, live.rui)});
@@ -48,4 +59,24 @@ test "live memory text covers absent tools rounding and the GiB boundary" {
     const ascii = try choices(arena.allocator(), .{ .rui = 38 * mib, .tools = 120 * mib }, false);
     try std.testing.expectEqualStrings("rui 38 MB . tools 120 MB", ascii[0]);
     try std.testing.expectEqualStrings("rui 38 MB", ascii[1]);
+}
+
+test "memory fits its widest form: full, then rui alone, then nothing, at every width" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const Case = struct { memory: ?Memory, unicode: bool, full: []const u8, rui: []const u8 };
+    const cases = [_]Case{
+        .{ .memory = null, .unicode = true, .full = "", .rui = "" },
+        .{ .memory = .{ .rui = 38 * mib, .tools = null }, .unicode = true, .full = "rui 38 MB", .rui = "rui 38 MB" },
+        .{ .memory = .{ .rui = 38 * mib, .tools = 120 * mib }, .unicode = true, .full = "rui 38 MB · tools 120 MB", .rui = "rui 38 MB" },
+        .{ .memory = .{ .rui = 38 * mib, .tools = 120 * mib }, .unicode = false, .full = "rui 38 MB . tools 120 MB", .rui = "rui 38 MB" },
+    };
+    for (cases) |case| for (0..40) |width| {
+        const columns: u16 = @intCast(width);
+        // "rui 38 MB · tools 120 MB" is 24 columns in either spelling; rui alone is 9.
+        const expected = if (case.full.len > 0 and columns >= 24) case.full else if (case.rui.len > 0 and columns >= 9) case.rui else "";
+        try std.testing.expectEqualStrings(expected, try fit(arena.allocator(), case.memory, case.unicode, columns));
+    };
+    try std.testing.expectEqualStrings("rui 38 MB", try fit(arena.allocator(), .{ .rui = 38 * mib, .tools = null }, true, 9));
+    try std.testing.expectEqualStrings("", try fit(arena.allocator(), .{ .rui = 38 * mib, .tools = null }, true, 8));
 }

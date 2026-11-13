@@ -129,14 +129,9 @@ pub const Settings = struct {
         const style = widget_style.of(self.caps, .{ .colour = .quiet, .background = ground });
         const version = @import("transport_options").version ++ " ";
         const label_text = "  Settings";
-        var right: []const u8 = version;
-        for (try @import("memory_text.zig").choices(ctx.arena, self.memory, self.caps.unicode)) |memory| {
-            if (memory.len == 0) break;
-            // Settings and the version keep their space; memory drops first.
-            if (label_text.len + 2 + ctx.stringWidth(memory) + 2 + version.len > size.width) continue;
-            right = try std.fmt.allocPrint(ctx.arena, "{s}  {s}", .{ memory, version });
-            break;
-        }
+        // Settings and the version keep their space, each two columns from memory.
+        const memory = try @import("memory_text.zig").fit(ctx.arena, self.memory, self.caps.unicode, size.width -| @as(u16, label_text.len + 2 + 2 + version.len));
+        const right = if (memory.len == 0) version else try std.fmt.allocPrint(ctx.arena, "{s}  {s}", .{ memory, version });
         const footer: @import("widgets/Footer.zig") = .{ .left = "", .right = right, .style = style };
         const drawn = try footer.widget().draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = 1 }));
         @memcpy(surface.buffer[size.width..], drawn.buffer);
@@ -210,34 +205,28 @@ test "overview Settings hover follows only its drawn row without selecting or fo
     try std.testing.expectEqual(widget_style.of(settings.caps, .{ .background = .selection }).bg, both.readCell(3, 1).style.bg);
 }
 
-test "overview Settings memory width domain preserves label and drops tools before rui" {
+test "overview Settings memory gets the columns between the label and the version" {
     var clicks: Clicks = .{};
-    var settings: Settings = .{ .selected = false, .caps = .{}, .userdata = &clicks, .on_click = Clicks.take };
+    var settings: Settings = .{ .selected = false, .caps = .{}, .userdata = &clicks, .on_click = Clicks.take, .memory = .{ .rui = 38 * overview_view.mib, .tools = 120 * overview_view.mib } };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const version = @import("transport_options").version ++ " ";
-    const full = "rui 38 MB · tools 120 MB";
-    const rui = "rui 38 MB";
-    for ([_]?overview_view.Memory{ null, .{ .rui = 38 * overview_view.mib, .tools = null }, .{ .rui = 38 * overview_view.mib, .tools = 120 * overview_view.mib } }) |memory| {
-        settings.memory = memory;
-        for (0..101) |width| {
-            const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = @intCast(width), .height = 2 }, .cell_size = .{} };
-            const surface = try settings.widget().draw(ctx);
-            const text = try cells(arena.allocator(), surface, 1);
-            const expected = if (memory) |live| (if (live.tools != null and width >= 14 + ctx.stringWidth(full) + version.len)
-                full
-            else if (width >= 14 + rui.len + version.len) rui else "") else "";
-            if (width >= "  Settings".len + version.len + 1) try std.testing.expect(std.mem.startsWith(u8, text, "  Settings"));
-            if (width >= version.len) try std.testing.expect(std.mem.endsWith(u8, text, version));
-            if (expected.len > 0) {
-                try std.testing.expect(std.mem.indexOf(u8, text, expected) != null);
-                try std.testing.expectEqualStrings(expected, text[text.len - version.len - 2 - expected.len ..][0..expected.len]);
-            } else {
-                try std.testing.expect(std.mem.indexOf(u8, text, "rui ") == null);
-                try std.testing.expect(std.mem.indexOf(u8, text, "tools ") == null);
-            }
-            if (std.mem.eql(u8, expected, rui)) try std.testing.expect(std.mem.indexOf(u8, text, "tools ") == null);
-            _ = arena.reset(.retain_capacity);
-        }
+    // memory_text owns which form fits; this row owns only the columns it gives memory.
+    const full_width = "  Settings".len + 2 + 24 + 2 + version.len;
+    const rui_width = "  Settings".len + 2 + 9 + 2 + version.len;
+    for ([_]struct { width: usize, expected: []const u8 }{
+        .{ .width = full_width, .expected = "rui 38 MB · tools 120 MB" },
+        .{ .width = full_width - 1, .expected = "rui 38 MB" },
+        .{ .width = rui_width, .expected = "rui 38 MB" },
+        .{ .width = rui_width - 1, .expected = "" },
+    }) |case| {
+        const surface = try settings.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = @intCast(case.width), .height = 2 }, .cell_size = .{} });
+        const text = try cells(arena.allocator(), surface, 1);
+        try std.testing.expect(std.mem.startsWith(u8, text, "  Settings"));
+        try std.testing.expect(std.mem.endsWith(u8, text, version));
+        if (case.expected.len > 0) {
+            try std.testing.expect(std.mem.endsWith(u8, text, try std.fmt.allocPrint(arena.allocator(), "{s}  {s}", .{ case.expected, version })));
+        } else try std.testing.expect(std.mem.indexOf(u8, text, "rui ") == null);
+        if (case.expected.len == 9) try std.testing.expect(std.mem.indexOf(u8, text, "tools ") == null);
     }
 }

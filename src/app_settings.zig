@@ -359,9 +359,10 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const size = ctx.max.size();
     if (size.width == 0 or size.height == 0) return .empty(self.widget());
     const memory = if (self.backend) |backend| (if (backend.memory) |read| read(backend.context) else null) else null;
-    const text = try @import("memory_text.zig").choices(ctx.arena, memory, self.panel.unicode);
-    self.fields[@backingInt(Row.memory)].value = text[0];
-    self.fields[@backingInt(Row.memory)].visible = memory != null;
+    // Memory is the row's whole value, from the aligned value column to the edge.
+    const text = try @import("memory_text.zig").fit(ctx.arena, memory, self.panel.unicode, size.width -| Panel.value_column);
+    self.fields[@backingInt(Row.memory)].value = text;
+    self.fields[@backingInt(Row.memory)].visible = text.len != 0;
     const children = try ctx.arena.alloc(vxfw.SubSurface, 2);
     children[0] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = try self.panel.widget().draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = size.height - 1 })) };
     const footer = try ctx.arena.create(Footer);
@@ -913,6 +914,38 @@ test "App settings Keys is last and opens by Enter or click without a backend" {
         try std.testing.expect(page.keys_open);
         try std.testing.expect(page.saving_row == null);
     };
+}
+
+test "App settings Memory gets the columns from the value column to the edge" {
+    var fixture: Fixture = .{ .memory_value = .{ .rui = 38 * view.mib, .tools = 120 * view.mib } };
+    var page: Self = .{ .backend = fixture.backend(), .version = "unreleased" };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    try page.refresh();
+    // memory_text owns which form fits; this page owns only the columns it gives memory.
+    for ([_]struct { width: u16, expected: ?[]const u8 }{
+        .{ .width = Panel.value_column + 24, .expected = "Memory          rui 38 MB · tools 120 MB" },
+        .{ .width = Panel.value_column + 23, .expected = "Memory          rui 38 MB" },
+        .{ .width = 40, .expected = "Memory          rui 38 MB" },
+        .{ .width = Panel.value_column + 9, .expected = "Memory          rui 38 MB" },
+        .{ .width = Panel.value_column + 8, .expected = null },
+    }) |case| {
+        const surface = try page.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = case.width, .height = 20 }, .cell_size = .{} });
+        const body = surface.children[0].surface;
+        var text: std.Io.Writer.Allocating = .init(arena.allocator());
+        for (0..body.size.height) |y| {
+            for (0..body.size.width) |x| try text.writer.writeAll(body.readCell(@intCast(x), @intCast(y)).char.grapheme);
+            try text.writer.writeByte('\n');
+        }
+        var line: ?[]const u8 = null;
+        var lines = std.mem.splitScalar(u8, text.written(), '\n');
+        while (lines.next()) |each| if (std.mem.indexOf(u8, each, "Memory") != null) {
+            line = std.mem.trim(u8, each, " ");
+        };
+        if (case.expected) |expected| try std.testing.expectEqualStrings(expected, line.?) else try std.testing.expectEqual(null, line);
+        try std.testing.expectEqual(case.expected != null, page.fields[@backingInt(Row.memory)].visible);
+        _ = arena.reset(.retain_capacity);
+    }
 }
 
 test "App settings live Memory is optional read-only and independent of saved preferences" {
