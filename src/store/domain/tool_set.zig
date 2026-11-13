@@ -290,10 +290,9 @@ pub const Selection = struct {
     /// and finishSelection's inserted members must use the same source.
     pub fn ofSaved(a: anytype, source_set: u64, names: *const command_input.ToolsField) !Selection {
         var selected: SavedSelection = .{ .names = names };
-        a.readEach(selection_records, .{ .set = source_set }, tool_name.max_tools + 1, &selected);
+        selected.queue(a, source_set);
         try a.run();
-        if (selected.count != names.count) return error.CorruptStore;
-        return .{ .names = names, .digest = selected.digest.final() };
+        return selected.selection();
     }
 };
 
@@ -314,10 +313,24 @@ const selection_records = rsql.Read(.{
     .cardinality = .each,
 });
 
-const SavedSelection = struct {
+/// `Selection.ofSaved` as one round its caller runs: `queue` queues the
+/// source set's records, and `selection`, after that round, is the
+/// selection. A transition keeps it, as the round's visitor, in storage
+/// that outlives the round.
+pub const SavedSelection = struct {
     names: *const command_input.ToolsField,
     digest: tool_record.SetDigest = .init(),
     count: usize = 0,
+
+    pub fn queue(self: *SavedSelection, a: anytype, source_set: u64) void {
+        a.readEach(selection_records, .{ .set = source_set }, tool_name.max_tools + 1, self);
+    }
+
+    /// After `queue`'s round.
+    pub fn selection(self: *SavedSelection) !Selection {
+        if (self.count != self.names.count) return error.CorruptStore;
+        return .{ .names = self.names, .digest = self.digest.final() };
+    }
 
     pub fn visit(self: *SavedSelection, row: *const selection_records.Row) bool {
         var names = self.names.iterator();

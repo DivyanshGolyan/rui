@@ -27,12 +27,21 @@ const allowed_std = [_][]const u8{
     "std.testing.expectError", "std.unicode.utf8ValidateSlice",  "std.unicode.utf8ByteSequenceLength",
     "std.unicode.utf8Decode",  "std.unicode.utf8Encode",         "std.bit_set",
     "std.unicode.Utf8View",    "std.EnumSet",                    "std.crypto.hash.sha2.Sha256",
-    "std.StringHashMap",
+    "std.StringHashMap",       "std.Uri",
 };
 
-/// vaxis's Unicode tables, which `configureTerminalEditor` in build.zig
-/// provides without vaxis's TTY or event loop.
-const value_modules = [_][]const u8{ "terminal_unicode", "terminal_width" };
+/// Pure constants and parsers exposed beside effectful standard-library APIs.
+/// Unlike namespace allowances, these grant no sibling or child access.
+const allowed_std_exact = [_][]const u8{
+    "std.posix.PATH_MAX",
+    "std.fs.path.isAbsolute",
+    "std.Io.net.Ip6Address.parse",
+    "std.Io.net.HostName.max_len",
+};
+
+/// Explicit value-only modules: Unicode tables without vaxis's TTY/event
+/// loop, and URL parsing without the transport's sockets or TLS.
+const value_modules = [_][]const u8{ "terminal_unicode", "terminal_width", "url" };
 
 /// Allowed only inside `test` declarations, for failure diagnostics.
 const test_only_std = [_][]const u8{ "std.debug.print", "std.testing.expectEqualDeep" };
@@ -234,6 +243,7 @@ fn fieldName(source: []const u8, tokens: *const std.zig.Tokenizer) ?union(enum) 
 fn allowedStd(path: []const u8) bool {
     var names = std.mem.splitScalar(u8, path, '.');
     while (names.next()) |member| if (contains(clock_methods, member)) return false;
+    if (contains(&allowed_std_exact, path)) return true;
     for (allowed_std) |allowed| if (within(path, allowed)) return true;
     return false;
 }
@@ -349,4 +359,22 @@ test "clock methods are reflected from every time type a core may hold" {
     };
     for (allowed_std) |allowed| if (within(allowed, "std.Io"))
         try std.testing.expect(contains(&paths, allowed) or within(allowed, "std.Io.Writer"));
+}
+
+test "pure standard leaves do not grant sibling I/O or child namespaces" {
+    inline for (.{
+        "std.posix.PATH_MAX",          "std.fs.path.isAbsolute", "std.Io.net.Ip6Address.parse",
+        "std.Io.net.HostName.max_len",
+    }) |path| {
+        try std.testing.expectEqual(@as(?Violation, null), check("const value = " ++ path ++ ";", &.{}));
+        try std.testing.expect(check("const value = " ++ path ++ ".effect;", &.{}) != null);
+    }
+    try std.testing.expectEqual(@as(?Violation, null), check("const value = std.Uri.parse; const url = @import(\"url\");", &.{}));
+    inline for (.{
+        "std.posix.read",               "std.posix",                     "std.fs.path",         "std.fs.openFileAbsolute",
+        "std.Io.net.Ip6Address",        "std.Io.net.Ip6Address.resolve", "std.Io.net.HostName", "std.Io.net.HostName.lookup",
+        "std.Io.net.IpAddress.connect", "std.builtin.Type.StructField",
+    }) |path| try std.testing.expect(check("const value = " ++ path ++ ";", &.{}) != null);
+    // A path to an unregistered core remains forbidden even with a named value module.
+    try std.testing.expect(check("const url = @import(\"url.zig\");", &.{}) != null);
 }

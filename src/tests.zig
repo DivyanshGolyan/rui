@@ -1,4 +1,5 @@
 test {
+    _ = @import("testing/host_settings.zig");
     _ = @import("relaunch_handoff.zig");
     _ = @import("widgets/Panel.zig");
     _ = @import("app_settings.zig");

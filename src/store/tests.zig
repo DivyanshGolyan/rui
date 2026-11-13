@@ -1151,7 +1151,7 @@ test "a Session creation that rolls back never reaches a since listing" {
                 defer a.deinit();
                 const reads = storage.configurationReads();
                 reads.* = .{ .next = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } } };
-                configuration_domain.prepareConfiguration(&a, "", &create.configuration, reads);
+                configuration_domain.prepareConfiguration(&a, storage.hostTools().host_tool_set, "", &create.configuration, reads);
                 try a.run();
                 try std.testing.expect(try configuration_domain.applyConfiguration(&a, storage.io, "", &create.configuration, null, .{}, reads) == .accepted);
                 try a.run();
@@ -14603,6 +14603,63 @@ test "skills empty initial snapshot is valid and schema rejects mismatched catal
     }.run);
 }
 
+test "skills initial catalog equal to an earlier Session's shares its content and starts the conversation" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            var sessions: [2]protocol.Bounded(protocol.max_session_bytes) = undefined;
+            for (&sessions, [_][]const u8{ "skills-shared-first", "skills-shared-second" }) |*session, key| {
+                var create = try completeConfiguration(key, "", workspace, "model-a");
+                session.* = (try storage.configureWithInitialSkills(&create, null, &skills_fixture_initial, .{})).accepted.session;
+            }
+            const catalog_sql = "SELECT catalog_content_id FROM session_skill_catalog WHERE session_ref=?1";
+            const text_sql = "SELECT content_id FROM conversation_entry WHERE session_ref=?1 AND source_catalog_position IS NOT NULL";
+            try std.testing.expectEqual(try store_testing.queryU64(&storage, catalog_sql, .{sessions[0].slice()}), try store_testing.queryU64(&storage, catalog_sql, .{sessions[1].slice()}));
+            try std.testing.expectEqual(try store_testing.queryU64(&storage, text_sql, .{sessions[0].slice()}), try store_testing.queryU64(&storage, text_sql, .{sessions[1].slice()}));
+            for (sessions) |session| try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT entry_ordinal FROM conversation_entry WHERE session_ref=?1 AND source_catalog_position IS NOT NULL", .{session.slice()}));
+        }
+    }.run);
+}
+
+test "skills a Message's refusal diagnostic that fails to import saves nothing" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            var create = try completeConfiguration("skills-diagnostic-session", "", workspace, "model-a");
+            const session = (try storage.configure(&create, .{})).accepted.session;
+            const text = "/missing please";
+            const file = try tmp.dir.createFile(std.testing.io, "skills-diagnostic-text", .{ .read = true });
+            try file.writeStreamingAll(std.testing.io, text);
+            try file.sync(std.testing.io);
+            var message = try completeMessage("skills-diagnostic-message", session.slice(), file, text);
+            defer message.removeTemporaryContent(std.testing.io) catch unreachable;
+            const diagnostic = "Skill missing is not in this Session's saved catalog; nothing was sent.";
+            const captured: skills_fixture_domain.MessageCapture = .{ .failed = .{ .code = .skill_file_unavailable, .bytes = diagnostic } };
+            try std.testing.expect(storage.submitMessageCapturedSkills(&message, null, null, &captured, .{ .content_import = true }) == .infrastructure_failure);
+            try std.testing.expect(storage.isFenced());
+            try storage.close();
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            try std.testing.expect((try store_testing.observeCommandForTesting(&storage, "skills-diagnostic-message")).status == .absent);
+            const rejected = storage.submitMessageCapturedSkills(&message, null, null, &captured, .{});
+            try std.testing.expect(rejected == .rejected and !rejected.rejected.replayed);
+            try std.testing.expectEqual(protocol.MessageRejection.skill_file_unavailable, rejected.rejected.code);
+            try std.testing.expectEqual(@as(u64, diagnostic.len), try store_testing.queryU64(&storage, "SELECT content.byte_length FROM core_command JOIN content ON content.content_id=core_command.primary_content_id WHERE command_key=?1", .{"skills-diagnostic-message"}));
+        }
+    }.run);
+}
+
 test "skills reload out of memory in configure or the skill tool rolls back without fencing" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
@@ -15150,7 +15207,7 @@ test "inline skills configuration validation borrows one Store-owned plan throug
                     defer a.deinit();
                     const reads = storage.configurationReads();
                     reads.* = .{ .next = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } } };
-                    configuration_domain.prepareConfiguration(&a, session.slice(), &update.configuration, reads);
+                    configuration_domain.prepareConfiguration(&a, storage.hostTools().host_tool_set, session.slice(), &update.configuration, reads);
                     try a.run();
                     const checked = try configuration_domain.validateConfiguration(&a, storage.io, session.slice(), &update.configuration, null, reads);
                     try std.testing.expect(checked == .ready);
@@ -15158,7 +15215,7 @@ test "inline skills configuration validation borrows one Store-owned plan throug
                     try std.testing.expect(plan == &reads.validated);
                     const original_instructions = plan.before.?.instructions_id;
                     try std.testing.expect(plan.before.?.label == null);
-                    const applied = try configuration_domain.applyValidatedConfiguration(&a, storage.io, session.slice(), &update.configuration, null, .{}, reads, plan);
+                    const applied = try configuration_domain.applyValidatedConfiguration(&a, storage.io, session.slice(), &update.configuration, null, .{}, reads);
                     try std.testing.expect(applied == .accepted);
                     try std.testing.expect(plan == &reads.validated);
                     try std.testing.expectEqual(original_instructions, plan.before.?.instructions_id);
