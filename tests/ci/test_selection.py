@@ -95,11 +95,15 @@ class AssertedTextSelectionTest(unittest.TestCase):
             root = Path(directory)
             (root / "src").mkdir()
             # Multiple occurrences count once; test-code files do not count.
-            (root / "src/source_test.zig").write_text(json.dumps(text))
-            (root / "src/other_tests.zig").write_text(json.dumps(text))
+            # Per-domain test folders are test code too.
+            test_code = ["src/source_test.zig", "src/other_tests.zig",
+                         "src/store/tests/session.zig", "src/store/sqlite_tests/retry.zig"]
+            for name in test_code:
+                (root / name).parent.mkdir(parents=True, exist_ok=True)
+                (root / name).write_text(json.dumps(text))
             for count in range(5):
                 with self.subTest(production_files=count):
-                    names = ["src/source_test.zig", "src/other_tests.zig"]
+                    names = list(test_code)
                     for index in range(count):
                         name = f"src/owner{index}.zig"
                         (root / name).write_text(json.dumps(text) + "\n" + json.dumps(text))
@@ -109,6 +113,35 @@ class AssertedTextSelectionTest(unittest.TestCase):
                           patch("select_tests.subprocess.check_output", return_value=tracked)):
                         uncommon = tree_uncommon_texts.__wrapped__((text,))
                     self.assertEqual(uncommon, {text} if count < 3 else set())
+
+    def test_test_code_covers_single_files_and_per_domain_folders(self):
+        for path in ("src/store/tests.zig", "src/store/sqlite_tests.zig", "src/store/tests/session.zig",
+                     "src/store/sqlite_tests/retry.zig", "src/other/tests/nested/case.zig"):
+            with self.subTest(path=path):
+                self.assertTrue(matches(path, TEST_CODE))
+        for path in ("src/store/Store.zig", "src/store/testsuite.zig", "src/action_text.zig"):
+            with self.subTest(path=path):
+                self.assertFalse(matches(path, TEST_CODE))
+
+    def test_store_test_copies_leave_fixture_text_uncommon(self):
+        # Store tests repeat the text a fixture waits for; only production
+        # files count toward its prevalence, so a change to its owner still
+        # selects the fixture.
+        path = "src/action_text.zig"
+        text = (Path(__file__).resolve().parents[2] / path).read_text()
+        self.assertIn('"Cancelled by Session stop."', text)
+        changed = text.replace("Cancelled by Session stop.", "Cancelled by a Session stop.")
+        result = select([path], "review", AVAILABLE, contents={path: (text, changed)})
+        self.assertIn("bash-integration", result["targets"])
+        self.assertIn("Asserted text: a fixture waits for text this file draws", result["reasons"])
+
+    def test_store_test_only_edit_selects_no_fixture_by_asserted_text(self):
+        for path in ("src/store/sqlite_tests/retry.zig", "src/store/tests/action.zig"):
+            with self.subTest(path=path):
+                text = (Path(__file__).resolve().parents[2] / path).read_text()
+                result = select([path], "review", AVAILABLE, contents={path: (text, text + "\n// edited\n")})
+                self.assertNotIn("Asserted text: a fixture waits for text this file draws", result["reasons"])
+                self.assertNotIn("dispatch-integration", result["targets"])
 
     def test_asserted_text_ownership_domain(self):
         from select_tests import script_literals
