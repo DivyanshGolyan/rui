@@ -694,6 +694,7 @@ fn appNext(self: *Self, ctx: *vxfw.EventContext, next: ?Next) !void {
             ctx.quit = true;
         },
         .open_settings => try self.root.openSettings(ctx),
+        .focus_chat => try self.root.focusChat(ctx),
 
         .open => |reference| {
             try self.root.showMain(ctx);
@@ -1094,7 +1095,8 @@ fn drawPart(self: *Self, ctx: vxfw.DrawContext, part: AppScreen.Overview.Part) s
     self.app_frame = frame;
     const rows = try ctx.arena.create(SessionRows);
     rows.* = .{ .state = &self.state, .width = size.width, .caps = self.caps, .frame = frame };
-    self.app_sessions.selected = if (view.selectedLine(&self.state)) |line| @intCast(line) else null;
+    self.app_sessions.selected = if (view.focusedLine(&self.state, self.root.input.list_focused or self.root.session == null)) |line| @intCast(line) else null;
+    self.app_sessions.selection_background = if (self.root.session != null and !self.root.input.list_focused) .bar else .selection;
     self.app_sessions.rows = .{ .userdata = rows, .count = @intCast(view.listLength(&self.state)), .rowFn = SessionRows.row, .countFromFn = SessionRows.count };
     self.app_sessions.aboveFn = SessionRows.above;
     self.app_sessions.belowFn = SessionRows.below;
@@ -1306,7 +1308,7 @@ fn destroy(self: *Self) void {
 const Ending = union(enum) { overview, conversation: Left };
 
 /// What the core asks of the loop: to leave or present a pane under Root.
-const Next = union(enum) { leave, open: view.Reference, open_settings };
+const Next = union(enum) { leave, open: view.Reference, open_settings, focus_chat };
 
 /// Steps the core with one event and queues the jobs it asks for. Presenting
 /// panes and leaving are the loop's to do.
@@ -1327,6 +1329,7 @@ fn eventResult(self: *Self, value: view.Event) !EventResult {
     var next: ?Next = null;
     for (effects.slice()) |effect| switch (effect) {
         .open_settings => next = .open_settings,
+        .focus_chat => next = .focus_chat,
         .list => |since| {
             self.traversal = .init(since);
             self.traversal_archive = self.state.listing_archive.?;
@@ -1701,7 +1704,7 @@ fn quiesceUpgrade(self: *Self) !bool {
                 .leave => return error.InteractiveInterrupted,
                 .open => |reference| self.started = reference,
                 // Only direct list input asks for settings, never a worker answer.
-                .open_settings => unreachable,
+                .open_settings, .focus_chat => unreachable,
             };
         }
     }
@@ -6981,6 +6984,8 @@ const key_encodings = std.enums.EnumArray(keymap.Key, []const []const u8).init(.
     .alt_a = &.{ "\x1ba", "\x1b[97;3u", "\x1b[27;3;97~" },
     .up = &.{ "\x1b[A", "\x1bOA", "\x1b[1;1A" },
     .down = &.{ "\x1b[B", "\x1bOB", "\x1b[1;1B" },
+    .left = &.{ "\x1b[D", "\x1bOD", "\x1b[1;1D" },
+    .right = &.{ "\x1b[C", "\x1bOC", "\x1b[1;1C" },
     .shift_up = &.{ "\x1b[1;2A", "\x1b[1;2:1A" },
     .shift_down = &.{ "\x1b[1;2B", "\x1b[1;2:1B" },
     .page_up = &.{ "\x1b[5~", "\x1b[5;1~", "\x1b[5;2~" },
@@ -7874,6 +7879,69 @@ test "creation preference read failure is retained through repair and ordinary r
     try std.testing.expectEqual(@as(usize, 1), Seen.now.creates);
     try std.testing.expectEqualStrings("high", Seen.now.creation.reasoning_effort.?.slice());
     try std.testing.expectEqualStrings("bypass", Seen.now.creation.permission_mode.slice());
+}
+
+test "App overview paste shapes after chat close cannot create or retain an editor paste" {
+    // #1379 removed the overview composer. Test its actual list owner, not
+    // a substitute editor: both paste marks are delivered and all text is inert.
+    for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |list_focused| for ([_][]const u8{ "", "\n", "text" }) |paste| {
+        const rig = try openOverview();
+        defer rig.close();
+        var events = rig.context();
+        defer events.cmds.deinit(std.testing.allocator);
+        try rig.overview.root.closeSession(&events);
+        try std.testing.expect(rig.overview.root.input.list_focused);
+        rig.overview.root.input.list_focused = list_focused;
+        var shown = try rig.shown(width, 30);
+        defer shown.deinit();
+        const creates = Seen.now.creates;
+        const opens = Seen.now.conversations;
+        try std.testing.expect(try rig.press("\x1b[200~") == null);
+        try std.testing.expect(try rig.press(paste) == null);
+        try std.testing.expect(try rig.press("\x1b[201~") == null);
+        try std.testing.expect(!rig.overview.root.input.pasting);
+        try std.testing.expect(try rig.press("\x1b[DX") == null);
+        try std.testing.expectEqual(creates, Seen.now.creates);
+        try std.testing.expectEqual(opens, Seen.now.conversations);
+        try std.testing.expect(!rig.overview.state.creating());
+        try std.testing.expect(rig.overview.root.session == null);
+        // Ordinary explicit Enter still creates an empty chat, never sends
+        // any of the ignored paste or later typing as a first Message.
+        try std.testing.expect(try rig.press("\r") == null);
+        try std.testing.expect(try rig.settle() == null);
+        try std.testing.expectEqual(creates + 1, Seen.now.creates);
+    };
+}
+
+test "App overview list activation resumes the open chat without closing its presentation" {
+    const Presentation = struct {
+        var closes: usize = 0;
+        fn close(_: *anyopaque) void {
+            closes += 1;
+        }
+    };
+    for ([_][]const u8{ "\r", "\x1b[C" }) |key| {
+        const rig = try openListed();
+        defer rig.close();
+        const reference = shownRow(rig, 2);
+        const chat: vxfw.Text = .{ .text = "Chat" };
+        rig.overview.root.session = chat.widget();
+        // The fixture borrowed the dummy widget, not an app_session allocation.
+        defer rig.overview.root.session = null;
+        rig.overview.root.size = .{ .width = 140, .height = 40 };
+        _ = try rig.overview.event(.{ .conversation = reference });
+        // Stand in for an open Chat Info: it must survive the return.
+        rig.overview.root.main_presentation = .{ .context = rig, .close = Presentation.close };
+        Presentation.closes = 0;
+        var ctx = rig.context();
+        defer ctx.cmds.deinit(std.testing.allocator);
+        try std.testing.expect(try rig.overview.root.focusList(&ctx));
+        const opens = Seen.now.conversations;
+        try std.testing.expect(try rig.press(key) == null);
+        try std.testing.expect(!rig.overview.root.input.list_focused);
+        try std.testing.expectEqual(@as(usize, 0), Presentation.closes);
+        try std.testing.expectEqual(opens, Seen.now.conversations);
+    }
 }
 
 test "Overview Settings live memory frame uses quiet role in day and night" {

@@ -2501,12 +2501,19 @@ One line map, `listItem` in `src/overview_view.zig`, names each list line for dr
 Each drawn row keeps that name, so a click means what the person saw even when the list changed since the frame, and a Session gone by then opens nothing.
 The Sessions list, a panel and the model picker are three widgets in the list's place; the screen shows the one the core names (`State.listArea`), and only the Sessions hear a press.
 Ctrl-X sends an ordinary `session stop` for the selected row, with the same capture and recovery as the CLI command.
-List input reaches `overview_view.step` as a semantic action, Enter or ignored input; clicks carry the Session, New Session or Settings identity drawn in the frame.
+List input reaches `overview_view.step` as a semantic action from the list's one key table (Right is `open_session` there), Enter or ignored input; clicks carry the Session, New Session or Settings identity drawn in the frame.
+Enter on a Session row opens it, and Right does the same on a Session row and nothing on New Session or Settings; on the row of the chat already open, either one, or a click on that row, returns keys to that chat's input instead, keeping its draft and anything it presents, such as Chat Info, and sends the Host nothing.
 Printable keys and bracketed paste are ignored: no editor, hidden draft, frozen-editor state, command list, skill cache or duplicate footer focus exists on the overview.
 Arrows, Home and End keep whole-list navigation, including the pinned New Session and Settings rows; Settings is the penultimate row immediately before the footer.
 The core owns selection, opening admission and pending/uncertain creation; the shell applies its effects.
 The core holds the terminal’s size, and shared screen composition accepts the actual bottom widget: the overview’s status/footer, not a manufactured editor.
 Without an open chat, the overview’s list uses the full width at every terminal size, with no empty compose pane. The wide list beside an open chat or its settings retains its existing row navigation and pointer spans, without an input of its own.
+At 100 columns and wider, keys go to the list or to the chat beside it, one at a time (`app_input`'s list focus).
+Left on an empty chat draft gives keys to the list and leaves the chat open and drawn; a draft with text, even with the caret at its start, takes Left as an edit.
+Below 100 columns no list sits beside the chat, so Left on an empty draft leaves the chat as Esc does; Esc and Ctrl-G leave the chat at every width.
+While the list has keys, its selected row takes the focused background and the chat's prompt shows a quiet `›` with no caret; while the chat has keys, the open chat's row keeps a dimmed, inactive selection.
+A click on the list gives it keys, and a click in the chat gives keys back to the chat's input, by the same transition as Enter on the open chat's row.
+Divyansh chose this list focus, Left on an empty draft and Esc leaving at every width in November 2026 (PR #1400).
 The rules table says which work states Ctrl-X may stop: pending, working, retrying, Bash and approval.
 Ctrl-X on such a row opens a confirm prompt in the core's state; a second Ctrl-X returns the `stop` effect, Esc only cancels, and any other input cancels before it acts.
 Every creation and stop is an entry in the core's request ledger (`State.requests`) until a definite answer removes it; a full ledger refuses new requests and evicts nothing, and departure prints every entry still left.
@@ -2679,8 +2686,8 @@ Option/Command-Backspace may be consumed by the terminal; only supported receive
 No Host input policy, completion or configurable keymap is added, and recalling sent Messages keeps no history of its own.
 
 An incomplete CSI or SS3 sequence also times out and ends the caller, rather than treating its delayed tail as Message text; bare ESC alone may expire without rejecting the draft.
-Each screen has one key table over the keys in `src/keymap.zig`: Esc, Ctrl-C, Ctrl-D, Ctrl-G, Ctrl-N, Ctrl-O, Ctrl-P, Ctrl-R, Ctrl-X, Up, Down, Shift-Up, Shift-Down, PgUp, PgDn, Home, End and Ctrl-End.
-The editor edits with such a key while the draft gives it a use (Up and Down with a draft line in that direction; Home, End and Ctrl-D with any draft) and otherwise returns the screen's action for it, or nothing where the table binds nothing.
+Each screen has one key table over the keys in `src/keymap.zig`: Esc, Ctrl-C, Ctrl-D, Ctrl-G, Ctrl-N, Ctrl-O, Ctrl-P, Ctrl-R, Ctrl-X, Up, Down, Left, Right, Shift-Up, Shift-Down, PgUp, PgDn, Home, End and Ctrl-End.
+The editor edits with such a key while the draft gives it a use (Left and Right always; Up and Down with a draft line in that direction; Home, End and Ctrl-D with any draft) and otherwise returns the screen's action for it, or nothing where the table binds nothing; a choice drawn in place of the draft takes the arrows its screen leaves unbound.
 A rejected draft changes no key's meaning.
 In a conversation Esc and Ctrl-G return to the latest view and, from there, to the overview, and Ctrl-X stops the Session as on the overview. End on an empty draft and Ctrl-End return to the latest view and stay in the conversation; End with a draft still edits its current line.
 Recalling sent Messages (approved 2026-10-31; keys chosen 2026-11-01): in a conversation Ctrl-P on an empty draft brings back the newest Message the person sent, for editing, and Ctrl-P again goes further back; Ctrl-N goes forward, and past the newest the draft is empty again.
@@ -3070,7 +3077,13 @@ Folder and Context are read-only; Folder shortens HOME to `~` and fits long path
 It first keeps a suffix of whole path components with a leading ellipsis; when the basename itself is too wide, it keeps the longest grapheme-aligned basename suffix that fits after that ellipsis.
 It never arbitrarily cuts the right edge or shows an ellipsis alone instead of all the name.
 A blank row separates the fields from Rename, Archive and Copy last answer, even when the actions stack.
-Up and Down visit selectable fields and actions, and Enter opens a choice or runs the action.
+Keys move focus over what is drawn (`chat_info_focus`): Effort, Permissions, Tools and Model, then the actions; Folder and Context take no focus.
+Up and Down move between rows: Down from Model reaches Rename, and Up from the action row returns to Model.
+Left and Right move between Rename, Archive and Copy last answer on their one row, stopping at either end; when the actions stack, each is its own row, Up and Down move between them, and Left and Right do nothing.
+Tab and Shift-Tab step through every focusable item in order and wrap from Copy last answer to Effort and back.
+Enter opens a choice or runs the action; moving focus never opens a choice.
+After a successful copy, Copy last answer reads `Copied` until the next key, a newer reply in the Footer or the notice's expiry; a refused or failed copy keeps `Copy last answer`.
+Divyansh chose arrow and Tab movement and the `Copied` label in November 2026 (PR #1400).
 The panel contributes no internal footer: its one footer substitutes for the normal chat footer after the input’s lower divider on the physical last row, leaving the draft between panel and footer and no blank notice row below it.
 Permissions names `run without asking` and `ask first`; Tools selects from the built-in tool set.
 Model opens that shared inline editor and compact match list for this Session’s provider, with type-to-filter, Up/Down and Enter to save.
