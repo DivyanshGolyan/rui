@@ -99,18 +99,21 @@ fn serve(settings: *host_settings.Settings) void { consume(settings); }
 fn read(settings: *SessionSettings) void { _ = settings.tools; }
 '''))
 
-    def test_only_literal_retired_diagnostics_are_exempt(self):
+    def test_only_literal_retired_rows_are_exempt(self):
         table = '''pub const retired_options = &[_]grammar.RetiredOption{
-    .{ .name = "bash-timeout-ms", .replacement = "--set tools.bash.timeoutMs=VALUE" },
+    grammar.retired("bash-timeout-ms", &.{"tools.bash.timeoutMs=VALUE"}, ""),
+    grammar.retired("provider-endpoint", &.{ "providers.codex.endpoint=VALUE", "providers.codex.unauthenticated=true" }, " (note)"),
 };
 '''
         self.assertFalse(self.check(table, "src/serve_grammar.zig"))
         self.assertTrue(self.check(table + 'const x = "timeoutMs";', "src/serve_grammar.zig"))
         self.assertTrue(self.check(table, "src/cli_grammar.zig"))
-        with self.assertRaises(ValueError):
-            self.check(table.replace('"--set tools.bash.timeoutMs=VALUE"', 'hidden()'), "src/serve_grammar.zig")
-        with self.assertRaises(ValueError):
-            self.check(table.replace('.replacement =', '.unexpected ='), "src/serve_grammar.zig")
+        for broken in (table.replace('"tools.bash.timeoutMs=VALUE"', 'hidden()'),
+                       table.replace('grammar.retired(', 'grammar.other('),
+                       table.replace(', "")', ', "", extra)'),
+                       table.replace('&.{"tools.bash.timeoutMs=VALUE"}', 'assignments')):
+            with self.assertRaises(ValueError):
+                self.check(broken, "src/serve_grammar.zig")
 
     def test_independent_domain_members_include_last_uncommaed_tag(self):
         self.assertEqual(declaration_members("pub const Kind = enum { one, two };", "Kind"), {"one", "two"})

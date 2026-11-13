@@ -170,24 +170,37 @@ def transition(tokens, relative):
         raise ValueError("retired_options must be a literal grammar.RetiredOption table")
     cursor = brace + 1
     exempt = set()
+
+    def literal(what):
+        nonlocal cursor
+        if unquote(names[cursor]) is None:
+            raise ValueError(f"retired option {what} must be literal")
+        exempt.add(cursor)
+        cursor += 1
+
     while cursor < end:
-        if names[cursor:cursor + 5] != [".", "{", ".", "name", "="]:
-            raise ValueError("retired_options accepts only name/replacement literal rows")
-        cursor += 5
-        if unquote(names[cursor]) is None:
-            raise ValueError("retired option name must be literal")
-        exempt.add(cursor)
-        cursor += 1
-        if names[cursor:cursor + 4] != [",", ".", "replacement", "="]:
-            raise ValueError("retired option requires replacement")
+        # grammar.retired("flag", &.{ "PATH=VALUE", ... }, "note")
+        if names[cursor:cursor + 4] != ["grammar", ".", "retired", "("]:
+            raise ValueError("retired_options accepts only grammar.retired literal rows")
         cursor += 4
-        if unquote(names[cursor]) is None:
-            raise ValueError("retired replacement must be literal")
-        exempt.add(cursor)
+        literal("name")
+        if names[cursor:cursor + 4] != [",", "&", ".", "{"]:
+            raise ValueError("retired option requires its assignments")
+        cursor += 4
+        while names[cursor] != "}":
+            literal("assignment")
+            if names[cursor] == ",":
+                cursor += 1
+            elif names[cursor] != "}":
+                raise ValueError("retired option assignments have unexpected code")
         cursor += 1
+        if names[cursor] != ",":
+            raise ValueError("retired option requires a note")
+        cursor += 1
+        literal("note")
         if names[cursor] == ",":
             cursor += 1
-        if names[cursor] != "}":
+        if names[cursor] != ")":
             raise ValueError("retired option row has unexpected code")
         cursor += 1
         if names[cursor] == ",":
