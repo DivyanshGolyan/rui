@@ -65,6 +65,9 @@ pub const Failure = enum { discovery, observation, selection };
 pub const Entry = struct {
     socket: []const u8,
     store: ?[]const u8 = null,
+    /// Why socket discovery could not confirm this Host. Only the error name
+    /// is kept, never argv, environment or paths read from the peer.
+    discovery_error: ?[]const u8 = null,
     state: union(enum) {
         /// Read-only census, never an activation plan. Reobserve before acting.
         observed: client.HostControlObservation,
@@ -172,10 +175,10 @@ pub fn discover(init: std.process.Init, allocator: std.mem.Allocator, home: []co
     }
     for (sockets) |socket| {
         try process.check(cancellation);
-        const facts = client.observeHostForUpgradeAtSocket(allocator, init.io, socket, null) catch {
+        const facts = client.observeHostForUpgradeAtSocket(allocator, init.io, socket, null) catch |err| {
             const path = try allocator.dupe(u8, socket);
             errdefer allocator.free(path);
-            try entries.append(allocator, .{ .socket = path, .state = .{ .failed = .discovery } });
+            try entries.append(allocator, .{ .socket = path, .discovery_error = @errorName(err), .state = .{ .failed = .discovery } });
             continue;
         } orelse continue;
         const path = try allocator.dupe(u8, socket);
@@ -260,7 +263,9 @@ fn writeEntryFailure(writer: *std.Io.Writer, entry: *const Entry, stage: Failure
     });
     try writer.writeAll("Store unknown (socket ");
     try field(writer, entry.socket);
-    try writer.writeAll("): failed at discovery: Host state is unconfirmed; inspect this socket and its Store with the owning client, then retry. A refused or missing socket alone does not prove the Host stopped.\n");
+    try writer.writeAll("): failed at discovery: Host state is unconfirmed");
+    if (entry.discovery_error) |name| try writer.print(" ({s})", .{name});
+    try writer.writeAll("; inspect this socket and its Store with the owning client, then retry. A refused or missing socket alone does not prove the Host stopped.\n");
 }
 
 /// Reports are not custody: a departed tool closes stdout, but all remaining
