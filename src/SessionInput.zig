@@ -78,18 +78,20 @@ pub fn complete(self: *Self, completion: Editor.Completion) void {
 
 /// Adds `text` at the draft's end, as Tab's completion does.
 pub fn append(self: *Self, text: []const u8) Editor.KeyOutcome {
-    const editor = &self.editors[self.active];
-    const edits = editor.edits;
-    const outcome = editor.append(text);
-    if (editor.edits != edits) self.changed();
-    return outcome;
+    return self.tracked(Editor.KeyOutcome, Editor.append, .{text});
 }
 
 /// Puts `change`'s text in place of its range, as Tab's completion does.
 pub fn replace(self: *Self, change: Editor.Replacement) Editor.KeyOutcome {
+    return self.tracked(Editor.KeyOutcome, Editor.replace, .{change});
+}
+
+/// Runs `method` on the active draft with `args`, and marks the draft
+/// changed when the call edited it.
+fn tracked(self: *Self, comptime Outcome: type, comptime method: anytype, args: anytype) Outcome {
     const editor = &self.editors[self.active];
     const edits = editor.edits;
-    const outcome = editor.replace(change);
+    const outcome = @call(.auto, method, .{editor} ++ args);
     if (editor.edits != edits) self.changed();
     return outcome;
 }
@@ -123,10 +125,7 @@ pub fn restore(self: *Self, draft: Snapshot) void {
 }
 
 pub fn appEvent(self: *Self, comptime keys: anytype, event: @import("vaxis").vxfw.Event, pasting: bool, selected: bool) Event(@TypeOf(keys).Action) {
-    const editor = &self.editors[self.active];
-    const edits = editor.edits;
-    const outcome = editor.appEvent(keys, event, pasting);
-    if (editor.edits != edits) self.changed();
+    const outcome = self.tracked(keymap.Outcome(@TypeOf(keys).Action), Editor.appEvent, .{ keys, event, pasting });
     return self.accept(@TypeOf(keys).Action, outcome, selected);
 }
 
