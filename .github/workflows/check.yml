@@ -391,7 +391,7 @@ jobs:
         with:
           targets: ${{ toJSON(matrix.targets) }}
           compiled: 'true'
-      - name: Start MySQL 8.4 for the live dialect and launch-frame checks
+      - name: Start MySQL 8.4 for the live dialect and settings-document checks
         if: ${{ env.LIVE_MYSQL == 'true' }}
         # In the background, so the pull and initialisation overlap the
         # restore; "Wait for MySQL 8.4" collects the outcome.

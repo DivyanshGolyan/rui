@@ -64,9 +64,10 @@ test("follow wakes for two local sends and makes no requests between them while 
 	let consume: Promise<void> | undefined;
 	try {
 		rui = await Rui.connect({
-			database: join(root, "store"), binary: binary ?? "rui",
-			provider: { baseUrl: `https://127.0.0.1:${address.port}/v1`, key: "local-fixture-only", caFile: cert },
-		});
+			store: { sqlite: { dir: join(root, "store") } },
+			providers: { openai: { endpoint: `https://127.0.0.1:${address.port}/v1/responses`, key: "local-fixture-only" } },
+			network: { caFile: cert },
+		}, { binary: binary ?? "rui" });
 		const session = await rui.sessions.create({
 			provider: "openai", model: "model-a", effort: null, compactAt: 100000,
 			workspace: tmpdir(), tools: [], permissionMode: "ask",

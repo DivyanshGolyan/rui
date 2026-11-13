@@ -1,4 +1,4 @@
-//! Start failures as owned values, independent of the launch frame and I/O.
+//! Start failures as owned values, independent of document intake and I/O.
 const std = @import("std");
 const bounded = @import("bounded.zig");
 
@@ -9,7 +9,6 @@ pub const Store = enum { sqlite, mysql };
 
 /// A refusal at open, as `RuiStartError.code` names it (D136).
 pub const StartError = enum {
-    launch_frame_invalid,
     settings_invalid,
     invalid_preset,
     store_locked,
@@ -192,7 +191,7 @@ test "start report owns formatted bytes across source and value mutation" {
     var original: Failure = .init(.tool_name_collision, message);
     const copied = original;
     @memset(&source, 'x');
-    original = .init(.launch_frame_invalid, "changed");
+    original = .init(.settings_invalid, "changed");
     var buffer: [max_line_bytes]u8 = undefined;
     try std.testing.expectEqualStrings("{\"rui_start_error\":{\"code\":\"tool_name_collision\",\"message\":\"tool name bash is offered by Rui and by docs\"}}\n", line(&copied, &buffer));
 }
@@ -210,7 +209,7 @@ test "start report preserves JSON escaping and the maximum message" {
     for (0..max_refusal_message_bytes) |i| try std.testing.expectEqualStrings("\\u0000", rendered[prefix.len + 6 * i ..][0..6]);
 }
 
-// Independent expectations from main's launch-frame classifier at the merge.
+// Independent expectations from the original startup classifier at the merge.
 test "start report classifier preserves every refusal code and message byte" {
     const cases = .{
         .{ error.StoreAlreadyOwned, StartError.store_locked, "another Host owns this Store", false },

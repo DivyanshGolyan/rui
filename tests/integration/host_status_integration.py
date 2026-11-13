@@ -20,7 +20,7 @@ import host_process
 from host_process import HeldReplies, HostDiagnostics, TestHTTPServer, canonical_fixture_root, dispose_all, is_peer_disconnect, start_ready_process, stop_process, wait_for
 import os_semantics
 import live_engines
-import launch_frame_fixture as frame_host
+import settings_fixture as frame_host
 from host_status_fixture import ACTOR, RUI, complete_response, socket_path, status
 
 
@@ -364,14 +364,16 @@ def mysql_host_info():
             ddl = subprocess.run([RUI, "store", "schema", "--engine", "mysql"], check=True, capture_output=True, text=True, timeout=20).stdout
             sql(f"USE {database};" + ddl)
             url = f"mysql://root:{quote(password, safe='')}@{quote(socket, safe='')}/{database}"
-            # Credentials travel only through the launch frame, never argv or
+            # Credentials travel only through the settings document, never argv or
             # the child's environment. The Host answers with its opaque id.
-            child = subprocess.Popen([RUI, "host", "serve", "--launch-frame"], stdin=subprocess.PIPE,
+            child = subprocess.Popen([RUI, "host", "serve", "--settings", "-"], stdin=subprocess.PIPE,
                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                      env={key: os.environ[key] for key in ("PATH", "HOME", "TMPDIR") if key in os.environ})
             child.stdin.write(frame_host.frame({
-                "v": 1, "store": url, "runtimeDir": str(runtime), "activeCapacity": 2,
-                "provider": {"kind": "openai_key", "baseUrl": "https://api.openai.com/v1", "key": "sk-host-info-test"},
+                "store": {"mysql": {"url": {"value": url}}},
+                "interface": {"dir": str(runtime), "lifetime": "stdin"},
+                "execution": {"activeCapacity": 2},
+                "providers": {"openai": {"endpoint": "https://api.openai.com/v1/responses", "key": {"value": "sk-host-info-test"}}},
             }))
             child.stdin.flush()
             sock = runtime / "rui.sock"
@@ -426,21 +428,24 @@ def resolved_sqlite_routing(root):
     runtime = pathlib.Path(root) / "sqlite-runtime"
     runtime.mkdir(mode=0o700)
     launched_store = pathlib.Path(root) / "launched-store"
-    frame = {"v": 1, "store": str(launched_store), "runtimeDir": str(runtime),
-             "provider": {"kind": "openai_key", "baseUrl": "https://api.openai.com/v1", "key": "sk-routing-test"}}
-    launched = subprocess.Popen([RUI, "host", "serve", "--launch-frame"], stdin=subprocess.PIPE,
+    document = {"store": {"sqlite": {"dir": str(launched_store)}},
+                "interface": {"dir": str(runtime), "lifetime": "stdin"},
+                "providers": {"openai": {"endpoint": "https://api.openai.com/v1/responses", "key": {"value": "sk-routing-test"}}}}
+    launched = subprocess.Popen([RUI, "host", "serve", "--settings", "-"], stdin=subprocess.PIPE,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
     try:
-        launched.stdin.write(frame_host.frame(frame))
+        launched.stdin.write(frame_host.frame(document))
         launched.stdin.flush()
         frame_host.wait_for_host(runtime / "rui.sock", launched_store, launched)
         value = frame_host.host_info(runtime / "rui.sock", str(launched_store))
         assert value["store"] == str(launched_store.resolve()), value
         assert "innodb_doublewrite" not in value and "kind" not in value and "engine" not in value, value
-        # SQLite must never acquire MySQL's empty-id discovery exception just
-        # because it uses a separately launched runtime directory.
+        # Read-only discovery supplies the canonical identity; a nonempty
+        # wrong identity still cannot address this Host.
+        discovered = frame_host.host_info(runtime / "rui.sock", "")
+        assert discovered["store"] == str(launched_store.resolve()), discovered
         wrong = frame_host.post(runtime / "rui.sock", "host-info",
-                                {"version": frame_host.WIRE, "kind": "host_info", "store": ""}, expected_status=409)
+                                {"version": frame_host.WIRE, "kind": "host_info", "store": str(pathlib.Path(root) / "foreign-store")}, expected_status=409)
         assert wrong["code"] == "wrong_store_identity", wrong
         host_process.close_stdin(launched)
         assert launched.wait(timeout=20) == 0, frame_host.output(launched)
