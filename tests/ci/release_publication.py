@@ -8,6 +8,8 @@ import tempfile
 from pathlib import Path
 from urllib.parse import quote
 
+from git_command import git
+
 
 def gh(*args, input=None, output=None):
     command = ["gh", *map(str, args)]
@@ -32,11 +34,6 @@ def _release_path(release_id):
     if type(release_id) is not int or release_id <= 0:
         raise SystemExit("release resource must have a positive integer ID")
     return f"repos/{_repository()}/releases/{release_id}"
-
-
-def git(*args):
-    return subprocess.run(["git", *args], check=True,
-                          capture_output=True, text=True).stdout.strip()
 
 
 def _repository():
