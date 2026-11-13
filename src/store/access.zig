@@ -38,8 +38,11 @@ pub const Mode = enum {
     /// One domain write: SQLite autocommit under the Entry lock, or an
     /// ownership-fenced transaction on a batching engine. It takes no
     /// identities or positions; `commit` runs exactly one queued write.
-    /// Only the transition runner opens one (`transition.Commit.single`).
     single,
+    // Only the transition runner opens a writing Access, `.write`,
+    // `.settlement` or `.single` (`transition.Commit`, `transition.Pass`);
+    // "Store entry points queue and fence only through canonical access"
+    // refuses one opened in any other Store file, tests included.
 };
 
 /// What a round reports besides its guards' errors. Each one fences.

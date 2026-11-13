@@ -2130,6 +2130,11 @@ def validate_scenario(data, sizes=None):
         require(isinstance(adjacent, dict) and all(isinstance(row, str) and row and "\n" not in row
                 and isinstance(detail, str) and detail and "\n" not in detail for row, detail in adjacent.items()),
                 f"{name}: expect_next maps row text to its following line")
+        backgrounds = state.get("expect_background", {})
+        require(isinstance(backgrounds, dict) and all(isinstance(text, str) and text
+                and not any(c in text for c in "\0\r\n") and isinstance(color, str)
+                and re.fullmatch(r"#[0-9a-fA-F]{6}", color) for text, color in backgrounds.items()),
+                f"{name}: expect_background maps row text to #rrggbb")
         last = state.get("expect_last")
         require(last is None or isinstance(last, str) and bool(last) and "\n" not in last,
                 f"{name}: expect_last must be nonempty single-line text")
@@ -2560,28 +2565,44 @@ def frame_row_failure(state, plain):
     return None
 
 
+def frame_marker_cells(frame, text):
+    """Return the committed cells spanning text's first occurrence, or None."""
+    for row in frame.cells:
+        start = "".join(cell.data for cell in row).find(text)
+        if start < 0:
+            continue
+        offset, matched = 0, []
+        for cell in row:
+            end = offset + len(cell.data)
+            if end > start and offset < start + len(text):
+                matched.append(cell)
+            offset = end
+        return matched
+    return None
+
+
 def frame_dim_failure(state, frame):
     """Assert actual committed cell attributes, independent of theme colours."""
     for rule in state.get("expect_dim", []):
         if frame.columns < rule.get("min_columns", 1):
             continue
         text = rule["text"]
-        for row in frame.cells:
-            line = "".join(cell.data for cell in row)
-            start = line.find(text)
-            if start < 0:
-                continue
-            offset, matched = 0, []
-            for cell in row:
-                end = offset + len(cell.data)
-                if end > start and offset < start + len(text):
-                    matched.append(cell)
-                offset = end
-            if matched and all(cell.faint == rule["dim"] for cell in matched):
-                break
-            return f"{text!r} must have dim={rule['dim']}"
-        else:
+        cells = frame_marker_cells(frame, text)
+        if cells is None:
             return f"missing dim specimen {text!r}"
+        if not all(cell.faint == rule["dim"] for cell in cells):
+            return f"{text!r} must have dim={rule['dim']}"
+    return None
+
+
+def frame_background_failure(state, frame):
+    """Assert committed cell backgrounds under each marker, not output bytes."""
+    for text, color in state.get("expect_background", {}).items():
+        cells = frame_marker_cells(frame, text)
+        if cells is None:
+            return f"missing background specimen {text!r}"
+        if not all(frame.colors(cell)[1] == color[1:].lower() for cell in cells):
+            return f"{text!r} must have background={color}"
     return None
 
 
@@ -2613,7 +2634,8 @@ def frame_capture(run, target, out, state, size, reason):
     if unexpected is not None and reason is None:
         reason = f"unexpected on screen: {unexpected}"
     if reason is None:
-        reason = frame_row_failure(state, plain) or frame_dim_failure(state, frame)
+        reason = (frame_row_failure(state, plain) or frame_dim_failure(state, frame)
+                  or frame_background_failure(state, frame))
     (out / files["txt"]).write_text(plain)
     (out / files["ansi"]).write_text(ansi)
     (out / files["html"]).write_text(page)
