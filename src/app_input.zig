@@ -342,6 +342,9 @@ pub fn step(state: *State, facts: Facts, input: Input) Effects {
     // The main pane's core takes every key and paste mark:
     // the open Session's, else the overview's. A click passes.
     if (state.layer != .main or input == .mouse) return .{};
+    // `pasted` classifies keys, not lifecycle delivery. In particular the
+    // end still reaches this same pane after clearing the stream flag; an
+    // editor that accepted the start owns its completion, even with no text.
     const delivery: Effects.Delivery = .{ .under = .main, .pasted = state.pasting };
     if (facts.frame.modal and facts.session_open) return .{ .route = .{ .session = delivery } };
     if (state.listFocused()) return .{ .route = .{ .overview = .{ .under = .main, .pasted = state.pasting, .wide = facts.wide } } };
@@ -737,4 +740,26 @@ test "App input model choice Tab domain retains its candidate in the filter and 
     focus.tab(&.{}, false);
     try std.testing.expectEqual(@as(?usize, 7), focus.selected());
     try std.testing.expect(focus == .filter);
+}
+}
+
+test "App input paste completion routes to the same owner for every focus and paste shape" {
+    for ([_]bool{ false, true }) |wide| for ([_]bool{ false, true }) |session_open| for ([_]bool{ false, true }) |list_focused| for ([_][]const u8{ "", "\n", "text" }) |paste| {
+        var state: State = .{ .area = if (list_focused) .list else .main };
+        const facts: Facts = .{ .wide = wide, .session_open = session_open };
+        const start = step(&state, facts, .paste_start);
+        const overview = list_focused or !session_open;
+        try std.testing.expectEqual(overview, start.route == .overview);
+        try std.testing.expectEqual(!overview, start.route == .session);
+        try std.testing.expect(state.pasting);
+        for (paste) |_| {
+            const text = step(&state, facts, .{ .key = .{ .named = null } });
+            try std.testing.expectEqual(start.route, text.route);
+        }
+        const end = step(&state, facts, .paste_end);
+        try std.testing.expectEqual(std.meta.activeTag(start.route), std.meta.activeTag(end.route));
+        const delivery = if (overview) end.route.overview else end.route.session;
+        try std.testing.expect(!delivery.pasted and !state.pasting);
+        try std.testing.expectEqual(list_focused, state.listFocused());
+    };
 }
