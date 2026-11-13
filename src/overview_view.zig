@@ -112,8 +112,8 @@ pub const Rule = struct {
 };
 
 /// The one per-kind table. `step` and `render` read it and switch on no kind.
-/// Counts, order and quietness read it at `heldKind`; marks, colours and
-/// words at `shownKind`.
+/// Marks, colours, words, counts, order and quietness all read it at
+/// `shownKind`.
 pub const rules = std.enums.EnumArray(Kind, Rule).init(.{
     .idle = .{ .mark = .waiting, .colour = .normal, .word = "idle", .order = .done, .stoppable = false },
     .pending = .{ .mark = .queued, .colour = .quiet, .order = .queued, .stoppable = true },
@@ -1887,11 +1887,10 @@ fn arrange(state: *State) error{OutOfMemory}!void {
     for (state.order.items, state.sort_keys.items) |*slot, key| slot.* = key.index;
 }
 
-/// How many rows hold each mark the counts line counts. A decision still
-/// awaited counts as needs-you while its stop is pending.
+/// How many rows hold each mark the counts line counts.
 fn counts(state: *const State) Counts {
     var result: Counts = .{};
-    for (state.rows.items) |*row| if (visible(state, row)) switch (rules.get(heldKind(state, row)).mark) {
+    for (state.rows.items) |*row| if (visible(state, row)) switch (rules.get(shownKind(state, row)).mark) {
         .needs_you => result.needs_you += 1,
         .active => result.working += 1,
         .queued => result.queued += 1,
@@ -1902,7 +1901,7 @@ fn counts(state: *const State) Counts {
 }
 
 fn orderClass(state: *const State, row: *const Row) OrderClass {
-    return rules.get(heldKind(state, row)).order;
+    return rules.get(shownKind(state, row)).order;
 }
 
 fn position(state: *const State, ref: Reference) ?usize {
@@ -2020,18 +2019,11 @@ fn stoppable(state: *const State, ref: Reference, work: Kind) bool {
 }
 
 /// The kind a row shows, with a retry that has fallen due as the work it
-/// became.
+/// became. A pending stop shows as stopping, an awaited decision included:
+/// the person has acted on it, so it no longer needs them.
 fn shownKind(state: *const State, row: *const Row) Kind {
     if (state.openStop(row.reference) == null and needsDecision((&row.state))) return .approval;
     return kindShown(state, row.reference, (&row.state).asOf(state.now_ms));
-}
-
-/// What a row's work holds for the person: its shown kind, except that a
-/// decision still awaited stays approval while its stop is pending, since
-/// the approval is pending until the stop lands. Counts, order and
-/// quietness read the rules at this kind.
-fn heldKind(state: *const State, row: *const Row) Kind {
-    return if (needsDecision(&row.state)) .approval else shownKind(state, row);
 }
 
 /// When the row's shown state began: a retry that has fallen due waits
@@ -2883,7 +2875,7 @@ fn yours(row: *const Row) bool {
 
 /// Chats you have never written in recede unless their work needs you.
 pub fn rowQuiet(state: *const State, row: *const Row) bool {
-    return !yours(row) and !rules.get(heldKind(state, row)).needs_person;
+    return !yours(row) and !rules.get(shownKind(state, row)).needs_person;
 }
 
 /// Provider recovery bands above the list. Archive views remain reachable
@@ -5411,19 +5403,21 @@ test "overview quiet rows cover every kind, sender, selection, a pending stop an
     // Independent expectations from the approved mock: a chat the person
     // never wrote in recedes unless it waits for approval or failed. The
     // second column is quiet when never written in; the third says whether
-    // the row needs you, which a pending stop keeps until it lands.
+    // the row needs you; the fifth is the kind it shows. A pending stop shows
+    // stopping, an awaited decision included: the person has acted on it, so
+    // it counts, sorts and recedes as stopping.
     const cases = .{
-        .{ kind_cases[0].state, true, false, "Last answer" },
-        .{ kind_cases[1].state, true, false, "Queued" },
-        .{ kind_cases[2].state, true, false, "Thinking" },
-        .{ kind_cases[3].state, true, false, "Provider error" },
-        .{ kind_cases[4].state, true, false, "Run the logic tests" },
-        .{ kind_cases[5].state, false, true, "Allow: echo yes" },
-        .{ kind_cases[6].state, true, false, "Stopping" },
-        .{ kind_cases[7].state, true, false, "Last answer" },
-        .{ kind_cases[8].state, false, false, "Last answer" },
-        .{ kind_cases[9].state, true, false, "Last answer" },
-        .{ WorkState{ .bash = .{ .since = test_now_s, .call = 0, .description = null, .running = 1, .approvals = 1 } }, false, true, "Allow: echo yes" },
+        .{ kind_cases[0].state, true, false, "Last answer", Kind.idle },
+        .{ kind_cases[1].state, true, false, "Queued", Kind.pending },
+        .{ kind_cases[2].state, true, false, "Thinking", Kind.working },
+        .{ kind_cases[3].state, true, false, "Provider error", Kind.retrying },
+        .{ kind_cases[4].state, true, false, "Run the logic tests", Kind.bash },
+        .{ kind_cases[5].state, false, true, "Allow: echo yes", Kind.approval },
+        .{ kind_cases[6].state, true, false, "Stopping", Kind.stopping },
+        .{ kind_cases[7].state, true, false, "Last answer", Kind.finished },
+        .{ kind_cases[8].state, false, false, "Last answer", Kind.failed },
+        .{ kind_cases[9].state, true, false, "Last answer", Kind.stopped },
+        .{ WorkState{ .bash = .{ .since = test_now_s, .call = 0, .description = null, .running = 1, .approvals = 1 } }, false, true, "Allow: echo yes", Kind.approval },
     };
     comptime std.debug.assert(cases.len == std.enums.values(Kind).len + 1);
     inline for (cases) |case| for ([_]bool{ false, true }) |stop| for ([_]bool{ false, true }) |wrote| for ([_]bool{ false, true }) |selected| for ([_]u16{ 46, 140 }) |width| for ([_]Caps.Depth{ .direct, .indexed, .none }) |depth| {
@@ -5445,14 +5439,22 @@ test "overview quiet rows cover every kind, sender, selection, a pending stop an
         }
         state.selected = if (selected) .{ .session = listed.reference } else .new_session;
         const row = state.find(listed.reference).?;
-        const quiet = !wrote and case[1];
+        try std.testing.expectEqual(if (stopping) Kind.stopping else case[4], shownKind(&state, row));
+        const needs_you = case[2] and !stopping;
+        const quiet = !wrote and (case[1] or stopping);
         try std.testing.expectEqual(quiet, rowQuiet(&state, row));
         // Counts, order and dimming agree on what needs you.
-        try std.testing.expectEqual(@intFromBool(case[2]), state.summary.counts.needs_you);
-        try std.testing.expectEqual(case[2], orderClass(&state, row) == .needs_you);
+        try std.testing.expectEqual(@intFromBool(needs_you), state.summary.counts.needs_you);
+        try std.testing.expectEqual(needs_you, orderClass(&state, row) == .needs_you);
+        if (stopping) {
+            try std.testing.expectEqual(@as(usize, 1), state.summary.counts.working);
+            try std.testing.expectEqual(OrderClass.working, orderClass(&state, row));
+        }
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         const first = try listSegments(arena.allocator(), &state, .{ .row = 0 }, width, caps, 0);
+        // The drawn mark is the counted mark.
+        try std.testing.expectEqual(markCounted(drawnMark(try segmentText(arena.allocator(), first.segments))), countedMark(state.summary.counts));
         const name = try styleOf(first.segments, "Quiet row");
         try std.testing.expectEqual(quiet, name.dim);
         try std.testing.expectEqual(selected, first.selected);
@@ -5472,6 +5474,33 @@ test "overview quiet rows cover every kind, sender, selection, a pending stop an
     defer empty.deinit();
     _ = try step(&empty, .{ .conversation = "newone".* });
     try std.testing.expect(!rowQuiet(&empty, empty.find("newone".*).?));
+}
+
+/// The mark a row's first line draws; a spinner draws the active mark.
+fn drawnMark(text: []const u8) Mark {
+    const glyph = text[1 .. std.mem.indexOfScalarPos(u8, text, 1, ' ') orelse text.len];
+    for (spinner) |frame| if (std.mem.eql(u8, glyph, frame)) return .active;
+    for (std.enums.values(Mark)) |mark| if (std.mem.eql(u8, glyph, marks.get(mark).unicode) or std.mem.eql(u8, glyph, marks.get(mark).ascii)) return mark;
+    std.debug.panic("no mark drawn in {s}", .{text});
+}
+
+/// The mark as the counts line counts it, or null for a mark it leaves out.
+fn markCounted(mark: Mark) ?Mark {
+    return switch (mark) {
+        .needs_you, .active, .queued, .failed => mark,
+        .waiting, .finished, .stopped, .newer => null,
+    };
+}
+
+/// The one mark the counts line counts for a single visible row, or null.
+fn countedMark(tally: Counts) ?Mark {
+    const total = tally.needs_you + tally.working + tally.queued + tally.failed;
+    std.debug.assert(total <= 1);
+    if (tally.needs_you == 1) return .needs_you;
+    if (tally.working == 1) return .active;
+    if (tally.queued == 1) return .queued;
+    if (tally.failed == 1) return .failed;
+    return null;
 }
 
 // PR3: independent layout expectations for the two-line list contract.

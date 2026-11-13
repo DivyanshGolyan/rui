@@ -2487,7 +2487,7 @@ Divyansh chose the counts line and totals-only memory on 2026-11-09 (TUI rework 
 Only your own Session at work (an active mark under Yours) turns a spinner, `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`, one frame per 200 ms of the monotonic clock, every spinner in step.
 Only a Unicode, colour screen spins, and a row faded while the Host does not answer holds still.
 In both the full Sessions list and the conversation sidebar, a Session with no `from_person_at` dims both complete row lines, including the mark, age and folder, unless its work needs the person: it waits for approval or failed. Every other state, stopped and stopping included, recedes in a chat the person never wrote in.
-A decision still awaited needs the person while a stop of it is pending, since the approval is pending until the stop lands: the row shows stopping but stays undimmed, counts as `?` and sorts under Needs you. One per-kind rule decides this for the counts, the order and the dimming.
+A pending stop shows stopping, an awaited decision included: the person has acted on it, so the row draws, counts and sorts as stopping and recedes in a chat they never wrote in. One per-kind rule at the kind a row shows decides its mark, count, order and dimming.
 The open empty New Session is yours and stays normal; selection and hover override dim text.
 Quietness is derived by the overview core from the listed facts, never stored or added to the wire.
 The overview wakes for frames only while a spinner is on screen, and each frame writes only the cells that changed.
