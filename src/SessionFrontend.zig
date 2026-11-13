@@ -9843,3 +9843,38 @@ test "empty chat composer placeholder follows current no-message facts" {
     _ = try fixture.draw();
     try std.testing.expectEqualStrings("", fixture.self.app_input.composer.placeholder);
 }
+
+test "App Session paste completion preserves retained draft caret after empty newline and ordinary pastes" {
+    for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |list_focused| for ([_][]const u8{ "", "\n", "pq" }) |paste| for (0..3) |cursor| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        held.size = .{ .width = width, .height = 30 };
+        held.root.size = .{ .width = width, .height = 30 };
+        _ = try held.draw();
+        _ = held.self.input.append("ab");
+        held.self.input.editors[held.self.input.active].cursor = cursor;
+        held.root.input.list_focused = list_focused;
+        try held.keys("\x1b[200~");
+        try std.testing.expectEqual(!list_focused, held.self.input.editors[held.self.input.active].pasting);
+        try held.keys(paste);
+        try held.keys("\x1b[201~");
+        try std.testing.expect(!held.root.input.pasting);
+        try std.testing.expect(!held.self.input.editors[held.self.input.active].pasting);
+        try std.testing.expect(held.self.submission.intent == null and held.self.input.submitted == null);
+        // The list has no editor: a paste there cannot alter the hidden chat.
+        var pasted: [32]u8 = undefined;
+        const accepted = if (list_focused) "" else paste;
+        const expected = try std.fmt.bufPrint(&pasted, "{s}{s}{s}", .{ "ab"[0..cursor], accepted, "ab"[cursor..] });
+        try std.testing.expectEqualStrings(expected, held.self.input.composition().bytes);
+        const after_paste = held.self.input.composition().cursor;
+        try std.testing.expectEqual(cursor + accepted.len, after_paste);
+        var ctx = held.context();
+        try held.root.showMain(&ctx);
+        try held.keys("\x1b[DX");
+        const insert = after_paste -| 1;
+        var edited: [32]u8 = undefined;
+        try std.testing.expectEqualStrings(try std.fmt.bufPrint(&edited, "{s}X{s}", .{ expected[0..insert], expected[insert..] }), held.self.input.composition().bytes);
+        try std.testing.expectEqual(insert + 1, held.self.input.composition().cursor);
+        try std.testing.expect(held.self.submission.intent == null and held.self.input.submitted == null);
+    };
+}

@@ -7776,3 +7776,35 @@ test "creation preference read failure is retained through repair and ordinary r
     try std.testing.expectEqualStrings("high", Seen.now.creation.reasoning_effort.?.slice());
     try std.testing.expectEqualStrings("bypass", Seen.now.creation.permission_mode.slice());
 }
+
+test "App overview paste shapes after chat close cannot create or retain an editor paste" {
+    // #1379 removed the overview composer. Test its actual list owner, not
+    // a substitute editor: both paste marks are delivered and all text is inert.
+    for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |list_focused| for ([_][]const u8{ "", "\n", "text" }) |paste| {
+        const rig = try openOverview();
+        defer rig.close();
+        var events = rig.context();
+        defer events.cmds.deinit(std.testing.allocator);
+        try rig.overview.root.closeSession(&events);
+        try std.testing.expect(rig.overview.root.input.list_focused);
+        rig.overview.root.input.list_focused = list_focused;
+        var shown = try rig.shown(width, 30);
+        defer shown.deinit();
+        const creates = Seen.now.creates;
+        const opens = Seen.now.conversations;
+        try std.testing.expect(try rig.press("\x1b[200~") == null);
+        try std.testing.expect(try rig.press(paste) == null);
+        try std.testing.expect(try rig.press("\x1b[201~") == null);
+        try std.testing.expect(!rig.overview.root.input.pasting);
+        try std.testing.expect(try rig.press("\x1b[DX") == null);
+        try std.testing.expectEqual(creates, Seen.now.creates);
+        try std.testing.expectEqual(opens, Seen.now.conversations);
+        try std.testing.expect(!rig.overview.state.creating());
+        try std.testing.expect(rig.overview.root.session == null);
+        // Ordinary explicit Enter still creates an empty chat, never sends
+        // any of the ignored paste or later typing as a first Message.
+        try std.testing.expect(try rig.press("\r") == null);
+        try std.testing.expect(try rig.settle() == null);
+        try std.testing.expectEqual(creates + 1, Seen.now.creates);
+    };
+}
