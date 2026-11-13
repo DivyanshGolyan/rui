@@ -475,7 +475,7 @@ test "continued accepted output allows model revisions and keeps public text rea
             "JOIN content text ON text.content_id=item.message_content_id " ++
             "JOIN content bag ON bag.content_id=item.extras_content_id WHERE item.message_content_id=?1");
         defer _ = c.sqlite3_finalize(backing);
-        try sqlite.bindI64(backing, 1, public_reader.content_id);
+        try sqlite.bindI64(backing, 1, public_reader.window.content_id);
         try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(backing));
         try std.testing.expectEqual(@as(c_int, 0), c.sqlite3_column_int(backing, 0));
         try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_column_int(backing, 1));

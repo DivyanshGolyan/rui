@@ -542,10 +542,10 @@ pub const HistoricalView = struct {
         const location: ContentLocation = .{ .store = self.store, .reference = identity, .content_id = reference.content_id };
         out.* = .{ .view = self, .reference = reference };
         out.reader.open(location);
-        out.reader.first = first;
-        out.reader.check.verified = reference.verified or reference.text_start != null;
+        out.reader.window.first = first;
+        out.reader.window.check.verified = reference.verified or reference.text_start != null;
         if (self.pageBytes(reference)) |bytes| {
-            out.reader.inline_bytes = bytes;
+            out.reader.window.inline_bytes = bytes;
             self.inline_readers += 1;
         }
         self.readers += 1;
@@ -651,7 +651,7 @@ pub const HistoricalReader = struct {
     /// Replay reads in order, so its content reader checks every value's
     /// digest at its end.
     pub fn read(self: *HistoricalReader, start: u64, destination: []u8) !usize {
-        std.debug.assert(self.usable() and (self.reader.check.verified or start == self.reader.check.position));
+        std.debug.assert(self.usable() and (self.reader.window.check.verified or start == self.reader.window.check.position));
         const base = self.reference.text_start orelse return self.reader.read(start, destination);
         const text = &self.view.output_parts.?.text.?;
         std.debug.assert(start <= self.reference.length and base + start == text.read);
@@ -666,7 +666,7 @@ pub const HistoricalReader = struct {
 
     pub fn close(self: *HistoricalReader) void {
         std.debug.assert(self.usable());
-        if (self.reader.inline_bytes != null) self.view.inline_readers -= 1;
+        if (self.reader.window.inline_bytes != null) self.view.inline_readers -= 1;
         self.reader.close();
         self.view.readers -= 1;
         self.active = false;

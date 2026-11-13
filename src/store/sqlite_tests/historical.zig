@@ -234,7 +234,7 @@ test "large historical readers leave checkpoints free" {
     var reader: HistoricalReader = undefined;
     try view.openContent(entry.content.?, &reader);
     defer reader.close();
-    reader.reader.allocator = std.testing.allocator;
+    reader.reader.window.allocator = std.testing.allocator;
     var buffer: [4096]u8 = undefined;
     var offset: usize = 0;
     while (offset < text.len) {
