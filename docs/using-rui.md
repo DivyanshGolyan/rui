@@ -30,7 +30,7 @@ Enter these at the chat’s `›` prompt. The overview has no input or slash com
 | `/new` | Starts a new empty chat; keeps the old chat unchanged. |
 | `/clear` | Same as `/new`: starts a new empty chat, not deletion of history. |
 
-Both `/new` and `/clear` use **+ New Session**’s creation owner. They send no Message until you type and send one in the new chat. Extra text, such as `/new foo`, is misuse. Loaded skill rows insert their names into the Message; they do not run an app command.
+Both `/new` and `/clear` use **+ New Session**’s creation owner. They send no Message until you type and send one in the new chat. Extra text, such as `/new foo`, is misuse. Loaded skill rows insert their names into the Message; they do not run an app command. A leading `/name` outside the chat command grammar is sent unchanged as a Message, even before suggestions arrive. The Host looks up skills in this Session's complete saved catalog; an unknown name stays literal text for the agent.
 
 While the model works on a reply, the work line says `Thinking` with elapsed time.
 Rate-limited retries keep their countdown, and running tools show their descriptions.
@@ -207,6 +207,8 @@ If the provider does not know the ID, the Session's first request fails and says
 Without `--model`, a new Session uses your saved default.
 With no saved default, it uses `gpt-6.1-sol`.
 To pick the default from a list, open **Settings** in the overview and press Enter on **Model**.
+The list shows the models of the sign-in new Sessions use, and **Sign-in** reads **ChatGPT** whether you signed in in the browser or with a device code.
+Typing `chatgpt` or `codex` keeps a ChatGPT sign-in's models; `api` keeps an API key's.
 
 To switch an existing Session within its provider, select **Model** in chat info, or run `rui session configure --session SESSION --model ID`.
 The next model request replays visible conversation without the old model’s private reasoning or compacted state.

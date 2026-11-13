@@ -743,34 +743,6 @@
       ]
     },
     {
-      "name": "draft-chat-unknown",
-      "note": "B06: conversation counterpart uses the same draft-ending rule",
-      "open": "Draft lifecycle",
-      "steps": [
-        {
-          "text": "/nope"
-        },
-        {
-          "keys": [
-            "Enter"
-          ]
-        },
-        {
-          "wait": "Unknown command /nope"
-        }
-      ],
-      "expect": [
-        "Unknown command /nope",
-        "Draft lifecycle"
-      ],
-      "absent": [
-        "\u203a /nope"
-      ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
-      ]
-    },
-    {
       "name": "settings",
       "note": "App settings by selecting the list's Settings row (End) and pressing Enter",
       "open": "overview",
@@ -2686,27 +2658,6 @@
       ]
     },
     {
-      "name": "unknown-command",
-      "note": "25-unknown-command",
-      "open": "Release notes for 0.60",
-      "steps": [
-        {
-          "text": "/nope"
-        },
-        {
-          "keys": [
-            "Enter"
-          ]
-        },
-        {
-          "wait": "Unknown command /nope"
-        }
-      ],
-      "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
-      ]
-    },
-    {
       "name": "misused-command",
       "note": "23-misused",
       "open": "Release notes for 0.60",
@@ -3406,6 +3357,205 @@
         "140x40"
       ],
       "expect": "Detached. Host work continues.",
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+      ]
+    },
+    {
+      "name": "appcmds-skill-without-preview",
+      "note": "Whole-line bracketed paste uses normal Message admission, never the suggestion preview",
+      "open": "Skill catalog authority",
+      "cast": [
+        {
+          "label": "Skill catalog authority",
+          "workspace": "code/appcmds-skill-without-preview",
+          "messages": [
+            "Seed a fresh chat."
+          ],
+          "mode": "bypass",
+          "skills": [
+            "review"
+          ]
+        }
+      ],
+      "steps": [
+        {
+          "text": "\u001b[200~/review this change\u001b[201~"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "The deadline check now runs"
+        }
+      ],
+      "expect": [
+        "/review this change",
+        "The deadline check now runs"
+      ],
+      "absent": [
+        "Unknown command",
+        "Usage:"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+      ]
+    },
+    {
+      "name": "appcmds-unknown-name-message",
+      "note": "Whole-line bracketed paste uses normal Message admission, never the suggestion preview",
+      "open": "Unknown name text",
+      "cast": [
+        {
+          "label": "Unknown name text",
+          "workspace": "code/appcmds-unknown-name-message",
+          "messages": [
+            "Seed a fresh chat."
+          ],
+          "mode": "bypass",
+          "skills": []
+        }
+      ],
+      "steps": [
+        {
+          "text": "\u001b[200~/genuinely-unknown this change\u001b[201~"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "The deadline check now runs"
+        }
+      ],
+      "expect": [
+        "/genuinely-unknown this change",
+        "The deadline check now runs"
+      ],
+      "absent": [
+        "Unknown command",
+        "Usage:"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+      ]
+    },
+    {
+      "name": "appcmds-hidden-discard-collision",
+      "note": "The complete grammar reserves hidden commands; noncolliding skills still complete",
+      "open": "Hidden discard collision",
+      "cast": [
+        {
+          "label": "Hidden discard collision",
+          "workspace": "code/appcmds-hidden-discard-collision",
+          "messages": [
+            "Seed a fresh chat."
+          ],
+          "mode": "bypass",
+          "skills": [
+            "discard",
+            "discarded"
+          ]
+        }
+      ],
+      "steps": [
+        {
+          "text": "/dis"
+        },
+        {
+          "wait": "/discarded"
+        }
+      ],
+      "expect": [
+        "/discarded"
+      ],
+      "absent_regex": [
+        "^\\s*/discard\\s+",
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+      ]
+    },
+    {
+      "name": "appcmds-hidden-recover-collision",
+      "note": "The complete grammar reserves hidden commands; noncolliding skills still complete",
+      "open": "Hidden recover collision",
+      "cast": [
+        {
+          "label": "Hidden recover collision",
+          "workspace": "code/appcmds-hidden-recover-collision",
+          "messages": [
+            "Seed a fresh chat."
+          ],
+          "mode": "bypass",
+          "skills": [
+            "recover",
+            "recovering"
+          ]
+        }
+      ],
+      "steps": [
+        {
+          "text": "/reco"
+        },
+        {
+          "wait": "/recovering"
+        }
+      ],
+      "expect": [
+        "/recovering"
+      ],
+      "absent_regex": [
+        "^\\s*/recover\\s+",
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+      ]
+    },
+    {
+      "name": "draft-chat-misused",
+      "note": "B06: conversation counterpart uses the same draft-ending rule",
+      "open": "Draft lifecycle",
+      "steps": [
+        {
+          "text": "/new unexpected"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Usage: /new"
+        }
+      ],
+      "expect": [
+        "Usage: /new",
+        "The deadline check now runs"
+      ],
+      "absent": [
+        "\u203a /new unexpected"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+      ]
+    },
+    {
+      "name": "misused-navigation-command",
+      "note": "Known navigation-command misuse stays local and takes the draft",
+      "open": "Release notes for 0.60",
+      "steps": [
+        {
+          "text": "/new unexpected"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Usage: /new"
+        }
+      ],
       "absent_regex": [
         "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]

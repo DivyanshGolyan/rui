@@ -725,8 +725,8 @@ fn queueSelectedContext(reader: anytype, kind: ModelAdmissionKind, row: *Selecte
 /// What a model admission that selected nothing checks before the Store
 /// counts as idle: no continuation disagrees with its calls, and every
 /// blocked Operation's calls have their outcomes. `queue` rides the
-/// caller's round; `settle` runs after it and costs one more round only
-/// when an Operation is blocked.
+/// caller's round; after it, `settled` says whether a blocked Operation's
+/// calls are still to read, in a round of their own.
 const IdleChecks = struct {
     disagreeing: disagreeing_continuation.Result = undefined,
     blocked: reads_domain.First(blocked_operation.Row) = .{},
@@ -734,10 +734,6 @@ const IdleChecks = struct {
     fn queue(checks: *IdleChecks, reader: anytype) void {
         reader.read(disagreeing_continuation, .{}, &checks.disagreeing);
         reader.readEach(blocked_operation, .{}, 1, &checks.blocked);
-    }
-
-    fn settle(checks: *const IdleChecks, reader: anytype) !void {
-        if (!try checks.settled()) try validateBlockedToolCalls(reader);
     }
 
     /// Whether the checks end here; false when a blocked Operation's
@@ -748,11 +744,50 @@ const IdleChecks = struct {
     }
 };
 
+/// The idle checks of a model admission that selected nothing
+/// (`IdleChecks`), read outside any transaction: their round, then, only
+/// when an Operation is blocked, its calls' outcomes in a round of their
+/// own. Main's names: a failed step is `TurnReadFailed`, but
+/// `blocked_operation`'s and the calls' are `CallReadFailed`.
+pub const CheckIdle = struct {
+    pub const rounds = transition.rounds(.{
+        .idle = .{ .always, error.TurnReadFailed, .{.{ blocked_operation, error.CallReadFailed }} },
+        .blocked_calls = .{ .branch, error.CallReadFailed },
+    });
+    pub const round_budget = 1;
+    pub const commit: transition.Commit = .none;
+    pub const begin: ?rounds.At = null;
+    pub const Input = struct {};
+    pub const Result = void;
+    pub const Ordinary = store_core.Ordinary.none;
+
+    input: Input = .{},
+    checks: IdleChecks = .{},
+    outcomes: reads_domain.ToolOutcomeCheck = .{},
+
+    pub fn step(t: *CheckIdle, r: *transition.Round(CheckIdle), ran: ?rounds.At) !transition.Next(CheckIdle) {
+        const at = ran orelse {
+            t.checks.queue(r);
+            return .{ .round = .idle };
+        };
+        switch (at) {
+            .idle => {
+                if (try t.checks.settled()) return .{ .done = {} };
+                queueBlockedToolCalls(r, &t.outcomes);
+                return .{ .round = .blocked_calls };
+            },
+            .blocked_calls => {
+                try t.outcomes.finish();
+                return .{ .done = {} };
+            },
+        }
+    }
+};
+
 /// Admits the next model Attempt of `kind`. The read Access `reader`
 /// selects, outside any transaction but inside the Store hold; with nothing
-/// selected it runs main's idle checks, the disagreeing continuations with
-/// whether any Operation is blocked, and only then the blocked calls'
-/// outcomes, and answers null. The selected Session's admission facts and
+/// selected it answers null, and its caller runs main's idle checks
+/// (`CheckIdle`). The selected Session's admission facts and
 /// recipe identities share selection's read batch, so Zig chooses coverage
 /// before the write Access opens. Only the selected recipe's uncovered
 /// bytes, where the purpose rests on them, are read inside the transaction.
@@ -779,10 +814,8 @@ noinline fn commitAdmission(writer: anytype, queued: *const QueuedAdmission, sta
     if (opened) {
         request = .init(start.?.view, start.?.settings);
         request.readAhead(start.?, &queued.session, queued.position);
-        store_core.followCommit(writer.store, request.follow());
     }
-    defer if (opened) store_core.followCommit(writer.store, null);
-    writer.commit() catch |err| {
+    writer.commitFollowed(if (opened) &request else null) catch |err| {
         if (opened) start.?.view.close();
         return err;
     };
@@ -818,13 +851,8 @@ noinline fn queueNextModelAttempt(reader: anytype, writer: anytype, kind: ModelA
         .{ open_turn_context, error.SessionReadFailed },
         .{ tool_continuation_context, error.SessionReadFailed },
     }, error.RunnableSelectionFailed);
-    const selection = found orelse {
-        var idle: IdleChecks = .{};
-        idle.queue(reader);
-        try store_access.runNamed(reader, .{.{ blocked_operation, error.CallReadFailed }}, error.TurnReadFailed);
-        try idle.settle(reader);
-        return false;
-    };
+    // With nothing selected, its caller runs `CheckIdle`.
+    const selection = found orelse return false;
     if (selection.cutoff.get() < selection.first_admission.get()) return error.CorruptStore;
     const session_ref: []const u8 = &selection.session.ref;
     const first_admission = selection.first_admission.get();
@@ -1183,6 +1211,11 @@ const blocked_operation = rsql.Read(.{
 const blocked_tool_calls = reads_domain.ToolOutcome("", "SELECT DISTINCT operation.operation_id," ++
     reads_domain.expectedCallsSql("operation.operation_id") ++ " " ++ blocked_operations_sql, struct {}, false);
 
+/// The idle checks' statements in the order they step, for a test that
+/// fails each: the disagreeing continuations, whether an Operation is
+/// blocked, and its calls' outcomes.
+pub const idle_statements = .{ disagreeing_continuation, blocked_operation, blocked_tool_calls };
+
 /// Before declaring the Store idle, distinguish valid permission waits
 /// from malformed canonical classification: the tool outcome rule over
 /// `blocked_tool_calls`, in a round of its own, once `blocked_operation`
@@ -1190,7 +1223,13 @@ const blocked_tool_calls = reads_domain.ToolOutcome("", "SELECT DISTINCT operati
 /// its statements.
 fn validateBlockedToolCalls(reader: anytype) !void {
     var check: reads_domain.ToolOutcomeCheck = .{};
-    reader.readEach(blocked_tool_calls, .{}, std.math.maxInt(u64), &check);
+    queueBlockedToolCalls(reader, &check);
     try store_access.runAs(reader, error.CallReadFailed);
     try check.finish();
+}
+
+/// Queues `validateBlockedToolCalls`'s read for `check`, which judges its
+/// rows and must outlive the round.
+fn queueBlockedToolCalls(reader: anytype, check: *reads_domain.ToolOutcomeCheck) void {
+    reader.readEach(blocked_tool_calls, .{}, std.math.maxInt(u64), check);
 }
