@@ -14660,6 +14660,55 @@ test "skills a Message's refusal diagnostic that fails to import saves nothing" 
     }.run);
 }
 
+test "skills a creating Message saves the skills its text bound with its admission" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            const settings = try completeConfiguration("skills-creating", "", workspace, "model-a");
+            var message: wire_request.MessageCommand = .{ .configuration = settings.configuration };
+            try message.key.set("skills-creating");
+            message.text = try testingBytesContent(&tmp, "skills-creating-text", "use /demo");
+            defer message.removeTemporaryContent(std.testing.io) catch unreachable;
+            const capture: skills_fixture_domain.MessageCapture = .{ .bound = &.{.{ .name = "demo", .bytes = "demo body" }} };
+            const reply = storage.submitMessageCapturedSkills(&message, null, null, &capture, .{});
+            try std.testing.expect(reply == .accepted);
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_skill k JOIN content c ON c.content_id=k.content_id WHERE k.admission_id=?1 AND k.name='demo' AND c.digest=?2", .{ reply.accepted.admission_id, store_testing.Blob{ .bytes = &protocol.contentDigest("demo body") } }));
+        }
+    }.run);
+}
+
+test "a Message's replay whose admission names other content fences the Store" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try configureTestSession(&storage, "replay-content");
+            var first = try completeMessage("replay-content-first", session.slice(), try tmp.dir.createFile(std.testing.io, "first", .{ .read = true }), "first text");
+            try first.text.file.?.writeStreamingAll(std.testing.io, "first text");
+            defer first.removeTemporaryContent(std.testing.io) catch unreachable;
+            var second = try completeMessage("replay-content-second", session.slice(), try tmp.dir.createFile(std.testing.io, "second", .{ .read = true }), "second text");
+            try second.text.file.?.writeStreamingAll(std.testing.io, "second text");
+            defer second.removeTemporaryContent(std.testing.io) catch unreachable;
+            try std.testing.expect(storage.submitMessageWithModel(&first, null, .{}) == .accepted);
+            try std.testing.expect(storage.submitMessageWithModel(&second, null, .{}) == .accepted);
+            try std.testing.expect(storage.submitMessageWithModel(&first, null, .{}).accepted.replayed);
+            const other = try store_testing.queryU64(&storage, "SELECT content_id FROM message_admission WHERE command_key=?1", .{"replay-content-second"});
+            try store_testing.exec(&storage, "UPDATE message_admission SET content_id=?2 WHERE command_key=?1", .{ "replay-content-first", other });
+            try std.testing.expect(storage.submitMessageWithModel(&first, null, .{}) == .infrastructure_failure);
+            try std.testing.expect(storage.isFenced());
+        }
+    }.run);
+}
+
 test "skills reload out of memory in configure or the skill tool rolls back without fencing" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {

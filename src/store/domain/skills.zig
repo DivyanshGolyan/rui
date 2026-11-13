@@ -205,7 +205,9 @@ pub const Failure = struct {
 
 /// Ordinary immutable rejected-command outcome; its typed code, not wording,
 /// controls the native caller's repair guidance and survives keyed replay.
-pub fn importFailure(a: anytype, bytes: []const u8, faults: store_core.Faults) !u64 {
+/// noinline: its value stays off its caller's frame, which sits on the
+/// engine thread's deepest chain under configure.
+pub noinline fn importFailure(a: anytype, bytes: []const u8, faults: store_core.Faults) !u64 {
     var importing: ImportingFailure = .{ .bytes = bytes };
     importing.lookup(a);
     try a.run();
