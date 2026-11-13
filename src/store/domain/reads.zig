@@ -1527,14 +1527,14 @@ const ModelCallRead = struct {
 };
 
 const call_details = rsql.Read(.{
-    .sql = "SELECT op.resolved_at,c.description,CASE WHEN name.byte_length<=" ++ std.fmt.comptimePrint("{d}", .{@import("../../tool_name.zig").max_bytes}) ++ " THEN @payload(name) END AS tool," ++
+    .sql = "SELECT op.resolved_at,c.description,CASE WHEN name.byte_length<=" ++ std.fmt.comptimePrint("{d}", .{activity_read.CallText.max_tool_bytes}) ++ " THEN @payload(name) END AS tool," ++
         action_domain.mcpServerForNameSql("op", "c.name_content_id") ++ " AS server FROM model_operation op " ++
         "JOIN model_tool_call c ON c.operation_id=op.operation_id JOIN content name ON name.content_id=c.name_content_id " ++
         "WHERE op.operation_id=?1 AND op.session_ref=?2 AND c.call_ordinal=?3",
     .Args = struct { operation: u64, session: []const u8, ordinal: u64 },
     // Text has one address, in the output item, not a second bounded copy
     // in every slot of the page's read-state union.
-    .Row = struct { resolved_at: rsql.Positive, description: *?Bounded(tool_presentation.max_description_bytes), tool: *?Bounded(@import("../../tool_name.zig").max_bytes), server: *?Bounded(@import("../../tool_record.zig").max_server_bytes) },
+    .Row = struct { resolved_at: rsql.Positive, description: *?activity_read.CallText.Description, tool: *?activity_read.CallText.Tool, server: *?activity_read.CallText.Server },
     .cardinality = .optional,
 });
 
@@ -1543,7 +1543,7 @@ fn checkCallDetails(details: *const call_details.Row, metadata: *const activity_
     const field = metadata.fields[@backingInt(tool_proposal.Field.name)];
     if (details.tool.*) |*tool| {
         if (tool.slice().len != field.length or !std.mem.eql(u8, &content_string.digest(tool.slice()), &field.digest)) return error.CorruptStore;
-    } else if (field.length <= @import("../../tool_name.zig").max_bytes) return error.CorruptStore;
+    } else if (field.length <= activity_read.CallText.max_tool_bytes) return error.CorruptStore;
 }
 
 /// A Message the Session sent from position ?3, with whether its command

@@ -64,6 +64,18 @@ pub const ReadActivityContent = struct {
 };
 
 pub const ProposalFieldReference = struct { length: u64, digest: [32]u8 };
+/// The text a call's proposal and its approval carry beside their fields,
+/// and the one place their bounds are named.
+pub const CallText = struct {
+    pub const max_description_bytes = @import("tool_presentation.zig").max_description_bytes;
+    pub const max_tool_bytes = @import("tool_name.zig").max_bytes;
+    /// tool_record.max_server_bytes names the same bound; importing it here
+    /// would cycle, so both take it from tool_name.
+    pub const max_server_bytes = @import("tool_name.zig").max_bytes;
+    pub const Description = Bounded(max_description_bytes);
+    pub const Tool = Bounded(max_tool_bytes);
+    pub const Server = Bounded(max_server_bytes);
+};
 pub const ProposalMetadata = struct {
     position: u64,
     operation: u64,
@@ -72,7 +84,7 @@ pub const ProposalMetadata = struct {
     action: ?u64,
     rejection: ?tool_proposal.Rejection,
     fields: [3]ProposalFieldReference, // ProposalField order.
-    description: ?@import("bounded.zig").Bounded(@import("tool_presentation.zig").max_description_bytes) = null,
-    tool: ?@import("bounded.zig").Bounded(@import("tool_name.zig").max_bytes) = null,
-    server: ?@import("bounded.zig").Bounded(@import("tool_name.zig").max_bytes) = null,
+    description: ?CallText.Description = null,
+    tool: ?CallText.Tool = null,
+    server: ?CallText.Server = null,
 };
