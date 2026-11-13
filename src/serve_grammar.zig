@@ -1,6 +1,7 @@
 //! Foreground Host serve options and conflicts.
 const std = @import("std");
 const grammar = @import("cli_grammar.zig");
+const provider_name = @import("provider_name.zig");
 const retention_capacity = @import("retention_capacity.zig");
 const Option = grammar.Option;
 const value = grammar.value;
@@ -23,14 +24,11 @@ pub const retired_options = &[_]grammar.RetiredOption{
     grammar.retired("bash-timeout-ms", &.{"tools.bash.timeoutMs=VALUE"}, ""),
 };
 
-/// A running Host's `host serve` arguments in this grammar. Each retired flag
-/// and its value become the assignments that replace it, and an argv with a
-/// retired flag but no --settings first gets `providers={}`: those releases
-/// started such a Host serving only the providers its flags named. An argv
-/// with no retired flag is returned as it is. `arena` owns the result.
+/// A running Host's `host serve` arguments in this grammar: each retired
+/// flag and its value become the assignments that replace it. An argv with
+/// no retired flag is returned as it is. `arena` owns the result.
 pub fn currentArguments(arena: std.mem.Allocator, args: []const []const u8) error{ OutOfMemory, InvalidArguments }![]const []const u8 {
     var flagged = false;
-    var settings = false;
     var count = args.len;
     var index: usize = 0;
     while (index < args.len) : (index += 1) {
@@ -43,17 +41,12 @@ pub fn currentArguments(arena: std.mem.Allocator, args: []const []const u8) erro
             count = count - 2 + 2 * old.assignments.len;
             index += 1;
         } else if (definition.optionNamed(arg[2..])) |option| {
-            if (std.mem.eql(u8, option.name, "settings")) settings = true;
             if (option.argument != null) index += 1;
         }
     }
     if (!flagged) return args;
-    const out = try arena.alloc([]const u8, count + @as(usize, if (settings) 0 else 2));
+    const out = try arena.alloc([]const u8, count);
     var at: usize = 0;
-    if (!settings) {
-        out[0..2].* = .{ "--set", "providers={}" };
-        at = 2;
-    }
     index = 0;
     while (index < args.len) : (index += 1) {
         const arg = args[index];
@@ -81,6 +74,31 @@ pub fn currentArguments(arena: std.mem.Allocator, args: []const []const u8) erro
     }
     std.debug.assert(at == out.len);
     return out;
+}
+
+/// The provider set a previous release served when no layer of its Host's
+/// launch named providers, which replay passes first so that an upgrade never
+/// changes what a running Host serves: a Host started without --settings
+/// served only the providers its flags named, and a --settings document
+/// without `providers` served every built-in entry. Null when the document
+/// names providers. Part of the retired_options transition, removed with it.
+pub fn previousProviders(settings: bool, document_names_providers: bool) ?[]const u8 {
+    if (!settings) return "providers={}";
+    if (document_names_providers) return null;
+    return every_provider;
+}
+
+const every_provider = blk: {
+    var set: []const u8 = "providers={";
+    for (std.meta.fieldNames(provider_name.Provider), 0..) |name, n| set = set ++ (if (n == 0) "" else ",") ++ "\"" ++ name ++ "\":{}";
+    break :blk set ++ "}";
+};
+
+test "a previous release's provider set when no layer named one" {
+    try std.testing.expectEqualStrings("providers={}", previousProviders(false, false).?);
+    try std.testing.expectEqualStrings("providers={}", previousProviders(false, true).?);
+    try std.testing.expectEqual(@as(?[]const u8, null), previousProviders(true, true));
+    try std.testing.expectEqualStrings("providers={\"codex\":{},\"openai\":{},\"chatgpt\":{}}", previousProviders(true, false).?);
 }
 
 fn retiredNamed(name: []const u8) ?grammar.RetiredOption {

@@ -369,6 +369,16 @@ fn readDocumentAt(init: std.process.Init, source: []const u8, settings: *hs.Sett
     return json.object.contains("providers");
 }
 
+/// Whether the --settings document at absolute `source` names `providers`.
+pub fn documentNamesProviders(init: std.process.Init, source: []const u8) !bool {
+    const settings = try init.gpa.create(hs.Settings);
+    defer init.gpa.destroy(settings);
+    settings.* = .{};
+    defer settings.deinit();
+    var failure: start_report.Failure = undefined;
+    return readDocumentAt(init, source, settings, &failure);
+}
+
 fn readPipe(init: std.process.Init, file: std.Io.File, settings: *hs.Settings, failure: *start_report.Failure) !void {
     _ = try readPipeAt(init, file, settings, failure);
 }
@@ -1030,7 +1040,10 @@ test "Host start reads a previous release's retired flags as the settings those 
         defer gpa.destroy(replayed);
         replayed.* = .{};
         defer replayed.deinit();
-        const parsed = try parseForTest(arena.allocator(), try serve_grammar.currentArguments(arena.allocator(), case.args));
+        // Replay puts the release's provider set first (HostLifecycle.replayOptions).
+        const translated = try serve_grammar.currentArguments(arena.allocator(), case.args);
+        const replayed_args = try std.mem.concat(arena.allocator(), []const u8, &.{ &.{ "--set", serve_grammar.previousProviders(false, false).? }, translated });
+        const parsed = try parseForTest(arena.allocator(), replayed_args);
         var fixtures: providers.Fixtures = .{};
         try fillAt(init, &parsed, dir, replayed, &fixtures, &failure);
         const expected = try gpa.create(hs.Settings);
