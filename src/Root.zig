@@ -93,6 +93,12 @@ pub fn showMain(self: *Self, ctx: *vxfw.EventContext) !void {
     try self.navigate(ctx, .show_main);
 }
 
+/// List activation resumes the open chat as a chat-pane click does: focus
+/// moves, and nothing the chat presents closes.
+pub fn focusChat(self: *Self, ctx: *vxfw.EventContext) !void {
+    try self.navigate(ctx, .focus_chat);
+}
+
 /// Settings takes the place of the main pane; it is no content of a feed.
 /// The page reloads first, so a failed reload leaves the layer as it was.
 pub fn openSettings(self: *Self, ctx: *vxfw.EventContext) !void {
@@ -1035,6 +1041,31 @@ test "Root navigation closes the composed main presentation before focusing anot
     try std.testing.expect(root.input.layer.settingsOpen());
     try std.testing.expect(root.settings_page.panel.choice != null);
     try std.testing.expectEqual(@as(usize, 7), owner.closes);
+}
+
+test "Root resumes the open chat from the list by key or click without closing its presentation" {
+    const Owner = struct {
+        closes: usize = 0,
+        fn close(raw: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.closes += 1;
+        }
+    };
+    const pane: vxfw.Text = .{ .text = "" };
+    var owner: Owner = .{};
+    var root: Self = .{ .overview = pane.widget(), .list = pane.widget(), .session = pane.widget(), .size = .{ .width = 140, .height = 40 }, .main_presentation = .{ .context = &owner, .close = Owner.close } };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    for ([_]bool{ false, true }) |click| {
+        try std.testing.expect(try root.focusList(&ctx, true));
+        if (click) {
+            try root.widget().captureEvent(&ctx, .{ .mouse = .{ .col = 100, .row = 10, .button = .left, .type = .press, .mods = .{} } });
+        } else try root.focusChat(&ctx);
+        try std.testing.expect(!root.input.list_focused);
+        try std.testing.expect(ctx.cmds.items[ctx.cmds.items.len - 1].request_focus.eql(root.session.?));
+    }
+    try std.testing.expectEqual(@as(usize, 0), owner.closes);
 }
 
 test "App root hands list activation unchanged to its one core" {

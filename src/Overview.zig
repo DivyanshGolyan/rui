@@ -694,7 +694,7 @@ fn appNext(self: *Self, ctx: *vxfw.EventContext, next: ?Next) !void {
             ctx.quit = true;
         },
         .open_settings => try self.root.openSettings(ctx),
-        .focus_chat => try self.root.showMain(ctx),
+        .focus_chat => try self.root.focusChat(ctx),
 
         .open => |reference| {
             try self.root.showMain(ctx);
@@ -7807,4 +7807,35 @@ test "App overview paste shapes after chat close cannot create or retain an edit
         try std.testing.expect(try rig.settle() == null);
         try std.testing.expectEqual(creates + 1, Seen.now.creates);
     };
+}
+
+test "App overview list activation resumes the open chat without closing its presentation" {
+    const Presentation = struct {
+        var closes: usize = 0;
+        fn close(_: *anyopaque) void {
+            closes += 1;
+        }
+    };
+    for ([_][]const u8{ "\r", "\x1b[C" }) |key| {
+        const rig = try openListed();
+        defer rig.close();
+        const reference = shownRow(rig, 2);
+        const chat: vxfw.Text = .{ .text = "Chat" };
+        rig.overview.root.session = chat.widget();
+        // The fixture borrowed the dummy widget, not an app_session allocation.
+        defer rig.overview.root.session = null;
+        rig.overview.root.size = .{ .width = 140, .height = 40 };
+        _ = try rig.overview.event(.{ .conversation = reference });
+        // Stand in for an open Chat Info: it must survive the return.
+        rig.overview.root.main_presentation = .{ .context = rig, .close = Presentation.close };
+        Presentation.closes = 0;
+        var ctx = rig.context();
+        defer ctx.cmds.deinit(std.testing.allocator);
+        try std.testing.expect(try rig.overview.root.focusList(&ctx, true));
+        const opens = Seen.now.conversations;
+        try std.testing.expect(try rig.press(key) == null);
+        try std.testing.expect(!rig.overview.root.input.list_focused);
+        try std.testing.expectEqual(@as(usize, 0), Presentation.closes);
+        try std.testing.expectEqual(opens, Seen.now.conversations);
+    }
 }

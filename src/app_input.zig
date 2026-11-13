@@ -80,6 +80,8 @@ pub const Input = union(enum) {
     other,
     back_to_list: bool,
     session_closed,
+    /// Keyboard focus returns from the list to the open chat it shows.
+    focus_chat,
     open_settings,
     /// Show the main pane: close settings, keeping any sign-in over it.
     show_main,
@@ -165,6 +167,9 @@ fn navigated(layer: Layer, page: Effects.Page) Effects {
 /// Root reloads the settings page before it sends `open_settings`, so a
 /// failed reload never reaches this state.
 pub fn step(state: *State, facts: Facts, input: Input) Effects {
+    // Under main, resuming the chat only moves keys, as a chat-pane click
+    // does. A page over main is left first, exactly as showing main leaves it.
+    if (input == .focus_chat and state.layer == .main) return if (facts.session_open) focusChat(state) else .{};
     switch (input) {
         .back_to_list => |draft_empty| {
             if (!draft_empty or !facts.wide or !facts.session_open or state.layer != .main) return .{};
@@ -183,7 +188,7 @@ pub fn step(state: *State, facts: Facts, input: Input) Effects {
             };
             return navigated(state.layer, .close_keys);
         },
-        .show_main => {
+        .show_main, .focus_chat => {
             state.list_focused = false;
             state.layer = switch (state.layer) {
                 .main, .settings => .main,
@@ -240,10 +245,7 @@ pub fn step(state: *State, facts: Facts, input: Input) Effects {
             state.list_focused = true;
             return .{ .focus = .list, .redraw = true };
         },
-        .chat_click => {
-            state.list_focused = false;
-            return .{ .focus = .main, .redraw = true };
-        },
+        .chat_click => return focusChat(state),
         else => {},
     };
     // The main pane's core takes every key and paste mark:
@@ -256,6 +258,13 @@ pub fn step(state: *State, facts: Facts, input: Input) Effects {
     if (state.list_focused) return .{ .route = .{ .overview = delivery } };
 
     return .{ .route = if (facts.session_open) .{ .session = delivery } else .{ .overview = delivery } };
+}
+
+/// The one list-to-chat transition, by click or list activation. It only
+/// moves keys: what the chat presents, such as Chat Info, stays open.
+fn focusChat(state: *State) Effects {
+    state.list_focused = false;
+    return .{ .focus = .main, .redraw = true };
 }
 
 /// The overview's keys under the settings page, never pasted.
@@ -516,10 +525,36 @@ test "App input list activation routes unchanged to its semantic owner" {
         const result = step(&state, .{ .session_open = wide, .wide = wide }, .{ .key = .{ .named = null } });
         try std.testing.expectEqual(Effects.Route{ .overview = .{ .under = .main, .pasted = false } }, result.route);
         try std.testing.expect(state.list_focused);
-        const resumed = step(&state, .{ .session_open = true, .wide = wide }, .show_main);
+        const resumed = step(&state, .{ .session_open = true, .wide = wide }, .focus_chat);
         try std.testing.expectEqual(@as(?Effects.Focus, .main), resumed.focus);
         try std.testing.expect(!state.list_focused);
     }
+}
+
+test "App input list activation and chat-pane click share one focus transition that keeps the chat's presentation" {
+    const layers = [_]Layer{ .main, .settings, .{ .sign_in = .{ .over = .main } }, .{ .sign_in = .{ .over = .settings } } };
+    for (layers) |layer| for ([_]bool{ false, true }) |wide| for ([_]bool{ false, true }) |session_open| for ([_]bool{ false, true }) |list_focused| {
+        const facts: Facts = .{ .session_open = session_open, .wide = wide };
+        var activated: State = .{ .layer = layer, .list_focused = list_focused };
+        const resume_effects = step(&activated, facts, .focus_chat);
+        try std.testing.expectEqual(Effects.Route.pass, resume_effects.route);
+        if (layer != .main) {
+            // Over a page, activation leaves it as showing main does.
+            var shown: State = .{ .layer = layer, .list_focused = list_focused };
+            try std.testing.expectEqualDeep(step(&shown, facts, .show_main), resume_effects);
+            try std.testing.expectEqualDeep(shown, activated);
+            continue;
+        }
+        // Under main, never a page reset: an open Chat Info survives.
+        try std.testing.expectEqual(Effects.Page.keep, resume_effects.page);
+        try std.testing.expectEqual(Layer.main, activated.layer);
+        try std.testing.expectEqual(if (session_open) false else list_focused, activated.list_focused);
+        try std.testing.expectEqual(if (session_open) @as(?Effects.Focus, .main) else null, resume_effects.focus);
+        if (!session_open or !wide) continue;
+        var clicked: State = .{ .layer = layer, .list_focused = list_focused };
+        try std.testing.expectEqualDeep(resume_effects, step(&clicked, facts, .{ .mouse = .chat_click }));
+        try std.testing.expectEqualDeep(activated, clicked);
+    };
 }
 
 test "App input list focus routes every list event to its semantic owner and mouse returns focus" {
