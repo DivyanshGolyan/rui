@@ -56,7 +56,7 @@ class TimelineTest(unittest.TestCase):
         self.assertEqual(row["stages"]["codex_reviewed"], "2026-11-13T10:43:48Z")
 
     def test_clean_requires_trusted_completed_summary(self):
-        for change in ("running", "findings", "string_false", "untrusted", "malformed"):
+        for change in ("running", "findings", "string_false", "untrusted"):
             with self.subTest(change=change):
                 data = self.snapshot(1418)
                 # Without the receipt, the summary alone decides.
@@ -73,12 +73,7 @@ class TimelineTest(unittest.TestCase):
                 elif change == "untrusted":
                     summary["user"]["login"] = "someone"
                 summary["body"] = "<!-- codex-review-state:v1 " + json.dumps(state) + " -->"
-                if change == "malformed":
-                    summary["body"] = "<!-- codex-review-state:v1 not-json -->"
-                    with self.assertRaises(ValueError):
-                        timeline.stages(**data)
-                else:
-                    self.assertIsNone(timeline.stages(**data)["stages"]["codex_clean"])
+                self.assertIsNone(timeline.stages(**data)["stages"]["codex_clean"])
 
     def test_clean_on_earlier_head_survives_unreviewed_commits_landing_allows(self):
         # #1316: clean on 22355cf, then a test-only commit merged unreviewed.
@@ -145,8 +140,34 @@ class TimelineTest(unittest.TestCase):
         self.assertEqual(row["stages"]["codex_clean"], "2026-11-13T10:55:00Z")
         self.assertEqual(row["codex_rounds"], 3)
         self.assertEqual(row["minutes"]["codex_reviewed_to_codex_clean"], 11.2)
-        sources = [o["source"] for o in timeline.review_outcomes(data["comments"], data["reviews"])]
+        sources = [o["source"] for o in timeline.review_outcomes(data["comments"], data["reviews"], 1418)]
         self.assertEqual(sources, ["receipt", "summary", "interim", "interim"])
+
+    def test_malformed_marker_is_dropped_with_a_warning_and_the_report_carries_on(self):
+        # Invalid JSON (an unfilled template) and a missing field, in each marker kind.
+        bad_interim = ('<!-- opus-review-state:v1 {"commit_sha":"7ba38bd","has_unresolved_findings":<true|false>} -->',
+                       '<!-- opus-review-state:v1 {"commit_sha":"7ba38bd"} -->')
+        bad_summary = ("<!-- codex-review-state:v1 not-json -->",
+                       '<!-- codex-review-state:v1 {"code_review":{"commit_sha":"7ba38bd","status":"completed"}} -->',
+                       '<!-- codex-review-state:v1 {"code_review":{"commit_sha":"7ba38bd","status":"completed",'
+                       '"has_unresolved_findings":false}} -->\n| **Code Review** | <relative-time datetime="soon">')
+        url = "https://github.com/DivyanshGolyan/rui/pull/1418#issuecomment-1"
+        for kind, bodies in (("interim", bad_interim), ("summary", bad_summary)):
+            for body in bodies:
+                with self.subTest(kind=kind, body=body):
+                    data = self.snapshot(1418)  # Clean receipt 10:43:48, clean summary 10:45:43.
+                    if kind == "interim":
+                        data["comments"].append({**self.interim("2026-11-13T10:50:00Z"), "body": body, "html_url": url})
+                        expected = "2026-11-13T10:45:43.596757Z"
+                    else:
+                        summary = next(c for c in data["comments"] if "codex-review-state:v1" in c["body"])
+                        summary.update(body=body, html_url=url)
+                        expected = "2026-11-13T10:43:48Z"
+                    with contextlib.redirect_stderr(io.StringIO()) as errors:
+                        row = timeline.stages(**data)
+                    self.assertEqual(row["stages"]["codex_clean"], expected)
+                    self.assertEqual(row["codex_rounds"], 1)
+                    self.assertIn(f"PR #1418: ignoring malformed {kind} marker in {url}", errors.getvalue())
 
     def test_html_escaped_summary_and_updated_at_fallback(self):
         data = self.snapshot(1418)

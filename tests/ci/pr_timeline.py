@@ -14,7 +14,10 @@ updated_at. Rounds count reviews, receipts and interim markers; the summary is
 only a fallback for a head without a review or receipt. Codex-clean is the time
 of the last outcome before merge when it is clean, on any head: landing.md lets
 test-only fixes, merges of main and stacked heads merge without another review,
-and only a later outcome with findings revokes it.
+and only a later outcome with findings revokes it. A malformed summary or
+interim marker (bad JSON, a missing field, a bad completion time) is dropped
+from that PR's outcomes with a stderr warning naming the PR and comment URL;
+the report carries on.
 Pushes include branch creation and subsequent pushes through merge, starting
 at the last creation before opening; missing creation/fork history is unknown.
 Adjacent durations are signed minutes: stages can occur out of the listed order,
@@ -94,7 +97,7 @@ def push_count(pr, activity):
 def stages(pr, timeline, comments, reviews, checks, activity, release=None):
     """Pure projection of recorded API JSON; the PR head is the head merged."""
     head = pr["head"]["sha"]
-    reviewed, clean, rounds = review_stages(review_outcomes(comments, reviews), pr["merged_at"])
+    reviewed, clean, rounds = review_stages(review_outcomes(comments, reviews, pr["number"]), pr["merged_at"])
     ready = [row["created_at"] for row in timeline if row["event"] == "ready_for_review"]
     if not ready and not pr["draft"] and not any(row["event"] in ("convert_to_draft", "converted_to_draft") for row in timeline):
         ready = [pr["created_at"]]
@@ -112,13 +115,40 @@ def stages(pr, timeline, comments, reviews, checks, activity, release=None):
             "release_tag": release["tag_name"] if release else None}
 
 
-def review_outcomes(comments, reviews):
+def marker_state(pattern, row, path, fields):
+    """The JSON state of a review marker comment, or None when it has none.
+
+    path is the key chain to the state; fields must be present in it. A
+    malformed marker raises ValueError (hand-written interim markers can be).
+    """
+    match = pattern.search(row.get("body") or "")
+    if not match:
+        return None
+    try:
+        state = json.loads(html.unescape(match[1]))
+        for key in path:
+            state = state[key]
+        missing = [field for field in fields if field not in state]
+    except (ValueError, KeyError, TypeError) as error:
+        raise ValueError(f"unparsable state ({error})") from error
+    if missing:
+        raise ValueError(f"missing {', '.join(missing)}")
+    return state
+
+
+def warning(message):
+    print(f"warning: {message}", file=sys.stderr)
+
+
+def review_outcomes(comments, reviews, number, warn=warning):
     """Every review outcome as {when, head, clean, source}; the one review record.
 
     Codex posts findings as a formal review ("review") and a clean result as a
     receipt comment ("receipt"). Its mutable summary ("summary") holds the
     latest state at its Code Review completion time. A maintainer's interim
     opus-review-state:v1 marker ("interim") stands in while Codex is unavailable.
+    A malformed summary or interim marker is no outcome: warn names the PR and
+    comment, and the report carries on.
     """
     result = []
     for row in reviews:
@@ -131,17 +161,22 @@ def review_outcomes(comments, reviews):
                 match = re.search(r"\*\*Reviewed commit:\*\*\s*`([0-9a-f]+)`", body)
                 result.append({"when": utc(row["created_at"]), "head": match[1] if match else None,
                                "clean": True, "source": "receipt"})
-            match = SUMMARY.search(body)
-            if match:
-                state = json.loads(html.unescape(match[1]))["code_review"]
-                if state["status"] == "completed":
-                    result.append({"when": utc(code_review_time(row)), "head": state["commit_sha"],
-                                   "clean": state["has_unresolved_findings"] is False, "source": "summary"})
-        match = INTERIM.search(body)
-        if match and row.get("author_association") in MAINTAINERS:
-            state = json.loads(html.unescape(match[1]))
-            result.append({"when": utc(row["updated_at"]), "head": state.get("commit_sha"),
-                           "clean": state["has_unresolved_findings"] is False, "source": "interim"})
+        markers = []
+        if row["user"]["login"] == CODEX:
+            markers.append(("summary", SUMMARY, ("code_review",), lambda: utc(code_review_time(row))))
+        if row.get("author_association") in MAINTAINERS:
+            markers.append(("interim", INTERIM, (), lambda: utc(row["updated_at"])))
+        for source, pattern, path, time_of in markers:
+            try:
+                state = marker_state(pattern, row, path, ("commit_sha", "has_unresolved_findings")
+                                     + (("status",) if source == "summary" else ()))
+                when = state and time_of()  # The summary's completion time is body text too.
+            except ValueError as error:
+                warn(f"PR #{number}: ignoring malformed {source} marker in {row.get('html_url') or 'a comment'}: {error}")
+                continue
+            if state and state.get("status", "completed") == "completed":
+                result.append({"when": when, "head": state["commit_sha"],
+                               "clean": state["has_unresolved_findings"] is False, "source": source})
     return sorted(result, key=lambda outcome: instant(outcome["when"]))
 
 
