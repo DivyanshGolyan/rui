@@ -17,6 +17,8 @@
 //!   `store_access.runNamed` does.
 //! - `round_budget`: its `.always` rounds plus its commit, checked here.
 //! - `commit`: how it commits (`Commit`). One that does not cannot ask to.
+//! - optionally `pass`: how many statements one engine pass of its
+//!   transaction steps (`Pass`), `.ordinary` when left out.
 //! - `begin`: the round its transaction opens before, or null when its
 //!   writes ride the commit round. Rounds before it read outside the
 //!   transaction; from it on, reads and writes share the transaction.
@@ -71,6 +73,16 @@ pub const Commit = enum {
     /// autocommit under the Entry lock, a batching engine in an
     /// ownership-fenced transaction (`Access`'s `.single`).
     single,
+};
+
+/// How many statements one engine pass of a transaction steps, each pass a
+/// round trip on a batching engine.
+pub const Pass = enum {
+    /// A write's twelve.
+    ordinary,
+    /// A settlement's twenty, for a transaction whose rows for one answer
+    /// outnumber a write's queue.
+    wide,
 };
 
 /// The rounds `spec` declares, in order: its tag enum `At`, each tag's
@@ -150,15 +162,15 @@ fn NextOf(comptime At: type, comptime commit: Commit, comptime Result: type) typ
 /// the same rounds, commit, guards and begin share it, so one can step
 /// through another.
 pub fn Round(comptime T: type) type {
-    return RoundOf(T.rounds, T.commit, GuardsOf(T), beginIndex(T));
+    return RoundOf(T.rounds, T.commit, GuardsOf(T), beginIndex(T), passOf(T));
 }
 
-fn RoundOf(comptime R: type, comptime commit: Commit, comptime Guards: type, comptime begin: ?u8) type {
+fn RoundOf(comptime R: type, comptime commit: Commit, comptime Guards: type, comptime begin: ?u8, comptime pass: Pass) type {
     return struct {
         const Self = @This();
         core: *anyopaque,
 
-        fn get(r: *Self) *Core(R, commit, Guards, begin) {
+        fn get(r: *Self) *Core(R, commit, Guards, begin, pass) {
             return @ptrCast(@alignCast(r.core));
         }
 
@@ -287,6 +299,11 @@ fn beginIndex(comptime T: type) ?u8 {
     return @backingInt(at);
 }
 
+/// `T.pass`, or `.ordinary`.
+fn passOf(comptime T: type) Pass {
+    return if (@hasDecl(T, "pass")) T.pass else .ordinary;
+}
+
 /// `T.Guards`, or none when it commits nothing.
 fn GuardsOf(comptime T: type) type {
     return if (T.commit == .none) error{} else T.Guards;
@@ -294,21 +311,22 @@ fn GuardsOf(comptime T: type) type {
 
 /// `Core` for `T`.
 fn CoreFor(comptime T: type) type {
-    return Core(T.rounds, T.commit, GuardsOf(T), beginIndex(T));
+    return Core(T.rounds, T.commit, GuardsOf(T), beginIndex(T), passOf(T));
 }
 
 /// The runner's state: a read Access for the rounds before `begin`, and
 /// the writer `commit` names, which runs the rounds from `begin` on. A
 /// transition whose transaction opens before its first round has no read
-/// Access; one that commits nothing has no writer.
-fn Core(comptime R: type, comptime commit: Commit, comptime Guards: type, comptime begin: ?u8) type {
+/// Access; one that commits nothing has no writer. A `.wide` pass's
+/// writer is a settlement Access, whose queue holds twenty statements.
+fn Core(comptime R: type, comptime commit: Commit, comptime Guards: type, comptime begin: ?u8, comptime pass: Pass) type {
     const reads_outside = (begin orelse 1) > 0;
     return struct {
         const Self = @This();
         reader: if (reads_outside) store_access.Access(.read, error{}) else void,
         writer: switch (commit) {
             .none => void,
-            .transaction => store_access.Access(.write, Guards),
+            .transaction => store_access.Access(if (pass == .wide) .settlement else .write, Guards),
             .single => store_access.Access(.single, Guards),
         },
         faults: Faults,
@@ -345,6 +363,7 @@ fn check(comptime T: type) void {
         "{s} is {d} bytes; a transition value holds at most 1 KiB",
         .{ @typeName(T), @sizeOf(T) },
     ));
+    if (passOf(T) == .wide and T.commit != .transaction) @compileError(@typeName(T) ++ ": only a transaction steps a wide pass");
     if (beginIndex(T)) |begin| {
         if (T.commit == .none) @compileError(@typeName(T) ++ " opens a transaction but commits nothing");
         for (0..begin) |i| if (T.rounds.kind(@fromBackingInt(@intCast(i))) != .always)

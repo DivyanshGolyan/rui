@@ -1743,6 +1743,57 @@ test "a transition's declined guard answers declined and leaves nothing it queue
     }.run);
 }
 
+/// Queues twenty content rows, twenty statements, in one round inside its
+/// transaction, then ends done, so none of them stays.
+fn TestingPassWidth(comptime width: transition.Pass) type {
+    return struct {
+        const Self = @This();
+        pub const rounds = transition.rounds(.{ .write = .{.always} });
+        pub const round_budget = 2;
+        pub const commit: transition.Commit = .transaction;
+        pub const pass = width;
+        pub const begin: ?rounds.At = .write;
+        pub const Input = struct {};
+        pub const Result = void;
+        pub const Ordinary = error{};
+        pub const Declined = error{};
+        pub const Guards = Declined;
+        const text = "abcdefghijklmnopqrst";
+
+        input: Input,
+
+        pub fn step(_: *Self, r: *transition.Round(Self), ran: ?rounds.At) !transition.Next(Self) {
+            if (ran != null) return .{ .done = {} };
+            for (0..text.len) |index| _ = try content_domain.insertRow(r, &.ofBytes(text[index..][0..1], false));
+            return .{ .round = .write };
+        }
+
+        pub fn committed(_: *const Self) Result {}
+    };
+}
+
+test "a transition with a wide pass steps twenty statements a pass, an ordinary one twelve" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var passes: [2]u64 = undefined;
+            inline for (.{ transition.Pass.wide, transition.Pass.ordinary }, &passes) |width, *taken| {
+                const before = RoundMeter.QueryShape.snapshot(&storage);
+                try transition.apply(&storage, TestingPassWidth(width), .{}, .{});
+                taken.* = RoundMeter.QueryShape.snapshot(&storage).since(before).access_passes;
+            }
+            try std.testing.expect(!storage.isFenced());
+            // Only a batching engine sends passes, and a rerun repeats them.
+            if (case.engine != .mysql or case.rerun) return;
+            try std.testing.expectEqual([2]u64{ 1, 2 }, passes);
+        }
+    }.run);
+}
+
 /// Counts Sessions a page of one at a time, in a `.paged` round that runs
 /// again until a page finds none.
 const TestingSessionPages = struct {
