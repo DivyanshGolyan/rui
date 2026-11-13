@@ -9,12 +9,22 @@ native builds. policy's checkout uses fetch-depth: 0, fetching the new tag even
 when the run keeps its original SHA.
 
 Only open, non-draft PRs based on main qualify. Use the latest check.yml PR run
-for the exact current head and PR number, never an older completed run. Poll
-active runs every 60 seconds, then rerun policy even if its original checkout
-preceded publication. One 90-minute budget covers all PRs, discovery and API
-calls; timeout names the PRs left unrechecked. No completed policy job yet is
-a logged skip, not an error. API errors fail the command. Required permissions:
-actions: write, pull-requests: read, contents: read (also at a reusable caller).
+for the PR's exact current head (SHA and head repository, so fork heads, whose
+runs GitHub lists with no pull_requests, match too), never an older completed
+run. RELEASE_PUBLISHED_AT is the release's published_at; the tag exists by
+then. A latest attempt whose policy job (or, before policy starts, the run)
+started at or after it already reads the new tag: no wait, no rerun. GitHub
+reruns a run only within 30 days of its creation, so an older run's PR is
+given up at once, naming the fix (a push starts a fresh run). Otherwise poll
+an active run every 60 seconds, then rerun policy. One 90-minute budget
+covers all PRs, discovery and API calls. No completed policy job yet is a
+logged skip, not an error. One PR's failure never stops another's recheck: an
+API error stays with that PR, which is retried next poll (given up after 3
+consecutive failures), and invalid data gives that PR up at once. The command
+then fails once, naming every unrechecked PR and why; so does the timeout.
+Errors outside one PR (listing open PRs, a missing RELEASE_PUBLISHED_AT) fail
+at once. Required permissions: actions: write, pull-requests: read,
+contents: read (also at a reusable caller).
 """
 import os
 import signal
@@ -22,6 +32,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode
 
 from conflict_alert import github, pages
@@ -31,6 +42,12 @@ WORKFLOW = ".github/workflows/check.yml"
 WIRE_PATHS = frozenset(("openapi.json", "src/wire_version.zig"))
 POLL_SECONDS = 60
 TIMEOUT_SECONDS = 90 * 60
+MAX_API_FAILURES = 3
+RERUN_WINDOW = timedelta(days=30)
+
+
+class Unrechecked(Exception):
+    """Some PRs could not be rechecked; the message names each and why."""
 
 
 @dataclass(frozen=True)
@@ -38,6 +55,7 @@ class Selection:
     job_id: int | None
     reason: str
     waiting: bool = False
+    failed: bool = False  # nothing this script can do fixes it; the reason says what does
 
 
 def main_pr(pr):
@@ -49,17 +67,40 @@ def touches_wire(files):
                for path in (file["filename"], file.get("previous_filename")))
 
 
+def timestamp(value):
+    """GitHub's UTC ISO 8601 time; a missing or malformed one is a ValueError."""
+    if not isinstance(value, str):
+        raise ValueError(f"expected a GitHub timestamp, got {value!r}")
+    moment = datetime.fromisoformat(value)
+    if moment.tzinfo is None:
+        raise ValueError(f"GitHub timestamp has no time zone: {value!r}")
+    return moment
+
+
 def latest_run(pr, runs):
-    """Attribute by PR and head, not a branch name shared with another fork."""
+    """Attribute by head SHA and head repository, the same rule for fork and
+    same-repository heads (GitHub lists no pull_requests for fork runs)."""
+    head_repo = (pr["head"].get("repo") or {}).get("full_name")
+    if head_repo is None:
+        return None
     matches = [run for run in runs
                if run["event"] == "pull_request" and run["path"] == WORKFLOW
                and run["head_sha"] == pr["head"]["sha"]
-               and any(pull["number"] == pr["number"] for pull in run["pull_requests"])]
+               and (run.get("head_repository") or {}).get("full_name") == head_repo]
     return max(matches, key=lambda run: run["run_number"], default=None)
 
 
-def select_rerun(pr, files, runs, jobs):
-    """Pure decision over REST snapshots; jobs are from the run's latest execution."""
+def checked_since(run, policy):
+    """When the latest attempt's policy checkout could first read tags: its
+    start, or the run's start while policy has not started."""
+    if policy is not None and policy["status"] in ("in_progress", "completed"):
+        return timestamp(policy["started_at"])
+    return timestamp(run["run_started_at"])
+
+
+def select_rerun(pr, files, runs, jobs, published, now):
+    """Pure decision over REST snapshots; jobs are from the run's latest
+    execution; published is the release's publication time, now the wall clock."""
     if not main_pr(pr):
         return Selection(None, "not an open, non-draft PR based on main")
     if not touches_wire(files):
@@ -67,25 +108,26 @@ def select_rerun(pr, files, runs, jobs):
     run = latest_run(pr, runs)
     if run is None:
         return Selection(None, "no check.yml PR run for the current head yet")
-    if run["status"] != "completed":
-        return Selection(None, f"latest run {run['id']} is {run['status']}", waiting=True)
     policy = [job for job in jobs if job["run_id"] == run["id"]
               and job["run_attempt"] == run["run_attempt"] and job["name"] == "policy"]
     if len(policy) > 1:
         raise ValueError(f"run {run['id']} has multiple latest policy jobs")
-    if not policy or policy[0]["status"] != "completed" or policy[0]["conclusion"] == "skipped":
+    policy = policy[0] if policy else None
+    if checked_since(run, policy) >= published:
+        return Selection(None, f"run {run['id']} checks after publication; it reads the new release itself")
+    if now - timestamp(run["created_at"]) > RERUN_WINDOW:
+        return Selection(None, f"run {run['id']} is older than GitHub's 30-day rerun limit; "
+                               "push to the PR to start a fresh run", failed=True)
+    if run["status"] != "completed":
+        return Selection(None, f"latest run {run['id']} is {run['status']}", waiting=True)
+    if policy is None or policy["status"] != "completed" or policy["conclusion"] == "skipped":
         return Selection(None, f"run {run['id']} has no completed policy check yet")
-    return Selection(policy[0]["id"], f"policy in run {run['id']} and its dependents (including admission)")
-
-
-def collection(api, path, key):
-    """Reuse the REST pager for object-wrapped Actions collections too."""
-    return list(pages(lambda method, endpoint: api(method, endpoint)[key], path))
+    return Selection(policy["id"], f"policy in run {run['id']} and its dependents (including admission)")
 
 
 def check_runs(api, repo, pr):
     query = urlencode({"event": "pull_request", "head_sha": pr["head"]["sha"]})
-    return collection(api, f"repos/{repo}/actions/workflows/check.yml/runs?{query}", "workflow_runs")
+    return list(pages(api, f"repos/{repo}/actions/workflows/check.yml/runs?{query}", "workflow_runs"))
 
 
 def same_pr(original, current):
@@ -99,21 +141,22 @@ def changed_files(api, repo, number):
     return files
 
 
-def recheck_one(api, repo, pr, files):
+def recheck_one(api, repo, pr, files, published, now):
     number = pr["number"]
     current = api("GET", f"repos/{repo}/pulls/{number}")
     if not main_pr(current):
         return Selection(None, "PR changed while selecting")
-    if current["head"]["sha"] != pr["head"]["sha"]:
+    if files is None or current["head"]["sha"] != pr["head"]["sha"]:
         files = changed_files(api, repo, number)
     if not touches_wire(files):
         return Selection(None, "no wire contract files")
     selected_pr = current
     runs = check_runs(api, repo, current)
     run = latest_run(current, runs)
-    jobs = (collection(api, f"repos/{repo}/actions/runs/{run['id']}/jobs?filter=latest", "jobs")
-            if run is not None and run["status"] == "completed" else [])
-    selection = select_rerun(current, files, runs, jobs)
+    # Active runs too: policy's start decides whether the run needs a wait.
+    jobs = (list(pages(api, f"repos/{repo}/actions/runs/{run['id']}/jobs?filter=latest", "jobs"))
+            if run is not None else [])
+    selection = select_rerun(current, files, runs, jobs, published, now())
     if selection.job_id is None:
         return selection
     # Revalidate before POST, including an intervening head change or rerun
@@ -125,18 +168,32 @@ def recheck_one(api, repo, pr, files):
     fresh = latest_run(current, fresh_runs)
     if fresh is not None and (fresh["id"], fresh["run_attempt"]) != (run["id"], run["run_attempt"]):
         return Selection(None, "latest run changed while selecting", waiting=True)
-    selection = select_rerun(current, files, fresh_runs, jobs)
+    selection = select_rerun(current, files, fresh_runs, jobs, published, now())
     if selection.job_id is not None:
         print(f"Rerun PR #{number}: job {selection.job_id}, {selection.reason}", flush=True)
         api("POST", f"repos/{repo}/actions/jobs/{selection.job_id}/rerun")
     return selection
 
 
-def recheck(api, repo, *, clock=None, sleep=None):
-    clock, sleep = clock or time.monotonic, sleep or time.sleep
+def api_error(error):
+    return (error.stderr or "").strip() or str(error)
+
+
+def unrechecked(reasons):
+    return ", ".join(f"#{number} ({reasons[number]})" for number in sorted(reasons)) or "unknown"
+
+
+def utc_now():
+    return datetime.now(timezone.utc)
+
+
+def recheck(api, repo, published, *, clock=None, sleep=None, now=None):
+    clock, sleep, now = clock or time.monotonic, sleep or time.sleep, now or utc_now
     deadline = clock() + TIMEOUT_SECONDS
-    pending = {}
-    discovery_complete = False
+    pending = {}   # number -> (PR snapshot, changed files or None until listed)
+    reasons = {}   # number -> why it is not rechecked yet, or was given up
+    failures = {}  # number -> consecutive API failures
+    listed = False
 
     def check_budget():
         remaining = deadline - clock()
@@ -150,34 +207,73 @@ def recheck(api, repo, *, clock=None, sleep=None):
         check_budget()
         return result
 
+    def give_up(number, reason):
+        print(f"Fail PR #{number}: {reason}", flush=True)
+        reasons[number] = reason
+        del pending[number]
+
+    def per_pr(number, step):
+        """Run one PR's step; its API or data error stays with that PR.
+        Returns (ok, result). The budget's TimeoutError is not per-PR."""
+        try:
+            result = step()
+        except subprocess.CalledProcessError as error:
+            failures[number] = failures.get(number, 0) + 1
+            reason = f"API error: {api_error(error)}"
+            if failures[number] >= MAX_API_FAILURES:
+                give_up(number, f"{reason} ({MAX_API_FAILURES} consecutive failures)")
+            else:
+                print(f"Retry PR #{number} next poll: {reason}", flush=True)
+                reasons[number] = reason
+            return False, None
+        except (ValueError, KeyError) as error:
+            give_up(number, f"invalid data: {error}")
+            return False, None
+        failures.pop(number, None)
+        return True, result
+
+    def done(number):
+        del pending[number]
+        reasons.pop(number, None)
+
     try:
         # Inventory before waiting, so timeout can name every unrechecked PR
         # and one slow run cannot prevent ready PRs from being rechecked.
         for pr in pages(bounded_api, f"repos/{repo}/pulls?state=open&base=main"):
             if main_pr(pr):
                 pending[pr["number"]] = (pr, None)
+                reasons[pr["number"]] = "PR discovery incomplete"
+        listed = True
         for number, (pr, _) in list(pending.items()):
-            files = changed_files(bounded_api, repo, number)
+            ok, files = per_pr(number, lambda: changed_files(bounded_api, repo, number))
+            if not ok:
+                continue  # recheck_one lists the files again
             if touches_wire(files):
                 pending[number] = (pr, files)
+                reasons[number] = "not rechecked yet"
             else:
-                del pending[number]
-        discovery_complete = True
+                done(number)
         while pending:
             for number, (pr, files) in list(pending.items()):
-                selection = recheck_one(bounded_api, repo, pr, files)
-                if selection.waiting:
+                ok, selection = per_pr(number, lambda: recheck_one(bounded_api, repo, pr, files, published, now))
+                if not ok:
+                    continue
+                if selection.failed:
+                    give_up(number, selection.reason)
+                elif selection.waiting:
                     print(f"Wait PR #{number}: {selection.reason}", flush=True)
+                    reasons[number] = selection.reason
                 else:
                     if selection.job_id is None:
                         print(f"Skip PR #{number}: {selection.reason}", flush=True)
-                    del pending[number]
+                    done(number)
             if pending:
                 sleep(min(POLL_SECONDS, check_budget()))
     except TimeoutError as error:
-        numbers = ", ".join(f"#{number}" for number in sorted(pending)) or "unknown"
-        phase = " (PR discovery incomplete)" if not discovery_complete else ""
-        raise TimeoutError(f"90-minute budget exhausted; could not recheck PRs: {numbers}{phase}") from error
+        names = unrechecked(reasons) if listed else "unknown (open PR list incomplete)"
+        raise TimeoutError(f"90-minute budget exhausted; could not recheck PRs: {names}") from error
+    if reasons:
+        raise Unrechecked(f"could not recheck PRs: {unrechecked(reasons)}")
 
 
 def alarm_timeout(_signal, _frame):
@@ -190,8 +286,8 @@ def main():
     previous = signal.signal(signal.SIGALRM, alarm_timeout)
     signal.alarm(TIMEOUT_SECONDS)
     try:
-        recheck(github, os.environ["GITHUB_REPOSITORY"])
-    except (subprocess.CalledProcessError, ValueError, KeyError, TimeoutError) as error:
+        recheck(github, os.environ["GITHUB_REPOSITORY"], timestamp(os.environ["RELEASE_PUBLISHED_AT"]))
+    except (subprocess.CalledProcessError, ValueError, KeyError, TimeoutError, Unrechecked) as error:
         print(f"::error::Cannot recheck wire PRs: {getattr(error, 'stderr', '') or error}", file=sys.stderr)
         return 1
     finally:
