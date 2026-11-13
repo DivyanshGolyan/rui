@@ -232,7 +232,7 @@ test "GroupedList quiet rows normalize whole lines before selection and hover in
         }};
         var presses: Pressed = .{};
         var list: Self = .{ .rows = .of(&rows), .selected = if (first.selected) 0 else null, .caps = caps, .on_press = presses.press() };
-        const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 2 }, .cell_size = .{} };
+        const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 2 }, .cell_size = .{} };
         _ = try list.widget().draw(ctx);
         if (hover_row) |row| {
             var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
