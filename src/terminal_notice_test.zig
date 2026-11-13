@@ -114,7 +114,7 @@ const ConsentProbe = struct {
     fn key(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event, delivery: @import("app_input.zig").Effects.Delivery) anyerror!void {
         const self: *ConsentProbe = @ptrCast(@alignCast(raw));
         const choice: @import("ActionConsent.zig").Input = switch (input) {
-            .key_press => |pressed| if (@import("TerminalEditor.zig").isEnter(pressed)) .enter else .other,
+            .key_press => |pressed| if (@import("keypress.zig").isEnter(pressed)) .enter else .other,
             else => return,
         };
         if (self.replace_request) self.consent.adopt(29);

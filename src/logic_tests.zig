@@ -176,6 +176,8 @@ test {
     _ = @import("session_drafts.zig");
     _ = @import("SessionInput.zig");
     _ = @import("TerminalEditor.zig");
+    _ = @import("DraftEditor.zig");
+    _ = @import("keypress.zig");
     _ = @import("tools.zig");
     _ = @import("core_tools.zig");
     inline for (cores) |core| _ = core[1];

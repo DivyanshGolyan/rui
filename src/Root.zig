@@ -211,7 +211,7 @@ pub fn closeSession(self: *Self, ctx: *vxfw.EventContext) !void {
 fn capture(raw: *anyopaque, ctx: *vxfw.EventContext, routed: vxfw.Event) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     const input: app_input.Input = switch (routed) {
-        .key_press => |key| .{ .key = .{ .named = @import("TerminalEditor.zig").named(key) } },
+        .key_press => |key| .{ .key = .{ .named = @import("keypress.zig").named(key) } },
         .paste_start => .paste_start,
         .paste_end => .paste_end,
         .mouse => |mouse| .{ .mouse = switch (mouse.button) {
@@ -791,7 +791,7 @@ test "App root routes Model filter typing to settings and Escape closes only its
     try root.widget().captureEvent(&ctx, typed);
     try std.testing.expect(!ctx.consume_event);
     try root.settings_page.widget().handleEvent(&ctx, typed);
-    try std.testing.expectEqualStrings("gpt", root.settings_page.model_choice.editor.buffer[0..root.settings_page.model_choice.editor.length]);
+    try std.testing.expectEqualStrings("gpt", root.settings_page.model_choice.editor.text());
     ctx.consume_event = false;
     try root.widget().captureEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.escape } });
     try std.testing.expect(ctx.consume_event);
@@ -862,7 +862,7 @@ test "App root routes typed and pasted settings text only to the Model filter wi
         if (choice != .none) try app_events.send(&ctx, "\r", root.widget(), page.widget());
         const row = page.panel.selected;
         try app_events.send(&ctx, if (pasted) "\x1b[200~" ++ text ++ "\x1b[201~" else text, root.widget(), page.widget());
-        try std.testing.expectEqualStrings(if (choice == .model) text else "", page.model_choice.editor.buffer[0..page.model_choice.editor.length]);
+        try std.testing.expectEqualStrings(if (choice == .model) text else "", page.model_choice.editor.text());
         try std.testing.expectEqual(@as(usize, if (choice == .model or pasted) 0 else text.len), fixture.overview_keys);
         try std.testing.expectEqual(choice != .none, page.hasChoice());
         try std.testing.expectEqual(row, page.panel.selected);

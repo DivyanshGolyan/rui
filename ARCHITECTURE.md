@@ -2694,7 +2694,7 @@ Recalling sent Messages (approved 2026-10-31; keys chosen 2026-11-01): in a conv
 Up, Down and the wheel keep scrolling, and no history file is kept.
 As built, only Messages without a Session sender come back.
 Each step asks the Host for a one-row activity page of `admission` rows before or after the shown one's position, at the end its first step read, then reads that Message's content alone; the client keeps that position and the draft, never a list or copy of Messages.
-One the draft cannot hold as typed text (over 65,536 bytes, or holding a control character) is passed over with a notice.
+One the draft cannot hold as typed text (over 65,536 bytes, holding a control character, or text the editor refuses to draw, such as a leading standalone combining mark) is passed over with a notice.
 Text that begins with `/` comes back with a second one, so Enter sends it again.
 Steps are read one at a time: presses made while one is read add up and opposite ones cancel.
 Each edit, clear or send of the draft makes it an ordinary one and drops the presses not yet read, and a step shows only on the draft it began from.
@@ -2871,6 +2871,8 @@ A command the Host received completes there, and the output it wrote before the 
 No borrower is joined while the terminal is raw, except the reader of a conversation that returned to the overview: with no command or submission running, it waits at most for the transport's cancellation poll.
 
 One invocation owns two 65,536-byte draft banks with independent grapheme cursors and one same-size command snapshot.
+Each bank's editing mechanism is libvaxis's `vxfw.TextArea`; Rui's `DraftEditor` adapter keeps every key meaning, Tab completion and refusal, and Composer keeps the rules, prompt and hidden-line label around it.
+`keypress.zig` is the one classification of a terminal key that the draft and every choice share; the values it classifies into stay in the `keymap.zig` functional core.
 Submission seals the original bank while the other remains editable through capture and Admission.
 A second Enter cannot create replacement intent while the original is unresolved.
 Only a joined, validated Host acceptance releases the submitted bank.

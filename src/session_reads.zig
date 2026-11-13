@@ -13,7 +13,7 @@ const Input = @import("SessionInput.zig");
 const Submission = @import("SessionSubmission.zig");
 const Task = @import("ClientTask.zig");
 const View = @import("session_view.zig");
-const Editor = @import("TerminalEditor.zig");
+const DraftEditor = @import("DraftEditor.zig");
 const History = @import("session_history.zig");
 const departure = @import("session_departure.zig");
 const TerminalText = @import("TerminalText.zig");
@@ -416,8 +416,9 @@ const RetryStaging = struct {
 /// One step over the Messages the person sent, from the one the draft
 /// shows or from the newest: a one-row activity page of `admission` rows,
 /// then that Message's content staged in scratch. One the draft cannot
-/// hold as typed text (over its capacity, or with a control character) is
-/// passed over, its content read at most once, and the result says so.
+/// hold (over its capacity, or text its own check refuses, such as a
+/// control character or a leading standalone mark) is passed over, its
+/// content read at most once, and the result says so.
 pub fn recall(raw: *anyopaque, task: *Task) !void {
     const job: *Job = @ptrCast(@alignCast(raw));
     const requests = task.requests();
@@ -457,46 +458,29 @@ pub fn recall(raw: *anyopaque, task: *Task) !void {
 /// it as typed text.
 fn stageRecalled(requests: client.Requests, job: *const Job, io: std.Io, at: Input.Recalled, content: protocol.ActivityItem.Content) !?Input.Found {
     try job.files.scratch.setLength(io, 0);
-    var staging: RecallStaging = .{ .io = io, .file = job.files.scratch };
+    var staging: RecallStaging = .{ .io = io, .file = job.files.scratch, .check = DraftEditor.textCheck() };
     const reference: protocol_reply.CommandObservation.ContentReference = .{ .bytes = content.length, .digest = content.digest };
     if (try requests.readActivityContent(job.store, job.session, at.position, 0, reference, &staging)) |failure| return requests.failRead(failure);
     if (staging.offset != content.length) return error.ContentLengthMismatch;
     const slash = staging.first == '/';
-    if (!staging.editable or staging.need != 0 or staging.offset + @intFromBool(slash) > Input.capacity) return null;
+    if (staging.check.finish() != null or staging.offset + @intFromBool(slash) > Input.capacity) return null;
     return .{ .at = at, .length = @intCast(staging.offset), .slash = slash };
 }
 
-/// A sent Message's text in scratch, checked scalar by scalar as the
-/// editor checks literal text.
+/// A sent Message's text in scratch, checked as it arrives by the draft's
+/// own check, the one `SessionInput.fill` relies on.
 const RecallStaging = struct {
     io: std.Io,
     file: std.Io.File,
+    check: DraftEditor.TextCheck,
     offset: u64 = 0,
     first: ?u8 = null,
-    editable: bool = true,
-    scalar: [4]u8 = undefined,
-    have: u3 = 0,
-    need: u3 = 0,
 
     pub fn feed(self: *@This(), bytes: []const u8) !void {
         try self.file.writePositionalAll(self.io, bytes, self.offset);
         self.offset += bytes.len;
         if (self.first == null and bytes.len != 0) self.first = bytes[0];
-        for (bytes) |byte| {
-            if (!self.editable) return;
-            if (self.need == 0) self.need = std.unicode.utf8ByteSequenceLength(byte) catch {
-                self.editable = false;
-                return;
-            };
-            self.scalar[self.have] = byte;
-            self.have += 1;
-            if (self.have != self.need) continue;
-            Editor.validateText(self.scalar[0..self.have]) catch {
-                self.editable = false;
-            };
-            self.have = 0;
-            self.need = 0;
-        }
+        self.check.feed(bytes);
     }
 };
 
@@ -2383,4 +2367,50 @@ test "chat info worker owns typed model and label bytes until completion" {
     try std.testing.expectEqualStrings("future-chat", job.info_edit.?.model);
     try job.setInfoEdit(.{ .permission = .ask });
     try std.testing.expectEqual(ChatInfo.Edit{ .permission = .ask }, job.info_edit.?);
+}
+
+test "session_reads recall passes over a Message the draft refuses in one step, whatever refuses it" {
+    // A control character fails the draft's scalar policy; a leading
+    // standalone mark fails its renderability. Both are passed over alike.
+    for ([_][]const u8{ "\x01x", "\u{301}x" }) |refused| for (0..3) |bad| {
+        errdefer std.debug.print("refused={any} bad position={d}\n", .{ refused, bad + 1 });
+        var texts = [_][]const u8{ "older", "middle", "newer" };
+        texts[bad] = refused;
+        var tail: [3]FakeHost.Tail = undefined;
+        for (&tail, texts, 1..) |*row, body, admission| {
+            var value = FakeHost.message(admission);
+            value.admission.content = .{ .length = body.len, .digest = protocol.contentDigest(body) };
+            row.* = .{ .value = value };
+        }
+        var host: FakeHost = .{ .history = 0, .tail = &tail, .end = tail.len, .content_texts = &texts };
+        // Ctrl-P from an empty draft until nothing older is left: each press
+        // lands on the next Message the draft holds.
+        var from: ?Input.Recalled = null;
+        var shown: [3]?u64 = .{ null, null, null };
+        var passed: [3]bool = .{ false, false, false };
+        for (0..3) |press| {
+            var job: Job = .{ .recall = .{ .from = from, .older = true, .revision = 0 } };
+            try host.readWith(&job, recall);
+            passed[press] = job.result.recall_passed;
+            const found = job.result.recalled orelse break;
+            try std.testing.expectEqual(texts[@intCast(found.at.position - 1)].len, found.length);
+            shown[press] = found.at.position;
+            from = found.at;
+        }
+        // `bad` 0 is the oldest Message, at position 1; 2 is the newest.
+        const expected_shown: [3]?u64 = switch (bad) {
+            0 => .{ 3, 2, null },
+            1 => .{ 3, 1, null },
+            else => .{ 2, 1, null },
+        };
+        const expected_passed: [3]bool = switch (bad) {
+            0 => .{ false, false, true },
+            1 => .{ false, true, false },
+            else => .{ true, false, false },
+        };
+        try std.testing.expectEqual(expected_shown, shown);
+        try std.testing.expectEqual(expected_passed, passed);
+        // Every Message's content is read once, the refused one included.
+        try std.testing.expectEqual(@as(usize, 3), host.contents);
+    };
 }

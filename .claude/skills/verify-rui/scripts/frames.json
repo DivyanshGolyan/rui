@@ -2285,6 +2285,31 @@
       ]
     },
     {
+      "name": "chat-draft-multiline",
+      "note": "chat composer with a wrapped multi-line draft and the caret moved up a line",
+      "open": "Fix retry deadline",
+      "steps": [
+        {
+          "text": "First line of a multi-line draft\nsecond line long enough to wrap at forty-six columns of the narrow layout\nthird"
+        },
+        {
+          "keys": [
+            "Up"
+          ]
+        },
+        {
+          "wait": "third"
+        }
+      ],
+      "expect": [
+        "First line of a multi-line draft",
+        "third"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
+    },
+    {
       "name": "chat-scrolled",
       "note": "11-conversation-scrolled",
       "open": "Fix retry deadline",
