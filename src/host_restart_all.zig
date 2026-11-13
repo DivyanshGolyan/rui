@@ -61,7 +61,18 @@ const Totals = struct {
     }
 };
 
-pub const Failure = enum { discovery, observation, selection };
+pub const Stage = enum { discovery, observation, selection };
+/// Where a Host could not be confirmed, and why. The cause is only the
+/// error's name, never argv, environment or paths read from the peer. It is
+/// owned like the entry's paths, so it survives the coordinator's event pipe.
+pub const Failure = struct {
+    stage: Stage,
+    cause: []const u8,
+
+    fn of(allocator: std.mem.Allocator, stage: Stage, err: anyerror) !Failure {
+        return .{ .stage = stage, .cause = try allocator.dupe(u8, @errorName(err)) };
+    }
+};
 pub const Entry = struct {
     socket: []const u8,
     store: ?[]const u8 = null,
@@ -71,6 +82,13 @@ pub const Entry = struct {
         outcome: HostLifecycle.ActivationOutcome,
         failed: Failure,
     },
+
+    /// The one release of an entry's owned strings, for every Batch builder.
+    pub fn deinit(self: Entry, allocator: std.mem.Allocator) void {
+        allocator.free(self.socket);
+        if (self.store) |store| allocator.free(store);
+        if (self.state == .failed) allocator.free(self.state.failed.cause);
+    }
 };
 
 /// Owns only routing strings and read-only facts, not private launch snapshots.
@@ -81,10 +99,7 @@ pub const Batch = struct {
     failure: ?anyerror = null,
 
     pub fn deinit(self: *Batch, allocator: std.mem.Allocator) void {
-        for (self.entries) |entry| {
-            allocator.free(entry.socket);
-            if (entry.store) |store| allocator.free(store);
-        }
+        for (self.entries) |entry| entry.deinit(allocator);
         allocator.free(self.entries);
         self.* = .{};
     }
@@ -134,7 +149,7 @@ pub const Batch = struct {
         if (self.failure) |err| try writer.print("Host restart could not finish ({s}); inspect this user's Hosts with their owning clients, then retry.\n", .{@errorName(err)});
         for (self.entries) |entry| switch (entry.state) {
             .observed => unreachable,
-            .failed => |stage| try writeEntryFailure(writer, &entry, stage),
+            .failed => |failure| try writeEntryFailure(writer, &entry, failure),
             .outcome => |outcome| _ = try writeOutcome(writer, entry.store.?, outcome, self.version),
         };
         try self.totals().write(writer);
@@ -149,7 +164,7 @@ pub const Batch = struct {
                 try writer.writeAll(": running; will restart on the selected installed build\n");
             },
             .outcome => |outcome| _ = try writeOutcome(writer, entry.store.?, outcome, self.version),
-            .failed => |stage| try writeEntryFailure(writer, &entry, stage),
+            .failed => |failure| try writeEntryFailure(writer, &entry, failure),
         };
     }
 };
@@ -164,18 +179,17 @@ pub fn discover(init: std.process.Init, allocator: std.mem.Allocator, home: []co
     }
     var entries: std.ArrayList(Entry) = .empty;
     errdefer {
-        for (entries.items) |entry| {
-            allocator.free(entry.socket);
-            if (entry.store) |store| allocator.free(store);
-        }
+        for (entries.items) |entry| entry.deinit(allocator);
         entries.deinit(allocator);
     }
     for (sockets) |socket| {
         try process.check(cancellation);
-        const facts = client.observeHostForUpgradeAtSocket(allocator, init.io, socket, null) catch {
+        // Reserve first: once an entry owns its strings, adding it cannot fail.
+        try entries.ensureUnusedCapacity(allocator, 1);
+        const facts = client.observeHostForUpgradeAtSocket(allocator, init.io, socket, null) catch |err| {
             const path = try allocator.dupe(u8, socket);
             errdefer allocator.free(path);
-            try entries.append(allocator, .{ .socket = path, .state = .{ .failed = .discovery } });
+            entries.appendAssumeCapacity(.{ .socket = path, .state = .{ .failed = try .of(allocator, .discovery, err) } });
             continue;
         } orelse continue;
         const path = try allocator.dupe(u8, socket);
@@ -183,7 +197,7 @@ pub fn discover(init: std.process.Init, allocator: std.mem.Allocator, home: []co
         const store = try allocator.dupe(u8, facts.facts.store.slice());
         errdefer allocator.free(store);
         const state: @FieldType(Entry, "state") = state: {
-            var observation = HostLifecycle.observe(allocator, init.io, home, store, cancellation) catch break :state .{ .failed = .observation };
+            var observation = HostLifecycle.observe(allocator, init.io, home, store, cancellation) catch |err| break :state .{ .failed = try .of(allocator, .observation, err) };
             defer observation.deinit(allocator);
             break :state switch (observation) {
                 .absent => .{ .outcome = .not_needed },
@@ -191,7 +205,7 @@ pub fn discover(init: std.process.Init, allocator: std.mem.Allocator, home: []co
                 .managed => .{ .observed = facts },
             };
         };
-        try entries.append(allocator, .{ .socket = path, .store = store, .state = state });
+        entries.appendAssumeCapacity(.{ .socket = path, .store = store, .state = state });
     }
     return .{ .entries = try entries.toOwnedSlice(allocator) };
 }
@@ -214,8 +228,8 @@ pub fn restart(init: std.process.Init, allocator: std.mem.Allocator, options: Op
         const facts = entry.state.observed;
         entry.state = .{ .outcome = outcome: {
             process.check(options.cancellation) catch break :outcome .cancelled;
-            var observation = HostLifecycle.observe(allocator, init.io, options.home, entry.store.?, options.cancellation) catch {
-                entry.state = .{ .failed = .observation };
+            var observation = HostLifecycle.observe(allocator, init.io, options.home, entry.store.?, options.cancellation) catch |err| {
+                entry.state = .{ .failed = try .of(allocator, .observation, err) };
                 continue;
             };
             defer observation.deinit(allocator);
@@ -225,8 +239,8 @@ pub fn restart(init: std.process.Init, allocator: std.mem.Allocator, options: Op
                 .managed => {},
             }
             if (options.target == null and selected == null) {
-                selected = Target.init(init, allocator, options.home, null, options.cancellation) catch {
-                    entry.state = .{ .failed = .selection };
+                selected = Target.init(init, allocator, options.home, null, options.cancellation) catch |err| {
+                    entry.state = .{ .failed = try .of(allocator, .selection, err) };
                     continue;
                 };
                 batch.version = selected.?.version;
@@ -252,15 +266,18 @@ pub fn run(init: std.process.Init, allocator: std.mem.Allocator) !void {
     if (batch.totals().failed != 0) return error.HostRestartFailed;
 }
 
-fn writeEntryFailure(writer: *std.Io.Writer, entry: *const Entry, stage: Failure) !void {
-    if (entry.store) |store| return writeFailure(writer, store, @tagName(stage), switch (stage) {
-        .discovery => unreachable,
-        .observation => "could not confirm this Host; inspect with its owning client, then retry.",
-        .selection => "selected installed build has no verified release version; install a managed release and retry.",
-    });
+fn writeEntryFailure(writer: *std.Io.Writer, entry: *const Entry, failure: Failure) !void {
+    if (entry.store) |store| {
+        try field(writer, store);
+        return writer.print(": failed at {s} ({s}): {s}\n", .{ @tagName(failure.stage), failure.cause, switch (failure.stage) {
+            .discovery => unreachable,
+            .observation => "could not confirm this Host; inspect with its owning client, then retry.",
+            .selection => "selected installed build has no verified release version; install a managed release and retry.",
+        } });
+    }
     try writer.writeAll("Store unknown (socket ");
     try field(writer, entry.socket);
-    try writer.writeAll("): failed at discovery: Host state is unconfirmed; inspect this socket and its Store with the owning client, then retry. A refused or missing socket alone does not prove the Host stopped.\n");
+    try writer.print("): failed at discovery: Host state is unconfirmed ({s}); inspect this socket and its Store with the owning client, then retry. A refused or missing socket alone does not prove the Host stopped.\n", .{failure.cause});
 }
 
 /// Reports are not custody: a departed tool closes stdout, but all remaining
@@ -299,11 +316,6 @@ fn field(writer: *std.Io.Writer, text: []const u8) !void {
     var terminal: TerminalText = .{ .mode = .line };
     try terminal.feed(writer, text);
     try terminal.finish(writer);
-}
-
-fn writeFailure(writer: *std.Io.Writer, store: []const u8, stage: []const u8, remedy: []const u8) !void {
-    try field(writer, store);
-    try writer.print(": failed at {s}: {s}\n", .{ stage, remedy });
 }
 
 /// Pure exit/total policy over the lifecycle's own values, not a mirrored union.
@@ -441,4 +453,16 @@ test "restart all counts every outcome even after its output reader closes" {
     try totals.write(&output.writer);
     try output.writer.flush();
     try std.testing.expectEqual(info.field_names.len, totals.restarted + totals.current + totals.skipped + totals.failed);
+}
+
+test "every failed stage names its cause" {
+    var buffer: [512]u8 = undefined;
+    for ([_]Stage{ .discovery, .observation, .selection }) |stage| {
+        var writer: std.Io.Writer = .fixed(&buffer);
+        const entry: Entry = .{ .socket = "/run/x.sock", .store = if (stage == .discovery) null else "/store", .state = .{ .failed = .{ .stage = stage, .cause = "ConnectionRefused" } } };
+        try writeEntryFailure(&writer, &entry, entry.state.failed);
+        const text = writer.buffered();
+        try std.testing.expect(std.mem.indexOf(u8, text, "(ConnectionRefused)") != null);
+        try std.testing.expect(std.mem.indexOf(u8, text, @tagName(stage)) != null);
+    }
 }
