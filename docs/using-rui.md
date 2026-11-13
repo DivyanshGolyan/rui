@@ -114,6 +114,7 @@ If that happens, run your terminal's reset command.
 
 Rui calls a saved conversation a **Session**.
 Bare `rui` opens the overview of unarchived Sessions in this Store; each row shows its project.
+While any Session is archived, the pinned **+ New Session** row also shows a quiet **Archived** at its right end, which opens the archived Sessions inside the overview (see [Archive Sessions](#archive-sessions)).
 Select the pinned **+ New Session** at the top with Home, then Enter, or click it, to create an empty Session and open its focused chat input.
 Creating it sends configuration only: it has no Messages until you type and send one in the chat.
 Sessions without a first Message are omitted from the list, except for the currently open chat’s selected row in a wide sidebar.
@@ -130,8 +131,9 @@ The overview list uses the full width at every terminal size, with no empty chat
 | --- | --- |
 | Up, Down, Home, End | Move through the whole list, including pinned **+ New Session** and **Settings**. |
 | Shift-Up, Shift-Down | Select the row above or below. |
-| Enter | Opens the selected Session, creates an empty chat from **+ New Session**, or opens **Settings**. In Settings, open **Model** to pick the default for future Sessions. |
-| Esc, Ctrl-G | Closes the topmost choice or panel; no draft or per-start settings exist to clear. |
+| Right, Left | On **+ New Session**, Right selects **Archived** while it is shown, and Left goes back to **New Session**. Right on a Session row opens it, as Enter does. |
+| Enter | Opens the selected Session, creates an empty chat from **+ New Session**, or opens **Settings**. On **Archived** it opens the archived Sessions, or from there returns to the usual list; a click on **Archived** does the same, and a click elsewhere on the row is still **New Session**. In Settings, open **Model** to pick the default for future Sessions. |
+| Esc, Ctrl-G | Closes the topmost choice or panel, and in the archived Sessions returns to the usual list; no draft or per-start settings exist to clear. |
 | Ctrl-X | Stops the selected Session’s work through the same request owner as the CLI. |
 | Ctrl-D, Ctrl-C | Leaves. |
 
@@ -176,7 +178,9 @@ Alt+A keeps your draft intact.
 For **Stop and archive**, press Enter to confirm or Esc to cancel; neither sends or clears your draft.
 
 The overview shows unarchived Sessions; its former `/sessions`, `/archive`, `/unarchive` and other overview slash commands are gone.
-Use the shell commands below to list archived Sessions or restore one without starting work.
+While any Session is archived, the pinned **+ New Session** row shows **Archived** at its right end, at every width; the chat sidebar never shows it.
+Press Right on that row to select it (Left goes back), then Enter, or click it, to list the archived Sessions in the overview; Enter or a click on it there, or Esc, returns to the usual list.
+Use the shell commands below to list archived Sessions from a script or restore one without starting work.
 Inside an open chat, `/archive` and `/unarchive` still act on that Session.
 
 Archive keeps history, saved results, settings, and files.
