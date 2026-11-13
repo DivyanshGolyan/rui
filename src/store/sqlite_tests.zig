@@ -694,11 +694,12 @@ test "a full queue takes an engine pass and the round still counts once" {
     defer entry.release();
     var a: store_access.Access(.write, error{TestingGuard}) = .open(&entry);
     defer a.deinit();
-    // Before engine passes the ninth entry was RoundFull.
-    const digest = protocol.contentDigest("ninefold");
+    // The thirteenth entry exceeds the write queue's twelve slots.
+    const text = "abcdefghijkl";
+    const digest = protocol.contentDigest(text);
     const id = try a.identity(.content_id);
-    a.write(TestingRound.insert_content, .{ .content_id = id, .digest = digest, .length = 8 });
-    for (0..8) |index| a.writeContent(id, "ninefold"[index..][0..1]);
+    a.write(TestingRound.insert_content, .{ .content_id = id, .digest = digest, .length = text.len });
+    for (0..text.len) |index| a.writeContent(id, text[index..][0..1]);
     const before = storage.testing_content_work.rounds;
     try a.run();
     try std.testing.expectEqual(1, storage.testing_content_work.rounds - before);
@@ -706,7 +707,7 @@ test "a full queue takes an engine pass and the round still counts once" {
     try a.abandon(.{});
 }
 
-test "a settlement's queue holds sixteen statements a pass, twice a write's" {
+test "a settlement's queue holds twenty statements a pass" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
@@ -717,16 +718,16 @@ test "a settlement's queue holds sixteen statements a pass, twice a write's" {
     var a: store_access.Access(.settlement, error{TestingGuard}) = undefined;
     a.init(&entry);
     defer a.deinit();
-    // A row and fifteen chunks fill one pass; a write's queue takes two.
-    const text = "sixteen in a row";
+    // A row and nineteen chunks fill one pass; a write's queue takes two.
+    const text = "abcdefghijklmnopqrst";
     const digest = protocol.contentDigest(text);
     const id = try a.identity(.content_id);
     a.write(TestingRound.insert_content, .{ .content_id = id, .digest = digest, .length = text.len });
-    for (0..15) |index| a.writeContent(id, text[index..][0..1]);
+    for (0..19) |index| a.writeContent(id, text[index..][0..1]);
     try a.run();
     try std.testing.expectEqual(1, a.passes);
-    a.writeContent(id, text[15..]);
-    for (0..16) |_| a.writeContent(id, "");
+    a.writeContent(id, text[19..]);
+    for (0..20) |_| a.writeContent(id, "");
     try a.run();
     try std.testing.expectEqual(3, a.passes);
     try a.abandon(.{});
@@ -2516,6 +2517,155 @@ test "Current report work is independent of terminal tool history" {
     const sixteen_groups = try Measure.run(16);
     const sixty_four_groups = try Measure.run(64);
     try std.testing.expectEqual(sixteen_groups, sixty_four_groups);
+}
+
+const DescendantHistory = enum { settled, queued, active };
+
+fn expectDescendantHistoryCost(kind: DescendantHistory) !void {
+    var costs: [2]i32 = undefined;
+    for ([_]usize{ 10, 10_000 }, &costs) |history, *cost| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        const root = try configureTestSession(&storage, "descendant-cost-root");
+        const child = try configureTestSession(&storage, "descendant-cost-child");
+        try store_testing.exec(&storage, "UPDATE session SET parent_ref=?1 WHERE session_ref=?2", .{ root.slice(), child.slice() });
+        // Excluded admissions deliberately remain unbound, just as model
+        // admission leaves them. A later eligible admission must seek past
+        // this history, rather than visit each row and reject it by cutoff.
+        try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=OFF");
+        const seed = try std.testing.allocator.printSentinel(
+            "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
+                "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at) " ++
+                "SELECT value,'{1s}',printf('excluded-%d',value),1,value+1,1 FROM sequence; " ++
+                "INSERT INTO session_stop(command_key,session_ref,admission_cutoff,position,stopped_at) VALUES('history-stop','{1s}',{0},{0}+2,1); " ++
+                "UPDATE session SET next_position={0}+3 WHERE session_ref='{1s}'",
+            .{ history, child.slice() },
+            0,
+        );
+        defer std.testing.allocator.free(seed);
+        try sqlite.exec(storage.sqliteDatabase(), seed);
+        // Reopen before canonical admission: its identity survey must see
+        // the fixture's historical IDs and the normal foreign-key setting.
+        try storage.close();
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        var expected_since: ?u64 = null;
+        if (kind != .settled) {
+            try submitTestMessage(&storage, &tmp, "descendant-eligible-file", "descendant-eligible", child.slice(), "live work");
+            try submitTestMessage(&storage, &tmp, "descendant-later-file", "descendant-later", child.slice(), "later input");
+            // ID order is not time order. Preserve the original minimum over
+            // eligible admissions even when a later admission's clock went back.
+            try store_testing.exec(&storage, "UPDATE message_admission SET admitted_at=17 WHERE command_key='descendant-eligible'", .{});
+            try store_testing.exec(&storage, "UPDATE message_admission SET admitted_at=9 WHERE command_key='descendant-later'", .{});
+            expected_since = if (kind == .active) 17 else 9;
+            if (kind == .active) try std.testing.expect(try storage.admitNextModelAttempt(.{}) != null);
+            try tests.refreshFrontierForTesting(&storage, child.slice());
+        }
+        for (0..2) |pass| {
+            _ = statementWorkSince(storage.sqliteDatabase());
+            const entry = try store_core.enter(&storage, .none);
+            defer entry.release();
+            var a: reads_domain.ReadAccess = .open(&entry);
+            defer a.deinit();
+            var works = [_]report_domain.WorkRead{.{ .session = root.slice() }};
+            try report_domain.readWorks(&a, &works);
+            try std.testing.expectEqual(expected_since, works[0].inputs.owed_since);
+            const work = try works[0].work(1, 1);
+            try std.testing.expectEqualStrings(if (kind == .settled) "idle" else "working", @tagName(work.state));
+            if (pass == 0) continue;
+            var statement = c.sqlite3_next_stmt(storage.sqliteDatabase(), null);
+            var measured = false;
+            while (statement) |each| : (statement = c.sqlite3_next_stmt(storage.sqliteDatabase(), each)) {
+                if (!std.mem.startsWith(u8, std.mem.span(c.sqlite3_sql(each)), "SELECT (SELECT obligation_since FROM session WHERE session_ref=")) continue;
+                try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_stmt_status(each, c.SQLITE_STMTSTATUS_RUN, 0));
+                cost.* = c.sqlite3_stmt_status(each, c.SQLITE_STMTSTATUS_VM_STEP, 0);
+                measured = true;
+            }
+            try std.testing.expect(measured);
+        }
+    }
+    std.debug.print("descendant {s}: excluded=10 {d} VM steps; excluded=10000 {d} VM steps\n", .{ @tagName(kind), costs[0], costs[1] });
+    try std.testing.expectEqual(costs[0], costs[1]);
+}
+
+test "descendant work cost is flat in excluded history with no live work" {
+    try expectDescendantHistoryCost(.settled);
+}
+
+test "descendant work cost is flat in excluded history with eligible queued Messages" {
+    try expectDescendantHistoryCost(.queued);
+}
+
+test "descendant work cost is flat in excluded history with active Turns" {
+    try expectDescendantHistoryCost(.active);
+}
+
+test "obligation frontier read cost is flat in finished children" {
+    var costs: [2]i32 = undefined;
+    var writer_costs: [2]i32 = undefined;
+    for ([_]usize{ 10, 10_000 }, &costs, &writer_costs) |history, *cost, *writer_cost| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const root = try configureTestSession(&storage, "finished-frontier-root");
+        // Native VM fixture: terminal children have no owed rows or input.
+        // As in the other cost fixtures, unrelated FK contents are omitted.
+        try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=OFF");
+        const seed = try std.testing.allocator.printSentinel(
+            "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
+                "INSERT INTO session(session_ref,workspace,provider,codec,model,instructions_content_id,tool_set_id,permission_mode," ++
+                "output_schema_content_id,revision,next_position,created_at,created_seq,workspace_digest,workspace_key,parent_ref) " ++
+                "SELECT printf('%06d',value),'/','codex','openai-responses/1','model-a',1,1,0,NULL,1,2,1,value+100,zeroblob(32),1,'{1s}' FROM sequence; " ++
+                "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
+                "INSERT INTO turn(turn_id,session_ref,first_admission_id,input_cutoff,operation_id,outcome_code,outcome_at,outcome_position,outcome_content_id) " ++
+                "SELECT value,printf('%06d',value),value,value,1,'completed',1,1,1 FROM sequence",
+            .{ history, root.slice() },
+            0,
+        );
+        defer std.testing.allocator.free(seed);
+        try sqlite.exec(storage.sqliteDatabase(), seed);
+        // Also drive the write owner against the large finished population.
+        _ = statementWorkSince(storage.sqliteDatabase());
+        try tests.refreshFrontierForTesting(&storage, root.slice());
+        var statement = c.sqlite3_next_stmt(storage.sqliteDatabase(), null);
+        var writer_measured = false;
+        while (statement) |each| : (statement = c.sqlite3_next_stmt(storage.sqliteDatabase(), each)) {
+            if (!std.mem.startsWith(u8, std.mem.span(c.sqlite3_sql(each)), "UPDATE session SET obligation_since=")) continue;
+            try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_stmt_status(each, c.SQLITE_STMTSTATUS_RUN, 0));
+            writer_cost.* = c.sqlite3_stmt_status(each, c.SQLITE_STMTSTATUS_VM_STEP, 0);
+            writer_measured = true;
+        }
+        try std.testing.expect(writer_measured);
+        for (0..2) |pass| {
+            _ = statementWorkSince(storage.sqliteDatabase());
+            const entry = try store_core.enter(&storage, .none);
+            defer entry.release();
+            var a: reads_domain.ReadAccess = .open(&entry);
+            defer a.deinit();
+            var work = [_]report_domain.WorkRead{.{ .session = root.slice() }};
+            try report_domain.readWorks(&a, &work);
+            try std.testing.expect(work[0].inputs.owed_since == null);
+            try std.testing.expect((try work[0].work(1, 1)).state == .idle);
+            if (pass == 0) continue;
+            statement = c.sqlite3_next_stmt(storage.sqliteDatabase(), null);
+            var measured = false;
+            while (statement) |each| : (statement = c.sqlite3_next_stmt(storage.sqliteDatabase(), each)) {
+                if (!std.mem.startsWith(u8, std.mem.span(c.sqlite3_sql(each)), "SELECT (SELECT obligation_since FROM session WHERE session_ref=")) continue;
+                try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_stmt_status(each, c.SQLITE_STMTSTATUS_RUN, 0));
+                cost.* = c.sqlite3_stmt_status(each, c.SQLITE_STMTSTATUS_VM_STEP, 0);
+                measured = true;
+            }
+            try std.testing.expect(measured);
+        }
+    }
+    std.debug.print("obligation finished children: 10={d} VM steps; 10000={d} VM steps\n", .{ costs[0], costs[1] });
+    try std.testing.expectEqual(costs[0], costs[1]);
+    std.debug.print("obligation owner finished children: 10={d} VM steps; 10000={d} VM steps\n", .{ writer_costs[0], writer_costs[1] });
+    try std.testing.expectEqual(writer_costs[0], writer_costs[1]);
 }
 
 test "Current pending count skips excluded Message history by indexed cutoff" {
@@ -6463,7 +6613,8 @@ test "a stop cancels its Actions in pages of one write each, in call order at de
         // page read and a write per `cancel_chunk` (13) Actions.
         const pages = (count + 12) / 13;
         // Closing the Turn also writes its owed ending.
-        const expected: u64 = if (count == 0) 11 else 12 + 2 * pages;
+        // The same commit also reads and clears its live frontier fact.
+        const expected: u64 = if (count == 0) 13 else 14 + 2 * pages;
         try std.testing.expectEqual(expected, statements.count);
         try std.testing.expectEqual(@as(u64, count), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE resolution_code='cancelled'", .{}));
         // Acceptance follows call order.
@@ -7548,15 +7699,15 @@ test "a list page of mixed work takes its deepest row's rounds, and a pass per r
             std.debug.print("{s}\n", .{bytes[0..read]});
             return err;
         };
-    // The stopped rows' seven: the page; the latest Turns and first-Message
-    // seeks; the cutoff, the queue after it, the excluded Message and its
-    // stop; the rows' settings. The awaiting rows end after their Actions.
-    try std.testing.expectEqual(7, rounds);
+    // The stopped rows' eight: page, latest/first Message, cutoff, queue,
+    // excluded Message, stop, saved frontier, settings. Awaiting rows end
+    // after their Actions; other settled rows reach the frontier sooner.
+    try std.testing.expectEqual(8, rounds);
     // A pass ends where a round queues a statement again, so a round takes
     // as many as its most repeated statement's rows: 1 for the page, 8 for
-    // the rows' first reads, 6 cutoffs, 6 queue seeks, 2 excluded seeks, 2
-    // stops, and 6 settings reads of a row with a first Message.
-    try std.testing.expectEqual(1 + 8 + 6 + 6 + 2 + 2 + 6, a.passes);
+    // the rows' first reads, 6 cutoffs, 6 queue seeks, then 4 frontier/excluded
+    // seeks, 2 stops, 2 remaining frontier seeks, and 6 settings reads.
+    try std.testing.expectEqual(1 + 8 + 6 + 6 + 4 + 2 + 2 + 6, a.passes);
 }
 
 test "a Current report's step faults answer the name of the earliest round that steps the table" {
@@ -8402,7 +8553,7 @@ fn statementWorkSince(database: *c.sqlite3) [2]i64 {
     return work;
 }
 
-test "Attempt checks, prefix seals and content lookups do no more work than main" {
+test "Attempt checks keep main cost and prefix seals include one frontier reconciliation" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
@@ -8412,7 +8563,11 @@ test "Attempt checks, prefix seals and content lookups do no more work than main
     // Main's statements and VM steps at 72db6de9 and again at 2e8e8353,
     // each on its warm second call: opening a view, recording a seal, the
     // Operation's kind, a dispatch handoff and a content lookup.
-    const main_work = [_][2]i64{ .{ 2, 24 }, .{ 6, 125 }, .{ 3, 32 }, .{ 2, 24 }, .{ 1, 14 } };
+    // The set-based frontier projection and streamed hints add two statements
+    // and 797 VM steps to the seal's five statements / 124 VM steps. This
+    // bounded CPU work replaces client-side ancestor rounds; the seal keeps
+    // main's two Access rounds. Unrelated statement limits stay unchanged.
+    const main_work = [_][2]i64{ .{ 2, 24 }, .{ 7, 921 }, .{ 3, 32 }, .{ 2, 24 }, .{ 1, 14 } };
     for (0..2) |call| {
         var work: [main_work.len][2]i64 = undefined;
         _ = statementWorkSince(storage.sqliteDatabase());
@@ -8436,7 +8591,7 @@ test "Attempt checks, prefix seals and content lookups do no more work than main
     }
     // Rounds, where main took 2 for a view, a check or a handoff, 3 for
     // the Operation's kind, 5 for a seal and 1 for a content lookup: each
-    // Attempt check is one read, a seal one read and its commit.
+    // Attempt check is one read; a seal reads, then projects inline with COMMIT.
     const entry = try store_core.enter(&storage, .none);
     defer entry.release();
     {
