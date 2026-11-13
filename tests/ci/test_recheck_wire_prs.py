@@ -185,6 +185,7 @@ class GitHub:
         self.calls = []
         self.posts = []
         self.fail = None
+        self.fail_count = None  # None: every call to the failing path fails
         self.next_runs = None
         self.run_reads = 0
 
@@ -193,7 +194,11 @@ class GitHub:
         parsed = urlsplit(endpoint)
         path = parsed.path.removeprefix(f"repos/{REPO}/")
         query = parse_qs(parsed.query)
-        if self.fail == path:
+        # A failing run listing fails only PR #1's head, so other PRs can be served.
+        if self.fail == path and query.get("head_sha", ["current-head"]) == ["current-head"] \
+                and self.fail_count != 0:
+            if self.fail_count is not None:
+                self.fail_count -= 1
             raise subprocess.CalledProcessError(1, ["gh", "api", endpoint], stderr="HTTP 403: denied")
         if method == "POST":
             self.posts.append(path)
@@ -293,7 +298,8 @@ class AdapterTest(unittest.TestCase):
         api.files[2] = files("src/wire_version.zig")
         api.runs = [run(status="in_progress"), run(20, status="queued", head_sha="head-2")]
         clock = Clock()
-        with redirect_stdout(io.StringIO()), self.assertRaisesRegex(TimeoutError, r"could not recheck PRs: #1, #2"):
+        with redirect_stdout(io.StringIO()), self.assertRaisesRegex(
+                TimeoutError, r"could not recheck PRs: #1 \(latest run 10 is in_progress\), #2 \(latest run 20 is queued\)$"):
             owner.recheck(api, REPO, PUBLISHED, clock=clock.monotonic, sleep=clock.sleep)
         self.assertEqual(clock.now, 90 * 60)
         self.assertEqual(clock.sleeps, [60] * 90)
@@ -434,7 +440,7 @@ class AdapterTest(unittest.TestCase):
     def test_file_api_limit_is_not_silently_truncated(self):
         api = GitHub()
         api.files[1] = files(*(["README.md"] * 3000))
-        with self.assertRaisesRegex(ValueError, "file list may be incomplete"):
+        with self.assertRaisesRegex(owner.Unrechecked, r"#1 \(invalid data: .*file list may be incomplete"):
             self.recheck(api)
         self.assertEqual(api.posts, [])
 
@@ -489,17 +495,73 @@ class AdapterTest(unittest.TestCase):
         self.assertEqual(clock.sleeps, [60])
         self.assertEqual(api.posts, ["actions/jobs/200/rerun"])
 
-    def test_each_api_error_fails_command_loudly(self):
-        for endpoint in ("pulls", "pulls/1/files", "actions/workflows/check.yml/runs",
-                         "actions/runs/10/jobs", "pulls/1", "actions/jobs/100/rerun"):
+    PER_PR_ENDPOINTS = ("pulls/1/files", "pulls/1", "actions/workflows/check.yml/runs",
+                        "actions/runs/10/jobs", "actions/jobs/100/rerun")
+
+    def two_prs(self):
+        api = GitHub()
+        api.pulls = [pull(), pull(2)]
+        api.files[2] = files("openapi.json")
+        api.runs = [run(), run(20, head_sha="head-2")]
+        api.jobs = [job(), job(200, run_id=20)]
+        return api
+
+    def main(self, api, clock):
+        output = io.StringIO()
+        with mock.patch.object(owner, "github", api), \
+                mock.patch.dict(os.environ, GITHUB_REPOSITORY=REPO, RELEASE_PUBLISHED_AT=PUBLISHED_AT), \
+                mock.patch.object(owner.time, "monotonic", clock.monotonic), \
+                mock.patch.object(owner.time, "sleep", clock.sleep), redirect_stdout(output), redirect_stderr(output):
+            status = owner.main()
+        return status, output.getvalue()
+
+    def test_open_pr_list_error_fails_at_once(self):
+        api, clock = GitHub(), Clock()
+        api.fail = "pulls"
+        status, output = self.main(api, clock)
+        self.assertEqual(status, 1)
+        self.assertIn("::error::Cannot recheck wire PRs: HTTP 403: denied", output)
+        self.assertEqual(clock.sleeps, [])
+        self.assertEqual(api.posts, [])
+
+    def test_one_prs_api_error_does_not_stop_another_prs_rerun(self):
+        for endpoint in self.PER_PR_ENDPOINTS:
             with self.subTest(endpoint=endpoint):
-                api = GitHub()
+                api, clock = self.two_prs(), Clock()
                 api.fail = endpoint
-                output = io.StringIO()
-                with mock.patch.object(owner, "github", api), mock.patch.dict(os.environ, GITHUB_REPOSITORY=REPO, RELEASE_PUBLISHED_AT=PUBLISHED_AT), \
-                        redirect_stdout(output), redirect_stderr(output):
-                    self.assertEqual(owner.main(), 1)
-                self.assertIn("::error::Cannot recheck wire PRs: HTTP 403: denied", output.getvalue())
+                status, output = self.main(api, clock)
+                self.assertEqual(status, 1)
+                self.assertEqual(api.posts, ["actions/jobs/200/rerun"])
+                self.assertIn("Retry PR #1 next poll: API error: HTTP 403: denied", output)
+                # Discovery and the first poll each try the file list before any sleep.
+                retries_without_sleep = 2 if endpoint == "pulls/1/files" else 1
+                self.assertEqual(clock.sleeps, [60] * (owner.MAX_API_FAILURES - retries_without_sleep))
+                message = output.split("::error::")[-1]
+                self.assertIn("could not recheck PRs: #1 (API error: HTTP 403: denied (3 consecutive failures))",
+                              message)
+                self.assertNotIn("#2", message)
+
+    def test_transient_api_error_is_retried_next_poll(self):
+        for endpoint in self.PER_PR_ENDPOINTS:
+            with self.subTest(endpoint=endpoint):
+                api, clock = self.two_prs(), Clock()
+                api.fail, api.fail_count = endpoint, 1
+                status, output = self.main(api, clock)
+                self.assertEqual(status, 0, output)
+                self.assertEqual(sorted(api.posts), ["actions/jobs/100/rerun", "actions/jobs/200/rerun"])
+                self.assertIn("Retry PR #1 next poll: API error: HTTP 403: denied", output)
+                self.assertIn("Rerun PR #1: job 100", output)
+                self.assertEqual(clock.sleeps, [] if endpoint == "pulls/1/files" else [60])
+
+    def test_one_prs_invalid_data_gives_it_up_without_stopping_others(self):
+        api, clock = self.two_prs(), Clock()
+        api.jobs.append(job(101))
+        status, output = self.main(api, clock)
+        self.assertEqual(status, 1)
+        self.assertEqual(api.posts, ["actions/jobs/200/rerun"])
+        self.assertEqual(clock.sleeps, [])
+        self.assertIn("could not recheck PRs: #1 (invalid data: run 10 has multiple latest policy jobs)",
+                      output.split("::error::")[-1])
 
     def test_actual_workflow_keeps_gate_and_admission_dependency_and_fetches_tags(self):
         workflow = (Path(__file__).resolve().parents[2] / ".github/workflows/check.yml").read_text()

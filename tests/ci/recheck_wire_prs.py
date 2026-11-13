@@ -15,10 +15,14 @@ run. RELEASE_PUBLISHED_AT is the release's published_at; the tag exists by
 then. A latest attempt whose policy job (or, before policy starts, the run)
 started at or after it already reads the new tag: no wait, no rerun. Otherwise
 poll an active run every 60 seconds, then rerun policy. One 90-minute budget
-covers all PRs, discovery and API calls; timeout names the PRs left
-unrechecked. No completed policy job yet is a logged skip, not an error. API
-errors fail the command. Required permissions: actions: write,
-pull-requests: read, contents: read (also at a reusable caller).
+covers all PRs, discovery and API calls. No completed policy job yet is a
+logged skip, not an error. One PR's failure never stops another's recheck: an
+API error stays with that PR, which is retried next poll (given up after 3
+consecutive failures), and invalid data gives that PR up at once. The command
+then fails once, naming every unrechecked PR and why; so does the timeout.
+Errors outside one PR (listing open PRs, a missing RELEASE_PUBLISHED_AT) fail
+at once. Required permissions: actions: write, pull-requests: read,
+contents: read (also at a reusable caller).
 """
 import os
 import signal
@@ -36,6 +40,11 @@ WORKFLOW = ".github/workflows/check.yml"
 WIRE_PATHS = frozenset(("openapi.json", "src/wire_version.zig"))
 POLL_SECONDS = 60
 TIMEOUT_SECONDS = 90 * 60
+MAX_API_FAILURES = 3
+
+
+class Unrechecked(Exception):
+    """Some PRs could not be rechecked; the message names each and why."""
 
 
 @dataclass(frozen=True)
@@ -109,14 +118,9 @@ def select_rerun(pr, files, runs, jobs, published):
     return Selection(policy["id"], f"policy in run {run['id']} and its dependents (including admission)")
 
 
-def collection(api, path, key):
-    """Reuse the REST pager for object-wrapped Actions collections too."""
-    return list(pages(lambda method, endpoint: api(method, endpoint)[key], path))
-
-
 def check_runs(api, repo, pr):
     query = urlencode({"event": "pull_request", "head_sha": pr["head"]["sha"]})
-    return collection(api, f"repos/{repo}/actions/workflows/check.yml/runs?{query}", "workflow_runs")
+    return list(pages(api, f"repos/{repo}/actions/workflows/check.yml/runs?{query}", "workflow_runs"))
 
 
 def same_pr(original, current):
@@ -135,7 +139,7 @@ def recheck_one(api, repo, pr, files, published):
     current = api("GET", f"repos/{repo}/pulls/{number}")
     if not main_pr(current):
         return Selection(None, "PR changed while selecting")
-    if current["head"]["sha"] != pr["head"]["sha"]:
+    if files is None or current["head"]["sha"] != pr["head"]["sha"]:
         files = changed_files(api, repo, number)
     if not touches_wire(files):
         return Selection(None, "no wire contract files")
@@ -143,7 +147,7 @@ def recheck_one(api, repo, pr, files, published):
     runs = check_runs(api, repo, current)
     run = latest_run(current, runs)
     # Active runs too: policy's start decides whether the run needs a wait.
-    jobs = (collection(api, f"repos/{repo}/actions/runs/{run['id']}/jobs?filter=latest", "jobs")
+    jobs = (list(pages(api, f"repos/{repo}/actions/runs/{run['id']}/jobs?filter=latest", "jobs"))
             if run is not None else [])
     selection = select_rerun(current, files, runs, jobs, published)
     if selection.job_id is None:
@@ -164,11 +168,21 @@ def recheck_one(api, repo, pr, files, published):
     return selection
 
 
+def api_error(error):
+    return (error.stderr or "").strip() or str(error)
+
+
+def unrechecked(reasons):
+    return ", ".join(f"#{number} ({reasons[number]})" for number in sorted(reasons)) or "unknown"
+
+
 def recheck(api, repo, published, *, clock=None, sleep=None):
     clock, sleep = clock or time.monotonic, sleep or time.sleep
     deadline = clock() + TIMEOUT_SECONDS
-    pending = {}
-    discovery_complete = False
+    pending = {}   # number -> (PR snapshot, changed files or None until listed)
+    reasons = {}   # number -> why it is not rechecked yet, or was given up
+    failures = {}  # number -> consecutive API failures
+    listed = False
 
     def check_budget():
         remaining = deadline - clock()
@@ -182,34 +196,71 @@ def recheck(api, repo, published, *, clock=None, sleep=None):
         check_budget()
         return result
 
+    def give_up(number, reason):
+        print(f"Fail PR #{number}: {reason}", flush=True)
+        reasons[number] = reason
+        del pending[number]
+
+    def per_pr(number, step):
+        """Run one PR's step; its API or data error stays with that PR.
+        Returns (ok, result). The budget's TimeoutError is not per-PR."""
+        try:
+            result = step()
+        except subprocess.CalledProcessError as error:
+            failures[number] = failures.get(number, 0) + 1
+            reason = f"API error: {api_error(error)}"
+            if failures[number] >= MAX_API_FAILURES:
+                give_up(number, f"{reason} ({MAX_API_FAILURES} consecutive failures)")
+            else:
+                print(f"Retry PR #{number} next poll: {reason}", flush=True)
+                reasons[number] = reason
+            return False, None
+        except (ValueError, KeyError) as error:
+            give_up(number, f"invalid data: {error}")
+            return False, None
+        failures.pop(number, None)
+        return True, result
+
+    def done(number):
+        del pending[number]
+        reasons.pop(number, None)
+
     try:
         # Inventory before waiting, so timeout can name every unrechecked PR
         # and one slow run cannot prevent ready PRs from being rechecked.
         for pr in pages(bounded_api, f"repos/{repo}/pulls?state=open&base=main"):
             if main_pr(pr):
                 pending[pr["number"]] = (pr, None)
+                reasons[pr["number"]] = "PR discovery incomplete"
+        listed = True
         for number, (pr, _) in list(pending.items()):
-            files = changed_files(bounded_api, repo, number)
+            ok, files = per_pr(number, lambda: changed_files(bounded_api, repo, number))
+            if not ok:
+                continue  # recheck_one lists the files again
             if touches_wire(files):
                 pending[number] = (pr, files)
+                reasons[number] = "not rechecked yet"
             else:
-                del pending[number]
-        discovery_complete = True
+                done(number)
         while pending:
             for number, (pr, files) in list(pending.items()):
-                selection = recheck_one(bounded_api, repo, pr, files, published)
+                ok, selection = per_pr(number, lambda: recheck_one(bounded_api, repo, pr, files, published))
+                if not ok:
+                    continue
                 if selection.waiting:
                     print(f"Wait PR #{number}: {selection.reason}", flush=True)
+                    reasons[number] = selection.reason
                 else:
                     if selection.job_id is None:
                         print(f"Skip PR #{number}: {selection.reason}", flush=True)
-                    del pending[number]
+                    done(number)
             if pending:
                 sleep(min(POLL_SECONDS, check_budget()))
     except TimeoutError as error:
-        numbers = ", ".join(f"#{number}" for number in sorted(pending)) or "unknown"
-        phase = " (PR discovery incomplete)" if not discovery_complete else ""
-        raise TimeoutError(f"90-minute budget exhausted; could not recheck PRs: {numbers}{phase}") from error
+        names = unrechecked(reasons) if listed else "unknown (open PR list incomplete)"
+        raise TimeoutError(f"90-minute budget exhausted; could not recheck PRs: {names}") from error
+    if reasons:
+        raise Unrechecked(f"could not recheck PRs: {unrechecked(reasons)}")
 
 
 def alarm_timeout(_signal, _frame):
@@ -223,7 +274,7 @@ def main():
     signal.alarm(TIMEOUT_SECONDS)
     try:
         recheck(github, os.environ["GITHUB_REPOSITORY"], timestamp(os.environ["RELEASE_PUBLISHED_AT"]))
-    except (subprocess.CalledProcessError, ValueError, KeyError, TimeoutError) as error:
+    except (subprocess.CalledProcessError, ValueError, KeyError, TimeoutError, Unrechecked) as error:
         print(f"::error::Cannot recheck wire PRs: {getattr(error, 'stderr', '') or error}", file=sys.stderr)
         return 1
     finally:
