@@ -5104,6 +5104,10 @@ test "the Host's stop signals reach its handler until serve restores the previou
 }
 
 test "a stop signal handler racing detach never writes to the closed or a reused wake socket" {
+    // The main thread waits on every hammer twice a round. When threads
+    // outnumber cores, a spinning thread holds its core until preempted, so
+    // each wait cost a scheduler slice and the test took minutes. Both sides
+    // yield instead; with free cores, yield returns at once and they still race.
     const Hammer = struct {
         calls: std.atomic.Value(u64) = .init(0),
         stop: std.atomic.Value(bool) = .init(false),
@@ -5112,12 +5116,13 @@ test "a stop signal handler racing detach never writes to the closed or a reused
             while (!self.stop.load(.acquire)) {
                 StopSignals.handle(std.posix.SIG.INT);
                 _ = self.calls.fetchAdd(1, .release);
+                std.Thread.yield() catch {};
             }
         }
 
         fn advance(self: *@This(), count: u64) void {
             const target = self.calls.load(.acquire) + count;
-            while (self.calls.load(.acquire) < target) std.atomic.spinLoopHint();
+            while (self.calls.load(.acquire) < target) std.Thread.yield() catch {};
         }
     };
     var hammers: [3]Hammer = @splat(.{});
