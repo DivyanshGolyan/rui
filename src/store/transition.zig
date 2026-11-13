@@ -22,6 +22,8 @@
 //!   `Declined` (those of `Guards` whose commit answers `declined(t, err)`
 //!   instead of failing).
 //! - `committed(t)`, the result once its commit stands.
+//! - optionally `announced(t)`, what the Host hears once its commit stands
+//!   and before the Store runs anything else (`Store.announce`).
 //!
 //! The rounds run through `Access` until its queue core moves here.
 
@@ -210,6 +212,20 @@ fn RoundOf(comptime R: type, comptime commit: Commit, comptime Guards: type, com
             r.get().writer.recordContentRow(content_id);
         }
 
+        /// `Access.contentSink`: it steps what is queued in process where
+        /// the engine needs the row first, and adds no round.
+        pub fn contentSink(r: *Self, content_id: u64, length: u64) !store_access.ContentSink {
+            transacts("streams content");
+            return r.get().writer.contentSink(content_id, length);
+        }
+
+        /// The configure reads in the Store's scratch, which the Entry
+        /// releases (`Store.configurationReads`): a lease for the run.
+        pub fn configurationReads(r: *Self) @typeInfo(@TypeOf(Store.configurationReads)).@"fn".return_type.? {
+            transacts("leases the configure reads");
+            return r.get().writer.store.configurationReads();
+        }
+
         /// `Access.attemptTimings`.
         pub fn attemptTimings(r: *Self, operation: u64) @import("../model_timing.zig").Values {
             writes("ends no Attempt");
@@ -345,6 +361,7 @@ fn drive(comptime T: type, t: *T, core: *CoreFor(T)) !T.Result {
                 };
                 return err;
             };
+            if (comptime @hasDecl(T, "announced")) if (T.announced(t)) |announcement| store_core.announce(core.writer.store, announcement);
             return T.committed(t);
         },
         .done => |result| {
