@@ -18,7 +18,7 @@ const codecs = @import("codecs.zig");
 
 pub const nghttp2_version = h2.nghttp2_version;
 pub const openssl_version = h2.openssl_version;
-pub const max_endpoint_bytes = h2.max_url_bytes;
+pub const max_endpoint_bytes = @import("endpoint_value.zig").max_endpoint_bytes;
 /// The linked nghttp2 and OpenSSL are exactly the pinned versions.
 pub const checkLibraries = h2.checkLibraries;
 
@@ -945,26 +945,7 @@ comptime {
 }
 
 /// Rui's endpoint rule, which h2's own URL rule must also accept.
-pub fn validateEndpoint(endpoint: []const u8) !void {
-    if (endpoint.len == 0 or endpoint.len > max_endpoint_bytes or
-        std.mem.indexOfScalar(u8, endpoint, 0) != null or !std.unicode.utf8ValidateSlice(endpoint))
-    {
-        return error.InvalidProviderEndpoint;
-    }
-    const uri = std.Uri.parse(endpoint) catch return error.InvalidProviderEndpoint;
-    if (uri.user != null or uri.password != null or uri.fragment != null) return error.InvalidProviderEndpoint;
-    var host_buffer: [std.Io.net.HostName.max_len]u8 = undefined;
-    const component = uri.host orelse return error.InvalidProviderEndpoint;
-    const host = component.toRaw(&host_buffer) catch return error.InvalidProviderEndpoint;
-    if (host.len == 0) return error.InvalidProviderEndpoint;
-    if (std.mem.eql(u8, uri.scheme, "http")) {
-        if (!std.mem.eql(u8, host, "127.0.0.1") and !std.mem.eql(u8, host, "::1")) return error.InsecureProviderEndpoint;
-    } else if (!std.mem.eql(u8, uri.scheme, "https")) return error.InvalidProviderEndpoint;
-    _ = h2.parseUrl(endpoint) catch |err| return switch (err) {
-        error.CleartextNotLoopback => error.InsecureProviderEndpoint,
-        error.InvalidUrl => error.InvalidProviderEndpoint,
-    };
-}
+pub const validateEndpoint = @import("endpoint_value.zig").validateEndpoint;
 
 test "idle reactor reports zero finished transfers and no completion" {
     var used: std.atomic.Value(u64) = .init(0);
@@ -1088,24 +1069,6 @@ test "scratch reservation is bounded and releases exact charge" {
     try std.testing.expect(!budget.charge(4));
     budget.release(7);
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
-}
-
-test "endpoint validation permits TLS and loopback fixture HTTP only" {
-    try validateEndpoint("https://example.com/responses");
-    try validateEndpoint("http://127.0.0.1:9876/fail");
-    try std.testing.expectError(error.InsecureProviderEndpoint, validateEndpoint("http://example.com/fail"));
-    try std.testing.expectError(
-        error.InvalidProviderEndpoint,
-        validateEndpoint("http://127.0.0.1:80@example.com/fail"),
-    );
-    try std.testing.expectError(
-        error.InvalidProviderEndpoint,
-        validateEndpoint("http://127.0.0.1:80@127.0.0.1:9876/fail"),
-    );
-    try std.testing.expectError(error.InvalidProviderEndpoint, validateEndpoint("https://user@example.com/fail"));
-    try std.testing.expectError(error.InsecureProviderEndpoint, validateEndpoint("http://[::1]evil:80/fail"));
-    // Accepted by the URI grammar but not by h2's: a query with no path.
-    try std.testing.expectError(error.InvalidProviderEndpoint, validateEndpoint("https://example.com?q=1"));
 }
 
 fn observeLines(context: *HeaderContext, observation: *const HeaderObservation, lines: []const []const u8) !void {
