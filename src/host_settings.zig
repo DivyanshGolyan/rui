@@ -777,7 +777,8 @@ fn readKind(comptime T: type, dest: *T, value: std.json.Value, at: []const u8, r
             const raw = try readOsBytes(T.max_bytes, value, at, read);
             const text = if (T.path_rule == .interface) std.mem.trimEnd(u8, raw, "/") else raw;
             if ((text.len == 0 and !T.allow_empty) or (T.absolute and !std.fs.path.isAbsolute(text))) return refuse(read.failure, at, "must be an absolute path");
-            dest.text.set(text) catch return refuse(read.failure, at, "path exceeds its byte bound or contains NUL");
+            if (text.len > T.max_bytes) return refuse(read.failure, at, std.fmt.comptimePrint("path is longer than {d} bytes{s}", .{ T.max_bytes, if (T.path_rule == .interface) ", the most a socket path in it allows" else "" }));
+            dest.text.set(text) catch return refuse(read.failure, at, "path contains NUL");
             dest.anchored = false;
         },
         .url => {

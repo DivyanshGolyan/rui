@@ -652,7 +652,7 @@ def saved_settings(root, env):
     try:
         host_ok(env, "set", "--store", moved, "interface.dir", elsewhere)
         too_long = host_command(env, "set", "--store", moved, "interface.dir", "/" + "d" * 94)
-        assert too_long.returncode == 2 and "interface.dir" in too_long.stderr and "94" in too_long.stderr, too_long
+        assert too_long.returncode == 2 and "interface.dir: path is longer than 94 bytes" in too_long.stderr, too_long
     finally:
         os.rmdir(elsewhere)
     refused = run_start(moved, env)
