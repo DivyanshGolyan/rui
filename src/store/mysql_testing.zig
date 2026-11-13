@@ -1200,8 +1200,11 @@ test "store.mysql live a reconnect onto a server admission refuses does not resu
     }
     const got = try commitLosing(&storage, .after_commit);
     // Its counters are not trusted, so the outcome stays unknown, and no
-    // write follows on that server.
-    try std.testing.expectError(error.CommitOutcomeUnknown, got.result);
+    // write follows on that server. The engine keeps the unknown outcome,
+    // so the rollback after it cannot run and takes its place in what the
+    // runner answers.
+    try std.testing.expectEqual(@as(?anyerror, error.CommitOutcomeUnknown), storage.engine.mysql.state.failure);
+    try std.testing.expectError(error.CanonicalRollbackFailed, got.result);
     try std.testing.expectEqual(@as(u64, 0), storage.engine.mysql.state.testing_shape.reconnects);
 }
 
@@ -1227,9 +1230,14 @@ test "store.mysql live a reconnect never ends a session that does not hold the S
     // Whether the lost session's lock had gone yet decides between resuming
     // and leaving the outcome unknown; either way the answer is true.
     const rows_saved = try queryU64(&storage, "SELECT count(*) FROM content WHERE content_id=?1", .{got.id});
+    // An unknown outcome is the engine's, and the rollback that cannot run
+    // after it is the runner's answer.
     if (got.result) |_| {
         try std.testing.expectEqual(@as(u64, 1), rows_saved);
-    } else |err| try std.testing.expectEqual(error.CommitOutcomeUnknown, err);
+    } else |err| {
+        try std.testing.expectEqual(@as(?anyerror, error.CommitOutcomeUnknown), storage.engine.mysql.state.failure);
+        try std.testing.expectEqual(error.CanonicalRollbackFailed, err);
+    }
 }
 
 const live_count = rsql.Read(.{
