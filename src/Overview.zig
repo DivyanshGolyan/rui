@@ -649,14 +649,11 @@ fn appKey(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event, delivery:
         .enter => .enter,
         else => .ignored,
     };
-    if (delivery.under == .settings) {
-        const live = semantic == .action and (semantic.action == .exit or (semantic.action == .clear and self.state.upgrade.takesEscape()));
-        if (!live) {
-            ctx.consumeEvent();
-            return;
-        }
-    }
-    try self.appNext(ctx, try self.event(.{ .input = semantic }));
+    try self.appNext(ctx, try self.event(.{ .input = .{
+        .key = semantic,
+        .under = delivery.under == .settings,
+        .pasted = delivery.pasted,
+    } }));
     ctx.consumeAndRedraw();
 }
 
@@ -6104,7 +6101,7 @@ test "App settings Model filters live choices and saves the next Session at both
         try std.testing.expectEqual(@as(usize, 1), overview.job_count);
         try std.testing.expect(try rig.settle() == null);
         try std.testing.expectEqual(@as(usize, 1), Seen.now.model_lists);
-        _ = try overview.event(.{ .input = .{ .action = .first } });
+        _ = try overview.event(.{ .input = .{ .key = .{ .action = .first } } });
         try std.testing.expect(try overview.event(.{ .models = .{ .menu = try model_picker.testMenu(&.{
             .{ .provider = .codex, .list = .{ .live = .{ .bytes = "gpt-5.5\ngpt-6-luna\nfuture-chat\n" } } },
             .{ .provider = .openai, .list = .{ .live = .{ .bytes = "gpt-5.5\ngpt-6-luna\nfuture-chat\n" } } },
@@ -7547,4 +7544,52 @@ test "empty New Session owner upgrade handoff preserves model draft and caret th
     try fixture.refresh();
     try fixture.expectVisible(&.{});
     try std.testing.expectEqual(@as(usize, 1), EmptySessionOwner.count);
+}
+
+test "Overview forwards captured covered pane and paste without rereading newer Root state" {
+    const rig = try openOverview();
+    defer rig.close();
+    const overview = rig.overview;
+    const text = "Keep this notice";
+    overview.state.notice = .{ .colour = .normal, .len = text.len };
+    @memcpy(overview.state.notice.?.bytes[0..text.len], text);
+    const enter: vxfw.Event = .{ .key_press = .{ .codepoint = vaxis.Key.enter } };
+    const exit: vxfw.Event = .{ .key_press = .{ .codepoint = 'c', .mods = .{ .ctrl = true } } };
+    var ctx = rig.context();
+    defer ctx.cmds.deinit(std.testing.allocator);
+
+    // Captured under Settings: a newer main layer cannot authorize Enter.
+    overview.root.input.layer = .main;
+    try appKey(overview, &ctx, enter, .{ .under = .settings, .pasted = false });
+    try std.testing.expectEqual(@as(usize, 0), overview.job_count);
+    try std.testing.expectEqual(@as(usize, 0), overview.state.request_count);
+    try std.testing.expectEqualStrings(text, overview.state.notice.?.bytes[0..overview.state.notice.?.len]);
+
+    // The terminal's later paste flag cannot turn pasted Enter or Ctrl-C
+    // into actions, nor may those ignored events clear the current notice.
+    overview.root.input.pasting = false;
+    for ([_]vxfw.Event{ enter, exit }) |input| {
+        try appKey(overview, &ctx, input, .{ .under = .main, .pasted = true });
+        try std.testing.expect(!ctx.quit);
+        try std.testing.expectEqual(@as(usize, 0), overview.job_count);
+        try std.testing.expectEqualStrings(text, overview.state.notice.?.bytes[0..overview.state.notice.?.len]);
+    }
+
+    // Conversely the main, non-pasted delivery remains authorized after
+    // Root has switched to Settings and begun a different paste.
+    overview.root.input.layer = .settings;
+    overview.root.input.pasting = true;
+    try appKey(overview, &ctx, enter, .{ .under = .main, .pasted = false });
+    try std.testing.expect(overview.state.creating());
+    try std.testing.expectEqual(@as(usize, 1), overview.job_count);
+    try std.testing.expect(overview.root.input.layer.settingsOpen());
+
+    // Covered-screen exit still precedes the pending-creation guard. Its
+    // captured non-paste bit wins over Root's newer paste transaction too.
+    overview.root.input.layer = .main;
+    try appKey(overview, &ctx, exit, .{ .under = .settings, .pasted = false });
+    try std.testing.expect(ctx.quit);
+    try std.testing.expect(overview.state.creating());
+    try std.testing.expectEqual(@as(usize, 1), overview.job_count);
+    try std.testing.expectEqual(@as(usize, 0), Seen.now.creates);
 }

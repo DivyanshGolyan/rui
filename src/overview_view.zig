@@ -155,6 +155,14 @@ test "keys list covers both screens without unbound or duplicate keys" {
 /// Semantic list input: printable text has no editing route.
 pub const Input = union(enum) { action: Action, enter, ignored };
 
+/// The screen and paste context captured when this semantic key arrived.
+/// Covered Settings admits only exit and a still-cancellable Upgrade Escape.
+pub const InputDelivery = struct {
+    key: Input,
+    under: bool = false,
+    pasted: bool = false,
+};
+
 pub const Delta = enum {
     not_modified,
     changed,
@@ -326,7 +334,7 @@ pub const CreateResult = union(enum) {
 };
 
 pub const Event = union(enum) {
-    input: Input,
+    input: InputDelivery,
 
     /// The size of the screen the shell draws next; keys read until the
     /// next one act on that screen.
@@ -2057,8 +2065,9 @@ fn startUpgrade(state: *State) void {
     if (state.upgrade.start()) state.notice = null;
 }
 
-fn listInput(state: *State, input: Input, effects: *Effects) error{OutOfMemory}!void {
-    if (input == .ignored) return;
+fn listInput(state: *State, delivery: InputDelivery, effects: *Effects) error{OutOfMemory}!void {
+    const input = delivery.key;
+    if (delivery.pasted or input == .ignored) return;
     if (input == .action and input.action == .exit) {
         effects.add(.exit);
         return;
@@ -2067,7 +2076,7 @@ fn listInput(state: *State, input: Input, effects: *Effects) error{OutOfMemory}!
         effects.add(.cancel_upgrade);
         return;
     }
-    if (state.creating()) return;
+    if (delivery.under or state.creating()) return;
     switch (input) {
         .ignored => unreachable,
         .enter => try enter(state, effects),
@@ -3093,10 +3102,10 @@ fn refresh(state: *State, delta: Delta, since: Token, rows: []const Listed) !Eff
 var test_edits: u32 = 0;
 
 fn press(state: *State, action: Action) !Effects {
-    return step(state, .{ .input = .{ .action = action } });
+    return step(state, .{ .input = .{ .key = .{ .action = action } } });
 }
 fn submit(state: *State) !Effects {
-    return step(state, .{ .input = .enter });
+    return step(state, .{ .input = .{ .key = .enter } });
 }
 
 /// One needs-you row's command read.
@@ -5505,7 +5514,7 @@ test "list input has no text domain and ignored printable or slash input preserv
     defer state.deinit();
     state.say(.attention, "retained notice", .{});
     const selected = state.selected;
-    try expectEffects(&.{}, try step(&state, .{ .input = .ignored }));
+    try expectEffects(&.{}, try step(&state, .{ .input = .{ .key = .ignored } }));
     try std.testing.expectEqual(selected, state.selected);
     try std.testing.expect(state.notice != null);
     try std.testing.expectEqualStrings("retained notice", state.notice.?.text());
@@ -5517,13 +5526,13 @@ test "New Session Enter and click create exactly once with a copied default" {
         var state = try opened(&.{});
         defer state.deinit();
         state.default = Default.of("openai", "gpt-6-sol");
-        const input: Event = if (click) .{ .clicked = .{ .target = .new_session } } else .{ .input = .enter };
+        const input: Event = if (click) .{ .clicked = .{ .target = .new_session } } else .{ .input = .{ .key = .enter } };
         const effects = try step(&state, input);
         try expectEffects(&.{.{ .create = state.default }}, effects);
         state.default = null;
         try std.testing.expectEqualStrings("gpt-6-sol", effects.slice()[0].create.?.model.slice());
         try std.testing.expect(state.creating());
-        try expectEffects(&.{}, try step(&state, .{ .input = .enter }));
+        try expectEffects(&.{}, try step(&state, .{ .input = .{ .key = .enter } }));
         try expectEffects(&.{}, try step(&state, .{ .clicked = .{ .target = .new_session } }));
         try std.testing.expectEqual(@as(usize, 1), state.request_count);
         try std.testing.expectEqual(.create, state.requests[0].kind);
@@ -5635,7 +5644,7 @@ test "Alt-A archives the selected row at once, busy or not, without a composer" 
         var state = try opened(&.{ a, b });
         defer state.deinit();
         state.selected = .{ .session = ref };
-        try expectEffects(&.{.{ .archive = .{ .reference = ref } }}, try step(&state, .{ .input = .{ .action = .archive } }));
+        try expectEffects(&.{.{ .archive = .{ .reference = ref } }}, try step(&state, .{ .input = .{ .key = .{ .action = .archive } } }));
         try std.testing.expectEqual(ArchiveState.active, state.find(ref).?.archive_state);
         _ = try step(&state, .{ .archive = .{ .request = .{ .reference = ref }, .outcome = .{ .failed = "archive_pending" } } });
         try std.testing.expect(state.find(ref) != null);
@@ -5645,7 +5654,7 @@ test "Alt-A archives the selected row at once, busy or not, without a composer" 
 test "upgrade holds share stop admission for both screens, and the stop goes once they clear" {
     const ref = "aaaaaa".*;
     const events = [_]Event{
-        .{ .input = .{ .action = .stop } },
+        .{ .input = .{ .key = .{ .action = .stop } } },
         .{ .conversed = .{ .reference = ref, .work = .working, .input = .stop } },
     };
     for ([_]bool{ false, true }) |blocked| {
@@ -5669,7 +5678,7 @@ test "archive admission reports only a new ledger request across every surface c
     for ([_]bool{ false, true }) |full| for (std.enums.values(Held)) |held| for (std.enums.values(Hold)) |hold| for ([_]ArchiveState{ .active, .archiving, .archived }) |archive| {
         const cases = [_]struct { event: Event, restore: bool = false }{
             .{ .event = .{ .conversed = .{ .reference = ref, .work = .working, .input = .{ .archive = archive } } } },
-            .{ .event = .{ .input = .{ .action = .archive } } },
+            .{ .event = .{ .input = .{ .key = .{ .action = .archive } } } },
             .{ .event = .{ .conversed = .{ .reference = ref, .work = .working, .input = .unarchive } }, .restore = true },
         };
         for (cases) |case| {
@@ -5963,7 +5972,7 @@ test "empty Session projection shows only the current open empty and reconciles 
     // An explicit stale selection cannot authorize hidden-row operations.
     state.selected = .{ .session = "empty1".* };
     try std.testing.expect(state.selectedRow() == null);
-    try expectEffects(&.{}, try step(&state, .{ .input = .enter }));
+    try expectEffects(&.{}, try step(&state, .{ .input = .{ .key = .enter } }));
 }
 
 test "empty Session projection leaving the last visible empty selects New Session" {
@@ -6098,5 +6107,89 @@ test "empty chat name and selection agree across listing arrival orders and firs
         _ = try step(&state, .{ .first_line = .{ .reference = admitted.reference, .admission = 4, .line = "The first admitted task" } });
         try std.testing.expectEqualStrings(label orelse "The first admitted task", title(&state, &state.rows.items[0]).text);
         try std.testing.expectEqual(@as(usize, 1), state.order.items.len);
+    };
+}
+
+test "semantic list admission owns covered Settings paste creation and Upgrade precedence" {
+    const phases = [_]struct { upgrade: session_upgrade.Upgrade, escape: bool = false, held: bool = false }{
+        .{ .upgrade = .{} },
+        .{ .upgrade = .{ .run = .checking }, .escape = true, .held = true },
+        .{ .upgrade = .{ .run = .{ .installing = .{ .found = .{ .host = .none }, .step = .preparing } } }, .escape = true, .held = true },
+        .{ .upgrade = .{ .run = .{ .installing = .{ .found = .{ .host = .none }, .step = .publishing } } }, .held = true },
+        .{ .upgrade = .{ .run = .{ .installing = .{ .found = .{ .host = .none }, .step = .restarting } } }, .held = true },
+        .{ .upgrade = .{ .run = .cancelling }, .escape = true, .held = true },
+        .{ .upgrade = .{ .run = .{ .ended = .{ .how = .cancelled, .outcome = .unchanged } } } },
+        .{ .upgrade = .{ .after = .reobserving }, .held = true },
+        .{ .upgrade = .{ .after = .blocked }, .held = true },
+    };
+    const creations = enum { none, pending, uncertain };
+    // The entire semantic key domain, independent of the terminal decoder.
+    var inputs: [std.enums.values(Action).len + 2]Input = undefined;
+    for (std.enums.values(Action), 0..) |action, at| inputs[at] = .{ .action = action };
+    inputs[inputs.len - 2] = .enter;
+    inputs[inputs.len - 1] = .ignored;
+    for ([_]bool{ false, true }) |under| for ([_]bool{ false, true }) |pasted| for (std.enums.values(creations)) |creation| for (phases) |phase| for (inputs) |key| {
+        var state = try opened(&.{});
+        defer state.deinit();
+        if (creation != .none) {
+            _ = try submit(&state);
+            if (creation == .uncertain) _ = try step(&state, .{ .created = .{ .unconfirmed = "saved-create" } });
+        }
+        state.upgrade = phase.upgrade;
+        state.say(.quiet, "Kept notice", .{});
+        const before_notice = state.notice;
+        const before_requests = state.request_count;
+        const effects = try step(&state, .{ .input = .{ .key = key, .under = under, .pasted = pasted } });
+        try std.testing.expect(std.meta.eql(phase.upgrade, state.upgrade));
+        if (pasted or key == .ignored) {
+            try expectEffects(&.{}, effects);
+            try std.testing.expect(std.meta.eql(before_notice, state.notice));
+            try std.testing.expectEqual(Selection.new_session, state.selected);
+            try std.testing.expectEqual(before_requests, state.request_count);
+        } else if (key == .action and key.action == .exit) {
+            // Exit remains live even while creation or a covered page waits.
+            try expectEffects(&.{.exit}, effects);
+            try std.testing.expect(std.meta.eql(before_notice, state.notice));
+            try std.testing.expectEqual(before_requests, state.request_count);
+        } else if (key == .action and key.action == .clear and phase.escape) {
+            // Cancellable Escape precedes both Settings and creation isolation.
+            try expectEffects(&.{.cancel_upgrade}, effects);
+            try std.testing.expect(std.meta.eql(before_notice, state.notice));
+            try std.testing.expectEqual(before_requests, state.request_count);
+        } else if (under or creation != .none) {
+            try expectEffects(&.{}, effects);
+            try std.testing.expect(std.meta.eql(before_notice, state.notice));
+            try std.testing.expectEqual(Selection.new_session, state.selected);
+            try std.testing.expectEqual(before_requests, state.request_count);
+        } else switch (key) {
+            .ignored => unreachable,
+            .enter => {
+                if (phase.held) {
+                    try expectEffects(&.{}, effects);
+                    try expectNotice(&state, upgrade_recovery);
+                    try std.testing.expectEqual(before_requests, state.request_count);
+                } else {
+                    try expectEffects(&.{.{ .create = null }}, effects);
+                    try std.testing.expectEqual(before_requests + 1, state.request_count);
+                    try std.testing.expect(state.creating());
+                }
+            },
+            .action => |action| {
+                try expectEffects(&.{}, effects);
+                try std.testing.expectEqual(before_requests, state.request_count);
+                switch (action) {
+                    .exit => unreachable,
+                    .clear => try expectNotice(&state, null),
+                    .stop, .archive => try expectNotice(&state, if (phase.held) upgrade_recovery else no_selection),
+                    .previous, .next, .first, .last, .select_previous, .select_next => {
+                        const expected: Selection = if (action == .next or action == .last or action == .select_next) .settings else .new_session;
+                        try std.testing.expectEqual(expected, state.selected);
+                        if (action == .select_previous or action == .select_next) {
+                            try std.testing.expect(std.meta.eql(before_notice, state.notice));
+                        } else try expectNotice(&state, null);
+                    },
+                }
+            },
+        }
     };
 }
