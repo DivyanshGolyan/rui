@@ -13,14 +13,19 @@ import argparse
 import json
 import subprocess
 import sys
+from urllib.parse import quote
 
 from conflict_alert import gh, github
-from pr_overlap import branch_changes, overlaps, report
+from pr_overlap import branch_changes, origin_repo, overlaps, report
 
 
-def create_args(title, body_file, base, branch):
-    """`gh pr create` for a draft: the opener has no way to open a ready PR."""
-    return ["pr", "create", "--draft", "--base", base, "--head", branch, "--title", title, "--body-file", body_file]
+def create_args(repo, title, body_file, base, branch):
+    """REST `gh api` arguments creating a draft: the opener has no way to open a ready PR.
+
+    `gh pr create`, `gh pr comment` and `gh pr list` use GraphQL, which cloud sessions are refused.
+    """
+    return ["api", "-X", "POST", f"repos/{repo}/pulls", "-f", f"title={title}", "-f", f"head={branch}",
+            "-f", f"base={base}", "-F", "draft=true", "-F", f"body=@{body_file}"]
 
 
 def open_refusal(local_head, pushed_head):
@@ -32,19 +37,20 @@ def open_refusal(local_head, pushed_head):
 
 
 def ready_refusal(pr, local_head, dirty):
-    """Why the PR cannot become ready yet, or None.
+    """Why the PR (a REST pull request) cannot become ready yet, or None.
 
     Run ready once Codex is clean: the PR's head on GitHub is this checkout's committed
     head, with nothing left uncommitted to push after it.
     """
     if pr is None:
         return "This branch has no open PR; open one with `open_pr.py open`."
-    if not pr["isDraft"]:
+    if not pr["draft"]:
         return f"PR #{pr['number']} is already ready for review."
     if dirty:
         return "Commit or discard local changes first: ready requires a committed, Codex-clean head."
-    if pr["headRefOid"] != local_head:
-        return (f"PR #{pr['number']}'s head on GitHub is {pr['headRefOid'][:10]}, not this checkout's "
+    head = pr["head"]["sha"]
+    if head != local_head:
+        return (f"PR #{pr['number']}'s head on GitHub is {head[:10]}, not this checkout's "
                 f"{local_head[:10]}: push the last planned commit and request `@codex review` first.")
     return None
 
@@ -65,26 +71,27 @@ def main():
     args = parser.parse_args()
     branch, head = git("branch", "--show-current"), git("rev-parse", "HEAD")
     try:
+        repo = origin_repo()
         if args.command == "open":
             if refusal := open_refusal(head, git("rev-parse", "--verify", "-q", f"origin/{branch}")):
                 print(refusal, file=sys.stderr)
                 return 1
-            repo = json.loads(gh("repo", "view", "--json", "nameWithOwner"))["nameWithOwner"]
             report(overlaps(github, repo, branch, *branch_changes(f"origin/{args.base}")))
-            url = gh(*create_args(args.title, args.body_file, args.base, branch)).strip()
-            print(url)
-            gh("pr", "comment", url, "--body", "@codex review")
+            pr = json.loads(gh(*create_args(repo, args.title, args.body_file, args.base, branch)))
+            print(pr["html_url"])
+            github("POST", f"repos/{repo}/issues/{pr['number']}/comments", [("body", "@codex review")])
             print("Opened as a draft and requested Codex review. Push fixes to the draft, then comment "
                   "`@codex review` after each push. Once Codex is clean on the current head, run: "
                   "python3 tests/ci/open_pr.py ready (starts the full suite).")
             return 0
-        found = json.loads(gh("pr", "list", "--head", branch, "--state", "open",
-                              "--json", "number,isDraft,headRefOid"))
+        owner = repo.split("/")[0]
+        found = github("GET", f"repos/{repo}/pulls?state=open&head={quote(f'{owner}:{branch}', safe=':/')}")
         pr = found[0] if found else None
         if refusal := ready_refusal(pr, head, bool(git("status", "--porcelain"))):
             print(refusal, file=sys.stderr)
             return 1
-        gh("pr", "ready", str(pr["number"]))
+        # GitHub's REST API has no ready-for-review endpoint, so this one step stays on GraphQL.
+        gh("pr", "ready", str(pr["number"]), "--repo", repo)
         print(f"PR #{pr['number']} is ready; its full selected suite now runs on {head[:10]}.")
         return 0
     except (subprocess.CalledProcessError, ValueError, KeyError) as error:

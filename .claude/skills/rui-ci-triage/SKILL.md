@@ -29,6 +29,7 @@ A run can fail in several jobs for different reasons.
 Read each failed job's own failing step before calling it derivative.
 The required `admission` job can fail because an upstream acceptance job failed or was cancelled.
 Read that upstream failure rather than blaming the aggregate.
+A Promote run whose step has failed is red even while its bisect step keeps the run in progress (up to four hours); report it as red at once.
 A Promote failure bisects each failed step of the job inside that job: read every `Promotion bisect: <step>:` line and the retained replay logs before diagnosing the commit each names.
 A Release failure inside a green promotion is publication or the post-publication wire recheck; [Release publication](../../../VERIFICATION.md#release-publication) says which, and what recovers each.
 
@@ -36,13 +37,25 @@ A Release failure inside a green promotion is publication or the post-publicatio
 
 Before blaming the commit under test or calling it a stale base, look up the signature on other SHAs and workflows: Selected and on-demand qualification runs.
 
+- **Infrastructure first** for a cancelled or timed-out job.
+  Read the aggregate job's "Name each failed job and its cause" lines.
+  A Mac job cancelled at exactly 15 minutes with no steps never got a runner; rerun the failed jobs.
+  A compile job that times out after a dependency change may have restored only a cold cache: compare its "Cache restored from key" line and snapshot size with the last green run of that job.
+  Suspect the diff only after these are ruled out.
+- **Broken main** when the failing file or fixture is not in the PR's diff.
+  Reproduce on main HEAD before routing it to the PR's owner: `gh workflow run check.yml --ref main -f base=$(git rev-parse origin/stable)`.
+  Selection covers `base..main`, so a base at the last promoted commit selects every Linux check the merged batch touched.
+  That dispatch runs no native macOS targets and no upgrade gate, so reproduce those on their own workflow at main HEAD instead: a native Mac failure with `gh workflow run qualify-macos.yml -f ref=main -f suite=native`, and an upgrade failure with `gh workflow run previous-release-upgrade.yml --ref main`.
+  A green run that skipped the failing check proves nothing about `main`.
+  If main is red, find the merged pair that crossed (two PRs green alone, broken together, or a release that shipped between a wire PR's green run and its merge), name them, and route one main fix or a revert of the later PR.
+
 - **Intermittent** when the signature fails on SHAs that never touched the fixture or its owner (`git log <a>..<b> -- <paths>`), or when one SHA both passes and fails across workflows.
   Promotion runs native Mac and the full suite over a batch, so unrelated SHAs failing one fixture can expose a race rather than a stale base.
 - **Caused by the diff** when the signature is new and the diff touches the fixture's owner.
 - **A job that stalled or hit its timeout** shows as cancelled, not failed, and has no per-fixture `timed out` record.
   Treat it as a failure.
   Find the last test that started.
-  If the diff added tests to that binary, suspect them first.
+  After the infrastructure checks above, if the diff added tests to that binary, suspect them.
   Compare the same job's duration on main and other PRs before an A/B run or asking the user.
 
 Search the open CI issues for the signature before filing, and group them by fixture; several signatures in one fixture are often one race.

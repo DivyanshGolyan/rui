@@ -506,9 +506,12 @@ test "store.mysql live metadata failures precede missing-key repair and ownershi
         .{ std.fmt.comptimePrint("UPDATE store_meta SET meta_value='{d}' WHERE meta_key='format'", .{schema.schema_version + 1}), error.StoreSchemaAhead },
         .{ "UPDATE store_meta SET meta_value='not-a-number' WHERE meta_key='format'", error.MalformedStoreFormat },
         .{ "UPDATE store_meta SET meta_value=REPEAT('9',600) WHERE meta_key='format'", error.MalformedStoreFormat },
-        .{ "UPDATE store_meta SET meta_value='13' WHERE meta_key='wire_version'", error.WrongStoreVersion },
-        .{ "UPDATE store_meta SET meta_value='wrong-wire' WHERE meta_key='wire_version'", error.WrongStoreVersion },
-        .{ "UPDATE store_meta SET meta_value=REPEAT('9',600) WHERE meta_key='wire_version'", error.WrongStoreVersion },
+        // A Store at the previous format still has its wire label: its
+        // format is refused first, whatever order the rows come in.
+        .{ std.fmt.comptimePrint("UPDATE store_meta SET meta_value='{d}' WHERE meta_key='format';INSERT INTO store_meta VALUES('wire_version','16')", .{schema.schema_version - 1}), error.StoreSchemaBehind },
+        // At this format the label is retired: a row is an unexpected key.
+        .{ "INSERT INTO store_meta VALUES('wire_version','" ++ @import("../wire_version.zig").wire_version ++ "')", error.WrongStoreSchema },
+        .{ "INSERT INTO store_meta VALUES('wire_version',REPEAT('9',600))", error.WrongStoreSchema },
         .{ "INSERT INTO store_meta VALUES('store_id','not-an-id')", error.WrongStoreIdentity },
         .{ "INSERT INTO store_meta VALUES('store_id',REPEAT('a',600))", error.WrongStoreIdentity },
         .{ "UPDATE store_meta SET meta_value='different' WHERE meta_key='store_selector'", error.WrongStoreIdentity },
@@ -516,14 +519,13 @@ test "store.mysql live metadata failures precede missing-key repair and ownershi
         .{ "INSERT INTO store_meta VALUES('unexpected','private-value')", error.WrongStoreSchema },
     };
     inline for (cases) |case| {
-        try run("DELETE FROM store_meta WHERE meta_key='store_id' OR meta_key='unexpected';" ++
-            "UPDATE store_meta SET meta_value='" ++ std.fmt.comptimePrint("{d}", .{schema.schema_version}) ++ "' WHERE meta_key='format';" ++
-            "UPDATE store_meta SET meta_value='" ++ @import("../wire_version.zig").wire_version ++ "' WHERE meta_key='wire_version'");
+        try run("DELETE FROM store_meta WHERE meta_key='store_id' OR meta_key='unexpected' OR meta_key='wire_version';" ++
+            "UPDATE store_meta SET meta_value='" ++ std.fmt.comptimePrint("{d}", .{schema.schema_version}) ++ "' WHERE meta_key='format'");
         try run("DELETE FROM store_meta WHERE meta_key='store_selector'");
         var baseline = try admitMetadata(name, selector.slice());
         try baseline.close();
         try run("DELETE FROM store_meta WHERE meta_key='store_id'");
-        const unexpected_key = case[1] == error.WrongStoreSchema;
+        const unexpected_key = case[1] == error.WrongStoreSchema and std.mem.indexOf(u8, case[0], "'unexpected'") != null;
         if (unexpected_key) try run("ALTER TABLE store_meta ALTER CHECK store_meta_chk_1 NOT ENFORCED");
         defer if (unexpected_key) {
             run("DELETE FROM store_meta WHERE meta_key='unexpected';ALTER TABLE store_meta ALTER CHECK store_meta_chk_1 ENFORCED") catch @panic("cannot restore metadata CHECK enforcement");
@@ -570,7 +572,9 @@ test "store.mysql live metadata repair rolls back with a refused ownership updat
     try std.testing.expectEqual(epoch + 1, repaired.state.epoch);
     try repaired.close();
     try root.query("SELECT count(*) FROM store_meta");
-    try std.testing.expectEqual(@as(u64, 4), try readU64());
+    try std.testing.expectEqual(@as(u64, 3), try readU64());
+    try root.query("SELECT count(*) FROM store_meta WHERE meta_key='wire_version'");
+    try std.testing.expectEqual(@as(u64, 0), try readU64());
     var reopened = try admitMetadata(name, name);
     defer reopened.close() catch unreachable;
     try std.testing.expectEqualStrings(&id, &reopened.state.store_id);
