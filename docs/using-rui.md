@@ -217,6 +217,11 @@ For example, `/setup --permission-mode ask` makes new Sessions ask before runnin
 An explicit `--permission-mode` on a new Session wins over the saved choice; without either, Rui runs without asking.
 `rui defaults inspect` reads the saved defaults without changing them.
 
+Signing in with `rui auth login PROVIDER` saves that provider as the default when none is saved.
+`rui auth login chatgpt` also replaces a saved `codex` default, since both sign in to the same ChatGPT account, and clears a model saved for Codex.
+Any other saved provider stays; the sign-in says so and names the command that changes it, such as `rui defaults configure --provider chatgpt`.
+Existing Sessions keep their provider.
+
 ## Notifications
 
 When the terminal running Rui is out of focus, the overview or an open conversation sends a desktop notification when a Session finishes, fails or needs approval. iTerm2, kitty, WezTerm and Ghostty show it as a desktop notification and foot through its notify command.

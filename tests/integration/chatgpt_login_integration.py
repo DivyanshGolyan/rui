@@ -4,7 +4,10 @@ against a loopback that answers as the plan's issuer and as OpenAI's API,
 with made-up tokens only: a sign-in through the listener and one through a
 pasted address, a returning sign-in that reuses the issued client, a
 callback for another attempt refused, and a logout that revokes and leaves
-a running Host refusing work as signed out until the next sign-in."""
+a running Host refusing work as signed out until the next sign-in. Each
+sign-in's receipt and saved default: an unset default is filled, a saved
+OpenAI one stays and the receipt names the command that changes it, and a
+saved Codex one is replaced with its model cleared."""
 
 import base64
 import hashlib
@@ -130,6 +133,20 @@ def tokens(link, access, refresh):
                   "expires_in": 3600, "token_type": "Bearer", "scope": PLAN_SCOPE})
 
 
+def default_receipt(stdout):
+    """What a sign-in's stdout says about the saved default: its `Rui:`
+    lines after the one that says it signed in."""
+    lines = stdout.splitlines(keepends=True)
+    assert lines[0] == "Rui: Signed in to ChatGPT.\n", stdout
+    return "".join(line for line in lines[1:] if line.startswith("Rui: "))
+
+
+def saved_default():
+    """The saved provider and model for new Sessions."""
+    inspected = fixture.command("defaults", "inspect")
+    return inspected["provider"], inspected["model"]
+
+
 def challenge(verifier):
     return base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
 
@@ -224,6 +241,9 @@ def run():
         assert (facts["generation"], facts["state"], facts["client_id"], facts["account_id"], facts["access_token"]) == \
             ("1", "ready", CLIENT, SUBJECT, first), facts
         assert first not in stdout + stderr and "plan-refresh-1" not in stdout + stderr
+        # With no default saved, the sign-in fills it.
+        assert default_receipt(stdout) == "Rui: New Sessions will use ChatGPT.\n", stdout
+        assert saved_default() == ("chatgpt", None)
 
         # Status names the account and when its token expires.
         status = subprocess.run([str(fixture.RUI), "auth", "status"], capture_output=True, text=True, timeout=15)
@@ -247,7 +267,8 @@ def run():
 
         # A returning sign-in, by pasting the address as a chat app hands it
         # back: the saved client and host id, no agent and no token in the
-        # link, and no client id in the answer.
+        # link, and no client id in the answer. A saved OpenAI default stays.
+        fixture.command("defaults", "configure", "--provider", "openai", "--model", "gpt-6-sol")
         login = Login(url)
         logins.append(login)
         link = login.link(base)
@@ -264,6 +285,9 @@ def run():
         assert endpoint.token_requests[1]["client_id"] == [CLIENT] and endpoint.token_requests[1]["code"] == ["ac-made-up-2"]
         facts = credential_facts(credential_file)
         assert (facts["generation"], facts["client_id"], facts["access_token"]) == ("2", CLIENT, second), facts
+        assert default_receipt(stdout) == ("Rui: Your default provider for new Sessions is unchanged. "
+                          "To use ChatGPT instead: rui defaults configure --provider chatgpt\n"), stdout
+        assert saved_default() == ("openai", "gpt-6-sol")
         assert host_id_file.read_text().strip() == host_id
         # The running Host takes the new sign-in at its next request.
         fixture.message(state, store, "second", session, "after a returning sign-in")
@@ -305,6 +329,9 @@ def run():
         assert len(endpoint.bearers) == 2, endpoint.bearers
 
         # Signing in after a logout reuses the issued client; the Host serves it.
+        # It replaces a saved Codex default, the same account's older sign-in,
+        # and clears the model saved for Codex; the open Session keeps its own.
+        fixture.command("defaults", "configure", "--provider", "codex", "--model", "gpt-6-sol")
         login = Login(url)
         logins.append(login)
         link = login.link(base)
@@ -316,6 +343,10 @@ def run():
         code, stdout, stderr = login.finish()
         assert code == 0, (code, stdout, stderr)
         assert credential_facts(credential_file)["access_token"] == third
+        assert default_receipt(stdout) == ("Rui: New Sessions will use ChatGPT instead of Codex.\n"
+                          "Rui: The model saved for Codex was cleared, so new Sessions use the recommended model. "
+                          "To pick one: rui defaults configure --model ID\n"), stdout
+        assert saved_default() == ("chatgpt", None)
         fixture.message(state, store, "third", session, "after signing in again")
         fixture.wait_for(lambda: fixture.completed_observation(store, "third"), "answer after signing in again")
         assert endpoint.bearers[2:] == ["Bearer " + third], endpoint.bearers
@@ -331,7 +362,8 @@ def run():
         fixture.stop_host(host)
         host = None
         print("chatgpt login passed: listener and pasted sign-in, returning client reused, stale answer refused, "
-              "logout revokes and a running Host refuses until the next sign-in")
+              "logout revokes and a running Host refuses until the next sign-in; an unset default is filled, "
+              "an OpenAI default stays and a Codex one is replaced")
         complete = True
     finally:
         incoming_error = sys.exc_info()[1]
