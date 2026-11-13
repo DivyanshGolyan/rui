@@ -551,7 +551,7 @@ fn planLogin(init: std.process.Init, fixture_endpoint: ?[]const u8) !void {
         error.HomeRequired => homeRequired("the ChatGPT credential and host id are in HOME/.config/rui unless " ++ comptime provider_login.credentialVariable(.chatgpt) ++ " names the credential"),
         else => err,
     };
-    if (!try finishLogin(init, .chatgpt, "Rui: Signed in to ChatGPT.\n", true)) return;
+    if (!try finishLogin(init, .chatgpt, "Rui: Signed in to ChatGPT.\n")) return;
     try std.Io.File.stdout().writeStreamingAll(init.io, "A running Host that serves chatgpt uses this sign-in from its next request; one started before you signed in needs a restart to serve it.\nStart a conversation with: rui --provider chatgpt\n");
 }
 
@@ -1200,7 +1200,7 @@ fn login(init: std.process.Init, args: []const []const u8, comptime exchange: an
             return login_state.cmpxchgStrong(.cancellable, .publishing, .acq_rel, .acquire) == null;
         }
     }.publish);
-    if (!try finishLogin(init, .codex, "Rui: Signed in to Codex.\n", true)) return;
+    if (!try finishLogin(init, .codex, "Rui: Signed in to Codex.\n")) return;
     try std.Io.File.stdout().writeStreamingAll(init.io, "Start a conversation with: rui\n");
 }
 
@@ -1208,22 +1208,46 @@ fn login(init: std.process.Init, args: []const []const u8, comptime exchange: an
 /// so a receipt that cannot be written never skips it, then report both.
 /// Installation and future defaults have independent outcomes. Returns
 /// whether the default's outcome was reported as settled.
-fn finishLogin(init: std.process.Init, provider: protocol.Provider, receipt: []const u8, only_if_unset: bool) !bool {
-    const default_outcome = preferences.saveProviderAfterLogin(init.environ_map.get("HOME") orelse "", provider, only_if_unset);
+fn finishLogin(init: std.process.Init, provider: protocol.Provider, receipt: []const u8) !bool {
+    const default_outcome = preferences.fillProviderAfterLogin(init.environ_map.get("HOME") orelse "", provider);
     const stdout = std.Io.File.stdout();
     try stdout.writeStreamingAll(init.io, receipt);
     const name = providerPresentation(provider).name;
-    const added = default_outcome catch |err| {
+    const settled = default_outcome catch |err| {
         var buffer: [256]u8 = undefined;
         try stdout.writeStreamingAll(init.io, try std.fmt.bufPrint(&buffer, "Rui: {s} may not be saved as the default for new Sessions ({s}). Check with: rui defaults inspect\n", .{ name, preferences.loginDefaultFailureReason(err) }));
         return false;
     };
-    var buffer: [64]u8 = undefined;
-    try stdout.writeStreamingAll(init.io, if (added)
-        try std.fmt.bufPrint(&buffer, "Rui: New Sessions will use {s}.\n", .{name})
-    else
-        "Rui: Your default provider for new Sessions is unchanged.\n");
+    var buffer: [256]u8 = undefined;
+    try stdout.writeStreamingAll(init.io, try loginDefaultReceipt(&buffer, provider, settled));
     return true;
+}
+
+/// The receipt line(s) for what a login did to the default provider.
+fn loginDefaultReceipt(buffer: []u8, provider: protocol.Provider, outcome: preferences.LoginDefault) ![]const u8 {
+    const name = providerPresentation(provider).name;
+    var receipt = std.Io.Writer.fixed(buffer);
+    switch (outcome) {
+        .filled => try receipt.print("Rui: New Sessions will use {s}.\n", .{name}),
+        .replaced => |replaced| {
+            const previous = providerPresentation(replaced.previous).name;
+            try receipt.print("Rui: New Sessions will use {s} instead of {s}.\n", .{ name, previous });
+            if (replaced.cleared_pin) try receipt.print("Rui: The model saved for {s} was cleared, so new Sessions use the recommended model. To pick one: rui defaults configure --model ID\n", .{previous});
+        },
+        .already => try receipt.writeAll("Rui: Your default provider for new Sessions is unchanged.\n"),
+        .kept => try receipt.print("Rui: Your default provider for new Sessions is unchanged. To use {s} instead: rui defaults configure --provider {s}\n", .{ name, @tagName(provider) }),
+    }
+    return receipt.buffered();
+}
+
+test "a login's default receipt says what changed and, when nothing did, how to change it" {
+    var buffer: [256]u8 = undefined;
+    try std.testing.expectEqualStrings("Rui: New Sessions will use ChatGPT.\n", try loginDefaultReceipt(&buffer, .chatgpt, .filled));
+    try std.testing.expectEqualStrings("Rui: New Sessions will use ChatGPT instead of Codex.\n", try loginDefaultReceipt(&buffer, .chatgpt, .{ .replaced = .{ .previous = .codex, .cleared_pin = false } }));
+    try std.testing.expectEqualStrings("Rui: New Sessions will use ChatGPT instead of Codex.\nRui: The model saved for Codex was cleared, so new Sessions use the recommended model. To pick one: rui defaults configure --model ID\n", try loginDefaultReceipt(&buffer, .chatgpt, .{ .replaced = .{ .previous = .codex, .cleared_pin = true } }));
+    try std.testing.expectEqualStrings("Rui: Your default provider for new Sessions is unchanged.\n", try loginDefaultReceipt(&buffer, .chatgpt, .already));
+    try std.testing.expectEqualStrings("Rui: Your default provider for new Sessions is unchanged. To use ChatGPT instead: rui defaults configure --provider chatgpt\n", try loginDefaultReceipt(&buffer, .chatgpt, .kept));
+    try std.testing.expectEqualStrings("Rui: Your default provider for new Sessions is unchanged. To use OpenAI instead: rui defaults configure --provider openai\n", try loginDefaultReceipt(&buffer, .openai, .kept));
 }
 
 // OpenAI shows a disabled device-code setting only after sign-in and MFA, so
@@ -1310,7 +1334,7 @@ fn saveApiKey(init: std.process.Init) !void {
         if (err == error.InvalidApiKey) stderr.diagnostic("rui: that is not an API key: expected one line of visible characters, at most {d} bytes. Nothing was saved.\n", .{api_key.max_key_bytes});
         return err;
     };
-    _ = try finishLogin(init, .openai, "Rui: OpenAI API key saved. A Host started from now on serves openai; stop and restart a running Host to add it.\n", true);
+    _ = try finishLogin(init, .openai, "Rui: OpenAI API key saved. A Host started from now on serves openai; stop and restart a running Host to add it.\n");
 }
 
 fn loginInterrupted() bool {

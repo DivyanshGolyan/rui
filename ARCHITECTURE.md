@@ -1181,7 +1181,7 @@ The credential file and stable lock live in the same private directory and rejec
 They carry a closed versioned format.
 There is no Session account binding or Codex CLI credential fallback.
 
-`rui auth login openai` reads one line from stdin (unechoed on a terminal) and installs it as an owner-only `~/.config/rui/openai.key`, or the absolute path `RUI_OPENAI_KEY_FILE` names; it then fills only an unset provider default, as Codex login does.
+`rui auth login openai` reads one line from stdin (unechoed on a terminal) and installs it as an owner-only `~/.config/rui/openai.key`, or the absolute path `RUI_OPENAI_KEY_FILE` names; it then saves the provider default as every `rui auth login` does ([Human entry and authentication](#human-entry-and-authentication)).
 `--provider openai` reads that key once at startup and sends it as `authorization: Bearer` only to `https://api.openai.com/v1/responses` and the model list beside it (`/v1/models`), or to `BASE/responses` and `BASE/models` when `RUI_OPENAI_BASE_URL` names an OpenAI-compatible `https://` base URL with a host and no credentials, query or fragment (an invalid one fails `host serve --provider openai`, and an auto-started Host then starts without OpenAI), with no ChatGPT account header.
 It speaks the same Responses codec and model catalog as Codex, so a Session's request body is the same on either.
 A missing or unreadable key fails startup.
@@ -1198,7 +1198,7 @@ An auto-started Host adds `--provider chatgpt` whenever that credential is usabl
 `rui auth login chatgpt` (`src/chatgpt_plan_login.zig`) makes the host id `~/.config/rui/host-id` (owner-only, a version 4 UUID URN, never replaced) before its first authorization.
 It listens on `127.0.0.1:1455`, else any free loopback port, prints the authorization link, opens a browser when there is one, and reads a callback address pasted on stdin at the same time; the first answer that is this attempt's wins, so a machine whose browser cannot reach the listener signs in by pasting.
 A first sign-in names `dynamic_agent_client` and the agent name; a returning one names the saved issued client id and no agent, sends no `id_token_hint` because the link is printed, and refuses an answer for another client.
-The checked record is installed through the same custody and SIGINT gate as a Codex login and, like it, fills only an unset provider default; a Host already serving `chatgpt` uses it from its next lease.
+The checked record is installed through the same custody and SIGINT gate as a Codex login; it fills an unset provider default and replaces a saved `codex` one, as the provider table says `chatgpt` supersedes `codex`, and a Host already serving `chatgpt` uses it from its next lease.
 `rui auth logout chatgpt` revokes the refresh token as the issued client under the exclusive credential lock, retrying a server failure, then publishes the record `signed_out` at a new generation even when the revocation was not confirmed, which it reports.
 A `signed_out` record holds no tokens and keeps its account and issued client id, which the next sign-in reuses as the issuer's guide asks; every reader treats it as no sign-in, so a lease fails with `provider_sign_in_required` and local status reports it missing.
 `rui auth status` prints each provider's local sign-in, with the ChatGPT account's email and access-token expiry.
@@ -2582,7 +2582,10 @@ It never refreshes, contacts a provider, creates a Host/Session or imports anoth
 The bare-entry provider chooser can begin Codex device login or defer; explicit `rui auth login codex` uses the same publication rule.
 Authentication remains an explicit shell operation, separate from the conversation.
 Denial/expiry leaves preferences unchanged.
-After secure credential installation, explicit `rui auth login codex`, like saving an OpenAI key, atomically fills only its own provider when no provider default exists; choosing a provider in the bare-entry chooser saves it as the default, leaving the model unpinned and preserving an existing choice even if unsupported.
+After secure credential installation, explicit `rui auth login PROVIDER` atomically fills its own provider when no provider default exists, and replaces a saved default only when the provider table says the signed-in provider supersedes it: the same account signed in an older way, so `chatgpt` supersedes `codex`.
+Replacing clears the model saved for the old provider, as any provider replacement does; every other saved choice stays, even an unsupported one, and existing Sessions keep their binding.
+The receipt says which happened; when the default stays on another provider it names `rui defaults configure --provider PROVIDER`, and when a replacement cleared a pin it names `rui defaults configure --model ID`.
+Choosing a provider in the bare-entry chooser saves it as the default, leaving the model unpinned and preserving an existing choice even if unsupported.
 Failure of that independent preference save is reported without claiming credential rollback.
 Local usability is not proof of remote acceptance.
 Existing Sessions retain their exact saved binding despite changed preferences, recommendations or credentials.
@@ -2600,7 +2603,7 @@ Only explicit choices are saved; an absent model inherits the recommendation whe
 Keep retains a pin for the unchanged provider.
 `rui defaults configure --clear-model` and `/setup --clear-model` remove only the saved model; they are mutually exclusive with `--model`, including when flags are repeated or reversed.
 Clear preserves the saved provider, even an unsupported one, unless an explicit `--provider` replaces it; it never discovers a provider or persists a recommended replacement model.
-Login fills only an unset provider, not a model pin.
+Login never sets a model pin; it fills an unset provider or replaces only the provider it supersedes, clearing that provider's pin.
 Clear must pass the same HOME, syntax, private-file and atomic-publication checks as other edits, without checking an unused Store's availability.
 Store/provider clearing is outside this unit.
 
