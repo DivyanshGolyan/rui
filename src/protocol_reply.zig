@@ -438,6 +438,7 @@ test "a model list reply reads as what the Host writes" {
 /// Read-only Host information profiles; historical profiles grant no ordinary requests.
 pub const HostInfoProfile = enum {
     current,
+    released_16,
     released_15,
     released_14,
     released_13,
@@ -451,6 +452,7 @@ pub const HostInfoProfile = enum {
     pub fn wire(self: HostInfoProfile) []const u8 {
         return switch (self) {
             .current => protocol.wire_version,
+            .released_16 => "16",
             .released_15 => "15",
             .released_14 => "14",
             .released_13 => "13",
@@ -459,10 +461,11 @@ pub const HostInfoProfile = enum {
     }
 
     /// Providers are decoded at this boundary, not inferred by consumers.
-    /// Current wire 16 requires every route; wire 13 spans both released shapes.
+    /// Current wire 17 requires every route; wire 13 spans both released shapes.
     fn Providers(comptime self: HostInfoProfile) type {
         return switch (self) {
             .current => protocol.Routes,
+            .released_16 => struct { codex: protocol.Route, openai: protocol.Route, chatgpt: protocol.Route },
             .released_15 => struct { codex: protocol.Route, openai: protocol.Route, chatgpt: protocol.Route },
             .released_14 => struct { codex: protocol.Route, openai: protocol.Route, chatgpt: protocol.Route },
             // Freeze released shapes independently of future current-provider additions.
@@ -739,6 +742,7 @@ test "upgrade Host information profiles retain the entire strict shape" {
     try std.testing.expectEqualStrings("9", HostInfoProfile.released_9.wire());
     try std.testing.expectEqualStrings("13", HostInfoProfile.released_13.wire());
     try std.testing.expectEqualStrings("14", HostInfoProfile.released_14.wire());
+    try std.testing.expectEqualStrings("16", HostInfoProfile.released_16.wire());
     try std.testing.expectEqualStrings("15", HostInfoProfile.released_15.wire());
     // Provider additions do not relax wire identity: neither profile reads
     // the other's reply, even when the provider fields happen to match.
@@ -754,6 +758,12 @@ test "upgrade Host information profiles retain the entire strict shape" {
     defer std.testing.allocator.free(historical);
     const historical_full = try std.mem.replaceOwned(u8, std.testing.allocator, current, "\"version\":\"" ++ protocol.wire_version ++ "\"", historical_field);
     defer std.testing.allocator.free(historical_full);
+    const released_16 = try std.mem.replaceOwned(u8, std.testing.allocator, current, "\"version\":\"" ++ protocol.wire_version ++ "\"", "\"version\":\"" ++ comptime HostInfoProfile.released_16.wire() ++ "\"");
+    defer std.testing.allocator.free(released_16);
+    try std.testing.expectError(error.InvalidHostInfo, parseHostInfo(released_16, "/one"));
+    const missing_16 = try std.mem.replaceOwned(u8, std.testing.allocator, released_16, ",\"chatgpt\":\"unserved\"", "");
+    defer std.testing.allocator.free(missing_16);
+    try std.testing.expectError(error.MissingField, parseHostInfoForProfile(missing_16, "/one", .released_16));
     const released_15 = try std.mem.replaceOwned(u8, std.testing.allocator, current, "\"version\":\"" ++ protocol.wire_version ++ "\"", "\"version\":\"" ++ comptime HostInfoProfile.released_15.wire() ++ "\"");
     defer std.testing.allocator.free(released_15);
     try std.testing.expectError(error.InvalidHostInfo, parseHostInfo(released_15, "/one"));
@@ -767,6 +777,7 @@ test "upgrade Host information profiles retain the entire strict shape" {
     defer std.testing.allocator.free(missing_14);
     try std.testing.expectError(error.MissingField, parseHostInfoForProfile(missing_14, "/one", .released_14));
     const samples = [_]struct { body: []const u8, profile: HostInfoProfile, historical: bool }{
+        .{ .body = released_16, .profile = .released_16, .historical = true },
         .{ .body = released_15, .profile = .released_15, .historical = true },
         .{ .body = released_14, .profile = .released_14, .historical = true },
         .{ .body = current, .profile = .current, .historical = false },
