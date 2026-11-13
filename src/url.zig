@@ -102,7 +102,10 @@ pub fn percentDecode(text: []const u8, out: []u8, plus: Plus) ?[]u8 {
         var byte = text[index];
         if (byte == '%') {
             if (index + 3 > text.len) return null;
-            byte = std.fmt.parseInt(u8, text[index + 1 .. index + 3], 16) catch return null;
+            // Digit by digit: a number parser would also take a sign.
+            const high = std.fmt.charToDigit(text[index + 1], 16) catch return null;
+            const low = std.fmt.charToDigit(text[index + 2], 16) catch return null;
+            byte = high * 16 + low;
             index += 3;
         } else {
             if (plus == .space and byte == '+') byte = ' ';
@@ -118,7 +121,9 @@ test "percentDecode decodes escapes and reads plus as asked" {
     try std.testing.expectEqualStrings("a b+c", percentDecode("a%20b+c", &out, .literal).?);
     try std.testing.expectEqualStrings("a b c", percentDecode("a%20b+c", &out, .space).?);
     try std.testing.expectEqualStrings("", percentDecode("", &out, .literal).?);
-    for ([_][]const u8{ "%", "%2", "%zz", "123456789" }) |bad| try std.testing.expectEqual(@as(?[]u8, null), percentDecode(bad, &out, .literal));
+    try std.testing.expectEqualStrings("A\xff", percentDecode("%41%fF", &out, .literal).?);
+    for ([_][]const u8{ "%", "%2", "%4", "%zz", "%G0", "%+1", "%-0", "%0+", "123456789" }) |bad|
+        try std.testing.expectEqual(@as(?[]u8, null), percentDecode(bad, &out, .literal));
 }
 
 test "URLs: https anywhere, cleartext only to loopback literals" {
