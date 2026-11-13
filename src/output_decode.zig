@@ -17,6 +17,7 @@ const pages = @import("os/pages.zig");
 const protocol = @import("protocol.zig");
 const ScratchBudget = @import("ScratchBudget.zig");
 const transport_policy = @import("transport_policy.zig");
+const utf8_validation = @import("utf8_validation.zig");
 
 /// One response's decoding, in the execution Workspace; the Host decodes
 /// one response at a time.
@@ -58,7 +59,7 @@ pub const ReportPart = struct {
     /// `text` holds the start of a longer value: keep its whole scalars and
     /// mark it.
     pub fn shorten(self: *ReportPart) void {
-        while (!std.unicode.utf8ValidateSlice(self.text.slice())) self.text.len -= 1;
+        self.text.len = utf8_validation.validPrefix(self.text.slice()).len;
         self.shortened = true;
     }
 };

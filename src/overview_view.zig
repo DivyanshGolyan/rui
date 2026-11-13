@@ -32,6 +32,7 @@ const submission = @import("submission_state.zig");
 const TerminalText = @import("TerminalText.zig");
 const theme = @import("theme.zig");
 const work_line = @import("work_line.zig");
+const utf8_validation = @import("utf8_validation.zig");
 const unicode = @import("terminal_unicode");
 const gwidth = @import("terminal_width");
 
@@ -1034,8 +1035,7 @@ pub const State = struct {
         held.status = status;
         // A long failure, such as a refused environment, keeps its start,
         // cut between characters.
-        var end = @min(text.len, held.text.bytes.len);
-        while (end < text.len and end > 0 and text[end] & 0xc0 == 0x80) end -= 1;
+        const end = utf8_validation.scalarStart(text, @min(text.len, held.text.bytes.len));
         held.text.set(text[0..end]) catch unreachable;
     }
 
