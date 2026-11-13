@@ -1809,6 +1809,204 @@ test "a transition's paged round runs again for each page" {
     }.run);
 }
 
+/// Reads a Session's head and the content count in one round, which names
+/// the head's failed step apart from any other's.
+const TestingNamedRound = struct {
+    pub const rounds = transition.rounds(.{
+        .reads = .{ .always, error.TestingRead, .{.{ TestingRound.head, error.TestingHeadRead }} },
+    });
+    pub const round_budget = 1;
+    pub const commit: transition.Commit = .none;
+    pub const begin: ?rounds.At = null;
+    pub const Input = struct { session: []const u8 };
+    pub const Result = void;
+    pub const Ordinary = error{ TestingRead, TestingHeadRead };
+    const contents = rsql.Read(.{
+        .sql = "SELECT count(*) AS count FROM content",
+        .Args = struct {},
+        .Row = struct { count: u64 },
+        .cardinality = .one,
+    });
+
+    input: Input,
+    head: TestingRound.head.Result = undefined,
+    count: contents.Row = undefined,
+
+    pub fn step(t: *TestingNamedRound, r: *transition.Round(TestingNamedRound), ran: ?rounds.At) !transition.Next(TestingNamedRound) {
+        if (ran != null) return .{ .done = {} };
+        r.read(contents, .{}, &t.count);
+        r.read(TestingRound.head, .{ .session_ref = t.input.session }, &t.head);
+        return .{ .round = .reads };
+    }
+};
+
+test "a transition's round names the failed step of each statement it names, and the round's name answers for the rest" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            inline for (.{ .{ "session", error.TestingHeadRead }, .{ "content", error.TestingRead } }) |failing| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                const session = try configureTestSession(&storage, "transition-named");
+                try transition.apply(&storage, TestingNamedRound, .{ .session = session.slice() }, .{});
+                try store_testing.failReadsOf(&storage, failing[0]);
+                try std.testing.expectError(failing[1], transition.apply(&storage, TestingNamedRound, .{ .session = session.slice() }, .{}));
+                try std.testing.expect(!storage.isFenced());
+            }
+        }
+    }.run);
+}
+
+/// Dates a Session and, where `follow`, reads its date back after COMMIT
+/// in the commit's message: the reads a transition's `follow` names.
+const TestingFollow = struct {
+    pub const rounds = transition.rounds(.{ .head = .{ .always, error.TestingRead } });
+    pub const round_budget = 2;
+    pub const commit: transition.Commit = .transaction;
+    pub const begin: ?rounds.At = null;
+    pub const Input = struct { session: []const u8, follow: bool };
+    /// The date the follow read, or null where it did not ride.
+    pub const Result = ?u64;
+    pub const Ordinary = error{};
+    pub const Guards = error{TestingGuard};
+    pub const Declined = error{};
+    const created = rsql.Read(.{
+        .sql = "SELECT created_at FROM session WHERE session_ref=?1",
+        .Args = struct { session_ref: []const u8 },
+        .Row = struct { created_at: u64 },
+        .cardinality = .one,
+    });
+
+    input: Input,
+    loaded: TestingRound.head.Result = undefined,
+    after: After = .{},
+
+    const After = struct {
+        session: []const u8 = &.{},
+        row: created.Row = undefined,
+        seen: ?u64 = null,
+
+        pub fn queue(after: *After, reads: anytype) void {
+            reads.read(created, .{ .session_ref = after.session }, &after.row);
+        }
+
+        pub fn followed(after: *After) void {
+            after.seen = after.row.created_at;
+        }
+    };
+
+    pub fn step(t: *TestingFollow, r: *transition.Round(TestingFollow), ran: ?rounds.At) !transition.Next(TestingFollow) {
+        if (ran == null) {
+            r.read(TestingRound.head, .{ .session_ref = t.input.session }, &t.loaded);
+            return .{ .round = .head };
+        }
+        r.write(TestingRound.date_session, .{ .session = t.loaded.head, .revision = 1 });
+        t.after.session = t.input.session;
+        return .commit;
+    }
+
+    pub fn follow(t: *TestingFollow) ?*After {
+        return if (t.input.follow) &t.after else null;
+    }
+
+    pub fn committed(t: *const TestingFollow) Result {
+        return t.after.seen;
+    }
+
+    /// The body a queued write runs, so the commit is its batch's first.
+    fn held(storage: *Store, session: []const u8, follows: bool) !Result {
+        return transition.apply(storage, TestingFollow, .{ .session = session, .follow = follows }, .{});
+    }
+};
+
+test "a transition's follow reads ride its commit's message where that message carries reads, and cost no round" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try configureTestSession(&storage, "transition-follow");
+            for ([_]bool{ false, true }) |follows| {
+                const rounds = storage.testing_content_work.rounds;
+                const seen = try storage.queue().write(TestingFollow.held, .{ &storage, session.slice(), follows });
+                // A rerun commits at its batch's end, with nothing after it.
+                if (case.rerun) continue;
+                // The head's round, then the commit, which the reads ride.
+                try std.testing.expectEqual(rounds + 2, storage.testing_content_work.rounds);
+                // Only a network engine's lone write sends COMMIT with reads after it.
+                if (follows and case.engine == .mysql) {
+                    try std.testing.expectEqual(try store_testing.queryU64(&storage, "SELECT created_at FROM session", .{}), seen.?);
+                } else try std.testing.expectEqual(@as(?u64, null), seen);
+            }
+            try std.testing.expect(!storage.isFenced());
+        }
+    }.run);
+}
+
+/// Dates a Session where its revision is `revision`, or fails its step
+/// after the head's round, noting in `failed` when the runner calls its
+/// failure hook.
+const TestingFailing = struct {
+    pub const rounds = transition.rounds(.{ .head = .{ .always, error.TestingRead } });
+    pub const round_budget = 2;
+    pub const commit: transition.Commit = .transaction;
+    pub const begin: ?rounds.At = null;
+    pub const Input = struct { session: []const u8, revision: u64, fail_step: bool, failed: *bool };
+    pub const Result = void;
+    pub const Ordinary = error{ TestingGuard, TestingStep };
+    pub const Guards = error{TestingGuard};
+    pub const Declined = error{};
+
+    input: Input,
+    loaded: TestingRound.head.Result = undefined,
+
+    pub fn step(t: *TestingFailing, r: *transition.Round(TestingFailing), ran: ?rounds.At) !transition.Next(TestingFailing) {
+        if (ran == null) {
+            r.read(TestingRound.head, .{ .session_ref = t.input.session }, &t.loaded);
+            return .{ .round = .head };
+        }
+        r.write(TestingRound.date_session, .{ .session = t.loaded.head, .revision = t.input.revision });
+        if (t.input.fail_step) return error.TestingStep;
+        return .commit;
+    }
+
+    pub fn committed(_: *const TestingFailing) Result {}
+
+    pub fn failed(t: *TestingFailing) void {
+        t.input.failed.* = true;
+    }
+};
+
+test "a transition's failure hook runs when a step or its commit fails, and only then" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try configureTestSession(&storage, "transition-failing");
+            const before: TestingDatingState = try .of(&storage);
+            var failed = false;
+            // A guard the commit does not decline, then a step's error.
+            try std.testing.expectError(error.TestingGuard, transition.apply(&storage, TestingFailing, .{ .session = session.slice(), .revision = 99, .fail_step = false, .failed = &failed }, .{}));
+            try std.testing.expect(failed);
+            failed = false;
+            try std.testing.expectError(error.TestingStep, transition.apply(&storage, TestingFailing, .{ .session = session.slice(), .revision = 1, .fail_step = true, .failed = &failed }, .{}));
+            try std.testing.expect(failed);
+            try std.testing.expectEqual(before, try TestingDatingState.of(&storage));
+            failed = false;
+            try transition.apply(&storage, TestingFailing, .{ .session = session.slice(), .revision = 1, .fail_step = false, .failed = &failed }, .{});
+            try std.testing.expect(!failed);
+            try std.testing.expect(!storage.isFenced());
+        }
+    }.run);
+}
+
 /// Reads a Session's head once outside its transaction and once inside,
 /// noting each time whether the transaction is open, then dates the
 /// Session where its revision is `revision`.
@@ -8031,6 +8229,86 @@ test "the dispatch work read fences a Store whose blocked Operations are malform
                 try std.testing.expectError(error.CorruptStore, storage.dispatchWork(false));
                 try std.testing.expect(storage.isFenced());
             }
+        }
+    }.run);
+}
+
+test "an admission that selects nothing fences a Store whose blocked Operations are malformed" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            const Malformed = enum { unrecorded, premature };
+            for (std.enums.values(Malformed)) |malformed| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                const session = try configureTestSessionAsk(&storage, "malformed-admission");
+                try submitTestMessage(&storage, &tmp, "malformed", "malformed", session.slice(), "start");
+                const first = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
+                switch (malformed) {
+                    .unrecorded => {
+                        const calls = [_]TestingCall{.{ .item_id = "item", .name = "unknown", .encoded_call_id = "call", .decoded_call_id = "call", .encoded_arguments = "{}", .decoded_arguments = "{}" }};
+                        try settleCallsForTesting(&storage, &tmp, first, "malformed-metadata", &calls);
+                        try store_testing.exec(&storage, "UPDATE turn SET continuation_operation_id=NULL", .{});
+                    },
+                    .premature => {
+                        try settleTwoActionsForTesting(&storage, &tmp, first, "malformed-admission");
+                        try store_testing.exec(&storage, "UPDATE turn SET continuation_operation_id=operation_id", .{});
+                    },
+                }
+                try std.testing.expect(!storage.isFenced());
+                // No Message waits, so the admission selects nothing.
+                try std.testing.expectError(error.CorruptStore, storage.admitModelAttempt(.message, .{}));
+                try std.testing.expect(storage.isFenced());
+            }
+        }
+    }.run);
+}
+
+test "an admission that selects nothing fences a Store whose blocked Operation's calls fail the tool outcome rule" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try configureTestSessionAsk(&storage, "outcome-admission");
+            try submitTestMessage(&storage, &tmp, "outcome", "outcome", session.slice(), "start");
+            const first = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
+            try settleTwoActionsForTesting(&storage, &tmp, first, "outcome-admission");
+            // The calls lose their output items: the Turn still agrees it
+            // waits, so only the calls' own round finds the damage.
+            try store_testing.exec(&storage, "UPDATE model_output_item SET item_kind=1 WHERE item_kind=3", .{});
+            try std.testing.expect(!storage.isFenced());
+            try std.testing.expectError(error.CorruptStore, storage.admitModelAttempt(.message, .{}));
+            try std.testing.expect(storage.isFenced());
+        }
+    }.run);
+}
+
+test "an admission that selects nothing reads a blocked Operation's calls in a round of their own" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            // Selection, then the idle checks.
+            var rounds = storage.testing_content_work.rounds;
+            try std.testing.expect(try storage.admitModelAttempt(.message, .{}) == null);
+            if (!case.rerun) try std.testing.expectEqual(rounds + 2, storage.testing_content_work.rounds);
+            const session = try configureTestSessionAsk(&storage, "blocked-admission");
+            try submitTestMessage(&storage, &tmp, "blocked", "blocked", session.slice(), "start");
+            const first = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
+            try settleTwoActionsForTesting(&storage, &tmp, first, "blocked-admission");
+            // Its asked calls block the Operation: their outcomes take a third round.
+            rounds = storage.testing_content_work.rounds;
+            try std.testing.expect(try storage.admitModelAttempt(.message, .{}) == null);
+            if (!case.rerun) try std.testing.expectEqual(rounds + 3, storage.testing_content_work.rounds);
+            try std.testing.expect(!storage.isFenced());
         }
     }.run);
 }
