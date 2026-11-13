@@ -11,7 +11,7 @@
       "cast": [
         {
           "label": "Skill catalog authority",
-          "workspace": "code/rui",
+          "workspace": "code/appcmds-skill-without-preview",
           "messages": [
             "Seed a fresh chat."
           ],
@@ -53,7 +53,7 @@
       "cast": [
         {
           "label": "Unknown name text",
-          "workspace": "code/rui",
+          "workspace": "code/appcmds-unknown-name-message",
           "messages": [
             "Seed a fresh chat."
           ],
@@ -93,7 +93,7 @@
       "cast": [
         {
           "label": "Hidden discard collision",
-          "workspace": "code/rui",
+          "workspace": "code/appcmds-hidden-discard-collision",
           "messages": [
             "Seed a fresh chat."
           ],
@@ -127,7 +127,7 @@
       "cast": [
         {
           "label": "Hidden recover collision",
-          "workspace": "code/rui",
+          "workspace": "code/appcmds-hidden-recover-collision",
           "messages": [
             "Seed a fresh chat."
           ],
@@ -732,7 +732,7 @@
       ],
       "expect": [
         "Usage: /new",
-        "Draft lifecycle"
+        "The deadline check now runs"
       ],
       "absent": [
         "\u203a /new unexpected"
