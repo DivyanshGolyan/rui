@@ -3115,9 +3115,9 @@ Tab adds the rest of the highlighted word, and a space when another word may fol
 A word Tab or Enter adds that the draft cannot hold is refused as a typed one is.
 Enter in a shown list takes the highlighted row: a command with nothing more to say, or a fixed value, runs the line it completes; a command that needs a word (`/effort` or `/rename`) or an option that takes a value only gets its word and the space, so the next list shows.
 So `/copy` alone, taken from the list, copies the answer, and `/copy ` then Enter copies its highlighted choice, `code` first.
-Esc or Ctrl-G, when the latest frame showed a command list, cancels the command and clears its draft; a skill or recovery list closes without consuming Message text.
-Submitting a command consumes its draft whether it is unknown, succeeds or fails; a command refused by a hold keeps its draft.
-`command_input.zig` owns that ending rule for the chat; otherwise Esc and Ctrl-G do what they always did.
+Esc or Ctrl-G closes a list the latest frame drew. The same complete conversation grammar used by Enter decides whether to clear the draft: recognized command names, including misuse, are cancelled; skill-led and unknown-name Messages, plain text and empty input are preserved. A command-name prefix alone is not a command. Closing a recovery list also preserves Message text.
+Submitting a command consumes its draft whether it succeeds or fails; a command refused by a hold keeps its draft. Lines outside the grammar use normal Message admission.
+The conversation parser owns the draft classification; otherwise Esc and Ctrl-G do what they always did.
 While the list shows, Up and Down move its highlight; otherwise they scroll the conversation.
 The overview has no command list or unknown-command notice: printable `/` and the following text are ignored there.
 Chat-local commands, including `/rename` and `/setup`, keep their existing parser, completion, dispatch and draft-ending behavior.

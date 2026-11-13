@@ -49,7 +49,6 @@ const empty_app_text: vxfw.Text = .{ .text = "" };
 
 const reads = @import("session_reads.zig");
 const session_line = @import("session_line.zig");
-const command_input = @import("command_input.zig");
 const slash_commands_shared = @import("slash_commands.zig");
 const skill_completion = @import("skill_completion.zig");
 const skill_suggestions = @import("skill_suggestions.zig");
@@ -2609,7 +2608,7 @@ fn perform(self: *Self, action: ConversationAction) !void {
             // Esc closes only a list the person saw.
             if (action == .close) if (self.shownCommands()) |shown| {
                 shown.close();
-                if (command_input.consumesDraft(self.input.composition().bytes, .cancelled)) self.input.clear();
+                if (slash_commands.parse(self.input.composition().bytes) != .unknown) self.input.clear();
                 self.dirty = true;
                 return;
             };
@@ -2886,8 +2885,8 @@ fn commandLine(self: *Self) !void {
 /// stays until the hold lifts.
 fn runLine(self: *Self) !void {
     const text = self.input.composition().bytes;
-    const end: command_input.DraftEnd = if (self.upgradeHeld()) .held else .submitted;
-    defer if (command_input.consumesDraft(text, end)) self.input.clear();
+    const submitted = !self.upgradeHeld();
+    defer if (submitted) self.input.clear();
     try self.slashCommand(text);
 }
 
@@ -4191,6 +4190,49 @@ test "Enter takes a drawn command through its existing conversation action" {
     try std.testing.expectEqualStrings("", self.input.composition().bytes);
 }
 
+test "Esc and Ctrl-G use the Enter grammar over command skill unknown plain and empty drafts" {
+    const entries = [_]skill_suggestions.Entry{.{ .name = "review", .description = "Review a change" }};
+    const Case = struct { text: []const u8, caret: ?usize = null, command: bool = false, list: bool = false };
+    const cases = [_]Case{
+        .{ .text = "/copy", .command = true, .list = true },
+        .{ .text = "/effort", .command = true, .list = true },
+        .{ .text = "/review this change", .caret = "/review".len, .list = true },
+        .{ .text = "/review this change" },
+        .{ .text = "/review", .list = true },
+        .{ .text = "/genuinely-unknown" },
+        .{ .text = "/re", .list = true },
+        .{ .text = "plain text" },
+        .{ .text = "please /review now", .caret = "please /review".len, .list = true },
+        .{ .text = "" },
+    };
+    for ([_][]const u8{ "\x1b", "\x07" }) |key| {
+        for ([_]bool{ false, true }) |drawn| {
+            for (cases) |case| {
+                const held = try HeldFrontend.create();
+                defer held.destroy();
+                const self = &held.self;
+                errdefer std.debug.print("cancel domain: key={any} drawn={} draft={s}\n", .{ key, drawn, case.text });
+                // The preview is presentation only, even when its leading
+                // skill is the caret word of a longer Message.
+                defer _ = self.skills.reset();
+                const read = self.skills.ask("").?;
+                try std.testing.expect(self.skills.answer(read.read, .{ .entries = @constCast(&entries), .total = entries.len }, "") == null);
+                _ = self.input.append(case.text);
+                self.input.editors[self.input.active].cursor = case.caret orelse case.text.len;
+                if (drawn) _ = try held.draw();
+                try std.testing.expectEqual(drawn and case.list, self.shownCommands() != null);
+                try held.keys(key);
+                const cleared = drawn and case.list and case.command;
+                try std.testing.expectEqualStrings(if (cleared) "" else case.text, self.input.composition().bytes);
+                try std.testing.expectEqual(if (cleared) @as(usize, 0) else case.caret orelse case.text.len, self.input.composition().cursor);
+                try std.testing.expect(self.submission.intent == null);
+                try std.testing.expectEqual(@as(u64, 0), self.admission.sent);
+                if (drawn and case.list) try std.testing.expect(self.shownCommands() == null);
+            }
+        }
+    }
+}
+
 test "a key on a draft changed since the latest frame acts on that draft's list when the frame drew one" {
     {
         const held = try HeldFrontend.create();
@@ -4218,12 +4260,13 @@ test "a key on a draft changed since the latest frame acts on that draft's list 
     try held.settle();
     try std.testing.expectEqualStrings("r", held.screen.commands.?.list.typed);
     try std.testing.expectEqual(@as(usize, 1), held.screen.commands.?.highlight);
-    // Esc on `/re`, typed after the frame drew `/r`'s list, cancels the command.
+    // Esc on `/re`, typed after the frame drew `/r`'s list, closes the
+    // suggestions but keeps text outside the command grammar.
     try stepKeys(held, "e\x07");
     try std.testing.expectEqualStrings("", try barShows(held));
-    try std.testing.expectEqualStrings("", held.self.input.composition().bytes);
+    try std.testing.expectEqualStrings("/re", held.self.input.composition().bytes);
     try held.settle();
-    try std.testing.expect(held.screen.commands == null);
+    try std.testing.expect(held.self.shownCommands() == null);
 }
 
 test "Tab focuses footer without completing a command and Enter still takes drawn command choices" {
@@ -9087,7 +9130,7 @@ test "repair details keep explicit command cancellation and return to the adopte
         if (!action) {
             // A visible command still owns the first Escape. An adopted
             // Action intentionally hides command choices instead.
-            try held.keys("/ef");
+            try held.keys("/effort");
             _ = try held.draw();
             try std.testing.expectEqual(.drawn, self.screen.commands.?.seen);
             try held.keys("\x1b");

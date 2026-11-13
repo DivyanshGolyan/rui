@@ -243,9 +243,10 @@ pub fn Commands(comptime N: type, comptime commands: std.enums.EnumFieldStruct(N
             return std.meta.stringToEnum(Name, word);
         }
 
-        /// Reads a draft line that starts with `/`.
+        /// Classifies any draft against the complete command grammar.
+        /// Unknown names, plain text and empty input belong to Messages.
         pub fn parse(text: []const u8) Parsed {
-            std.debug.assert(text.len != 0 and text[0] == '/');
+            if (text.len == 0 or text[0] != '/') return .unknown;
             const end = std.mem.indexOfScalar(u8, text, ' ') orelse text.len;
             const name = nameOf(text[1..end]) orelse return .unknown;
             const argument = trimmed(text[end..]);
@@ -689,6 +690,21 @@ test "a /requests list takes only keys the parser reads back as one word the lis
     const shown = requests.list(null).?;
     try std.testing.expectEqual(@as(usize, 3), shown.count);
     for (shown.shown()) |entry| try std.testing.expectEqualStrings(entry.word["/result ".len..], conversation.parse(entry.word).command.argument);
+}
+
+test "the conversation grammar classifies command and Message drafts for Enter and cancellation" {
+    const names = [_][]const u8{ "archive", "clear", "copy", "discard", "effort", "model", "new", "recover", "reload-skills", "rename", "requests", "result", "setup", "unarchive" };
+    for (names) |name| {
+        for ([_][]const u8{ "", " ", " argument" }) |suffix| {
+            var buffer: [80]u8 = undefined;
+            const draft = try std.fmt.bufPrint(&buffer, "/{s}{s}", .{ name, suffix });
+            // Misuse is still a local command, including hidden actions.
+            try std.testing.expect(conversation.parse(draft) != .unknown);
+        }
+    }
+    for ([_][]const u8{ "", "plain text", "please /review now", "/review this change", "/genuinely-unknown", "/re", "/", "//copy", " /copy" }) |draft| {
+        try std.testing.expect(conversation.parse(draft) == .unknown);
+    }
 }
 
 test "a command admits exactly the arguments its shape names" {

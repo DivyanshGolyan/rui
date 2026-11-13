@@ -5,6 +5,206 @@
   ],
   "states": [
     {
+      "name": "appcmds-cancel-skill-esc",
+      "note": "Closing a drawn list uses the same complete grammar as Enter, preserving Message text and caret",
+      "open": "Cancel skill esc",
+      "cast": [
+        {
+          "label": "Cancel skill esc",
+          "workspace": "code/appcmds-cancel-skill-esc",
+          "mode": "bypass",
+          "messages": [
+            "Seed cancellation."
+          ],
+          "skills": [
+            "review"
+          ]
+        }
+      ],
+      "steps": [
+        {
+          "text": "\u001b[200~/review this change\u001b[201~"
+        },
+        {
+          "keys": [
+            "Home",
+            "Right",
+            "Right",
+            "Right",
+            "Right",
+            "Right",
+            "Right",
+            "Right"
+          ]
+        },
+        {
+          "wait": "Verify the project"
+        },
+        {
+          "keys": [
+            "Esc"
+          ]
+        },
+        {
+          "gone": "Verify the project"
+        }
+      ],
+      "expect": [
+        "\u203a /review this change"
+      ],
+      "absent": [
+        "Verify the project",
+        "Unknown command"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+      ],
+      "first_frame": true
+    },
+    {
+      "name": "appcmds-cancel-command-esc",
+      "note": "Closing a drawn list uses the same complete grammar as Enter, preserving Message text and caret",
+      "open": "Cancel command esc",
+      "cast": [
+        {
+          "label": "Cancel command esc",
+          "workspace": "code/appcmds-cancel-command-esc",
+          "mode": "bypass",
+          "messages": [
+            "Seed cancellation."
+          ],
+          "skills": []
+        }
+      ],
+      "steps": [
+        {
+          "text": "/copy "
+        },
+        {
+          "wait": "file"
+        },
+        {
+          "keys": [
+            "Esc"
+          ]
+        },
+        {
+          "gone": "file"
+        }
+      ],
+      "expect": [
+        "gpt-6.1-sol"
+      ],
+      "absent": [
+        "\u203a /copy",
+        "file",
+        "code \u00b7 file"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+      ]
+    },
+    {
+      "name": "appcmds-cancel-skill-ctrl-g",
+      "note": "Closing a drawn list uses the same complete grammar as Enter, preserving Message text and caret",
+      "open": "Cancel skill ctrl-g",
+      "cast": [
+        {
+          "label": "Cancel skill ctrl-g",
+          "workspace": "code/appcmds-cancel-skill-ctrl-g",
+          "mode": "bypass",
+          "messages": [
+            "Seed cancellation."
+          ],
+          "skills": [
+            "review"
+          ]
+        }
+      ],
+      "steps": [
+        {
+          "text": "\u001b[200~/review this change\u001b[201~"
+        },
+        {
+          "keys": [
+            "Home",
+            "Right",
+            "Right",
+            "Right",
+            "Right",
+            "Right",
+            "Right",
+            "Right"
+          ]
+        },
+        {
+          "wait": "Verify the project"
+        },
+        {
+          "keys": [
+            "C-g"
+          ]
+        },
+        {
+          "gone": "Verify the project"
+        }
+      ],
+      "expect": [
+        "\u203a /review this change"
+      ],
+      "absent": [
+        "Verify the project",
+        "Unknown command"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+      ],
+      "first_frame": true
+    },
+    {
+      "name": "appcmds-cancel-command-ctrl-g",
+      "note": "Closing a drawn list uses the same complete grammar as Enter, preserving Message text and caret",
+      "open": "Cancel command ctrl-g",
+      "cast": [
+        {
+          "label": "Cancel command ctrl-g",
+          "workspace": "code/appcmds-cancel-command-ctrl-g",
+          "mode": "bypass",
+          "messages": [
+            "Seed cancellation."
+          ],
+          "skills": []
+        }
+      ],
+      "steps": [
+        {
+          "text": "/copy "
+        },
+        {
+          "wait": "file"
+        },
+        {
+          "keys": [
+            "C-g"
+          ]
+        },
+        {
+          "gone": "file"
+        }
+      ],
+      "expect": [
+        "gpt-6.1-sol"
+      ],
+      "absent": [
+        "\u203a /copy",
+        "file",
+        "code \u00b7 file"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+      ]
+    },
+    {
       "name": "appcmds-skill-without-preview",
       "note": "Whole-line bracketed paste uses normal Message admission, never the suggestion preview",
       "open": "Skill catalog authority",
