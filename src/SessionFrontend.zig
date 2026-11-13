@@ -5559,12 +5559,14 @@ test "reader failure provenance keeps transport loss separate from local copy fa
         // not change where its own error came from or suppress a local notice.
         discovery.unavailable = already_unavailable;
         try self.settleReader();
-        if (thread) |worker| worker.join();
-        joined = true;
-        try peer.result;
+        // Validate the reader before joining a peer that may still await
+        // content. An unexpected early failure uses the deferred stop/wake.
         const transport = mode == .read_disconnect or mode == .copy_disconnect or mode == .command_disconnect;
         try std.testing.expectEqual(if (transport) client.FailureOrigin.host_transport else .local, self.reader.result.failure_origin);
         try std.testing.expectError(if (transport) error.TruncatedResponse else if (mode == .sink) error.BrokenPipe else error.FileNotFound, self.reader.result.outcome.?);
+        if (thread) |worker| worker.join();
+        joined = true;
+        try peer.result;
         try std.testing.expectEqual(@as(usize, @intFromBool(transport)), discovery.losses);
         try std.testing.expectEqual(already_unavailable or transport, self.hostHeld());
         try std.testing.expectEqual(@as(usize, @intFromBool(!transport)), Probe.local_effects);
