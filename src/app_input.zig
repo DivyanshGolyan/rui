@@ -741,7 +741,6 @@ test "App input model choice Tab domain retains its candidate in the filter and 
     try std.testing.expectEqual(@as(?usize, 7), focus.selected());
     try std.testing.expect(focus == .filter);
 }
-}
 
 test "App input paste completion routes to the same owner for every focus and paste shape" {
     for ([_]bool{ false, true }) |wide| for ([_]bool{ false, true }) |session_open| for ([_]bool{ false, true }) |list_focused| for ([_][]const u8{ "", "\n", "text" }) |paste| {
