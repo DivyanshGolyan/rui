@@ -150,26 +150,14 @@ test "widget text meets WCAG contrast on each used ground" {
         fn rgb(color: vaxis.Color) [3]u8 {
             return switch (color) {
                 .rgb => |value| value,
-                .index => |i| if (i < 232) blk: {
-                    const levels = [_]u8{ 0, 95, 135, 175, 215, 255 };
-                    const n: usize = i - 16;
-                    break :blk .{ levels[n / 36], levels[n / 6 % 6], levels[n % 6] };
-                } else @splat(@intCast(8 + 10 * (@as(u16, i) - 232))),
+                .index => |i| theme.xtermRgb(i),
                 else => unreachable,
             };
         }
-        fn luminance(c: [3]u8) f64 {
-            var result: f64 = 0;
-            for (c, [_]f64{ 0.2126, 0.7152, 0.0722 }) |byte, weight| {
-                const s = @as(f64, @floatFromInt(byte)) / 255;
-                result += weight * (if (s <= 0.04045) s / 12.92 else std.math.pow(f64, (s + 0.055) / 1.055, 2.4));
-            }
-            return result;
-        }
         fn check(caps: view.Caps, role: view.Style) !void {
             const style = of(caps, role);
-            const a = luminance(rgb(style.fg));
-            const b = luminance(rgb(style.bg));
+            const a = theme.relativeLuminance(rgb(style.fg));
+            const b = theme.relativeLuminance(rgb(style.bg));
             const contrast = (@max(a, b) + 0.05) / (@min(a, b) + 0.05);
             if (contrast < 4.5) std.debug.print("{s} {s} on {s}: {d:.3}\n", .{ @tagName(caps.depth), @tagName(role.colour), @tagName(role.background), contrast });
             try std.testing.expect(contrast >= 4.5);

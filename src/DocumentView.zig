@@ -347,22 +347,11 @@ test "DocumentView user text keeps theme contrast without terminal dim" {
         fn rgb(c: vaxis.Color) [3]u8 {
             return switch (c) {
                 .rgb => |value| value,
-                .index => |i| if (i < 232) blk: {
-                    const levels = [_]u8{ 0, 95, 135, 175, 215, 255 };
-                    const n: usize = i - 16;
-                    break :blk .{ levels[n / 36], levels[n / 6 % 6], levels[n % 6] };
-                } else @splat(@intCast(8 + 10 * (@as(u16, i) - 232))),
+                .index => |i| @import("theme.zig").xtermRgb(i),
                 else => unreachable,
             };
         }
-        fn luminance(c: [3]u8) f64 {
-            var total: f64 = 0;
-            for (c, [_]f64{ 0.2126, 0.7152, 0.0722 }) |channel, weight| {
-                const value = @as(f64, @floatFromInt(channel)) / 255;
-                total += weight * (if (value <= 0.04045) value / 12.92 else std.math.pow(f64, (value + 0.055) / 1.055, 2.4));
-            }
-            return total;
-        }
+        const luminance = @import("theme.zig").relativeLuminance;
     };
     const document = try std.testing.allocator.create(viewport.Document);
     defer std.testing.allocator.destroy(document);

@@ -97,13 +97,31 @@ pub fn thread(mode: Mode, depth: Depth) Color {
     };
 }
 
+/// The colour of xterm entry `index`, from the 6x6x6 cube or the grey ramp;
+/// the terminal defines entries 0-15 itself, so they have none here.
+pub fn xtermRgb(index: u8) Rgb {
+    std.debug.assert(index >= 16);
+    const levels = [_]u8{ 0, 95, 135, 175, 215, 255 };
+    const n: usize = index - 16;
+    return if (index < 232) .{ levels[n / 36], levels[n / 6 % 6], levels[n % 6] } else @splat(@intCast(8 + 10 * (@as(u16, index) - 232)));
+}
+
+/// WCAG 2 relative luminance of an sRGB colour.
+pub fn relativeLuminance(rgb: Rgb) f64 {
+    var result: f64 = 0;
+    for (rgb, [_]f64{ 0.2126, 0.7152, 0.0722 }) |byte, weight| {
+        const s = @as(f64, @floatFromInt(byte)) / 255.0;
+        result += weight * (if (s <= 0.04045) s / 12.92 else std.math.pow(f64, (s + 0.055) / 1.055, 2.4));
+    }
+    return result;
+}
+
 /// Nearest xterm cube or grey-ramp entry; terminal-defined entries 0–15 are excluded.
 pub fn nearestIndex(want: Rgb) u8 {
-    const levels = [_]u8{ 0, 95, 135, 175, 215, 255 };
     var best: u8 = 16;
     var distance: u32 = std.math.maxInt(u32);
     for (16..256) |i| {
-        const candidate: Rgb = if (i < 232) .{ levels[(i - 16) / 36], levels[(i - 16) / 6 % 6], levels[(i - 16) % 6] } else @splat(@intCast(8 + 10 * (i - 232)));
+        const candidate = xtermRgb(@intCast(i));
         var d: u32 = 0;
         for (want, candidate) |a, b| {
             const delta = @as(i32, a) - b;
@@ -217,24 +235,12 @@ test "readable text meets WCAG contrast on its layout backgrounds" {
         fn rgb(color: Color) Rgb {
             return switch (color) {
                 .direct => |value| value,
-                .indexed => |i| if (i < 232) blk: {
-                    const levels = [_]u8{ 0, 95, 135, 175, 215, 255 };
-                    const n: usize = i - 16;
-                    break :blk .{ levels[n / 36], levels[n / 6 % 6], levels[n % 6] };
-                } else @splat(@intCast(8 + 10 * (@as(u16, i) - 232))),
+                .indexed => |i| xtermRgb(i),
             };
         }
-        fn luminance(c: Rgb) f64 {
-            var result: f64 = 0;
-            for (c, [_]f64{ 0.2126, 0.7152, 0.0722 }) |byte, weight| {
-                const s = @as(f64, @floatFromInt(byte)) / 255.0;
-                result += weight * (if (s <= 0.04045) s / 12.92 else std.math.pow(f64, (s + 0.055) / 1.055, 2.4));
-            }
-            return result;
-        }
         fn contrast(a: Color, b: Color) f64 {
-            const x = luminance(rgb(a));
-            const y = luminance(rgb(b));
+            const x = relativeLuminance(rgb(a));
+            const y = relativeLuminance(rgb(b));
             return (@max(x, y) + 0.05) / (@min(x, y) + 0.05);
         }
     };

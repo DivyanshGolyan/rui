@@ -2475,22 +2475,11 @@ test "a blank line on the ground sits under New Session, selected or not, at nar
 
 test "App cursor contrasts with the painted ground after terminal theme reports" {
     const Check = struct {
-        fn luminance(channels: [3]u8) f64 {
-            var result: f64 = 0;
-            for (channels, [_]f64{ 0.2126, 0.7152, 0.0722 }) |byte, weight| {
-                const value = @as(f64, @floatFromInt(byte)) / 255;
-                result += weight * (if (value <= 0.04045) value / 12.92 else std.math.pow(f64, (value + 0.055) / 1.055, 2.4));
-            }
-            return result;
-        }
+        const luminance = @import("theme.zig").relativeLuminance;
         fn rgb(colour: vaxis.Color) [3]u8 {
             return switch (colour) {
                 .rgb => |value| value,
-                .index => |i| if (i < 232) blk: {
-                    const levels = [_]u8{ 0, 95, 135, 175, 215, 255 };
-                    const n: usize = i - 16;
-                    break :blk .{ levels[n / 36], levels[n / 6 % 6], levels[n % 6] };
-                } else @splat(@intCast(8 + 10 * (@as(u16, i) - 232))),
+                .index => |i| @import("theme.zig").xtermRgb(i),
                 else => unreachable,
             };
         }
