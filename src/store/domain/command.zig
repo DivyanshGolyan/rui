@@ -16,6 +16,7 @@ const idempotency_key = @import("../../idempotency_key.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
 const cli_value = @import("../../cli_value.zig");
 const mutation_answer = @import("../../mutation_answer.zig");
+const configuration_admission = @import("../../configuration_admission.zig");
 const provider_name = @import("../../provider_name.zig");
 const provider_route = @import("../../provider_route.zig");
 const session_archive = @import("../../session_archive.zig");
@@ -1123,6 +1124,303 @@ pub const StartAgent = struct {
 
     pub fn committed(t: *const StartAgent) Result {
         return if (t.applied != null) .started else .failed;
+    }
+};
+
+/// Applies a configure command in one transaction: creates a Session, or
+/// updates one, or reloads its skills catalog, or saves why it refused.
+/// A configuration that requires a model is refused when the Host does
+/// not serve its Session's provider.
+///
+/// Round `.facts` reads the command's saved answer, the Session's saved
+/// configuration and the content lookups its instructions and output
+/// schema need (`configuration.prepareConfiguration`). A fresh
+/// configuration validates and applies in their own rounds (`.model` to
+/// `.loaded`, `configuration.validateStep`; `.creation` and `.catalog`,
+/// `configuration.applyStep`): a creation reads whether each drawn
+/// reference is taken after the replay check, so a replay draws none. A
+/// skills reload reads the Session's catalog in `.skills`, then its bytes
+/// one `.skills_window` each, appends a changed one in `.skills_append`
+/// (`skills.Reloading`), and looks its result's row up in `.outcome`. A
+/// refusal with a diagnostic looks its row up in `.failure`. The commit
+/// round saves the Session, the command and its revision, and a creation
+/// is announced once it commits.
+pub const Configure = struct {
+    pub const rounds = transition.rounds(.{
+        .facts = .{.always},
+        .model = .{.branch},
+        .saved_tools = .{.branch},
+        .saved_loaded = .{.branch},
+        .loaded_source = .{.branch},
+        .loaded = .{.branch},
+        .creation = .{.paged},
+        .catalog = .{.branch},
+        .skills = .{.branch},
+        .skills_window = .{.raw},
+        .skills_append = .{.branch},
+        .outcome = .{.branch},
+        .failure = .{.branch},
+    });
+    pub const round_budget = 2;
+    pub const commit: transition.Commit = .transaction;
+    pub const begin: ?rounds.At = .facts;
+    /// Each is the caller's, which outlives the transition.
+    pub const Input = struct {
+        io: std.Io,
+        served: provider_route.Routes,
+        tools: *const store_core.HostTools,
+        command: *const content_custody.ConfigureCommand,
+        preset: ?*const configuration_domain.PresetDecision,
+        initial_skills: ?*const skills_domain.Initial,
+        reload_capture: ?*const skills_domain.Capture,
+        /// What a skills reload allocates from, in an arena this frees.
+        allocator: std.mem.Allocator,
+        committed: ?Store.CreationCommitted,
+        /// Where the answer goes, in the caller's frame: a step's result
+        /// stays one word wide.
+        reply: *configuration_domain.ConfigureReply,
+    };
+    pub const Result = void;
+    /// Running out of memory, the caller's for a reload or the engine's,
+    /// rolls the write back cleanly and is the caller's to answer.
+    pub const Ordinary = error{OutOfMemory};
+    pub const Guards = error{SessionUpdateFailed};
+    pub const Declined = error{};
+
+    input: Input,
+    /// The configure reads, leased from the Store's scratch, which also
+    /// hold the command's digest and answer.
+    reads: *configuration_domain.ConfigurationReads = undefined,
+    /// The refusal the commit saves, if it saves one.
+    rejection: ?configuration_admission.Rejection = null,
+    /// A skills reload's result, once reloaded.
+    reloaded: ?skills_domain.Result = null,
+    /// The reload result's row.
+    outcome: content_domain.Import = undefined,
+    /// A reload's scratch, from the caller's allocator; `deinit` frees it.
+    memory: ?std.heap.ArenaAllocator = null,
+    /// A creation's parent refusal's diagnostic, which its content write
+    /// reads in place.
+    parent_text: [256]u8 = undefined,
+    /// What the rounds after the decision keep, as one path runs them: the
+    /// saved tool selection validation reads, a refusal's diagnostic, or
+    /// the reload.
+    later: union {
+        saved: tool_set.SavedSelection,
+        failure: skills_domain.ImportingFailure,
+        reload: skills_domain.Reloading,
+    } = undefined,
+
+    pub fn step(t: *Configure, r: *transition.Round(Configure), ran: ?rounds.At) !transition.Next(Configure) {
+        const at = ran orelse return t.start(r);
+        switch (at) {
+            .facts => return t.decide(r),
+            .model, .saved_tools, .saved_loaded, .loaded_source, .loaded => return t.validate(r, switch (at) {
+                inline .model, .saved_tools, .saved_loaded, .loaded_source, .loaded => |tag| @field(configuration_domain.ValidationRound, @tagName(tag)),
+                else => unreachable,
+            }),
+            .creation => return t.apply(r, .creation),
+            .catalog => return t.apply(r, .catalog),
+            .skills => return t.reload(r, .latest),
+            .skills_window => return t.reload(r, .window),
+            .skills_append => return t.reload(r, .append),
+            .outcome => return t.settleReload(r),
+            .failure => return t.rejectDiagnosed(r),
+        }
+    }
+
+    // The steps that run a round's work are noinline, so none sits under
+    // another on the engine thread's chain.
+    noinline fn start(t: *Configure, r: *transition.Round(Configure)) transition.Next(Configure) {
+        const command = t.input.command;
+        // Over 4.6 KB, so held where the Store owns it.
+        t.reads = r.configurationReads();
+        t.reads.* = .{ .next = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } } };
+        lookupCommand(r, command.key.slice(), &t.reads.saved_command);
+        configuration_domain.prepareConfiguration(r, t.input.tools.host_tool_set, command.session.slice(), &command.configuration, t.reads);
+        return .{ .round = .facts };
+    }
+
+    /// After `.facts`: a replay answers what was saved; a fresh command is
+    /// refused, reloads skills or validates its configuration.
+    noinline fn decide(t: *Configure, r: *transition.Round(Configure)) !transition.Next(Configure) {
+        const command = t.input.command;
+        const reads = t.reads;
+        const saved = &reads.saved_command;
+        configuration_domain.configureDigest(command, t.input.preset, saved, &reads.command_digest);
+        switch (try classify(configuration_admission.Rejection, saved, .configure, command.session.slice(), &reads.command_digest)) {
+            .fresh => {},
+            .conflict => return t.done(.conflict),
+            .accepted => |existing| return t.done(.{ .accepted = .{
+                .replayed = true,
+                .revision = existing.revision,
+                .created = existing.created,
+                .skills = if (command.reload_skills) (if (existing.code.eql("skills_reloaded")) .reloaded else if (existing.code.eql("skills_unchanged")) .unchanged else return error.CorruptStore) else null,
+                .session = existing.target,
+            } }),
+            .rejected => |code| return t.done(.{ .rejected = .{ .replayed = true, .code = code } }),
+        }
+        if (t.input.preset) |decision| if (decision.rejection) |code| switch (code) {
+            inline else => |tag| return t.refuse(r, @field(configuration_admission.Rejection, @tagName(tag)), null),
+        };
+        if (command.require_model and !configuration_domain.servesProviderOf(t.input.served, &command.configuration, if (reads.found.get()) reads.next.provider else if (reads.inherits_parent and reads.parent_found.get()) reads.inherited.provider else null))
+            return t.refuse(r, .model_capability_unavailable, null);
+        if (command.reload_skills) return t.startReload(r);
+        t.later = .{ .saved = undefined };
+        return t.validate(r, null);
+    }
+
+    /// Answers `reply` without writing.
+    fn done(t: *Configure, reply: configuration_domain.ConfigureReply) transition.Next(Configure) {
+        t.input.reply.* = reply;
+        return .{ .done = {} };
+    }
+
+    /// What the configuration steps read besides its rows.
+    fn request(t: *Configure) configuration_domain.Request {
+        return .{
+            .io = t.input.io,
+            .tools = t.input.tools,
+            .served = t.input.served,
+            .session = t.input.command.session.slice(),
+            .configuration = &t.input.command.configuration,
+            .initial_skills = t.input.initial_skills,
+            .saved = &t.later.saved,
+        };
+    }
+
+    /// Validation refuses the configuration or readies it for application.
+    noinline fn validate(t: *Configure, r: *transition.Round(Configure), ran: ?configuration_domain.ValidationRound) !transition.Next(Configure) {
+        return switch (try configuration_domain.validateStep(r, &t.request(), t.reads, ran)) {
+            .round => |round| .{ .round = switch (round) {
+                inline else => |tag| @field(rounds.At, @tagName(tag)),
+            } },
+            .rejected => |code| t.refuse(r, code, null),
+            .ready => t.apply(r, null),
+        };
+    }
+
+    /// Applies the valid configuration, then saves the command and its
+    /// revision.
+    noinline fn apply(t: *Configure, r: *transition.Round(Configure), ran: ?configuration_domain.ApplyRound) !transition.Next(Configure) {
+        const applied = switch (try configuration_domain.applyStep(r, &t.request(), r.faults(), t.reads, ran)) {
+            .round => |round| return .{ .round = switch (round) {
+                inline else => |tag| @field(rounds.At, @tagName(tag)),
+            } },
+            .accepted => |value| value,
+        };
+        const command = t.input.command;
+        const reads = t.reads;
+        reads.command_answer = .{ .accepted = true, .revision = applied.revision, .created = command.session.len == 0 };
+        try configuration_domain.queueConfiguredCommand(r, applied, command.key.slice(), .configure, &reads.command_digest, applied.instructions_id, applied.output_schema_id, &reads.command_answer);
+        if (r.faults().before_commit) return error.InjectedCommitFailure;
+        return .commit;
+    }
+
+    /// Native reload has its own atomic result and catalog settlement:
+    /// after replay, a reload names an existing Session and nothing else,
+    /// and carries a catalog the Host captured.
+    noinline fn startReload(t: *Configure, r: *transition.Round(Configure)) !transition.Next(Configure) {
+        const command = t.input.command;
+        const reads = t.reads;
+        if (configuration_domain.targetRejection(command.session.slice())) |code| return t.refuse(r, code, null);
+        if (command.session.len == 0 or !reads.found.get()) return t.refuse(r, .unknown_session, null);
+        var invalid = command.preset != null or command.require_model;
+        inline for (@typeInfo(content_custody.Configuration).@"struct".field_names) |field| {
+            if (@field(command.configuration, field).state != .omitted) invalid = true;
+        }
+        if (invalid) return t.refuse(r, .incomplete_initial_configuration, null);
+        const captured = t.input.reload_capture orelse return t.refuse(r, .skills_unavailable, null);
+        switch (captured.*) {
+            .failed => |failure| return t.refuse(r, failure.configurationRejection(), failure.bytes),
+            .invocation => return t.refuse(r, .skills_unavailable, null),
+            .reload => |candidate| {
+                t.memory = .init(t.input.allocator);
+                const head: rsql.SessionHead = .{ .ref = command.session.slice()[0..session_id.bytes].*, .workspace_key = .of(reads.next.workspace_key), .next_position = .of(reads.next.next_position) };
+                t.later = .{ .reload = .init(head, candidate, t.memory.?.allocator()) };
+                return t.reload(r, null);
+            },
+        }
+    }
+
+    /// The reload's next round; once reloaded, its result's lookup.
+    noinline fn reload(t: *Configure, r: *transition.Round(Configure), ran: ?skills_domain.ReloadRound) !transition.Next(Configure) {
+        const result = switch (try t.later.reload.step(r, r.faults(), ran)) {
+            .round => |round| return .{ .round = switch (round) {
+                .latest => .skills,
+                .window => .skills_window,
+                .append => .skills_append,
+            } },
+            .reloaded => |value| value,
+        };
+        t.reloaded = result;
+        t.outcome = .ofBytes(result.bytes, false);
+        content_domain.lookup(r, &t.outcome);
+        return .{ .round = .outcome };
+    }
+
+    /// After `.outcome`: saves the reload's result and command.
+    noinline fn settleReload(t: *Configure, r: *transition.Round(Configure)) !transition.Next(Configure) {
+        const command = t.input.command;
+        const reads = t.reads;
+        const result = t.reloaded.?;
+        const outcome_id = try content_domain.importBytes(r, &t.outcome, result.bytes);
+        const status = result.reload_status orelse return error.CorruptStore;
+        reads.command_answer = .{ .accepted = true, .revision = reads.next.revision };
+        try reads.command_answer.code.set(if (status == .unchanged) "skills_unchanged" else "skills_reloaded");
+        try queueCommand(r, command.key.slice(), .configure, command.session.slice(), &reads.command_digest, outcome_id, null, &reads.command_answer);
+        if (r.faults().before_commit) return error.InjectedCommitFailure;
+        return .commit;
+    }
+
+    /// A refusal; one with a diagnostic, its own or a creation's parent's,
+    /// looks its row up in `.failure`.
+    fn refuse(t: *Configure, r: *transition.Round(Configure), code: configuration_admission.Rejection, diagnostic: ?[]const u8) !transition.Next(Configure) {
+        t.rejection = code;
+        const bytes = diagnostic orelse if (t.reads.parent_failure) |parent| parent.text(&t.parent_text, "created") else return t.reject(r, null);
+        t.later = .{ .failure = .{ .bytes = bytes } };
+        t.later.failure.lookup(r);
+        return .{ .round = .failure };
+    }
+
+    /// After `.failure`: the refusal, with its diagnostic's row.
+    noinline fn rejectDiagnosed(t: *Configure, r: *transition.Round(Configure)) !transition.Next(Configure) {
+        return t.reject(r, try t.later.failure.import(r, r.faults()));
+    }
+
+    /// Saves the refused command.
+    fn reject(t: *Configure, r: *transition.Round(Configure), outcome_id: ?u64) !transition.Next(Configure) {
+        const command = t.input.command;
+        const reads = t.reads;
+        reads.command_answer = .{ .accepted = false };
+        try reads.command_answer.code.set(@tagName(t.rejection.?));
+        try queueCommand(r, command.key.slice(), .configure, command.session.slice(), &reads.command_digest, outcome_id, null, &reads.command_answer);
+        if (r.faults().before_commit) return error.InjectedCommitFailure;
+        return .commit;
+    }
+
+    /// Commit before announcing a creation: in a batch, once the batch
+    /// commits (`Store.created`).
+    pub fn announced(t: *const Configure) ?store_core.Announcement {
+        if (t.rejection != null or t.reloaded != null or t.input.command.session.len != 0) return null;
+        const callback = t.input.committed orelse return null;
+        return .{ .creation = .{ .callback = callback, .session = t.reads.applied.session.slice() } };
+    }
+
+    pub fn committed(t: *const Configure) Result {
+        const command = t.input.command;
+        t.input.reply.* = if (t.rejection) |code|
+            .{ .rejected = .{ .replayed = false, .code = code } }
+        else if (t.reloaded) |result|
+            .{ .accepted = .{ .replayed = false, .revision = t.reads.next.revision, .created = false, .session = command.session, .skills = result.reload_status } }
+        else
+            .{ .accepted = .{ .replayed = false, .revision = t.reads.applied.revision, .created = command.session.len == 0, .session = t.reads.applied.session } };
+    }
+
+    pub fn deinit(t: *Configure) void {
+        const memory = if (t.memory) |*value| value else return;
+        t.later.reload.deinit();
+        memory.deinit();
     }
 };
 
