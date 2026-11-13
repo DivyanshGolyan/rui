@@ -24,8 +24,8 @@ const store_module = @import("store.zig");
 const session_report = @import("session_report.zig");
 const stderr = @import("stderr.zig");
 
-pub const default_bash_timeout_ms: u64 = 5 * 60 * 1000;
-pub const default_bash_path = "/bin/bash";
+pub const default_bash_timeout_ms = @import("host_settings.zig").default_bash_timeout_ms;
+pub const default_bash_path = @import("host_settings.zig").default_bash_path;
 pub const scratch_limit_bytes: u64 = 8 * 1024 * 1024 * 1024;
 pub const default_retention_entry_capacity = @import("retention_capacity.zig").entries;
 /// Real operating limits. Tests may narrow them; production uses the defaults.

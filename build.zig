@@ -79,7 +79,7 @@ pub fn build(b: *std.Build) void {
 
     const h2_test_step = b.step("test-h2", "Run the HTTP/2 client's own tests");
     const pg_test_step = b.step("test-pg", "Run the Postgres wire client's tests (live ones against RUI_TEST_PG_PORT)");
-    if (product.addTlsClient(b, target, .ReleaseSafe, pinned_transport)) |tls_client| {
+    if (product.addTlsClient(b, target, .ReleaseSafe, pinned_transport, product.addUrl(b))) |tls_client| {
         const h2 = product.addH2(b, target, .ReleaseSafe, pinned_transport, product.addTestPoll(b), tls_client);
         const h2_tests = b.addTest(.{ .root_module = h2, .filters = test_filters });
         const run_h2_tests = ci.run(h2_tests);
@@ -282,7 +282,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     // TLS: the connection's tls.zig is on tls_client's OpenSSL.
-    if (product.addTlsClient(b, target, .ReleaseSafe, pinned_transport)) |tls_client| mysql_connection.addImport("tls_client", tls_client);
+    if (product.addTlsClient(b, target, .ReleaseSafe, pinned_transport, product.addUrl(b))) |tls_client| mysql_connection.addImport("tls_client", tls_client);
     mysql_wire_tests.root_module.addImport("mysql_connection", mysql_connection);
     const mysql_wire_integration = b.addSystemCommand(&.{"python3"});
     mysql_wire_integration.addFileArg(b.path("tests/integration/mysql_wire_integration.py"));

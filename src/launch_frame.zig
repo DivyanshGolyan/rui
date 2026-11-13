@@ -11,6 +11,7 @@ const protocol = @import("protocol.zig");
 const wire_request = @import("wire_request.zig");
 const core_tools = @import("core_tools.zig");
 const platform = @import("platform.zig");
+const host_settings = @import("host_settings.zig");
 pub const MysqlUrl = @import("mysql_url.zig");
 const http1 = @import("http1/request.zig");
 
@@ -87,11 +88,11 @@ test "launch presets resolve MCP tools through the same tool set as configure" {
 /// The one frame version.
 pub const version = 1;
 /// A frame longer than this is refused before it is read.
-pub const max_frame_bytes = 1024 * 1024;
+pub const max_frame_bytes = host_settings.max_document_bytes;
 /// The launched Host's socket, inside the frame's `runtimeDir`.
-pub const socket_name = "rui.sock";
+pub const socket_name = host_settings.socket_name;
 /// The longest `runtimeDir` whose socket path still binds.
-pub const max_runtime_dir_bytes = platform.max_launch_socket_path_bytes - "/".len - socket_name.len;
+pub const max_runtime_dir_bytes = host_settings.max_runtime_dir_bytes;
 
 pub const Frame = struct {
     store: Store = .{ .sqlite_dir = .{} },
@@ -112,11 +113,11 @@ pub const Frame = struct {
     presets: []const core_tools.Preset = &.{},
     presets_memory: ?std.heap.ArenaAllocator = null,
 
-    pub const max_base_url_bytes = 2048;
+    pub const max_base_url_bytes = host_settings.max_base_url_bytes;
     /// Leave room for the TLS loader's terminating NUL.
-    pub const max_ca_file_bytes = std.posix.PATH_MAX - 1;
-    pub const max_mcp_servers = 8;
-    pub const max_mcp_name_bytes = 64;
+    pub const max_ca_file_bytes = host_settings.max_ca_file_bytes;
+    pub const max_mcp_servers = host_settings.max_mcp_servers;
+    pub const max_mcp_name_bytes = host_settings.max_mcp_name_bytes;
 
     /// One entry of `mcpServers`. The name labels the server in errors; the
     /// token is a secret and is wiped with the key.
@@ -189,7 +190,7 @@ fn refuse(refusal: *start_report.Failure, message: []const u8) error{LaunchFrame
     return error.LaunchFrameInvalid;
 }
 
-pub const default_mcp_call_timeout_ms: u32 = 600_000;
+pub const default_mcp_call_timeout_ms = host_settings.default_mcp_call_timeout_ms;
 
 /// The frame as JSON. Unknown fields are refused.
 pub const Wire = struct {
@@ -320,11 +321,7 @@ fn refusePreset(refusal: *start_report.Failure, name: []const u8, reason: []cons
     return error.LaunchFrameInvalid;
 }
 
-fn validServerName(name: []const u8) bool {
-    if (name.len == 0 or name.len > Frame.max_mcp_name_bytes) return false;
-    for (name) |byte| if (!std.ascii.isAlphanumeric(byte) and byte != '-' and byte != '_') return false;
-    return true;
-}
+const validServerName = host_settings.validName;
 
 fn frameBytes(comptime json: []const u8) [4 + json.len]u8 {
     var out: [4 + json.len]u8 = undefined;
@@ -546,22 +543,7 @@ test "an oversized frame length is refused before any body is read" {
 
 /// Wipe every JSON allocation, including partial strings on a parse error.
 /// The arena's backing allocations never move or shrink behind this owner.
-const WipingAllocator = struct {
-    backing: std.mem.Allocator,
-
-    fn allocator(self: *WipingAllocator) std.mem.Allocator {
-        return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = std.mem.Allocator.noResize, .remap = std.mem.Allocator.noRemap, .free = free } };
-    }
-    fn alloc(context: *anyopaque, len: usize, alignment: std.mem.Alignment, ret: usize) ?[*]u8 {
-        const self: *WipingAllocator = @ptrCast(@alignCast(context));
-        return self.backing.rawAlloc(len, alignment, ret);
-    }
-    fn free(context: *anyopaque, bytes: []u8, alignment: std.mem.Alignment, ret: usize) void {
-        const self: *WipingAllocator = @ptrCast(@alignCast(context));
-        std.crypto.secureZero(u8, bytes);
-        self.backing.rawFree(bytes, alignment, ret);
-    }
-};
+const WipingAllocator = @import("secret_value.zig").WipingAllocator;
 
 test "a MySQL launch frame keeps its login only in the stdin-owned frame" {
     var frame: Frame = .{};
