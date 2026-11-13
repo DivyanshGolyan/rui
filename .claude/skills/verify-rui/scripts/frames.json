@@ -48,16 +48,6 @@
       "name": "appcmds-conversation-end",
       "note": "The existing slash viewport scrolls to the remaining chat commands",
       "open": "App command replacements",
-      "cast": [
-        {
-          "label": "App command replacements",
-          "workspace": "code/rui",
-          "messages": [
-            "Ready."
-          ],
-          "mode": "bypass"
-        }
-      ],
       "steps": [
         {
           "text": "/"
