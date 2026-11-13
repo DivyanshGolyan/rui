@@ -12,6 +12,8 @@ const Bounded = @import("../../bounded.zig").Bounded;
 const tool_record = @import("../../tool_record.zig");
 const rsql = @import("../rsql.zig");
 const content_domain = @import("content.zig");
+const store_core = @import("../Store.zig");
+const transition = @import("../transition.zig");
 
 const lookup_set = rsql.Read(.{
     .sql = "SELECT tool_set_id FROM tool_set WHERE digest=?1",
@@ -102,50 +104,128 @@ pub fn toolSetDigest(tool_set: *const tool_record.HostToolSet) [32]u8 {
     return digest.final();
 }
 
-/// How many records one transaction of `ensureRecords` saves: each
+/// How many records one transaction of `SavingRecords` saves: each
 /// imports at most its two texts, within an Access's `max_inserted`.
 pub const records_per_transaction = 2;
 
-/// What `ensureRecords` reads for one transaction's records.
-pub const RecordReads = struct {
+/// Saves each of `records` and its texts that no row holds yet, in rounds
+/// its caller runs: `lookup` queues the lookup of each record's texts;
+/// `importTexts`, after that round, imports the missing ones and queues the
+/// lookup of each record whose texts both existed, true when it queued
+/// one, a round its caller runs; `insert` then queues each record no row
+/// holds. A record that exists is left as it is. A transition keeps it in
+/// its value, so the rounds' rows land there.
+pub const SavingRecords = struct {
+    /// The caller's, which outlive the transaction.
+    records: []const tool_record.Record,
     pairs: [records_per_transaction]content_domain.Pair = undefined,
     descriptions: [records_per_transaction]content_domain.Import = undefined,
     schemas: [records_per_transaction]content_domain.Import = undefined,
+    content_ids: [records_per_transaction][2]u64 = undefined,
     existing: [records_per_transaction]lookup_record.Result = undefined,
-};
 
-/// Saves each of `records` and its texts that no row holds yet, on `a`, a
-/// write Access the caller commits. A record that exists is left as it is.
-pub fn ensureRecords(a: anytype, records: []const tool_record.Record, reads: *RecordReads) !void {
-    std.debug.assert(records.len <= records_per_transaction);
-    for (records, 0..) |*each, index| {
-        reads.descriptions[index] = .ofBytes(each.description, false);
-        reads.schemas[index] = .ofBytes(each.input_schema, false);
-        content_domain.lookupPair(a, &reads.descriptions[index], &reads.schemas[index], &reads.pairs[index]);
-    }
-    try a.run();
-    // A record can exist only when both its texts already do.
-    var content_ids: [records_per_transaction][2]u64 = undefined;
-    var known = false;
-    for (records, 0..) |*each, index| {
-        content_domain.foundPair(&reads.pairs[index], &reads.descriptions[index], &reads.schemas[index]);
-        const both = reads.descriptions[index].found != null and reads.schemas[index].found != null;
-        content_ids[index] = .{
-            try content_domain.importBytes(a, &reads.descriptions[index], each.description),
-            try content_domain.importBytes(a, &reads.schemas[index], each.input_schema),
-        };
-        reads.existing[index] = null;
-        if (both) {
-            known = true;
-            a.read(lookup_record, .{ .name = each.name, .owner = each.owner, .server = each.server, .read_only = each.read_only, .description = content_ids[index][0], .input_schema = content_ids[index][1] }, &reads.existing[index]);
+    pub fn lookup(saving: *SavingRecords, a: anytype) void {
+        std.debug.assert(saving.records.len <= records_per_transaction);
+        for (saving.records, 0..) |*each, index| {
+            saving.descriptions[index] = .ofBytes(each.description, false);
+            saving.schemas[index] = .ofBytes(each.input_schema, false);
+            content_domain.lookupPair(a, &saving.descriptions[index], &saving.schemas[index], &saving.pairs[index]);
         }
     }
-    if (known) try a.run();
-    for (records, 0..) |*each, index| if (reads.existing[index] == null) {
-        const id = try a.identity(.tool_record_id);
-        a.write(insert_record, .{ .id = id, .name = each.name, .owner = each.owner, .server = each.server, .read_only = each.read_only, .description = content_ids[index][0], .input_schema = content_ids[index][1] });
-    };
-}
+
+    /// After `lookup`'s round.
+    pub fn importTexts(saving: *SavingRecords, a: anytype) !bool {
+        // A record can exist only when both its texts already do.
+        var known = false;
+        for (saving.records, 0..) |*each, index| {
+            content_domain.foundPair(&saving.pairs[index], &saving.descriptions[index], &saving.schemas[index]);
+            const both = saving.descriptions[index].found != null and saving.schemas[index].found != null;
+            const ids = &saving.content_ids[index];
+            ids.* = .{
+                try content_domain.importBytes(a, &saving.descriptions[index], each.description),
+                try content_domain.importBytes(a, &saving.schemas[index], each.input_schema),
+            };
+            saving.existing[index] = null;
+            if (both) {
+                known = true;
+                a.read(lookup_record, .{ .name = each.name, .owner = each.owner, .server = each.server, .read_only = each.read_only, .description = ids[0], .input_schema = ids[1] }, &saving.existing[index]);
+            }
+        }
+        return known;
+    }
+
+    /// After `importTexts`, and the round it asked for, if any.
+    pub fn insert(saving: *SavingRecords, a: anytype) !void {
+        for (saving.records, 0..) |*each, index| if (saving.existing[index] == null) {
+            const ids = saving.content_ids[index];
+            const id = try a.identity(.tool_record_id);
+            a.write(insert_record, .{ .id = id, .name = each.name, .owner = each.owner, .server = each.server, .read_only = each.read_only, .description = ids[0], .input_schema = ids[1] });
+        };
+    }
+};
+
+/// One transaction of `Store.saveHostToolSet`, by `start`. With none, round
+/// `.set` finds the saved set that holds `offered`: none ends with null,
+/// and one the Host does not point at yet is pointed at in the commit
+/// round. Below the record count, rounds `.texts` and `.records` save the
+/// records from `start` (`SavingRecords`), which the commit round writes.
+/// At it, the commit round saves the set and points the Host at it.
+pub const SaveHostToolSet = struct {
+    pub const rounds = transition.rounds(.{ .set = .{.branch}, .texts = .{.branch}, .records = .{.branch} });
+    pub const round_budget = 1;
+    pub const commit: transition.Commit = .transaction;
+    pub const begin: ?rounds.At = .set;
+    /// The caller's, which outlive the transition.
+    pub const Input = struct { offered: *const tool_record.HostToolSet, digest: *const [32]u8, start: ?usize };
+    /// The set's id: the saved one, or the one saved; null when no set
+    /// holds `offered` or the transaction saved records.
+    pub const Result = ?u64;
+    pub const Ordinary = store_core.Ordinary.none;
+    pub const Guards = error{};
+    pub const Declined = error{};
+
+    input: Input,
+    set: lookup_tool_set.Result = null,
+    saving: SavingRecords = undefined,
+    set_id: ?u64 = null,
+
+    pub fn step(t: *SaveHostToolSet, r: *transition.Round(SaveHostToolSet), ran: ?rounds.At) !transition.Next(SaveHostToolSet) {
+        const offered = t.input.offered;
+        const at = ran orelse {
+            const start = t.input.start orelse {
+                lookupHostToolSet(r, t.input.digest, &t.set);
+                return .{ .round = .set };
+            };
+            if (start < offered.records.len) {
+                t.saving = .{ .records = offered.records[start..@min(offered.records.len, start + records_per_transaction)] };
+                t.saving.lookup(r);
+                return .{ .round = .texts };
+            }
+            const set_id = try r.identity(.tool_set_id);
+            insertHostToolSet(r, offered, t.input.digest, set_id);
+            pointHostToolSet(r, set_id);
+            t.set_id = set_id;
+            return .commit;
+        };
+        switch (at) {
+            .set => {
+                const row = t.set orelse return .{ .done = null };
+                if (row.current) return .{ .done = row.tool_set_id.get() };
+                pointHostToolSet(r, row.tool_set_id.get());
+                t.set_id = row.tool_set_id.get();
+                return .commit;
+            },
+            .texts => if (try t.saving.importTexts(r)) return .{ .round = .records },
+            .records => {},
+        }
+        try t.saving.insert(r);
+        return .commit;
+    }
+
+    pub fn committed(t: *const SaveHostToolSet) Result {
+        return t.set_id;
+    }
+};
 
 /// The tool_set's saved set, by its digest, and whether host_tool_set
 /// names it already.
