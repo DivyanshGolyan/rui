@@ -2367,8 +2367,8 @@ pub const Caps = struct {
     /// answer.
     background: ?Rgb = null,
 
-    /// `none` under NO_COLOR draws in the terminal's own colours with bold
-    /// and reverse only; `indexed` uses the nearest 256-colour entries;
+    /// `none` under NO_COLOR draws in the terminal's own colours with bold,
+    /// dim, reverse and underline; `indexed` uses the nearest 256-colour entries;
     /// `direct` uses 24-bit colour.
     pub const Depth = enum { none, indexed, direct };
 
@@ -2480,8 +2480,8 @@ fn topRows(state: *const State) usize {
 
 /// One line's spans, placed left to right at their columns, its text made
 /// terminal-safe and clipped to the room it has. Each span keeps the role
-/// it was given, as `plain` leaves it without colour; the widget that
-/// draws the line makes the role a colour through `widget_style`.
+/// it was given; only `widget_style.of` normalizes that role for terminal
+/// capabilities when the widget draws it.
 const Spans = struct {
     arena: Allocator,
     caps: Caps,
@@ -2514,8 +2514,7 @@ const Spans = struct {
     fn pad(self: *Spans, column: usize, wanted: Style) error{OutOfMemory}!void {
         const to = @min(column, self.width);
         if (to <= self.column) return;
-        const drawn = plain(self.caps, wanted);
-        if (drawn.reverse or drawn.background != .ground) {
+        if (wanted.reverse or wanted.background != .ground) {
             const blank = try self.arena.alloc(u8, to - self.column);
             @memset(blank, ' ');
             self.push(blank, to - self.column, wanted);
@@ -2525,7 +2524,7 @@ const Spans = struct {
 
     fn push(self: *Spans, bytes: []const u8, cells: usize, wanted: Style) void {
         if (self.count == self.spans.len or cells == 0) return;
-        self.spans[self.count] = .{ .column = @intCast(self.column), .cells = @intCast(cells), .text = bytes, .style = plain(self.caps, wanted) };
+        self.spans[self.count] = .{ .column = @intCast(self.column), .cells = @intCast(cells), .text = bytes, .style = wanted };
         self.count += 1;
         self.column += cells;
     }
@@ -2563,17 +2562,6 @@ const Spans = struct {
 };
 
 pub const Keep = enum { head, tail };
-
-/// `wanted` as a terminal without colour shows it: only bold and reverse
-/// remain, the band and the selection reverse, and every other ground is
-/// the terminal's own.
-fn plain(caps: Caps, wanted: Style) Style {
-    if (caps.depth != .none) return wanted;
-    return .{
-        .bold = wanted.bold or wanted.background == .band,
-        .reverse = wanted.reverse or wanted.background == .band or wanted.background == .selection,
-    };
-}
 
 /// `bytes` made terminal-safe and clipped to `room` cells, as `Pieces`
 /// shows it, with an ellipsis where it was cut: at the end, or at the
@@ -3400,7 +3388,8 @@ test "a retry that has fallen due reads as queued in its group, mark and colour"
     try std.testing.expect(std.mem.indexOf(u8, text, " Active ·") == null);
     var screen = try Frame.of(&state, 80, 24, .{ .depth = .none }, 0);
     defer screen.deinit();
-    try std.testing.expectEqual(Style{ .colour = .normal }, screen.styleAt(2, 1).?);
+    // The core retains the pending mark's role, even without colour.
+    try std.testing.expectEqual(Style{ .colour = .quiet, .dim = true }, screen.styleAt(2, 1).?);
 }
 
 test "overview rows draw a flat order without headings" {
@@ -4831,7 +4820,7 @@ test "the overview's rows draw twenty mixed rows" {
     }
 }
 
-test "the overview's rows draw ASCII without colour" {
+test "the overview's rows stay ASCII and keep semantic roles without colour" {
     var state = try opened(&mixed);
     defer state.deinit();
     _ = try step(&state, .{ .first_line = .{ .reference = "h8q2mz".*, .admission = 4, .line = "résumé the naïve café ☕ notes" } });
@@ -4842,7 +4831,9 @@ test "the overview's rows draw ASCII without colour" {
         defer std.testing.allocator.free(text);
         for (text) |byte| try std.testing.expect(byte < 0x80 and (byte >= 0x20 or byte == '\n'));
         try std.testing.expect(std.mem.indexOf(u8, text, "r?sum? the na?ve caf? ? notes") != null);
-        for (shown.list) |line| for (line) |segment| try std.testing.expectEqual(Colour.normal, segment.style.colour);
+        var direct = try Frame.of(&state, width, 60, .{ .unicode = false }, 0);
+        defer direct.deinit();
+        try std.testing.expectEqualDeep(direct.list, shown.list);
     }
 }
 
@@ -5418,7 +5409,8 @@ test "overview quiet rows cover sender work selection and the open empty chat" {
         .{ kind_cases[9].state, false, "Last answer" },
         .{ WorkState{ .bash = .{ .since = test_now_s, .call = 0, .description = null, .running = 1, .approvals = 1 } }, false, "Allow: echo yes" },
     };
-    inline for (cases) |case| for ([_]bool{ false, true }) |wrote| for ([_]bool{ false, true }) |selected| for ([_]u16{ 46, 140 }) |width| {
+    inline for (cases) |case| for ([_]bool{ false, true }) |wrote| for ([_]bool{ false, true }) |selected| for ([_]u16{ 46, 140 }) |width| for ([_]Caps.Depth{ .direct, .indexed, .none }) |depth| {
+        const caps: Caps = .{ .depth = depth };
         var listed = session("k7m2qx", case[0], .{ .label = "Quiet row", .yours = wrote, .first_action = 7 });
         listed.last_line = .{ .position = 1, .text = "Last answer" };
         var state = try opened(&.{listed});
@@ -5431,13 +5423,13 @@ test "overview quiet rows cover sender work selection and the open empty chat" {
         try std.testing.expectEqual(quiet, rowQuiet(&state, state.find(listed.reference).?));
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
-        const first = try listSegments(arena.allocator(), &state, .{ .row = 0 }, width, .{}, 0);
+        const first = try listSegments(arena.allocator(), &state, .{ .row = 0 }, width, caps, 0);
         const name = try styleOf(first.segments, "Quiet row");
         try std.testing.expectEqual(quiet, name.dim);
         try std.testing.expectEqual(selected, first.selected);
         try std.testing.expectEqual(selected, name.bold);
         try std.testing.expectEqual(if (selected) Colour.strong else Colour.normal, name.colour);
-        const second = try rowSecondSegments(arena.allocator(), &state, 0, width, .{});
+        const second = try rowSecondSegments(arena.allocator(), &state, 0, width, caps);
         // Main's folder role is quiet, exactly like the detail and age.
         // Quiet rows add dim without replacing that existing muted role.
         const muted: Style = .{ .colour = .quiet, .dim = quiet };

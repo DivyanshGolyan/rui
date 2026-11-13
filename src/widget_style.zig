@@ -4,11 +4,12 @@ const vaxis = @import("vaxis");
 const view = @import("overview_view.zig");
 const theme = @import("theme.zig");
 
+/// The sole terminal-capability normalization boundary for semantic styles.
 pub fn of(caps: view.Caps, role: view.Style) vaxis.Style {
     var style: vaxis.Style = .{ .bold = role.bold, .reverse = role.reverse, .dim = role.dim };
     if (caps.depth == .none) {
         style.bold = role.bold or role.background == .band;
-        style.reverse = role.background == .band or role.background == .selection;
+        style.reverse = role.reverse or role.background == .band or role.background == .selection;
         // Reverse marks the keyboard's row; the pointer's row only underlines.
         if (role.background == .hover) style.ul_style = .single;
         return style;
@@ -72,12 +73,15 @@ test "widget styles resolve theme colours and preserve NO_COLOR" {
     const selected = of(.{ .depth = .indexed }, .{ .background = .selection });
     try std.testing.expectEqual(vaxis.Color{ .index = 237 }, selected.bg);
     for (std.enums.values(view.Colour)) |colour| for (std.enums.values(view.Background)) |background| {
-        const plain = of(.{ .depth = .none }, .{ .colour = colour, .background = background });
-        try std.testing.expectEqual(vaxis.Color.default, plain.fg);
-        try std.testing.expectEqual(vaxis.Color.default, plain.bg);
-        try std.testing.expectEqual(background == .band, plain.bold);
-        try std.testing.expectEqual(background == .band or background == .selection, plain.reverse);
-        try std.testing.expectEqual(if (background == .hover) vaxis.Style.Underline.single else .off, plain.ul_style);
+        for ([_]bool{ false, true }) |bold| for ([_]bool{ false, true }) |reverse| for ([_]bool{ false, true }) |dim| {
+            const plain = of(.{ .depth = .none }, .{ .colour = colour, .background = background, .bold = bold, .reverse = reverse, .dim = dim });
+            try std.testing.expectEqual(vaxis.Color.default, plain.fg);
+            try std.testing.expectEqual(vaxis.Color.default, plain.bg);
+            try std.testing.expectEqual(bold or background == .band, plain.bold);
+            try std.testing.expectEqual(reverse or background == .band or background == .selection, plain.reverse);
+            try std.testing.expectEqual(dim, plain.dim);
+            try std.testing.expectEqual(if (background == .hover) vaxis.Style.Underline.single else .off, plain.ul_style);
+        };
     };
 }
 
