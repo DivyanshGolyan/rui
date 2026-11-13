@@ -697,7 +697,7 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
     }
 }
 
-/// Root hands the overview each key, paste mark and malformed key it
+/// Root hands the overview each key and paste mark it
 /// routes here, with what it arrived under and whether it is pasted. The
 /// core decides what it means; this applies that and reads only the facts
 /// other owners hold: the draft, the footer choice's answer and whether the
@@ -740,7 +740,6 @@ fn overviewKey(input: vxfw.Event) view.Key {
     return switch (input) {
         .paste_start => .paste_start,
         .paste_end => .paste_end,
-        .invalid_key => .invalid,
         .key_press => |key| if (TerminalEditor.named(key)) |name| .{ .named = name } else if (TerminalEditor.isEnter(key)) .enter else if (key.matchExact(vaxis.Key.tab, .{})) .tab else if (key.matchExact(vaxis.Key.tab, .{ .shift = true })) .shift_tab else if (SessionFrontend.hostStartKey(key)) .host_start else if (TerminalEditor.selectKey(view.keys, key) == .text) .text else .other,
         // Root routes only these to the overview.
         else => unreachable,
@@ -4935,15 +4934,16 @@ test "bytes that are not text reject the composer's line at Enter, as in a conve
     try expectStarted(rig, "typed\xff\r", null);
     // The rejected line is gone; the next one starts alone.
     try expectStarted(rig, "next\r", "next");
-    // A malformed key sequence (Kitty, past U+10FFFF) rejects the line the
-    // same way: it stays as typed until Enter, which reports and clears it.
-    try std.testing.expect(try rig.press("kept\x1b[1114112u") == null);
-    try std.testing.expect(try rig.settle() == null);
-    try std.testing.expectEqualStrings("kept", rig.overview.composerDraft().bytes);
-    try std.testing.expectEqual(null, rig.overview.state.notice);
-    try expectStarted(rig, "\r", null);
-    try std.testing.expectEqualStrings("! Not valid text; nothing sent.", rig.overview.state.notice.?.text());
-    try std.testing.expectEqualStrings("", rig.overview.composerDraft().bytes);
+}
+
+test "unknown terminal sequences leave overview text available to start a Session" {
+    const rig = try openComposer();
+    defer rig.close();
+    for ([_][]const u8{ "\x1b[1114112u", "\x1b[27;3;1114112~" }) |sequence| {
+        var bytes: [64]u8 = undefined;
+        try expectStarted(rig, try std.fmt.bufPrint(&bytes, "one{s}two\r", .{sequence}), "onetwo");
+        try std.testing.expectEqual(null, rig.overview.state.notice);
+    }
 }
 
 test "Shift-Enter and Alt-Enter add a line in every encoding, and a paste keeps its line ends" {

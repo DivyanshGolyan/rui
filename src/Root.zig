@@ -12,8 +12,8 @@ const Self = @This();
 pub const list_width = 40;
 pub const split_at = 100;
 
-/// A pane core's key owner: Root hands it each key, paste mark and
-/// malformed key `app_input.step` routes to that pane, with its delivery.
+/// A pane core's key owner: Root hands it each key and
+/// paste mark `app_input.step` routes to that pane, with its delivery.
 pub const Keys = struct {
     context: *anyopaque,
     take: *const fn (*anyopaque, *vxfw.EventContext, vxfw.Event, app_input.Effects.Delivery) anyerror!void,
@@ -27,8 +27,8 @@ pub const MainPresentation = struct {
 main_presentation: ?MainPresentation = null,
 
 overview: vxfw.Widget,
-/// The overview's key owner: Root hands it each key, paste mark and
-/// malformed key `app_input.step` routes to the overview, with what it
+/// The overview's key owner: Root hands it each key and
+/// paste mark `app_input.step` routes to the overview, with what it
 /// arrived under. A Root with no overview core (UI-only tests and native
 /// probes) hands those events to the `overview` widget instead.
 overview_keys: ?Keys = null,
@@ -218,7 +218,6 @@ fn capture(raw: *anyopaque, ctx: *vxfw.EventContext, routed: vxfw.Event) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     const input: app_input.Input = switch (routed) {
         .key_press => |key| .{ .key = .{ .named = @import("TerminalEditor.zig").named(key), .right = key.matches(vaxis.Key.right, .{}), .enter = key.matches(vaxis.Key.enter, .{}) } },
-        .invalid_key => .invalid_key,
         .paste_start => .paste_start,
         .paste_end => .paste_end,
         .mouse => |mouse| .{ .mouse = switch (mouse.button) {

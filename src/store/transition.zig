@@ -176,6 +176,12 @@ fn RoundOf(comptime R: type, comptime commit: Commit, comptime Guards: type, com
             r.get().writer.write(S, args);
         }
 
+        /// Publication settlement whose identity does not bind a Session column.
+        pub fn obligationsChanged(r: *Self, head: rsql.SessionHead) void {
+            transacts("changes obligations");
+            r.get().writer.obligationsChanged(head);
+        }
+
         /// `Access.readRaw`, as the `.raw` round the step asks for next:
         /// `destination`, which must outlive that round, is defined once it
         /// runs. Nothing else may be queued for it. Its error is the

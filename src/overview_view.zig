@@ -353,7 +353,7 @@ pub const StartResult = union(enum) {
 
 pub const Event = union(enum) {
     composed: Composed,
-    /// A key, paste mark or malformed key Root handed the overview. `step`
+    /// A key or paste mark Root handed the overview. `step`
     /// decides what it means and returns that in `Effects.take`.
     key: KeyInput,
     /// A footer input that is no key: the drawn choice's close action.
@@ -417,8 +417,6 @@ pub const Key = union(enum) {
     other,
     paste_start,
     paste_end,
-    /// A malformed key sequence.
-    invalid,
 };
 
 /// One input Root handed the overview, with the facts its owners hold.
@@ -1991,7 +1989,7 @@ fn footerKey(input: KeyInput) FooterInput {
         .enter => .enter,
         .named => |name| if (name == .escape or name == .ctrl_g) .escape else .other,
         .text, .host_start => .text,
-        .other, .paste_start, .paste_end, .invalid => .other,
+        .other, .paste_start, .paste_end => .other,
     };
 }
 

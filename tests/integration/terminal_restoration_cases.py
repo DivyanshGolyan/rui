@@ -2048,7 +2048,8 @@ def app_consent_cases():
     for replaced, keys, expected in (
         (True, b"\r", b"decision=none\n"),
         (False, b"\r", b"decision=17:allow_once\n"),
-        (False, b"\x1b[13;0u", b"decision=none\n"),
+        # The surrogate is unknown; a non-authorizing key ends the one-key probe.
+        (False, b"\x1b[55296ux", b"decision=none\n"),
     ):
         master, slave = open_pty()
         ready_read, ready_write = os.pipe()

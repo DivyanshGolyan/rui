@@ -193,8 +193,6 @@ pub const Key = union(enum) {
     other,
     paste_start,
     paste_end,
-    /// A malformed key sequence.
-    invalid,
 };
 
 /// One input Root handed the Session.
@@ -334,7 +332,6 @@ pub fn step(state: State, facts: Facts, input: Input) Take {
             .left => .{ .card = .left },
             .right => .{ .card = .right },
             .paste_end => .{ .card = .cancel },
-            .invalid => .{ .card = .invalid },
             else => .taken,
         },
         .blocked => if (input.key == .enter) .needs_decision else .taken,
@@ -357,7 +354,7 @@ pub fn rowKey(input: Input) ActionConsent.RowKey {
         .left, .right => .arrows,
         .text, .host_start => .printable,
         .paste_start => .paste,
-        .named, .tab, .shift_tab, .info, .details, .other, .paste_end, .invalid => .other,
+        .named, .tab, .shift_tab, .info, .details, .other, .paste_end => .other,
     };
 }
 
@@ -409,7 +406,7 @@ test "every key Root hands the Session means one thing in each Session state" {
     // at the Action's choice moves to its draft wherever focus was. Each
     // combination matches exactly one row, and every row matches some.
     const Setup = enum { plain, selector, draft_row, footer_focused, choice_shown, choice_pending, info_open, info_choice, host_held, opening, preparing, command_active, submitting, shown_row };
-    const Pressed = enum { printable, pasted_printable, enter, pasted_enter, escape, ctrl_g, ctrl_c, ctrl_d, left, right, tab, shift_tab, host_start, info, details, paste_start, paste_end, invalid };
+    const Pressed = enum { printable, pasted_printable, enter, pasted_enter, escape, ctrl_g, ctrl_c, ctrl_d, left, right, tab, shift_tab, host_start, info, details, paste_start, paste_end };
     const Focus = session_chrome.FooterFocus;
     const Row = ConsentPolicy.Row;
     const Expected = struct {
@@ -427,7 +424,7 @@ test "every key Root hands the Session means one thing in each Session state" {
     const main = [_]Setup{ .plain, .choice_pending, .host_held, .opening, .preparing, .command_active, .submitting, .shown_row };
     const sends = [_]Setup{ .plain, .choice_pending, .shown_row };
     const held = [_]Setup{ .host_held, .opening, .preparing, .command_active, .submitting };
-    const edits = [_]Pressed{ .printable, .pasted_printable, .pasted_enter, .ctrl_c, .ctrl_d, .right, .paste_start, .paste_end, .invalid };
+    const edits = [_]Pressed{ .printable, .pasted_printable, .pasted_enter, .ctrl_c, .ctrl_d, .right, .paste_start, .paste_end };
     const send: Take = .{ .edit = .{ .send = true } };
     const hold: Take = .{ .edit = .{ .send = false } };
     const rows = [_]Expected{
@@ -456,7 +453,7 @@ test "every key Root hands the Session means one thing in each Session state" {
         .{ .setups = &(main ++ [_]Setup{ .selector, .draft_row }), .keys = &.{.shift_tab}, .take = .taken, .focus = .effort },
         // Focus on the footer's model.
         .{ .setups = &.{.footer_focused}, .keys = &.{ .printable, .host_start, .paste_start }, .take = send, .focus = .input },
-        .{ .setups = &.{.footer_focused}, .keys = &.{ .pasted_printable, .pasted_enter, .ctrl_c, .ctrl_d, .left, .right, .details, .paste_end, .invalid }, .take = send },
+        .{ .setups = &.{.footer_focused}, .keys = &.{ .pasted_printable, .pasted_enter, .ctrl_c, .ctrl_d, .left, .right, .details, .paste_end }, .take = send },
         .{ .setups = &.{.footer_focused}, .keys = &.{.enter}, .take = .open_choice, .focus = .input },
         .{ .setups = &.{.footer_focused}, .keys = &closing, .take = .taken, .focus = .input },
         .{ .setups = &.{.footer_focused}, .keys = &.{.tab}, .take = .taken, .focus = .effort },
@@ -470,7 +467,7 @@ test "every key Root hands the Session means one thing in each Session state" {
         .{ .setups = &.{.info_choice}, .keys = &closing, .take = .cancel_panel_choice },
         .{ .setups = &.{.info_open}, .keys = &.{.details}, .take = .panel_details },
         .{ .setups = &.{ .choice_shown, .info_choice }, .keys = &.{.details}, .take = .panel },
-        .{ .setups = &.{ .choice_shown, .info_open, .info_choice }, .keys = &.{ .printable, .pasted_printable, .enter, .pasted_enter, .left, .right, .tab, .shift_tab, .host_start, .info, .paste_start, .paste_end, .invalid }, .take = .panel },
+        .{ .setups = &.{ .choice_shown, .info_open, .info_choice }, .keys = &.{ .printable, .pasted_printable, .enter, .pasted_enter, .left, .right, .tab, .shift_tab, .host_start, .info, .paste_start, .paste_end }, .take = .panel },
         // At the Action's choice the arrows and Enter choose, typing and
         // any paste move to the draft, and the screen's keys act.
         .{ .setups = &.{.selector}, .keys = &.{ .printable, .host_start, .pasted_printable, .pasted_enter, .paste_start }, .take = .consent_draft, .row = .draft },
@@ -478,7 +475,6 @@ test "every key Root hands the Session means one thing in each Session state" {
         .{ .setups = &.{.selector}, .keys = &.{.left}, .take = .{ .card = .left } },
         .{ .setups = &.{.selector}, .keys = &.{.right}, .take = .{ .card = .right } },
         .{ .setups = &.{.selector}, .keys = &.{.paste_end}, .take = .{ .card = .cancel } },
-        .{ .setups = &.{.selector}, .keys = &.{.invalid}, .take = .{ .card = .invalid } },
         .{ .setups = &.{.selector}, .keys = &closing, .take = .{ .perform = .close } },
         .{ .setups = &.{.selector}, .keys = &leaving, .take = .{ .perform = .detach } },
         .{ .setups = &.{.selector}, .keys = &.{.details}, .take = .taken },
@@ -513,7 +509,6 @@ test "every key Root hands the Session means one thing in each Session state" {
                 // Root marks a paste's start pasted and its end not.
                 .paste_start => .{ .key = .paste_start, .pasted = true },
                 .paste_end => .{ .key = .paste_end },
-                .invalid => .{ .key = .invalid },
             };
         }
         fn facts(setup: Setup) Facts {

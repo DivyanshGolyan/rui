@@ -1383,7 +1383,7 @@ test "Chat info hosted parts and standalone wrapper respect finite zero and smal
 }
 
 test "Chat info Rename recovers refused input without reopening its field" {
-    const Fault = enum { typed_overflow, invalid_utf8, invalid_key, invalid_scalar, paste_overflow, invalid_paste, edit_rejected, paste_edit_rejected, unbound };
+    const Fault = enum { typed_overflow, invalid_utf8, invalid_scalar, paste_overflow, invalid_paste, edit_rejected, paste_edit_rejected, unbound };
     for (std.enums.values(Fault)) |fault| {
         errdefer std.debug.print("Rename recovery fault={s}\n", .{@tagName(fault)});
         var fixture: Fixture = .{};
@@ -1400,7 +1400,6 @@ test "Chat info Rename recovers refused input without reopening its field" {
         switch (fault) {
             .typed_overflow => try typeText(&page, &ctx, &spaces),
             .invalid_utf8 => try typeText(&page, &ctx, "\xff"),
-            .invalid_key => try page.widget().handleEvent(&ctx, .invalid_key),
             .invalid_scalar => try typeText(&page, &ctx, "z\x01"),
             .edit_rejected => {
                 page.rename_editor.cursor = 0;

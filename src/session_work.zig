@@ -122,6 +122,9 @@ pub const Inputs = struct {
     /// earliest stop that excluded it. Ignored beside an active Turn.
     excluded: ?Excluded = null,
 
+    /// The transactional Store frontier, including unpublished child facts.
+    owed_since: ?u64 = null,
+
     /// A queued Message's `admitted_at` and its admission position.
     pub const Pending = struct { at: u64, position: u64 };
     pub const Excluded = struct { admission: u64, stop_position: u64, stop_at: u64 };
@@ -196,6 +199,14 @@ pub const Work = struct {
 /// Inputs no writer produces return `error.CorruptStore`, and the reader
 /// fences as it does for other contradictions.
 pub fn derive(inputs: Inputs) error{CorruptStore}!Work {
+    var work = try deriveOwn(inputs);
+    if (work.state.progress() == null) {
+        if (inputs.owed_since) |at| work.state = .{ .working = .{ .since = @max(work.state.since(), at) } };
+    }
+    return work;
+}
+
+fn deriveOwn(inputs: Inputs) error{CorruptStore}!Work {
     const latest = inputs.latest orelse return .{ .state = settled(inputs, null) orelse .{ .idle = .{ .since = inputs.created_at } } };
     const actions = latest.actions;
     if (actions.unresolved > actions.total or actions.awaiting + actions.running > actions.unresolved or
