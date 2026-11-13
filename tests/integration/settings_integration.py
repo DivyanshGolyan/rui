@@ -182,7 +182,10 @@ def source_modes(root, good):
             host_process.close_stdin(process)
         else:
             host_stop(path, target, info["instance"])
-        assert process.wait(timeout=30) == 0, output(process)
+        # Explicit stdin lifetime settles cleanly. Detached shutdown retains
+        # the ordinary flag Host's EffectAwareShutdown exit classification.
+        expected_exit = 0 if source == "file" else 1
+        assert process.wait(timeout=30) == expected_exit, output(process)
         assert not path.exists()
 
 
