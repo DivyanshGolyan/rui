@@ -465,28 +465,32 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
 
         /// Tool identity uses the same retained, hidden address representation as
         /// internal Session links, with no new style bytes or closed output cache.
-        fn lineMarker(self: *const Self, offset: usize) ?struct { uri: []const u8, end: usize } {
+        const LineMarker = struct { marker: tool_fold.Marker, end: usize };
+
+        fn lineMarker(self: *const Self, offset: usize) ?LineMarker {
             if (!styled or offset >= self.text().len or foregroundIndex(self.styles[offset]) != address_index) return null;
             var end = offset;
             while (end < self.text().len and foregroundIndex(self.styles[end]) == address_index) : (end += 1) {}
-            const uri = self.bytes[offset..end];
-            if (!std.mem.eql(u8, uri, tool_fold.heading_uri) and !std.mem.eql(u8, uri, tool_fold.output_uri) and !std.mem.eql(u8, uri, tool_fold.more_uri)) return null;
-            return .{ .uri = uri, .end = end };
+            return .{ .marker = tool_fold.Marker.of(self.bytes[offset..end]) orelse return null, .end = end };
+        }
+
+        fn markerAt(self: *const Self, offset: usize) ?tool_fold.Marker {
+            return (self.lineMarker(offset) orelse return null).marker;
         }
 
         /// A tool row's heading line: the row Ctrl-O or a click folds.
         pub fn toolHeading(self: *const Self, offset: usize) bool {
-            const mark = self.lineMarker(offset) orelse return false;
-            return std.mem.eql(u8, mark.uri, tool_fold.heading_uri);
+            return self.markerAt(offset) == .heading;
         }
 
-        fn toolOutput(self: *const Self, offset: usize) bool {
-            const mark = self.lineMarker(offset) orelse return false;
-            return std.mem.eql(u8, mark.uri, tool_fold.output_uri) or std.mem.eql(u8, mark.uri, tool_fold.more_uri);
+        /// Whether the heading line at `offset` has its output shown on the
+        /// lines after it.
+        fn headingOpen(self: *const Self, offset: usize) bool {
+            return self.markerAt(self.nextLine(offset) orelse return false) == .output;
         }
 
         pub fn toolIsOpen(self: *const Self, offset: usize) bool {
-            return self.toolHeading(offset) and self.toolOutput(self.nextLine(offset) orelse return false);
+            return self.toolHeading(offset) and self.headingOpen(offset);
         }
 
         /// Where the line starting at `offset` ends (its newline or the text end).
@@ -526,11 +530,11 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
 
         /// A line's trusted marker owns its band, never an independent code
         /// painter or a retained list of byte offsets to repair after edits.
-        fn lineKind(self: *const Self, offset: usize) Line {
-            if (self.lineMarker(offset)) |mark| {
-                if (std.mem.eql(u8, mark.uri, tool_fold.output_uri) or std.mem.eql(u8, mark.uri, tool_fold.more_uri)) return .output;
-                if (self.toolIsOpen(offset)) return .selected;
-            }
+        fn lineKind(self: *const Self, offset: usize, mark: ?LineMarker) Line {
+            if (mark) |value| switch (value.marker) {
+                .output => return .output,
+                .heading => if (self.headingOpen(offset)) return .selected,
+            };
             if (styled and offset < self.length and foregroundIndex(self.styles[offset]) == code_index) return .code;
             return .plain;
         }
@@ -542,7 +546,7 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             const end = self.lineEnd(offset);
             const mark = self.lineMarker(offset);
             const content_start = if (mark) |value| value.end else offset;
-            const kind = self.lineKind(offset);
+            const kind = self.lineKind(offset, mark);
             const output = kind == .output;
             const plain = kind.style(colour, base, colours);
             // Every band (including selection) is painted here, over the
