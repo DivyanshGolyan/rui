@@ -1366,11 +1366,22 @@ pub const Store = struct {
     }
 
     fn startAgentHeld(self: *Store, binding: ActionAttemptBinding, caller: []const u8, task: []const u8, attached: bool, configuration: *content_custody.Configuration, committed: ?MessageCommitted, initial_skills: ?*const skills_domain.Initial, captured: ?*const skills_domain.MessageCapture, faults: Faults) !AgentStart {
-        const entry = try enter(self, .none);
-        defer entry.release();
-        var access: Access(.write, Ordinary.agent_start) = .open(&entry);
-        defer access.deinit();
-        return entry.finishTransaction(Ordinary.agent_start, faults, access.end(faults, command_domain.startAgent(&access, self.io, binding, caller, task, attached, configuration, committed, initial_skills, captured, faults)));
+        // The call's result text, which its content write reads in place.
+        var result_buffer: [tool_record.HostToolSet.max_refusal_message_bytes]u8 = undefined;
+        return transition.apply(self, command_domain.StartAgent, .{
+            .io = self.io,
+            .served = self.served,
+            .tools = self.hostTools(),
+            .binding = binding,
+            .caller = caller,
+            .task = task,
+            .attached = attached,
+            .configuration = configuration,
+            .committed = committed,
+            .initial_skills = initial_skills,
+            .captured = captured,
+            .result_buffer = &result_buffer,
+        }, faults);
     }
 
     /// Loads matching saved tools and resolves the call in one transaction.
@@ -1829,7 +1840,7 @@ pub const Ordinary = struct {
     pub const action_attempt = error{StaleActionAttemptBinding};
     const action_dispatch = action_attempt || error{SupersededByControl};
     /// A creation updates no Session, but shares configure's error set.
-    const agent_start = action_attempt || error{SessionUpdateFailed};
+    pub const agent_start = action_attempt || error{SessionUpdateFailed};
 
     /// Rejects a declared ordinary name the body cannot return, so a
     /// stale or misspelled name fails to compile instead of fencing.

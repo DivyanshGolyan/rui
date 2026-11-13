@@ -260,19 +260,11 @@ const insert_message_skill = rsql.Write(.{
 
 /// The one write every Message door makes for what its text bound: each
 /// skill's body as content (shared with equal bytes), and its row after
-/// `admission_id`, in order. A Turn that takes the Message projects each
-/// one as its own entry right after the Message's (`model_admission`).
-pub fn saveBound(a: anytype, admission_id: u64, bound: []const BoundSkill, faults: store_core.Faults) !void {
-    var saving: SavingBound = .{ .admission_id = admission_id, .bound = bound };
-    while (saving.lookupNext(a)) {
-        try a.run();
-        try saving.save(a, faults);
-    }
-}
-
-/// `saveBound`, one skill a round: `lookupNext` queues the lookup of the
-/// next skill's body, and `save`, after that round, saves the skill. A
-/// transition keeps it in its value, so the lookup's row lands there.
+/// `admission_id`, in order, one skill a round: `lookupNext` queues the
+/// lookup of the next skill's body, and `save`, after that round, saves the
+/// skill. A Turn that takes the Message projects each one as its own entry
+/// right after the Message's (`model_admission`). A transition keeps it in
+/// its value, so the lookup's row lands there.
 ///
 /// One lookup round per skill keeps no per-skill state beyond one body;
 /// the bytes of a Message's skills are bounded together (1 MiB). A Message
