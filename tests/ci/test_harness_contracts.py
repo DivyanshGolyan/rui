@@ -91,18 +91,31 @@ class ObservationCodecTest(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
+def flushes_closed_stdin(version):
+    """Whether this CPython's communicate() flushes a stdin closed by hand, and so fails.
+
+    CPython 3.13.10 and 3.14.1 skip that flush; 3.12.13, 3.13.0 to 3.13.9 and
+    3.14.0 still fail (each run, #1420). Fixtures run on 3.11 and newer, CI's
+    unpinned 3.12 among them, so the hazard stays theirs.
+    """
+    return version[:2] < (3, 13) or version[:2] == (3, 13) and version[2] < 10 or tuple(version[:3]) == (3, 14, 0)
+
+
 class ChildInputTest(unittest.TestCase):
     """Fixtures end a child's input only through host_process.close_stdin."""
 
-    def test_communicate_after_closing_stdin_by_hand_fails_and_close_stdin_does_not(self):
+    def test_communicate_after_closing_stdin_by_hand_fails_where_python_flushes_it_and_close_stdin_does_not(self):
         # The settings-document fixture's failure in five PRs before #898.
         child = subprocess.Popen(["cat"], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
         child.stdin.write(b"by hand")
         child.stdin.close()
-        with self.assertRaisesRegex(ValueError, "closed file"):
-            child.communicate(timeout=5)
-        child.wait(timeout=5)
-        child.stdout.close()
+        if flushes_closed_stdin(sys.version_info):
+            with self.assertRaisesRegex(ValueError, "flush of closed file"):
+                child.communicate(timeout=5)
+            child.wait(timeout=5)
+            child.stdout.close()
+        else:
+            self.assertEqual(child.communicate(timeout=5), (b"by hand", None))
         child = subprocess.Popen(["cat"], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
         child.stdin.write(b"owned")
         HOST.close_stdin(child)
