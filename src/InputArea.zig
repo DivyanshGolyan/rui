@@ -133,7 +133,7 @@ test "InputArea permission hides and restores the draft and its caret after deci
     var editor: @import("DraftEditor.zig") = .initText(&bytes, &bytes, 9);
     var consent: Consent = .{};
     const command: vxfw.Text = .{ .text = "$ zig build test-store" };
-    var card: PermissionCard = .{ .consent = &consent, .description = "Run tests", .body = command.widget(), .userdata = &owner, .on_decision = Owner.decide };
+    var card: PermissionCard = .{ .consent = &consent, .body = command.widget(), .userdata = &owner, .on_decision = Owner.decide };
     var input: Self = .{ .composer = .{ .editor = &editor } };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -184,7 +184,7 @@ test "InputArea approval has one document title above a choice between composer 
     var editor: @import("DraftEditor.zig") = .initText(&bytes, &bytes, 4);
     var consent: @import("ActionConsent.zig") = .{};
     const document: vxfw.Text = .{ .text = "? Record thirty progress steps\n$ set -eu\n│ printf 'step 01'" };
-    var card: PermissionCard = .{ .consent = &consent, .description = "Record thirty progress steps", .body = document.widget(), .userdata = &owner, .on_decision = Owner.decide };
+    var card: PermissionCard = .{ .consent = &consent, .body = document.widget(), .userdata = &owner, .on_decision = Owner.decide };
     var input: Self = .{ .composer = .{ .editor = &editor }, .permission = &card };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();

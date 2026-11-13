@@ -403,8 +403,6 @@ fn queueEffortRefusal(a: anytype, session: rsql.SessionHead, revision: u64, oper
     a.write(invalidate_effort_prefix, .{ .session = session });
 }
 
-const EffortRefusal = union(enum) { unmatched, retried, exhausted: u64 };
-
 /// The content a failure settles with: its diagnostic and its report.
 const FailureContent = struct {
     diagnostic: ?content_domain.Import,
@@ -1155,7 +1153,7 @@ pub const Batch = struct {
         args.operation_id = operation_id;
         // Zeroed pages: every name starts empty.
         const names: *[batch_items]Name = @ptrCast(&args.n0);
-        var reader = try OutputMetadataReader.init(io, output.metadata, output.item_count);
+        var reader = try OutputMetadataReader.init(io, output.metadata);
         reader.offset = batch.start;
         var index: usize = 0;
         while (index < batch.digest_count) {
@@ -1330,7 +1328,7 @@ fn recordImport(record: *const OutputMetadataRecord) ?content_domain.Import {
 noinline fn collectItems(batch: *Batch, output: *const ValidatedOutput, io: std.Io, start: u64, resuming: bool, cut: *?u64) void {
     batch.reset(.items, start);
     cut.* = null;
-    var reader = OutputMetadataReader.init(io, output.metadata, output.item_count) catch |err| return batch.stop(err, start);
+    var reader = OutputMetadataReader.init(io, output.metadata) catch |err| return batch.stop(err, start);
     reader.offset = start;
     var unit_start = start;
     var unit_identities = batch.identity_count;
@@ -1398,7 +1396,7 @@ noinline fn collectCalls(batch: *Batch, output: *const ValidatedOutput, io: std.
     @setEvalBranchQuota(20_000);
     comptime std.debug.assert(batch_identities >= 4 * batch_items + 1);
     batch.reset(.calls, start);
-    var reader = OutputMetadataReader.init(io, output.metadata, output.item_count) catch |err| return batch.stop(err, start);
+    var reader = OutputMetadataReader.init(io, output.metadata) catch |err| return batch.stop(err, start);
     reader.offset = start;
     var name: ?OutputMetadataRecord = null;
     var call_id: ?OutputMetadataRecord = null;
@@ -1461,7 +1459,7 @@ fn rejectionText(io: std.Io, output: *const ValidatedOutput, code: tool_proposal
 /// Main's checks on the candidate output, before any import: compaction
 /// items and calls must fit the Operation's purpose.
 fn validateCandidate(io: std.Io, output: *const ValidatedOutput, purpose: ModelOperationKind) !void {
-    var candidate_metadata = try OutputMetadataReader.init(io, output.metadata, output.item_count);
+    var candidate_metadata = try OutputMetadataReader.init(io, output.metadata);
     var compaction_count: u64 = 0;
     while (try candidate_metadata.next()) |record| {
         if (record.tag == .item and record.kind == .compaction) {
@@ -1586,7 +1584,7 @@ pub const SettleSuccess = struct {
         const batch = t.input.batch;
         const positions = try r.positions(row.session);
         const first_item_position = try positions.take(output.item_count);
-        const call_items = try OutputMetadataReader.init(io, output.metadata, output.item_count);
+        const call_items = try OutputMetadataReader.init(io, output.metadata);
         t.settlement = .{
             .io = io,
             .binding = binding,
@@ -1758,7 +1756,7 @@ const Settlement = struct {
     /// read-argument construction.
     noinline fn writeItems(s: *Settlement, a: anytype, batch: *Batch, oversized: *Oversized) !void {
         if (oversized.paused != null) return s.resumeItem(a, batch, oversized);
-        var reader = try OutputMetadataReader.init(s.io, s.output.metadata, s.output.item_count);
+        var reader = try OutputMetadataReader.init(s.io, s.output.metadata);
         reader.offset = batch.start;
         var region_start = batch.start;
         var index: u8 = 0;
@@ -1795,7 +1793,7 @@ const Settlement = struct {
     fn resumeItem(s: *Settlement, a: anytype, batch: *Batch, oversized: *Oversized) !void {
         if (batch.stopped) |err| return err;
         const paused = &oversized.paused.?;
-        var reader = try OutputMetadataReader.init(s.io, s.output.metadata, s.output.item_count);
+        var reader = try OutputMetadataReader.init(s.io, s.output.metadata);
         reader.offset = paused.item_at;
         const record = try reader.next() orelse return error.CorruptOutputMetadata;
         var description: tool_record.Description = .{};
@@ -1860,7 +1858,7 @@ const Settlement = struct {
     /// it records how far it walked in `progress` and answers null. A
     /// hosted call's description goes to `description`.
     fn importItem(s: *Settlement, a: anytype, batch: *Batch, item: OutputMetadataRecord, metadata_start: u64, metadata_end: u64, progress: *ItemProgress, cut: ?u64, description: *tool_record.Description) !?ImportedNeutral {
-        var metadata = try OutputMetadataReader.init(s.io, s.output.metadata, s.output.item_count);
+        var metadata = try OutputMetadataReader.init(s.io, s.output.metadata);
         metadata.offset = progress.offset;
         metadata.length = metadata_end;
         var item_bag: ?u64 = null;
@@ -1994,7 +1992,7 @@ const Settlement = struct {
     /// row and, when runnable, its Action. Keep call scratch separate
     /// from the next batch's read-argument construction.
     noinline fn writeCalls(s: *Settlement, a: anytype, batch: *Batch) !void {
-        var reader = try OutputMetadataReader.init(s.io, s.output.metadata, s.output.item_count);
+        var reader = try OutputMetadataReader.init(s.io, s.output.metadata);
         reader.offset = batch.start;
         var name_record: ?OutputMetadataRecord = null;
         var call_id_record: ?OutputMetadataRecord = null;
@@ -2136,28 +2134,10 @@ fn writeChecked(sink: ?store_access.ContentSink, hash: *std.crypto.hash.sha2.Sha
     written.* += bytes.len;
 }
 
-/// Streams the source's `[start, start + length)` into `sink`, if any,
-/// checking its digest. noinline with a small window, so the settlement
-/// frame stays small.
-noinline fn streamSourceRange(io: std.Io, file: std.Io.File, start: u64, length: u64, digest: *const [32]u8, sink: ?store_access.ContentSink, faults: Faults) !void {
-    var copy: content_domain.HashedWindow(import_window_bytes) = .{ .hash = content_string.hasher() };
-    var offset: u64 = 0;
-    while (offset < length) {
-        const wanted: usize = @intCast(@min(length - offset, copy.window.len));
-        const count = try file.readPositionalAll(io, copy.window[0..wanted], start + offset);
-        if (count != wanted or faults.output_read) return error.OutputSourceReadFailed;
-        copy.hash.update(copy.window[0..count]);
-        if (sink) |value| try value.write(copy.window[0..count], offset);
-        if (faults.output_import) return error.InjectedOutputImportFailure;
-        offset += count;
-    }
-    if (!std.mem.eql(u8, &copy.hash.finalResult(), digest)) return error.OutputSourceChanged;
-}
-
 /// Streams a bag's members in `[start, end)` into `sink`, if any,
 /// checking its length and digest.
 noinline fn streamBag(io: std.Io, output: *const ValidatedOutput, trailer: OutputMetadataRecord, start: u64, end: u64, sink: ?store_access.ContentSink, faults: Faults) !void {
-    var members = try OutputMetadataReader.init(io, output.metadata, output.item_count);
+    var members = try OutputMetadataReader.init(io, output.metadata);
     members.offset = start;
     members.length = end;
     var copy: content_domain.HashedWindow(import_window_bytes) = .{ .hash = content_string.hasher() };
@@ -2184,7 +2164,7 @@ noinline fn streamBag(io: std.Io, output: *const ValidatedOutput, trailer: Outpu
 
 /// Decodes a message's text parts among `[start, end)` into `sink`.
 noinline fn streamMessageText(io: std.Io, output: *const ValidatedOutput, text: OutputMetadataRecord, start: u64, end: u64, sink: store_access.ContentSink, faults: Faults) !void {
-    var parts = try OutputMetadataReader.init(io, output.metadata, output.item_count);
+    var parts = try OutputMetadataReader.init(io, output.metadata);
     parts.offset = start;
     parts.length = end;
     var decoded: content_domain.HashedWindow(import_window_bytes) = .{ .hash = content_string.hasher() };

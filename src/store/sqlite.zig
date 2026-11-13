@@ -4,9 +4,11 @@
 const std = @import("std");
 const provider_route = @import("../provider_route.zig");
 const Bounded = @import("../bounded.zig").Bounded;
+const isBounded = @import("../bounded.zig").isBounded;
 const model_capability = @import("../model_capability.zig");
 const provider_name = @import("../provider_name.zig");
 const rsql = @import("rsql.zig");
+const isBlob = rsql.isBlob;
 const store_schema = @import("schema.zig");
 const change_ring = @import("../change_ring.zig");
 pub const c = @import("sqlite");
@@ -314,34 +316,12 @@ pub fn bindU64(statement: *c.sqlite3_stmt, index: c_int, value: u64) !void {
     try bindI64(statement, index, value);
 }
 
-pub fn bindNullableI64(statement: *c.sqlite3_stmt, index: c_int, value: ?i64) !void {
-    const result = if (value) |actual|
-        c.sqlite3_bind_int64(statement, index, actual)
-    else
-        c.sqlite3_bind_null(statement, index);
-    if (result != c.SQLITE_OK) return error.BindFailed;
-}
-
-pub fn bindNullableU64(statement: *c.sqlite3_stmt, index: c_int, value: ?u64) !void {
-    if (value) |present| return bindU64(statement, index, present);
-    if (c.sqlite3_bind_null(statement, index) != c.SQLITE_OK) return error.BindFailed;
-}
-
 pub fn expectDone(statement: *c.sqlite3_stmt) !void {
     if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.StatementFailed;
 }
 
 pub fn readText(statement: *c.sqlite3_stmt, index: c_int, destination: anytype) !void {
     try destination.set(try columnText(statement, index));
-}
-
-/// The column's text, held to the bound and UTF-8 check a
-/// Bounded(capacity) read applies, without copying it into one.
-pub fn boundedColumnText(statement: *c.sqlite3_stmt, index: c_int, comptime capacity: usize) ![]const u8 {
-    const value = try columnText(statement, index);
-    if (value.len > capacity) return error.ValueTooLong;
-    if (!std.unicode.utf8ValidateSlice(value)) return error.InvalidUtf8;
-    return value;
 }
 
 /// The column's text as SQLite holds it, valid until the statement next
@@ -359,13 +339,6 @@ pub fn maxEnumTagBytes(comptime Enum: type) usize {
     var maximum: usize = 0;
     for (std.meta.tags(Enum)) |value| maximum = @max(maximum, @tagName(value).len);
     return maximum;
-}
-
-pub fn readDigest(statement: *c.sqlite3_stmt, index: c_int) ![32]u8 {
-    if (c.sqlite3_column_bytes(statement, index) != 32) return error.CorruptStore;
-    const pointer = c.sqlite3_column_blob(statement, index) orelse return error.CorruptStore;
-    const bytes: [*]const u8 = @ptrCast(pointer);
-    return bytes[0..32].*;
 }
 
 /// A required positive integer column; anything else is a contradiction.
@@ -403,19 +376,6 @@ pub fn readNullableEffort(statement: *c.sqlite3_stmt, index: c_int) !?model_capa
     var value: Bounded(16) = .{};
     readText(statement, index, &value) catch return error.CorruptStore;
     return std.meta.stringToEnum(model_capability.ReasoningEffort, value.slice()) orelse error.CorruptStore;
-}
-
-pub fn bindNullableEffort(statement: *c.sqlite3_stmt, index: c_int, value: ?model_capability.ReasoningEffort) !void {
-    if (value) |effort| return bindText(statement, index, @tagName(effort));
-    if (c.sqlite3_bind_null(statement, index) != c.SQLITE_OK) return error.BindFailed;
-}
-
-pub fn readNullableTokens(statement: *c.sqlite3_stmt, index: c_int, allow_zero: bool) !?u64 {
-    if (c.sqlite3_column_type(statement, index) == c.SQLITE_NULL) return null;
-    if (c.sqlite3_column_type(statement, index) != c.SQLITE_INTEGER) return error.CorruptStore;
-    const value = c.sqlite3_column_int64(statement, index);
-    if (value < 0 or (!allow_zero and value == 0)) return error.CorruptStore;
-    return @intCast(value);
 }
 
 /// The longest fixed value a statement binds by value: an `[n]u8` Args
@@ -512,18 +472,6 @@ pub fn decodeRow(comptime Row: type, statement: *c.sqlite3_stmt, row: *Row) erro
         decodeValue(Field, statement, column, &@field(row, name)) catch return error.CorruptStore;
         column += if (Field == rsql.SessionHead) 3 else 1;
     }
-}
-
-/// Whether `T` is an `rsql.Blob`: bytes up to its capacity.
-fn isBlob(comptime T: type) bool {
-    return @typeInfo(T) == .@"struct" and @hasDecl(T, "blob_capacity") and T == rsql.Blob(T.blob_capacity);
-}
-
-/// Whether `T` is a `Bounded`: text up to its capacity.
-fn isBounded(comptime T: type) bool {
-    if (@typeInfo(T) != .@"struct" or !@hasField(T, "bytes")) return false;
-    const bytes = @typeInfo(@FieldType(T, "bytes"));
-    return bytes == .array and T == Bounded(bytes.array.len);
 }
 
 fn decodeValue(comptime T: type, statement: *c.sqlite3_stmt, column: c_int, out: *T) !void {

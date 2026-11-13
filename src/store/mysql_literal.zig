@@ -11,6 +11,7 @@
 //! Nothing is copied whole: `write` hex-encodes through the writer's buffer.
 const std = @import("std");
 const Bounded = @import("../bounded.zig").Bounded;
+const isBounded = @import("../bounded.zig").isBounded;
 const provider_route = @import("../provider_route.zig");
 const provider_name = @import("../provider_name.zig");
 const rsql = @import("rsql.zig");
@@ -109,13 +110,6 @@ fn writeSlot(comptime Args: type, comptime slot: rsql.Slot, args: *const Args, b
         .now => try w.print("{d}", .{bound.now}),
         .served => |provider| try writeText(served(provider, bound), w),
     }
-}
-
-/// Whether `T` is a `Bounded` text.
-fn isBounded(comptime T: type) bool {
-    if (@typeInfo(T) != .@"struct" or !@hasField(T, "bytes")) return false;
-    const bytes = @typeInfo(@FieldType(T, "bytes"));
-    return bytes == .array and T == Bounded(bytes.array.len);
 }
 
 /// The types `sqlite.bindValue` binds, each written as the literal of the

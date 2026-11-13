@@ -67,10 +67,9 @@ const Layout = struct {
 /// One derived pane decision drives drawing, visibility and return focus.
 fn chooseLayout(self: *const Self) Layout {
     std.debug.assert(!self.input.layer.signInOpen() or self.sign_in != null);
-    return .{
-        .split = self.size.width >= split_at and app_input.mainPane(self.input, self.session != null, self.size.width >= split_at) != .overview,
-        .pane = app_input.mainPane(self.input, self.session != null, self.size.width >= split_at),
-    };
+    const wide = self.size.width >= split_at;
+    const pane = app_input.mainPane(self.input, self.session != null, wide);
+    return .{ .split = wide and pane != .overview, .pane = pane };
 }
 
 pub fn closeMainPresentation(self: *Self) void {

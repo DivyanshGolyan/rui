@@ -805,7 +805,7 @@ test "Sign-in worker reports installation default activation and cancellation ou
             var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
             var key: api_key.Key = .{};
             defer key.wipe();
-            try std.testing.expect(try api_key.read(try api_key.path(&env, &path_buffer), &key) != null);
+            try std.testing.expect(try api_key.read(try api_key.path(&env, &path_buffer), &key));
             try std.testing.expectEqualStrings(secret, key.slice());
         }
     }
@@ -912,8 +912,8 @@ test "Sign-in departure settles cancellation and every published default and act
                 var saved: api_key.Key = .{};
                 defer saved.wipe();
                 const installed = try api_key.read(try api_key.path(&env, &path_buffer), &saved);
-                try std.testing.expectEqual(!cancel_before_publication, installed != null);
-                if (installed != null) try std.testing.expectEqualStrings(key, saved.slice());
+                try std.testing.expectEqual(!cancel_before_publication, installed);
+                if (installed) try std.testing.expectEqualStrings(key, saved.slice());
                 try std.testing.expect(page.task.thread == null and page.outcome == null);
                 try std.testing.expectEqual(@as(usize, 0), page.key.len);
                 const reported = report.written().len;
