@@ -12911,6 +12911,78 @@ test "core_tools start_agent spec refusals fail calls and name the refused setti
     }.run);
 }
 
+test "a start_agent call fails and starts nothing when its key is taken or its task's skill is unreadable, and a started one saves every skill its task bound" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            var opened = true;
+            defer if (opened) {
+                storage.close() catch unreachable;
+            };
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            var create = try completeConfiguration("unstarted-agent-parent", "", workspace, "model-a");
+            create.configuration.tools = try .of(&.{"start_agent"});
+            const parent = (try storage.configure(&create, .{})).accepted.session;
+            try submitTestMessage(&storage, &tmp, "unstarted-agent-message", "unstarted-agent-key", parent.slice(), "start children");
+            const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            const arguments = "{\"task\":\"read\",\"attached\":true,\"spec\":{\"model\":\"model-a\",\"effort\":null,\"compactAt\":100000,\"tools\":[],\"permissionMode\":\"ask\"}}";
+            var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer arena.deinit();
+            const encoded = try std.json.Stringify.valueAlloc(arena.allocator(), arguments, .{});
+            var calls: [3]TestingCall = undefined;
+            inline for (&calls, 0..) |*call, index| {
+                const id = std.fmt.comptimePrint("unstarted-{d}", .{index});
+                call.* = .{ .item_id = id, .name = "start_agent", .encoded_call_id = id, .decoded_call_id = id, .encoded_arguments = encoded[1 .. encoded.len - 1], .decoded_arguments = arguments };
+            }
+            try settleCallsForTesting(&storage, &tmp, model, "unstarted-agent-calls", &calls);
+            const core_tools = @import("../core_tools.zig");
+            const start = try arena.allocator().create(core_tools.StartAgent);
+            const failed_sql = "SELECT count(*) FROM action_operation a JOIN content c ON c.content_id=a.resolution_content_id WHERE a.action_id=?1 AND a.resolution_code='failed' AND c.digest=?2";
+
+            // Another command already holds the call's key.
+            const taken = (try storage.nextCoreWork()).?.action;
+            var key_buffer: [64]u8 = undefined;
+            try submitTestMessage(&storage, &tmp, "unstarted-agent-taken", try std.fmt.bufPrint(&key_buffer, "rui.core/start_agent/{d}", .{taken.binding.action_id}), parent.slice(), "taken");
+            // A fault injected before the failure's import rolls it back.
+            try std.testing.expect(try core_tools.checkStartAgent(arena.allocator(), arguments, start) == .accepted);
+            try std.testing.expectError(error.InjectedContentImportFailure, storage.startAgent(taken.binding, parent.slice(), start.task, start.attached, &start.configuration, null, .{ .content_import = true }));
+            try storage.close();
+            opened = false;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            opened = true;
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE action_id=?1 AND resolution_code IS NULL", .{taken.binding.action_id}));
+            try std.testing.expectEqual(taken.binding.action_id, (try storage.nextCoreWork()).?.action.binding.action_id);
+            try std.testing.expect(try core_tools.checkStartAgent(arena.allocator(), arguments, start) == .accepted);
+            try std.testing.expect(try storage.startAgent(taken.binding, parent.slice(), start.task, start.attached, &start.configuration, null, .{}) == .failed);
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, failed_sql, .{ taken.binding.action_id, store_testing.Blob{ .bytes = &protocol.contentDigest("Rui could not start the agent: its command key is already taken. Nothing was started.") } }));
+
+            // The task names a skill the Host could not read.
+            const unreadable = (try storage.nextCoreWork()).?.action;
+            const diagnostic = "Skill missing is not in the new Session's catalog.";
+            const captured: skills_fixture_domain.MessageCapture = .{ .failed = .{ .code = .skill_file_unavailable, .bytes = diagnostic } };
+            try std.testing.expect(try core_tools.checkStartAgent(arena.allocator(), arguments, start) == .accepted);
+            try std.testing.expect(try storage.startAgentWithInitialSkills(unreadable.binding, parent.slice(), start.task, start.attached, &start.configuration, null, null, &captured, .{}) == .failed);
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, failed_sql, .{ unreadable.binding.action_id, store_testing.Blob{ .bytes = &protocol.contentDigest(diagnostic ++ " Nothing was started.") } }));
+
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session", .{}));
+
+            // A started agent's task keeps every skill it bound, in order.
+            const bound_call = (try storage.nextCoreWork()).?.action;
+            const bound: skills_fixture_domain.MessageCapture = .{ .bound = &.{ .{ .name = "first", .bytes = "first body" }, .{ .name = "second", .bytes = "second body" } } };
+            try std.testing.expect(try core_tools.checkStartAgent(arena.allocator(), arguments, start) == .accepted);
+            try std.testing.expect(try storage.startAgentWithInitialSkills(bound_call.binding, parent.slice(), start.task, start.attached, &start.configuration, null, null, &bound, .{}) == .started);
+            const child_sql = "SELECT count(*) FROM message_skill k JOIN message_admission m ON m.admission_id=k.admission_id JOIN content c ON c.content_id=k.content_id WHERE m.session_ref<>?1 AND k.position=?2 AND k.name=?3 AND c.digest=?4";
+            try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_skill", .{}));
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, child_sql, .{ parent.slice(), @as(u64, 1), "first", store_testing.Blob{ .bytes = &protocol.contentDigest("first body") } }));
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, child_sql, .{ parent.slice(), @as(u64, 2), "second", store_testing.Blob{ .bytes = &protocol.contentDigest("second body") } }));
+        }
+    }.run);
+}
+
 test "a start_agent child works in its caller's Workspace with its provider" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
