@@ -1059,18 +1059,6 @@ fn appListDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!v
     return self.drawPart(ctx, .list);
 }
 
-/// A visible conversation determines the highlight without changing the
-/// overview's own selection or borrowing a row's storage across frames.
-fn selectedListLine(self: *const Self) ?u32 {
-    const open = self.state.conversing orelse return if (view.selectedLine(&self.state)) |line| @intCast(line) else null;
-    var line: usize = 0;
-    while (view.listItem(&self.state, line)) |item| : (line += 1) {
-        const target = view.clickOf(&self.state, item) orelse continue;
-        if (target == .open and std.mem.eql(u8, &target.open, &open)) return @intCast(line);
-    }
-    return null;
-}
-
 /// The overview is a full-width list and footer; a sidebar draws only rows.
 fn drawPart(self: *Self, ctx: vxfw.DrawContext, part: AppScreen.Overview.Part) std.mem.Allocator.Error!vxfw.Surface {
     const size = ctx.max.size();
@@ -1086,7 +1074,7 @@ fn drawPart(self: *Self, ctx: vxfw.DrawContext, part: AppScreen.Overview.Part) s
     self.app_frame = frame;
     const rows = try ctx.arena.create(SessionRows);
     rows.* = .{ .state = &self.state, .width = size.width, .caps = self.caps, .frame = frame };
-    self.app_sessions.selected = self.selectedListLine();
+    self.app_sessions.selected = if (view.selectedLine(&self.state)) |line| @intCast(line) else null;
     self.app_sessions.rows = .{ .userdata = rows, .count = @intCast(view.listLength(&self.state)), .rowFn = SessionRows.row, .countFromFn = SessionRows.count };
     self.app_sessions.aboveFn = SessionRows.above;
     self.app_sessions.belowFn = SessionRows.below;
@@ -7562,4 +7550,74 @@ test "unknown terminal sequences leave noinput overview available to create an e
         try fixture.leave();
         try fixture.expectVisible(&.{});
     }
+}
+
+test "App list selection consumes the core projection through arrivals covered Settings peer switches and departure" {
+    const Check = struct {
+        fn draw(rig: *Rig) !void {
+            const overview = rig.overview;
+            for ([_]u16{ 46, 140 }) |width| {
+                var shown = try rig.shown(width, 24);
+                defer shown.deinit();
+                // Root deliberately hides a narrow sidebar. Exercise its
+                // production draw owner too, without inventing its policy.
+                if (!overview.root.listVisible()) _ = try overview.listWidget().draw(.{ .arena = shown.arena.allocator(), .min = .{}, .max = .{ .width = Root.list_width, .height = 24 }, .cell_size = .{} });
+                const expected: ?u32 = if (view.selectedLine(&overview.state)) |line| @intCast(line) else null;
+                try std.testing.expectEqual(expected, overview.app_sessions.selected);
+            }
+        }
+    };
+    const fixture = try EmptySessionOwner.create();
+    defer fixture.destroy();
+    const rig = fixture.rig;
+    const overview = rig.overview;
+    try Check.draw(rig);
+
+    // Opening and an activity read precede the first canonical list row.
+    try std.testing.expect(try rig.press("\x1b[H\r") == null);
+    try std.testing.expect(try rig.settle() == null);
+    const first = overview.app_session.?.session;
+    try std.testing.expect(view.selectedLine(&overview.state) == null);
+    try Check.draw(rig);
+    try fixture.readCurrent();
+    try Check.draw(rig);
+    try fixture.refresh();
+    try Check.draw(rig);
+    try fixture.leave();
+    try Check.draw(rig);
+
+    const second = try fixture.openNew();
+    // Canonical admitted rows keep both peers listed while either is open.
+    for (EmptySessionOwner.rows[0..EmptySessionOwner.count]) |*row| {
+        row.first_message = .{ .position = 1, .admission = 37, .admitted_at = test_now_s, .sender = null, .content = .{ .length = EmptySessionOwner.message.len, .digest = protocol.contentDigest(EmptySessionOwner.message) } };
+        row.end = 1;
+        row.revision += 1;
+        row.peers.from_person_at = test_now_s;
+    }
+    try fixture.refresh();
+    try Check.draw(rig);
+    try std.testing.expect(try rig.next(.{ .open = first }) == null);
+    try std.testing.expectEqual(first, overview.state.conversing.?);
+    try fixture.readCurrent();
+    try Check.draw(rig);
+
+    var ctx = rig.context();
+    defer ctx.cmds.deinit(std.testing.allocator);
+    try overview.root.openSettings(&ctx);
+    try std.testing.expect(overview.root.input.layer.settingsOpen());
+    try Check.draw(rig);
+    try std.testing.expect(try rig.next(.{ .open = second }) == null);
+    try std.testing.expectEqual(second, overview.state.conversing.?);
+    try std.testing.expect(!overview.root.input.layer.settingsOpen());
+    try fixture.readCurrent();
+    try Check.draw(rig);
+
+    // A followed peer returns once to its origin, then to the overview.
+    try std.testing.expect(try rig.press("\x1b") == null);
+    try std.testing.expectEqual(first, overview.state.conversing.?);
+    try fixture.readCurrent();
+    try Check.draw(rig);
+    try fixture.leave();
+    try std.testing.expect(overview.state.conversing == null);
+    try Check.draw(rig);
 }
