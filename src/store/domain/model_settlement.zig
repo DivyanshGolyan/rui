@@ -1655,14 +1655,14 @@ const Oversized = struct {
 };
 
 /// How far an item's import walked: the record it resumes at, and what
-/// the records before it set.
+/// the parts before it set. Only a part's bag ends a cut, so only an
+/// item with parts (a message or a reasoning item) pauses, before its
+/// item bag; a hosted call's action and pattern records follow its item
+/// bag, and its import never pauses.
 const ItemProgress = struct {
     offset: u64,
     part_count: u64 = 0,
     text_length: u64 = 0,
-    /// A hosted call's action and pattern records, by offset.
-    action_at: ?u64 = null,
-    pattern_at: ?u64 = null,
 };
 
 /// A content row a settlement value imports: found, or inserted by this
@@ -1874,19 +1874,15 @@ const Settlement = struct {
         // A hosted call's action record, and its pattern record if any.
         var action: ?OutputMetadataRecord = null;
         var pattern: ?OutputMetadataRecord = null;
-        var action_at = progress.action_at;
-        var pattern_at = progress.pattern_at;
-        if (action_at) |at| action = try s.recordAt(at);
-        if (pattern_at) |at| pattern = try s.recordAt(at);
         while (true) {
             if (cut) |at| if (metadata.offset == at) {
                 // A cut follows a part's bag, which closed the part, and
-                // no bag or text closes the item before its last part.
-                std.debug.assert(part == null and item_bag == null and text == null);
-                progress.* = .{ .offset = at, .part_count = part_count, .text_length = text_length, .action_at = action_at, .pattern_at = pattern_at };
+                // no bag, text, action or pattern closes the item before
+                // its last part.
+                std.debug.assert(part == null and item_bag == null and text == null and action == null);
+                progress.* = .{ .offset = at, .part_count = part_count, .text_length = text_length };
                 return null;
             };
-            const record_start = metadata.offset;
             const record = try metadata.next() orelse break;
             if (record.tag == .item) break;
             if (record.ordinal != item.ordinal or record.kind != item.kind) return error.CorruptOutputMetadata;
@@ -1940,12 +1936,10 @@ const Settlement = struct {
                 .action => {
                     if (item.kind != .web_search_call or action != null) return error.CorruptOutputMetadata;
                     action = record;
-                    action_at = record_start;
                 },
                 .pattern => {
                     if (action == null or pattern != null) return error.CorruptOutputMetadata;
                     pattern = record;
-                    pattern_at = record_start;
                 },
                 .member, .name, .call_id, .arguments => {},
                 .usage => return error.CorruptOutputMetadata,
@@ -1964,13 +1958,6 @@ const Settlement = struct {
             .described = action != null,
             .call_failed = if (action) |call| call.call_failed else false,
         };
-    }
-
-    /// The metadata record at `offset`, which an earlier batch read.
-    fn recordAt(s: *Settlement, offset: u64) !OutputMetadataRecord {
-        var reader = try OutputMetadataReader.init(s.io, s.output.metadata, s.output.item_count);
-        reader.offset = offset;
-        return try reader.next() orelse error.CorruptOutputMetadata;
     }
 
     fn importMessageText(s: *Settlement, a: anytype, batch: *Batch, text: OutputMetadataRecord, start: u64, end: u64) !u64 {
