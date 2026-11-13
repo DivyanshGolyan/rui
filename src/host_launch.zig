@@ -86,6 +86,9 @@ pub const Result = struct {
     pub const Ready = struct {
         facts: protocol_reply.HostInfoFacts,
         diagnostics_directory: protocol.Bounded(protocol.max_store_bytes) = .{ .len = 0 },
+        /// The serving Host was already running or won a launch race, so it
+        /// did not start with this command's settings.
+        adopted: bool = false,
     };
     pub const Failure = struct {
         cause: Cause,

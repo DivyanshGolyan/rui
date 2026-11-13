@@ -1123,8 +1123,8 @@ pub fn launchFailure(result: *HostLaunchResult, kind: HostLaunchResult.Cause.Kin
     if (store) |canonical| result.outcome.failed.store.set(canonical) catch unreachable;
 }
 
-pub fn launchReady(result: *HostLaunchResult, ready: @import("protocol_reply.zig").HostInfoFacts, paths: *const platform.Paths) void {
-    result.outcome = .{ .ready = .{ .facts = ready, .diagnostics_directory = .{ .len = 0 } } };
+pub fn launchReady(result: *HostLaunchResult, ready: @import("protocol_reply.zig").HostInfoFacts, paths: *const platform.Paths, adopted: bool) void {
+    result.outcome = .{ .ready = .{ .facts = ready, .diagnostics_directory = .{ .len = 0 }, .adopted = adopted } };
     result.outcome.ready.diagnostics_directory.set(paths.diagnosticsDirectory()) catch unreachable;
 }
 
@@ -1235,7 +1235,7 @@ pub noinline fn spawn(init: std.process.Init, request: Spawn, ops: Ops, progress
         else => return launchFailure(result, .store_access, error.StoreAccessFailed, null),
     };
     switch (if (resolved) |*paths| ops.observe(ops.context, io, paths, null) else @as(@import("protocol_reply.zig").HostStatus, .unavailable)) {
-        .ready => |ready| return launchReady(result, ready, &resolved.?),
+        .ready => |ready| return launchReady(result, ready, &resolved.?, true),
         .incompatible => return launchFailure(result, .incompatible, error.IncompatibleHost, null),
         .access_failure => return launchFailure(result, .store_access, error.StoreAccessFailed, null),
         .unavailable, .owned_unavailable => {},
@@ -1351,9 +1351,12 @@ pub noinline fn spawn(init: std.process.Init, request: Spawn, ops: Ops, progress
                 const final_count = ops.read(ops.context, startup_read, result.startup_bytes[result.startup_len..]);
                 if (final_count > 0) result.startup_len += @intCast(final_count);
                 result.wait.?.observe(result.startup(), ops.now(ops.context, io));
-                if (refusal != null and refusal.?.code == .store_locked) result.startup_len = 0;
+                // A child refused for the lock lost the race: the Host serving
+                // now started with another command's settings.
+                const lost = refusal != null and refusal.?.code == .store_locked;
+                if (lost) result.startup_len = 0;
                 if (std.mem.indexOf(u8, result.startup(), @import("host_launch.zig").invalid_base_url) != null) result.warning = .invalid_openai_base_url;
-                return launchReady(result, ready, &paths);
+                return launchReady(result, ready, &paths, lost);
             },
             .incompatible => return launchFailure(result, .incompatible, error.IncompatibleHost, paths.store.slice()),
             .access_failure => return launchFailure(result, .store_access, error.StoreAccessFailed, paths.store.slice()),

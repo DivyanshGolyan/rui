@@ -4056,7 +4056,7 @@ Unavailable and owned-but-unavailable never claim that outstanding effects have 
 Otherwise it creates only a candidate private Store directory, resolves the canonical selector and launches this executable's `host serve --store DIR` with generic settings assignments in a separate session; the Host reads saved settings and owns automatic provider selection.
 Bare `rui`, `host start` and `host serve` all use the product default Active Capacity of 100 unless settings override it; `host start --set execution.activeCapacity=N` overrides it for the Host it launches, and `host serve --set execution.activeCapacity=N` overrides it with caller-owned lifetime.
 A running Host keeps the capacity it started with, including across Rui upgrades, until it stops and a new Host starts.
-When `host start` finds or loses a launch race to a ready Host, it still reports that Host and exits zero; settings apply only to a new Host, never reconfigure the running one.
+When `host start` finds or loses a launch race to a ready Host, it still reports that Host and exits zero; settings apply only to a new Host, never reconfigure the running one, and when the command gave `--settings` or `--set`, stderr says so.
 Startup raises only its own soft descriptor limit, up to the hard limit, to fit that capacity.
 It never reduces Active Capacity to fit: when even minimum intake cannot fit, startup fails before the Store lease and names the limit to raise.
 From macOS's default soft limit of 256, the default Host starts with full intake when the hard limit and OS per-process ceiling cover its full requirement.

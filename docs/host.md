@@ -85,7 +85,7 @@ See [Store format and upgrades](../ARCHITECTURE.md#store-format-and-upgrades) fo
 A new Host can run 100 executions at once.
 `rui host start --set execution.activeCapacity=8` starts a new Host with a different capacity.
 A running Host keeps its configured capacity through an Upgrade restart.
-If you pass `--set execution.activeCapacity=N` while a Host is running, `host start` connects to that Host unchanged and says so on stderr.
+If you pass `--set` or `--settings` while a Host is running, or another start wins the race to launch one, `host start` connects to that Host unchanged and says so on stderr.
 To change the capacity, pause the Host and start it again.
 
 `host status` reports the capacity as `active_capacity`, the slots in use as `custody_occupied` (running work and cleanup that still holds a slot), and the Unix second the Host started as `started_at`.

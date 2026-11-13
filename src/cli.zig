@@ -1373,7 +1373,7 @@ fn reportHostLaunch(io: std.Io, result: *const HostLaunchResult, quiet: bool, ov
     try host_launch.writeDiagnostics(result, &writer, shown);
     if (writer.buffered().len != 0) _ = stderr.write(writer.buffered());
     switch (result.outcome) {
-        .ready => |*ready| try reportStartedHost(io, ready, quiet, overrides and result.wait == null),
+        .ready => |*ready| try reportStartedHost(io, ready, quiet, overrides and ready.adopted),
         .failed => |failure| return failure.cause.err,
     }
 }
@@ -4747,7 +4747,9 @@ test "Host launch owner returns one result for terminal and screen across its wh
             try std.testing.expectEqual(case.success and surface == .terminal, out_length != 0);
             if (case.success) {
                 if (surface == .terminal) try std.testing.expect(std.mem.indexOf(u8, out[0..out_length], "\"status\":\"ready\"") != null);
-                try std.testing.expectEqual(case.scenario == .already_ready, std.mem.indexOf(u8, text, "running Host keeps its settings") != null);
+                // The notice follows the serving Host's origin: one already
+                // running, or the winner of a launch race this child lost.
+                try std.testing.expectEqual(case.scenario == .already_ready or case.scenario == .competitor, std.mem.indexOf(u8, text, "running Host keeps its settings") != null);
             }
             if (case.terminal.len != 0) try std.testing.expect(std.mem.indexOf(u8, text, case.terminal) != null);
             if (fixture.migration_announced or case.scenario == .migration_final) try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, HostStartupWait.migrating_tag));
