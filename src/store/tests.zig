@@ -7779,6 +7779,64 @@ test "the dispatch work read fences a Store whose blocked Operations are malform
     }.run);
 }
 
+test "an admission that selects nothing fences a Store whose blocked Operations are malformed" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            const Malformed = enum { unrecorded, premature };
+            for (std.enums.values(Malformed)) |malformed| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                const session = try configureTestSessionAsk(&storage, "malformed-admission");
+                try submitTestMessage(&storage, &tmp, "malformed", "malformed", session.slice(), "start");
+                const first = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
+                switch (malformed) {
+                    .unrecorded => {
+                        const calls = [_]TestingCall{.{ .item_id = "item", .name = "unknown", .encoded_call_id = "call", .decoded_call_id = "call", .encoded_arguments = "{}", .decoded_arguments = "{}" }};
+                        try settleCallsForTesting(&storage, &tmp, first, "malformed-metadata", &calls);
+                        try store_testing.exec(&storage, "UPDATE turn SET continuation_operation_id=NULL", .{});
+                    },
+                    .premature => {
+                        try settleTwoActionsForTesting(&storage, &tmp, first, "malformed-admission");
+                        try store_testing.exec(&storage, "UPDATE turn SET continuation_operation_id=operation_id", .{});
+                    },
+                }
+                try std.testing.expect(!storage.isFenced());
+                // No Message waits, so the admission selects nothing.
+                try std.testing.expectError(error.CorruptStore, storage.admitModelAttempt(.message, .{}));
+                try std.testing.expect(storage.isFenced());
+            }
+        }
+    }.run);
+}
+
+test "an admission that selects nothing reads a blocked Operation's calls in a round of their own" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            // Selection, then the idle checks.
+            var rounds = storage.testing_content_work.rounds;
+            try std.testing.expect(try storage.admitModelAttempt(.message, .{}) == null);
+            if (!case.rerun) try std.testing.expectEqual(rounds + 2, storage.testing_content_work.rounds);
+            const session = try configureTestSessionAsk(&storage, "blocked-admission");
+            try submitTestMessage(&storage, &tmp, "blocked", "blocked", session.slice(), "start");
+            const first = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
+            try settleTwoActionsForTesting(&storage, &tmp, first, "blocked-admission");
+            // Its asked calls block the Operation: their outcomes take a third round.
+            rounds = storage.testing_content_work.rounds;
+            try std.testing.expect(try storage.admitModelAttempt(.message, .{}) == null);
+            if (!case.rerun) try std.testing.expectEqual(rounds + 3, storage.testing_content_work.rounds);
+            try std.testing.expect(!storage.isFenced());
+        }
+    }.run);
+}
+
 test "retry settlement adds actual entropy after the provider deadline" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {

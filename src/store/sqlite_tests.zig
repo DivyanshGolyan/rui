@@ -7744,6 +7744,34 @@ test "a round's failed step is named by the statement that failed" {
     }
 }
 
+test "an admission that selects nothing answers main's names for its idle checks' failed steps" {
+    // The idle round's failed step is TurnReadFailed, but the blocked
+    // Operation's seek and its calls' outcomes are CallReadFailed.
+    const statements = model_admission_domain.idle_statements;
+    inline for (.{
+        .{ statements[0].sql, error.TurnReadFailed },
+        .{ statements[1].sql, error.CallReadFailed },
+        .{ statements[2].sql, error.CallReadFailed },
+    }) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try configureTestSessionAsk(&storage, "idle-names");
+        try submitTestMessage(&storage, &tmp, "idle-names-input", "idle-names-message", session.slice(), "start");
+        const first = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
+        // Asked calls block the Operation, so every idle statement steps.
+        try settleTwoActionsForTesting(&storage, &tmp, first, "idle-names");
+        var fault: TestingStatementFault = .{ .sql = case[0] };
+        fault.arm(storage.sqliteDatabase());
+        defer fault.disarm(storage.sqliteDatabase());
+        try std.testing.expectError(case[1], storage.admitModelAttempt(.message, .{}));
+        try std.testing.expect(fault.failed > 0);
+        try std.testing.expect(storage.isFenced());
+    }
+}
+
 test "Session inspection's count reads answer main's names" {
     // Inspection reads the Current report's counts and the rule in the
     // same rounds, under main's names.

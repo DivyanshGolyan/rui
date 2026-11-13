@@ -1181,6 +1181,11 @@ const blocked_operation = rsql.Read(.{
 const blocked_tool_calls = reads_domain.ToolOutcome("", "SELECT DISTINCT operation.operation_id," ++
     reads_domain.expectedCallsSql("operation.operation_id") ++ " " ++ blocked_operations_sql, struct {}, false);
 
+/// The idle checks' statements in the order they step, for a test that
+/// fails each: the disagreeing continuations, whether an Operation is
+/// blocked, and its calls' outcomes.
+pub const idle_statements = .{ disagreeing_continuation, blocked_operation, blocked_tool_calls };
+
 /// Before declaring the Store idle, distinguish valid permission waits
 /// from malformed canonical classification: the tool outcome rule over
 /// `blocked_tool_calls`, in a round of its own, once `blocked_operation`
