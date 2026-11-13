@@ -951,7 +951,6 @@ test "Sign-in frames keep the list at 140 columns and the code link, browser lin
                 .key_entry => try std.testing.expect(std.mem.indexOf(u8, text, "•••••••••") != null),
                 else => unreachable,
             }
-            std.debug.print("\nSIGN-IN {s} {d}x12\n{s}END SIGN-IN\n", .{ @tagName(stage), width, text });
         }
     }
 }

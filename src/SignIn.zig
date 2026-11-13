@@ -628,10 +628,11 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
             break :line segments;
         },
         // The entry shows a mask, as the key entry does; never the address.
+        // A long paste stops short of the right edge, keeping the indent there too.
         .browser_waiting => try ctx.arena.dupe(vaxis.Cell.Segment, &.{.{ .text = if (browser.link.len == 0)
             "  Connecting to ChatGPT"
         else if (browser.typed != 0)
-            try masked(ctx.arena, @min(browser.typed, size.width -| 2))
+            try masked(ctx.arena, @min(browser.typed, size.width -| 4))
         else if (browser.stray)
             "  Not the sign-in address · paste again"
         else if (browser.checking)
@@ -1382,6 +1383,8 @@ test "Sign-in browser row, entry, failure and footer fit at 46 columns and wide"
                 }
             }
             try std.testing.expect(used <= width);
+            // A long paste's mask keeps the two-column margin on both sides.
+            if (std.mem.indexOf(u8, rich.text[0].text, "•") != null) try std.testing.expectEqual(width - 2, used);
             texts += 1;
         }
         // The link row shows once the link is known, above the entry.
