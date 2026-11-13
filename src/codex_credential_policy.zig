@@ -87,7 +87,10 @@ pub fn Required(comptime capacity: usize) type {
     };
 }
 
-pub const State = enum { ready, refresh_pending };
+/// `signed_out` is a ChatGPT plan sign-in after `rui auth logout chatgpt`:
+/// its tokens are gone, and it keeps only the account and the client id the
+/// issuer registered, which the next sign-in reuses (`signOut`).
+pub const State = enum { ready, refresh_pending, signed_out };
 
 /// Room to decode one compact token's claims: its payload and the JSON parse
 /// arena. Its owner keeps it off the stack. Each parse wipes what it wrote.
@@ -189,7 +192,28 @@ pub fn expiryOf(record: *const Record, scratch: *ClaimScratch) !i64 {
 /// A pending record means an earlier claimant may have consumed the refresh
 /// token, so only explicit login can recover it.
 pub fn requireReady(record: *const Record) !void {
-    if (record.state != .ready) return error.RefreshRequiresLogin;
+    switch (record.state) {
+        .ready => {},
+        .refresh_pending => return error.RefreshRequiresLogin,
+        .signed_out => return error.SignedOut,
+    }
+}
+
+/// Signs a plan record out in place: its tokens are wiped and only its
+/// account and issued client id remain, for the next sign-in to name. The
+/// generation advances, as a login's does, so no lease of the old tokens
+/// outlives it. Only a plan sign-in, which has an issued client to keep,
+/// signs out this way.
+pub fn signOut(record: *Record) !void {
+    if (record.client_id.len == 0) return error.MissingClientId;
+    const generation = std.math.add(u64, record.generation, 1) catch return error.GenerationExhausted;
+    record.id_token.wipe();
+    record.access_token.wipe();
+    record.refresh_token.wipe();
+    record.fedramp = false;
+    record.expires_at = 0;
+    record.state = .signed_out;
+    record.generation = generation;
 }
 
 pub const Selection = enum { use, refresh };
@@ -221,7 +245,12 @@ pub const LocalStatus = enum {
 /// Ready and renewal-due are locally usable, not remotely accepted. Applies
 /// the runtime's routing and expiry checks to a read-only snapshot.
 pub fn localStatus(record: *const Record, now_seconds: i64, scratch: *ClaimScratch) !LocalStatus {
-    if (record.state == .refresh_pending) return .refresh_required;
+    switch (record.state) {
+        .ready => {},
+        .refresh_pending => return .refresh_required,
+        // A signed-out record holds no tokens: there is no sign-in to use.
+        .signed_out => return .missing,
+    }
     try validateSelected(record, false, scratch);
     return if (refreshDue(record, now_seconds, 0)) .renewal_due else .configured;
 }
@@ -247,7 +276,7 @@ pub fn failureCode(err: anyerror) []const u8 {
 
 /// Credential failures that only a new login resolves. `PlanScopeMissing`
 /// first needs the account to let this app use its plan.
-pub const LoginRequired = error{ RefreshRejected, RefreshTokenExpired, RefreshTokenReused, RefreshTokenInvalidated, RefreshRequiresLogin, ExpiredCredential, AccountMismatch, AccountChanged, InvalidCredentialExpiry, PlanScopeMissing };
+pub const LoginRequired = error{ RefreshRejected, RefreshTokenExpired, RefreshTokenReused, RefreshTokenInvalidated, RefreshRequiresLogin, SignedOut, ExpiredCredential, AccountMismatch, AccountChanged, InvalidCredentialExpiry, PlanScopeMissing };
 
 pub const Claim = enum { claimed, superseded };
 
@@ -296,6 +325,15 @@ pub fn validateRecord(record: *const Record) !void {
     if (record.version != 3) return error.UnsupportedCredentialVersion;
     try validateText(record.account_id.slice(), false);
     try validateText(record.client_id.slice(), true);
+    // A signed-out record is exactly what `signOut` leaves: an account and
+    // an issued client, no tokens and no expiry.
+    if (record.state == .signed_out) {
+        if (record.client_id.len == 0) return error.MissingClientId;
+        if (record.id_token.len != 0 or record.access_token.len != 0 or record.refresh_token.len != 0 or record.fedramp)
+            return error.SignedOutHoldsTokens;
+        if (record.expires_at != 0 or record.refreshed_at <= 0) return error.InvalidCredentialTime;
+        return;
+    }
     try validateText(record.id_token.slice(), false);
     try validateText(record.access_token.slice(), false);
     try validateText(record.refresh_token.slice(), false);
@@ -478,6 +516,26 @@ fn parseSubject(id_token: []const u8, scratch: *ClaimScratch, account: *Account)
     try account.id.set(id);
 }
 
+pub const max_email_bytes = 320;
+pub const Email = Bounded(max_email_bytes);
+
+/// The email an ID token names, for a person to recognize their account;
+/// empty when it names none or none that prints as one line. It routes and
+/// decides nothing.
+pub fn emailOf(id_token: []const u8, scratch: *ClaimScratch, email: *Email) !void {
+    email.* = .{};
+    const payload = try tokenPayload(id_token, &scratch.decoded);
+    defer std.crypto.secureZero(u8, payload);
+    defer std.crypto.secureZero(u8, &scratch.arena);
+    var fixed = std.heap.FixedBufferAllocator.init(&scratch.arena);
+    const parsed = std.json.parseFromSlice(struct { email: ?json_scalar.Text = null }, fixed.allocator(), payload, .{
+        .ignore_unknown_fields = true,
+    }) catch return error.InvalidTokenClaims;
+    const named = (parsed.value.email orelse return).slice;
+    if (!safeAscii(named) or named.len > max_email_bytes) return;
+    email.set(named) catch unreachable;
+}
+
 /// A compact access token may carry an expiry. The issuer also returns opaque
 /// access tokens; their lifetime is tracked from the last successful exchange.
 pub fn parseExpiry(access_token: []const u8, scratch: *ClaimScratch) !?i64 {
@@ -615,6 +673,78 @@ test "a refresh keeps the issued client id and a login may change it" {
         try std.testing.expectError(error.AccountMismatch, admitReplacement(&current, &replacement, 5));
         try std.testing.expectEqual(@as(u64, 6), try admitReplacement(&current, &replacement, null));
     }
+}
+
+test "signing out keeps the account and issued client, and nothing selects the record until a login" {
+    var claims: ClaimScratch = undefined;
+    var record: Record = undefined;
+    try fixtureRecord(&record);
+    // A Codex record has no issued client to keep.
+    try std.testing.expectError(error.MissingClientId, signOut(&record));
+    try std.testing.expectEqual(State.ready, record.state);
+    try record.client_id.set(fixture_client_id);
+    try signOut(&record);
+    try std.testing.expectEqual(State.signed_out, record.state);
+    try std.testing.expectEqual(@as(u64, 6), record.generation);
+    try std.testing.expectEqualStrings(fixture_account_id, record.account_id.slice());
+    try std.testing.expectEqualStrings(fixture_client_id, record.client_id.slice());
+    try std.testing.expectEqual(@as(usize, 0), record.id_token.len + record.access_token.len + record.refresh_token.len);
+    try std.testing.expectEqual(@as(i64, 0), record.expires_at);
+
+    // It round-trips through the file with empty token lines.
+    var bytes: [max_file_bytes]u8 = undefined;
+    const encoded = try encode(&record, &bytes);
+    try std.testing.expectEqualStrings("version=3\ngeneration=6\naccount_id=" ++ fixture_account_id ++ "\nclient_id=" ++ fixture_client_id ++
+        "\nfedramp=0\nid_token=\naccess_token=\nrefresh_token=\nexpires_at=0\nrefreshed_at=100\nstate=signed_out\n", encoded);
+    var decoded: Record = undefined;
+    try parseInto(encoded, &decoded);
+    try expectSameRecord(&record, &decoded);
+
+    // Every reader treats it as no sign-in: no lease, no refresh claim, and
+    // local status reports none; only a login replaces it.
+    try std.testing.expectError(error.SignedOut, select(&record, false, 0, &claims));
+    try std.testing.expectError(error.SignedOut, claimRefresh(&record, 6));
+    try std.testing.expectEqual(LocalStatus.missing, try localStatus(&record, 0, &claims));
+    try std.testing.expectEqualStrings("provider_sign_in_required", failureCode(error.SignedOut));
+    var replacement: Record = undefined;
+    try fixtureRecord(&replacement);
+    try replacement.client_id.set(fixture_client_id);
+    try replacement.account_id.set("plan-subject");
+    try replacement.id_token.set("e30.eyJzdWIiOiJwbGFuLXN1YmplY3QifQ.c2ln");
+    try std.testing.expectError(error.GenerationMismatch, admitReplacement(&record, &replacement, 6));
+    try std.testing.expectEqual(@as(u64, 7), try admitReplacement(&record, &replacement, null));
+    // A signed-out record cannot itself be installed as a login.
+    try std.testing.expectError(error.InstallMustBeReady, validateReplacement(&record));
+
+    // Its file holds no token, no expiry and no FedRAMP routing, and always
+    // keeps its issued client.
+    for ([_][2][]const u8{
+        .{ "id_token=\n", "id_token=x\n" },
+        .{ "access_token=\n", "access_token=a.b.c\n" },
+        .{ "refresh_token=\n", "refresh_token=r\n" },
+        .{ "expires_at=0\n", "expires_at=5\n" },
+        .{ "fedramp=0\n", "fedramp=1\n" },
+        .{ "client_id=" ++ fixture_client_id ++ "\n", "" },
+    }) |case| {
+        var edited: [max_file_bytes]u8 = undefined;
+        const at = std.mem.indexOf(u8, encoded, case[0]).?;
+        const spelled = try std.fmt.bufPrint(&edited, "{s}{s}{s}", .{ encoded[0..at], case[1], encoded[at + case[0].len ..] });
+        if (parseInto(spelled, &decoded)) |_| return error.TestUnexpectedResult else |_| {}
+    }
+}
+
+test "an ID token's email is shown only as one printable line" {
+    var claims: ClaimScratch = undefined;
+    var email: Email = .{};
+    // {"sub":"s","email":"someone@example.com"}
+    try emailOf("e30.eyJzdWIiOiJzIiwiZW1haWwiOiJzb21lb25lQGV4YW1wbGUuY29tIn0.c2ln", &claims, &email);
+    try std.testing.expectEqualStrings("someone@example.com", email.slice());
+    try emailOf(fixture_id_token, &claims, &email);
+    try std.testing.expectEqual(@as(usize, 0), email.len);
+    // {"email":"a b\n"}
+    try emailOf("e30.eyJlbWFpbCI6ImEgYlxuIn0.c2ln", &claims, &email);
+    try std.testing.expectEqual(@as(usize, 0), email.len);
+    try std.testing.expectError(error.InvalidCompactToken, emailOf("a..c", &claims, &email));
 }
 
 test "extracts both pinned account claim spellings and rejects malformed compact tokens" {

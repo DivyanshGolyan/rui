@@ -27,6 +27,7 @@ const protocol_reply = @import("protocol_reply.zig");
 const codex_auth = @import("codex_auth.zig");
 const provider_login = @import("provider_login.zig");
 const codex_credentials = @import("codex_credentials.zig");
+const chatgpt_plan_login = @import("chatgpt_plan_login.zig");
 const model_adapter = @import("model_adapter.zig");
 const providers = @import("providers.zig");
 const api_key = @import("api_key.zig");
@@ -340,7 +341,16 @@ noinline fn clientCommand(init: std.process.Init, command: cli_args.Command, par
         // Inspection has its own read-only operation; configure's grammar
         // requires an edit.
         .defaults_inspect, .defaults_configure => try setup(init, parsed, .command_line),
-        .auth_login => try login(init, &.{parsed.positional.?}, codex_auth.login),
+        // Only the ChatGPT sign-in has a test issuer.
+        .auth_login => if (parsed.get("test-chatgpt-fixture-endpoint")) |fixture| {
+            if (!std.mem.eql(u8, parsed.positional.?, "chatgpt")) return usage();
+            try planLogin(init, fixture);
+        } else try login(init, &.{parsed.positional.?}, codex_auth.login),
+        .auth_logout => try planLogout(init, parsed.positional.?, parsed.get("test-chatgpt-fixture-endpoint")),
+        .auth_status => {
+            const readiness = localReadiness(init);
+            try writeSignIns(init, &readiness);
+        },
     }
 }
 
@@ -443,18 +453,7 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, reader: SetupRe
     try writeSafeField(init.io, "Reasoning effort: ", if (values.reasoning_effort) |effort| @tagName(effort) else "each model's default");
     try writeSafeField(init.io, "Permissions: ", if (values.permission_mode) |mode| @tagName(mode) else @import("product_defaults.zig").permission_mode);
     var output: [std.Io.Dir.max_path_bytes + 512]u8 = undefined;
-    try std.Io.File.stdout().writeStreamingAll(init.io, switch (readiness.get(.codex)) {
-        .configured => "Codex credential: configured locally (remote acceptance not checked).\n",
-        .renewal_due => "Codex credential: usable locally; renewal due at dispatch (remote acceptance not checked).\n",
-        .missing => "Codex credential: missing.\n",
-        .refresh_required => "Codex credential: refresh required; a pending refresh may require login.\n",
-        .credential_error => "Codex credential: error reading private Rui credential; inspect it before use.\n",
-    });
-    try std.Io.File.stdout().writeStreamingAll(init.io, switch (readiness.get(.openai)) {
-        .configured, .renewal_due => "OpenAI API key: saved locally (remote acceptance not checked).\n",
-        .missing => "OpenAI API key: missing.\n",
-        .refresh_required, .credential_error => "OpenAI API key: unreadable, not owner-only or not one key; save it again with `" ++ comptime protocol.Provider.openai.login().? ++ "`.\n",
-    });
+    try writeSignIns(init, &readiness);
     const selectable = model_capability.capabilities(&readiness);
     const selection: ?provider_selection.Selection = provider_selection.resolve(&selectable, null, null, if (values.provider.len != 0) values.provider.slice() else null, if (values.model.len != 0) values.model.slice() else null) catch |err| blk: {
         const advice: []const u8 = switch (err) {
@@ -488,6 +487,104 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, reader: SetupRe
         .access_failure => "Host: access failure; inspect Store permissions.\n",
     } else "Host: unavailable; selected Store unavailable.\n";
     try std.Io.File.stdout().writeStreamingAll(init.io, host_details);
+}
+
+/// Each provider's local sign-in, one line each, as `rui auth status` and
+/// the setup report show them.
+fn writeSignIns(init: std.process.Init, readiness: *const provider_selection.Readinesses) !void {
+    const stdout = std.Io.File.stdout();
+    try stdout.writeStreamingAll(init.io, switch (readiness.get(.codex)) {
+        .configured => "Codex credential: configured locally (remote acceptance not checked).\n",
+        .renewal_due => "Codex credential: usable locally; renewal due at dispatch (remote acceptance not checked).\n",
+        .missing => "Codex credential: missing.\n",
+        .refresh_required => "Codex credential: refresh required; a pending refresh may require login.\n",
+        .credential_error => "Codex credential: error reading private Rui credential; inspect it before use.\n",
+    });
+    var line: [1024]u8 = undefined;
+    try stdout.writeStreamingAll(init.io, switch (readiness.get(.chatgpt)) {
+        .configured, .renewal_due => planSignInLine(init, &line),
+        .missing => "ChatGPT: not signed in; sign in with `" ++ comptime protocol.Provider.chatgpt.login().? ++ "`.\n",
+        .refresh_required => "ChatGPT: a renewal did not finish; sign in again with `" ++ comptime protocol.Provider.chatgpt.login().? ++ "`.\n",
+        .credential_error => "ChatGPT: error reading private Rui credential; inspect it before use.\n",
+    });
+    try stdout.writeStreamingAll(init.io, switch (readiness.get(.openai)) {
+        .configured, .renewal_due => "OpenAI API key: saved locally (remote acceptance not checked).\n",
+        .missing => "OpenAI API key: missing.\n",
+        .refresh_required, .credential_error => "OpenAI API key: unreadable, not owner-only or not one key; save it again with `" ++ comptime protocol.Provider.openai.login().? ++ "`.\n",
+    });
+}
+
+/// A usable plan sign-in: the account's email when its ID token names one,
+/// and when its access token expires, which a Host renews by itself.
+fn planSignInLine(init: std.process.Init, buffer: []u8) []const u8 {
+    const plain = "ChatGPT: signed in (remote acceptance not checked).\n";
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = credentialPath(init, .chatgpt, &path_buffer, false) catch return plain;
+    var shown: codex_auth.Shown = undefined;
+    codex_auth.localSignIn(path, codex_auth.nowSeconds(init.io), &shown) catch return plain;
+    if (!shown.status.usable()) return plain;
+    var writer = std.Io.Writer.fixed(buffer);
+    writer.writeAll("ChatGPT: signed in") catch return plain;
+    if (shown.email.len != 0) writer.print(" as {s}", .{shown.email.slice()}) catch return plain;
+    if (shown.expires_at > 0) {
+        const day = (std.time.epoch.EpochSeconds{ .secs = @intCast(shown.expires_at) }).getEpochDay();
+        const year_day = day.calculateYearDay();
+        const month_day = year_day.calculateMonthDay();
+        const seconds = @as(u64, @intCast(shown.expires_at)) % std.time.s_per_day;
+        writer.print("; access token expires {d}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2} UTC and renews by itself", .{ year_day.year, month_day.month.numeric(), month_day.day_index + 1, seconds / 3600, seconds % 3600 / 60 }) catch return plain;
+    }
+    writer.writeAll(" (remote acceptance not checked).\n") catch return plain;
+    return writer.buffered();
+}
+
+/// `rui auth login chatgpt`: the plan sign-in, published through the same
+/// custody and SIGINT gate as a Codex login.
+fn planLogin(init: std.process.Init, fixture_endpoint: ?[]const u8) !void {
+    var interrupt = LoginInterrupt.init();
+    defer interrupt.deinit();
+    const issuer = try planIssuer(init, fixture_endpoint);
+    provider_login.chatgpt(init, issuer, loginInterrupted, struct {
+        fn publish() bool {
+            return login_state.cmpxchgStrong(.cancellable, .publishing, .acq_rel, .acquire) == null;
+        }
+    }.publish) catch |err| return switch (err) {
+        error.HomeRequired => homeRequired("the ChatGPT credential and host id are in HOME/.config/rui unless " ++ comptime provider_login.credentialVariable(.chatgpt) ++ " names the credential"),
+        else => err,
+    };
+    if (!try finishLogin(init, .chatgpt, "Rui: Signed in to ChatGPT.\n", true)) return;
+    try std.Io.File.stdout().writeStreamingAll(init.io, "A running Host that serves chatgpt uses this sign-in from its next request; one started before you signed in needs a restart to serve it.\nStart a conversation with: rui --provider chatgpt\n");
+}
+
+/// `rui auth logout chatgpt`: revoke, then remove the tokens, keeping the
+/// issued client id and the host id.
+fn planLogout(init: std.process.Init, provider: []const u8, fixture_endpoint: ?[]const u8) !void {
+    if (!std.mem.eql(u8, provider, "chatgpt")) {
+        stderr.diagnostic("rui: rui auth logout signs out of chatgpt only; Rui keeps no sign-in to end for another provider.\n", .{});
+        return usage();
+    }
+    const issuer = try planIssuer(init, fixture_endpoint);
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try credentialPath(init, .chatgpt, &path_buffer, false);
+    const outcome = chatgpt_plan_login.logout(init.io, path, issuer) catch |err| switch (err) {
+        // No private directory: never signed in.
+        error.FileNotFound => .not_signed_in,
+        else => return err,
+    };
+    try std.Io.File.stdout().writeStreamingAll(init.io, switch (outcome) {
+        .not_signed_in => "Rui: Not signed in to ChatGPT; nothing changed.\n",
+        .revoked => "Rui: Signed out of ChatGPT.\n",
+        .unconfirmed => "Rui: Signed out of ChatGPT: Rui deleted its tokens, but ChatGPT did not confirm it ended the sign-in. To end it there too, disconnect Rui in ChatGPT's settings.\n",
+    });
+}
+
+/// The plan's issuer: OpenAI's, or a test's loopback fixture, which only a
+/// test-named credential file may be signed in to.
+fn planIssuer(init: std.process.Init, fixture_endpoint: ?[]const u8) !chatgpt_plan_login.Issuer {
+    const endpoint = fixture_endpoint orelse return .openai;
+    if (init.environ_map.get("RUI_CHATGPT_CREDENTIAL_FILE") == null) return error.FixtureCredentialPathRequired;
+    const base = providers.responsesBase(endpoint) orelse return error.InvalidArguments;
+    if (!std.mem.startsWith(u8, base, "http://127.0.0.1:")) return error.InvalidArguments;
+    return .{ .fixture = base };
 }
 
 /// The saved defaults select a provider and model whose sign-in is usable.
@@ -1090,8 +1187,7 @@ fn login(init: std.process.Init, args: []const []const u8, comptime exchange: an
     switch (provider) {
         .openai => return saveApiKey(init),
         .codex => {},
-        // Its login fact is false, so the check above returned.
-        .chatgpt => unreachable,
+        .chatgpt => return planLogin(init, null),
     }
     var interrupt = LoginInterrupt.init();
     defer interrupt.deinit();
@@ -1860,7 +1956,7 @@ fn hostProvidersLine(routes: protocol.Routes, buffer: []u8) []const u8 {
 test "the Host line names a login only for an unserved provider that has one" {
     var buffer: [512]u8 = undefined;
     const served_one: protocol.Routes = .{ .codex = .chatgpt_device, .openai = .unserved, .chatgpt = .unserved };
-    try std.testing.expectEqualStrings("Host: serves Codex (credentials checked locally, not by status); to add OpenAI, stop and restart it after `rui auth login openai`; ChatGPT needs a sign-in this terminal cannot make yet.\n", hostProvidersLine(served_one, &buffer));
+    try std.testing.expectEqualStrings("Host: serves Codex (credentials checked locally, not by status); to add OpenAI, stop and restart it after `rui auth login openai`; to add ChatGPT, stop and restart it after `rui auth login chatgpt`.\n", hostProvidersLine(served_one, &buffer));
     inline for (comptime std.enums.values(protocol.Provider)) |unserved| {
         var routes = protocol.routesAll(.endpoint);
         @field(routes, @tagName(unserved)) = .unserved;

@@ -1191,9 +1191,17 @@ An auto-started Host adds `--provider openai` whenever a usable key is saved.
 `--provider chatgpt` serves a ChatGPT plan sign-in from an owner-only `~/.config/rui/chatgpt.json`, or the absolute path `RUI_CHATGPT_CREDENTIAL_FILE` names, in the same credential format and custody as Codex; its record carries the issued client id and its account is the ID token's `sub`.
 It speaks `openai-responses/3` and sends the access token as `authorization: Bearer` with user-agent only to `https://api.openai.com/v1/responses`, with no account or FedRAMP header; its route is `chatgpt_plan`, and it accepts structured output.
 Its token must carry `exp`, so it refreshes within 300 seconds of expiry and never on the eight-day opaque clock; a 401 forces one refresh over the plan's token wire, as Codex's does over its own.
-The terminal cannot sign it in yet: its provider fact has no login, so `rui auth login chatgpt` changes nothing and says so, the Host line and the overview's missing-sign-in notice say the terminal cannot sign in to it instead of naming a command, and its band reads only "ChatGPT sign-in expired." so the list pane keeps it whole.
+Its provider fact names `rui auth login chatgpt`, so the Host line and the overview's notices name that command; an expired sign-in's band names it too when the line holds it whole, and otherwise reads only "ChatGPT sign-in expired." so the 40-column list pane keeps it whole.
 The Host's one sign-in worker serves both sign-ins; each lease or forced refresh names the sign-in it is for.
 An auto-started Host adds `--provider chatgpt` whenever that credential is usable.
+
+`rui auth login chatgpt` (`src/chatgpt_plan_login.zig`) makes the host id `~/.config/rui/host-id` (owner-only, a version 4 UUID URN, never replaced) before its first authorization.
+It listens on `127.0.0.1:1455`, else any free loopback port, prints the authorization link, opens a browser when there is one, and reads a callback address pasted on stdin at the same time; the first answer that is this attempt's wins, so a machine whose browser cannot reach the listener signs in by pasting.
+A first sign-in names `dynamic_agent_client` and the agent name; a returning one names the saved issued client id and no agent, sends no `id_token_hint` because the link is printed, and refuses an answer for another client.
+The checked record is installed through the same custody and SIGINT gate as a Codex login and, like it, fills only an unset provider default; a Host already serving `chatgpt` uses it from its next lease.
+`rui auth logout chatgpt` revokes the refresh token as the issued client under the exclusive credential lock, retrying a server failure, then publishes the record `signed_out` at a new generation even when the revocation was not confirmed, which it reports.
+A `signed_out` record holds no tokens and keeps its account and issued client id, which the next sign-in reuses as the issuer's guide asks; every reader treats it as no sign-in, so a lease fails with `provider_sign_in_required` and local status reports it missing.
+`rui auth status` prints each provider's local sign-in, with the ChatGPT account's email and access-token expiry.
 `subscription_sharing_usage_limit_exceeded` and `subscription_sharing_usage_unavailable` are quota refusals, never retried.
 
 The credential owner serializes mutations across Hosts and login processes.

@@ -53,7 +53,7 @@ pub const Provider = enum {
         return switch (self) {
             .codex => .{ .endpoint = managed_endpoint, .codec = .@"openai-responses/2", .shown = "ChatGPT (device code)", .sign_in = "Codex", .credential = .sign_in, .login = true, .model_list = .catalog, .runs_tools = &.{"web_search"} },
             .openai => .{ .endpoint = api_endpoint, .codec = .@"openai-responses/2", .shown = "OpenAI", .sign_in = "API key", .credential = .api_key, .login = true, .model_list = .live, .runs_tools = &.{"web_search"} },
-            .chatgpt => .{ .endpoint = api_endpoint, .codec = .@"openai-responses/3", .shown = "ChatGPT", .sign_in = "ChatGPT", .credential = .sign_in, .login = false, .model_list = .catalog, .runs_tools = &.{"web_search"} },
+            .chatgpt => .{ .endpoint = api_endpoint, .codec = .@"openai-responses/3", .shown = "ChatGPT", .sign_in = "ChatGPT", .credential = .sign_in, .login = true, .model_list = .catalog, .runs_tools = &.{"web_search"} },
         };
     }
 
@@ -128,7 +128,7 @@ test "every provider's name and sign-in read apart from the others', and only a 
     try std.testing.expectEqualStrings("ChatGPT", Provider.chatgpt.signIn());
     try std.testing.expectEqualStrings("API key", Provider.openai.signIn());
     try std.testing.expectEqualStrings("rui auth login codex", Provider.codex.login().?);
-    try std.testing.expectEqual(@as(?[]const u8, null), Provider.chatgpt.login());
+    try std.testing.expectEqualStrings("rui auth login chatgpt", Provider.chatgpt.login().?);
 }
 
 fn firstWord(text: []const u8) []const u8 {
