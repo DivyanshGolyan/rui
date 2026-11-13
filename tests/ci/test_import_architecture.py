@@ -284,3 +284,23 @@ const y = @import("after.zig");
             (root / "src/store.zig").write_text("pub fn helper() void {}")
             with self.assertRaisesRegex(ValueError, "declares a function"):
                 store_access_sources(root)
+
+    def test_source_scan_tests_may_live_in_a_per_domain_test_file(self):
+        scan = 'test "{}" {{\n{}\n}}\n'
+        listing = '    const sources = .{ @embedFile("../Store.zig"), @embedFile("../domain/a.zig") };'
+        names = ("Store entry points queue and fence only through canonical access",
+                 "every function that enters the Store has a round budget")
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.store_tree(directory, {
+                "src/store.zig": 'pub const Store = @import("store/Store.zig").Store;',
+                "src/store/Store.zig": "pub fn enter() void {}",
+                "src/store/domain/a.zig": "pub fn f() void {}",
+                "src/store/tests.zig": "pub fn fixture() void {}",
+                "src/store/tests/access_rules.zig": scan.format(names[0], listing),
+                "src/store/tests/round_budget.zig": scan.format(names[1], listing),
+                "src/store/sqlite_tests/schema.zig": "test {}",
+            })
+            store_access_sources(root)
+            (root / "src/store/tests/round_budget.zig").write_text(scan.format(names[1], listing.replace("../", "")))
+            with self.assertRaisesRegex(ValueError, "round budget.*the Store's files are"):
+                store_access_sources(root)
