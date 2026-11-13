@@ -8,6 +8,22 @@ const Hover = @import("widgets/Hover.zig");
 /// How one label is drawn. The selection wins over the pointer.
 pub const Look = enum { plain, hovered, selected };
 
+const prompt_text = " ›";
+/// Cells the prompt takes; a caller aligns content after it by this.
+pub const prompt_cells = 2;
+const pad = " ";
+const gap = "  ";
+
+/// Where one label is drawn on the row, its padding included.
+pub const Span = struct { col: u16, width: u16 };
+
+/// Where `segments` draws each label, from the row's first cell. Labels are
+/// ASCII, so a byte is a cell.
+pub fn spans(labels: [2][]const u8, prompt: bool) [2]Span {
+    const first: Span = .{ .col = if (prompt) prompt_cells else 0, .width = @intCast(pad.len + labels[0].len + pad.len) };
+    return .{ first, .{ .col = first.col + first.width + @as(u16, gap.len), .width = @intCast(pad.len + labels[1].len + pad.len) } };
+}
+
 /// Borrows labels through drawing. The caller places the row, decides
 /// whether its narrow layout has room for the prompt, and says each label's
 /// look. Of `hover` only its background, reverse and underline apply.
@@ -15,14 +31,14 @@ pub fn segments(labels: [2][]const u8, looks: [2]Look, style: vaxis.Style, hover
     const first = labelStyle(looks[0], style, hover);
     const second = labelStyle(looks[1], style, hover);
     return .{
-        .{ .text = if (prompt) " ›" else "", .style = style },
-        .{ .text = " ", .style = first },
+        .{ .text = if (prompt) prompt_text else "", .style = style },
+        .{ .text = pad, .style = first },
         .{ .text = labels[0], .style = first },
-        .{ .text = " ", .style = first },
-        .{ .text = "  ", .style = style },
-        .{ .text = " ", .style = second },
+        .{ .text = pad, .style = first },
+        .{ .text = gap, .style = style },
+        .{ .text = pad, .style = second },
         .{ .text = labels[1], .style = second },
-        .{ .text = " ", .style = second },
+        .{ .text = pad, .style = second },
     };
 }
 
@@ -65,6 +81,12 @@ test "Choice row preserves the approval labels and draws each label plain, hover
                 }
             }
             try std.testing.expectEqualStrings(if (prompt) " › Allow once    Deny " else " Allow once    Deny ", writer.buffered());
+            // Each span covers exactly its padded label in the drawn row.
+            const drawn = writer.buffered();
+            const offset: usize = if (prompt) prompt_text.len - prompt_cells else 0;
+            for (spans(.{ "Allow once", "Deny" }, prompt), [_][]const u8{ " Allow once ", " Deny " }) |span, label| {
+                try std.testing.expectEqualStrings(label, drawn[span.col + offset ..][0..span.width]);
+            }
         };
     };
 }
