@@ -6,7 +6,7 @@ It binds an ephemeral loopback port and writes only that port to stdout.
 Pass the bearer token as the first argument (or `MCP_TOKEN`).
 Every route requires that token.
 
-The launch-frame suite runs `npm ci --ignore-scripts` once and verifies that
+The settings-document suite runs `npm ci --ignore-scripts` once and verifies that
 Host startup adds `echo`, `fail`, `slow` and `progress` to the tool set under `drift-sdk`.
 The current public API has no tool-set listing route, so each name and owning server
 is verified through the Host's structured tool-name collision refusal.

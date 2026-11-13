@@ -1,4 +1,6 @@
 test {
+    _ = @import("host_start.zig");
+    _ = @import("server_mcp_settings.zig");
     _ = @import("testing/host_settings.zig");
     _ = @import("relaunch_handoff.zig");
     _ = @import("widgets/Panel.zig");
@@ -70,7 +72,7 @@ test {
     _ = @import("os/socket.zig");
     _ = @import("os/system_path.zig");
     _ = @import("execution_turn.zig");
-    _ = @import("launch_frame.zig");
+    _ = @import("preset_settings_test.zig");
     _ = @import("start_report.zig");
     _ = @import("mysql_url.zig");
     _ = @import("openapi.zig");

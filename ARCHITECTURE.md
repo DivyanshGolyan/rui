@@ -123,7 +123,7 @@ This source map locates the existing owners; file boundaries are not part of the
 | Bash process and output lifetime | `src/bash.zig`: preparation, launch, process-group retirement, capture and cleanup. `src/BashLifecycle.zig` owns the value transitions those handles follow: process phases, pipe terminal reasons, stop reason, signaling facts and resolution. |
 | Temporary storage | `src/ScratchBudget.zig` accounts for bytes; `src/named_scratch.zig` retains failed reclamation; `src/output_retention.zig` owns disposable-output retention and eviction. |
 | Product defaults | `src/product_defaults.zig`: values supplied for omitted settings, namely default Active and intake capacity, fresh-Session tools and permission mode, the recommended model and compaction policy. |
-| Provider facts | `src/provider_name.zig`: one table of what each provider fixes (its codec, the name prose knows it by ("ChatGPT (device code)", "ChatGPT", "OpenAI"), the short label of its sign-in where one is chosen or read beside a model ("Codex", "ChatGPT", "API key"), whether its credential is a sign-in or a key, whether `rui auth login` signs it in, and whether its model list is Rui's catalog or fetched live). Whether a Session may ask for structured output depends on the sign-in source, so `src/providers.zig` answers it. Core asks a provider for a fact and never switches on which provider it is; [provider_locality.py](tests/ci/provider_locality.py) fails CI when core production code imports a sign-in file, names a ChatGPT header, endpoint or OpenAI error code, or names a provider by its tag. |
+| Provider facts | `src/provider_name.zig`: one table of what each provider fixes (its codec, the name prose knows it by ("ChatGPT (device code)", "ChatGPT", "OpenAI"), the short label of its sign-in where one is chosen or read beside a model ("ChatGPT", "ChatGPT", "API key": both ways into one account read the same), whether its credential is a sign-in or a key, the `rui auth login` command that signs it in (`rui auth login chatgpt --device-code`, `rui auth login chatgpt`, `rui auth login openai`), the other provider that signs in to the same account (`codex` and `chatgpt` name each other; `openai` names none), and whether its model list is Rui's catalog or fetched live). Whether a Session may ask for structured output depends on the sign-in source, so `src/providers.zig` answers it. Core asks a provider for a fact and never switches on which provider it is; [provider_locality.py](tests/ci/provider_locality.py) fails CI when core production code imports a sign-in file, names a ChatGPT header, endpoint or OpenAI error code, or names a provider by its tag. |
 | Model capability | `src/model_catalog.zig`: identifier syntax, the reasoning-effort grammar and the shipped models.dev facts; the Store selects saved facts when a source exists, otherwise shipped facts. `src/model_capability.zig` derives capability from the operation's supplied facts (listed efforts and optional context window). |
 | Session work | `src/session_work.zig` derives each Session's work state, a functional core; `src/store/domain/report.zig` reads its inputs under one Store lock. |
 | Session change hint | `src/change_ring.zig`: the fixed in-memory ring of recent (Session, commit, Workspace key) entries behind Session listing's `since`. `src/store/Store.zig` records into it where its commit counter advances. |
@@ -477,7 +477,7 @@ Only the rejection code is durable; direct replies derive the advisory message f
 Other request refusals have a null advisory message.
 An admitted MCP call that cannot reach its server continues to return `mcp_server_unavailable` as a tool result (A-D116).
 
-The CLI spells a Label `--label TEXT` (the Session's name or title, shown in lists and chat info) on `session start`, `session configure` and the overview’s `/configure`, and clears it with `--label ""`: the empty string is the one spelling that can never be a Label.
+The CLI spells a Label `--label TEXT` (the Session's name or title, shown in lists and chat info) on `session start` and `session configure`, and clears it with `--label ""`: the empty string is the one spelling that can never be a Label.
 A Session can label itself from Bash with `--store "$RUI_STORE" --session "$RUI_ADDRESS"`, and its collaboration context names that command so a model asked to rename its Session finds it.
 Every Label change is a revision like any other configuration change.
 A Label-only revision adds no Conversation entry and changes no model input.
@@ -501,7 +501,7 @@ A listed model with effort levels takes one of those values; explicit `null` is 
 On an existing Session, omission preserves the saved effort and an accepted explicit `null` leaves provider effort unspecified, without a catalog fallback.
 Configuration validates the effective requested-or-retained effort against the effective requested-or-current model, including null effort on a model revision.
 The pinned `openai-responses/2` codec cannot encode a boundary back to unspecified effort, so clearing an assigned value rejects atomically as `unsupported_reasoning_effort`; a client reset sends a concrete supported effort instead (D165).
-The CLI resolves `--reasoning-effort default` on the client to the client's product effort choice or explicit null; `--reasoning-effort VALUE` selects a value for `session configure`, initial `session start` and the overview’s `/configure`; chat info’s Effort field submits the equivalent typed edit.
+The CLI resolves `--reasoning-effort default` on the client to the client's product effort choice or explicit null; `--reasoning-effort VALUE` selects a value for `session configure` and initial `session start`; chat info’s Effort field submits the equivalent typed edit.
 Current inspection reports the effective `reasoning_effort` and saved nullable `reasoning_effort_override`; an explicit saved value wins.
 For an admitted pre-D111 Session with null settings, the configuration owner carries forward its latest Operation's frozen effort, so continuation never clears that historical value; it does not infer a catalog or product default.
 Fresh explicit-null specs have no earlier concrete effort and remain unspecified.
@@ -1173,7 +1173,7 @@ The pinned first-party login tests accept opaque tokens without `exp`, so treati
 Account IDs are nonempty opaque exact strings, not UUIDs.
 No independent token/account length quota, JWT verification/JWKS/discovery or generic OAuth framework; bounded credential/encoding owners fail explicitly on exhaustion.
 
-`rui auth login codex` uses the pinned device-code flow and installs one global account in an owner-only `~/.config/rui/codex.json`, or an absolute path selected by `RUI_CODEX_CREDENTIAL_FILE`.
+`rui auth login chatgpt --device-code` (also the unlisted `rui auth login codex`) uses the pinned device-code flow and installs one global account in an owner-only `~/.config/rui/codex.json`, or an absolute path selected by `RUI_CODEX_CREDENTIAL_FILE`.
 `rui host serve --provider codex` activates the fixed HTTPS subscription endpoint; it cannot be combined with a development endpoint or private CA.
 A Host serves only the providers it names; model admission skips Sessions of any other provider, and `host_info` reports each provider's route.
 Configuration and saved-result inspection need no credential.
@@ -1191,16 +1191,18 @@ An auto-started Host adds `--provider openai` whenever a usable key is saved.
 `--provider chatgpt` serves a ChatGPT plan sign-in from an owner-only `~/.config/rui/chatgpt.json`, or the absolute path `RUI_CHATGPT_CREDENTIAL_FILE` names, in the same credential format and custody as Codex; its record carries the issued client id and its account is the ID token's `sub`.
 It speaks `openai-responses/3` and sends the access token as `authorization: Bearer` with user-agent only to `https://api.openai.com/v1/responses` and the model list beside it (`https://api.openai.com/v1/models`), with no account or FedRAMP header; its route is `chatgpt_plan`, and it accepts structured output.
 Its token must carry `exp`, so it refreshes within 300 seconds of expiry and never on the eight-day opaque clock; a 401 forces one refresh over the plan's token wire, as Codex's does over its own.
-Its provider fact names `rui auth login chatgpt`, so the Host line and the overview's notices name that command; an expired sign-in's band names it too when the line holds it whole, and otherwise reads only "ChatGPT sign-in expired." so the 40-column list pane keeps it whole.
+Its provider fact names `rui auth login chatgpt`, and the device-code provider's names `rui auth login chatgpt --device-code`, so the Host line and the overview's notices name the command for the sign-in at hand; an expired sign-in's band names it too when the line holds it whole, and otherwise reads only "ChatGPT sign-in expired." or "ChatGPT (device code) sign-in expired." so the 40-column list pane keeps it whole.
 The Host's one sign-in worker serves both sign-ins; each lease or forced refresh names the sign-in it is for.
 An auto-started Host adds `--provider chatgpt` whenever that credential is usable.
 
 `rui auth login chatgpt` (`src/chatgpt_plan_login.zig`) makes the host id `~/.config/rui/host-id` (owner-only, a version 4 UUID URN, never replaced) before its first authorization.
 It listens on `127.0.0.1:1455`, else any free loopback port, prints the authorization link, opens a browser when there is one, and reads a callback address pasted on stdin at the same time; the first answer that is this attempt's wins, so a machine whose browser cannot reach the listener signs in by pasting.
 A first sign-in names `dynamic_agent_client` and the agent name; a returning one names the saved issued client id and no agent, sends no `id_token_hint` because the link is printed, and refuses an answer for another client.
-The checked record is installed through the same custody and SIGINT gate as a Codex login; it fills an unset provider default and replaces a saved `codex` one, as the provider table says `chatgpt` supersedes `codex`, and a Host already serving `chatgpt` uses it from its next lease.
-`rui auth logout chatgpt` revokes the refresh token as the issued client under the exclusive credential lock, retrying a server failure, then publishes the record `signed_out` at a new generation even when the revocation was not confirmed, which it reports.
-A `signed_out` record holds no tokens and keeps its account and issued client id, which the next sign-in reuses as the issuer's guide asks; every reader treats it as no sign-in, so a lease fails with `provider_sign_in_required` and local status reports it missing.
+The checked record is installed through the same custody and SIGINT gate as a device-code login; it fills an unset provider default and replaces a saved `codex` one, as either ChatGPT sign-in replaces a saved default of the other because the provider table says both sign in to the same account, and a Host already serving `chatgpt` uses it from its next lease.
+`rui auth logout chatgpt` ends both ChatGPT logins (Divyansh chose this on 2026-11-13), each under its own exclusive credential lock and each whether or not the other could be ended.
+For the browser sign-in it revokes the refresh token as the issued client, retrying a server failure, then publishes the record `signed_out` at a new generation even when the revocation was not confirmed.
+The device-code login has no revocation Rui sends, so its record is only published `signed_out` locally at a new generation; OpenAI is not told.
+A `signed_out` record holds no tokens and keeps its account and, for the browser sign-in, its issued client id, which the next sign-in reuses as the issuer's guide asks; every reader treats it as no sign-in, so a lease fails with `provider_sign_in_required` and local status reports it missing.
 `rui auth status` prints each provider's local sign-in, with the ChatGPT account's email and access-token expiry.
 `subscription_sharing_usage_limit_exceeded` and `subscription_sharing_usage_unavailable` are quota refusals, never retried.
 
@@ -1507,7 +1509,7 @@ The Store's format version is the `format` row of `store_meta`, and SQLite's `PR
 Before any write, open compares the format and then each table's and index's stored CREATE text with the DDL this binary renders, so a Store missing an object, holding an extra one, or carrying a changed column, CHECK or index is refused as the wrong schema.
 The Host opens schema 51 (41 let a failed, overflowed or retry-exhausted Turn outcome reference its report content; 42 saves each Model Output Item's replay rule, judged once at import, and replaces raw items with the neutral form: `model_output_item` keeps kind, phase, part count and an item bag; `model_output_part` keeps each part's array, kind, text and part bag; no answer or string projection tables remain; and content payloads are non-null with their recorded length; 43 certifies a Tool Call by its name, call ID and arguments only, since the provider item ID lives in the item bag, stores usage as four neutral counts beside the provider's report, pins each Session's codec (`openai-responses/1` for `codex`) and optional codec options of at most 512 bytes at creation, checks a provider label's syntax instead of a provider list, so adding a provider is no format change, and keeps each Session's [prefix seal](#prefix-seal); 44 stores a message's text once, as the item's message text row, with each text part keeping only its length into it, while a reasoning part keeps its own private row; 45 orders the index of Messages without a Session sender by Admission position; 46 names each Tool Call's Session on its row, and indexes every Activity row source by Session and position, so an Activity page is a range seek whatever the history's length; 47 makes the schema's tables expressible on SQLite, Postgres and MySQL and holds every statement to the reserved-name and `rowid` rules: no name any engine reserves outside its keyword place, no `rowid` (Sessions carry `created_seq` and Commands `command_seq`, each allocated max+1 in its creating transaction), a stored Workspace digest and key, foreign keys checked when each row is written rather than at commit, non-null key columns, byte-length checks, and the format marker in `store_meta`, while statements keep SQLite-only forms such as `unixepoch`, `GLOB`, `||`, `IS`, `INDEXED BY`, `ON CONFLICT`, `INSERT OR IGNORE` and `printf` until the typed statements bring their dialect rules; 48 and 49 record OpenAI web search; 50 drops the per-Session read-through position that 46 added; 51 makes a Command's `command_seq` its primary key and `command_key` unique, and indexes Commands by target, kind and `command_seq` in place of `command_seq`'s own index, so a Session's decisions, stops and interruptions are a range seek, and indexes Tool Calls by Session, Operation and call ordinal, and rejected Tool Calls and resolved Actions by Session, Operation and acceptance position, in place of the rejected calls' index by Operation, so a Session's calls and Tool Results are a range seek on their own tables, indexes revisions by Session and content so a Full report finds each content's first revision in SQL, and limits `store_meta`'s key to its three names, because MySQL keys only bounded text): a Store at any earlier version is rejected as unsupported and requires a compatible build or a separate fresh Store.
 Schema 51 is the migration baseline (Divyansh, D204): every later format change ships one forward step in `schema.migrations`, for SQLite and MySQL, and the build fails when `schema_version` and the steps disagree, and `tests/ci/test_store_schema_version.py` fails when a step whose `from` is below the released schema_version differs from its text at the release.
-A SQLite Store at a format from 51 up to the current one takes each pending step at open, in one transaction that also sets its format and the current wire label (from the last released wire after historical steps), and commits only when every foreign key holds and every object's text equals a fresh bootstrap's; otherwise nothing changes and the Store is refused.
+A SQLite Store at a format from 51 up to the current one takes each pending step at open, in one transaction that also sets its format, and commits only when every foreign key holds and every object's text equals a fresh bootstrap's; otherwise nothing changes and the Store is refused.
 The typed statement marker `@index(name)` renders as `INDEXED BY name` on SQLite.
 On MySQL it renders as `FORCE INDEX (name)` only when `schema.mysqlCanForceIndex` confirms that the named MySQL DDL index uses real columns; generated-leading and functional partial indexes remain unhinted, since forcing their lowered keys can turn a lookup into a full index scan.
 MySQL open includes every forceable index's canonical name in its catalog comparison and refuses a renamed index as `store_schema_behind` before any write; server-generated keys remain checked by definition.
@@ -1515,7 +1517,7 @@ This admission digest is computed, not stored or pinned by Store format, so tigh
 Rui runs no DDL on MySQL (D203).
 `rui store schema --engine mysql` prints this build's canonical `schema.ddl(.mysql)` as one SQL file for the DB team to apply to an empty database.
 With `--from N` it instead prints every forward MySQL migration from format N to this build's format, oldest first (D223); the current format prints empty stdout successfully, and formats outside the migration baseline through the current format are usage errors naming that range, with no stdout.
-The composed migration finishes with one update of the saved format and wire version to this build's values; individual steps remain `schema.mysqlMigration(from)`, and this command never applies the SQL.
+The composed migration finishes with one update of the saved format to this build's value; individual steps remain `schema.mysqlMigration(from)`, and this command never applies the SQL.
 The step to 52 lets tool records name an MCP server and keeps the Host tool set (T1e).
 The step to 53 records a Session's parent (D27).
 The step to 54 records the stops and ending Messages an attached child owes (D38, D39), ancestor feed forwarding in `session_forward` (D135, D180), and gives each Store a random `store_id` in `store_meta`, which a Store needs to open.
@@ -1537,6 +1539,8 @@ The step to 69 freezes each model Operation's effective context window as a non-
 It backfills every old Operation using its frozen settings revision's exact model and a literal mapping of the pre-change shipped snapshot, using 128,000 for absent or null windows, not the mutable saved catalog.
 This pins legacy escalation policy; the old rows did not retain their admission-time saved window, and migration does not claim to recover it.
 Existing floors, levels, counts, resolutions and references are preserved.
+The step to 74 deletes the saved wire label from `store_meta` on both engines (Divyansh, 2026-11-13), whatever it reads; a new Store writes none and opening compares none.
+`store_meta`'s key CHECK still names `wire_version`, because narrowing it would rebuild the table on SQLite.
 Each format PR appends its own version and step; even unreleased steps and digests already on main are immutable (D226).
 The schema writes each closed value set as fixed literals, so the Store format never silently follows a code enum, and changing a set is a format change that needs a new version.
 Provider labels and codec names are open by design (Divyansh, 2026-10-31 provider-plugin design): the schema checks their syntax, and a Host refuses a label or codec it does not serve.
@@ -1607,7 +1611,7 @@ The overview owns the one run and runs its worker once its own and the conversat
 It checks (`Checking for updates…`), then installs a found release at once, with no Enter step even while Sessions work, and its first line says what the restart will do: `Preparing Upgrade · restarts every eligible Host (2 found) · esc cancels`.
 Esc cancels while it checks or prepares, before Esc clears the draft, and not once publishing starts (`Publishing; cancelling no longer rolls back`); the run then says `Restarting Hosts…` and ends `Upgraded to 0.60.0 · Host restarted`, or as a notice when it installs nothing.
 When this run installs a different Rui, compatible or incompatible with the old client, the terminal leaves through its ordinary cancellation, save-flush and restoration path, then the CLI replaces its process image with the published selection's `bin/rui` (same PID and terminal, never PATH or the old executable).
-It reopens the overview or the same conversation (`Overview.Options.open`), pinning the old client's actual canonical Store explicitly and preserving its explicit `--provider` and `--model` selectors, the overview draft and every chat draft, including the open editor's bytes, caret, recall anchor and rejection state.
+It reopens the overview or the same conversation (`Overview.Options.open`), pinning the old client's actual canonical Store explicitly and preserving its explicit `--provider` and `--model` selectors, every per-Session chat draft, including the open editor's bytes, caret, recall anchor and rejection state; the overview has no draft.
 A changed saved Store cannot redirect this restart.
 The new screen shows the run's ending line; scroll position resets.
 A run that installs nothing does not relaunch, even if it activates an already-selected Host build.
@@ -1633,13 +1637,14 @@ The TUI handoff is a cross-version contract: the departing binary writes it and 
 It belongs neither to the Store nor to a shared temporary directory.
 Before fresh-Session admission, the CLI's one relaunch-startup owner consumes the environment value once, authenticates the location and file, unlinks the file before accepting its contents, and ignores missing, unreadable, malformed, unsupported-version or nonmatching canonical Store handoffs.
 A valid handoff reenters existing work through the same startup owner as `rui session resume`, opening its conversation when present or the overview otherwise; unreadable preferences and absent local provider credentials cannot trigger fresh-session admission or login.
-The CLI owns the decoded payload through that synchronous run; the overview copies its drafts and ending line before terminal startup and never rereads the environment or handoff file.
+The CLI owns the decoded payload through that synchronous run; the overview restores per-Session drafts and the ending line before terminal startup and never rereads the environment or handoff file.
 A failed cleanup names the retained private path rather than silently losing cleanup guidance.
 
 Version 1 is compact UTF-8 JSON, with these fields in this order and explicit null/default fields:
 `{"v":1,"store":"/store","open":null,"overview":{"bytes":"","cursor":0,"anchor":null,"rejected":null},"drafts":[],"line":""}`.
 `open` is null or the six-byte Session ID to open; each `drafts` entry is `{"id":"k7m2qx","snapshot":<snapshot>}`, with no repeated ID.
-`overview` and each `snapshot` contain draft text in `bytes`, a byte-offset `cursor` at a UTF-8 boundary, a nullable recall `anchor` (`{"position":<u64>,"end":<u64>}`), and nullable `keymap.Refusal` tag text in `rejected`.
+`overview` remains in the shared v1 schema for compatibility. `Overview.zig` emits the empty snapshot shown above and ignores legacy overview snapshot bytes on restore; the unchanged generic `relaunch_handoff.zig` codec still validates and round-trips legacy nonempty snapshots.
+Each per-Session `snapshot` preserves draft text in `bytes`, a byte-offset `cursor` at a UTF-8 boundary, a nullable recall `anchor` (`{"position":<u64>,"end":<u64>}`), and nullable `keymap.Refusal` tag text in `rejected`.
 `line` is the run's new-client ending: an incompatible old-client ending becomes `Upgraded to <version>` rather than asking for another restart; only a confirmed Host restart adds `Host restarted`.
 Each draft is bounded by `SessionInput.capacity`, the Store and ending line by their existing owner capacities, and the sparse draft population by the Session ID domain, not a smaller handoff-only limit.
 The encoded size bound allows six JSON-escaped bytes per input byte plus fixed field/integer overhead for that population; the reader streams into owned decoded drafts rather than allocating the file's advertised size.
@@ -1662,7 +1667,7 @@ Closed stdout cannot abort remaining restarts: outcome counts are retained and r
 `platform` alone owns per-user runtime naming and socket enumeration, without creating a runtime directory or Store.
 Socket discovery retries transient refusal for at most 200 ms inside the shared observation deadline; failed transport alone never establishes absence.
 Under the Store lease, `platform.StoreLease.listen` atomically publishes the canonical Store path beside a standard SQLite socket as `<hash>.store` (0600) before binding.
-Clean socket retirement removes its hint only after unlink succeeds; a crash leaves the hint for read-only discovery. MySQL and launch-frame sockets publish no hint.
+Clean socket retirement removes its hint only after unlink succeeds; a crash leaves the hint for read-only discovery. MySQL and settings-document sockets publish no hint.
 For an unreachable socket, `platform` validates the private same-owner regular hint, bounded canonical Store and exact socket hash, then observes that Store's lease: only a free lease proves absence, which discovery skips silently without deleting anything.
 A held or inaccessible lease, missing or untrusted hint (including older Hosts), or connected unreadable peer remains unconfirmed and counts as a failure with its socket path and recovery advice.
 The hint is only routing information, never a liveness flag, Host registry or activation authority. Startup's `platform.reclaimStaleSocket` still requires the held Store/runtime lease; discovery never reclaims sockets.
@@ -1710,7 +1715,7 @@ Development test Stores and associated configure captures are recreated for chan
 This does not authorize recreating user Stores.
 Public activity search was added to wire label `8` after v0.53.1 shipped it: an added request needs no new label, and an older Host answers it as unknown.
 Wire label `8` changed after v0.50.0 shipped `7` when the Host dropped the `proposal_page` and `proposal_field` requests, and when the Activity page gained `kinds`, `limit` and the `received` row kind and the Host dropped the `person_message` request, which Divyansh asked for on 2026-11-03.
-The Store records the wire label it was created with in `store_meta` and opens only at the current one.
+The Store keeps no wire label (format 74): a client and a Host compare the wire the running Host reports in `host_info` and refuse each other as incompatible, so a wire change needs no Store format step.
 It has one canonical configure shape, which includes the omission-aware provider and Label fields, and one canonical Message shape, whose creating form may carry `require_model` (digest domain `rui/core/message/v4`).
 Pre-provider captures are not accepted or defaulted to Codex.
 
@@ -2414,9 +2419,8 @@ An explicit permission mode wins; naming both binding selectors and permissions 
 The defaults report includes the saved `permission_mode` (null when absent); the app settings Permissions row between Effort and Notifications shows `run without asking` for bypass and `ask first` for ask.
 Enter opens those two choices, and picking publishes through the same preferences writer as the other settings rows.
 `rui session configure` creating a Session and each overview start read it at that moment, so a choice made since an overview opened applies.
-A `/setup` that runs in an overview also moves the provider and model its next Session starts on: the shell resolves them again from the launch's own `--provider` and `--model`, as given, and the saved defaults, through the same `new_session_selection` owner the launch used, so a selector the launch named still wins and `--clear-model` falls back to the provider's recommended model, as a fresh launch would.
-That resolution counts every sign-in as ready, as a caller that cannot ask does, since the Host answers readiness at the start; when no saved or named provider decides, the default in force stays.
-An overview opened with all three selectors never changes its default this way, and what `/configure` holds still leads, as `nextBinding` says.
+When saved defaults change, the overview resolves its prospective provider/model through `new_session_selection`, retaining explicit launch selectors; fully explicit launch bindings do not follow unused saved defaults.
+`/setup` remains chat-local and has no overview command path or held per-start override.
 `/effort LEVEL` in a conversation saves LEVEL the same way once the Session accepts it, because the effort a person picks is the one they want next time; chat info’s Effort field changes only its Session.
 These edits never change an existing Session's saved binding or permission mode.
 An explicitly edited Store is validated and canonicalized before publication, allowing replacement of a deleted saved Store.
@@ -2425,7 +2429,7 @@ Independent provider/model inspection or publication does not require an unused 
 Inspection reports unavailable prospective destinations without selecting an alternate.
 HOME and the private preference path must still be valid.
 Interactive defaults output escapes dynamic fields without changing stored bytes.
-`/setup` and the overview’s `/configure` accept double-quoted values and escaped quotes, backslashes or spaces without shell expansion; invalid quoting rejects before mutation.
+The chat’s `/setup` accepts double-quoted values and escaped quotes, backslashes or spaces without shell expansion; invalid quoting rejects before mutation.
 
 The versioned private file under `$HOME/.config/rui/preferences` contains only these three optional values, the notification choice, the new-Session effort and permission mode, not credentials, Session lists or work status.
 Versions 1–3 have no saved permission mode.
@@ -2446,26 +2450,28 @@ On a terminal, bare `rui` (optionally `--store`, `--provider`, `--model`) opens 
 The overview is Rui's primary terminal surface: a client view over Session listing and host information, not a Host entity, registry or report.
 It neither creates nor resumes a Session.
 It captures canonical cwd before starting/attaching the selected Host (default Active Capacity 100), and resolves only a locally usable supported provider for Sessions it may start; an unavailable or ambiguous choice opens the app with ChatGPT and API key choices on the input row, without creating a Session.
-The same screen opens from app settings Sign-in; it drives the credential owners on a cancellable UI worker, shows a clickable device-login link or masked key entry, and keeps failures on that row.
+The same screen opens from app settings Sign-in; it drives the credential owners on a cancellable UI worker, shows a clickable sign-in link or masked key entry, and keeps failures on that row in plain words.
+Its ChatGPT choice is selected first and signs in through the browser, with a device code as the option (Divyansh chose this on 2026-11-13, "one ChatGPT sign-in, two ways to log in"): Enter reuses a usable browser sign-in, else a usable device-code sign-in, else begins the browser sign-in through the same login as `rui auth login chatgpt`.
+While it waits the row shows `Sign in at HOST`, linked to the whole address, and a masked entry for the address the browser ended on, which Enter hands to the login as the command line hands it a pasted line; a line that is not that address says so and the wait goes on.
+Tab while it waits, or after it failed with nothing saved, cancels it through the same gate as Esc and begins the device code once the cancelled attempt has settled, even when that attempt ends with a failure of its own.
+The link and the entry live in pages mapped for that attempt alone, wiped and unmapped when it settles; the browser's failure page sends the person back to Rui.
 While it is open it takes every key and click, so nothing behind it opens or navigates.
 Esc leaves it, except the first-run screen, which stays until sign-in gives a default; a screen opened from Settings always returns there.
 Its choice uses the approval row's prompt and background-only selection, including with NO_COLOR; the device row always reads `auth.openai.com/codex/device · CODE`, using the answer view's terminal hyperlink boundary.
-Either locally ready provider is selected without reinstalling its credential. Credential publication, default saving and Host activation settle once through the same owner on completion or departure, so leaving after publication cannot hide a failed default save.
+A locally ready sign-in for the chosen row is selected without reinstalling its credential. Credential publication, default saving and Host activation settle once through the same owner on completion or departure, so leaving after publication cannot hide a failed default save.
 After credential publication it saves the provider default through `saveProviderAfterLogin` and uses the existing Host start path before enabling task input.
 The shared `host_launch` result retains startup output, failure context and warnings across activation. Its reporting policy supplies terminal diagnostics after screen restoration and one plain sign-in-row line; only retryable failures offer Enter. Successful activation warnings remain a single overview notice, independently of default-save failure.
 A running Host that does not serve the chosen provider is reported, not restarted.
 When all three selectors are explicit, unreadable future defaults cannot block the overview, even after login fails to save them; otherwise the post-login choice rereads future defaults.
 A ready existing Host retains its actual capacity/capabilities; no model capability prevents opening the overview without restarting it.
-When its Host goes away the overview stays open and says so on one Host line, `■ Host stopped · r start`; `r` on an empty draft, or a click on the line, starts it through the same launch owner.
+When its Host goes away the overview stays open and says so on one Host line, `■ Host stopped · start`; a click on its start control starts it through the same launch owner. Printable `r` on the overview is ignored.
 A Host that ended without being asked to stop (a crash or SIGKILL) is started once by itself, the line reading `Host starting` meanwhile; a Host stopped by `host-stop` (pause, stop or an Upgrade's swap), by its launcher closing stdin, or by SIGINT, SIGTERM or SIGHUP (Ctrl-C on a foreground `host serve`, closing its terminal, or `kill`) is not, nor while an Upgrade holds the Host.
 The stopping Host leaves a stop record beside its Store lease, which every Host start removes; an unreadable record counts as a stop someone asked for.
-At most one automatic start runs per overview: a failed start or a second crash leaves the line to `r`, with no retry or backoff.
+At most one automatic start runs per overview: a failed start or a second crash leaves the line’s start control available, with no retry or backoff.
 
 The overview refreshes about once a second with `session list` `since`, keeping its rows and replacing those reported changed.
-`/sessions unarchived`, `/sessions archived`, and `/sessions all` choose the server-side archive filter.
-The counts line names the view only off the default, and a click on the name returns to the default view; changing it clears the previous traversal.
-`/archive` or Alt-A puts away the selected Session at once, stopping its work first when it has any; nothing asks, because `/sessions archived` and `/unarchive` bring it back.
-`/unarchive` restores the selected Session.
+The overview has no slash-command parser or view command surface; the former `/sessions` archive-view commands and counts-line view-name click are removed.
+Alt-A puts away the selected Session through the existing archive owner, stopping its work first when required. Shell archive/list/unarchive commands remain available, and `/archive` and `/unarchive` in an open chat retain their existing Session-local behavior.
 A row remains visible with archive progress until the server reports it archived.
 Archived rows and exact conversations show their archive state.
 Conversations also expose `/archive` and `/unarchive`; these validated commands and Alt-A forward semantic intents for the exact open Session even when it is absent from the listing.
@@ -2474,12 +2480,17 @@ Alt-A leaves the draft, caret and retained original unchanged.
 While a conversation is open the refreshes go on without the screen or input, for [desktop notifications](#desktop-notifications).
 Marks hold still: `?` needs you, in the attention colour, `●` active, `◌` queued, dim, `○` idle, `✓` finished, `×` failed, `■` stopped; moving to its group says a row changed.
 The overview's top line is the counts line: the wordmark, then each mark's count where it is not zero, `? 1  ● 2  ◌ 3 · slots 2/2  × 1`, with only `?` and `×` coloured and the model slots only while a Session waits for one.
-On its right sits live memory in plain text, `rui 42 MB · tools 1.8 GB`: `rui` is this TUI plus its Host (the TUI alone with no Host), and `tools` the processes below the Host, shown only while one runs; a narrow screen drops memory before the counts, `rui` before `tools`.
+Live memory reads `rui 42 MB · tools 1.8 GB`: `rui` is this TUI plus its Host (the TUI alone with no Host), and `tools` the processes below the Host, shown only while one runs.
+It shows quietly on the pinned Settings row, before the version, and as a read-only Memory row on the app Settings page, once the first reading arrives; chat info does not show it.
+Where the whole figure does not fit, `tools` drops first, then the whole figure; the pinned Settings row keeps its label and version first.
 Memory is each process's physical footprint, `phys_footprint` on macOS and `RssAnon + RssShmem + VmSwap` on Linux, summed over the Host's process tree, which one pure core, `process_memory`, walks; a tool that leaves that tree is not counted.
 The counts line replaces the headline and the Host health line; full Host facts remain available through `rui host status`.
 Divyansh chose the counts line and totals-only memory on 2026-11-09 (TUI rework plan, "What changes" O1 to O4 and "Live memory on the overview").
 Only your own Session at work (an active mark under Yours) turns a spinner, `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`, one frame per 200 ms of the monotonic clock, every spinner in step.
 Only a Unicode, colour screen spins, and a row faded while the Host does not answer holds still.
+In both the full Sessions list and the conversation sidebar, a Session with no `from_person_at` dims both complete row lines, including the mark, age and folder, unless it needs the person: it sorts under Needs you or its work failed. Every other state, stopped and stopping included, recedes in a chat the person never wrote in.
+The open empty New Session is yours and stays normal; selection and hover override dim text.
+Quietness is derived by the overview core from the listed facts, never stored or added to the wire.
 The overview wakes for frames only while a spinner is on screen, and each frame writes only the cells that changed.
 Beside its title a row says only what its mark and group leave out: on a needs-you row, the command its waiting Action would run; a retry and its countdown, without the attempt number; the running command; stopping; and a failed row's cause in a few words (`Sign-in expired`, `Out of quota`), else its saved code.
 A needs-you row reads its waiting Action's tool, then its arguments, once per Action, and names a command only for Bash, so another tool's arguments never read as a command; any other tool's row shows its mark and title.
@@ -2490,15 +2501,22 @@ One line map, `listItem` in `src/overview_view.zig`, names each list line for dr
 Each drawn row keeps that name, so a click means what the person saw even when the list changed since the frame, and a Session gone by then opens nothing.
 The Sessions list, a panel and the model picker are three widgets in the list's place; the screen shows the one the core names (`State.listArea`), and only the Sessions hear a press.
 Ctrl-X sends an ordinary `session stop` for the selected row, with the same capture and recovery as the CLI command.
-Every input takes one route, the one the core's input mode (`State.inputMode`: compose, frozen or choice) names, and the core steps once with what it made and the draft as it then stands.
-In compose mode the shell's line editor applies the input with the overview's one key table (`keys` in `src/overview_view.zig`); no key is caught ahead of the editor.
-While a start awaits its answer the composer is frozen: the table's keys still act, nothing edits, and a failed start keeps its text.
-At the model picker's sign-in choice the arrows and Enter are the choice's own and the table's keys keep their meaning, while typing and a paste go to the line editor, which takes a paste from its start to its end.
-The core holds the terminal's size, which the shell steps before each frame, and one pure `layout` divides the screen into the top, the list, the picker and the input; `render` draws from it, and the core acts on the picker only while it shows it.
-Enter's start effect borrows only until the next step; the shell copies its text and held settings into one allocation its job owns, so Esc may clear the draft and the settings while the start runs.
+List input reaches `overview_view.step` as a semantic action from the list's one key table (Right is `open_session` there), Enter or ignored input; clicks carry the Session, New Session or Settings identity drawn in the frame.
+Enter on a Session row opens it, and Right does the same on a Session row and nothing on New Session or Settings; on the row of the chat already open, either one, or a click on that row, returns keys to that chat's input instead, keeping its draft and anything it presents, such as Chat Info, and sends the Host nothing.
+Printable keys and bracketed paste are ignored: no editor, hidden draft, frozen-editor state, command list, skill cache or duplicate footer focus exists on the overview.
+Arrows, Home and End keep whole-list navigation, including the pinned New Session and Settings rows; Settings is the penultimate row immediately before the footer.
+The core owns selection, opening admission and pending/uncertain creation; the shell applies its effects.
+The core holds the terminal’s size, and shared screen composition accepts the actual bottom widget: the overview’s status/footer, not a manufactured editor.
+Without an open chat, the overview’s list uses the full width at every terminal size, with no empty compose pane. The wide list beside an open chat or its settings retains its existing row navigation and pointer spans, without an input of its own.
+At 100 columns and wider, keys go to the list or to the chat beside it, one at a time (`app_input`'s list focus).
+Left on an empty chat draft gives keys to the list and leaves the chat open and drawn; a draft with text, even with the caret at its start, takes Left as an edit.
+Below 100 columns no list sits beside the chat, so Left on an empty draft leaves the chat as Esc does; Esc and Ctrl-G leave the chat at every width.
+While the list has keys, its selected row takes the focused background and the chat's prompt shows a quiet `›` with no caret; while the chat has keys, the open chat's row keeps a dimmed, inactive selection.
+A click on the list gives it keys, and a click in the chat gives keys back to the chat's input, by the same transition as Enter on the open chat's row.
+Divyansh chose this list focus, Left on an empty draft and Esc leaving at every width in November 2026 (PR #1400).
 The rules table says which work states Ctrl-X may stop: pending, working, retrying, Bash and approval.
 Ctrl-X on such a row opens a confirm prompt in the core's state; a second Ctrl-X returns the `stop` effect, Esc only cancels, and any other input cancels before it acts.
-Every start and stop is an entry in the core's request ledger (`State.requests`) until a definite answer removes it; a full ledger refuses new requests and evicts nothing, and departure prints every entry still left.
+Every creation and stop is an entry in the core's request ledger (`State.requests`) until a definite answer removes it; a full ledger refuses new requests and evicts nothing, and departure prints every entry still left.
 A stop's answer asks for a listing at once, so `■ stopped` follows within one refresh.
 While a stop of a row is in flight or unconfirmed, the row reads `Stopping…` and takes no other stop; Ctrl-X then names the stop's recovery.
 A retry that has fallen due reads as the pending work it became in its words, mark and colour alike.
@@ -2511,7 +2529,7 @@ Every job's answer is taken there, so a stop's notice shows in the conversation 
 A canonical Store failure in the overview's own step or job, a listing's included, then ends the overview as it does there, with no guidance to resume the Session.
 A canonical Store failure in any overview read or request ends the overview after the terminal is restored.
 Keys are read while output waits for terminal credit, so Ctrl-C still leaves.
-Ctrl-D on an empty composer, or Ctrl-C, leaves the overview, and the Detached notice names the command that opens it again.
+Ctrl-D or Ctrl-C leaves the overview, and the Detached notice names the command that opens it again.
 
 The overview paints its own look; the conversation and the shell keep the terminal's.
 `overview_view` holds the two Khadi skins as data, one palette table each, and `render` names only roles (text colours and grounds).
@@ -2520,25 +2538,24 @@ The core chooses night unless the answer is light.
 Each frame clears every line to the skin's ground, draws its spans in 24-bit colour under `COLORTERM=truecolor` or `24bit` and in the nearest 256-colour entries otherwise, and ends in an SGR reset, so no exit path has colours to restore.
 `NO_COLOR` frames carry no colour at all: the band and the selection are reverse video.
 
-Typing in the overview's composer and pressing Enter starts a new Session with that text as its first Message, through one captured `session start` command: atomic configuration plus Message admission with the full Workspace, exact provider/model, Bash and the saved permission mode (or `bypass` when absent), unless the composer's `/configure` start settings select otherwise.
-The Store returns the allocated ID, and the overview opens that Session.
-The same enumerable handle recovers that ID after a lost reply; a second Enter is a new intent, so a start whose reply is lost clears the composer, says in the overview that the start is unconfirmed, and names its recovery command after the terminal is restored.
+Enter on the pinned `+ New Session` row (Home then Enter), or one click on it, captures Configure only, creates an empty Session with zero Messages and opens that reference through the existing `SessionFrontend`, with its chat input focused.
+The core admits creation and emits its copied provider/model binding. While interpreting that effect, the native owner reads saved preferences once and copies effort and permission mode (or the read failure) into the queued creation snapshot; neither a default-state effort cache nor the worker rereads them. `configure_input.ConfigureInput.completeCreation` completes that snapshot with the Workspace and provider/model; captured Configure and `Requests.sendCaptured` use the existing request ledger.
+No Message or Turn receipt is synthesized. Only sending text from the chat admits a Message.
+The single pure list projection in `overview_view.visible` omits a listed row whose `first_message` is null, except when it names the currently open Session.
+The shared `overview_view.title` names that current empty row `New Session`, using the pinned control’s words rather than its raw reference; first Message admission restores the normal Label/first-line/reference naming precedence.
+The shared row rendering and selected-line projection derive selection from the current conversation, otherwise the overview selection; canonical list membership is still required before a row is drawn.
+Changing model or effort without admitting a Message does not make that row visible after leaving the chat.
+This is presentation only: Configure-created Sessions and their observed metadata stay stored and remain available through CLI list, inspect and resume; leaving does not delete, archive or reconfigure them.
+While that creation is pending, Enter and clicks cannot duplicate it; pending state is derived from the ledger entry.
+One creation settlement handles accepted, rejected and uncertain Configure outcomes: acceptance retains the known reference before opening, rejection reports the failure, and uncertainty retains the capture key for recovery without creating a new intent.
 Successful Host startup and request receipts stay out of normal output; chat info exposes chat settings, `/requests` exposes recovery records, and `rui session inspect` retains full machine-readable inspection.
-A capture failure creates no transmissible intent and keeps the composer's text.
+A capture failure creates no transmissible intent.
 Non-TTY entry rejects before Store, Host or request mutation.
 Existing explicit Session entry and scripted commands retain their saved permission modes.
 
-The overview composer captures a `require_model` condition in its `session start` Message command, not an observed Host instance.
-A Message command that creates a Session may carry it; a Message to an existing Session may not, and ingress rejects it.
-The receiving Host supplies its actual model capability to the Store's atomic creating admission; for a new key, missing capability is a saved rejection with no Session.
-An identical key replays its saved acceptance or rejection regardless of later Host capability, and changing the condition with the same key conflicts.
-Low-level configuration without the condition remains available for offline setup.
-This closes Host replacement between preflight and submission without binding Store-wide recovery to a particular process.
-
-Bare `rui` accepts no initial Message operand.
-Terminal input goes through the overview composer, which is a conversation's line editor: it edits, rejects and ends lines as a draft does.
-The overview keeps Esc, Ctrl-C and Ctrl-X, and the arrows, Home and End select rows while the composer is empty; Up and Down past a draft's lines select rows too.
-Before Enter, its `/configure` edits only the start settings of the Session that Enter will start.
+Empty-Session creation captures `require_model` on Configure rather than binding to an observed Host instance; the receiving Host and Store own capability admission and replay of that captured outcome.
+Scripted Message commands that create a Session retain their existing capability condition, and low-level configuration without the condition remains available for offline setup.
+Bare `rui` accepts no initial Message operand and has no overview command path, including `/configure` or unknown-command handling.
 The Model field of app settings opens the shared `model_choice.zig` inline field editor and match list, also used by chat info.
 The filter replaces the field’s value at the normal value column; there is no separate `Filter:` row.
 Matches start under the field at the shared panel indent (current mark, one-cell gap, then the model name), shrinking to the number of matches within the viewport.
@@ -2548,14 +2565,16 @@ The compact context-size column follows the longest model name actually shown, n
 The overview's worker reads the Host's [`/v1/model-list`](#public-session-activity), so the screen never blocks on a model list.
 The choice uses a revisioned snapshot and validates it before drawing or handling an event; replacing or releasing a list closes the old choice before it can use retired storage.
 It falls back to the compiled model catalog when no live list is available.
-The short sign-in labels come from provider facts: "Codex" (`codex`), "ChatGPT" (`chatgpt`) and "API key" (`openai`), distinct from their longer prose names.
-The selected sign-in scopes the models offered; typing filters, Up and Down move, and Enter picks a model through app settings' typed backend.
+The short sign-in labels come from provider facts: "ChatGPT" for both `codex` and `chatgpt`, and "API key" (`openai`), so app settings' **Sign-in** row reads "ChatGPT" for either way into ChatGPT; only the longer prose names ("ChatGPT (device code)", "ChatGPT", "OpenAI") tell the ways apart, where that matters.
+Every model list scopes to one sign-in: app settings and a new chat's Model choice list the models of the sign-in new Sessions use, which is the one logged in last, and chat info lists the Session's own, which is fixed for its life; so a person sees one ChatGPT, and a chat that signed in with a device code keeps its models while new chats use the browser (Divyansh chose this on 2026-11-13, "one ChatGPT sign-in, two ways to log in").
+Typing filters by account: `chatgpt` and `codex` both keep a ChatGPT sign-in's rows, either way in, and `api` keeps an API key's; `openai` stays a word of model IDs. `--provider codex` and every command that names a provider keep their meaning.
+Typing filters, Up and Down move, and Enter picks a model through app settings' typed backend.
 An empty match keeps the field's choice open with feedback rather than saving an invalid model.
 Every successful pick saves the default for future Sessions through the same preferences writer as `rui defaults configure`; existing Sessions keep their settings.
 Esc closes the choice before app settings, and leaving without a pick writes nothing.
 A pending or failed save is shown on the Model field; a failed save is not silently retried.
-The overview's `/configure` remains a per-start override; `nextBinding` owns what the next start uses, and explicit launch selectors still take precedence over saved defaults.
-The saved effort applies to the next start unless a per-start override or fully explicit launch binding supplies its own choice; `StartEffort` owns that decision.
+The prospective binding comes from the launch selectors and saved defaults, without an overview per-start override.
+The admitted creation snapshot supplies saved effort only when the launch uses defaults and has a resolved binding; `ConfigureInput.completeCreation` completes the new empty Session’s captured configuration. Saved permission and effort are copied from the same admission-time preference observation. App Settings reads its saved page values directly; the removed overview footer has no standalone Settings choice or cached creation-effort projection. Per-Session footer choices remain owned by Chat Info.
 A start the Host refuses for want of the start's sign-in (`model_capability_unavailable`) says which sign-in is missing and its login command.
 Scripts use `session start` with stdin.
 A first word naming a former top-level command (for example `configure`, `message` or `recover`) is refused with its resource-first replacement before capture, Host contact or terminal entry.
@@ -2576,22 +2595,33 @@ Codex owns the local identifier syntax: 1–256 printable non-space ASCII bytes,
 Syntax validation is the only model check: an ID Rui's [list](#supported-model-ids) lacks runs with default limits, as the picker offers it from the provider's live list (Divyansh, 2026-11-01, picker plan "Where the list comes from").
 A bad ID fails at the provider’s first request, whose remedy is the Model field in app settings.
 Old pins remain readable and clearable, never substituted.
-The built-in providers are Codex, OpenAI and ChatGPT; they share one catalog and the recommended model `gpt-6.1-sol`.
+The built-in providers are ChatGPT by device code (`codex`), ChatGPT in a browser (`chatgpt`) and OpenAI (`openai`); they share one catalog and the recommended model `gpt-6.1-sol`.
+A person sees one ChatGPT sign-in with two ways to log in: `rui auth login chatgpt` opens the browser, `--device-code` uses a code instead, new Sessions use whichever was logged in last, open Sessions keep theirs, and saved device-code settings carry over (Divyansh chose this on 2026-11-13, "one ChatGPT sign-in, two ways to log in"). The two stay separate providers on the wire, in the Store and in preferences, so `--provider codex` still selects the device-code route.
+Three places still say "codex": the device-code page `auth.openai.com/codex/device` and ChatGPT's own "device code authorization for Codex" setting, which are OpenAI's names, and `--provider codex`, which scripts use to choose the device-code route.
 `rui defaults inspect` shows the prospective choice, each provider's local Rui-owned credential state (`local_credentials` in JSON) and separately the selected Store's actual readable Host capabilities.
 It never refreshes, contacts a provider, creates a Host/Session or imports another CLI's credentials.
-The bare-entry provider chooser can begin Codex device login or defer; explicit `rui auth login codex` uses the same publication rule.
+The bare-entry provider chooser can begin the browser or device-code login or defer; explicit `rui auth login chatgpt`, with or without `--device-code`, uses the same publication rule.
 Authentication remains an explicit shell operation, separate from the conversation.
 Denial/expiry leaves preferences unchanged.
-After secure credential installation, explicit `rui auth login PROVIDER` atomically fills its own provider when no provider default exists, and replaces a saved default only when the provider table says the signed-in provider supersedes it: the same account signed in an older way, so `chatgpt` supersedes `codex`.
-Replacing clears the model saved for the old provider, as any provider replacement does; every other saved choice stays, even an unsupported one, and existing Sessions keep their binding.
-The receipt says which happened; when the default stays on another provider it names `rui defaults configure --provider PROVIDER`, and when a replacement cleared a pin it names `rui defaults configure --model ID`.
-Choosing a provider in the bare-entry chooser saves it as the default, leaving the model unpinned and preserving an existing choice even if unsupported.
+After secure credential installation, explicit `rui auth login PROVIDER` atomically fills its own provider when no provider default exists, and replaces a saved default only when the provider table says it is the other sign-in to the same account, so a browser sign-in replaces a saved `codex` and a device-code sign-in replaces a saved `chatgpt`.
+Replacing keeps the saved model, as any provider change within one account does; every other saved choice stays, even an unsupported one, and existing Sessions keep their binding.
+The receipt says which happened: "New Sessions will use this sign-in." when it filled the default, with "; Sessions already open keep theirs." when it replaced one, and when the default stays on another provider it names `rui defaults configure --provider PROVIDER`.
+A ChatGPT sign-in ends with `Start a conversation with: rui`, or with `rui --provider PROVIDER` when the default stayed on another provider.
+`rui auth logout chatgpt` ends both ways in (Divyansh chose this on 2026-11-13) and settles one outcome for each: ended, already absent, or not ended.
+Its stdout says "Rui: Signed out of ChatGPT." when it ended at least one and could end every one that existed, "Rui: Not signed in to ChatGPT; nothing changed." when neither existed, and names the way it ended, "in the browser" or "with a device code", when the other could not be found, read or changed.
+When ChatGPT did not confirm the browser revocation, that stdout line goes on to say Rui deleted its tokens but ChatGPT did not confirm it ended the browser sign-in, and to disconnect Rui in ChatGPT's settings; the sign-in is ended locally, so this alone exits 0, as before.
+Each way in that could not be ended gets one stderr line, and the command then exits 1: a credential Rui could not read or change says that sign-in is still there and to inspect it, and a credential path Rui could not resolve says it could not end that sign-in and names the variable that sets the path (`RUI_CHATGPT_CREDENTIAL_FILE` or `RUI_CODEX_CREDENTIAL_FILE`, else HOME); none of these stops the other way in from being ended, and only a bad invocation, such as an unusable test issuer, is refused before either is touched.
+Afterwards `rui auth status` reads as if neither was ever signed in, and a running Host refuses new work on either route as it does for any missing sign-in; chats already open show the expired sign-in band naming their own login command on their next request.
+Logout leaves the saved default provider and model as they were; like any unavailable saved provider, it stays selected for repair until the next login.
+`rui auth logout` with any other provider, `codex` included, is an invalid invocation.
+`rui auth status` and the setup report give ChatGPT's two ways in one line each, saying nothing of one that is missing unless both are, in which case one line names `rui auth login chatgpt` and its `--device-code` option; setup's `Provider:` and `Next Session:` lines show a known provider by its prose name, while JSON keeps the raw names.
+Choosing a provider in the bare-entry chooser saves it as the default, never pinning a model and keeping a saved one only within the same account, as any provider change does, and preserving an existing choice even if unsupported.
 Failure of that independent preference save is reported without claiming credential rollback.
 Local usability is not proof of remote acceptance.
 Existing Sessions retain their exact saved binding despite changed preferences, recommendations or credentials.
 
 Setup observes local credential readiness once before a save and supplies that capability to provider/model resolution under the preference lock; a model-only update with no saved provider can choose the sole locally usable provider.
-It resolves edits against the original saved provider/model pair, so replacing a provider clears its old model without persisting a recommendation; Store-only edits preserve stale provider/model values without checking current capability support.
+It resolves edits against the original saved provider/model pair, so replacing a provider with one in another account clears its old model without persisting a recommendation, while a change between the two ChatGPT sign-ins keeps it; Store-only edits preserve stale provider/model values without checking current capability support.
 Local inspection opens a credential snapshot without blocking on a private non-file path.
 Configured and renewal-due credentials are locally usable; renewal due does not require fresh login.
 An opaque token becomes renewal due eight days after its last successful exchange, and a token with known expiry becomes renewal due at that timestamp.
@@ -2603,7 +2633,7 @@ Only explicit choices are saved; an absent model inherits the recommendation whe
 Keep retains a pin for the unchanged provider.
 `rui defaults configure --clear-model` and `/setup --clear-model` remove only the saved model; they are mutually exclusive with `--model`, including when flags are repeated or reversed.
 Clear preserves the saved provider, even an unsupported one, unless an explicit `--provider` replaces it; it never discovers a provider or persists a recommended replacement model.
-Login never sets a model pin; it fills an unset provider or replaces only the provider it supersedes, clearing that provider's pin.
+Login never sets a model pin; it fills an unset provider or replaces only the other sign-in to its account, keeping that pin.
 Clear must pass the same HOME, syntax, private-file and atomic-publication checks as other edits, without checking an unused Store's availability.
 Store/provider clearing is outside this unit.
 
@@ -2635,7 +2665,7 @@ Exit, interruption or a disconnected caller never cancels Host work.
 App owns keyboard and paste decoding for the invocation; draft resets, bank switches and a permission card never replace its input runtime.
 Each chat keeps its own draft bytes, caret, recall anchor and rejection when switching through the list, returning to the overview or following a Session link; a newly opened chat starts empty unless it has a saved draft.
 Only inactive drafts with text or other draft state own storage in this invocation, with exact-length text keyed by the Session reference; taking one transfers it to the active editor, and sending clears that chat's draft.
-The overview's new-Session composer stays independent, and quitting forgets all drafts without writing them to the Store or disk.
+The overview has no draft. Quitting forgets per-Session drafts without writing them to the Store or disk, except for the compatible inline-Upgrade handoff described above.
 Terminal replies reach App rather than the editor, and an editor that did not see a paste begin rejects its remainder.
 Its caller supplies storage: up to 65,536 UTF-8 bytes for a Message.
 Validated submission borrows complete bytes; [staged persistent input](#staged-persistent-input) owns sealing, next-draft custody and Admission.
@@ -2656,8 +2686,8 @@ Option/Command-Backspace may be consumed by the terminal; only supported receive
 No Host input policy, completion or configurable keymap is added, and recalling sent Messages keeps no history of its own.
 
 An incomplete CSI or SS3 sequence also times out and ends the caller, rather than treating its delayed tail as Message text; bare ESC alone may expire without rejecting the draft.
-Each screen has one key table over the keys in `src/keymap.zig`: Esc, Ctrl-C, Ctrl-D, Ctrl-G, Ctrl-N, Ctrl-O, Ctrl-P, Ctrl-R, Ctrl-X, Up, Down, Shift-Up, Shift-Down, PgUp, PgDn, Home, End and Ctrl-End.
-The editor edits with such a key while the draft gives it a use (Up and Down with a draft line in that direction; Home, End and Ctrl-D with any draft) and otherwise returns the screen's action for it, or nothing where the table binds nothing.
+Each screen has one key table over the keys in `src/keymap.zig`: Esc, Ctrl-C, Ctrl-D, Ctrl-G, Ctrl-N, Ctrl-O, Ctrl-P, Ctrl-R, Ctrl-X, Up, Down, Left, Right, Shift-Up, Shift-Down, PgUp, PgDn, Home, End and Ctrl-End.
+The editor edits with such a key while the draft gives it a use (Left and Right always; Up and Down with a draft line in that direction; Home, End and Ctrl-D with any draft) and otherwise returns the screen's action for it, or nothing where the table binds nothing; a choice drawn in place of the draft takes the arrows its screen leaves unbound.
 A rejected draft changes no key's meaning.
 In a conversation Esc and Ctrl-G return to the latest view and, from there, to the overview, and Ctrl-X stops the Session as on the overview. End on an empty draft and Ctrl-End return to the latest view and stay in the conversation; End with a draft still edits its current line.
 Recalling sent Messages (approved 2026-10-31; keys chosen 2026-11-01): in a conversation Ctrl-P on an empty draft brings back the newest Message the person sent, for editing, and Ctrl-P again goes further back; Ctrl-N goes forward, and past the newest the draft is empty again.
@@ -2819,11 +2849,11 @@ Persisted model syntax and transport encoding remain independent of the compiled
 
 Explicitly addressed `rui session resume` and a Session opened from the overview use one conversation-first `SessionFrontend`, without a compatibility alias.
 The overview owns the terminal and lends it to that frontend.
-It holds no existing Session's draft or submission state; its composer's draft and start settings belong to the Session it has not yet started.
+Per-Session drafts stay with `session_drafts` and the active `SessionInput`; the overview has no composer or prospective draft state.
 The former preview replaces the parallel per-prompt conversation and interactive allow/deny/later loop; one-shot commands, the provider/login chooser and diagnostics retain their own contracts.
 This consolidation changes no Store selection, capture format, backend or Host authorization rule.
 Fresh Sessions use Bash and `bypass`; existing Sessions retain their saved bindings and permission modes.
-Sessions started from the overview composer are fresh Sessions.
+The overview’s New Session action creates a fresh empty Session; the first Message is sent only from its chat.
 Explicitly ask-configured Sessions use the same allow-once/deny path, without special fresh-Session behavior.
 
 The frontend's caller owns the terminal and lends it.
@@ -2927,7 +2957,7 @@ Every page carries `queued`: the field came with wire version 3, and a frontend 
 Wire version 10 makes the refused-send target required and nullable under the [public activity contract](#public-session-activity); non-null peers keep their canonical ID grammar.
 
 Wire version 14 requires the `chatgpt` provider key, and supports the `chatgpt_plan` route, in `host_info`'s `capabilities.providers`; ordinary clients and Hosts on different wire versions refuse each other.
-A wire bump also appends a Store format step because the Store saves its wire label: format 72 moves the saved label from 15 to 16 on SQLite and MySQL, without changing ordinary rows.
+Until format 74 the Store saved its wire label, so each wire bump also appended a Store format step (format 72 moved the saved label from 15 to 16); format 74 deletes the label, and a wire bump now needs only the historical Host-info profile below.
 The `model_call` Activity rows shipped in v0.69.x under wire version 13 without a bump, although 13 had already shipped in v0.67.x; a 0.69 client asking a 0.67 Host for those rows therefore failed with `InvalidCursor` instead of refusing the incompatible Host.
 `tests/ci/test_wire_version.py` requires a wire version greater than the newest release's whenever generated `openapi.json` changes, ignoring only `info.version` and documentation-only `description`, `summary`, `example` and `examples` annotations (never named schema entries or literal wire data); wire constraints such as `x-rui-*` bounds remain part of the comparison.
 Upgrade and restart-all control recognize wire 13 as a historical Host-info profile: v0.69.1 may omit `chatgpt`, while v0.69.2 reports it. Historical observation never grants ordinary client readiness; exact-instance shutdown uses the observed Host's own executable before the new build starts it.
@@ -3015,7 +3045,7 @@ Headings, fixed status fields and unkeyed summary aggregates remain inert.
 Rui does not enable alternate scroll mode 1007.
 libvaxis `Window.print` lays out and wraps text: words wrap at spaces, and continuation rows hang under leading spaces and a list or role marker, up to half the width.
 Rui's pinned vaxis patch keeps wide clusters, window-wide words and words crossing a style change off the row edge.
-The feed window keeps retained bytes and styles; Feed draws only visible rows, and the Composer shares the draft layout across both screens.
+The feed window keeps retained bytes and styles; Feed draws only visible rows, and the chat Composer owns the draft layout; the overview has no Composer.
 One `vxfw.App` owns terminal input, modes, output and cell allocation for the Root and its screens.
 Switching screens does not restore or lend the terminal.
 Resize keeps the first browsed line in view and preserves draft bytes and logical cursor; an Action restarts from its top.
@@ -3047,7 +3077,13 @@ Folder and Context are read-only; Folder shortens HOME to `~` and fits long path
 It first keeps a suffix of whole path components with a leading ellipsis; when the basename itself is too wide, it keeps the longest grapheme-aligned basename suffix that fits after that ellipsis.
 It never arbitrarily cuts the right edge or shows an ellipsis alone instead of all the name.
 A blank row separates the fields from Rename, Archive and Copy last answer, even when the actions stack.
-Up and Down visit selectable fields and actions, and Enter opens a choice or runs the action.
+Keys move focus over what is drawn (`chat_info_focus`): Effort, Permissions, Tools and Model, then the actions; Folder and Context take no focus.
+Up and Down move between rows: Down from Model reaches Rename, and Up from the action row returns to Model.
+Left and Right move between Rename, Archive and Copy last answer on their one row, stopping at either end; when the actions stack, each is its own row, Up and Down move between them, and Left and Right do nothing.
+Tab and Shift-Tab step through every focusable item in order and wrap from Copy last answer to Effort and back.
+Enter opens a choice or runs the action; moving focus never opens a choice.
+After a successful copy, Copy last answer reads `Copied` until the next key, a newer reply in the Footer or the notice's expiry; a refused or failed copy keeps `Copy last answer`.
+Divyansh chose arrow and Tab movement and the `Copied` label in November 2026 (PR #1400).
 The panel contributes no internal footer: its one footer substitutes for the normal chat footer after the input’s lower divider on the physical last row, leaving the draft between panel and footer and no blank notice row below it.
 Permissions names `run without asking` and `ask first`; Tools selects from the built-in tool set.
 Model opens that shared inline editor and compact match list for this Session’s provider, with type-to-filter, Up/Down and Enter to save.
@@ -3064,7 +3100,7 @@ That UI-owned repair scratch is independent of the reader’s staging file, so o
 Session-wide detach, stop, archive and original-recovery keys retain their conversation owner while the panel or a nested choice is open; navigation and editing never reach the hidden draft.
 An environment-too-large notice also has clickable `details`; that page, not info, owns the refused capture and its repair instructions.
 Scripts retain `rui session inspect` and `rui session configure` for full inspection and settings not exposed in the panel, including compaction overrides.
-`/status`, `/configure` and `/model` are absent from conversation parsing, the slash list and completion; the overview also has no `/model`.
+`/status` and `/configure` remain absent from conversation parsing, the slash list and completion; the overview has no slash commands at all.
 The default model is the Model field of app settings, not a second command path.
 
 Complete Action inspection is staged in an independent unlinked file before choice readiness.
@@ -3083,21 +3119,25 @@ Typed chat info configuration and the `/setup` and `/result KEY` commands run on
 The slash commands’ unchanged CLI owners write complete stdout and stderr to the inspection scratch file.
 Output of up to two lines becomes a notice under the input without the CLI's `Rui: ` prefix, with `rui: ` diagnostics marked `!`; longer output opens as an inspection page under the `Browsing · Esc returns` heading.
 The Session screen stays in place and no command reads terminal input.
-`/discard` and `/recover KEY` answer with a notice; an unknown command shows `! Unknown command /NAME`, and a known one given an argument it does not take shows its usage, as `! Usage: /copy [code|file]`.
+`/discard` and `/recover KEY` answer with a notice; a known command given an argument it does not take shows its usage, as `! Usage: /copy [code|file]`. `slash_commands.zig`'s `draftOf` alone says what a draft is, from its bytes and the complete command grammar: a command line (its first word is exactly a command's name, listed or not), one unfinished `/word` and nothing else, or a Message, which is every other draft, `/review this change` and `//literal` included. The editor's Enter, Esc and Ctrl-G, completion and the list all ask it; none keeps its own test for a leading `/`. Enter runs a command line and sends anything else through ordinary Message admission, unchanged. The Host resolves skill references against the Session's complete saved catalog; a name absent from that catalog stays literal agent text, not an unknown-command notice.
+
+`/new` and `/clear` are identical no-argument navigation commands: retain the old chat, retire its frontend normally, then invoke the same overview New Session transition and captured Configure creation owner. Neither creates a Message or deletes history. Both list as `start a new chat`.
+`/model` is a no-argument request for the same model choice that the footer button opens. Its semantic footer admission and choice preparation are shared; the existing tick/read boundary opens it once Current and the borrowed model source are ready. Choosing a model calls chat info’s existing typed Configure edit and re-reads Current for the footer; no model CLI path or second worker is added.
+The bounded list holds the twelve listed commands plus the loaded skill preview. Suggestion reads, including absent, failed and truncated previews, never decide whether a line is a Message. The Session catalog alone owns skill membership; the complete command grammar, including unlisted `/discard` and `/recover`, takes precedence over same-named leading skills. Mid-Message references remain skills. The draft's first word lists the commands and then the skills its name starts, both read from the caret's word; a later word lists skills alone, and a command line's later words list that command's own choices. `skill_completion.enter` decides what Enter or a click does with the highlighted row: a row runs only where its word ends the draft, so the line run is the line shown, and anywhere else it only fills the word in.
 
 A command list appears when you type "/", built from the same table the command parser uses. /effort and /rename submit the corresponding Session configuration edits. (Divyansh approved this on 2026-10-31, front-end plan row 6.)
 
-`slash_commands.zig` holds one table per screen of each command's name, argument shape and plain listed flag; the parser, command runner and list read it. The `/` list shows only names as typed, with fixed choice words in quiet colour separated by ` · `; choice and option rows are names only too.
-`/requests`, `/recover`, `/result` and `/discard` are for recovery: they work, but the list leaves them out (Divyansh, 2026-11-02).
+`slash_commands.zig` holds the conversation’s table of each command's name, argument shape and plain listed flag; the parser, command runner and list read it. The `/` list shows each listed chat command with its short plain description beside loaded skills. Palette descriptions use the same terminal-safe, grapheme-aware ellipsis fitter as overview list rows, with the current terminal capabilities. Choice and option rows remain names only.
+`/requests` and `/result KEY` are listed alongside the other chat commands. Only `/recover KEY` and `/discard` stay unlisted behind the failed-send line (Divyansh, 2026-11-13).
 `/requests` still writes its page of every recovery handle, and while that page shows over an empty draft the list's rows offer what can be done with them, each row the command line it runs, so a pick does what typing it does and no key is typed (Divyansh, 2026-11-02).
 The first row is `/recover KEY` for this conversation's own original only while a retry would go now and could only send a Message: a plain Message whose Admission is unconfirmed, nothing in flight and no Action waiting; never a decision or a Message that carries one.
-Then come each saved Message's `/result KEY`, newest saved first with its local `HH:MM` (23 of them, the list's rows less that one), the original included when it has no `/recover` row.
+Then come each saved Message's `/result KEY`, newest saved first with its local `HH:MM` (bounded by the list’s rows less that one), the original included when it has no `/recover` row.
 A row offers only what applies to it: a saved Message's answer is the one result a page reads, and a conversation's `/recover` retries only its own unconfirmed original, so other saved requests and a rejected original, which `/discard` releases, have no row.
 Up and Down move the highlight, Enter runs the row's line and Tab puts it in the draft; Esc closes the rows until the draft changes, then leaves the page; typing gives their place to the draft's own list.
 Rows that change under an unchanged draft are a new list, which no key acts on until a frame draws it.
 Typed `/recover`, like Ctrl-R, retries nothing while an Action waits.
 The list shows while the draft is one line that starts with one `/`: while it holds no space, a row for each command the word starts; after a command's name, a row for each choice the word being typed starts.
-The choices are fixed words, never free text: `/copy`'s `code` and `file`; `/effort`'s levels, those the screen's model offers, the one in force marked `current` (the Session's model in a conversation, the next Session's in the overview, none before a read names it); and for `/setup` (plus `/configure` in the overview) each option, then after an option the lowercase words its shape names, so `--permission-mode` offers `bypass` and `ask`, `--compaction-trigger` offers `default`, and `--reasoning-effort` offers the model's levels and `default`; `/setup`'s saves a default for any model, so it offers every level (Divyansh, 2026-11-02: "every fixed choice").
+The choices are fixed words, never free text: `/copy`'s `code` and `file`; `/effort`'s levels, those the Session's model offers, the one in force marked `current` (none before a read names it); and for `/setup` each option, then after an option the lowercase words its shape names, so `--permission-mode` offers `bypass` and `ask`, `--compaction-trigger` offers `default`, and `--reasoning-effort` offers the model's levels and `default`; `/setup`'s saves a default for any model, so it offers every level (Divyansh, 2026-11-02: "every fixed choice").
 A quote or a backslash in the words ends the list: that text is the shell grammar's to read.
 The rows sit right above the input, in the rows a growing draft would take, under the rule, so the input never moves; at most a third of the screen, less the input's own row.
 When more match than fit, the last row says `+N more · type to narrow`, unless the list has only one row, which then shows the highlighted match.
@@ -3105,27 +3145,25 @@ It goes when nothing matches.
 One row is highlighted, reversed as the Action's choice is: the first, until Up or Down moves it; any edit, a word Enter adds among them, returns it to the first, the rows follow it, and a list that narrows under it (another model, say) highlights its last row.
 Tab adds the rest of the highlighted word, and a space when another word may follow; in a draft no list is for, or over a partial character or a rejected draft, Tab does what it always did.
 A word Tab or Enter adds that the draft cannot hold is refused as a typed one is.
-Enter in a shown list takes the highlighted row: a command with nothing more to say, or a fixed value, runs the line it completes; a command that needs a word (`/effort`, `/rename`, or the overview’s `/configure` alone, which only states its usage) or an option that takes a value only gets its word and the space, so the next list shows.
+Enter in a shown list takes the highlighted row: a command with nothing more to say, or a fixed value, runs the line it completes; a command that needs a word (`/effort` or `/rename`) or an option that takes a value only gets its word and the space, so the next list shows.
 So `/copy` alone, taken from the list, copies the answer, and `/copy ` then Enter copies its highlighted choice, `code` first.
-Esc or Ctrl-G, when the latest frame showed a command list, cancels the command and clears its draft; a skill or recovery list closes without consuming Message text.
+Esc or Ctrl-G, when the latest frame showed a list, closes it; it also clears a draft that is a command line or one unfinished `/word`, and never one that is a Message, whichever word the caret is in.
 Submitting a command consumes its draft whether it is unknown, succeeds or fails; a command refused by a hold keeps its draft.
-`command_input.zig` owns that ending rule for both screens; otherwise Esc and Ctrl-G do what they always did.
+`command_input.zig` owns that ending rule for the chat; otherwise Esc and Ctrl-G do what they always did.
 While the list shows, Up and Down move its highlight; otherwise they scroll the conversation.
-The overview lists its own commands, `/archive`, `/configure`, `/rename`, `/sessions`, `/setup` and `/unarchive`, the same way, giving the list rows the Sessions above can spare, and its Up and Down move the highlight while the list shows (Home and End stay the draft's); there too Esc and Ctrl-G cancel a command whose list the latest frame showed, and the line under its input says what Enter and Esc do to the draft (Divyansh, 2026-10-31: the two screens behave the same).
-Both screens share `/rename` and `/setup`, and both answer a name no command has with `! Unknown command /NAME` (Divyansh, 2026-11-02: "Same commands both screens").
-There is no `/help` command or `?` shortcut: a question mark is ordinary draft text, including on an empty draft.
+The overview has no command list or unknown-command notice: printable `/` and the following text are ignored there.
+Chat-local commands, including `/rename` and `/setup`, keep their existing parser, completion, dispatch and draft-ending behavior.
+There is no `/help` command or `?` shortcut: a question mark is ordinary chat draft text, including on an empty draft, and is ignored on the overview.
 The footer shows the keys available now; the full reference opens from **Settings › Keys**, the last row after Version, on either screen.
 Selecting Keys by Enter or click opens only key names in strong text and their short meanings, in aligned row-major pairs when they fit, or one column otherwise: no title, footer or instructions.
 One `ctrl+x` stops work; it does not require two presses.
 `keymap.list` owns the reference rows, checked against the union of both screens' keymaps so each bound key is listed or explicitly marked as an alias of one listed row, and neither rows nor aliases name unbound keys.
 `keys_panel` derives fields from those rows; `Panel.KeyList` reuses the Panel's cell clipping, without selection or an event handler.
 `AppSettings` owns whether the reference is open; Esc or Ctrl-G closes it back to Settings before any choice, Upgrade cancellation or settings-page close, never leaving a conversation through that first press.
-The overview's `/rename NAME` names the selected Session and `/setup [OPTIONS]` saves defaults with no Session, each through the same CLI owner a conversation's runs, on the overview's worker with stdout and stderr in an unlinked scratch file; without a selected Session `/rename` says `! Select a Session first.`, as Ctrl-X does.
-With no Session, the overview's `/setup` says `Saved defaults for future Sessions.` and its failures name no Session, where a conversation's add that the active Session is unchanged.
-One command runs at a time, and Enter on an empty draft waits for it too, since a conversation's commands write to the same stdout and stderr; either says `! Wait for /NAME to finish.`
-A result a conversation shows as a notice (two lines and 256 bytes at most, `slash_commands.resultNotice`) is the same notice, its second line in a row under the first; longer output takes the Sessions' rows under the command's name until Esc, cut at 8 KiB with a line that says so; empty output says `Command finished with no output.`
+Conversation commands keep their existing CLI owners and scratch-file output path; no overview command worker or selected-Session command dispatch remains.
+One conversation command runs at a time; a second says `! Wait for /NAME to finish.`
+Short command output uses `slash_commands.resultNotice`; longer output stays in the conversation’s inspection page.
 After `/rename` the next listing, which shows the new label, goes at once.
-A command that could not start says `! /NAME unavailable.`, as a conversation says of an inspection that could not start; one that fails while it runs ends the overview, as a conversation ends, with its own failure, and the way out prints its output, as it does for output that came after the person left, unless stderr did not come back from the scratch file; one still queued then says `rui: /NAME did not run.`
 `/effort` needs a level: alone it states its usage, and the list offers the levels.
 `/effort LEVEL` submits the reasoning-effort configuration edit and `/rename NAME` submits the label edit with the rest of the line as one value, using the configuration argument decoder, so `/rename "lane four"` and `/rename lane four` both name the Session `lane four`.
 They have the same checks and the same messages, except that a line that does not parse shows the usage of the command typed.
@@ -3209,13 +3247,14 @@ The status bar never says `Sent`: an accepted Message's own row, or its waiting 
 The Store assigns admission IDs in Session position order, so a page that ends before it, or one read before a later Message's acceptance, does not clear it, and a page delivered before its acceptance joined does.
 
 The composer uses the same `› ` marker as submitted User messages.
-The input keeps the bottom rows of the screen in a conversation and in the overview: a rule, then the draft, which grows to ten rows or a third of the screen, whichever is fewer, and then scrolls inside itself, keeping the same text first until its caret leaves the shown lines.
-The overview keeps its own key-hint rows. The chat footer is two rows: the composer's lower rule and one `src/widgets/Footer.zig` line.
+Only a conversation has input at the bottom of the screen: a rule, then the draft, which grows to ten rows or a third of the screen, whichever is fewer, and then scrolls inside itself, keeping the same text first until its caret leaves the shown lines.
+The overview ends in Settings and its list footer, with no editor, model/effort/folder facts or footer buttons. The chat footer is two rows: the composer's lower rule and one `src/widgets/Footer.zig` line.
 While chat info is open, its footer replaces that Footer line on the physical last row; it adds neither a second footer between the panel and input nor a notice row below the footer.
-Its left side identifies the chat: `Name · model · effort · N% left`, plus an archive state when present; permission settings belong in chat information, not this line.
+An empty chat’s footer uses the created Session’s model, effort and folder from `session_chrome.Footer` and the shared chat footer spans; model and effort remain buttons. It has no duplicate overview facts owner.
+A populated chat keeps its existing identity and controls: `Name · model · effort · N% left`, plus an archive state when present; permission settings belong in chat information, not this line.
 Its right side names `alt+i info` and other active keys, including recovery, discard, unarchive and stop when applicable; keys take space before identity. The info hint and the chat’s own Session/model/effort line are clickable and share Alt-I’s panel-opening action; clicking again while info is open is safe and leaves the open choice intact.
 The chat shows `‹` only while `Root.listVisible()` is false; it has no separate width test.
-The empty chat composer shows its prompt without placeholder instructions; approval shows the request and its choices, not a key-help sentence.
+The empty chat composer shows `Type a task`; approval shows the request and its choices, not a key-help sentence.
 The chat footer shows `ctrl+x stop` only while there is work to stop (Divyansh approved this on 2026-10-31, front-end plan PR 5).
 It shows while Ctrl-X would ask to stop the work the conversation shows, so not while a stop of that work is open.
 The name is the Label, else the first line of the first Message, else the reference, as in overview rows.
@@ -3225,9 +3264,9 @@ Identity fits whole items before its right-aligned keys, marking omitted items w
 The overview keeps its own line-fitting policy.
 The ordinary chat footer keeps its previous placement above the bottom single-row state slot, which is blank while idle; chat info suppresses that slot and puts its replacement footer on the physical last row.
 A chat notice occupies that bottom state slot and never replaces identity; it uses the failure colour when it starts with `!`. An unresolved send takes priority there, then the newest local notice, send progress and the overview's state. A transient notice goes after five seconds or the next key; an unresolved send remains. Overview notices keep their own policy.
-The rule names how many draft lines it hides above or below; a conversation drops its Session line when fewer than three rows remain under its status and the rule when fewer than four remain above the line, and an overview narrower or shorter than six cells shows no input.
+The rule names how many draft lines it hides above or below; a conversation drops its Session line when fewer than three rows remain under its status and the rule when fewer than four remain above the line. The overview never shows input at any size.
 Outside chat info, the chat state slot stays below the ordinary footer; conversation text starts at the top of the screen, and its tool rows and live line follow its last line (Divyansh approved this on 2026-10-31, front-end plan PR 3, mock CFWmXwCYELhK15T7LnR6ZF).
-A draft wraps between words the same way on both screens: spaces at the edge hang past it rather than start a row, a word wider than the line (a URL or a path) breaks after its last `/`, `.`, `-` or similar mark that fits, and between clusters only when it has none; continuation rows align under the text.
+A chat draft wraps between words: spaces at the edge hang past it rather than start a row, a word wider than the line (a URL or a path) breaks after its last `/`, `.`, `-` or similar mark that fits, and between clusters only when it has none; continuation rows align under the text.
 The conversation paints presentation colours from the shared Khadi theme roles: ink for User markers and work under way, quiet for settled outcomes and transient status, attention for permission decisions, and failure for failures.
 Marks come from `src/marks.zig`; CLI reads keep the matching ANSI foreground codes.
 Nonempty `NO_COLOR` disables these presentation colours.
@@ -3317,7 +3356,7 @@ Shared shell-selector emission preserves exact bytes while keeping controls and 
 Slash text deliberately replaces normal composition; the original submission remains pinned.
 Inspection does not reserve an Action.
 Ctrl-C leaves and loses the unsent in-memory draft; Ctrl-D also leaves where the current input accepts it.
-Deleted app command names (`/upgrade`, `/login`, `/wait`, `/inspect-action`, `/exit`) follow the ordinary unknown-command path on both screens; login uses the explicit one-shot command.
+Deleted app command names (`/upgrade`, `/login`, `/wait`, `/inspect-action`, `/exit`) follow the ordinary unknown-command path in a chat; the overview ignores slash text, and login uses the explicit one-shot command.
 A pending command or inspection waits for the current observation.
 A read that has delivered no output is cancelled and later repeated; once the UI owns a nonempty window, that read completes first, so output is never replayed.
 Only a successful joined observation advances Current and the activity cursor.
@@ -3514,7 +3553,7 @@ Both `call` and `approval_requested` rows carry inline `description`, `tool` and
 `tool` is the saved name, at most the tool-name bound, or null for an oversized rejected name (its full name remains in `fields[0]`).
 `server` is the MCP server from the proposing Operation's frozen offer, null for built-ins or an unknown tool, never today's tool set.
 These fields read existing call content, settlement and frozen-offer facts; no arguments are re-parsed and no Store-format change is needed.
-The format 69 → 70 migration owns the saved wire-13 → wire-14 move on both engines. A current-format Store must already carry wire 14; opening never relabels it.
+The format 69 → 70 migration moved the saved wire-13 label to wire 14 on both engines; format 74 deletes the label, and opening neither reads nor writes one.
 Opening either row through `activity-content` returns the call's original arguments JSON, including original whitespace and the description field.
 A forwarded approval reads and certifies the child's canonical call and returns that same saved detail and arguments, not anything belonging to the receiving Session.
 Core built-ins do not request permission; Bash and MCP calls under `ask` do.
@@ -3819,7 +3858,7 @@ Existing Sessions preserve their saved mode.
 User submissions are `›` blocks with their admission time and assistant prose has no role labels; concise tool outcomes stay quiet and the live line ends the conversation only while work is under way.
 Divyansh approved this on 2026-10-31 (front-end plan PR 3, mock CFWmXwCYELhK15T7LnR6ZF).
 Successful conversation omits protocol receipts and follow reminders; original captured request handles remain available through `/requests`.
-If opening a Session started from the overview fails after its `session start` was confirmed, best-effort stderr guidance retains that request handle and an executable exact Store/Session resume command while preserving the original failure.
+If opening a Session started from the overview fails after its empty-Session Configure was confirmed, best-effort stderr guidance retains that request handle and an executable exact Store/Session resume command while preserving the original failure.
 This reports admission only, not completion, and does not promise delivery under stderr contention or failed output credit.
 These are presentation choices over existing Host facts, not new conversation or recovery authority; one-shot and JSON output remain unchanged.
 
@@ -3914,17 +3953,17 @@ Reclaim only the expected stale socket after ownership.
 Unavailable/inaccessible/competing owners reject.
 Clients never auto-start or access SQLite; disconnects/timeouts do not cancel work.
 
-A MySQL Host starts only from `rui host serve --launch-frame`.
-Its stdin
-frame's `store` is `mysql://USER:PASSWORD@HOST[:PORT]/DATABASE`; TCP verifies
+A MySQL Host starts only from a settings document, `rui host serve --settings -` or `--settings FILE`.
+The
+document's `store.mysql.url` is `mysql://USER:PASSWORD@HOST[:PORT]/DATABASE`; TCP verifies
 TLS with system trust unless its sole query option is `ssl-ca=<path>`, a nonempty absolute PEM CA-bundle path (percent escapes allowed, at most `PATH_MAX - 1` decoded bytes) trusted exclusively; unknown or repeated keys, fragments, relative or empty paths, `ssl-ca` on a Unix socket and any verification-disabling option are refused (D224).
 A Unix socket is an absolute path in place of HOST,
 usually percent-encoded (`%2Fvar%2Frun%2Fmysqld.sock`).
 User, password and
 database components accept percent escapes.
-The frame requires a private
-`runtimeDir`; every launched Host binds `runtimeDir/rui.sock` (D211).
-The URL travels only in stdin, never in argv, environment, files or
+The document requires a private
+`interface.dir`; every launched Host binds `interface.dir/rui.sock` (D211).
+The URL travels as a literal only in stdin; a document file names a secret source for it (an environment variable or a private file), and it never appears in argv or
 refusal messages.
 Parsing wipes all JSON allocations, including failed
 parses; the connection handshake wipes its authentication buffer as soon as
@@ -4118,16 +4157,16 @@ Restart then uses committed uncertainty and owned-leftover cleanup; it preserves
 Remote effects and duplicate model cost remain possible.
 Orphan tools may retain each bounded unlinked stdin file until exit; replacement Hosts cannot reclaim it, and no aggregate scratch bound spans dead-Host generations.
 
-A launched Host (`rui host serve --launch-frame`) is the exception: its shutdown is bounded.
+A Host whose settings give `interface.lifetime` as `stdin` (the TypeScript client's default with `rui host serve --settings -`) is the exception: its shutdown is bounded.
 The program that starts it writes one frame to its stdin, a 4-byte big-endian length and then UTF-8 JSON naming `v` (1), the Store directory, the OpenAI key provider `{kind: "openai_key", baseUrl, key, caFile?}`, the `runtimeDir` that holds its socket `rui.sock`, and optionally `activeCapacity`.
-The frame is the sole source of a launched Host's settings; `--launch-frame` refuses separate provider settings, including `--provider-ca-file`.
+Serve flags given beside `--settings` are applied on top of the document.
 The provider's optional `caFile` names a PEM file trusted exclusively for that provider, on macOS as on Linux, with the same trust semantics as `--provider-ca-file`; omitted or null uses system trust.
 A supplied `caFile` must be a nonempty UTF-8 path without NUL bytes and shorter than the platform's path limit; a relative path is relative to the Host's working directory, and an unloadable file or failed verification never falls back to system trust.
 The optional `presets` object maps at most 64 names (1–64 bytes of `[a-z0-9_-]`) to complete agent specs, checked by the shared agent-spec parser and held only in Host memory (D22, D112).
 A `start_agent` call may name a preset and override its fields, but still refuses provider or Workspace fields, including those supplied by the preset (D221).
 The key stays in memory only, never on disk, in argv or in the environment.
-stdin then stays open and carries nothing; when it closes, the Host stops as `host-stop` does, and an alarm ends the process 10 seconds later if the drain has not finished, which is a forced termination as above.
-A refusal at open is one stdout line `{"rui_start_error":{"code","message"}}` with code `launch_frame_invalid`, `invalid_preset` or `store_locked`, then exit status 1.
+With `interface.lifetime` `stdin`, stdin then stays open and carries nothing; when it closes, the Host stops as `host-stop` does, and an alarm ends the process 10 seconds later if the drain has not finished, which is a forced termination as above.
+A refusal at open is one stdout line `{"rui_start_error":{"code","message"}}` with code `settings_invalid`, `invalid_preset` or `store_locked`, then a nonzero exit status set by the cause, 2 for `settings_invalid`.
 
 `rui host pause [--store PATH]` observes the ready Host once, then sends a bounded protected `POST /v1/control/host-stop`.
 It requires the observed `X-Rui-Host-Instance`, validated before fencing.
@@ -4258,7 +4297,7 @@ On Linux with glibc, the execution loop calls `malloc_trim(0)` once each time it
 | Model retries | Startup default 3 after initial try; 2/4/8 s backoff or later valid Retry-After, then positive jitter up to one quarter of backoff; conserved per Operation. |
 | Provider inactivity | Startup default 5 min awaiting first body and between chunks; body/heartbeats reset it, no progressing-stream total deadline. |
 | Bash | Startup default 5 min from process start, output does not reset it; per-call positive finite representable override, no policy maximum. |
-| Tool excerpt | Startup default 10,000 UTF-8 bytes of tail output across the entire Tool Result, no line quota; omission/path metadata additional. |
+| Tool excerpt | Startup default 20,000 UTF-8 bytes across the entire Bash Tool Result, no line quota; fitting Bash streams are complete, truncated streams use one half of their allowance for the head and the rest for the tail; omission/path metadata additional. |
 | Edit copy window | Reusable 16 KiB; not an expected-text/line/replacement/file limit. |
 | Diagnostics | Startup default 128 MiB, at most 16 files, each floor(cap/16), 4 KiB encoded record; exports consume scratch. [Failed-response records](#diagnostic-records-and-export) are separate: first 16 MiB per capture, 64 MiB and 256 records per Store, oldest first. |
 | Qualification acceptance targets | [Verification’s Host qualification targets](VERIFICATION.md#resources-and-accepted-host-qualification-targets) define workload-specific acceptance targets. They are not runtime admission limits or per-module quotas. |
@@ -4337,15 +4376,16 @@ Measure filesystem metadata and cleanup latency separately from logical bytes an
 #### Tool excerpts and full output
 
 Bash output has no per-call total capture cap.
-Short output is complete; larger output saves status, tail excerpt, omission notice and the path of each truncated stream, preserving combined-stream allowance and valid UTF-8 boundaries before provider JSON framing.
+Short output is complete; larger output saves status, head-and-tail excerpts, exact omitted-byte counts and the path of each truncated stream, preserving combined-stream allowance and valid UTF-8 boundaries before provider JSON framing.
 Failed full capture cannot masquerade as successful preservation.
 Full output is read through ordinary Bash permissions/timeouts/excerpts, not a new Read tool or whole-file context injection.
 FIFO or Host exit/crash may remove it; unavailability leaves saved results unchanged.
 Canonical permission, Edit intent and outcome evidence are not disposable spillover.
 
-A Bash result names only what carries information: the outcome line, any warnings, a `stdout tail:` section only when stdout is nonempty and a `stderr tail:` section only when stderr is nonempty.
-When either tail omits earlier bytes, `[earlier output omitted]` follows, then `Full stdout: PATH` or `Full stderr: PATH` for each truncated stream, or `Full output was not retained.` when retention is unavailable.
-An untruncated stream is complete in the result and names no file.
+A Bash result names only what carries information: the unchanged outcome line and warnings, a `stdout:` section only when stdout is nonempty and a `stderr:` section only when stderr is nonempty.
+A fitting stream is complete. A truncated stream shows its head, a separate `[N bytes left out]` line (the exact number of source bytes not shown, without thousands separators), then its tail. The head receives one half of that stream's existing allowance and the tail the rest, both cut on valid UTF-8 boundaries. If a newline lies within the last 256 source bytes of the head, the head ends just after the last such newline; if one lies within the first 256 source bytes of the tail and the tail does not already start a line (the source byte before it is not a newline), the tail starts just after the first such newline. A cut that already falls on a line boundary therefore stays where it is at either end. Bytes removed by either adjustment count as left out.
+After the stream sections, `Full stdout: PATH` or `Full stderr: PATH` names each truncated stream, or `Full output was not retained.` reports unavailable retention. There is no separate `[earlier output omitted]` line. An untruncated stream names no file.
+Saved results from older Hosts retain their `stdout tail:` / `stderr tail:` sections and `[earlier output omitted]` notice; readers accept both shapes without rewriting stored results.
 
 MCP answers are bounded by the existing 4 MiB per-call answer buffer.
 Their resolution keeps the first 10,000 rendered bytes, cut at a UTF-8 boundary, and the omitted-byte suffix; fitting answers keep their complete existing bytes and create no retained file.

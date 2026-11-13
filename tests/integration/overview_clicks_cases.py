@@ -1,6 +1,7 @@
-"""Overview pointer behavior: Session rows open, New Session composes,
-/sessions reaches archive views, and panels never open rows.
-The flat list exposes every Session without group headings or folds.
+"""Overview pointer behavior: Session rows and New Session open chats,
+and panels never open rows.
+The flat list exposes admitted conversations without group headings or folds;
+empty Configure-created Sessions appear only while currently open.
 """
 import json
 import pathlib
@@ -76,8 +77,8 @@ def click_label(screen, frame, label):
 
 
 def is_overview(frame):
-    """Pinned Settings and the overview composer, never chat facts."""
-    return "Settings" in frame and not any(line.startswith(" ‹ ") for line in frame.split("\n"))
+    """Pinned actions and the list footer, never a chat editor or facts."""
+    return "+ New Session" in frame and "Settings" in frame and "enter open" in frame and "Type a task" not in frame and not any(line.startswith(" ‹ ") for line in frame.split("\n"))
 
 
 def conversation_of(label):
@@ -90,23 +91,6 @@ def back_to_overview(screen, *markers):
     screen.keys(b"\x1b")
     return screen.wait(lambda frame: is_overview(frame) and all(marker in frame for marker in markers),
                        ("Esc returns to the overview", markers))
-
-
-def assert_still_overview(screen, what, *markers):
-    """The click before this one opened nothing: a draft typed after it
-    shows in the overview's composer, beside `markers`. Esc closes any
-    panel, then clears the draft."""
-    screen.keys("zz")
-    frame = screen.wait(lambda frame: "› zz" in frame, (what, "the draft typed after the click"))
-    assert is_overview(frame), (what, "a click opened something", frame)
-    for marker in markers:
-        assert marker in frame, (what, marker, frame)
-    if "Esc returns" in frame:
-        screen.keys(b"\x1b")
-        screen.wait(lambda frame: "Esc returns" not in frame and "› zz" in frame, (what, "Esc closes the panel"))
-    screen.keys(b"\x1b")
-    screen.wait(lambda frame: "› Type a task" in frame and is_overview(frame), (what, "Esc clears the draft"))
-    return frame
 
 
 def opening_and_views():
@@ -122,7 +106,7 @@ def opening_and_views():
 
         with w.overview(columns=WIDTH, rows=30) as screen:
             screen.wait(lambda frame: " ✓ alpha" in frame and " ✓ bravo" in frame, "both answered rows")
-            # Enter on a blank draft opens the selected Session: that names it.
+            # Enter opens the selected Session: that names it.
             screen.keys(b"\r")
             opened = screen.wait(lambda frame: conversation_of("alpha")(frame) or conversation_of("bravo")(frame),
                                  "Enter opens the selected Session")
@@ -148,20 +132,6 @@ def opening_and_views():
 
         with w.overview(columns=WIDTH, rows=30) as screen:
             screen.wait(lambda frame: " ✓ alpha" in frame, "the default view")
-            assert not screen.rows()[0].rstrip().endswith(("Archived", "All")), screen.text
-            for command, name in (("archived", "Archived"), ("all", "All")):
-                screen.keys(f"/sessions {command}\r")
-                expected = "○ charlie" + (" · archived" if command == "all" else "")
-                archived = screen.wait(lambda frame: expected in frame and "/sessions" not in frame,
-                                       f"the {name} view")
-                assert "[Archived]" not in archived, archived
-                assert ("charlie · archived" in archived) == (command == "all"), archived
-                screen.keys(b"/sessions unarchived\r")
-                back = screen.wait(lambda frame: "✓ alpha" in frame and "charlie" not in frame and "/sessions" not in frame,
-                                   f"{name} returns to default by command")
-                assert is_overview(back), back
-            print("overview clicks: /sessions reaches every archive view without a counts-line click", flush=True)
-
             listed = screen.text
             alpha_row = row_of(listed, "alpha")
             screen.keys(b"\x1b[F\r")
@@ -200,10 +170,12 @@ def flat_list():
             assert lines[0] == "  + New Session" and lines[1] == "", listed
             assert not any(re.fullmatch(r" \S.* · \d+", line) for line in lines), listed
             assert " more" not in listed, listed
-            # New Session selects the composer, not a conversation.
+            # New Session opens an empty chat, then returns to this flat list.
             screen.click(4, 1)
-            assert_still_overview(screen, "New Session", *peers_by_label)
+            screen.wait(lambda frame: "Type a task" in frame and not is_overview(frame), "New Session opens chat")
+            listed = back_to_overview(screen, *peers_by_label)
             # Every formerly hidden row is directly clickable.
+            lines = listed.split("\n")
             label = lines[max(row_of(listed, peer) for peer in peers_by_label) - 1].split()[1]
             click_label(screen, listed, label)
             screen.wait(lambda frame: conversation_of(label)(frame) and "peer done" in frame,
@@ -213,17 +185,89 @@ def flat_list():
 
 
 def empty_list():
-    with world("clicks-empty") as w, w.overview(columns=WIDTH, rows=30) as screen:
-        frame = screen.contains("+ New Session")
-        assert "No unarchived Sessions" not in frame, frame
-        screen.click(4, line_of(frame, lambda line: "+ New Session" in line, "New Session"))
-        assert_still_overview(screen, "New Session in an empty Store", "+ New Session")
-        screen.keys(b"\r")
-        assert_still_overview(screen, "Enter on New Session", "+ New Session")
-    print("overview clicks: New Session in an empty Store keeps the composer focused", flush=True)
+    for columns in (46, 140):
+        with world("clicks-empty", {"first task": answer("new", "first task answered")}) as w, w.overview(columns=columns, rows=30) as screen:
+            frame = screen.contains("+ New Session")
+            assert "No unarchived Sessions" not in frame and "Type a task" not in frame, frame
+            known = set()
+            abandoned = set()
+            for gesture in ("click", "Enter"):
+                before = set((w.home / ".config/rui/requests").glob("*.json"))
+                if gesture == "click":
+                    screen.click(4, line_of(frame, lambda line: "+ New Session" in line, "New Session"))
+                else:
+                    screen.keys(b"\x1b[H\r")
+                chat = screen.wait(lambda frame: "Type a task" in frame and not is_overview(frame), f"{gesture} opens an empty chat")
+                sessions = json.loads(w.run("session", "list", "--store", w.store, "--all"))["sessions"]
+                current = {row["reference"] for row in sessions}
+                created, = current - known
+                assert len(current) == len(known) + 1, sessions
+                known = current
+                report = w.inspect(created)
+                assert report["selected_message"] is None and report["recent_messages"] == [], report
+                assert report["session"]["model"] == MODEL, report
+                assert MODEL in chat and w.endpoint.requests == [], chat
+                assert all(reference not in chat for reference in abandoned), (abandoned, chat)
+                captured, = set((w.home / ".config/rui/requests").glob("*.json")) - before
+                assert json.loads(captured.read_bytes())["kind"] == "configure", captured.read_text()
+                if gesture == "Enter":
+                    screen.keys(b"first task")
+                    screen.contains("› first task")
+                    screen.keys(b"\r")
+                    screen.contains("first task answered")
+                    wait_for_host(w, [created], finished, "the chat Message finishes")
+                    assert len(w.endpoint.requests) == 1, w.endpoint.requests
+                    report = w.inspect(created)
+                    sent, = report["recent_messages"]
+                    assert sent["outcome"] == "completed", report
+                else:
+                    abandoned.add(created)
+                frame = back_to_overview(screen)
+                frame = screen.wait(lambda frame: is_overview(frame)
+                                    and all(reference not in frame for reference in abandoned)
+                                    and (gesture != "Enter" or "first task" in frame),
+                                    "only the same Session with an admitted Message becomes a named list row")
+                # Visibility is derived, not destructive: abandoned Configure
+                # outcomes remain inspectable with no Messages or provider turn.
+                for reference in abandoned:
+                    report = w.inspect(reference)
+                    assert report["selected_message"] is None and report["recent_messages"] == [], report
+                assert set(row["reference"] for row in json.loads(w.run("session", "list", "--store", w.store, "--all"))["sessions"]) == known
+        print(f"overview clicks: {columns} columns: empty chats stay stored but vanish on leave; only the original sent Session becomes a named row", flush=True)
+
+
+def new_chat_aliases():
+    with world("new-chat-aliases", {"old task": answer("old", "Old answer retained")}) as w:
+        old = w.session("--label", "Old unchanged", "--reasoning-effort", "high")
+        w.run("session", "send", "--store", w.store, "--to", old, input="old task")
+        wait_for_host(w, [old], finished, "the old chat has canonical history")
+        before = w.inspect(old)
+        with w.overview(columns=WIDTH, rows=30) as screen:
+            for alias in ("/new", "/clear"):
+                listed = screen.contains("Old unchanged")
+                click_label(screen, listed, "Old unchanged")
+                screen.wait(conversation_of("Old unchanged"), "open the old chat")
+                screen.keys(alias + " foo\r")
+                screen.contains("! Usage:")
+                assert w.inspect(old) == before
+                screen.keys(alias + "\r")
+                screen.wait(lambda frame: not is_overview(frame) and "Type a task" in frame
+                            and "Old unchanged" not in frame, "alias opens a new empty chat")
+                assert w.inspect(old) == before
+                listed = back_to_overview(screen, "Old unchanged")
+                assert "Old unchanged" in listed
+        # Only the old Session and two Configure-created empty Sessions exist.
+        rows = json.loads(w.run("session", "list", "--store", w.store))["sessions"]
+        assert len(rows) == 3, rows
+        for row in rows:
+            if row["reference"] != old:
+                report = w.inspect(row["reference"])
+                assert report["work"]["state"]["kind"] == "idle", report
+    print("overview aliases: no Message and old Current unchanged", flush=True)
 
 
 def cases():
     opening_and_views()
     flat_list()
     empty_list()
+    new_chat_aliases()

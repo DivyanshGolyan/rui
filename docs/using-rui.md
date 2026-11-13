@@ -8,17 +8,29 @@ For a first conversation, see [Start a conversation](../README.md#start-a-conver
 Open **Settings › Keys** for the full key list. In the overview, End then Enter opens the pinned Settings row; select the last **Keys** row and press Enter.
 In a wide conversation, click the pinned Settings row without leaving the chat.
 Esc returns to Settings; another Esc returns to the conversation or overview.
-The footer shows the keys available in the current state. A typed `?` is ordinary draft text, not a shortcut.
+The footer shows the keys available in the current state. In a chat, a typed `?` is ordinary draft text, not a shortcut; on the overview, printable keys and paste do nothing.
 There is no `/help` command.
 
 ## Commands
 
-Enter these at the `›` prompt. Typing `/` lists names only; fixed choices appear quietly beside the name, separated by ` · `. Choice and option rows also show names only.
+Enter these at the chat’s `›` prompt. The overview has no input or slash commands. Typing `/` lists chat commands with their descriptions beside loaded skills. Choice and option rows show their admitted names. `/discard` and `/recover KEY` stay unlisted behind the failed-send line.
 
 | Command | What it does |
 | --- | --- |
+| `/archive` | Stops active work and archives this Session, confirming when required. |
+| `/unarchive` | Restores this chat without restarting work. |
+| `/rename NAME` | Names this Session. |
+| `/copy [code\|file]` | Copies the last answer; `code` copies its last code block; `file` saves the answer here. |
+| `/effort LEVEL` | Changes this chat’s effort and also sets the default for new chats. |
+| `/model` | Opens this Session’s model picker, the same one as the footer model button and chat info. Choose a model to save it. |
+| `/setup` | Shows or changes defaults for future Sessions, not the current one. |
 | `/requests` | Lists saved requests for recovery. |
-| `/setup` | Changes defaults for future Sessions, not the current one. |
+| `/result KEY` | Reads a saved answer. |
+| `/reload-skills` | Rescans skills and appends catalog changes without model work. |
+| `/new` | Starts a new empty chat; keeps the old chat unchanged. |
+| `/clear` | Same as `/new`: starts a new empty chat, not deletion of history. |
+
+Both `/new` and `/clear` use **+ New Session**’s creation owner. They send no Message until you type and send one in the new chat. Extra text, such as `/new foo`, is misuse. Loaded skill rows insert their names into the Message; they do not run an app command. A draft whose first word is not exactly a chat command is a Message: Enter sends it unchanged, even before suggestions arrive, and Esc closes the list without deleting it. Esc on a list clears only a command line or a single unfinished `/word`. The Host looks up skills in this Session's complete saved catalog; an unknown name stays literal text for the agent.
 
 While the model works on a reply, the work line says `Thinking` with elapsed time.
 Rate-limited retries keep their countdown, and running tools show their descriptions.
@@ -102,27 +114,35 @@ If that happens, run your terminal's reset command.
 
 Rui calls a saved conversation a **Session**.
 Bare `rui` opens the overview of unarchived Sessions in this Store; each row shows its project.
-Type in its composer to start a new Session; Enter on a row opens one, and Esc returns.
-Ctrl-X stops the selected Session, and Ctrl-D leaves.
+Select the pinned **+ New Session** at the top with Home, then Enter, or click it, to create an empty Session and open its focused chat input.
+Creating it sends configuration only: it has no Messages until you type and send one in the chat.
+Sessions without a first Message are omitted from the list, except for the currently open chat’s selected row in a wide sidebar.
+That row is named **New Session**, never its raw reference; after the first Message is admitted it uses the normal conversation name.
+Leaving an empty chat hides its row even after changing its model or effort; the configured Session stays stored and remains available to CLI list, inspect and resume.
+The empty chat footer shows its model, effort and folder; model and effort are buttons for changing that Session’s settings.
+An existing populated chat keeps its usual footer.
+Enter on a Session row opens it, and Esc returns to the overview.
+**Settings** stays on the penultimate row, immediately above the list footer; there is no composer, hidden draft, model/effort footer or footer buttons on the overview.
+The overview list uses the full width at every terminal size, with no empty chat pane. A wide chat or its settings keeps the list sidebar’s existing navigation, without an input of its own.
 `rui session resume` still opens one Session directly, inside the overview.
 
 | Key in the overview | What it does |
 | --- | --- |
-| Up, Down, Home, End | Select a Session while the composer is empty. In a draft, Home and End move the caret, and Up and Down select a Session once past its first or last line. While a start waits for its answer, all four select. |
-| Shift-Up, Shift-Down | Select the Session above or below, whatever the composer holds. |
-| Enter | Sends the composer's text: a task starts a new Session, and `/configure` sets the next start's settings. Select **Settings** in the overview, then its **Model** field, to pick the default for new Sessions; type to filter, use ↑ and ↓ to move, and Enter to save. Esc closes the choice before settings. On a blank composer, opens the selected Session. |
-| Esc, Ctrl-G | Clears the composer's draft. On an empty composer, clears the settings `/configure` held. A start already sent keeps its own text and settings. In a conversation's latest view, returns to the overview. |
-| Ctrl-X | Asks to stop the selected Session while it works, waits or needs approval. Press Ctrl-X again to stop it; any other key cancels. The row reads `stopping` until the Host answers, then `■ stopped`; if the stop fails, a message says why and the row keeps its state. On any other row a message says why nothing was stopped. |
-| Ctrl-D | Leaves, when the composer is empty or a start waits for its answer. |
-| Ctrl-C | Leaves. |
+| Up, Down, Home, End | Move through the whole list, including pinned **+ New Session** and **Settings**. |
+| Shift-Up, Shift-Down | Select the row above or below. |
+| Enter | Opens the selected Session, creates an empty chat from **+ New Session**, or opens **Settings**. In Settings, open **Model** to pick the default for future Sessions. |
+| Esc, Ctrl-G | Closes the topmost choice or panel; no draft or per-start settings exist to clear. |
+| Ctrl-X | Stops the selected Session’s work through the same request owner as the CLI. |
+| Ctrl-D, Ctrl-C | Leaves. |
 
-While a start waits for its answer, its text stays in the composer and typing does not change it; if the start fails, Enter sends the text again.
-A key not in this table does nothing in the overview.
+Printable keys, including `/` and `?`, and bracketed paste are ignored on the list: they cannot start work or create a draft.
+While empty-Session creation awaits its answer, another Enter or click cannot create it again.
+A rejected creation shows its failure; an unconfirmed creation retains its original recovery key rather than fabricating a Message receipt.
 
 A stop works like `rui session stop`: if its reply is lost, the overview says it is not sure the Session stopped, and prints the `rui request recover` command when you leave.
 To stop every Session that Ctrl-X could stop at once, run `rui session stop --all`.
 A stop still waiting to be sent when you leave is reported as not sent.
-The overview holds at most eight starts and stops awaiting answers, and refuses more until one is answered.
+The overview holds at most eight creation and stop requests awaiting answers, and refuses more until one is answered.
 Sessions the stopped Session messaged keep running.
 
 The overview paints its own colours, in khadi: an indigo ground with cotton text on a dark terminal, a cotton ground with indigo ink on a light one.
@@ -148,16 +168,16 @@ Existing Sessions keep their saved settings, including approval mode and model.
 
 ### Archive Sessions
 
-Select a Session in the overview and press **Alt+A** or enter `/archive`.
+Select a Session in the overview and press **Alt+A**.
 If it has work, confirm **Stop and archive**.
 The Session stays visible until the stop completes.
 You can also press **Alt+A** or enter `/archive` inside its conversation.
 Alt+A keeps your draft intact.
 For **Stop and archive**, press Enter to confirm or Esc to cancel; neither sends or clears your draft.
 
-Use `/sessions archived` to show archived Sessions, `/sessions all` to show both views, or `/sessions unarchived` to return.
-Enter `/unarchive` to restore the selected Session without starting work.
-After an archive hides a row, `/undo` restores that last archived Session.
+The overview shows unarchived Sessions; its former `/sessions`, `/archive`, `/unarchive` and other overview slash commands are gone.
+Use the shell commands below to list archived Sessions or restore one without starting work.
+Inside an open chat, `/archive` and `/unarchive` still act on that Session.
 
 Archive keeps history, saved results, settings, and files.
 Opening an archived Session does not restore it.
@@ -187,6 +207,8 @@ If the provider does not know the ID, the Session's first request fails and says
 Without `--model`, a new Session uses your saved default.
 With no saved default, it uses `gpt-6.1-sol`.
 To pick the default from a list, open **Settings** in the overview and press Enter on **Model**.
+The list shows the models of the sign-in new Sessions use, and **Sign-in** reads **ChatGPT** whether you signed in in the browser or with a device code.
+Typing `chatgpt` or `codex` keeps a ChatGPT sign-in's models; `api` keeps an API key's.
 
 To switch an existing Session within its provider, select **Model** in chat info, or run `rui session configure --session SESSION --model ID`.
 The next model request replays visible conversation without the old model’s private reasoning or compacted state.
@@ -201,7 +223,7 @@ App settings changes saved defaults without changing existing Sessions.
 The Permissions row, between Effort and Notifications, offers **run without asking** and **ask first**.
 Press Enter to open the choices, then Enter to save one.
 
-From the shell, use `rui defaults configure`; in the terminal composer, use `/setup`.
+From the shell, use `rui defaults configure`; in a chat’s composer, use `/setup`.
 Both accept `--store PATH`, `--provider PROVIDER`, `--model ID`, `--clear-model`,
 `--reasoning-effort LEVEL|default`, `--permission-mode ask|bypass`, and `--notifications on|off`.
 `--clear-model` cannot be combined with `--model`.
@@ -210,7 +232,7 @@ An explicit `--permission-mode` on a new Session wins over the saved choice; wit
 `rui defaults inspect` reads the saved defaults without changing them.
 
 Signing in with `rui auth login PROVIDER` saves that provider as the default when none is saved.
-`rui auth login chatgpt` also replaces a saved `codex` default, since both sign in to the same ChatGPT account, and clears a model saved for Codex.
+Either ChatGPT sign-in, in the browser or with `--device-code`, also replaces a saved default of the other and keeps the model saved with it, since both sign in to the same ChatGPT account: new Sessions use the one logged in last, and Sessions already open keep theirs.
 Any other saved provider stays; the sign-in says so and names the command that changes it, such as `rui defaults configure --provider chatgpt`.
 Existing Sessions keep their provider.
 

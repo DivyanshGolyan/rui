@@ -1,7 +1,7 @@
 """Two-line overview rows, pinned Settings and one Footer through a real PTY.
 
-The historical counts group now checks the replacement presentation; archive
-views remain reachable through /sessions without a clickable counts row.
+The historical counts group now checks the replacement presentation. The
+list has no editor or overview command surface.
 """
 from contextlib import contextmanager
 import json
@@ -56,7 +56,12 @@ def rows_by_mark():
             assert lines[queued].strip() == "◌ q1", frame
             assert lines[queued + 1].startswith("   Queued"), frame
             assert lines[queued + 1].rstrip().endswith("workspace"), frame
-            assert "slots " not in frame and not re.search(r"rui \d+ MB", frame), frame
+            assert "slots " not in frame, frame
+            # Live app memory belongs only on the pinned Settings row, not
+            # the Session rows or a replacement counts/status line.
+            for line in lines:
+                if not line.startswith("  Settings"):
+                    assert not re.search(r"(?:rui|tools) \d+(?:\.\d+)? (?:MB|GB)\b", line), frame
             assert screen.style("? Asking").fg != screen.style("× Failing").fg, frame
             holds["w1"].set()
             screen.wait(lambda f: "✓ w1" in f and "◌ q1" not in f, "queue admission")
@@ -66,43 +71,27 @@ def rows_by_mark():
     print("overview drawing: two-line state rows replace counts and slots", flush=True)
 
 
-def view_name():
-    with world("drawing-view", {"talk": answer("talk")}) as w:
-        session = w.session("--label", "Talk")
-        send(w, session, "talk")
-        with w.overview(columns=99) as screen:
-            screen.contains("✓ Talk")
-            for view in ("archived", "all", "unarchived"):
-                screen.keys(f"/sessions {view}".encode())
-                screen.contains(f"/sessions {view}")
-                screen.keys(b"\r")
-                frame = screen.wait(lambda f, view=view: "/sessions" not in f and ("✓ Talk" in f) == (view != "archived"), view)
-                assert frame.split("\n")[0] == "  + New Session", frame
-                assert "Settings" in frame, frame
-    print("overview drawing: /sessions reaches archive views without a view-name row", flush=True)
-
-
 def pinned_settings():
     with world("drawing-settings") as w, w.overview(columns=46, rows=16) as screen:
         frame = screen.contains("Settings")
         rows = frame.split("\n")
         settings = next(i for i, line in enumerate(rows) if "Settings" in line)
-        composer = next(i for i, line in enumerate(rows) if "› Type a task" in line)
-        assert settings == composer - 2, frame
+        assert settings == len(rows) - 2, frame
         assert re.fullmatch(r"─+", rows[settings - 1]), frame
-        assert rows[-1].rstrip().endswith("enter start"), frame
-        screen.keys(b"\x1b[F")
-        screen.wait(lambda f: f.split("\n")[-1].rstrip().endswith("enter open"), "Settings selected")
-        # Clicking the row opens app settings; Esc returns with the row pinned.
-        screen.click(4, settings + 1)
+        assert rows[-1].rstrip().endswith("enter open"), frame
+        assert "Type a task" not in frame and "gpt-6-luna" not in frame, frame
+        before = requests(w)
+        # Text and marked paste have no hidden draft. Opening Settings is
+        # the acknowledgement after both inputs, not a timed absence check.
+        screen.keys(b"/nope\x1b[200~pasted task\x1b[201~\x1b[F\r")
         screen.contains("Notifications")
         screen.keys(b"\x1b")
-        screen.contains("› Type a task")
-        screen.keys("draft")
-        frame = screen.contains("› draft")
+        frame = screen.wait(lambda f: "Settings" in f and "Notifications" not in f, "return to list")
         assert frame.split("\n")[settings].lstrip().startswith("Settings"), frame
-        assert frame.split("\n")[-1].rstrip().endswith("enter start"), frame
-    print("overview drawing: Settings stays above the composer, opens app settings, and one Footer keeps the keys", flush=True)
+        assert "Type a task" not in frame and "/nope" not in frame and "pasted task" not in frame, frame
+        assert "Unknown command" not in frame and requests(w) == before, frame
+        assert json.loads(w.run("session", "list", "--store", w.store, "--all"))["sessions"] == [], frame
+    print("overview drawing: Settings ends the list above one Footer; text and paste create no draft or request", flush=True)
 
 
 def requests(w):
@@ -111,7 +100,7 @@ def requests(w):
 
 def unconfirmed_status():
     """A send the conversation could not confirm shows, back in the overview,
-    on the status row under the input with its saved request's recover key.
+    on the status row above the footer with its saved request's recover key.
     The Host is stopped (SIGSTOP) while the send uploads, so the send's own
     inactivity deadline leaves it unconfirmed."""
     with world("counts-unconfirmed", {"first": answer("first"), "lost": answer("lost")}) as w:
@@ -137,11 +126,11 @@ def unconfirmed_status():
             key = saved.pop()
             screen.keys(b"\x1b")
             line = f"! Not confirmed · rui request recover {key}"
-            frame = screen.wait(lambda f: line in f and "Type a task" in f and "enter open" in f, line)
+            frame = screen.wait(lambda f: line in f and "Settings" in f and "enter open" in f, line)
             rows = screen.rows()
             status = next(at for at, row in enumerate(rows) if line in row)
-            composer = next(at for at, row in enumerate(rows) if "› Type a task" in row)
-            assert status > composer, frame
+            settings = next(at for at, row in enumerate(rows) if "Settings" in row)
+            assert status > settings and "Type a task" not in frame, frame
             # The whole handle on its own row, the one Footer under it.
             assert rows[status].strip() == line, frame
             assert rows[status + 1].rstrip().endswith("enter open"), frame
@@ -152,6 +141,5 @@ def unconfirmed_status():
 
 def cases():
     rows_by_mark()
-    view_name()
     unconfirmed_status()
     pinned_settings()

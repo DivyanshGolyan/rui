@@ -583,7 +583,7 @@ fn drawFooterContents(raw: *anyopaque, ctx: vxfw.DrawContext) !vxfw.Surface {
 fn drawTitle(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const self: *Self = @ptrCast(@alignCast(raw));
     const size = ctx.max.size();
-    var surface = try vxfw.Surface.init(ctx.arena, self.widget(), size);
+    var surface = try vxfw.Surface.init(ctx.cell_arena, self.widget(), size);
     @memset(surface.buffer, .{ .style = self.panel.ground });
     if (size.width == 0 or size.height == 0) return surface;
     const failure = try Panel.displayText(ctx.arena, self.failures[6] orelse if (self.pending == 6) " · saving" else "", self.panel.unicode);
@@ -679,7 +679,7 @@ const Fixture = struct {
     }
     fn copied(raw: *anyopaque) bool {
         const self: *Fixture = @ptrCast(@alignCast(raw));
-        return self.copy_notice.isCopy(0);
+        return self.copy_notice.showsPanelCopy(0);
     }
     fn caps(raw: *anyopaque) view.Caps {
         const self: *Fixture = @ptrCast(@alignCast(raw));
@@ -701,9 +701,9 @@ fn dump(page: *Self, arena: std.mem.Allocator, width: u16, height: u16) ![]const
 }
 
 fn dumpWidget(widget_: vxfw.Widget, arena: std.mem.Allocator, width: u16, height: u16) ![]const u8 {
-    const surface = try widget_.draw(.{ .arena = arena, .min = .{}, .max = .{ .width = width, .height = height }, .cell_size = .{} });
+    const surface = try widget_.draw(.{ .arena = arena, .cell_arena = arena, .min = .{}, .max = .{ .width = width, .height = height }, .cell_size = .{} });
     var screen = try vaxis.Screen.init(arena, .{ .cols = width, .rows = height, .x_pixel = 0, .y_pixel = 0 });
-    surface.render(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = height, .screen = &screen }, widget_);
+    try surface.render(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = height, .screen = &screen }, widget_);
     var out: std.Io.Writer.Allocating = .init(arena);
     for (0..surface.size.height) |row| {
         var line: std.Io.Writer.Allocating = .init(arena);
@@ -739,14 +739,14 @@ test "Chat info draws standalone ground and facts at 99 and 46 columns" {
         try std.testing.expect(std.mem.indexOf(u8, text, if (page.narrow) " ‹ Fix retry deadline · info" else " Fix retry deadline · info") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, "k7m2qx") == null);
         std.debug.print("\nCHAT INFO {d}x12\n{s}END CHAT INFO\n", .{ width, text });
-        const drawn = try page.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 12 }, .cell_size = .{} });
+        const drawn = try page.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 12 }, .cell_size = .{} });
         const panel = drawn.children[0].surface;
         try std.testing.expect(panel.readCell(1, 1).style.bold);
         try std.testing.expectEqual(page.panel.selection.bg, panel.readCell(0, 2).style.bg);
         try std.testing.expectEqual(page.panel.ground.bg, panel.readCell(0, 10).style.bg);
     }
     for (0..10) |width| for (0..8) |height| {
-        _ = try page.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = @intCast(width), .height = @intCast(height) }, .cell_size = .{} });
+        _ = try page.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = @intCast(width), .height = @intCast(height) }, .cell_size = .{} });
     };
 }
 
@@ -993,7 +993,7 @@ test "Chat info model choice is a full-width field and saves a typed model" {
     try press(&page, &ctx, vaxis.Key.enter);
     try std.testing.expect(page.model_choice.active);
     for ([_]u16{ 99, 46 }) |width| {
-        const surface = try page.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
+        const surface = try page.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
         const parts = surface.children[0].surface.children;
         const child = parts[parts.len - 1];
         try std.testing.expectEqual(@as(i17, 0), child.origin.col);
@@ -1005,9 +1005,9 @@ test "Chat info model choice is a full-width field and saves a typed model" {
     }
     try typeText(&page, &ctx, "5.5");
     for ([_]u16{ 99, 46 }) |width| {
-        const surface = try page.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
+        const surface = try page.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
         var screen = try vaxis.Screen.init(arena.allocator(), .{ .cols = width, .rows = 20, .x_pixel = 0, .y_pixel = 0 });
-        surface.render(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = 20, .screen = &screen }, page.widget());
+        try surface.render(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = 20, .screen = &screen }, page.widget());
         try std.testing.expect(screen.cursor_vis);
         try std.testing.expectEqual(@as(u16, 22), screen.cursor.col);
         try std.testing.expectEqual(@as(u16, 6), screen.cursor.row);
@@ -1343,7 +1343,7 @@ test "Chat info Folder prefers whole components then a grapheme-aligned basename
         page.home = case.home;
         page.refresh();
         page.bind();
-        const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = case.room + 19, .height = 14 }, .cell_size = .{} };
+        const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = case.room + 19, .height = 14 }, .cell_size = .{} };
         const value = try page.folderValue(ctx, case.room);
         try std.testing.expectEqualStrings(case.expected, value);
         try std.testing.expect(ctx.stringWidth(value) <= case.room);
@@ -1361,7 +1361,7 @@ test "Chat info Folder prefers whole components then a grapheme-aligned basename
     page.refresh();
     page.bind();
     for (0..basename.len + 2) |room| {
-        const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = @intCast(room + 19), .height = 14 }, .cell_size = .{} };
+        const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = @intCast(room + 19), .height = 14 }, .cell_size = .{} };
         const expected = if (room == 0) "" else try std.fmt.allocPrint(arena.allocator(), "…{s}", .{basename[basename.len - (room - 1) ..]});
         try std.testing.expectEqualStrings(expected, try page.folderValue(ctx, @intCast(room)));
     }
@@ -1389,7 +1389,7 @@ test "Chat info hosted parts and standalone wrapper respect finite zero and smal
         page.failures[7] = if (failed) " · couldn't archive" else null;
         page.failures[8] = if (failed) " · couldn't copy" else null;
         for ([_]vxfw.Widget{ page.bodyWidget(), page.footerWidget(), page.widget() }, 0..) |part, index| {
-            const surface = try part.draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = @intCast(width), .height = @intCast(height) }, .cell_size = .{} });
+            const surface = try part.draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = @intCast(width), .height = @intCast(height) }, .cell_size = .{} });
             try std.testing.expect(surface.size.width <= width);
             try std.testing.expect(surface.size.height <= height);
             if (index == 1) try std.testing.expectEqual(@as(u16, if (height == 0) 0 else 1), surface.size.height);
@@ -1477,7 +1477,7 @@ test "Chat info natural body matches the mock grows by actual Model rows and shr
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
-        const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 40 }, .cell_size = .{} };
+        const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 40 }, .cell_size = .{} };
         const base_height: u16 = if (context) 11 else 10;
         const body = try page.bodyWidget().draw(ctx);
         try std.testing.expectEqual(base_height, body.size.height);
@@ -1521,7 +1521,7 @@ test "Chat info hover follows editable fields and action click regions without c
         page.refresh();
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
-        const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 12 }, .cell_size = .{} };
+        const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 12 }, .cell_size = .{} };
         _ = try page.widget().draw(draw_ctx);
         var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
         try page.widget().handleEvent(&events, .mouse_enter);
@@ -1564,7 +1564,7 @@ test "Chat info standalone choices reuse edits hide pending preserve failures an
     try page.openStandaloneChoice(&ctx, .effort);
     try std.testing.expect(page.standaloneOpen());
     try std.testing.expectEqual(Row.effort, page.standalone.?.row);
-    const drawn = try page.standaloneWidget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 30 }, .cell_size = .{} });
+    const drawn = try page.standaloneWidget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 30 }, .cell_size = .{} });
     try std.testing.expectEqualStrings("E", drawn.readCell(1, 0).char.grapheme);
     try std.testing.expectEqual(@as(u16, @intCast(1 + page.effort_count)), drawn.size.height);
     try page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
@@ -1582,7 +1582,7 @@ test "Chat info standalone choices reuse edits hide pending preserve failures an
     try page.openStandaloneChoice(&ctx, .model);
     try std.testing.expect(page.model_choice.active);
     for ([_]u16{ 0, 1, 2, 46, 140 }) |width| for (0..12) |height| {
-        const model_surface = try page.standaloneWidget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = @intCast(height) }, .cell_size = .{} });
+        const model_surface = try page.standaloneWidget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = @intCast(height) }, .cell_size = .{} });
         try std.testing.expect(model_surface.size.height <= height);
         for (model_surface.children) |child| {
             try std.testing.expect(child.origin.row + child.surface.size.height <= model_surface.size.height);
@@ -1615,7 +1615,7 @@ test "Chat info standalone draw invalidation never falls through to enclosing pa
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
-    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 30 }, .cell_size = .{} };
+    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 30 }, .cell_size = .{} };
     try page.openStandaloneChoice(&events, .model);
     var revision: u64 = 0;
     page.model_choice.source = .{ .context = &revision, .read = Live.read };
@@ -1655,7 +1655,7 @@ test "Chat info standalone effort checks the actual Session effort without chang
         try std.testing.expectEqualStrings("high", page.effort_labels[1]);
         try std.testing.expectEqual(actual, page.panel.choice.?.current);
         for ([_]u16{ 46, 140 }) |width| {
-            const drawn = try page.standaloneWidget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
+            const drawn = try page.standaloneWidget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
             for (0..page.effort_count) |row| try std.testing.expectEqualStrings(if (actual == row) "✓" else " ", drawn.readCell(1, @intCast(row + 1)).char.grapheme);
         }
     };
@@ -1701,7 +1701,7 @@ test "Chat info standalone Model and Effort retry read and save failures by draw
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
-        const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} };
+        const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} };
         const click: vaxis.Mouse = .{ .col = 1, .row = 1, .button = .left, .type = .press, .mods = .{} };
         const index: usize = if (field == .model) 4 else 0;
         try page.openStandaloneChoice(&ctx, field);
@@ -1812,7 +1812,7 @@ test "Chat info standalone lifetime domain closes every phase without cancelling
             }
             try std.testing.expect(page.standaloneField() == null);
             try std.testing.expect(!page.standaloneOpen());
-            const surface = try page.standaloneWidget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 20 }, .cell_size = .{} });
+            const surface = try page.standaloneWidget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 20 }, .cell_size = .{} });
             try std.testing.expectEqual(@as(u16, 0), surface.size.height);
             try std.testing.expectEqual(@as(usize, 0), surface.buffer.len);
             try std.testing.expectEqual(@as(usize, 0), surface.children.len);
@@ -1843,7 +1843,7 @@ test "Chat info copy label follows successful short reply dismissal replacement 
         try press(&page, &ctx, vaxis.Key.enter);
         try std.testing.expectEqual(@as(?usize, 8), page.pending);
         try std.testing.expect(std.mem.indexOf(u8, try dump(&page, arena.allocator(), width, 15), "Copied") == null);
-        fixture.copy_notice.showCopy(0);
+        fixture.copy_notice.showCopy(0, .panel_copy);
         fixture.state_value = .saved;
         try page.widget().handleEvent(&ctx, .tick);
         const copied = try dump(&page, arena.allocator(), width, 15);
@@ -1855,7 +1855,7 @@ test "Chat info copy label follows successful short reply dismissal replacement 
         fixture.copy_notice.dismiss();
         try press(&page, &ctx, vaxis.Key.left);
         try std.testing.expect(std.mem.indexOf(u8, try dump(&page, arena.allocator(), width, 15), "Copy last answer") != null);
-        fixture.copy_notice.showCopy(0);
+        fixture.copy_notice.showCopy(0, .panel_copy);
         fixture.copy_notice.show("another reply", 0);
         try std.testing.expect(std.mem.indexOf(u8, try dump(&page, arena.allocator(), width, 15), "Copied") == null);
         page.panel.selected = 8;
@@ -1919,5 +1919,23 @@ test "Chat info focus consumes drawn action layout across pending failures and C
         page.panel.selected = 4;
         try press(&page, &ctx, vaxis.Key.tab);
         try std.testing.expectEqual(@as(usize, 6), page.panel.selected);
+    };
+}
+
+test "Chat info contains only chat settings and never an app Memory row" {
+    var fixture: Fixture = .{};
+    fixture.init();
+    var page: Self = .{ .backend = fixture.backend() };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    for ([_]?u64{ null, 18 }) |context| for ([_]u16{ 46, 99 }) |width| {
+        fixture.session.context_estimate = context;
+        page.refresh();
+        const text = try dump(&page, arena.allocator(), width, 20);
+        try std.testing.expect(std.mem.indexOf(u8, text, "Memory") == null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "Permissions") != null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "Copy last answer") != null);
+        try std.testing.expectEqual(@as(usize, 6), page.fields.len);
+        _ = arena.reset(.retain_capacity);
     };
 }

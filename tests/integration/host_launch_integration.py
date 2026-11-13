@@ -458,17 +458,19 @@ def startup_limits(root, env):
     assert "back up" in failed.stderr and "[internal_unexpected]" in failed.stderr, failed.stderr
     with sqlite3.connect(database) as connection:
         assert connection.execute("PRAGMA user_version").fetchone()[0] == 21
-    for wire in (None, "future"):
+    # At the current format, a missing or other saved format is refused too.
+    for saved_format in (None, "future"):
         with sqlite3.connect(database) as connection:
             connection.execute(f"PRAGMA user_version={SCHEMA}")
-            connection.execute("DELETE FROM store_meta WHERE meta_key='wire_version'")
-            if wire is not None:
-                connection.execute("INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version',?)", (wire,))
+            connection.execute("DELETE FROM store_meta WHERE meta_key='format'")
+            if saved_format is not None:
+                connection.execute("INSERT INTO store_meta(meta_key,meta_value) VALUES('format',?)", (saved_format,))
         original = hashlib.sha256(database.read_bytes()).digest()
         before = time.monotonic()
         failed = run_start(store, env)
         assert failed.returncode == 1 and time.monotonic() - before < 5, failed
-        assert "wire metadata" in failed.stderr and f"wire {host_process.WIRE_VERSION}" in failed.stderr, failed.stderr
+        assert "format metadata" in failed.stderr and "wire metadata" not in failed.stderr, failed.stderr
+        assert f"wire {host_process.WIRE_VERSION}" in failed.stderr, failed.stderr
         assert "unsupported Store format" not in failed.stderr, failed.stderr
         assert str(store) in failed.stderr and "back up" in failed.stderr and "No migration" in failed.stderr, failed.stderr
         assert hashlib.sha256(database.read_bytes()).digest() == original
@@ -501,12 +503,12 @@ def startup_limits(root, env):
     with sqlite3.connect(database) as source, sqlite3.connect(hostile_database) as destination:
         source.backup(destination)
     hostile_database.chmod(0o600)
-    for schema, wire in ((21, "1"), (SCHEMA, None), (SCHEMA, "future")):
+    for schema, saved_format in ((21, "21"), (SCHEMA, None), (SCHEMA, "future")):
         with sqlite3.connect(hostile_database) as connection:
             connection.execute(f"PRAGMA user_version={schema}")
-            connection.execute("DELETE FROM store_meta WHERE meta_key='wire_version'")
-            if wire is not None:
-                connection.execute("INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version',?)", (wire,))
+            connection.execute("DELETE FROM store_meta WHERE meta_key='format'")
+            if saved_format is not None:
+                connection.execute("INSERT INTO store_meta(meta_key,meta_value) VALUES('format',?)", (saved_format,))
         original = hashlib.sha256(hostile_database.read_bytes()).digest()
         before = time.monotonic()
         failed = run_start(hostile, env)
@@ -707,7 +709,7 @@ def main():
             forced_crash_cleanup(sized_store)
 
         # A saved OpenAI key file that holds no key is not ready: the Host
-        # starts and serves Codex instead of failing on the optional provider.
+        # starts and serves ChatGPT by device code instead of failing on the optional provider.
         key_dir = root / "openai-private"
         key_dir.mkdir(mode=0o700)
         key_file = key_dir / "openai.key"
@@ -723,7 +725,7 @@ def main():
         finally:
             forced_crash_cleanup(invalid_store)
         # A saved OpenAI key adds openai to an auto-started Host. A bad base
-        # URL is OpenAI's alone to fail: the Host starts and serves Codex.
+        # URL is OpenAI's alone to fail: the Host starts and serves ChatGPT by device code.
         key_file.write_text("sk-host-launch\n")
         for base, served, message in (("https://proxy.example/v1", "key_file", None),
                                       ("http://proxy.example/v1", "unserved", "this Host starts without OpenAI")):
@@ -893,9 +895,8 @@ def main():
             output = bytearray()
             screen = ScreenCapture(COLUMNS, ROWS, reply=answers_to(master))
             until = time.monotonic() + COMMAND_TIMEOUT
-            # The committed screen with the cursor at the composer establishes the overview.
-            while not (screen.completed
-                    and screen.screen.display[screen.screen.cursor.y].startswith(" ›")):
+            # The overview commits its pinned actions and footer, not an editor.
+            while not all(marker in screen.completed for marker in ("+ New Session", "Settings", "enter open")):
                 remaining = until - time.monotonic()
                 assert remaining > 0 and select.select([master], [], [], remaining)[0], (screen.completed, output)
                 chunk = os.read(master, 65536)
@@ -906,6 +907,7 @@ def main():
             # Automatic success is quiet; readiness is established separately
             # through protected status and the accepted Session below.
             assert all(noise not in screen.completed for noise in ("Provider:", "Model:", "Permission:", "request:", "Session:", "Workspace:")), screen.completed
+            assert "Type a task" not in screen.completed, screen.completed
             assert not screen.plain, ("bypass notice left the frame", screen.plain)
             assert "Bash commands can run without asking you" not in screen.completed, screen.completed
             assert not list((bare_home / ".config/rui/requests").glob("*.json")), "the overview captured a request"

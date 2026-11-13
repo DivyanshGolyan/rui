@@ -179,10 +179,10 @@ pub const Store = struct {
     }
 
     /// Records `seal` for the current `binding` through the production
-    /// write (`historical.recordPrefixSeal`), whatever the seal holds.
+    /// write (`recordPrefixSeal`), whatever the seal holds.
     pub fn setPrefixSealForTesting(self: *Store, binding: AttemptBinding, seal: *const PrefixSeal) !void {
         if (!@import("builtin").is_test) @compileError("test-only Store fixture");
-        return historical_domain.recordPrefixSeal(self, binding, seal);
+        return self.recordPrefixSeal(binding, seal);
     }
 
     pub fn setHistoricalModelForTesting(self: *Store, binding: AttemptBinding, model: []const u8) !void {
@@ -1116,8 +1116,8 @@ pub const Store = struct {
             self.admitModelAttempt(.tool_continuation, faults);
     }
 
-    /// Never inlined: its two Accesses and admission's rows (about 4 KiB)
-    /// stay off the frame of a caller that goes on to dispatch the Attempt.
+    /// Admission's rows over 1 KiB stay off the engine thread's stack, in
+    /// the Store's scratch (`AdmitModel.Scratch`).
     pub fn admitModelAttempt(self: *Store, admission_kind: ModelAdmissionKind, faults: Faults) !?AttemptAdmission {
         return self.admitModelAttemptInto(admission_kind, faults, null);
     }
@@ -1133,22 +1133,39 @@ pub const Store = struct {
     noinline fn admitModelAttemptHeld(self: *Store, admission_kind: ModelAdmissionKind, faults: Faults, start: ?historical_domain.Start) !?AttemptAdmission {
         const entry = try enter(self, .none);
         defer entry.release();
-        var reader: ReadAccess = .open(&entry);
-        defer reader.deinit();
+        // Only a network engine's commit carries the request's reads.
+        const starting: ?model_admission_domain.AdmitModel.Starting = if (start) |into| if (self.engine.batches()) .{ .start = into, .store = self } else null else null;
         // An admission whose purpose rests on its context's size writes as
         // an assistant response under a guard on that size, and so reads no
         // size. Only the guard's failure, rolled back, admits again as the
         // compaction it showed is due.
-        const first = admitModelAttemptOnce(&entry, &reader, admission_kind, .weighed, faults, start);
+        const first = admitModelAttemptOnce(&entry, admission_kind, .weighed, faults, starting);
         const due = if (first) |_| false else |err| err == error.CompactionDue;
-        return entry.finishTransaction(Ordinary.none, faults, if (due) admitModelAttemptOnce(&entry, &reader, admission_kind, .over, faults, start) else first);
+        const outcome = if (due) admitModelAttemptOnce(&entry, admission_kind, .over, faults, starting) else first;
+        return entry.finishTransaction(Ordinary.none, faults, idleUnlessAdmitted(&entry, outcome));
+    }
+
+    /// `outcome`, but an admission that selected nothing first checks the
+    /// Store is idle (`CheckIdle`). Never inlined: the checks' rounds run
+    /// beside an admission's, not under it.
+    noinline fn idleUnlessAdmitted(entry: *const Entry, outcome: anytype) !?AttemptAdmission {
+        if (try outcome) |selected| return selected;
+        var checks: model_admission_domain.CheckIdle = .{};
+        try transition.run(entry, model_admission_domain.CheckIdle, &checks, .{});
+        return null;
     }
 
     /// Never inlined: the second admission reuses the first's frame.
-    noinline fn admitModelAttemptOnce(entry: *const Entry, reader: *ReadAccess, admission_kind: ModelAdmissionKind, pressure: model_admission_domain.Pressure, faults: Faults, start: ?historical_domain.Start) !?AttemptAdmission {
-        var writer: Access(.write, error{ SelectionChanged, ProjectionFailed, InstructionSelectionFailed, CompactionDue }) = .open(entry);
-        defer writer.deinit();
-        return writer.end(faults, model_admission_domain.admitNextModelAttempt(reader, &writer, admission_kind, pressure, faults, start));
+    noinline fn admitModelAttemptOnce(entry: *const Entry, admission_kind: ModelAdmissionKind, pressure: model_admission_domain.Pressure, faults: Faults, starting: ?model_admission_domain.AdmitModel.Starting) !?AttemptAdmission {
+        const Admit = model_admission_domain.AdmitModel;
+        var admission: Admit = .{ .input = .{
+            .kind = admission_kind,
+            .pressure = pressure,
+            .faults = faults,
+            .start = starting,
+            .scratch = entry.store.reportScratch(Admit.Scratch),
+        } };
+        return transition.run(entry, Admit, &admission, faults);
     }
 
     pub fn admitNextActionAttempt(
@@ -1578,6 +1595,17 @@ pub const Store = struct {
         active: ActiveOperationFilter,
     ) !bool {
         return transition.apply(self, model_settlement_domain.RecoverExhausted, .{ .active = active }, .{});
+    }
+
+    /// Records `seal` as the prefix seal of the Session of the Attempt
+    /// `binding` names, while the binding is current
+    /// (`historical.RecordSeal`).
+    pub fn recordPrefixSeal(self: *Store, binding: AttemptBinding, seal: *const PrefixSeal) !void {
+        return self.queue().write(recordPrefixSealHeld, .{ self, binding, seal });
+    }
+
+    fn recordPrefixSealHeld(self: *Store, binding: AttemptBinding, seal: *const PrefixSeal) !void {
+        return transition.apply(self, historical_domain.RecordSeal, .{ .binding = binding, .seal = seal }, .{});
     }
 
     pub fn settleModelSuccess(
@@ -2055,17 +2083,17 @@ pub fn commitsWithWrites(self: *Store) bool {
 /// is kept only beside a writer that did not fail, and only when that one
 /// round gave it: checks that need more rounds are left to the Host's own
 /// `dispatchWork`. A read that fails after COMMIT fences, as it does when
-/// the Host asks, and the commit stands.
-pub noinline fn commitWithSurvey(self: *Store, writer: anytype) void {
+/// the Host asks, and the commit stands. `follow`'s reads, when the
+/// writer has any (`Access.commitFollowed`), ride ahead of the survey's
+/// on the same terms.
+pub noinline fn commitWithSurvey(self: *Store, writer: anytype, follow: anytype) void {
     const kept = &self.identities().survey;
-    const follow = self.identities().follow;
-    self.identities().follow = null;
     const surveyed = kept.asked != .never;
     if (!surveyed and follow == null) return writer.passCommit(null);
     kept.kept = .none;
     var reads: store_access.Access(.survey, error{}) = .{ .store = self, .tail = true };
     defer reads.deinit();
-    if (follow) |after| after.queue(after.context, &reads);
+    if (follow) |after| after.queue(&reads);
     var survey: model_admission_domain.DispatchSurvey = .{};
     if (surveyed) survey.queue(&reads, kept.asked == .paused);
     if (reads.failure != null) {
@@ -2078,7 +2106,7 @@ pub noinline fn commitWithSurvey(self: *Store, writer: anytype) void {
         @as(anyerror!void, fence(self, err)) catch {};
         return;
     }
-    if (follow) |after| after.settle(after.context);
+    if (follow) |after| after.followed();
     if (!surveyed) return;
     const found = (survey.work() catch |err| {
         @as(anyerror!void, fence(self, err)) catch {};
@@ -2091,23 +2119,6 @@ pub noinline fn commitWithSurvey(self: *Store, writer: anytype) void {
     kept.tool_continuation = found.tool_continuation;
     kept.retry = found.retry;
     kept.kept = .fresh;
-}
-
-/// Reads a write asks to follow its COMMIT in the same message, ahead of
-/// the dispatch survey: `queue` binds them, and `settle` takes their
-/// answers once the message ran with no failure. They ride whole or not
-/// at all, as the survey does, so their owner must be able to read them
-/// in a round of its own.
-pub const Follow = struct {
-    context: *anyopaque,
-    queue: *const fn (*anyopaque, *store_access.Access(.survey, error{})) void,
-    settle: *const fn (*anyopaque) void,
-};
-
-/// Sets, or with null clears, the reads the holder's next commit carries
-/// (`commitWithSurvey`). The write that set them clears them when it ends.
-pub fn followCommit(self: *Store, follow: ?Follow) void {
-    self.identities().follow = follow;
 }
 
 /// `Queue.Batch.closed`: the batch's COMMIT already ran.
@@ -2361,8 +2372,6 @@ const HostValues = struct {
     /// and advances the generation, then `ready` until the next advance.
     /// It fits the padding after `admitted_len`.
     survey: Survey = .{},
-    /// The reads the holder's next commit carries after it (`followCommit`).
-    follow: ?Follow = null,
 };
 
 const Survey = packed struct(u16) {

@@ -31,7 +31,8 @@ const chatgpt_plan_login = @import("chatgpt_plan_login.zig");
 const model_adapter = @import("model_adapter.zig");
 const providers = @import("providers.zig");
 const api_key = @import("api_key.zig");
-const launch_frame = @import("launch_frame.zig");
+const host_start = @import("host_start.zig");
+const host_settings = @import("host_settings.zig");
 const start_report = @import("start_report.zig");
 const new_session_selection = @import("new_session_selection.zig");
 const platform = @import("platform.zig");
@@ -341,11 +342,7 @@ noinline fn clientCommand(init: std.process.Init, command: cli_args.Command, par
         // Inspection has its own read-only operation; configure's grammar
         // requires an edit.
         .defaults_inspect, .defaults_configure => try setup(init, parsed, .command_line),
-        // Only the ChatGPT sign-in has a test issuer.
-        .auth_login => if (parsed.get("test-chatgpt-fixture-endpoint")) |fixture| {
-            if (!std.mem.eql(u8, parsed.positional.?, "chatgpt")) return usage();
-            try planLogin(init, fixture);
-        } else try login(init, &.{parsed.positional.?}, codex_auth.login),
+        .auth_login => try login(init, parsed.positional.?, parsed.has("device-code"), parsed.get("test-chatgpt-fixture-endpoint"), codex_auth.login),
         .auth_logout => try planLogout(init, parsed.positional.?, parsed.get("test-chatgpt-fixture-endpoint")),
         .auth_status => {
             const readiness = localReadiness(init);
@@ -380,7 +377,7 @@ fn postCommandHoldDescriptors(ready: std.posix.fd_t, release: std.posix.fd_t) !v
 /// with HOME's absence reported as the terminal names that provider.
 fn credentialPath(init: std.process.Init, comptime provider: protocol.Provider, buffer: []u8, create: bool) ![]const u8 {
     return provider_login.credentialPath(init, provider, buffer, create) catch |err| {
-        if (err == error.HomeRequired) return homeRequired("the " ++ providerPresentation(provider).name ++ " credential is HOME/.config/rui/" ++ @tagName(provider) ++ ".json unless " ++ comptime provider_login.credentialVariable(provider) ++ " names it");
+        if (err == error.HomeRequired) return homeRequired("the " ++ (comptime provider.shown()) ++ " credential is HOME/.config/rui/" ++ @tagName(provider) ++ ".json unless " ++ comptime provider_login.credentialVariable(provider) ++ " names it");
         return err;
     };
 }
@@ -447,12 +444,13 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, reader: SetupRe
     try writeSafeText(init.io, prospective_store orelse "unavailable");
     try std.Io.File.stdout().writeStreamingAll(init.io, if (values.store.len != 0) " (saved)\n" else " (HOME fallback)\n");
     if (available_store == null) try std.Io.File.stdout().writeStreamingAll(init.io, "Store unavailable: destination cannot be selected; no alternate Store selected.\n");
-    try writeSafeField(init.io, "Provider: ", if (values.provider.len != 0) values.provider.slice() else "not selected");
+    try writeSafeField(init.io, "Provider: ", if (values.provider.len != 0) providerShown(values.provider.slice()) else "not selected");
     try writeSafeField(init.io, "Model: ", if (values.model.len != 0) values.model.slice() else "not selected");
     try std.Io.File.stdout().writeStreamingAll(init.io, if (values.notifications) "Notifications: on\n" else "Notifications: off\n");
     try writeSafeField(init.io, "Reasoning effort: ", if (values.reasoning_effort) |effort| @tagName(effort) else "each model's default");
     try writeSafeField(init.io, "Permissions: ", if (values.permission_mode) |mode| @tagName(mode) else @import("product_defaults.zig").permission_mode);
     var output: [std.Io.Dir.max_path_bytes + 512]u8 = undefined;
+    var note_buffer: [128]u8 = undefined;
     try writeSignIns(init, &readiness);
     const selectable = model_capability.capabilities(&readiness);
     const selection: ?provider_selection.Selection = provider_selection.resolve(&selectable, null, null, if (values.provider.len != 0) values.provider.slice() else null, if (values.model.len != 0) values.model.slice() else null) catch |err| blk: {
@@ -464,16 +462,17 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, reader: SetupRe
         break :blk null;
     };
     if (selection) |choice| switch (choice) {
-        .chooser => try std.Io.File.stdout().writeStreamingAll(init.io, "Next Session: choose a provider with `rui defaults configure --provider " ++ provider_choices ++ "`; Codex login: `" ++ comptime protocol.Provider.codex.login().? ++ "`; OpenAI key: `" ++ protocol.Provider.openai.login().? ++ "`.\n"),
+        .chooser => try std.Io.File.stdout().writeStreamingAll(init.io, "Next Session: choose a provider with `rui defaults configure --provider " ++ provider_choices ++ "`; ChatGPT login: `" ++ comptime protocol.Provider.chatgpt.login().? ++ "`; OpenAI key: `" ++ protocol.Provider.openai.login().? ++ "`.\n"),
         .selected => |selected| {
+            const login_command = if (std.meta.stringToEnum(protocol.Provider, selected.provider)) |provider| provider.login() else null;
             const note: []const u8 = switch (selected.readiness) {
                 .configured => "local credential configured; remote acceptance not checked",
                 .renewal_due => "local credential usable; renewal due at dispatch; remote acceptance not checked",
-                .missing => "credential missing; run `rui auth login <provider>`. No fallback",
+                .missing => if (login_command) |command| try std.fmt.bufPrint(&note_buffer, "credential missing; run `{s}`. No fallback", .{command}) else "credential missing. No fallback",
                 .refresh_required => "credential refresh required; login may be required. No fallback",
                 .credential_error => "credential error; inspect private Rui credential or log in. No fallback",
             };
-            const line = try std.fmt.bufPrint(&output, "Next Session: {s} / {s} ({s}).\n", .{ selected.provider, selected.model, note });
+            const line = try std.fmt.bufPrint(&output, "Next Session: {s} / {s} ({s}).\n", .{ providerShown(selected.provider), selected.model, note });
             try std.Io.File.stdout().writeStreamingAll(init.io, line);
         },
     };
@@ -489,29 +488,118 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, reader: SetupRe
     try std.Io.File.stdout().writeStreamingAll(init.io, host_details);
 }
 
-/// Each provider's local sign-in, one line each, as `rui auth status` and
-/// the setup report show them.
+/// A saved provider name as a person reads it: a known provider's name,
+/// otherwise the saved text itself.
+fn providerShown(saved: []const u8) []const u8 {
+    const provider = std.meta.stringToEnum(protocol.Provider, saved) orelse return saved;
+    return provider.shown();
+}
+
+/// Each provider's local sign-in, as `rui auth status` and the setup report
+/// show them: ChatGPT's two ways in (`chatgptLines`), then the OpenAI key.
 fn writeSignIns(init: std.process.Init, readiness: *const provider_selection.Readinesses) !void {
     const stdout = std.Io.File.stdout();
-    try stdout.writeStreamingAll(init.io, switch (readiness.get(.codex)) {
-        .configured => "Codex credential: configured locally (remote acceptance not checked).\n",
-        .renewal_due => "Codex credential: usable locally; renewal due at dispatch (remote acceptance not checked).\n",
-        .missing => "Codex credential: missing.\n",
-        .refresh_required => "Codex credential: refresh required; a pending refresh may require login.\n",
-        .credential_error => "Codex credential: error reading private Rui credential; inspect it before use.\n",
-    });
+    const chatgpt = chatgptLines(readiness.get(.chatgpt), readiness.get(.codex));
     var line: [1024]u8 = undefined;
-    try stdout.writeStreamingAll(init.io, switch (readiness.get(.chatgpt)) {
-        .configured, .renewal_due => planSignInLine(init, &line),
-        .missing => "ChatGPT: not signed in; sign in with `" ++ comptime protocol.Provider.chatgpt.login().? ++ "`.\n",
-        .refresh_required => "ChatGPT: a renewal did not finish; sign in again with `" ++ comptime protocol.Provider.chatgpt.login().? ++ "`.\n",
-        .credential_error => "ChatGPT: error reading private Rui credential; inspect it before use.\n",
-    });
+    switch (chatgpt.plan) {
+        .none => {},
+        .account => try stdout.writeStreamingAll(init.io, planSignInLine(init, &line)),
+        .text => |text| try stdout.writeStreamingAll(init.io, text),
+    }
+    if (chatgpt.device) |text| try stdout.writeStreamingAll(init.io, text);
     try stdout.writeStreamingAll(init.io, switch (readiness.get(.openai)) {
         .configured, .renewal_due => "OpenAI API key: saved locally (remote acceptance not checked).\n",
         .missing => "OpenAI API key: missing.\n",
         .refresh_required, .credential_error => "OpenAI API key: unreadable, not owner-only or not one key; save it again with `" ++ comptime protocol.Provider.openai.login().? ++ "`.\n",
     });
+}
+
+/// What `rui auth status` says about the one ChatGPT sign-in and its two
+/// ways in: the browser sign-in (`plan`) and the device-code one
+/// (`device`). A way in that is missing goes unsaid unless both are.
+const ChatgptLines = struct {
+    plan: union(enum) {
+        none,
+        /// Signed in: the account's own line, read from its credential.
+        account,
+        text: []const u8,
+    },
+    device: ?[]const u8,
+};
+
+fn chatgptLines(plan: provider_selection.Readiness, device: provider_selection.Readiness) ChatgptLines {
+    const plan_login = comptime protocol.Provider.chatgpt.login().?;
+    const device_login = comptime protocol.Provider.codex.login().?;
+    return .{
+        .plan = switch (plan) {
+            .configured, .renewal_due => .account,
+            .missing => if (device == .missing) .{ .text = "ChatGPT: not signed in; sign in with `" ++ plan_login ++ "` (add --device-code to use a code instead of the browser).\n" } else .none,
+            .refresh_required => .{ .text = "ChatGPT: a renewal did not finish; sign in again with `" ++ plan_login ++ "`.\n" },
+            .credential_error => .{ .text = "ChatGPT: error reading private Rui credential; inspect it before use.\n" },
+        },
+        .device = switch (device) {
+            .missing => null,
+            .configured => "ChatGPT (device code): signed in (remote acceptance not checked).\n",
+            .renewal_due => "ChatGPT (device code): signed in; renewal due at dispatch (remote acceptance not checked).\n",
+            .refresh_required => "ChatGPT (device code): a renewal did not finish; sign in again with `" ++ device_login ++ "`.\n",
+            .credential_error => "ChatGPT (device code): error reading private Rui credential; inspect it before use.\n",
+        },
+    };
+}
+
+test "auth status says each ChatGPT way in that exists, and how to sign in when neither does" {
+    const Readiness = provider_selection.Readiness;
+    // Written out by hand for every pair: the browser line, then the
+    // device-code line, null where nothing is said.
+    const signed_in = "account";
+    const plan_renew = "ChatGPT: a renewal did not finish; sign in again with `rui auth login chatgpt`.\n";
+    const plan_error = "ChatGPT: error reading private Rui credential; inspect it before use.\n";
+    const neither = "ChatGPT: not signed in; sign in with `rui auth login chatgpt` (add --device-code to use a code instead of the browser).\n";
+    const device_on = "ChatGPT (device code): signed in (remote acceptance not checked).\n";
+    const device_due = "ChatGPT (device code): signed in; renewal due at dispatch (remote acceptance not checked).\n";
+    const device_renew = "ChatGPT (device code): a renewal did not finish; sign in again with `rui auth login chatgpt --device-code`.\n";
+    const device_error = "ChatGPT (device code): error reading private Rui credential; inspect it before use.\n";
+    const cases = [_]struct { Readiness, Readiness, ?[]const u8, ?[]const u8 }{
+        .{ .configured, .configured, signed_in, device_on },
+        .{ .configured, .renewal_due, signed_in, device_due },
+        .{ .configured, .missing, signed_in, null },
+        .{ .configured, .refresh_required, signed_in, device_renew },
+        .{ .configured, .credential_error, signed_in, device_error },
+        .{ .renewal_due, .configured, signed_in, device_on },
+        .{ .renewal_due, .renewal_due, signed_in, device_due },
+        .{ .renewal_due, .missing, signed_in, null },
+        .{ .renewal_due, .refresh_required, signed_in, device_renew },
+        .{ .renewal_due, .credential_error, signed_in, device_error },
+        .{ .missing, .configured, null, device_on },
+        .{ .missing, .renewal_due, null, device_due },
+        .{ .missing, .missing, neither, null },
+        .{ .missing, .refresh_required, null, device_renew },
+        .{ .missing, .credential_error, null, device_error },
+        .{ .refresh_required, .configured, plan_renew, device_on },
+        .{ .refresh_required, .renewal_due, plan_renew, device_due },
+        .{ .refresh_required, .missing, plan_renew, null },
+        .{ .refresh_required, .refresh_required, plan_renew, device_renew },
+        .{ .refresh_required, .credential_error, plan_renew, device_error },
+        .{ .credential_error, .configured, plan_error, device_on },
+        .{ .credential_error, .renewal_due, plan_error, device_due },
+        .{ .credential_error, .missing, plan_error, null },
+        .{ .credential_error, .refresh_required, plan_error, device_renew },
+        .{ .credential_error, .credential_error, plan_error, device_error },
+    };
+    const states = std.enums.values(Readiness).len;
+    try std.testing.expectEqual(states * states, cases.len);
+    for (cases) |case| {
+        const said = chatgptLines(case[0], case[1]);
+        const plan: ?[]const u8 = switch (said.plan) {
+            .none => null,
+            .account => signed_in,
+            .text => |text| text,
+        };
+        if (case[2]) |expected| try std.testing.expectEqualStrings(expected, plan.?) else try std.testing.expectEqual(@as(?[]const u8, null), plan);
+        if (case[3]) |expected| try std.testing.expectEqualStrings(expected, said.device.?) else try std.testing.expectEqual(@as(?[]const u8, null), said.device);
+        // No person reads the retired name.
+        inline for (.{ plan, said.device }) |text| if (text) |line| try std.testing.expect(std.mem.indexOf(u8, line, "Codex") == null);
+    }
 }
 
 /// A usable plan sign-in: the account's email when its ID token names one,
@@ -537,13 +625,13 @@ fn planSignInLine(init: std.process.Init, buffer: []u8) []const u8 {
     return writer.buffered();
 }
 
-/// `rui auth login chatgpt`: the plan sign-in, published through the same
-/// custody and SIGINT gate as a Codex login.
+/// `rui auth login chatgpt`: the plan sign-in in a browser, published
+/// through the same custody and SIGINT gate as a device-code login.
 fn planLogin(init: std.process.Init, fixture_endpoint: ?[]const u8) !void {
     var interrupt = LoginInterrupt.init();
     defer interrupt.deinit();
     const issuer = try planIssuer(init, fixture_endpoint);
-    provider_login.chatgpt(init, issuer, loginInterrupted, struct {
+    provider_login.chatgpt(init, issuer, planDisplay, .{ .fd = std.Io.File.stdin().handle, .read = readStdin }, loginInterrupted, struct {
         fn publish() bool {
             return login_state.cmpxchgStrong(.cancellable, .publishing, .acq_rel, .acquire) == null;
         }
@@ -551,30 +639,242 @@ fn planLogin(init: std.process.Init, fixture_endpoint: ?[]const u8) !void {
         error.HomeRequired => homeRequired("the ChatGPT credential and host id are in HOME/.config/rui unless " ++ comptime provider_login.credentialVariable(.chatgpt) ++ " names the credential"),
         else => err,
     };
-    if (!try finishLogin(init, .chatgpt, "Rui: Signed in to ChatGPT.\n")) return;
-    try std.Io.File.stdout().writeStreamingAll(init.io, "A running Host that serves chatgpt uses this sign-in from its next request; one started before you signed in needs a restart to serve it.\nStart a conversation with: rui --provider chatgpt\n");
+    const outcome = try finishLogin(init, .chatgpt, "Rui: Signed in to ChatGPT.\n") orelse return;
+    try std.Io.File.stdout().writeStreamingAll(init.io, "A running Host that serves ChatGPT uses this sign-in from its next request; one started before you signed in needs a restart to serve it.\n");
+    try std.Io.File.stdout().writeStreamingAll(init.io, conversationStart(.chatgpt, outcome));
 }
 
-/// `rui auth logout chatgpt`: revoke, then remove the tokens, keeping the
-/// issued client id and the host id.
+/// The terminal's rendering of what the plan sign-in shows, on stderr.
+fn planDisplay(shown: chatgpt_plan_login.Shown) !void {
+    std.debug.print("{f}", .{PlanShown{ .shown = shown }});
+}
+
+/// The terminal text of one `chatgpt_plan_login.Shown`.
+const PlanShown = struct {
+    shown: chatgpt_plan_login.Shown,
+
+    pub fn format(self: PlanShown, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        const again = " Nothing was saved; run rui auth login chatgpt again.\n";
+        switch (self.shown) {
+            .link => |link| try writer.print(
+                \\Sign in with ChatGPT. Open this link in a browser where you are already signed in to ChatGPT:
+                \\
+                \\{s}
+                \\
+                \\If the page says "Your session has ended", sign in to ChatGPT, then open the link again.
+                \\If the browser ends on a page that cannot load, copy its address and paste it here, then press Enter.
+                \\Waiting for the browser (Ctrl+C cancels)...
+                \\
+            , .{link}),
+            .stray_paste => |port| try writer.print("rui: that is not the address the browser ended on. Paste the whole address, which starts with http://127.0.0.1:{d}/auth/callback\n", .{port}),
+            .failed => |failure| switch (failure) {
+                .invalid_host_id => |path| try writer.print("rui: {s} does not hold a host id Rui wrote; move it aside and sign in again.\n", .{path}),
+                .refused => |code| try writer.print("rui: ChatGPT did not grant the sign-in ({s}). Nothing was saved.\n", .{code}),
+                .timed_out => try writer.print("rui: no sign-in answer arrived in {d} minutes." ++ again, .{chatgpt_plan_login.wait_minutes}),
+                .no_answer_source => try writer.writeAll("rui: input ended and Rui could not listen for the browser, so no sign-in answer can arrive. Nothing was saved.\n"),
+                .callback => |cause| try writer.print("rui: {s}" ++ again, .{switch (cause) {
+                    .state_mismatch => "That answer is not from this sign-in.",
+                    .client_id_mismatch => "ChatGPT answered for another app registration than the one Rui saved.",
+                    .missing_client_id => "ChatGPT's answer did not name Rui's app registration.",
+                    .damaged => "The sign-in answer was incomplete or damaged.",
+                }}),
+                .unreachable_service => |cause| try writer.print("rui: could not reach ChatGPT's sign-in service ({s})." ++ again, .{cause}),
+                .exchange => |cause| try writer.print("rui: {s} Nothing was saved.\n", .{switch (cause) {
+                    .plan_scope_missing => "You signed in, but ChatGPT did not let Rui use your plan. Allow it on the ChatGPT page, then run rui auth login chatgpt again.",
+                    .code_refused => "ChatGPT refused the sign-in code. Run rui auth login chatgpt again for a new link.",
+                    .not_for_this_sign_in => "ChatGPT's answer was not for this sign-in.",
+                    .unreadable => "ChatGPT's answer could not be read.",
+                }}),
+            },
+        }
+    }
+};
+
+test "the terminal shows each plan sign-in value in the words the login printed before it took a display" {
+    // Expected text is the base commit's literals, written out by hand.
+    for ([_]struct { chatgpt_plan_login.Shown, []const u8 }{
+        .{ .{ .link = "https://example.test/x" }, "Sign in with ChatGPT. Open this link in a browser where you are already signed in to ChatGPT:\n\nhttps://example.test/x\n\nIf the page says \"Your session has ended\", sign in to ChatGPT, then open the link again.\nIf the browser ends on a page that cannot load, copy its address and paste it here, then press Enter.\nWaiting for the browser (Ctrl+C cancels)...\n" },
+        .{ .{ .stray_paste = 1455 }, "rui: that is not the address the browser ended on. Paste the whole address, which starts with http://127.0.0.1:1455/auth/callback\n" },
+        .{ .{ .failed = .{ .invalid_host_id = "/h/host-id" } }, "rui: /h/host-id does not hold a host id Rui wrote; move it aside and sign in again.\n" },
+        .{ .{ .failed = .{ .refused = "access_denied" } }, "rui: ChatGPT did not grant the sign-in (access_denied). Nothing was saved.\n" },
+        .{ .{ .failed = .timed_out }, "rui: no sign-in answer arrived in 30 minutes. Nothing was saved; run rui auth login chatgpt again.\n" },
+        .{ .{ .failed = .no_answer_source }, "rui: input ended and Rui could not listen for the browser, so no sign-in answer can arrive. Nothing was saved.\n" },
+        .{ .{ .failed = .{ .callback = .state_mismatch } }, "rui: That answer is not from this sign-in. Nothing was saved; run rui auth login chatgpt again.\n" },
+        .{ .{ .failed = .{ .callback = .client_id_mismatch } }, "rui: ChatGPT answered for another app registration than the one Rui saved. Nothing was saved; run rui auth login chatgpt again.\n" },
+        .{ .{ .failed = .{ .callback = .missing_client_id } }, "rui: ChatGPT's answer did not name Rui's app registration. Nothing was saved; run rui auth login chatgpt again.\n" },
+        .{ .{ .failed = .{ .callback = .damaged } }, "rui: The sign-in answer was incomplete or damaged. Nothing was saved; run rui auth login chatgpt again.\n" },
+        .{ .{ .failed = .{ .unreachable_service = "TransportFailed" } }, "rui: could not reach ChatGPT's sign-in service (TransportFailed). Nothing was saved; run rui auth login chatgpt again.\n" },
+        .{ .{ .failed = .{ .exchange = .plan_scope_missing } }, "rui: You signed in, but ChatGPT did not let Rui use your plan. Allow it on the ChatGPT page, then run rui auth login chatgpt again. Nothing was saved.\n" },
+        .{ .{ .failed = .{ .exchange = .code_refused } }, "rui: ChatGPT refused the sign-in code. Run rui auth login chatgpt again for a new link. Nothing was saved.\n" },
+        .{ .{ .failed = .{ .exchange = .not_for_this_sign_in } }, "rui: ChatGPT's answer was not for this sign-in. Nothing was saved.\n" },
+        .{ .{ .failed = .{ .exchange = .unreadable } }, "rui: ChatGPT's answer could not be read. Nothing was saved.\n" },
+    }) |case| {
+        var bytes: [1024]u8 = undefined;
+        try std.testing.expectEqualStrings(case[1], try std.fmt.bufPrint(&bytes, "{f}", .{PlanShown{ .shown = case[0] }}));
+    }
+}
+
+/// The plan sign-in's paste source on the terminal: stdin, which a read
+/// error ends as its end does.
+fn readStdin(buffer: []u8) ?usize {
+    return std.posix.read(std.Io.File.stdin().handle, buffer) catch 0;
+}
+
+/// `rui auth logout chatgpt`: ends both ChatGPT logins, the browser sign-in
+/// (revoked, then its tokens removed, keeping the issued client id and the
+/// host id) and the device-code one (its tokens removed), then says how each
+/// ended (Divyansh chose this on 2026-11-13).
 fn planLogout(init: std.process.Init, provider: []const u8, fixture_endpoint: ?[]const u8) !void {
     if (!std.mem.eql(u8, provider, "chatgpt")) {
         stderr.diagnostic("rui: rui auth logout signs out of chatgpt only; Rui keeps no sign-in to end for another provider.\n", .{});
         return usage();
     }
+    // A bad test issuer is a bad invocation, refused before either login
+    // is touched. A credential path Rui cannot resolve is only that
+    // login's outcome (`unlocated`); the other is still ended.
     const issuer = try planIssuer(init, fixture_endpoint);
-    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const path = try credentialPath(init, .chatgpt, &path_buffer, false);
-    const outcome = chatgpt_plan_login.logout(init.io, path, issuer) catch |err| switch (err) {
-        // No private directory: never signed in.
-        error.FileNotFound => .not_signed_in,
-        else => return err,
+    var browser_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const browser_path = provider_login.credentialPath(init, .chatgpt, &browser_buffer, false) catch null;
+    var device_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const device_path = provider_login.credentialPath(init, .codex, &device_buffer, false) catch null;
+    const receipt = logoutReceipt(chatgpt_plan_login.logout(init.io, browser_path, device_path, issuer));
+    if (receipt.done) |line| try std.Io.File.stdout().writeStreamingAll(init.io, line);
+    if (receipt.browser) |line| stderr.diagnosticBytes(line);
+    if (receipt.device_code) |line| stderr.diagnosticBytes(line);
+    if (receipt.failed()) {
+        recordExit(.unclassified);
+        return error.Reported;
+    }
+}
+
+/// What a logout says: one stdout line for what it ended, and one stderr
+/// line for each login that may remain, which also fails the command.
+const LogoutReceipt = struct {
+    done: ?[]const u8,
+    browser: ?[]const u8,
+    device_code: ?[]const u8,
+
+    fn failed(self: LogoutReceipt) bool {
+        return self.browser != null or self.device_code != null;
+    }
+};
+
+fn logoutReceipt(ended: chatgpt_plan_login.Logout) LogoutReceipt {
+    const again = "inspect it, then run rui auth logout chatgpt again.\n";
+    const removed_browser = ended.browser == .revoked or ended.browser == .unconfirmed;
+    const removed_device = ended.device_code == .removed;
+    const partial = ended.browser == .failed or ended.browser == .unlocated or ended.device_code == .failed or ended.device_code == .unlocated;
+    // An unconfirmed revocation still ended the sign-in locally: it is said
+    // on stdout, as before, and fails nothing.
+    const unconfirmed = ": Rui deleted its tokens, but ChatGPT did not confirm it ended the browser sign-in. To end it there too, disconnect Rui in ChatGPT's settings.\n";
+    const confirmed = ended.browser != .unconfirmed;
+    return .{
+        .done = if (partial)
+            if (removed_browser)
+                if (confirmed) "Rui: Signed out of ChatGPT in the browser.\n" else "Rui: Signed out of ChatGPT in the browser" ++ unconfirmed
+            else if (removed_device) "Rui: Signed out of ChatGPT with a device code.\n" else null
+        else if (!confirmed) "Rui: Signed out of ChatGPT" ++ unconfirmed else if (removed_browser or removed_device) "Rui: Signed out of ChatGPT.\n" else "Rui: Not signed in to ChatGPT; nothing changed.\n",
+        .browser = switch (ended.browser) {
+            .absent, .revoked, .unconfirmed => null,
+            .failed => "rui: still signed in to ChatGPT in the browser: Rui could not read or change its private credential; " ++ again,
+            .unlocated => unlocated("browser", .chatgpt),
+        },
+        .device_code = switch (ended.device_code) {
+            .absent, .removed => null,
+            .failed => "rui: still signed in to ChatGPT with a device code: Rui could not read or change its private credential; " ++ again,
+            .unlocated => unlocated("device-code", .codex),
+        },
     };
-    try std.Io.File.stdout().writeStreamingAll(init.io, switch (outcome) {
-        .not_signed_in => "Rui: Not signed in to ChatGPT; nothing changed.\n",
-        .revoked => "Rui: Signed out of ChatGPT.\n",
-        .unconfirmed => "Rui: Signed out of ChatGPT: Rui deleted its tokens, but ChatGPT did not confirm it ended the sign-in. To end it there too, disconnect Rui in ChatGPT's settings.\n",
-    });
+}
+
+/// A login whose credential path Rui could not resolve, naming the variable
+/// that sets it.
+fn unlocated(comptime way: []const u8, comptime provider: protocol.Provider) []const u8 {
+    return "rui: could not end the ChatGPT " ++ way ++ " sign-in: Rui could not find its credential. Set " ++
+        comptime provider_login.credentialVariable(provider) ++ " to an absolute path, or leave it unset with HOME absolute, then run rui auth logout chatgpt again.\n";
+}
+
+test "logout says how it left each ChatGPT login, and fails while either may remain" {
+    const Readiness = provider_selection.Readiness;
+    // Written out by hand for every pair of local states, as `rui auth
+    // status` reads them, with the revocation confirmed, and then
+    // unconfirmed for each state that holds a browser sign-in to revoke,
+    // which still ends it locally and exits 0, as before.
+    // A readable record whose claims status rejects (`credential_error`)
+    // is signed out like any other; these rows are an unreadable one.
+    const out = "Rui: Signed out of ChatGPT.\n";
+    const nothing = "Rui: Not signed in to ChatGPT; nothing changed.\n";
+    const out_browser = "Rui: Signed out of ChatGPT in the browser.\n";
+    const out_device = "Rui: Signed out of ChatGPT with a device code.\n";
+    const unconfirmed = "Rui: Signed out of ChatGPT: Rui deleted its tokens, but ChatGPT did not confirm it ended the browser sign-in. To end it there too, disconnect Rui in ChatGPT's settings.\n";
+    const unconfirmed_browser = "Rui: Signed out of ChatGPT in the browser: Rui deleted its tokens, but ChatGPT did not confirm it ended the browser sign-in. To end it there too, disconnect Rui in ChatGPT's settings.\n";
+    const browser_stays = "rui: still signed in to ChatGPT in the browser: Rui could not read or change its private credential; inspect it, then run rui auth logout chatgpt again.\n";
+    const device_stays = "rui: still signed in to ChatGPT with a device code: Rui could not read or change its private credential; inspect it, then run rui auth logout chatgpt again.\n";
+    const browser_unfound = "rui: could not end the ChatGPT browser sign-in: Rui could not find its credential. Set RUI_CHATGPT_CREDENTIAL_FILE to an absolute path, or leave it unset with HOME absolute, then run rui auth logout chatgpt again.\n";
+    const device_unfound = "rui: could not end the ChatGPT device-code sign-in: Rui could not find its credential. Set RUI_CODEX_CREDENTIAL_FILE to an absolute path, or leave it unset with HOME absolute, then run rui auth logout chatgpt again.\n";
+    const B = chatgpt_plan_login.Browser;
+    const D = chatgpt_plan_login.DeviceCode;
+    const Row = struct { Readiness, Readiness, B, D, ?[]const u8, ?[]const u8, ?[]const u8, u8 };
+    const rows = [_]Row{
+        .{ .missing, .missing, .absent, .absent, nothing, null, null, 0 },
+        .{ .missing, .configured, .absent, .removed, out, null, null, 0 },
+        .{ .missing, .renewal_due, .absent, .removed, out, null, null, 0 },
+        .{ .missing, .refresh_required, .absent, .removed, out, null, null, 0 },
+        .{ .missing, .credential_error, .absent, .failed, null, null, device_stays, 1 },
+        .{ .configured, .missing, .revoked, .absent, out, null, null, 0 },
+        .{ .configured, .configured, .revoked, .removed, out, null, null, 0 },
+        .{ .configured, .renewal_due, .revoked, .removed, out, null, null, 0 },
+        .{ .configured, .refresh_required, .revoked, .removed, out, null, null, 0 },
+        .{ .configured, .credential_error, .revoked, .failed, out_browser, null, device_stays, 1 },
+        .{ .renewal_due, .missing, .revoked, .absent, out, null, null, 0 },
+        .{ .renewal_due, .configured, .revoked, .removed, out, null, null, 0 },
+        .{ .renewal_due, .renewal_due, .revoked, .removed, out, null, null, 0 },
+        .{ .renewal_due, .refresh_required, .revoked, .removed, out, null, null, 0 },
+        .{ .renewal_due, .credential_error, .revoked, .failed, out_browser, null, device_stays, 1 },
+        .{ .refresh_required, .missing, .revoked, .absent, out, null, null, 0 },
+        .{ .refresh_required, .configured, .revoked, .removed, out, null, null, 0 },
+        .{ .refresh_required, .renewal_due, .revoked, .removed, out, null, null, 0 },
+        .{ .refresh_required, .refresh_required, .revoked, .removed, out, null, null, 0 },
+        .{ .refresh_required, .credential_error, .revoked, .failed, out_browser, null, device_stays, 1 },
+        .{ .credential_error, .missing, .failed, .absent, null, browser_stays, null, 1 },
+        .{ .credential_error, .configured, .failed, .removed, out_device, browser_stays, null, 1 },
+        .{ .credential_error, .renewal_due, .failed, .removed, out_device, browser_stays, null, 1 },
+        .{ .credential_error, .refresh_required, .failed, .removed, out_device, browser_stays, null, 1 },
+        .{ .credential_error, .credential_error, .failed, .failed, null, browser_stays, device_stays, 1 },
+        // ChatGPT did not confirm the revocation.
+        .{ .configured, .missing, .unconfirmed, .absent, unconfirmed, null, null, 0 },
+        .{ .configured, .configured, .unconfirmed, .removed, unconfirmed, null, null, 0 },
+        .{ .configured, .renewal_due, .unconfirmed, .removed, unconfirmed, null, null, 0 },
+        .{ .configured, .refresh_required, .unconfirmed, .removed, unconfirmed, null, null, 0 },
+        .{ .configured, .credential_error, .unconfirmed, .failed, unconfirmed_browser, null, device_stays, 1 },
+        // A credential path Rui cannot resolve, beside each outcome of the
+        // other login, and both at once.
+        .{ .missing, .missing, .unlocated, .absent, null, browser_unfound, null, 1 },
+        .{ .missing, .configured, .unlocated, .removed, out_device, browser_unfound, null, 1 },
+        .{ .missing, .credential_error, .unlocated, .failed, null, browser_unfound, device_stays, 1 },
+        .{ .missing, .missing, .absent, .unlocated, null, null, device_unfound, 1 },
+        .{ .configured, .missing, .revoked, .unlocated, out_browser, null, device_unfound, 1 },
+        .{ .configured, .missing, .unconfirmed, .unlocated, unconfirmed_browser, null, device_unfound, 1 },
+        .{ .credential_error, .missing, .failed, .unlocated, null, browser_stays, device_unfound, 1 },
+        .{ .missing, .missing, .unlocated, .unlocated, null, browser_unfound, device_unfound, 1 },
+    };
+    // Every pair of states is in the table once with a confirmed revocation.
+    var seen = std.EnumArray(Readiness, std.EnumSet(Readiness)).initFill(.empty);
+    for (rows[0..25]) |row| {
+        try std.testing.expect(!seen.get(row[0]).contains(row[1]));
+        seen.getPtr(row[0]).insert(row[1]);
+    }
+    for (std.enums.values(Readiness)) |state| try std.testing.expectEqual(std.enums.values(Readiness).len, seen.get(state).count());
+    for (rows) |row| {
+        const said = logoutReceipt(.{ .browser = row[2], .device_code = row[3] });
+        const lines = [_]?[]const u8{ said.done, said.browser, said.device_code };
+        for (lines, [_]?[]const u8{ row[4], row[5], row[6] }) |actual, expected| {
+            if (expected) |line| try std.testing.expectEqualStrings(line, actual.?) else try std.testing.expectEqual(@as(?[]const u8, null), actual);
+        }
+        try std.testing.expectEqual(row[7], @as(u8, @intFromBool(said.failed())));
+        // No person reads the retired name.
+        for (lines) |text| if (text) |line| try std.testing.expect(std.mem.indexOf(u8, line, "Codex") == null);
+    }
 }
 
 /// The plan's issuer: OpenAI's, or a test's loopback fixture, which only a
@@ -1177,13 +1477,40 @@ fn reportStartedHost(io: std.Io, ready: *const HostLaunchResult.Ready, quiet: bo
     if (!quiet) try writeHostStatus(io, .{ .ready = ready.facts }, ready.diagnostics_directory.slice());
 }
 
-fn login(init: std.process.Init, args: []const []const u8, comptime exchange: anytype) !void {
-    if (args.len != 1) return usage();
-    const provider = std.meta.stringToEnum(protocol.Provider, args[0]) orelse return usage();
+/// The provider `rui auth login NAME [--device-code]` signs in: `chatgpt`
+/// in a browser, or by a device code with the flag or as the unlisted
+/// `codex`, and `openai` by key. Null is a usage error.
+fn loginProvider(name: []const u8, device_code: bool) ?protocol.Provider {
+    const named = std.meta.stringToEnum(protocol.Provider, name) orelse return null;
+    return switch (named) {
+        .chatgpt => if (device_code) .codex else .chatgpt,
+        .codex => .codex,
+        .openai => if (device_code) null else .openai,
+    };
+}
+
+test "auth login reads its provider and --device-code as one of the two ways into ChatGPT, or a key" {
+    // Written out by hand: name, --device-code, the provider signed in.
+    for ([_]struct { []const u8, bool, ?protocol.Provider }{
+        .{ "chatgpt", false, .chatgpt },
+        .{ "chatgpt", true, .codex },
+        .{ "codex", false, .codex },
+        .{ "codex", true, .codex },
+        .{ "openai", false, .openai },
+        .{ "openai", true, null },
+        .{ "ChatGPT", false, null },
+        .{ "claude", true, null },
+    }) |case| try std.testing.expectEqual(case[2], loginProvider(case[0], case[1]));
+}
+
+fn login(init: std.process.Init, name: []const u8, device_code: bool, fixture_endpoint: ?[]const u8, comptime exchange: anytype) !void {
+    const provider = loginProvider(name, device_code) orelse return usage();
     if (provider.login() == null) {
-        stderr.diagnostic("rui auth login: {s} has no terminal sign-in yet; nothing was changed.\n", .{providerPresentation(provider).name});
+        stderr.diagnostic("rui auth login: {s} has no terminal sign-in yet; nothing was changed.\n", .{provider.shown()});
         return usage();
     }
+    // Only the browser sign-in has a test issuer.
+    if (fixture_endpoint) |fixture| return if (provider == .chatgpt) planLogin(init, fixture) else usage();
     switch (provider) {
         .openai => return saveApiKey(init),
         .codex => {},
@@ -1200,54 +1527,63 @@ fn login(init: std.process.Init, args: []const []const u8, comptime exchange: an
             return login_state.cmpxchgStrong(.cancellable, .publishing, .acq_rel, .acquire) == null;
         }
     }.publish);
-    if (!try finishLogin(init, .codex, "Rui: Signed in to Codex.\n")) return;
-    try std.Io.File.stdout().writeStreamingAll(init.io, "Start a conversation with: rui\n");
+    const outcome = try finishLogin(init, .codex, "Rui: Signed in to ChatGPT with a device code.\n") orelse return;
+    try std.Io.File.stdout().writeStreamingAll(init.io, conversationStart(.codex, outcome));
 }
 
 /// After any provider's credential is installed: attempt the default first,
 /// so a receipt that cannot be written never skips it, then report both.
 /// Installation and future defaults have independent outcomes. Returns
-/// whether the default's outcome was reported as settled.
-fn finishLogin(init: std.process.Init, provider: protocol.Provider, receipt: []const u8) !bool {
+/// what the login did to the default, or null when that was not settled.
+fn finishLogin(init: std.process.Init, provider: protocol.Provider, receipt: []const u8) !?preferences.LoginDefault {
     const default_outcome = preferences.fillProviderAfterLogin(init.environ_map.get("HOME") orelse "", provider);
     const stdout = std.Io.File.stdout();
     try stdout.writeStreamingAll(init.io, receipt);
-    const name = providerPresentation(provider).name;
     const settled = default_outcome catch |err| {
         var buffer: [256]u8 = undefined;
-        try stdout.writeStreamingAll(init.io, try std.fmt.bufPrint(&buffer, "Rui: {s} may not be saved as the default for new Sessions ({s}). Check with: rui defaults inspect\n", .{ name, preferences.loginDefaultFailureReason(err) }));
-        return false;
+        try stdout.writeStreamingAll(init.io, try std.fmt.bufPrint(&buffer, "Rui: {s} may not be saved as the default for new Sessions ({s}). Check with: rui defaults inspect\n", .{ provider.shown(), preferences.loginDefaultFailureReason(err) }));
+        return null;
     };
     var buffer: [256]u8 = undefined;
     try stdout.writeStreamingAll(init.io, try loginDefaultReceipt(&buffer, provider, settled));
-    return true;
+    return settled;
 }
 
-/// The receipt line(s) for what a login did to the default provider.
+/// The receipt line for what a login did to the default provider.
 fn loginDefaultReceipt(buffer: []u8, provider: protocol.Provider, outcome: preferences.LoginDefault) ![]const u8 {
-    const name = providerPresentation(provider).name;
-    var receipt = std.Io.Writer.fixed(buffer);
-    switch (outcome) {
-        .filled => try receipt.print("Rui: New Sessions will use {s}.\n", .{name}),
-        .replaced => |replaced| {
-            const previous = providerPresentation(replaced.previous).name;
-            try receipt.print("Rui: New Sessions will use {s} instead of {s}.\n", .{ name, previous });
-            if (replaced.cleared_pin) try receipt.print("Rui: The model saved for {s} was cleared, so new Sessions use the recommended model. To pick one: rui defaults configure --model ID\n", .{previous});
-        },
-        .already => try receipt.writeAll("Rui: Your default provider for new Sessions is unchanged.\n"),
-        .kept => try receipt.print("Rui: Your default provider for new Sessions is unchanged. To use {s} instead: rui defaults configure --provider {s}\n", .{ name, @tagName(provider) }),
-    }
-    return receipt.buffered();
+    return switch (outcome) {
+        .filled => "Rui: New Sessions will use this sign-in.\n",
+        .replaced => "Rui: New Sessions will use this sign-in; Sessions already open keep theirs.\n",
+        .already => "Rui: Your default provider for new Sessions is unchanged.\n",
+        .kept => try std.fmt.bufPrint(buffer, "Rui: Your default provider for new Sessions is unchanged. To use {s} instead: rui defaults configure --provider {s}\n", .{ provider.shown(), @tagName(provider) }),
+    };
+}
+
+/// How to start a conversation on what a ChatGPT login signed in: plain
+/// `rui` once new Sessions use it, or naming it while another default stays.
+fn conversationStart(comptime provider: protocol.Provider, outcome: preferences.LoginDefault) []const u8 {
+    return switch (outcome) {
+        .filled, .replaced, .already => "Start a conversation with: rui\n",
+        .kept => "Start a conversation with: rui --provider " ++ @tagName(provider) ++ "\n",
+    };
 }
 
 test "a login's default receipt says what changed and, when nothing did, how to change it" {
     var buffer: [256]u8 = undefined;
-    try std.testing.expectEqualStrings("Rui: New Sessions will use ChatGPT.\n", try loginDefaultReceipt(&buffer, .chatgpt, .filled));
-    try std.testing.expectEqualStrings("Rui: New Sessions will use ChatGPT instead of Codex.\n", try loginDefaultReceipt(&buffer, .chatgpt, .{ .replaced = .{ .previous = .codex, .cleared_pin = false } }));
-    try std.testing.expectEqualStrings("Rui: New Sessions will use ChatGPT instead of Codex.\nRui: The model saved for Codex was cleared, so new Sessions use the recommended model. To pick one: rui defaults configure --model ID\n", try loginDefaultReceipt(&buffer, .chatgpt, .{ .replaced = .{ .previous = .codex, .cleared_pin = true } }));
-    try std.testing.expectEqualStrings("Rui: Your default provider for new Sessions is unchanged.\n", try loginDefaultReceipt(&buffer, .chatgpt, .already));
+    // Every outcome for every provider, written out by hand.
+    for (std.enums.values(protocol.Provider)) |provider| {
+        try std.testing.expectEqualStrings("Rui: New Sessions will use this sign-in.\n", try loginDefaultReceipt(&buffer, provider, .filled));
+        try std.testing.expectEqualStrings("Rui: New Sessions will use this sign-in; Sessions already open keep theirs.\n", try loginDefaultReceipt(&buffer, provider, .replaced));
+        try std.testing.expectEqualStrings("Rui: Your default provider for new Sessions is unchanged.\n", try loginDefaultReceipt(&buffer, provider, .already));
+    }
     try std.testing.expectEqualStrings("Rui: Your default provider for new Sessions is unchanged. To use ChatGPT instead: rui defaults configure --provider chatgpt\n", try loginDefaultReceipt(&buffer, .chatgpt, .kept));
+    try std.testing.expectEqualStrings("Rui: Your default provider for new Sessions is unchanged. To use ChatGPT (device code) instead: rui defaults configure --provider codex\n", try loginDefaultReceipt(&buffer, .codex, .kept));
     try std.testing.expectEqualStrings("Rui: Your default provider for new Sessions is unchanged. To use OpenAI instead: rui defaults configure --provider openai\n", try loginDefaultReceipt(&buffer, .openai, .kept));
+    for (std.enums.values(preferences.LoginDefault)) |outcome| {
+        const expected = if (outcome == .kept) "Start a conversation with: rui --provider chatgpt\n" else "Start a conversation with: rui\n";
+        try std.testing.expectEqualStrings(expected, conversationStart(.chatgpt, outcome));
+        try std.testing.expectEqualStrings(if (outcome == .kept) "Start a conversation with: rui --provider codex\n" else "Start a conversation with: rui\n", conversationStart(.codex, outcome));
+    }
 }
 
 // OpenAI shows a disabled device-code setting only after sign-in and MFA, so
@@ -1256,9 +1592,9 @@ const device_login_guidance =
     \\The code signs Rui in to your ChatGPT account. Never share it.
     \\If the page says device code login is off, press Ctrl+C here. Turn on device
     \\code authorization for Codex in your ChatGPT security settings, or ask your
-    \\workspace admin to allow it. Then run rui auth login codex again.
+    \\workspace admin to allow it. Then run
     \\
-;
+++ protocol.Provider.codex.login().? ++ " again.\n";
 
 const LoginState = enum(u8) { cancellable, cancelled, publishing };
 var login_state = std.atomic.Value(LoginState).init(.cancellable);
@@ -1491,7 +1827,8 @@ test "login owner preserves interruption, publication and independent defaults" 
                 defer readonly.close(io);
                 if (std.c.dup2(readonly.handle, 1) < 0) return error.TestRedirectFailed;
             }
-            outcome = login(init, &.{"codex"}, Fixture.exchange);
+            // Both spellings of the device-code login run the one flow.
+            outcome = if (@backingInt(case) % 2 == 0) login(init, "codex", false, null, Fixture.exchange) else login(init, "chatgpt", true, null, Fixture.exchange);
         }
         if (Fixture.signal_thread) |thread| thread.join();
         custodian.done.store(true, .release);
@@ -1534,9 +1871,9 @@ test "login owner preserves interruption, publication and independent defaults" 
             try std.testing.expectEqualStrings(codex_auth.fixture_account_id, record.account_id.slice());
             try std.testing.expectEqualStrings("new-synthetic-refresh", record.refresh_token.slice());
             try std.testing.expectEqual(@as(u64, if (existing) 2 else 1), record.generation);
-            if (case != .receipt_failure) try std.testing.expect(std.mem.indexOf(u8, receipt_bytes, "Signed in to Codex.") != null);
+            if (case != .receipt_failure) try std.testing.expect(std.mem.indexOf(u8, receipt_bytes, "Rui: Signed in to ChatGPT with a device code.\n") != null);
             if (case == .missing_home or case == .preference_failure) {
-                try std.testing.expect(std.mem.indexOf(u8, receipt_bytes, "Codex may not be saved as the default for new Sessions") != null);
+                try std.testing.expect(std.mem.indexOf(u8, receipt_bytes, "ChatGPT (device code) may not be saved as the default for new Sessions") != null);
                 try std.testing.expect(std.mem.indexOf(u8, receipt_bytes, if (case == .missing_home) "InvalidHome" else "UnsupportedPreferencesVersion") != null);
             }
         }
@@ -1889,24 +2226,13 @@ fn preflightNewSession(io: std.Io, destination: []const u8, saved: bool) !void {
 const invalid_base_url = host_launch.invalid_base_url;
 
 /// Whether an auto-started Host can serve OpenAI at its base URL. A bad one
-/// is OpenAI's alone to fail, so the Host still starts and serves Codex.
+/// is OpenAI's alone to fail, so the Host still starts and serves ChatGPT.
 fn openAiBaseUrlDiagnostic(init: std.process.Init) ?Overview.HostLaunch.Warning {
     _ = providers.openAiEndpoint(init.environ_map, init.arena.allocator()) catch |err| {
         if (err != error.InvalidBaseUrl) return null; // `host serve` reports it.
         return .invalid_openai_base_url;
     };
     return null;
-}
-
-/// The OpenAI key a served `openai` presents; a Host never starts serving
-/// it without one.
-noinline fn readServedKey(init: std.process.Init, key: *api_key.Key) ![]const u8 {
-    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    if (try api_key.read(try openAiKeyPath(init, &path_buffer), key) == null) {
-        stderr.diagnostic("rui: no OpenAI API key; save one with `" ++ comptime protocol.Provider.openai.login().? ++ "`, then start the Host again.\n", .{});
-        return error.ApiKeyMissing;
-    }
-    return key.slice();
 }
 
 const provider_labels = joinedProviders(", ");
@@ -1943,19 +2269,6 @@ fn providerReadiness(init: std.process.Init, provider: protocol.Provider) !provi
     }
 }
 
-/// How the terminal names each built-in provider.
-const ProviderPresentation = struct {
-    name: []const u8,
-};
-
-fn providerPresentation(provider: protocol.Provider) ProviderPresentation {
-    return switch (provider) {
-        .codex => .{ .name = "Codex" },
-        .openai => .{ .name = "OpenAI" },
-        .chatgpt => .{ .name = "ChatGPT" },
-    };
-}
-
 /// What a running Host serves, as one status line written into `buffer`.
 fn hostProvidersLine(routes: protocol.Routes, buffer: []u8) []const u8 {
     if (!protocol.servesModel(routes)) return "Host: ready without a model provider; use `rui host serve --provider " ++ provider_choices ++ "` for new model work.\n";
@@ -1963,15 +2276,15 @@ fn hostProvidersLine(routes: protocol.Routes, buffer: []u8) []const u8 {
     line.writeAll("Host: serves") catch unreachable;
     var first = true;
     for (std.enums.values(protocol.Provider)) |provider| if (protocol.routeOf(routes, provider) != .unserved) {
-        line.print("{s} {s}", .{ if (first) "" else ",", providerPresentation(provider).name }) catch unreachable;
+        line.print("{s} {s}", .{ if (first) "" else ",", provider.shown() }) catch unreachable;
         first = false;
     };
     line.writeAll(" (credentials checked locally, not by status)") catch unreachable;
     for (std.enums.values(protocol.Provider)) |provider| if (protocol.routeOf(routes, provider) == .unserved) {
         if (provider.login()) |command|
-            line.print("; to add {s}, stop and restart it after `{s}`", .{ providerPresentation(provider).name, command }) catch unreachable
+            line.print("; to add {s}, stop and restart it after `{s}`", .{ provider.shown(), command }) catch unreachable
         else
-            line.print("; {s} needs a sign-in this terminal cannot make yet", .{providerPresentation(provider).name}) catch unreachable;
+            line.print("; {s} needs a sign-in this terminal cannot make yet", .{provider.shown()}) catch unreachable;
     };
     line.writeAll(".\n") catch unreachable;
     return line.buffered();
@@ -1980,7 +2293,7 @@ fn hostProvidersLine(routes: protocol.Routes, buffer: []u8) []const u8 {
 test "the Host line names a login only for an unserved provider that has one" {
     var buffer: [512]u8 = undefined;
     const served_one: protocol.Routes = .{ .codex = .chatgpt_device, .openai = .unserved, .chatgpt = .unserved };
-    try std.testing.expectEqualStrings("Host: serves Codex (credentials checked locally, not by status); to add OpenAI, stop and restart it after `rui auth login openai`; to add ChatGPT, stop and restart it after `rui auth login chatgpt`.\n", hostProvidersLine(served_one, &buffer));
+    try std.testing.expectEqualStrings("Host: serves ChatGPT (device code) (credentials checked locally, not by status); to add OpenAI, stop and restart it after `rui auth login openai`; to add ChatGPT, stop and restart it after `rui auth login chatgpt`.\n", hostProvidersLine(served_one, &buffer));
     inline for (comptime std.enums.values(protocol.Provider)) |unserved| {
         var routes = protocol.routesAll(.endpoint);
         @field(routes, @tagName(unserved)) = .unserved;
@@ -1994,126 +2307,69 @@ test "the Host line names a login only for an unserved provider that has one" {
 
 fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     const io = init.io;
-    // A launched Host reads its Store, key and runtime directory from stdin,
-    // and holds the frame for its life: the provider borrows the key and CA path.
-    const launched: ?*launch_frame.Frame = if (parsed.has("launch-frame")) try readLaunchFrame(init) else null;
-    defer if (launched) |frame| {
-        frame.deinit();
-        std.heap.c_allocator.destroy(frame);
-    };
-    var launch_socket: [platform.max_launch_socket_path_bytes]u8 = undefined;
-    const store_path = if (launched) |frame| switch (frame.store) {
-        .sqlite_dir => |*directory| directory.slice(),
-        .mysql_url => frame.runtime_dir.slice(),
-    } else parsed.get("store");
-    const provider_endpoint = parsed.get("provider-endpoint");
-    const provider_ca_file = parsed.get("provider-ca-file");
-    const fixture_endpoint = parsed.get("test-codex-fixture-endpoint");
-    // Test only: a loopback that answers as OpenAI's API and, at
-    // BASE/oauth/token beside BASE/responses, as the plan's token issuer.
+    try host_start.checkFlags(parsed);
+    // Caller-owned final storage: Prepared and the provider table borrow it
+    // until all Host owners drain. Its secrets are wiped on every exit.
+    const settings = try std.heap.c_allocator.create(host_settings.Settings);
+    defer std.heap.c_allocator.destroy(settings);
+    settings.* = .{};
+    defer settings.deinit();
     const chatgpt_fixture = parsed.get("test-chatgpt-fixture-endpoint");
     if (chatgpt_fixture != null and init.environ_map.get("RUI_CHATGPT_CREDENTIAL_FILE") == null)
         return error.FixtureCredentialPathRequired;
-    const bash_path = parsed.get("bash-path") orelse server.default_bash_path;
-    if (bash_path.len == 0) return error.InvalidBashPath;
-    const bash_timeout_ms = try parsed.number(u64, "bash-timeout-ms") orelse server.default_bash_timeout_ms;
-    if (bash_timeout_ms == 0 or bash_timeout_ms > std.math.maxInt(i64)) return error.InvalidBashTimeout;
-    const active_capacity = (if (launched) |frame| frame.active_capacity else try parsed.number(usize, "active-capacity")) orelse product_defaults.active_capacity;
-    const tuning = try server.Tuning.fromOptions(parsed, init.environ_map.get("RUI_TEST_MODELS_DEV_URL"));
-    if (fixture_endpoint != null and init.environ_map.get("RUI_CODEX_CREDENTIAL_FILE") == null)
+    var tuning = try server.Tuning.fromOptions(parsed, init.environ_map.get("RUI_TEST_MODELS_DEV_URL"));
+    tuning.home = init.environ_map.get("HOME");
+    if (parsed.get("test-codex-fixture-endpoint") != null and init.environ_map.get("RUI_CODEX_CREDENTIAL_FILE") == null)
         return error.FixtureCredentialPathRequired;
-    var credential_path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    var chatgpt_path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    // Read once here and borrowed by the Host for its life.
-    var openai_key: api_key.Key = .{ .len = 0 };
-    defer openai_key.wipe();
-    const openai_fixture = parsed.get("test-openai-fixture-endpoint");
-    if (openai_fixture != null and init.environ_map.get(api_key.path_variable) == null)
+    if (parsed.get("test-openai-fixture-endpoint") != null and init.environ_map.get(api_key.path_variable) == null)
         return error.FixtureCredentialPathRequired;
-    var served: providers.Providers = .{ .ca_file = provider_ca_file };
-    for (parsed.all("provider")) |label| {
-        const named = std.meta.stringToEnum(protocol.Provider, label) orelse {
-            // A label is short lowercase text; anything else is not echoed.
-            const printable = label.len <= protocol.max_provider_bytes and for (label) |byte| {
-                if (!std.ascii.isLower(byte) and !std.ascii.isDigit(byte) and byte != '_' and byte != '-') break false;
-            } else true;
-            stderr.diagnostic("rui: --provider {s} is not a built-in provider; they are " ++ provider_labels ++ ".\n", .{if (printable) label else "(unprintable)"});
-            return error.UnsupportedProvider;
-        };
-        if (served.serves(named)) return error.DuplicateArgument;
-        served.table.set(named, switch (named) {
-            .codex => .{ .endpoint = providers.endpoint(.codex), .credential = .{ .chatgpt_device = .{ .path = try credentialPath(init, .codex, &credential_path_buffer, false) } } },
-            .chatgpt => .{ .endpoint = providers.endpoint(.chatgpt), .credential = .{ .chatgpt_plan = .{ .path = try credentialPath(init, .chatgpt, &chatgpt_path_buffer, false) } } },
-            .openai => .{ .endpoint = providers.openAiEndpoint(init.environ_map, init.arena.allocator()) catch |err| {
-                if (err == error.InvalidBaseUrl) stderr.diagnostic(invalid_base_url ++ "; the Host did not start.\n", .{});
-                return err;
-            }, .credential = .{ .key_file = .{ .key = try readServedKey(init, &openai_key) } } },
-        });
-    }
-    if (launched) |frame| {
-        const endpoint = providers.endpointUnder(init.arena.allocator(), frame.base_url.slice()) catch |err| {
-            if (err == error.InvalidBaseUrl) return writeRefusal(io, &.init(.launch_frame_invalid, "provider.baseUrl must be an https URL with a host and no query"));
-            return err;
-        };
-        served.ca_file = if (frame.ca_file.len == 0) null else frame.ca_file.slice();
-        served.table.set(.openai, .{ .endpoint = endpoint, .credential = .{ .key_file = .{ .key = frame.key.slice() } } });
-    }
-    if (openai_fixture) |endpoint| {
-        if (served.serves(.openai)) return error.ConflictingArguments;
-        served.table.set(.openai, .{ .endpoint = endpoint, .credential = .{ .key_file = .{ .key = try readServedKey(init, &openai_key), .fixture = true } } });
-    }
-    if (fixture_endpoint) |endpoint| served.table.set(.codex, .{ .endpoint = endpoint, .credential = .{ .chatgpt_device = .{ .path = try credentialPath(init, .codex, &credential_path_buffer, false), .refresh = .synthetic } } });
-    if (chatgpt_fixture) |endpoint| {
-        if (served.serves(.chatgpt)) return error.ConflictingArguments;
-        const base = providers.responsesBase(endpoint) orelse return error.InvalidArguments;
-        const token = try std.fmt.allocPrint(init.arena.allocator(), "{s}/oauth/token", .{base});
-        served.table.set(.chatgpt, .{ .endpoint = endpoint, .credential = .{ .chatgpt_plan = .{ .path = try credentialPath(init, .chatgpt, &chatgpt_path_buffer, false), .refresh = .{ .fixture_endpoint = token } } } });
-    }
-    if (provider_endpoint) |endpoint| served.table.set(.codex, .{ .endpoint = endpoint, .credential = .none });
-    // The execution thread's fence would report this while startup still
-    // holds stderr, so its cause could be dropped (#1093).
+    var preparation_failure: start_report.Failure = undefined;
+    host_start.fill(init, parsed, settings, &tuning.fixtures, &preparation_failure) catch |err| {
+        if (err == error.SettingsInvalid) return writeRefusal(io, &preparation_failure, caller_exit.knownError(err));
+        return err;
+    };
+    // Keep the existing environment diagnostic before startup takes stderr.
+    host_start.resolveProviders(init, settings, tuning.fixtures, &preparation_failure) catch |err| {
+        if (err == error.SettingsInvalid) return writeRefusal(io, &preparation_failure, caller_exit.knownError(err));
+        return err;
+    };
+    const served = providers.fromSettings(settings, tuning.fixtures);
     if (try served.proxyRefusal(std.heap.c_allocator)) |reason| {
+        // The proxy is process environment, not a settings leaf, and has no
+        // StartError code: keep its stderr-only diagnostic and exit.
         stderr.diagnostic("rui: https_proxy/HTTPS_PROXY {s}; Rui tunnels only through an http:// proxy. The Host did not start.\n", .{reason});
         recordExit(.environment);
         return error.Reported;
     }
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    if (settings.store == .sqlite or parsed.get("store") != null) {
+        const document_dir = if (settings.store == .sqlite and !settings.store.sqlite.dir.anchored) settings.store.sqlite.dir.slice() else null;
+        // Document paths are admitted OS bytes. The text-only spelling policy
+        // belongs to legacy CLI/default selection, not the settings reader.
+        const selected = if (parsed.get("store")) |explicit| try selectedStore(init, explicit, &selected_buffer) else document_dir orelse try selectedStore(init, null, &selected_buffer);
+        if (document_dir != null and parsed.get("store") == null) holdStore(selected);
+        host_start.selectStore(init, settings, selected, parsed.get("settings") != null and parsed.get("store") == null, &preparation_failure) catch |err| {
+            if (err == error.SettingsInvalid) return writeRefusal(io, &preparation_failure, caller_exit.knownError(err));
+            return storeFailure(err);
+        };
+    }
+    const prepared = host_start.prepare(init, settings, tuning.fixtures, &preparation_failure) catch |err| {
+        if (err == error.SettingsInvalid) return writeRefusal(io, &preparation_failure, caller_exit.knownError(err));
+        return err;
+    };
     var failure: ?start_report.Failure = null;
-    const result = server.serve(
-        io,
-        std.heap.c_allocator,
-        try selectedStore(init, store_path, &selected_buffer),
-        active_capacity,
-        tuning.limits,
-        tuning.hooks,
-        &served,
-        bash_path,
-        bash_timeout_ms,
-        init.environ_map.get("HOME"),
-        if (launched) |frame| .{ .runtime_dir = frame.runtime_dir.slice(), .socket_path = frame.socketPath(&launch_socket), .stdin = 0, .paused = frame.paused, .mcp_servers = frame.mcpServerSlice(), .presets = frame.presets, .mysql_url = switch (frame.store) {
-            .mysql_url => |url| url,
-            .sqlite_dir => null,
-        } } else null,
-        &failure,
-    );
-    return finishServe(io, if (launched) |frame| switch (frame.store) {
-        .sqlite_dir => .sqlite,
-        .mysql_url => .mysql,
-    } else null, &failure, result);
+    return finishServe(io, settings.interface.lifetime.value, if (settings.store == .mysql) .mysql else .sqlite, &failure, server.serve(io, std.heap.c_allocator, prepared, tuning, &failure));
 }
 
 /// Settle the whole Host outcome before treating stdin closure as a clean end.
-fn finishServe(io: std.Io, store: ?start_report.Store, failure: *const ?start_report.Failure, result: anyerror!void) !void {
-    if (store) |kind| {
-        if (failure.*) |*value| return writeRefusal(io, value);
-        result catch |err| {
-            // Without a refusal, closing a launched Host's stdin is clean.
-            if (err == error.EffectAwareShutdown) return;
-            if (start_report.classify(kind, err)) |value| return writeRefusal(io, &value);
-            return err;
-        };
-    }
-    return result;
+fn finishServe(io: std.Io, lifetime: host_settings.Interface.Lifetime, store: start_report.Store, failure: *const ?start_report.Failure, result: anyerror!void) !void {
+    if (failure.*) |*value| return writeRefusal(io, value, .unclassified);
+    result catch |err| {
+        // Only interface.lifetime requests shutdown on stdin closure.
+        if (err == error.EffectAwareShutdown and lifetime == .stdin) return;
+        if (start_report.classify(store, err)) |value| return writeRefusal(io, &value, caller_exit.knownError(err));
+        return err;
+    };
 }
 
 test "start report CLI publishes once before settling every Host outcome" {
@@ -2142,50 +2398,42 @@ test "start report CLI publishes once before settling every Host outcome" {
     const supplied_line = "{\"rui_start_error\":{\"code\":\"store_fenced\",\"message\":\"the MySQL Store lost ownership or its connection; restart the Host\"}}\n";
     const fallback_line = "{\"rui_start_error\":{\"code\":\"runtime_dir_unusable\",\"message\":\"another Host owns this runtimeDir\"}}\n";
     const mysql_line = "{\"rui_start_error\":{\"code\":\"store_locked\",\"message\":\"another Host owns this Store\"}}\n";
-    for ([_]?start_report.Store{ null, .sqlite, .mysql }) |store| {
-        for ([_]bool{ false, true }) |supplied| {
-            for ([_]?anyerror{ null, error.EffectAwareShutdown, error.RuntimeDirectoryInUse, error.StoreLocked, error.StoreFenced, error.OutOfMemory }) |err| {
-                var failure: ?start_report.Failure = if (supplied)
-                    .init(.store_fenced, "the MySQL Store lost ownership or its connection; restart the Host")
-                else
-                    null;
-                Probe.used = 0;
-                const outcome = finishServe(io, store, &failure, if (err) |value| value else {});
-                const expected = if (store == null) "" else if (supplied) supplied_line else if (err != null and err.? == error.RuntimeDirectoryInUse) fallback_line else if (store == .mysql and err != null and err.? == error.StoreLocked) mysql_line else "";
-                if (expected.len != 0) {
-                    // Every refusal is already reported, even when a fence
-                    // overrides success or an otherwise clean stdin closure.
-                    try std.testing.expectError(error.Reported, outcome);
-                } else if (err) |value| {
-                    if (store != null and value == error.EffectAwareShutdown) {
-                        try outcome;
-                    } else try std.testing.expectError(value, outcome);
-                } else try outcome;
-                try std.testing.expectEqualStrings(expected, Probe.output[0..Probe.used]);
+    const saved_exit_status = exit_status;
+    defer exit_status = saved_exit_status;
+    for ([_]host_settings.Interface.Lifetime{ .detached, .stdin }) |lifetime| {
+        for ([_]start_report.Store{ .sqlite, .mysql }) |store| {
+            for ([_]bool{ false, true }) |supplied| {
+                for ([_]?anyerror{ null, error.EffectAwareShutdown, error.RuntimeDirectoryInUse, error.StoreAlreadyOwned, error.StoreLocked, error.StoreFenced, error.OutOfMemory }) |err| {
+                    var failure: ?start_report.Failure = if (supplied)
+                        .init(.store_fenced, "the MySQL Store lost ownership or its connection; restart the Host")
+                    else
+                        null;
+                    Probe.used = 0;
+                    exit_status = .done;
+                    const outcome = finishServe(io, lifetime, store, &failure, if (err) |value| value else {});
+                    const expected = if (supplied) supplied_line else if (err != null and err.? == error.RuntimeDirectoryInUse) fallback_line else if (err != null and (err.? == error.StoreAlreadyOwned or (store == .mysql and err.? == error.StoreLocked))) mysql_line else "";
+                    if (expected.len != 0) {
+                        // Every refusal is already reported, even when a fence
+                        // overrides success or an otherwise clean stdin closure.
+                        try std.testing.expectError(error.Reported, outcome);
+                        try std.testing.expectEqual(if (!supplied and err != null and err.? == error.StoreAlreadyOwned) caller_exit.Status.environment else caller_exit.Status.unclassified, exit_status);
+                    } else if (err) |value| {
+                        if (value == error.EffectAwareShutdown and lifetime == .stdin) {
+                            try outcome;
+                        } else try std.testing.expectError(value, outcome);
+                    } else try outcome;
+                    try std.testing.expectEqualStrings(expected, Probe.output[0..Probe.used]);
+                }
             }
         }
     }
 }
 
-/// Startup-only rendering scratch does not stay in serve's resident frame.
-// The CLI owns publication and the already-reported status, through cleanup.
-noinline fn writeRefusal(io: std.Io, failure: *const start_report.Failure) error{Reported} {
-    var buffer: [start_report.max_line_bytes]u8 = undefined;
-    std.Io.File.stdout().writeStreamingAll(io, start_report.line(failure, &buffer)) catch {};
+/// The CLI alone settles publication into the already-reported exit status.
+noinline fn writeRefusal(io: std.Io, failure: *const start_report.Failure, status: caller_exit.Status) error{Reported} {
+    recordExit(status);
+    host_start.report(io, failure);
     return error.Reported;
-}
-
-/// Reads the launch frame from stdin, or reports its refusal on stdout.
-noinline fn readLaunchFrame(init: std.process.Init) !*launch_frame.Frame {
-    const frame = try std.heap.c_allocator.create(launch_frame.Frame);
-    errdefer std.heap.c_allocator.destroy(frame);
-    frame.* = .{};
-    var refusal: start_report.Failure = undefined;
-    launch_frame.read(init.io, .stdin(), std.heap.c_allocator, frame, &refusal) catch |err| {
-        if (err == error.LaunchFrameInvalid) return writeRefusal(init.io, &refusal);
-        return err;
-    };
-    return frame;
 }
 
 /// The live Session addresses its own /configure.
@@ -2742,7 +2990,7 @@ pub fn sessionCommand(init: std.process.Init, read: client.ReadContext, destinat
     const live: LiveAddress = .{ .store = destination, .session = reference };
     switch (command.name) {
         .setup => {
-            const setup_usage = "Usage: /setup [--store PATH] [--provider codex] [--model ID | --clear-model] [--notifications on|off] [--reasoning-effort LEVEL|default]; no changes saved. See rui session configure --help for model IDs.\n";
+            const setup_usage = "Usage: /setup [--store PATH] [--provider chatgpt] [--model ID | --clear-model] [--notifications on|off] [--reasoning-effort LEVEL|default]; no changes saved. See rui session configure --help for model IDs.\n";
             var setup_args: [setup_capacity][]const u8 = undefined;
             const count = interactiveTokens(argument, &setup_args) catch
                 return std.Io.File.stdout().writeStreamingAll(init.io, setup_usage);
@@ -4223,7 +4471,7 @@ const compaction_help = cli_args.compaction_policy ++ " Inspect settings with /s
 
 const usage_text =
     \\usage:
-    \\  rui [--store PATH] [--provider codex] [--model MODEL]
+    \\  rui [--store PATH] [--provider chatgpt] [--model MODEL]
     \\    Create a fresh live terminal conversation in the current directory. Bash runs
     \\    without asking by default. Enter Message text in the terminal editor.
     \\    Open Settings > Keys for the key list.
@@ -4763,7 +5011,7 @@ test "CLI boundary classifies local failures with repair lines and exits" {
         .{ .err = error.PreferencesUnavailable, .code = .preferences_unavailable, .exit = 6, .phrase = "preferences file (0600)" },
         .{ .err = error.InsecurePreferenceDirectory, .code = .preferences_unavailable, .exit = 6, .phrase = "HOME/.config/rui (0700)" },
         .{ .err = error.InvalidPreferenceStore, .code = .preference_store_invalid, .exit = 2, .phrase = "rui defaults configure --store PATH" },
-        .{ .err = error.UnsupportedPreferenceProvider, .code = .preference_provider_invalid, .exit = 2, .phrase = "--provider codex, --provider openai or --provider chatgpt." },
+        .{ .err = error.UnsupportedPreferenceProvider, .code = .preference_provider_invalid, .exit = 2, .phrase = "--provider chatgpt or --provider openai." },
         .{ .err = error.InvalidPreferenceModel, .code = .preference_model_invalid, .exit = 2, .phrase = "1-256 printable non-space ASCII bytes" },
         .{ .err = error.PreferenceProviderRequired, .code = .preference_provider_required, .exit = 2, .phrase = "Saving a default model requires a provider." },
         .{ .err = error.HomeUnavailable, .code = .home_unavailable, .exit = 6, .phrase = "Set HOME to your absolute home directory" },
@@ -4823,7 +5071,7 @@ test "Host transport classification requires Store lock evidence" {
     try std.testing.expectEqualStrings("rui session inspect: The Host for this Store is shutting down and no longer accepts requests. Store: \"/private/store\". Next: Wait for it to exit, then start it again with rui host start --store PATH and retry. [host_stopping]\n", writer.buffered());
 }
 
-test "MySQL Host unavailability uses launch-frame repair without lock claims" {
+test "MySQL Host unavailability uses settings-based repair without lock claims" {
     const code = caller_error.of(error.MysqlHostUnavailable);
     try std.testing.expectEqual(caller_error.Code.mysql_host_unavailable, code);
     try std.testing.expectEqual(caller_error.Act.operate, caller_error.facts(code).act);
@@ -4831,7 +5079,7 @@ test "MySQL Host unavailability uses launch-frame repair without lock claims" {
     var bytes: [1024]u8 = undefined;
     var writer = std.Io.Writer.fixed(&bytes);
     try caller_error.writeLine(&writer, code, .{ .resource = "host", .operation = "start", .store = "0123456789abcdef0123456789abcdef", .not_sent = false });
-    try std.testing.expectEqualStrings("rui host start: The launched MySQL Host for this Store is unavailable. Store: \"0123456789abcdef0123456789abcdef\". Next: Check this Store's launch-frame Host and RUI_RUNTIME_DIR, then retry unchanged. [mysql_host_unavailable]\n", writer.buffered());
+    try std.testing.expectEqualStrings("rui host start: The launched MySQL Host for this Store is unavailable. Store: \"0123456789abcdef0123456789abcdef\". Next: Check this Store's settings-based Host and RUI_RUNTIME_DIR, then retry unchanged. [mysql_host_unavailable]\n", writer.buffered());
 }
 
 test "CLI boundary keeps Store and transport failures distinct" {

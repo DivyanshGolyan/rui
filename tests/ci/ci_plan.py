@@ -14,8 +14,10 @@ class Plan:
 
 
 def plan(selection: dict, *, event_name: str, draft: bool, promotion: bool,
-         change_kind: ChangeKind) -> Plan:
+         change_kind: ChangeKind, compile_only: bool = False) -> Plan:
     """Derive output values and summary without I/O or changing the input."""
+    if promotion and compile_only:
+        raise ValueError('A promotion runs its suites; a compile-only build runs none')
     p = dict(selection)
     kind = change_kind if event_name == 'pull_request' else ChangeKind.NORMAL
     # Future selector obligations must not be erased by the path allowlist.
@@ -40,6 +42,19 @@ def plan(selection: dict, *, event_name: str, draft: bool, promotion: bool,
         p['linux_memory_checks'] = False
         p['retry'] = False
         quarantine = 'off' if draft_run else quarantine
+    elif compile_only:
+        # The main build after each merge (main-build.yml): every gate, every
+        # unit root and the macOS type-check compile, whatever the push
+        # changed; outside the PR backend that includes ReleaseSmall. No test
+        # runs, so no suite, policy or Mac producer is selected.
+        p['targets'] = ['check', 'test-logic']
+        p['native_targets'] = []
+        p['server_targets'] = []
+        p['cache_execution_checks'] = False
+        p['typecheck_macos'] = True
+        p['linux_memory_checks'] = False
+        p['retry'] = False
+        quarantine = 'off'
     elif promotion:
         # The batch's full suite on both systems, plus the selected
         # standalone targets. check-full omits the portable logic root,
@@ -84,5 +99,6 @@ def plan(selection: dict, *, event_name: str, draft: bool, promotion: bool,
         cache_execution=p['cache_execution_checks'],
         typecheck_macos=p['typecheck_macos'],
         policy_skips=p['policy_skips'],
+        compile_only=compile_only,
     )
     return Plan(outputs, p)

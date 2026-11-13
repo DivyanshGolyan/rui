@@ -245,6 +245,13 @@ def openai_base_url_run(*, catalog_available=False):
         def model_list():
             return h2_fixture.closed_host_request(ready["socket"], store, "model_list")["providers"]
         assert model_list()[0]["source"] == "pending", model_list()
+        # Pending is Host state, not proof the peer received discovery. Order
+        # the POST after the recorded GET while its response remains held.
+        def models_received():
+            with endpoint.lock:
+                return any(headers[b":method"] == b"GET" and headers[b":path"] == b"/custom/v1/models"
+                           for headers in endpoint.request_headers)
+        fixture.wait_for(models_received, "the initial OpenAI models GET", timeout=20)
         configuration = fixture.command(
             "session", "configure", "--store", store, "--record", root / "config.json", "--key", "config",
             "--workspace", fixture.ROOT, "--provider", "openai", "--model", "gpt-6-sol", "--tools", "none",

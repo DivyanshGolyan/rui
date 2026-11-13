@@ -1,4 +1,4 @@
-//! App defaults presented as fields behind a borrowed, typed backend.
+//! App defaults and live app facts behind a borrowed, typed backend.
 //! No preference writer or Upgrade worker lives here.
 const std = @import("std");
 const vaxis = @import("vaxis");
@@ -30,19 +30,17 @@ pub const Backend = struct {
     upgrade: *const fn (*anyopaque) anyerror!void,
     run: *const fn (*anyopaque) ?upgrade_status.Run,
     caps: *const fn (*anyopaque) view.Caps,
+    /// Latest app-owned physical memory reading; null before the first read.
+    memory: ?*const fn (*anyopaque) ?view.Memory = null,
     /// Live lists change revision on every replacement or release.
     models: ?*const fn (*anyopaque) ModelChoice.Snapshot = null,
     sign_in: ?*const fn (*anyopaque, *vxfw.EventContext) anyerror!void = null,
 };
 
 /// The page's rows, in drawn order: the Panel's field index of each.
-pub const Row = enum { model, effort, permissions, notifications, sign_in, version, keys };
+pub const Row = enum { model, effort, permissions, notifications, sign_in, version, memory, keys };
 const row_count = std.enums.values(Row).len;
 
-const Phase = enum { open, pending, failed };
-const Standalone = struct { row: Row, current: ?view.Default, phase: Phase = .open };
-
-standalone: ?Standalone = null,
 backend: ?Backend = null,
 narrow: bool = false,
 keys_open: bool = false,
@@ -65,53 +63,13 @@ pub fn widget(self: *Self) vxfw.Widget {
     return .{ .userdata = self, .eventHandler = event, .drawFn = draw };
 }
 
-/// Open the existing field choice without its enclosing settings page.
-pub fn openStandaloneChoice(self: *Self, ctx: *vxfw.EventContext, row: Row, current: ?view.Default) !void {
-    if (self.saving_row != null) return;
-    self.closeStandaloneChoice();
-    self.standalone = .{ .row = row, .current = current };
-    const index: usize = @backingInt(row);
-    self.bind();
-    self.panel.selected = index;
-    try activate(self, ctx, index);
-    if (self.read_failed) self.failures.set(row, " · couldn't read settings");
-}
-
-pub fn standaloneOpen(self: *const Self) bool {
-    return if (self.standalone) |shown| shown.phase != .pending else false;
-}
-
-/// The presentation intent, including an admitted save hidden while pending.
-pub fn standaloneField(self: *const Self) ?Row {
-    return if (self.standalone) |shown| shown.row else null;
-}
-
-pub fn closeStandaloneChoice(self: *Self) void {
-    self.standalone = null;
-    self.cancelEdit();
-}
-
-pub fn standaloneWidget(self: *Self) vxfw.Widget {
-    return .{ .userdata = self, .eventHandler = standaloneEvent, .drawFn = drawStandalone };
-}
-
-fn drawStandalone(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
-    const self: *Self = @ptrCast(@alignCast(raw));
-    self.bind();
-    if (!self.standaloneOpen()) return .empty(self.standaloneWidget());
-    var surface = try self.panel.drawChoice(ctx, @backingInt(self.standalone.?.row));
-    surface.widget = self.standaloneWidget();
-    return surface;
-}
-
 pub fn hasChoice(self: *const Self) bool {
     return self.panel.choice != null or self.model_choice.active;
 }
 
-/// Compatibility entry for ending the current edit. A standalone edit owns
-/// its whole presentation; ordinary Settings retains its enclosing page.
+/// End the current edit while retaining the enclosing Settings page.
 pub fn cancelChoice(self: *Self) void {
-    if (self.standalone != null) self.closeStandaloneChoice() else self.cancelEdit();
+    self.cancelEdit();
 }
 
 /// Transient editing state, independent of presentation and admitted work.
@@ -144,14 +102,13 @@ pub fn select(self: *Self, row: Row) void {
 }
 
 pub fn refresh(self: *Self) !void {
-    self.closeStandaloneChoice();
     try self.readValues();
 }
 
-/// Refresh saved facts without changing the standalone presentation owner.
+/// Refresh the saved facts used by the Settings page.
 fn readValues(self: *Self) !void {
     // A choice is tied to the saved provider/model snapshot it opened on.
-    // Refreshing (including failure) invalidates that choice, never its owner.
+    // Refreshing (including failure) invalidates that choice.
     self.cancelEdit();
     const backend = self.backend orelse {
         self.read_failed = true;
@@ -169,17 +126,14 @@ fn readValues(self: *Self) !void {
 }
 
 fn provider(self: *const Self) ?protocol.Provider {
-    if (self.standalone) |presentation| if (presentation.current) |current| return current.provider;
     return std.meta.stringToEnum(protocol.Provider, if (self.values.provider.len == 0) defaults.provider else self.values.provider.slice());
 }
 
 fn model(self: *const Self) []const u8 {
-    if (self.standalone) |*presentation| if (presentation.current) |*current| return current.model.slice();
     return if (self.values.model.len == 0) defaults.recommended_model else self.values.model.slice();
 }
 
 fn choiceEffort(self: *const Self) ?catalog.ReasoningEffort {
-    if (self.standalone) |presentation| if (presentation.current) |current| return current.effort;
     return self.values.reasoning_effort;
 }
 
@@ -195,7 +149,7 @@ fn permissionText(mode: protocol.PermissionMode) []const u8 {
 }
 
 fn value(self: *const Self, row: Row) []const u8 {
-    if (row == .keys) return "";
+    if (row == .keys or row == .memory) return "";
     if (row == .version) return self.version;
     if (self.read_failed) return "unavailable";
     return switch (row) {
@@ -204,7 +158,7 @@ fn value(self: *const Self, row: Row) []const u8 {
         .permissions => permissionText(self.permissionMode()),
         .notifications => if (self.values.notifications) "on" else "off",
         .sign_in => if (self.provider()) |saved| saved.signIn() else "unavailable",
-        .version, .keys => unreachable,
+        .version, .memory, .keys => unreachable,
     };
 }
 
@@ -221,8 +175,7 @@ fn bind(self: *Self) void {
     self.panel.userdata = self;
     self.panel.on_activate = activate;
     self.panel.on_pick = pick;
-    const model_was_active = self.model_choice.active;
-    if (!self.model_choice.validate() and model_was_active and self.standalone != null) self.closeStandaloneChoice();
+    _ = self.model_choice.validate();
     self.model_choice.userdata = self;
     self.model_choice.on_pick = pickModel;
     self.panel.custom_choice = if (self.model_choice.active) self.model_choice.field(@backingInt(Row.model)) else null;
@@ -234,10 +187,13 @@ fn bind(self: *Self) void {
             .notifications => "Notifications",
             .sign_in => "Sign-in",
             .version => "Version",
+            .memory => "Memory",
             .keys => "Keys",
         },
         .value = self.value(row),
         .tail = self.tail(row),
+        .selectable = row != .memory,
+        .visible = row != .memory,
     };
     self.panel.fields = &self.fields;
     const caps = if (self.backend) |b| b.caps(b.context) else view.Caps{};
@@ -249,12 +205,7 @@ fn bind(self: *Self) void {
     self.panel.title_style = widget_style.of(caps, .{ .background = .bar, .colour = .strong, .bold = true });
     self.panel.quiet = widget_style.of(caps, .{ .background = .bar, .colour = .quiet });
     self.panel.rule_style = widget_style.of(caps, .{ .background = .bar, .colour = .rule });
-    if (self.standalone != null) {
-        self.panel.ground = widget_style.of(caps, .{});
-        self.panel.title_style = widget_style.of(caps, .{ .colour = .strong, .bold = true });
-        self.panel.quiet = widget_style.of(caps, .{ .colour = .quiet });
-    }
-    self.model_choice.show_more = self.standalone == null;
+    self.model_choice.show_more = true;
     self.model_choice.ground = self.panel.ground;
     self.model_choice.selection = self.panel.selection;
     self.model_choice.hover_style = self.panel.hover_style;
@@ -264,14 +215,12 @@ fn bind(self: *Self) void {
 fn activate(raw: *anyopaque, ctx: *vxfw.EventContext, index: usize) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     const row: Row = @fromBackingInt(@intCast(index));
+    if (row == .memory) return;
     if (row == .keys) {
         self.keys_open = true;
         ctx.consumeAndRedraw();
         return;
     }
-    defer if (self.standalone) |*shown| {
-        if (self.saving_row == null) shown.phase = if (self.failures.get(row) != null) .failed else .open;
-    };
     const backend = self.backend orelse {
         self.failures.set(row, " · settings unavailable");
         return;
@@ -289,7 +238,7 @@ fn activate(raw: *anyopaque, ctx: *vxfw.EventContext, index: usize) !void {
             };
             return;
         },
-        .keys => unreachable,
+        .memory, .keys => unreachable,
         .model, .effort, .permissions, .notifications => {
             try self.readValues();
             if (self.read_failed) {
@@ -325,7 +274,7 @@ fn activate(raw: *anyopaque, ctx: *vxfw.EventContext, index: usize) !void {
         },
         .permissions => self.panel.openChoice(&.{ "run without asking", "ask first" }, if (self.permissionMode() == .bypass) 0 else 1),
         .notifications => try self.save(ctx, row, .{ .notifications = !self.values.notifications }),
-        .sign_in, .version, .keys => {},
+        .sign_in, .version, .memory, .keys => {},
     }
     ctx.redraw = true;
 }
@@ -341,7 +290,7 @@ fn pick(raw: *anyopaque, ctx: *vxfw.EventContext, field: usize, choice: usize) !
         },
         .permissions => .{ .permission_mode = .{ .set = if (choice == 0) .bypass else .ask } },
         // Model uses the shared full-width choice.
-        .model, .notifications, .sign_in, .version, .keys => unreachable,
+        .model, .notifications, .sign_in, .version, .memory, .keys => unreachable,
     });
 }
 
@@ -358,12 +307,10 @@ fn save(self: *Self, ctx: *vxfw.EventContext, row: Row, edit: preferences.Edit) 
     const backend = self.backend.?;
     backend.save(backend.context, edit) catch {
         self.failures.set(row, " · couldn't save");
-        if (self.standalone) |*shown| shown.phase = .failed;
         ctx.redraw = true;
         return;
     };
     self.saving_row = row;
-    if (self.standalone) |*shown| shown.phase = .pending;
     try self.poll();
     ctx.redraw = true;
 }
@@ -377,11 +324,6 @@ fn poll(self: *Self) !void {
         .saved, .failed => {},
     }
     try self.readValues();
-    if (state == .failed or self.read_failed) {
-        if (self.standalone) |*shown| shown.phase = .failed;
-    } else {
-        self.closeStandaloneChoice();
-    }
     self.failures.set(row, if (state == .failed) " · couldn't save" else if (self.read_failed) " · couldn't read settings" else null);
     self.saving_row = null;
 }
@@ -389,7 +331,6 @@ fn poll(self: *Self) !void {
 fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     if (self.model_choice.active and !self.model_choice.validate()) {
-        if (self.standalone != null) self.closeStandaloneChoice();
         self.panel.custom_choice = null;
         ctx.consumeAndRedraw();
         return;
@@ -402,17 +343,7 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
     }
     if (self.keys_open) return;
     self.bind();
-    if (self.standalone) |shown| {
-        if (shown.phase == .pending) return;
-        try self.panel.choiceEvent(ctx, input, @backingInt(shown.row));
-    } else {
-        try self.panel.widget().handleEvent(ctx, input);
-    }
-}
-
-fn standaloneEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
-    const self: *Self = @ptrCast(@alignCast(raw));
-    if (input == .tick or self.standaloneOpen()) try event(raw, ctx, input);
+    try self.panel.widget().handleEvent(ctx, input);
 }
 
 fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
@@ -427,6 +358,11 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     self.bind();
     const size = ctx.max.size();
     if (size.width == 0 or size.height == 0) return .empty(self.widget());
+    const memory = if (self.backend) |backend| (if (backend.memory) |read| read(backend.context) else null) else null;
+    // Memory is the row's whole value, from the aligned value column to the edge.
+    const text = try @import("memory_text.zig").fit(ctx.arena, memory, self.panel.unicode, size.width -| Panel.value_column);
+    self.fields[@backingInt(Row.memory)].value = text;
+    self.fields[@backingInt(Row.memory)].visible = text.len != 0;
     const children = try ctx.arena.alloc(vxfw.SubSurface, 2);
     children[0] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = try self.panel.widget().draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = size.height - 1 })) };
     const footer = try ctx.arena.create(Footer);
@@ -442,6 +378,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
 const Fixture = struct {
     unicode: bool = true,
     background: ?view.Rgb = null,
+    memory_value: ?view.Memory = null,
     read_calls: usize = 0,
     save_calls: usize = 0,
     values: preferences.Values = .{},
@@ -454,7 +391,7 @@ const Fixture = struct {
     status: ?upgrade_status.Run = .{ .ended = .{ .how = .{ .up_to_date = .{ .schema = 60, .patch = 0 } }, .outcome = .unchanged } },
 
     fn backend(self: *Fixture) Backend {
-        return .{ .context = self, .read = read, .save = saveEdit, .save_state = saveState, .upgrade = upgrade, .run = run, .caps = caps };
+        return .{ .context = self, .read = read, .save = saveEdit, .save_state = saveState, .upgrade = upgrade, .run = run, .caps = caps, .memory = memory };
     }
     fn read(raw: *anyopaque) !preferences.Values {
         const self: *Fixture = @ptrCast(@alignCast(raw));
@@ -484,6 +421,10 @@ const Fixture = struct {
     fn run(raw: *anyopaque) ?upgrade_status.Run {
         const self: *Fixture = @ptrCast(@alignCast(raw));
         return self.status;
+    }
+    fn memory(raw: *anyopaque) ?view.Memory {
+        const self: *Fixture = @ptrCast(@alignCast(raw));
+        return self.memory_value;
     }
     fn caps(raw: *anyopaque) view.Caps {
         const self: *Fixture = @ptrCast(@alignCast(raw));
@@ -667,9 +608,9 @@ test "App settings page text and ground at 99x20 and 46x20" {
     defer arena.deinit();
     for ([_]u16{ 99, 46 }) |width| {
         page.narrow = width == 46;
-        const surface = try page.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
+        const surface = try page.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
         var screen = try vaxis.Screen.init(arena.allocator(), .{ .cols = width, .rows = 20, .x_pixel = 0, .y_pixel = 0 });
-        surface.render(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = 20, .screen = &screen }, page.widget());
+        try surface.render(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = 20, .screen = &screen }, page.widget());
         var dump: std.Io.Writer.Allocating = .init(arena.allocator());
         for (0..20) |row| {
             var line: std.Io.Writer.Allocating = .init(arena.allocator());
@@ -683,7 +624,10 @@ test "App settings page text and ground at 99x20 and 46x20" {
         try std.testing.expect(std.mem.indexOf(u8, text, "   Effort          low") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, "   Permissions     run without asking") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, "   Notifications   on") != null);
-        try std.testing.expect(std.mem.indexOf(u8, text, "   Sign-in         Codex") != null);
+        // The product default signs in with a device code, and reads as
+        // the one ChatGPT sign-in.
+        try std.testing.expect(std.mem.indexOf(u8, text, "   Sign-in         ChatGPT") != null);
+        try std.testing.expect(std.ascii.findIgnoreCase(text, "codex") == null);
         try std.testing.expect(std.mem.indexOf(u8, text, "   Version         0.60.0 · up to date") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, if (page.narrow) " ‹ Rui · settings" else " Rui · settings") != null);
         const ground = widget_style.of(.{}, .{ .background = .bar });
@@ -694,6 +638,15 @@ test "App settings page text and ground at 99x20 and 46x20" {
 
 test "App settings sign-in and effort choices reflect saved values without assuming a provider" {
     var fixture: Fixture = .{};
+    // Either way into ChatGPT reads "ChatGPT"; the device code is how,
+    // not what, a person signed in with.
+    for ([_][2][]const u8{ .{ "codex", "ChatGPT" }, .{ "chatgpt", "ChatGPT" }, .{ "openai", "API key" } }) |case| {
+        try fixture.values.provider.set(case[0]);
+        var shown: Self = .{ .backend = fixture.backend() };
+        try shown.refresh();
+        shown.bind();
+        try std.testing.expectEqualStrings(case[1], shown.fields[@backingInt(Row.sign_in)].value);
+    }
     try fixture.values.provider.set("openai");
     var page: Self = .{ .backend = fixture.backend() };
     try page.refresh();
@@ -810,7 +763,7 @@ test "App settings Model shares the provider list at full width and preserves ma
     try press(&page, &ctx, vaxis.Key.enter);
     try std.testing.expect(page.hasChoice());
     for ([_]u16{ 99, 46 }) |width| {
-        const drawn = try page.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
+        const drawn = try page.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
         const parts = drawn.children[0].surface.children;
         const choice = parts[parts.len - 1];
         try std.testing.expectEqual(@as(i17, 0), choice.origin.col);
@@ -828,9 +781,9 @@ test "App settings Model shares the provider list at full width and preserves ma
     try std.testing.expect(page.model_choice.no_match);
     try std.testing.expectEqualStrings("future", page.model_choice.editor.buffer[0..page.model_choice.editor.length]);
     for ([_]u16{ 99, 46 }) |width| {
-        const drawn = try page.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
+        const drawn = try page.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
         var screen = try vaxis.Screen.init(arena.allocator(), .{ .cols = width, .rows = 20, .x_pixel = 0, .y_pixel = 0 });
-        drawn.render(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = 20, .screen = &screen }, page.widget());
+        try drawn.render(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = 20, .screen = &screen }, page.widget());
         try std.testing.expect(screen.cursor_vis);
         try std.testing.expectEqual(@as(u16, 25), screen.cursor.col);
         try std.testing.expectEqual(@as(u16, 2), screen.cursor.row);
@@ -870,7 +823,7 @@ test "App settings shared ASCII capability reaches the panel model choice tails 
             }
             fixture.status = .checking;
             page.failures.set(.notifications, " · couldn't save");
-            const surface = try page.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
+            const surface = try page.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
             try Check.ascii(surface);
             try std.testing.expect(!page.panel.unicode and !page.model_choice.unicode);
             try std.testing.expectEqualStrings("-", surface.children[0].surface.readCell(0, 0).char.grapheme);
@@ -917,7 +870,7 @@ test "App settings mouse hover and click use the same field choices as Enter" {
         var page: Self = .{ .backend = fixture.backend() };
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
-        const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 60, .height = 12 }, .cell_size = .{} };
+        const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 60, .height = 12 }, .cell_size = .{} };
         var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
         try page.refresh();
         _ = try page.widget().draw(draw_ctx);
@@ -971,15 +924,16 @@ test "App settings Keys is last and opens by Enter or click without a backend" {
         try std.testing.expectEqualStrings("", page.fields[@backingInt(Row.keys)].value);
         var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
         if (click) {
-            _ = try page.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
-            try page.widget().handleEvent(&ctx, .{ .mouse = .{ .button = .left, .type = .press, .row = 2 + @as(u16, @backingInt(Row.keys)), .col = 4, .mods = .{} } });
+            _ = try page.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
+            // With no backend, Memory is absent and Keys follows Version.
+            try page.widget().handleEvent(&ctx, .{ .mouse = .{ .button = .left, .type = .press, .row = 2 + @as(u16, @backingInt(Row.version)) + 1, .col = 4, .mods = .{} } });
         } else {
             page.select(.keys);
             try press(&page, &ctx, vaxis.Key.enter);
         }
         try std.testing.expect(page.keys_open);
         try std.testing.expect(ctx.consume_event);
-        const drawn = try page.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
+        const drawn = try page.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
         try std.testing.expectEqualStrings("e", drawn.readCell(1, 0).char.grapheme);
         try std.testing.expect(drawn.widget.eql(page.widget()));
         // Enter on a reference is inert, not a hidden settings edit.
@@ -989,413 +943,79 @@ test "App settings Keys is last and opens by Enter or click without a backend" {
     };
 }
 
-test "App settings standalone choices reuse edits hide pending preserve failures and close success" {
-    var fixture: Fixture = .{};
-    var page: Self = .{ .backend = fixture.backend() };
+test "App settings Memory gets the columns from the value column to the edge" {
+    var fixture: Fixture = .{ .memory_value = .{ .rui = 38 * view.mib, .tools = 120 * view.mib } };
+    var page: Self = .{ .backend = fixture.backend(), .version = "unreleased" };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
-    try page.openStandaloneChoice(&ctx, .effort, null);
-    try std.testing.expect(page.standaloneOpen());
-    try std.testing.expectEqual(Row.effort, page.standalone.?.row);
-    const drawn = try page.standaloneWidget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 30 }, .cell_size = .{} });
-    try std.testing.expectEqualStrings("E", drawn.readCell(1, 0).char.grapheme);
-    try std.testing.expectEqual(@as(u16, @intCast(1 + page.effort_count)), drawn.size.height);
-    try press(&page, &ctx, vaxis.Key.enter);
-    try std.testing.expect(!page.hasChoice());
-    try std.testing.expect(!page.standaloneOpen());
-    try std.testing.expectEqual(@as(?Row, .effort), page.saving_row);
-    try page.openStandaloneChoice(&ctx, .model, null);
-    try std.testing.expectEqual(@as(Row, .effort), page.standalone.?.row);
-    fixture.save_status = .failed;
-    try page.widget().handleEvent(&ctx, .tick);
-    try std.testing.expect(page.standaloneOpen());
-    try std.testing.expectEqualStrings(" · couldn't save", page.failures.get(.effort).?);
-    page.closeStandaloneChoice();
-    try std.testing.expect(!page.standaloneOpen());
-    try page.openStandaloneChoice(&ctx, .model, null);
-    try std.testing.expect(page.model_choice.active);
-    for ([_]u16{ 0, 1, 2, 46, 140 }) |width| for (0..12) |height| {
-        const model_surface = try page.standaloneWidget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = @intCast(height) }, .cell_size = .{} });
-        try std.testing.expect(model_surface.size.height <= height);
-        for (model_surface.children) |child| {
-            try std.testing.expect(child.origin.row + child.surface.size.height <= model_surface.size.height);
-            try std.testing.expect(child.origin.col + child.surface.size.width <= model_surface.size.width);
-        }
-    };
-    try std.testing.expect(!page.model_choice.show_more);
-    try press(&page, &ctx, vaxis.Key.enter);
-    try std.testing.expect(!page.standaloneOpen());
-    fixture.save_status = .saved;
-    try page.widget().handleEvent(&ctx, .tick);
-    try std.testing.expect(!page.standaloneOpen());
-    try std.testing.expect(page.standalone == null);
-    try page.openStandaloneChoice(&ctx, .effort, null);
     try page.refresh();
-    try std.testing.expect(!page.standaloneOpen());
-    page.bind();
-    try std.testing.expect(page.model_choice.show_more);
-}
-
-test "App settings standalone draw invalidation never falls through to enclosing page" {
-    const Live = struct {
-        fn read(raw: *anyopaque) ModelChoice.Snapshot {
-            const revision: *u64 = @ptrCast(@alignCast(raw));
-            return .{ .revision = revision.* };
+    // memory_text owns which form fits; this page owns only the columns it gives memory.
+    for ([_]struct { width: u16, expected: ?[]const u8 }{
+        .{ .width = Panel.value_column + 24, .expected = "Memory          rui 38 MB · tools 120 MB" },
+        .{ .width = Panel.value_column + 23, .expected = "Memory          rui 38 MB" },
+        .{ .width = 40, .expected = "Memory          rui 38 MB" },
+        .{ .width = Panel.value_column + 9, .expected = "Memory          rui 38 MB" },
+        .{ .width = Panel.value_column + 8, .expected = null },
+    }) |case| {
+        const surface = try page.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = case.width, .height = 20 }, .cell_size = .{} });
+        const body = surface.children[0].surface;
+        var text: std.Io.Writer.Allocating = .init(arena.allocator());
+        for (0..body.size.height) |y| {
+            for (0..body.size.width) |x| try text.writer.writeAll(body.readCell(@intCast(x), @intCast(y)).char.grapheme);
+            try text.writer.writeByte('\n');
         }
-    };
-    var fixture: Fixture = .{};
-    var page: Self = .{ .backend = fixture.backend() };
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
-    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 30 }, .cell_size = .{} };
-    try page.openStandaloneChoice(&events, .model, null);
-    var revision: u64 = 0;
-    page.model_choice.source = .{ .context = &revision, .read = Live.read };
-    page.model_choice.revision = revision;
-    _ = try page.standaloneWidget().draw(ctx);
-    revision += 1;
-    const closed = try page.standaloneWidget().draw(ctx);
-    try std.testing.expectEqual(@as(u16, 0), closed.size.height);
-    try std.testing.expectEqual(@as(usize, 0), closed.buffer.len);
-    try std.testing.expectEqual(@as(usize, 0), closed.children.len);
-    try std.testing.expect(!page.standaloneOpen());
-    try page.openStandaloneChoice(&events, .effort, null);
-    try page.widget().handleEvent(&events, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
-    const pending = try page.standaloneWidget().draw(ctx);
-    try std.testing.expectEqual(@as(u16, 0), pending.size.height);
-}
-
-test "App settings standalone effort uses the owned next-start projection instead of saved intent" {
-    for ([_]bool{ false, true }) |saved| for ([_]?catalog.ReasoningEffort{ .high, .low, null }) |shown| {
-        var fixture: Fixture = .{};
-        if (saved) {
-            try fixture.values.provider.set("codex");
-            try fixture.values.model.set("gpt-5.5");
-            fixture.values.reasoning_effort = .low;
-        }
-        var page: Self = .{ .backend = fixture.backend() };
-        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-        defer arena.deinit();
-        var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
-        var current = view.Default.of("openai", "azure/gpt-5-pro").?;
-        current.effort = shown;
-        try page.openStandaloneChoice(&ctx, .effort, current);
-        // The caller may replace its projection immediately; the picker owns
-        // the context it displays, not a pointer into the caller's stack.
-        try current.model.set("gpt-5.5");
-        current.effort = .medium;
-        try std.testing.expectEqual(protocol.Provider.openai, page.provider().?);
-        try std.testing.expectEqualStrings("azure/gpt-5-pro", page.model());
-        try std.testing.expectEqual(@as(usize, 2), page.effort_count);
-        try std.testing.expectEqualStrings("model default", page.effort_choices[0]);
-        try std.testing.expectEqualStrings("high", page.effort_choices[1]);
-        const checked: ?usize = if (shown == null) 0 else if (shown == .high) 1 else null;
-        try std.testing.expectEqual(checked, page.panel.choice.?.current);
-        for ([_]u16{ 46, 140 }) |width| {
-            const drawn = try page.standaloneWidget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
-            for (0..page.effort_count) |row| try std.testing.expectEqualStrings(if (checked == row) "✓" else " ", drawn.readCell(1, @intCast(row + 1)).char.grapheme);
-        }
-        page.closeStandaloneChoice();
-        try std.testing.expect(page.standalone == null);
-        try page.refresh();
-        page.select(.effort);
-        try press(&page, &ctx, vaxis.Key.enter);
-        // Full Settings continues to describe the saved intention, not the
-        // next-start context that was supplied only to its standalone caller.
-        const saved_effort = fixture.values.reasoning_effort;
-        const selected = page.panel.choice.?.current.?;
-        try std.testing.expectEqualStrings(if (saved_effort) |effort_| @tagName(effort_) else "model default", page.effort_choices[selected]);
-    };
-}
-
-test "App settings standalone model checks and saves the drawn next-start provider and model" {
-    const List = struct {
-        const menu: picker.Menu = .{ .entries = &.{
-            .{ .id = "gpt-5.5", .known = true, .catalogued = true, .providers = .initOne(.codex) },
-            .{ .id = "azure/gpt-5-pro", .known = true, .catalogued = true, .providers = .initOne(.openai) },
-        } };
-        fn models(_: *anyopaque) ModelChoice.Snapshot {
-            return .{ .menu = &menu };
-        }
-    };
-    for ([_]bool{ false, true }) |saved| {
-        var fixture: Fixture = .{};
-        if (saved) {
-            try fixture.values.provider.set("codex");
-            try fixture.values.model.set("gpt-5.5");
-        }
-        var backend = fixture.backend();
-        backend.models = List.models;
-        var page: Self = .{ .backend = backend };
-        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-        defer arena.deinit();
-        var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
-        var current = view.Default.of("openai", "azure/gpt-5-pro").?;
-        current.effort = .high;
-        try page.openStandaloneChoice(&ctx, .model, current);
-        try current.model.set("gpt-5.5");
-        current.provider = .codex;
-        try std.testing.expectEqual(protocol.Provider.openai, page.model_choice.provider);
-        try std.testing.expectEqualStrings("azure/gpt-5-pro", page.model_choice.current);
-        try std.testing.expectEqualStrings("azure/gpt-5-pro", page.model_choice.menu.entries[page.model_choice.selected.?].id);
-        const drawn = try page.model_choice.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 20 }, .cell_size = .{} });
-        var checks: usize = 0;
-        for (drawn.buffer) |cell| checks += @intFromBool(std.mem.eql(u8, "✓", cell.char.grapheme));
-        try std.testing.expectEqual(@as(usize, 1), checks);
-        // A saved preference changing behind an already drawn choice does
-        // not retarget the provider carried by that choice's model pick.
-        try page.values.provider.set("codex");
-        try press(&page, &ctx, vaxis.Key.enter);
-        try std.testing.expectEqualStrings("openai", fixture.last_edit.?.provider.set);
-        try std.testing.expectEqualStrings("azure/gpt-5-pro", fixture.last_edit.?.model.set);
+        var line: ?[]const u8 = null;
+        var lines = std.mem.splitScalar(u8, text.written(), '\n');
+        while (lines.next()) |each| if (std.mem.indexOf(u8, each, "Memory") != null) {
+            line = std.mem.trim(u8, each, " ");
+        };
+        if (case.expected) |expected| try std.testing.expectEqualStrings(expected, line.?) else try std.testing.expectEqual(null, line);
+        try std.testing.expectEqual(case.expected != null, page.fields[@backingInt(Row.memory)].visible);
+        _ = arena.reset(.retain_capacity);
     }
 }
 
-test "App settings standalone context survives pending failure and field-only retry then clears on success" {
+test "App settings live Memory is optional read-only and independent of saved preferences" {
+    const Case = struct { memory: ?view.Memory, expected: ?[]const u8 };
     var fixture: Fixture = .{};
-    try fixture.values.model.set("gpt-5.5");
-    fixture.values.reasoning_effort = .low;
-    var page: Self = .{ .backend = fixture.backend() };
+    var page: Self = .{ .backend = fixture.backend(), .version = "unreleased" };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
-    var current = view.Default.of("openai", "azure/gpt-5-pro").?;
-    current.effort = .high;
-    try page.openStandaloneChoice(&ctx, .effort, current);
-    try press(&page, &ctx, vaxis.Key.enter);
-    try std.testing.expect(!page.standaloneOpen());
-    try std.testing.expectEqual(catalog.ReasoningEffort.high, fixture.last_edit.?.reasoning_effort.set);
-    try page.openStandaloneChoice(&ctx, .model, null);
-    try std.testing.expectEqual(Row.effort, page.standalone.?.row);
-    try std.testing.expect(page.standalone.?.current != null);
-    try std.testing.expectEqualDeep(current, page.standalone.?.current.?);
-    fixture.save_status = .failed;
-    try page.widget().handleEvent(&ctx, .tick);
-    try std.testing.expect(page.standaloneOpen());
-    try std.testing.expectEqualStrings(" · couldn't save", page.failures.get(.effort).?);
-    try std.testing.expect(page.standalone.?.current != null);
-    try std.testing.expectEqualDeep(current, page.standalone.?.current.?);
-    try press(&page, &ctx, vaxis.Key.enter);
-    try std.testing.expectEqual(Row.effort, page.standalone.?.row);
-    try std.testing.expectEqual(@as(usize, 2), page.effort_count);
-    try std.testing.expectEqual(@as(?usize, 1), page.panel.choice.?.current);
-    page.panel.choice.?.selected = 0;
-    try press(&page, &ctx, vaxis.Key.enter);
-    try std.testing.expectEqual(.clear, fixture.last_edit.?.reasoning_effort);
-    fixture.save_status = .saved;
-    try page.widget().handleEvent(&ctx, .tick);
-    try std.testing.expect(!page.standaloneOpen() and page.standalone == null);
-}
-
-test "App settings standalone model retry retains the drawn context through backend failure" {
-    var fixture: Fixture = .{};
-    try fixture.values.provider.set("codex");
-    try fixture.values.model.set("gpt-5.5");
-    var page: Self = .{ .backend = fixture.backend() };
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
-    const current = view.Default.of("openai", "gpt-6.1-sol").?;
-    try page.openStandaloneChoice(&ctx, .model, current);
-    try press(&page, &ctx, vaxis.Key.enter);
-    try std.testing.expect(!page.standaloneOpen());
-    try std.testing.expectEqualStrings("openai", fixture.last_edit.?.provider.set);
-    fixture.save_status = .failed;
-    try page.widget().handleEvent(&ctx, .tick);
-    try std.testing.expect(page.standaloneOpen());
-    try std.testing.expect(page.standalone.?.current != null);
-    try std.testing.expectEqualDeep(current, page.standalone.?.current.?);
-    try press(&page, &ctx, vaxis.Key.enter);
-    try std.testing.expectEqual(Row.model, page.standalone.?.row);
-    try std.testing.expect(page.model_choice.active);
-    try std.testing.expectEqual(protocol.Provider.openai, page.model_choice.provider);
-    try std.testing.expectEqualStrings("gpt-6.1-sol", page.model_choice.current);
-    page.closeStandaloneChoice();
-    try std.testing.expect(page.standalone == null);
-    try page.refresh();
-    try std.testing.expectEqual(protocol.Provider.codex, page.provider().?);
-    try std.testing.expectEqualStrings("gpt-5.5", page.model());
-}
-
-test "App settings standalone Model and Effort retry read and save failures by drawn click or Enter" {
-    const Failure = enum { read, save, publication };
-    for ([_]Row{ .model, .effort }) |field| for (std.enums.values(Failure)) |failure| for ([_]bool{ false, true }) |pointer| for ([_]u16{ 46, 140 }) |width| {
-        errdefer std.debug.print("App standalone field={s} failure={s} pointer={} width={d}\n", .{ @tagName(field), @tagName(failure), pointer, width });
-        var fixture: Fixture = .{ .fail_read = failure == .read };
-        try fixture.values.provider.set("codex");
-        try fixture.values.model.set("gpt-5.5");
-        fixture.values.reasoning_effort = .low;
-        var page: Self = .{ .backend = fixture.backend() };
-        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-        defer arena.deinit();
-        var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
-        const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} };
-        const click: vaxis.Mouse = .{ .col = 1, .row = 1, .button = .left, .type = .press, .mods = .{} };
-        var current = view.Default.of("openai", "gpt-6.1-sol").?;
-        current.effort = .high;
-        try page.openStandaloneChoice(&ctx, field, current);
-        if (failure != .read) {
-            fixture.fail_save = failure == .publication;
-            try press(&page, &ctx, vaxis.Key.enter);
-            fixture.fail_save = false;
-            if (failure == .save) {
-                try std.testing.expect(!page.standaloneOpen());
-                try std.testing.expectEqual(Phase.pending, page.standalone.?.phase);
-                const pending = try page.standaloneWidget().draw(draw_ctx);
-                try std.testing.expectEqual(@as(u16, 0), pending.size.height);
-                const reads = fixture.read_calls;
-                const saves = fixture.save_calls;
-                try @import("testing/app_events.zig").mouse(&ctx, pending, click);
-                try press(&page, &ctx, vaxis.Key.enter);
-                try std.testing.expectEqual(reads, fixture.read_calls);
-                try std.testing.expectEqual(saves, fixture.save_calls);
-                fixture.save_status = .failed;
-                try page.widget().handleEvent(&ctx, .tick);
-            }
-        }
-        try std.testing.expect(page.standaloneOpen() and !page.hasChoice());
-        try std.testing.expectEqual(Phase.failed, page.standalone.?.phase);
-        try std.testing.expectEqualStrings(if (failure == .read) " · couldn't read settings" else " · couldn't save", page.failures.get(field).?);
-        const retained = try page.standaloneWidget().draw(draw_ctx);
-        try std.testing.expectEqual(@as(u16, 2), retained.size.height);
-        try std.testing.expect(!std.mem.eql(u8, " ", retained.readCell(1, 1).char.grapheme));
-        fixture.fail_read = false;
-        const before_read = fixture.read_calls;
-        const before_save = fixture.save_calls;
-        if (pointer) try @import("testing/app_events.zig").mouse(&ctx, retained, click) else try press(&page, &ctx, vaxis.Key.enter);
-        try std.testing.expectEqual(before_read + 1, fixture.read_calls);
-        try std.testing.expectEqual(before_save, fixture.save_calls);
-        try std.testing.expect(page.standaloneOpen() and page.hasChoice());
-        try std.testing.expectEqual(field, page.standalone.?.row);
-        try std.testing.expectEqualDeep(current, page.standalone.?.current.?);
-        try std.testing.expectEqual(Phase.open, page.standalone.?.phase);
-        try std.testing.expect(page.failures.get(field) == null);
-        if (field == .model) {
-            try std.testing.expect(page.model_choice.active);
-            try std.testing.expectEqual(protocol.Provider.openai, page.model_choice.provider);
-            try std.testing.expectEqualStrings(current.model.slice(), page.model_choice.current);
-        } else {
-            const choice = page.panel.choice.?;
-            try std.testing.expectEqualStrings("high", choice.labels[choice.current.?]);
-        }
-        try press(&page, &ctx, vaxis.Key.enter);
-        try std.testing.expectEqual(before_save + 1, fixture.save_calls);
-        if (field == .model) {
-            try std.testing.expectEqualStrings("openai", fixture.last_edit.?.provider.set);
-            try std.testing.expectEqualStrings(current.model.slice(), fixture.last_edit.?.model.set);
-        } else try std.testing.expectEqual(catalog.ReasoningEffort.high, fixture.last_edit.?.reasoning_effort.set);
-        fixture.save_status = .saved;
-        try page.widget().handleEvent(&ctx, .tick);
-        const saved = try page.standaloneWidget().draw(draw_ctx);
-        try std.testing.expectEqual(@as(u16, 0), saved.size.height);
-        const saves = fixture.save_calls;
-        try @import("testing/app_events.zig").mouse(&ctx, saved, click);
-        try std.testing.expectEqual(saves, fixture.save_calls);
-        try std.testing.expect(!page.standaloneOpen());
-    };
-}
-
-test "App settings standalone without a backend retains only its drawn field until a source can retry" {
-    for ([_]Row{ .model, .effort }) |field| for ([_]bool{ false, true }) |pointer| {
-        var page: Self = .{};
-        var fixture: Fixture = .{};
-        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-        defer arena.deinit();
-        var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
-        const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 20 }, .cell_size = .{} };
-        const click: vaxis.Mouse = .{ .col = 1, .row = 1, .button = .left, .type = .press, .mods = .{} };
+    for ([_]bool{ false, true }) |unicode| for ([_]bool{ false, true }) |fail_read| for ([_]u16{ 46, 99 }) |width| {
+        fixture.unicode = unicode;
+        fixture.fail_read = fail_read;
         try page.refresh();
-        try page.openStandaloneChoice(&ctx, field, null);
-        var retained = try page.standaloneWidget().draw(draw_ctx);
-        try std.testing.expectEqual(@as(u16, 2), retained.size.height);
-        try @import("testing/app_events.zig").mouse(&ctx, retained, click);
-        try press(&page, &ctx, vaxis.Key.enter);
-        try std.testing.expect(page.standaloneOpen() and !page.hasChoice());
-        try std.testing.expectEqual(@as(usize, 0), fixture.read_calls);
-        try std.testing.expectEqual(@as(usize, 0), fixture.save_calls);
-        page.backend = fixture.backend();
-        retained = try page.standaloneWidget().draw(draw_ctx);
-        if (pointer) try @import("testing/app_events.zig").mouse(&ctx, retained, click) else try press(&page, &ctx, vaxis.Key.enter);
-        try std.testing.expect(page.hasChoice());
-        try std.testing.expectEqual(field, page.standalone.?.row);
-        try std.testing.expectEqual(@as(usize, 1), fixture.read_calls);
-        try std.testing.expectEqual(@as(usize, 0), fixture.save_calls);
-    };
-}
-
-test "App settings standalone lifetime domain closes every phase without cancelling admitted work or reopening late" {
-    const Cases = @import("session_chrome.zig").StandaloneCases;
-    const Outcome = enum { saved, failed, unread };
-    for (Cases.all) |case| {
-        if (case.screen != .new_chat) continue;
-        for (std.enums.values(Outcome)) |outcome| {
-            var fixture: Fixture = .{ .fail_read = case.phase == .read_failed };
-            try fixture.values.provider.set("codex");
-            try fixture.values.model.set("gpt-5.5");
-            var page: Self = .{ .backend = fixture.backend() };
-            var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-            defer arena.deinit();
+        const reads = fixture.read_calls;
+        for ([_]Case{
+            .{ .memory = null, .expected = null },
+            .{ .memory = .{ .rui = 38 * view.mib, .tools = null }, .expected = "Memory          rui 38 MB" },
+            .{ .memory = .{ .rui = 38 * view.mib, .tools = 120 * view.mib }, .expected = if (unicode) "Memory          rui 38 MB · tools 120 MB" else "Memory          rui 38 MB . tools 120 MB" },
+            .{ .memory = .{ .rui = 1024 * view.mib, .tools = null }, .expected = "Memory          rui 1.0 GB" },
+            .{ .memory = null, .expected = null },
+        }) |case| {
+            fixture.memory_value = case.memory;
+            const surface = try page.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
+            const body = surface.children[0].surface;
+            var text: std.Io.Writer.Allocating = .init(arena.allocator());
+            for (0..body.size.height) |y| {
+                for (0..body.size.width) |x| try text.writer.writeAll(body.readCell(@intCast(x), @intCast(y)).char.grapheme);
+                try text.writer.writeByte('\n');
+            }
+            if (case.expected) |expected| {
+                try std.testing.expect(std.mem.indexOf(u8, text.written(), expected) != null);
+            } else try std.testing.expect(std.mem.indexOf(u8, text.written(), "Memory") == null);
+            try std.testing.expectEqual(case.memory != null, page.fields[@backingInt(Row.memory)].visible);
+            try std.testing.expect(!page.fields[@backingInt(Row.memory)].selectable);
+            try std.testing.expect(std.mem.indexOf(u8, text.written(), "Version         unreleased") != null);
             var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
-            var current = view.Default.of("openai", "azure/gpt-5-pro").?;
-            current.effort = .high;
-            const row: Row = if (case.field == .model) .model else .effort;
-            try page.openStandaloneChoice(&ctx, row, current);
-            if (case.phase == .pending or case.phase == .save_failed) {
-                try press(&page, &ctx, vaxis.Key.enter);
-                if (case.phase == .save_failed) {
-                    fixture.save_status = .failed;
-                    try page.widget().handleEvent(&ctx, .tick);
-                }
-            }
-            const phase: Phase = switch (case.phase) {
-                .open => .open,
-                .pending => .pending,
-                .read_failed, .save_failed => .failed,
-            };
-            try std.testing.expectEqual(@as(?Row, row), page.standaloneField());
-            try std.testing.expectEqual(phase, page.standalone.?.phase);
-            try std.testing.expectEqual(case.phase != .pending, page.standaloneOpen());
-            try std.testing.expectEqualDeep(current, page.standalone.?.current.?);
-            const admitted = page.saving_row;
-            // Shell adapters exercise the three distinct ending gestures. Here
-            // they meet the same owner operation; ordinary refresh also ends it.
-            switch (case.ending) {
-                .refresh => try page.refresh(),
-                .escape, .close_click, .navigate => page.closeStandaloneChoice(),
-            }
-            try std.testing.expect(!page.standaloneOpen());
-            try std.testing.expect(page.standaloneField() == null);
-            try std.testing.expect(page.standalone == null);
-            try std.testing.expectEqual(admitted, page.saving_row);
-            try std.testing.expect(!page.hasChoice());
-            if (admitted != null) {
-                fixture.fail_read = outcome == .unread;
-                fixture.save_status = if (outcome == .failed) .failed else .saved;
-                const reads = fixture.read_calls;
-                // Polling remains available even through the hidden widget.
-                try page.standaloneWidget().handleEvent(&ctx, .tick);
-                try std.testing.expectEqual(reads + 1, fixture.read_calls);
-                try std.testing.expect(page.saving_row == null);
-                if (outcome != .saved) try std.testing.expect(page.failures.get(row) != null);
-            }
-            try std.testing.expect(page.standaloneField() == null);
-            try std.testing.expect(!page.standaloneOpen());
-            const surface = try page.standaloneWidget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 20 }, .cell_size = .{} });
-            try std.testing.expectEqual(@as(u16, 0), surface.size.height);
-            try std.testing.expectEqual(@as(usize, 0), surface.buffer.len);
-            try std.testing.expectEqual(@as(usize, 0), surface.children.len);
-            const reads = fixture.read_calls;
-            const saves = fixture.save_calls;
-            try page.standaloneWidget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
-            try page.standaloneWidget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = 'x', .text = "x" } });
-            try page.standaloneWidget().handleEvent(&ctx, .{ .mouse = .{ .col = 1, .row = 1, .button = .left, .type = .press, .mods = .{} } });
+            page.select(.version);
+            try press(&page, &ctx, vaxis.Key.down);
+            try std.testing.expectEqual(@as(usize, @backingInt(Row.keys)), page.panel.selected);
+            try press(&page, &ctx, vaxis.Key.up);
+            try std.testing.expectEqual(@as(usize, @backingInt(Row.version)), page.panel.selected);
             try std.testing.expectEqual(reads, fixture.read_calls);
-            try std.testing.expectEqual(saves, fixture.save_calls);
-            try std.testing.expect(page.standaloneField() == null);
-            page.bind();
-            try std.testing.expect(page.model_choice.show_more);
+            try std.testing.expectEqual(@as(usize, 0), fixture.save_calls);
+            _ = arena.reset(.retain_capacity);
         }
-    }
+    };
 }

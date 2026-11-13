@@ -179,7 +179,7 @@ test "GroupedList selection preserves each segment foreground" {
     var list: Self = .{ .rows = .of(&all), .selected = 0 };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 12, .height = 2 }, .cell_size = .{} };
+    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 12, .height = 2 }, .cell_size = .{} };
     const surface = try list.widget().draw(ctx);
     const cells = surface.children[0].surface;
     try std.testing.expectEqual(vaxis.Color{ .rgb = .{ 0xf0, 0x8b, 0x74 } }, cells.readCell(0, 0).style.fg);
@@ -197,6 +197,62 @@ test "GroupedList selection preserves each segment foreground" {
         try std.testing.expectEqual(vaxis.Color.default, cell.style.bg);
         try std.testing.expect(cell.style.reverse);
     }
+}
+
+test "GroupedList quiet rows normalize whole lines before selection and hover in every colour depth" {
+    const view = overview_view;
+    for ([_]view.Caps.Depth{ .direct, .indexed, .none }) |depth| for ([_]bool{ false, true }) |wrote| for ([_]bool{ false, true }) |selected| for ([_]?i16{ null, 0, 1 }) |hover_row| for ([_]u16{ 46, 140 }) |width| {
+        const caps: view.Caps = .{ .depth = depth };
+        const token: view.Token = .{ .instance = @splat(0xab), .generation = 1 };
+        var state: view.State = undefined;
+        try state.init(std.testing.allocator, .{ .cwd = "/work/quiet", .home = "/work" });
+        defer state.deinit();
+        _ = try view.step(&state, .{ .host = .{ .instance = token.instance, .started_at = 100, .slots = 2, .slots_in_use = 0 } });
+        _ = try view.step(&state, .{ .tick = 100_000 });
+        const listed: view.Listed = .{
+            .reference = "quiet1".*,
+            .read_version = token,
+            .workspace = "/work/quiet",
+            .provider = .codex,
+            .label = "Quiet row",
+            .state = .{ .finished = .{ .since = 100 } },
+            .first = .{ .position = 1, .admission = 1, .sender = null },
+            .from_person_at = if (wrote) 100 else null,
+            .last_line = .{ .position = 1, .text = "Last answer" },
+        };
+        _ = try view.step(&state, .{ .list = .{ .page = .{ .rows = &.{listed}, .answer = .{ .delta = .full, .since = token } } } });
+        state.selected = if (selected) .{ .session = listed.reference } else .new_session;
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const first = try view.listSegments(arena.allocator(), &state, .{ .row = 0 }, width, caps, 0);
+        const rows: []const Row = &.{.{
+            .segments = first.segments,
+            .second = try view.rowSecondSegments(arena.allocator(), &state, 0, width, caps),
+            .height = 2,
+            .target = .{ .open = listed.reference },
+        }};
+        var presses: Pressed = .{};
+        var list: Self = .{ .rows = .of(&rows), .selected = if (first.selected) 0 else null, .caps = caps, .on_press = presses.press() };
+        const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 2 }, .cell_size = .{} };
+        _ = try list.widget().draw(ctx);
+        if (hover_row) |row| {
+            var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+            try list.widget().handleEvent(&events, .{ .mouse = .{ .col = 1, .row = row, .button = .none, .type = .motion, .mods = .{} } });
+        }
+        const surface = try list.widget().draw(ctx);
+        const background: view.Background = if (selected) .selection else if (hover_row != null) .hover else .ground;
+        const highlight = widget_style.of(caps, .{ .background = background });
+        for (surface.children[0].surface.buffer) |cell| {
+            // Includes both lines' visible text, interstitial padding and ends.
+            try std.testing.expectEqual(!wrote and !selected and hover_row == null, cell.style.dim);
+            try std.testing.expectEqual(highlight.bg, cell.style.bg);
+            try std.testing.expectEqual(highlight.reverse, cell.style.reverse);
+            try std.testing.expectEqual(highlight.ul_style, cell.style.ul_style);
+            if (depth == .none) try std.testing.expectEqual(vaxis.Color.default, cell.style.fg);
+        }
+        // The selected name stays bold, including in monochrome.
+        try std.testing.expectEqual(selected, surface.children[0].surface.readCell(3, 0).style.bold);
+    };
 }
 
 /// Records each press GroupedList reports, for the press tests.
@@ -237,7 +293,7 @@ test "GroupedList reports a left press as what the row under it drew with, after
     var list: Self = .{ .rows = .{ .userdata = undefined, .count = 40, .rowFn = Numbered.row }, .selected = 25, .on_press = presses.press() };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    const surface = try list.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 30, .height = 5 }, .cell_size = .{} });
+    const surface = try list.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 30, .height = 5 }, .cell_size = .{} });
     try std.testing.expect(list.shown.first > 0);
     // Find the screen row each index landed on from what was drawn, not
     // from how the list scrolls.
@@ -280,7 +336,7 @@ test "GroupedList ignores a press below its last row" {
     var list: Self = .{ .rows = .of(&all), .on_press = presses.press() };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    _ = try list.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 30, .height = 6 }, .cell_size = .{} });
+    _ = try list.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 30, .height = 6 }, .cell_size = .{} });
     var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
     for ([_]i16{ 2, 5 }) |row| try list.widget().handleEvent(&events, leftPress(0, row));
     try std.testing.expectEqual(@as(usize, 0), presses.count);
@@ -300,7 +356,7 @@ test "GroupedList reports what a row drew with, not what its index holds by the 
     var list: Self = .{ .rows = .of(&all), .on_press = presses.press() };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    _ = try list.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 30, .height = 6 }, .cell_size = .{} });
+    _ = try list.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 30, .height = 6 }, .cell_size = .{} });
     // The rows change before the next frame: the first is gone.
     all = rows[1..];
     var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
@@ -317,7 +373,7 @@ test "GroupedList without on_press only scrolls on the wheel" {
     var list: Self = .{ .rows = .{ .userdata = undefined, .count = 40, .rowFn = Plain.row } };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 30, .height = 5 }, .cell_size = .{} };
+    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 30, .height = 5 }, .cell_size = .{} };
     _ = try list.widget().draw(ctx);
     var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
     try list.widget().handleEvent(&events, leftPress(0, 1));
@@ -336,7 +392,7 @@ test "GroupedList two-line rows select and press both lines with a pinned tail" 
     var list: Self = .{ .rows = .of(&all), .selected = 0, .on_press = presses.press(), .tail = .{ .widget = tail.widget(), .rows = 2 } };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 8 }, .cell_size = .{} };
+    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 8 }, .cell_size = .{} };
     const surface = try list.widget().draw(ctx);
     try std.testing.expectEqual(@as(i17, 6), surface.children[1].origin.row);
     const row = surface.children[0].surface.children[0].surface;
@@ -371,7 +427,7 @@ test "GroupedList markers count Sessions not the New Session entry and stay quie
     defer arena.deinit();
     for ([_]overview_view.Caps.Depth{ .direct, .none }) |depth| for ([_]u32{ 0, 6 }) |selected| {
         var list: Self = .{ .rows = .{ .userdata = undefined, .count = 7, .rowFn = Source.row, .countFromFn = Source.count }, .selected = selected, .aboveFn = Source.above, .belowFn = Source.below, .caps = .{ .depth = depth } };
-        const surface = try list.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 30, .height = 7 }, .cell_size = .{} });
+        const surface = try list.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 30, .height = 7 }, .cell_size = .{} });
         const indicator = surface.children[if (selected == 0) surface.children.len - 1 else 1];
         try std.testing.expectEqual(@as(i17, if (selected == 0) 6 else 0), indicator.origin.row);
         var text: std.ArrayList(u8) = .empty;
@@ -387,7 +443,7 @@ test "GroupedList selected row uses the owner's focused or inactive background" 
     var list: Self = .{ .rows = .of(&rows), .selected = 0, .caps = .{ .depth = .direct } };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 5 }, .cell_size = .{} };
+    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 5 }, .cell_size = .{} };
     for ([_]@import("overview_style.zig").Background{ .selection, .bar }) |background| {
         list.selection_background = background;
         _ = try list.widget().draw(ctx);

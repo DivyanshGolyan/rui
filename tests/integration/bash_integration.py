@@ -67,7 +67,7 @@ def prove_stdin(state):
         "pathlib.Path('input.bin').write_bytes(sys.stdin.buffer.read())"
     )
     probe = "import os,stat; print('null' if stat.S_ISCHR(os.fstat(0).st_mode) else 'file'); print(len(os.read(0,1)))"
-    failed_send = "Bash failed. Exit code: 2.\nstderr tail:\n"
+    failed_send = "Bash failed. Exit code: 2.\nstderr:\n"
     # The empty-send cases retain the refusal line itself, measured below.
     retained_output_bytes = {"large": 524288, "over": 0, "null": 7, "missing": 7, "empty": 7,
                              "closed": 6, "timeout": 0}
@@ -125,14 +125,14 @@ def prove_stdin(state):
             result = result_text(store, session)
             if name == "large":
                 assert (workspace / "input.bin").read_bytes() == large.encode(), "large input changed or stopped before EOF"
-                assert "[earlier output omitted]" in result and "Full stdout:" in result and "Full stderr:" in result, result
+                assert " bytes left out]" in result and "Full stdout:" in result and "Full stderr:" in result, result
                 assert not (workspace / "evaluated").exists() and not (workspace / "substituted").exists()
             elif name == "over":
                 assert result == "Bash was not started: decoded stdin exceeds 122880 bytes. Split the input across smaller calls or read an existing file.", result
                 assert not (workspace / "forbidden-over-limit").exists(), "over-limit input launched"
             elif name in ("null", "missing", "empty"):
                 expected_kind = "file" if name == "empty" else "null"
-                assert result == f"Bash succeeded. Exit code: 0.\nstdout tail:\n{expected_kind}\n0\n", result
+                assert result == f"Bash succeeded. Exit code: 0.\nstdout:\n{expected_kind}\n0\n", result
             elif name == "closed":
                 assert "closed" in result, result
             elif name in ("empty-send", "null-send"):
@@ -798,7 +798,7 @@ def main():
     counter = success_workspace / "launch-counter"
     large_command = (
         "printf x >> launch-counter; "
-        "head -c 12000 /dev/zero | tr '\\0' z; printf '\\377'; printf stderr-marker >&2"
+        "head -c 24000 /dev/zero | tr '\\0' z; printf '\\377'; printf stderr-marker >&2"
     )
     success_arguments = json.dumps(
         {"cmd": large_command, "timeout_ms": None, "description": "Write large captured output"}, separators=(",", ":")
@@ -1167,7 +1167,7 @@ def main():
         assert outputs[2]["output"] == "Invalid arguments for tool 'bash': cmd must be a string of UTF-8 text with no NUL characters.", outputs
         output = outputs[0]["output"]
         assert "Bash succeeded." in output and "stderr-mark" in output, output
-        assert "�" in output and "[earlier output omitted]" in output, output
+        assert "�" in output and " bytes left out]" in output, output
         # Only the truncated stream names its full file.
         assert "Full stdout:" in output and "Full stderr:" not in output, output
         answer_report = fixture.command(

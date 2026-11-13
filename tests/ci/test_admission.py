@@ -22,6 +22,7 @@ UPGRADE = ROOT / '.github/workflows/previous-release-upgrade.yml'
 PROMOTE = ROOT / '.github/workflows/promote.yml'
 RELEASE = ROOT / '.github/workflows/release.yml'
 RENDERER = ROOT / '.github/workflows/renderer-contracts.yml'
+MAIN_BUILD = ROOT / '.github/workflows/main-build.yml'
 
 
 def job(text, name):
@@ -105,12 +106,12 @@ class PlanFixture:
         self.git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '--allow-empty', '-qm', 'fixture')
         return self.git('rev-parse', 'HEAD')
 
-    def run(self, base=None, candidate=None, event='pull_request', draft=False, promotion=False):
+    def run(self, base=None, candidate=None, event='pull_request', draft=False, promotion=False, compile_only=False):
         self.output = self.root / 'output'
         self.output.write_text('')
         script = step_script(job(CHECK.read_text(), 'plan'), 'Select existing targets')
         env = dict(os.environ, PYTHONDONTWRITEBYTECODE='1', BASE=base or self.base, DRAFT=str(draft).lower(), EVENT_NAME=event,
-                   PROMOTION=str(promotion).lower(),
+                   PROMOTION=str(promotion).lower(), COMPILE_ONLY=str(compile_only).lower(),
                    GITHUB_REF_NAME='5/merge', CANDIDATE_REF=candidate or self.git('rev-parse', 'HEAD'),
                    GITHUB_OUTPUT=str(self.output), GITHUB_STEP_SUMMARY=str(self.root / 'summary'))
         return subprocess.run(['bash', '-c', script], cwd=self.repo, env=env,
@@ -134,6 +135,7 @@ class AdmissionTest(unittest.TestCase):
             return int(re.search(r'(?m)^        timeout-minutes: (\d+)$', step)[1])
 
         release = RELEASE.read_text()
+        self.assertGreaterEqual(budget(job(text, 'linux_build')), budget(job(release, 'build')))
         self.assertGreaterEqual(budget(job(text, 'macos_build')), budget(job(release, 'build')))
         # On-demand Mac qualification compiles the same native gates cold.
         qualify = job((ROOT / '.github/workflows/qualify-macos.yml').read_text(), 'compile')
@@ -147,7 +149,7 @@ class AdmissionTest(unittest.TestCase):
         self.assertIn("    timeout-minutes: ${{ inputs.batch-base && 300 || 45 }}", upgrade)
         self.assertEqual(step_budget(upgrade, 'Start detached, then install, save real work, reinstall and '
                                      'restart the same Store'), 45)
-        for name in ('linux_build', 'linux_build_unit', 'macos_build_unit'):
+        for name in ('linux_build_unit', 'macos_build_unit'):
             self.assertEqual(budget(job(text, name)), 15)
 
     def test_main_ruleset_requires_admission_and_prs_with_only_an_admin_pr_bypass(self):
@@ -255,7 +257,7 @@ class AdmissionTest(unittest.TestCase):
         env = dict(DRAFT_RUN='false', CHANGE_KIND='documentation', PLAN_RESULT='success', POLICY_RESULT='skipped',
                    TARGETS='[]', SPLIT='false', CODEGEN='false', BUILD_RESULT='skipped',
                    UNIT_RESULT='skipped', CODEGEN_RESULT='skipped', NATIVE_RESULT='skipped',
-                   TYPECHECK='false', TYPECHECK_RESULT='skipped')
+                   TYPECHECK='false', TYPECHECK_RESULT='skipped', COMPILE_ONLY='false')
 
         def run(values):
             return subprocess.run(['bash', '-euc', script], env=values,
@@ -278,7 +280,8 @@ class AdmissionTest(unittest.TestCase):
         script = step_script(job(CHECK.read_text(), 'linux'), 'Require every selected Linux part')
         env = dict(DRAFT_RUN='false', PLAN_RESULT='success', POLICY_RESULT='success', TARGETS='[]', SPLIT='false',
                    CODEGEN='false', BUILD_RESULT='skipped', UNIT_RESULT='skipped',
-                   CODEGEN_RESULT='skipped', NATIVE_RESULT='skipped', TYPECHECK='false', TYPECHECK_RESULT='skipped')
+                   CODEGEN_RESULT='skipped', NATIVE_RESULT='skipped', TYPECHECK='false', TYPECHECK_RESULT='skipped',
+                   COMPILE_ONLY='false')
         self.assertEqual(subprocess.run(['bash', '-euc', script], env=env).returncode, 0)
         for kind in ('', 'docs', 'unknown'):
             with self.subTest(kind=kind):
@@ -525,15 +528,18 @@ class CandidatePlanTest(unittest.TestCase):
         with PlanFixture() as fixture:
             fixture.write('tests/ci/ci_plan.py', """from types import SimpleNamespace
 
-def plan(selection, *, event_name, draft, promotion, change_kind):
+def plan(selection, *, event_name, draft, promotion, change_kind, compile_only):
     return SimpleNamespace(outputs=dict(owner='called', event=event_name, draft=draft,
-        promotion=promotion, kind=change_kind.value, base=selection['base']),
+        promotion=promotion, kind=change_kind.value, base=selection['base'], compile_only=compile_only),
         selection=dict(summary='from owner'))
 """)
             candidate = fixture.commit()
             output = fixture.plan(self, candidate=candidate, draft=True)
             self.assertEqual(output, dict(owner='called', event='pull_request', draft='true',
-                promotion='false', kind='normal', base=fixture.base, candidate_ref=candidate))
+                promotion='false', kind='normal', base=fixture.base, compile_only='false',
+                candidate_ref=candidate))
+            built = fixture.plan(self, candidate=candidate, event='push', compile_only=True)
+            self.assertEqual((built['event'], built['compile_only']), ('push', 'true'))
             summary = (fixture.root / 'summary').read_text()
             self.assertIn('"summary": "from owner"', summary)
 
@@ -642,6 +648,34 @@ def plan(selection, *, event_name, draft, promotion, change_kind):
             # Even falsely relabelling the draft's event as ready cannot admit its skipped policy.
             self.assertNotEqual(self.aggregate(workflow, 'admission', admission, draft, results).returncode, 0)
 
+    def test_compile_only_plan_flows_through_the_real_linux_aggregate(self):
+        workflow = CHECK.read_text()
+        linux = step_script(job(workflow, 'linux'), 'Require every selected Linux part')
+        with PlanFixture() as fixture:
+            fixture.write('README.md', 'Main moved. Same line.\n')
+            candidate = fixture.commit()
+            output = fixture.plan(self, candidate=candidate, event='push', compile_only=True)
+            self.assertEqual(output['compile_only'], 'true')
+            self.assertEqual(json.loads(output['targets']), ['check', 'test-logic'])
+            built = {name: 'skipped' for name in ('policy', 'macos', 'previous_release_upgrade', 'cache_execution',
+                                                  'linux_codegen', 'linux_suites')}
+            built.update(plan='success', linux_build='success', linux_build_unit='success',
+                         macos_typecheck='success')
+            result = self.aggregate(workflow, 'linux', linux, output, built)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            for part in ('plan', 'linux_build', 'linux_build_unit', 'macos_typecheck'):
+                for value in ('skipped', 'failure', 'cancelled'):
+                    with self.subTest(part=part, result=value):
+                        self.assertNotEqual(self.aggregate(workflow, 'linux', linux, output,
+                                                           dict(built, **{part: value})).returncode, 0)
+            # Policy and suites never run in a compile-only build; one that did is a wrong plan.
+            for part in ('policy', 'linux_suites'):
+                with self.subTest(ran=part):
+                    self.assertNotEqual(self.aggregate(workflow, 'linux', linux, output,
+                                                       dict(built, **{part: 'success'})).returncode, 0)
+            for part in ('policy', 'linux_suites'):
+                self.assertIn("needs.plan.outputs.compile_only == 'false'", job(workflow, part).split('\n    if:', 1)[1].split('\n', 1)[0])
+
     def test_only_a_new_head_reopen_or_readiness_starts_a_candidate(self):
         # `edited` (title, body or base) and `converted_to_draft` cancelled a
         # running candidate on an unchanged head 121 times in 14 days.
@@ -674,6 +708,25 @@ class ReleaseFlowTest(unittest.TestCase):
         self.assertIn('  pull_request:', selected)
         self.assertNotIn('  push:', selected)
         self.assertNotIn('workflow_run:', selected)
+
+    def test_main_build_compiles_through_selected_checks_and_reports_outside_it(self):
+        text = MAIN_BUILD.read_text()
+        on = text.split('\npermissions:', 1)[0]
+        self.assertIn('  push:\n    branches: [main]\n', on)
+        self.assertNotIn('pull_request', on)
+        self.assertRegex(text, r'(?m)^concurrency:\n  # .*\n  group: main-build\n  cancel-in-progress: true$')
+        build = job(text, 'build')
+        self.assertIn('uses: ./.github/workflows/check.yml', build)
+        self.assertIn('compile_only: true', build)
+        self.assertIn('promotion: false', build)
+        self.assertNotIn('write', build)
+        # One owner for how CI compiles Rui: this file names no build command.
+        self.assertNotRegex(text, r'zig build|build_artifact|\.github/actions/setup')
+        report = job(text, 'report')
+        self.assertIn('needs: build', report)
+        self.assertIn('issues: write', report)
+        self.assertIn('python3 -B tests/ci/main_build.py', report)
+        self.assertIn('compile_only:', CHECK.read_text().split('\npermissions:', 1)[0])
 
     def test_promotion_publishes_only_after_every_tier_on_the_same_sha(self):
         text = PROMOTE.read_text()

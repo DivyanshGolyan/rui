@@ -140,6 +140,116 @@ class FramesTest(unittest.TestCase):
             ], "steps": [{"text": "/help"}, {"keys": ["Enter"]}, {"wait": "Keys", "timeout": 2}]},
         ]}
 
+    def test_dim_expectations_validate_and_assert_saved_cells_not_text_alone(self):
+        for value in (None, {}, [{"text": "", "dim": True}], [{"text": "Row", "dim": 1}],
+                      [{"text": "Row", "dim": True, "min_columns": False}],
+                      [{"text": "Row", "dim": True, "unknown": 1}]):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "expect_dim"):
+                data = self.scenario()
+                data["states"][0]["expect_dim"] = value
+                self.helper["validate_scenario"](data)
+        for dim in (False, True):
+            state = {"name": "dim-row", "steps": [], "expect": "Row",
+                     "expect_dim": [{"text": "Row", "dim": dim}]}
+            for drawn in (False, True):
+                frame = committed("Row")
+                frame = frame._replace(cells=tuple(tuple(cell._replace(faint=drawn) for cell in row)
+                                                  for row in frame.cells))
+                with self.subTest(want=dim, drawn=drawn), tempfile.TemporaryDirectory() as temp:
+                    record = self.helper["frame_capture"](types.SimpleNamespace(meta={"sha": "a" * 40}),
+                        types.SimpleNamespace(frame=frame), Path(temp), state, (100, 20), None)
+                    self.assertEqual(record["ok"], dim == drawn)
+                    self.assertTrue((Path(temp) / record["files"]["txt"]).exists())
+            self.assertIsNotNone(self.helper["frame_dim_failure"](state, committed("Missing")))
+            state["expect_dim"][0]["min_columns"] = 140
+            self.assertIsNone(self.helper["frame_dim_failure"](state, committed("Missing", columns=46)))
+        # One wrongly styled character must not pass a whole-label assertion.
+        frame = committed("Row")
+        frame = frame._replace(cells=((frame.cells[0][0]._replace(faint=True), *frame.cells[0][1:]),))
+        self.assertIsNotNone(self.helper["frame_dim_failure"](
+            {"expect_dim": [{"text": "Row", "dim": True}]}, frame))
+
+    def test_peer_cast_configures_empty_and_relays_every_message_from_a_live_sender(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            run = types.SimpleNamespace(home=root, root=root, store=root / "store",
+                                        meta={"sessions": {"Person": "person"}}, sid=lambda _name: "person")
+            calls = []
+            def command(*args, **kwargs):
+                calls.append((args, kwargs))
+                payload = {"work": {"state": {"kind": "finished"}}} if args[1] == "inspect" else {
+                    "context": {"session": "agent1"}}
+                return types.SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="request: key\n")
+            run.rui_cmd = command
+            seed = self.helper["seed_cast"]
+            with patch.dict(seed.__globals__, frame_request=unittest.mock.Mock()):
+                seed(run, [{"label": "Agent", "sender": "Person", "workspace": "code/quiet",
+                            "mode": "bypass", "messages": ["First", "Second"]}])
+            self.assertEqual(calls[0][0][:2], ("session", "configure"))
+            self.assertIsNone(calls[0][1]["input"])
+            sends = [(args, kwargs) for args, kwargs in calls if args[1] == "send"]
+            self.assertEqual([kwargs["input"] for _, kwargs in sends],
+                             ["relay to agent1: First", "relay to agent1: Second"])
+            self.assertTrue(all(args[-1] == "person" for args, _ in sends))
+            self.assertEqual(run.meta["sessions"]["Agent"], "agent1")
+        data = self.scenario()
+        data["states"][1]["cast"][0]["sender"] = "missing"
+        with self.assertRaisesRegex(ValueError, "sender"):
+            self.helper["validate_scenario"](data)
+
+        for sender in ([], {}, None):
+            data["states"][1]["cast"][0]["sender"] = sender
+            with self.subTest(sender=sender), self.assertRaisesRegex(ValueError, "sender"):
+                self.helper["validate_scenario"](data)
+        data = self.scenario()
+        data["states"][1]["cast"][0].update(sender="Person", settle="stop")
+        data["states"][0]["cast"] = [{"label": "Person", "workspace": "code/quiet",
+                                      "mode": "bypass", "messages": ["Ready"]}]
+        with self.assertRaisesRegex(ValueError, "sender cast supports"):
+            self.helper["validate_scenario"](data)
+
+    def test_min_columns_is_a_positive_integer_wait_or_gone_modifier_only(self):
+        validate = self.helper["validate_scenario"]
+        for action in ("wait", "gone"):
+            data = self.scenario()
+            data["states"][0].update(steps=[{action: "Sidebar", "min_columns": 140}], expect=[])
+            self.assertEqual(validate(data)["states"][0]["steps"], data["states"][0]["steps"])
+            for value in (None, 0, -1, True, 140.0, "140"):
+                with self.subTest(action=action, value=value), self.assertRaisesRegex(ValueError, "min_columns"):
+                    data["states"][0]["steps"][0]["min_columns"] = value
+                    validate(data)
+        for step in ({"text": "draft"}, {"keys": ["Enter"]}, {"sleep": 1},
+                     {"mouse": {"at": "Settings", "do": "click"}}, {"exited": 0},
+                     {"host": "pause"}, {"send": {"to": "Fix it", "text": "hello"}}):
+            with self.subTest(step=step), self.assertRaisesRegex(ValueError, "min_columns"):
+                data = self.scenario()
+                data["states"][1].update(steps=[{**step, "min_columns": 140}], expect=[])
+                validate(data)
+
+    def test_min_columns_skips_only_narrow_waits_and_logs_the_reason(self):
+        steps = [{"wait": "Sidebar", "min_columns": 140},
+                 {"gone": "Old sidebar", "min_columns": 140, "timeout": 3},
+                 {"wait": "Input"}, {"gone": "Loading"}]
+        for columns in (46, 140, 180):
+            with self.subTest(columns=columns), patch.dict(self.helper["frame_steps"].__globals__) as owner:
+                wait = unittest.mock.Mock()
+                owner["frame_wait"] = wait
+                terminal = types.SimpleNamespace(frame=committed("Input", columns=columns), status=None)
+                with contextlib.redirect_stderr(io.StringIO()) as log:
+                    self.helper["frame_steps"](None, terminal, steps)
+                expected = [] if columns < 140 else [
+                    unittest.mock.call(None, terminal, "Sidebar", False, 20, False),
+                    unittest.mock.call(None, terminal, "Old sidebar", True, 3, False),
+                ]
+                expected += [unittest.mock.call(None, terminal, "Input", False, 20, False),
+                             unittest.mock.call(None, terminal, "Loading", True, 20, False)]
+                self.assertEqual(wait.call_args_list, expected)
+                if columns < 140:
+                    self.assertIn("skip wait 'Sidebar': 46 columns < 140", log.getvalue())
+                    self.assertIn("skip gone 'Old sidebar': 46 columns < 140", log.getvalue())
+                else:
+                    self.assertEqual(log.getvalue(), "")
+
     def test_mouse_steps_validate_shared_nested_shape(self):
         validate = self.helper["validate_scenario"]
         for action in ("move", "click", "press", "release", "wheel-up", "wheel-down"):
@@ -647,10 +757,11 @@ while True:
     def test_first_run_states_are_isolated_and_validate_before_launch(self):
         scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
         states = {state["name"]: state for state in scenario["states"]}
-        for name in ("first-run", "first-run-codex", "first-run-key"):
+        for name in ("first-run", "first-run-browser", "first-run-codex", "first-run-key"):
             self.assertTrue(states[name]["first_run"])
             self.assertEqual(states[name]["open"], "overview")
-        self.assertEqual(states["first-run-codex"]["env"]["RUI_TEST_LOGIN"], "waiting")
+        for name in ("first-run-browser", "first-run-codex"):
+            self.assertEqual(states[name]["env"]["RUI_TEST_LOGIN"], "waiting")
         for invalid in ("yes", 1, None):
             data = self.scenario()
             data["states"][0]["first_run"] = invalid
@@ -674,6 +785,109 @@ while True:
         default = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
         self.assertEqual(default["sizes"], [(140, 40), (46, 30)])
         self.assertGreater(len(default["states"]), 25)
+
+    def test_regex_absences_validate_and_roundtrip_before_launch(self):
+        pattern = r"^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+        data = self.scenario()
+        data["states"][0]["absent_regex"] = [pattern]
+        validated = self.helper["validate_scenario"](data)
+        self.assertEqual(validated["states"][0]["absent_regex"], [pattern])
+        self.assertEqual(self.helper["validate_scenario"](self.helper["scenario_snapshot"](validated)), validated)
+        for invalid in (None, "pattern", [""], [12], ["nul\0"], ["("], ["(?q)"]):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, "absent_regex"):
+                data["states"][0]["absent_regex"] = invalid
+                self.helper["validate_scenario"](data)
+
+    def test_regex_absences_reject_dynamic_rows_in_readiness_and_saved_captures(self):
+        state = {"name": "no-empty-rows", "steps": [], "expect": ["Settings"],
+                 "absent_regex": [r"^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"]}
+        clean = "  + New Session\n ✓ Existing conversation  3h\n  Settings\nenter open"
+        run = types.SimpleNamespace(meta={"sha": "a" * 40})
+        for size in ((140, 40), (46, 30)):
+            for sid, age in (("9xt4vy", "42s"), ("emged6", "7m"), ("000000", "3h"), ("zzzzzz", "12d"),
+                             ("9xt4vy", "0s │"), ("emged6", "42s│ Model")):
+                with self.subTest(size=size, sid=sid, age=age), tempfile.TemporaryDirectory() as temp:
+                    bad = f"{clean}\n ○ {sid}                  {age}"
+
+                    def wait(predicate, description, **_kwargs):
+                        self.assertIn("absent_regex", description)
+                        self.assertFalse(predicate(types.SimpleNamespace(completed=bad)))
+                        self.assertTrue(predicate(types.SimpleNamespace(completed=clean)))
+
+                    self.helper["frame_ready"](types.SimpleNamespace(wait=wait), state)
+                    for frame, expected in ((bad, False), (clean, True)):
+                        terminal = types.SimpleNamespace(frame=committed(frame, *size))
+                        record = self.helper["frame_capture"](run, terminal, Path(temp), state, size, None)
+                        self.assertEqual(record["ok"], expected)
+                        if not expected:
+                            self.assertIn("unexpected row matching", record["reason"])
+                            self.assertIn(sid, record["reason"])
+                        self.assertEqual((Path(temp) / record["files"]["txt"]).read_text(), frame + "\n")
+                    # Transition captures may skip readiness, never the saved oracle.
+                    terminal = types.SimpleNamespace(wait=unittest.mock.Mock(), frame=committed(bad, *size))
+                    transition = {**state, "first_frame": True}
+                    self.helper["frame_ready"](terminal, transition)
+                    terminal.wait.assert_not_called()
+                    self.assertFalse(self.helper["frame_capture"](run, terminal, Path(temp), transition, size, None)["ok"])
+        for row in (" ○ Existing 9xt4vy  2m", " ○ 9xt4vy extra  2m", " ○ 9xt4vy  text  2m",
+                    " ○ 9xt4vy", "text mentions ○ 9xt4vy  2m"):
+            with self.subTest(named_or_nonrow=row):
+                self.assertIsNone(self.helper["frame_row_failure"](state, clean + "\n" + row))
+        for row in (" ○ 9xt4vy  0s │", " ○ emged6  42s│ Model", " ○ 000000  2m │chat text"):
+            with self.subTest(raw_sidebar=row):
+                self.assertIsNotNone(self.helper["frame_row_failure"](state, row))
+        for row in (" ○ New Session  0s │", " ○ New Session  0s │Model",
+                    " ○ Existing 9xt4vy  2m │chat", " ○ 9xt4vy extra  2m │chat"):
+            with self.subTest(named_sidebar=row):
+                self.assertIsNone(self.helper["frame_row_failure"](state, row))
+        # The helper remains generic: only recipes opt into row exclusions.
+        self.assertIsNone(self.helper["frame_row_failure"]({"name": "unrelated"}, " ○ 9xt4vy  0s"))
+
+    def test_empty_chat_roundtrips_and_current_chat_labels_exclude_raw_ids(self):
+        scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
+        states = {state["name"]: state for state in scenario["states"]}
+        for name in ("start-empty", "day-start", "start-busy", "overview-printable-ignored", "many-sessions",
+                     "many-sessions-middle", "many-sessions-end", "many-sessions-pinned-end",
+                     "empty-chat-left", "empty-chat-model-left", "empty-chat-two-left"):
+            with self.subTest(state=name):
+                state = states[name]
+                self.assertEqual(set(state["sizes"]), {(140, 40), (46, 30)})
+                self.assertIsNotNone(self.helper["frame_row_failure"](state, " ○ 9xt4vy                  2m"))
+        for name, state in states.items():
+            if state.get("first_run"):
+                continue
+            with self.subTest(raw_id_excluded_in_state=name):
+                self.assertIsNotNone(self.helper["frame_row_failure"](state, " ○ 9xt4vy  0s │ chat"))
+        for name in ("chat-empty", "start-model", "start-effort", "start-picked"):
+            state = states[name]
+            steps = state["steps"]
+            typed_ready = steps.index({"wait": "Type a task"})
+            self.assertEqual(steps[typed_ready + 1], {"wait": "○ New Session", "min_columns": 140})
+            self.assertEqual(state["sizes"], [(140, 40), (46, 30)])
+            self.assertIsNone(self.helper["frame_row_failure"](
+                {"name": name, "absent_regex": state["absent_regex"]}, " ○ New Session  0s │chat"))
+        for name in ("empty-chat-left", "empty-chat-model-left", "empty-chat-two-left"):
+            state = states[name]
+            self.assertTrue(state["first_frame"])
+            self.assertIn("Type a task", state["absent"])
+            self.assertIn("Existing conversation", state["expect"])
+            self.assertEqual(state["steps"][-1], {"wait": "enter open"})
+        model = states["empty-chat-model-left"]["steps"]
+        opened = model.index({"mouse": {"at": "gpt-6.1-sol", "do": "click"}})
+        typed = model.index({"text": "ter"})
+        picked = model.index({"keys": ["Down", "Enter"]})
+        # A sidebar's completed row already has ✓ before the choice opens.
+        # Standalone Model puts its filter on the next row, not Settings' inline value.
+        self.assertEqual(model[opened + 1:typed], [{"wait": "Model"}])
+        self.assertEqual(model[typed + 1:picked], [{"wait": "ter\n"}, {"wait": "gpt-6.1-terra"}])
+        self.assertNotIn({"wait": "Model           ter"}, model)
+        self.assertNotIn({"mouse": {"at": "gpt-6.1-terra", "do": "click"}}, model)
+        self.assertIn({"wait": "gpt-6.1-terra ·"}, model)
+        self.assertIn({"gone": "Model"}, model)
+        self.assertEqual(sum(step == {"keys": ["Home", "Enter"]} for step in states["empty-chat-two-left"]["steps"]), 2)
+        self.assertIn("Existing second conversation", states["empty-chat-two-left"]["expect"])
+        self.assertTrue(states["empty-chat-left"]["cast"][0]["messages"])
+        self.assertTrue(states["empty-chat-two-left"]["cast"][0]["messages"])
 
     def test_settings_frame_opens_the_list_row_and_waits_for_the_page(self):
         scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
@@ -724,6 +938,15 @@ while True:
         self.assertIn({"wait": "Docs build"}, state["steps"])
         self.assertEqual(state["expect"], ["Docs build", "Benchmark idle memory", "Settings"])
 
+    def test_fixture_summary_reads_current_and_historical_bash_sections(self):
+        for label in ("stdout:", "stdout tail:"):
+            with self.subTest(label=label):
+                result = {"output": f"Bash succeeded. Exit code: 0.\n{label}\nprinted\nstdout:\nstdout tail:\n"}
+                before = result.copy()
+                self.assertEqual(self.helper["fixture_bash_stdout"](result), "printed\nstdout:\nstdout tail:")
+                self.assertEqual(result, before)
+        self.assertEqual(self.helper["fixture_bash_stdout"]({}), "")
+
     def test_default_frames_use_plain_endings_and_active_tool_marks(self):
         scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
         states = {state["name"]: state for state in scenario["states"]}
@@ -749,10 +972,10 @@ while True:
                 self.assertTrue(any(text.startswith(("✓ ", "× ")) for text in state["expect"]))
                 self.assertIn({"gone": "▸"}, state["steps"])
                 status = "    Bash succeeded. Exit code: 0." if name == "tool-open-long" else "    Bash failed. Exit code: 1."
-                label = "    stdout tail:" if name == "tool-open-long" else "    stderr tail:"
+                label = "    stdout:" if name == "tool-open-long" else "    stderr:"
                 self.assertIn(status, state["expect"])
                 self.assertIn(label, state["expect"])
-                self.assertFalse(any(step.get("gone", "").startswith(("Bash ", "stdout tail:", "stderr tail:")) for step in state["steps"]))
+                self.assertFalse(any(step.get("gone", "").startswith(("Bash ", "stdout:", "stderr:")) for step in state["steps"]))
                 self.assertTrue(any(text.startswith("    ") for text in state["expect"]))
                 # Do not capture the asynchronous opening notice as the finished fold.
                 self.assertIn({"gone": "Opening tool output…"}, state["steps"])
@@ -782,7 +1005,7 @@ while True:
         self.assertEqual(state["steps"][:13], [
             {"wait": "The project has a README"},
             {"keys": ["C-o"]},
-            {"wait": "    stderr tail:"},
+            {"wait": "    stderr:"},
             {"gone": "Opening tool output…"},
             {"keys": ["PgDn"]},
             {"wait": "    unknown option --help"},
@@ -796,7 +1019,7 @@ while True:
         ])
         for text in ("✓ List project files", "    README.md", "    src",
                      "× Fail with exit 127 · 127", "× Fail with an excerpt · 1",
-                     "    Bash succeeded. Exit code: 0.", "    stdout tail:", "    Bash failed. Exit code: 1.", "    stderr tail:",
+                     "    Bash succeeded. Exit code: 0.", "    stdout:", "    Bash failed. Exit code: 1.", "    stderr:",
                      "    usage: example", "    unknown option --help"):
             self.assertIn(text, state["expect"])
 
@@ -1010,6 +1233,14 @@ while True:
             self.assertEqual(ps(42), ("Wed Nov 11 07:56:31 2026", "tmux -S /private/socket"))
 
 
+    def test_invalid_build_jobs_fails_before_build(self):
+        build = self.helper["cmd_build"]
+        for value in ("", "0", "-1", "1.5", "abc"):
+            with self.subTest(value=value), patch.dict(os.environ, {"RUI_BUILD_JOBS": value}), \
+                    contextlib.redirect_stderr(io.StringIO()) as err, self.assertRaises(SystemExit):
+                build(types.SimpleNamespace())
+            self.assertIn("RUI_BUILD_JOBS must be a positive integer", err.getvalue())
+
     def test_no_screen_build_skips_emulator_and_records_null(self):
         build = self.helper["cmd_build"]
         sha = "a" * 40
@@ -1029,7 +1260,7 @@ while True:
                 return types.SimpleNamespace(returncode=0, stdout=text)
 
             args = types.SimpleNamespace(sha=sha, source=str(source), repo=None, force=False, pkg_dir=None, no_screen=True)
-            with patch.dict(build.__globals__, {"CACHE": root / "cache"}), patch("subprocess.run", command), \
+            with patch.dict(os.environ, {"RUI_BUILD_JOBS": "2"}), patch.dict(build.__globals__, {"CACHE": root / "cache"}), patch("subprocess.run", command), \
                     contextlib.redirect_stdout(io.StringIO()):
                 build(args)
             manifest = json.loads((root / "cache/builds" / sha / "manifest.json").read_text())
@@ -1052,7 +1283,7 @@ while True:
             self.assertEqual(err.getvalue(), "verify-rui: this build has no screen library\n")
 
     def run_frames_scenario(self, scenario, sizes=None, capture_ok=True, only=None, failing_state=None,
-                            initial_frames=("›",)):
+                            initial_frames=("›",), real_steps=False):
         """Run the real loader/orchestrator with an inert OS and capture adapter."""
         command = self.helper["cmd_frames"]
         calls = []
@@ -1070,6 +1301,8 @@ while True:
             class Terminal:
                 def __init__(self, _run, state, size):
                     self.state = state
+                    self.status = None
+                    self.frame = types.SimpleNamespace(columns=size[0])
                     calls.append(("open", state["name"], size, state.get("theme", "night")))
 
                 def wait(self, predicate, _description, *, allow_exit=False):
@@ -1078,6 +1311,9 @@ while True:
                         if predicate(types.SimpleNamespace(completed=screen)):
                             return
                     raise AssertionError("initial readiness did not accept any committed frame")
+
+                def write(self, data):
+                    calls.append(("write", self.state["name"], data))
 
                 def resize(self, size):
                     calls.append(("resize", size))
@@ -1092,16 +1328,18 @@ while True:
                         "reason": reason if capture_ok else "state left before capture: Working"}
 
             def steps(_run, target, _steps, **_kwargs):
+                calls.append(("step-values", target.state["name"], _steps))
                 calls.append(("steps",))
                 if target.state["name"] == failing_state:
                     raise self.helper["FrameFailure"]("fixture state failed")
                 return False
 
             replacements = {"Run": lambda _path: run, "cmd_new": lambda _args: print(root),
-                            "cmd_cleanup": lambda _args: None, "frame_wait": lambda *_args, **_kw: None,
-                            "frame_ready": lambda *_args, **_kw: None, "FrameTerminal": Terminal,
+                            "cmd_cleanup": lambda _args: None,
+                            "frame_wait": lambda _run, target, text, *a: calls.append(("wait", target.state["name"], text)),
+                            "frame_ready": lambda target, state, **kw: calls.append(("ready", state["name"])), "FrameTerminal": Terminal,
                             "load_build": lambda _sha: {"screen_library": "/test/library"},
-                            "frame_steps": steps, "frame_capture": capture}
+                            "frame_steps": self.helper["frame_steps"] if real_steps else steps, "frame_capture": capture}
             with patch.dict(command.__globals__, replacements), patch.dict(os.environ), \
                     patch("time.sleep", side_effect=AssertionError("frames must not sleep to settle")), \
                     contextlib.redirect_stdout(io.StringIO()):
@@ -1125,8 +1363,38 @@ while True:
                 calls, records = self.run_frames_scenario(scenario, initial_frames=screens)
                 self.assertEqual([call for call in calls if call[0] == "initial-frame"],
                                  [("initial-frame", screen, allow_exit) for screen in screens[:count]])
-                self.assertEqual(calls[calls.index(("steps",)) - 1],
+                self.assertEqual(calls[calls.index(("steps",)) - 2],
                                  ("initial-frame", screens[count - 1], allow_exit))
+                self.assertTrue(records[0]["ok"])
+
+    def test_initial_readiness_accepts_editorless_list_and_legacy_prompt(self):
+        listed = "  + New Session\n  Settings\nenter open"
+        self.assertNotIn("Type a task", listed)
+        def accepts_list(predicate, _description, **_kwargs):
+            self.assertTrue(predicate(types.SimpleNamespace(completed=listed)),
+                            "committed overview list must not require an editor")
+        self.helper["frame_initial_ready"](types.SimpleNamespace(wait=accepts_list))
+        cases = [
+            ([listed], None, 1),
+            ([listed.replace("+ New Session", ""), listed], None, 2),
+            ([listed.replace("Settings", ""), listed], None, 2),
+            ([listed.replace("enter open", ""), listed], None, 2),
+            ([listed + " Opening…", listed], None, 2),
+            ([listed, listed + " Ready"], "Ready", 2),
+            # Before captures use the old image with the same new recipes.
+            ([" › Type a task"], None, 1),
+            ([" › ChatGPT    API key"], None, 1),
+        ]
+        for screens, first_wait, count in cases:
+            with self.subTest(screens=screens, first_wait=first_wait):
+                state = {"name": "initial-list", "open": "overview",
+                         "steps": [{"wait": first_wait}] if first_wait else []}
+                calls, records = self.run_frames_scenario({"sizes": ["100x30"], "states": [state]},
+                                                         initial_frames=screens)
+                self.assertEqual([call for call in calls if call[0] == "initial-frame"],
+                                 [("initial-frame", screen, False) for screen in screens[:count]])
+                self.assertEqual(calls[calls.index(("steps",)) - 2],
+                                 ("initial-frame", screens[count - 1], False))
                 self.assertTrue(records[0]["ok"])
 
     def test_frame_terminal_receives_initial_size_and_theme(self):
@@ -1146,15 +1414,38 @@ while True:
                 self.assertEqual([c[1] for c in calls if c[0] == "capture"], expected * 2)
                 self.assertEqual([r["size"] for r in records], [self.helper["size_name"](size) for size in expected] * 2)
                 first = next(i for i, call in enumerate(calls) if call[0] == "capture")
-                self.assertEqual(calls[first - 1], ("steps",))  # No first-size resize or sleep after the wait.
+                self.assertEqual(calls[first - 1], ("ready", "default"))  # No first-size resize or sleep after the wait.
                 second = next(i for i, call in enumerate(calls) if i > first and call[0] == "capture")
-                self.assertEqual(calls[second - 1], ("resize", expected[1]))
+                self.assertEqual(calls[second - 2:second + 1], [("resize", expected[1]), ("ready", "default"), ("capture", expected[1])])
 
     def test_failed_capture_makes_the_command_fail(self):
         scenario = {"sizes": ["100x30"], "states": [{"name": "working", "open": "overview", "steps": []}]}
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as result:
             self.run_frames_scenario(scenario, capture_ok=False)
         self.assertEqual(result.exception.code, 1)
+
+    def test_only_runs_predecessor_wait_but_does_not_capture_it(self):
+        scenario = {"sizes": ["100x30"], "states": [
+            {"name": "earlier", "open": "overview", "steps": [
+                {"text": "archive"}, {"wait": "archived"}]},
+            {"name": "chosen", "open": "overview", "steps": []},
+        ]}
+        calls, records = self.run_frames_scenario(scenario, only="chosen", real_steps=True)
+        self.assertLess(calls.index(("write", "earlier", b"archive")), calls.index(("wait", "earlier", "archived")))
+        self.assertLess(calls.index(("wait", "earlier", "archived")), calls.index(("ready", "earlier")))
+        self.assertEqual([r["name"] for r in records], ["chosen"])
+        self.assertEqual(len([c for c in calls if c[0] == "capture"]), 1)
+
+    def test_only_unknown_lists_valid_states(self):
+        command = self.helper["cmd_frames"]
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "scenario.json"
+            path.write_text(json.dumps({"sizes": ["100x30"], "states": [
+                {"name": "valid", "open": "overview", "steps": []}]}))
+            args = types.SimpleNamespace(scenario=str(path), sizes=None, only="bad")
+            with contextlib.redirect_stderr(io.StringIO()) as err, self.assertRaises(SystemExit):
+                command(args)
+            self.assertIn("unknown states: bad; valid states: valid", err.getvalue())
 
     def test_only_warns_for_failed_unselected_predecessor_and_records_selected_states(self):
         scenario = {"sizes": ["100x30"], "states": [

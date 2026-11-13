@@ -6,7 +6,7 @@
 ## Publish and merge
 
 Before publishing, run the focused checks in [Evidence](../../CODING_STANDARDS.md#evidence).
-For PR descriptions, use the `pr` skill.
+A PR description has a Summary, the Evidence it was checked with, and its Merge danger.
 The description lists every behavior change in the diff, small ones included, so the summary and the diff agree.
 PRs changing `src/` carry a [Shape section](../../CODING_STANDARDS.md#shape-before-code), and the plan job refuses them without it.
 Every PR commit states its actual test commands and results.
@@ -14,9 +14,14 @@ Open every PR with `python3 tests/ci/open_pr.py open --title TITLE --body-file F
 Draft CI runs only the plan (candidate, whitespace and selection checks) and cheap aggregates; local `prepush.py` owns development feedback.
 The opener comments `@codex review`; Codex reviews drafts only on request.
 Push fixes to the draft and comment `@codex review` after every push.
-Once Codex is clean on the current head, run `python3 tests/ci/open_pr.py ready` to start the full selected suite; it refuses while the PR's head on GitHub differs from the committed checkout or changes are uncommitted.
+Codex is clean when its latest `codex-review-state:v1` summary names the PR's current head and reports no unresolved findings.
+A "no major issues" receipt alone is not clean, and an earlier review thread stays open until its author resolves it.
+After a fix push, the PR's author resolves each earlier review thread that push answered, so the state can turn clean without anyone else stepping in.
+Once Codex is clean on the current head, the PR's author runs `python3 tests/ci/open_pr.py ready` to start the full selected suite; it refuses while the PR's head on GitHub differs from the committed checkout or changes are uncommitted.
+A critical-path PR (a dependency root, the front of a stack, or a fix for a red `main`) runs `ready` right after opening instead, so CI runs beside Codex rather than after it.
 After readiness, a fix whose diff since Codex's clean review changes only test files or blocks (`tests/**/test_*.py`, integration fixtures and their data, `*_test.zig`/test-only Zig roots, or `test "..."` blocks in source) merges once `admission` is green, without another Codex review.
-Any non-test change, including CI, build, release or other operational scripts (the rest of `tests/ci/`, workflows and `build.zig`), needs Codex clean on the new head again.
+Two more changes merge on green `admission` without another Codex review: a commit that only applies the Store format renumber `tests/ci/schema_number.py` computes, and a pure revert of the one merged PR that broke `main`.
+Any other non-test change, including CI, build, release or other operational scripts (the rest of `tests/ci/`, workflows and `build.zig`), needs Codex clean on the new head again.
 Performance changes include A/B numbers, and TUI changes include a plain-PTY capture using [verify-rui](../../.claude/skills/verify-rui/SKILL.md).
 Keep published commits unchanged so their CI evidence retains its SHA.
 
@@ -26,6 +31,9 @@ Pending, skipped, cancelled or earlier-head success is not green.
 A green PR squash-merges without waiting for review signoff or a promotion.
 Follow [Review](../../CODING_STANDARDS.md#review) for Codex requests and findings.
 Ship later fixes as follow-up PRs.
+
+The admin bypass in [the main ruleset](../../.github/main-ruleset.json) is a last resort, used only for changes on the critical path.
+Use it only when every red or missing check is a macOS job that GitHub never assigned a runner, every check that ran passed, and an infra-retry also failed to get a runner; state why in the merge commit or a PR comment.
 
 Merge `origin/main` into a PR only when it conflicts with `main`; [Conflict alert](../../.github/workflows/conflict-alert.yml) comments on each PR a move of `main` leaves conflicting.
 After that merge, run `python3 tests/ci/prepush.py` and wait for the new head's CI.
@@ -56,6 +64,9 @@ Arm auto-merge only on a PR whose base is `main`; on a stacked PR it would merge
 ## CI failures
 
 Diagnose failures through [rui-ci-triage](../../.claude/skills/rui-ci-triage/SKILL.md) and follow [Evidence](../../CODING_STANDARDS.md#evidence) for reruns, strict-path holds and failure retention.
+A red whose failing file or fixture is outside the PR's diff is first reproduced on `main`; when `main` itself is red, it gets one fix owner, and the PR's owner is not asked to fix it.
+The fastest fix for a red `main` is often a revert of the one merged PR that broke it.
+The [main build](../../.github/workflows/main-build.yml) names the PRs merged since `main` last compiled in its `ci-red` issue, and when two of them crossed, a revert of the later one is the fast fix.
 A red counts as fixed only when a commit between the red and a later green changed its failing fixture or owner.
 For a recurring fixture-and-assertion signature on SHAs that did not touch its code, update or file one issue for that signature and own the race fix.
 Preserve the assertion's strength.
@@ -71,7 +82,9 @@ A reopened issue keeps its label; change it if the next fix finds another cause.
 ## Promote
 
 Promotion publishes a release and advances `stable`; merging never does.
-Ask the user before dispatching it: `gh workflow run promote.yml --ref main`.
+Promote without asking once the merged batch holds the fixes users are waiting for, and at least before each working day: `gh workflow run promote.yml --ref main`.
+Whoever dispatches a promotion watches it to the end and reports the result unprompted.
+A failed step means the promotion is red even while its bisect step keeps the run in progress for up to four hours; report it then.
 A red promotion names, on each `promotion-red` issue it files, the first batch commit where each failed step of that job fails; a suite batch with several causes names only its earliest.
 Fix forward through an ordinary PR, then promote again.
-Recover an interrupted publication by rerunning that promotion's failed jobs, which reuses the same release identity.
+Recover a red Release as [Release publication](../../VERIFICATION.md#release-publication) says; a red wire recheck there follows publication, not a failed one.

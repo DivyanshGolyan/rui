@@ -4298,7 +4298,7 @@ test "fresh Store uses current schema and rejects the prior version" {
     try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().statFile(std.testing.io, try std.fmt.bufPrint(&wal_buffer, "{s}-wal", .{database}), .{}));
 }
 
-test "existing Store strictly validates current format and wire metadata" {
+test "existing Store strictly validates current format metadata and keeps no wire label" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
@@ -4308,10 +4308,13 @@ test "existing Store strictly validates current format and wire metadata" {
     var storage: Store = undefined;
     try storage.open(std.testing.io, database, root);
     try std.testing.expectEqual(@as(u64, schema_version), try store_testing.sqlite_only.queryU64(&storage, "SELECT CAST(meta_value AS INTEGER) FROM store_meta WHERE meta_key='format'", .{}));
+    // A new Store has no wire label, and it opens again without one.
+    try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM store_meta WHERE meta_key='wire_version'", .{}));
+    try storage.close();
+    try storage.open(std.testing.io, database, root);
     try storage.close();
     const Case = struct { sql: [:0]const u8, refusal: anyerror };
     const cases = [_]Case{
-        .{ .sql = "UPDATE store_meta SET meta_value='13' WHERE meta_key='wire_version'", .refusal = error.WrongStoreVersion },
         .{ .sql = std.fmt.comptimePrint("UPDATE store_meta SET meta_value='{d}' WHERE meta_key='format'", .{schema_version - 1}), .refusal = error.WrongStoreVersion },
         .{ .sql = "DELETE FROM store_meta WHERE meta_key='format'", .refusal = error.WrongStoreVersion },
     };
@@ -4319,7 +4322,7 @@ test "existing Store strictly validates current format and wire metadata" {
         var raw: ?*c.sqlite3 = null;
         var path_buffer: [platform.max_database_path_bytes + 1:0]u8 = undefined;
         try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_open(try std.fmt.bufPrintSentinel(&path_buffer, "{s}", .{database}, 0), &raw));
-        try sqlite.exec(raw.?, "UPDATE store_meta SET meta_value='" ++ std.fmt.comptimePrint("{d}", .{schema_version}) ++ "' WHERE meta_key='format';UPDATE store_meta SET meta_value='" ++ protocol.wire_version ++ "' WHERE meta_key='wire_version'");
+        try sqlite.exec(raw.?, "UPDATE store_meta SET meta_value='" ++ std.fmt.comptimePrint("{d}", .{schema_version}) ++ "' WHERE meta_key='format'");
         try sqlite.exec(raw.?, case.sql);
         _ = c.sqlite3_close(raw);
         const before = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, database, std.testing.allocator, .unlimited);
@@ -4403,10 +4406,11 @@ test "SQLite selector mismatch retains migration evidence and rolls back metadat
 }
 
 test "metadata seed preserves exact SQLite bootstrap bytes and digest" {
-    // The pre-refactor seed text: parameter slots, tuple order and random
-    // expression are format, not merely row-equivalent implementation details.
+    // The seed text: parameter slots, tuple order and random expression are
+    // format, not merely row-equivalent implementation details. Format 74
+    // dropped the wire label.
     try std.testing.expectEqualStrings(
-        "INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version',?1),('store_selector',?2),('format','" ++
+        "INSERT INTO store_meta(meta_key,meta_value) VALUES('store_selector',?1),('format','" ++
             std.fmt.comptimePrint("{d}", .{schema_version}) ++ "'),('store_id',lower(hex(randomblob(16))))",
         comptime store_schema.sqliteMetaSeedSql(),
     );
@@ -7895,6 +7899,34 @@ test "a round's failed step is named by the statement that failed" {
     }
 }
 
+test "an admission that selects nothing answers main's names for its idle checks' failed steps" {
+    // The idle round's failed step is TurnReadFailed, but the blocked
+    // Operation's seek and its calls' outcomes are CallReadFailed.
+    const statements = model_admission_domain.idle_statements;
+    inline for (.{
+        .{ statements[0].sql, error.TurnReadFailed },
+        .{ statements[1].sql, error.CallReadFailed },
+        .{ statements[2].sql, error.CallReadFailed },
+    }) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try configureTestSessionAsk(&storage, "idle-names");
+        try submitTestMessage(&storage, &tmp, "idle-names-input", "idle-names-message", session.slice(), "start");
+        const first = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
+        // Asked calls block the Operation, so every idle statement steps.
+        try settleTwoActionsForTesting(&storage, &tmp, first, "idle-names");
+        var fault: TestingStatementFault = .{ .sql = case[0] };
+        fault.arm(storage.sqliteDatabase());
+        defer fault.disarm(storage.sqliteDatabase());
+        try std.testing.expectError(case[1], storage.admitModelAttempt(.message, .{}));
+        try std.testing.expect(fault.failed > 0);
+        try std.testing.expect(storage.isFenced());
+    }
+}
+
 test "Session inspection's count reads answer main's names" {
     // Inspection reads the Current report's counts and the rule in the
     // same rounds, under main's names.
@@ -8602,10 +8634,9 @@ test "Attempt checks keep main cost and prefix seals include one frontier reconc
         try std.testing.expectEqual(1, storage.testing_content_work.rounds - before);
     }
     {
-        var a: store_access.Access(.write, error{}) = .open(&entry);
-        defer a.deinit();
+        var seal: historical_domain.RecordSeal = .{ .input = .{ .binding = attempt.binding, .seal = &TestingAttempt.seal } };
         const before = storage.testing_content_work.rounds;
-        try historical_domain.sealOn(&a, attempt.binding, &TestingAttempt.seal);
+        try transition.run(&entry, historical_domain.RecordSeal, &seal, .{});
         try std.testing.expectEqual(2, storage.testing_content_work.rounds - before);
     }
     {
@@ -8637,6 +8668,106 @@ test "a prefix seal on a full disk answers CanonicalStorageFull and fences" {
     try std.testing.expectError(error.CanonicalStorageFull, view.recordPrefixSeal(&TestingAttempt.seal));
     try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.sqliteDatabase()));
     try std.testing.expect(storage.isFenced());
+}
+
+/// How many times the Store has run the cached statement whose text is
+/// `sql` on this connection.
+fn runsOf(database: *c.sqlite3, sql: []const u8) i64 {
+    var statement = c.sqlite3_next_stmt(database, null);
+    while (statement) |each| : (statement = c.sqlite3_next_stmt(database, each)) {
+        if (std.mem.eql(u8, std.mem.span(c.sqlite3_sql(each)), sql)) return c.sqlite3_stmt_status(each, c.SQLITE_STMTSTATUS_RUN, 0);
+    }
+    return 0;
+}
+
+test "a prefix seal reads its Attempt inside the transaction it writes in" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const attempt = try TestingAttempt.admit(&storage, &tmp);
+    var view: HistoricalView = undefined;
+    storage.openHistoricalView(attempt.binding, &view);
+    defer view.close();
+    try storage.settleModelAttemptFailure(attempt.binding, .{ .uncorrelated = "provider_failure" }, .ordinary, .{});
+    const database = storage.sqliteDatabase();
+    const begins = runsOf(database, "BEGIN IMMEDIATE");
+    const rollbacks = runsOf(database, "ROLLBACK");
+    // The read that finds the Attempt settled runs after BEGIN, and the
+    // seal's ROLLBACK ends the transaction it opened.
+    try std.testing.expectError(error.StaleAttemptBinding, view.recordPrefixSeal(&TestingAttempt.seal));
+    try std.testing.expectEqual(begins + 1, runsOf(database, "BEGIN IMMEDIATE"));
+    try std.testing.expectEqual(rollbacks + 1, runsOf(database, "ROLLBACK"));
+    try std.testing.expect(!storage.isFenced());
+}
+
+/// Runs `write` on the connection as the statement whose text is `sql`
+/// starts: another writer's commit, between that statement and the ones
+/// before it in its round.
+const TestingStatementInterleave = struct {
+    sql: [:0]const u8,
+    write: [:0]const u8,
+    database: *c.sqlite3,
+    ran: u64 = 0,
+
+    fn arm(self: *TestingStatementInterleave) void {
+        _ = c.sqlite3_trace_v2(self.database, c.SQLITE_TRACE_STMT, traced, self);
+    }
+
+    fn disarm(self: *const TestingStatementInterleave) void {
+        _ = c.sqlite3_trace_v2(self.database, 0, null, null);
+    }
+
+    fn traced(_: c_uint, context: ?*anyopaque, statement: ?*anyopaque, _: ?*anyopaque) callconv(.c) c_int {
+        const self: *TestingStatementInterleave = @ptrCast(@alignCast(context.?));
+        if (!std.mem.eql(u8, std.mem.span(c.sqlite3_sql(@ptrCast(statement))), self.sql)) return 0;
+        if (c.sqlite3_exec(self.database, self.write, null, null, null) == c.SQLITE_OK) self.ran += 1;
+        return 0;
+    }
+};
+
+test "a model admission whose Session moves between its selection and its facts writes nothing" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSession(&storage, "moved-head-config");
+    try submitTestMessage(&storage, &tmp, "moved-head-input", "moved-head-message", session.slice(), "work");
+    // The selection reads the Session's head; another writer moves it
+    // before the facts read it again, outside any transaction.
+    var interleave: TestingStatementInterleave = .{
+        .sql = model_admission_domain.selected_context_sql,
+        .write = "UPDATE session SET next_position=next_position+1",
+        .database = storage.sqliteDatabase(),
+    };
+    interleave.arm();
+    const admitted = storage.admitModelAttempt(.message, .{});
+    interleave.disarm();
+    try std.testing.expectEqual(@as(u64, 1), interleave.ran);
+    try std.testing.expectError(error.SelectionChanged, admitted);
+    try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM turn", .{}));
+    try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM model_operation", .{}));
+    try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE turn_id IS NOT NULL", .{}));
+}
+
+test "a model admission selects outside its transaction, and one that selects nothing opens none" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const database = storage.sqliteDatabase();
+    var begins = runsOf(database, "BEGIN IMMEDIATE");
+    try std.testing.expect(try storage.admitModelAttempt(.message, .{}) == null);
+    try std.testing.expectEqual(begins, runsOf(database, "BEGIN IMMEDIATE"));
+    const session = try configureTestSession(&storage, "outside-config");
+    try submitTestMessage(&storage, &tmp, "outside-input", "outside-message", session.slice(), "work");
+    begins = runsOf(database, "BEGIN IMMEDIATE");
+    try std.testing.expect(try storage.admitModelAttempt(.message, .{}) != null);
+    try std.testing.expectEqual(begins + 1, runsOf(database, "BEGIN IMMEDIATE"));
+    try std.testing.expect(!storage.isFenced());
 }
 
 fn openRaw(path: []const u8) !*c.sqlite3 {
@@ -8803,6 +8934,49 @@ test "an exhausted Attempt still retains its effort refusal for the next Operati
     try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .low), settings.reasoning_effort);
 }
 
+test "schema 74 migration deletes a populated Store's wire label, whatever it reads, and preserves its rows" {
+    // Format 73 Stores saved wire 16; an unknown label migrates the same way.
+    for ([_][]const u8{ "16", "unknown-label" }) |label| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+        const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+        var path_buffer: [platform.max_database_path_bytes]u8 = undefined;
+        const path = try std.fmt.bufPrint(&path_buffer, "{s}/format-73.sqlite3", .{root});
+        const previous: u32 = 73;
+        {
+            const raw = try openRaw(path);
+            defer _ = c.sqlite3_close(raw);
+            try sqlite.exec(raw, store_testing.baseline_sqlite_ddl);
+            try sqlite.exec(raw, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
+            try sqlite.exec(raw, store_testing.baseline_rows);
+            inline for (store_schema.migrations) |step| if (step.from < previous) {
+                inline for (step.sqlite) |sql| try sqlite.exec(raw, sql);
+            };
+            const meta = try sqlite.prepare(raw, "INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version',?1),('store_selector',?2),('format','73')");
+            defer _ = c.sqlite3_finalize(meta);
+            try sqlite.bindText(meta, 1, label);
+            try sqlite.bindText(meta, 2, root);
+            try sqlite.expectDone(meta);
+            try sqlite.exec(raw, std.fmt.comptimePrint("PRAGMA application_id={d};PRAGMA user_version={d}", .{ store_schema.application_id, previous }));
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.sqliteQueryU64(raw, "SELECT count(*) FROM store_meta WHERE meta_key='wire_version'", .{}));
+        }
+        const original_id = try storeId(path);
+        // The first open migrates; the second opens the current format with no label.
+        for (0..2) |_| {
+            var storage: Store = undefined;
+            try storage.open(std.testing.io, path, root);
+            defer storage.close() catch unreachable;
+            try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM store_meta WHERE meta_key='wire_version'", .{}));
+            try std.testing.expectEqual(@as(u64, 3), try store_testing.queryU64(&storage, "SELECT count(*) FROM store_meta", .{}));
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM store_meta WHERE meta_key='format' AND meta_value=?1", .{std.fmt.comptimePrint("{d}", .{store_schema.schema_version})}));
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref='d8mv7p'", .{}));
+            try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM pragma_foreign_key_check", .{}));
+        }
+        try std.testing.expectEqualStrings(&original_id, &try storeId(path));
+    }
+}
+
 test "schema 72 migration opens a populated wire 15 Store and preserves its rows" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -8830,7 +9004,7 @@ test "schema 72 migration opens a populated wire 15 Store and preserves its rows
         var storage: Store = undefined;
         try storage.open(std.testing.io, path, root);
         defer storage.close() catch unreachable;
-        try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM store_meta WHERE meta_key='wire_version' AND meta_value=?1", .{protocol.wire_version}));
+        try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM store_meta WHERE meta_key='wire_version'", .{}));
         try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM store_meta WHERE meta_key='format' AND meta_value=?1", .{std.fmt.comptimePrint("{d}", .{store_schema.schema_version})}));
         try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref='d8mv7p'", .{}));
         try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM pragma_foreign_key_check", .{}));
@@ -8864,7 +9038,7 @@ test "schema 71 migration opens a populated wire 14 Store and preserves its rows
         var storage: Store = undefined;
         try storage.open(std.testing.io, path, root);
         defer storage.close() catch unreachable;
-        try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM store_meta WHERE meta_key='wire_version' AND meta_value=?1", .{protocol.wire_version}));
+        try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM store_meta WHERE meta_key='wire_version'", .{}));
         try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM store_meta WHERE meta_key='format' AND meta_value=?1", .{std.fmt.comptimePrint("{d}", .{store_schema.schema_version})}));
         try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref='d8mv7p'", .{}));
         try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM pragma_foreign_key_check", .{}));
@@ -8899,7 +9073,7 @@ test "schema 70 migration opens a populated wire 13 Store and preserves its rows
         var storage: Store = undefined;
         try storage.open(std.testing.io, path, root);
         defer storage.close() catch unreachable;
-        try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM store_meta WHERE meta_key='wire_version' AND meta_value=?1", .{protocol.wire_version}));
+        try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM store_meta WHERE meta_key='wire_version'", .{}));
         try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM store_meta WHERE meta_key='format' AND meta_value=?1", .{std.fmt.comptimePrint("{d}", .{store_schema.schema_version})}));
         try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref='d8mv7p'", .{}));
         try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM pragma_foreign_key_check", .{}));
@@ -9004,7 +9178,7 @@ test "the previous Store format preserves change rows and admits bounded effort 
         const raw = try openRaw(path);
         defer _ = c.sqlite3_close(raw);
         try std.testing.expectEqual(store_schema.schema_version, try sqlite.pragmaInt(raw, "PRAGMA user_version"));
-        try std.testing.expectEqual(@as(u64, 1), try store_testing.sqliteQueryU64(raw, "SELECT count(*) FROM store_meta WHERE meta_key='wire_version' AND meta_value=?1", .{protocol.wire_version}));
+        try std.testing.expectEqual(@as(u64, 0), try store_testing.sqliteQueryU64(raw, "SELECT count(*) FROM store_meta WHERE meta_key='wire_version'", .{}));
         try std.testing.expectEqual(@as(u64, 1), try store_testing.sqliteQueryU64(raw, "SELECT count(*) FROM session_change WHERE session_ref='d8mv7p' AND position=6 AND ordinal=0 AND revision=2 AND field='reasoning_effort' AND changed_at=1793781800 AND provider_text IS NULL", .{}));
         const insert = try sqlite.prepare(raw, "INSERT INTO session_change(session_ref,position,ordinal,revision,field,changed_at,provider_text,refused_operation_id) VALUES('d8mv7p',8,0,2,'reasoning_effort_refused',1793781801,?1,99)");
         defer _ = c.sqlite3_finalize(insert);
@@ -9108,7 +9282,7 @@ test "schema 57 refusal rows migrate to wire 10 without changing command identit
         defer storage.close() catch unreachable;
         try std.testing.expectEqual(store_schema.schema_version, try sqlite.pragmaInt(storage.sqliteDatabase(), "PRAGMA user_version"));
         try std.testing.expectEqual(@as(u64, store_schema.schema_version), try store_testing.sqlite_only.queryU64(&storage, "SELECT CAST(meta_value AS INTEGER) FROM store_meta WHERE meta_key='format'", .{}));
-        try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM store_meta WHERE meta_key='wire_version' AND meta_value=?1", .{protocol.wire_version}));
+        try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM store_meta WHERE meta_key='wire_version'", .{}));
         try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM pragma_foreign_key_check", .{}));
         try Legacy.expectSaved(storage.sqliteDatabase(), commands);
         inline for (.{ .forward, .backward }) |direction| {
@@ -9391,6 +9565,42 @@ test "a page of approval requests costs the same however many calls ran without 
     try std.testing.expectEqual(thousand, try Page.steps(&storage, request));
 }
 
+/// The floor walk as admission and settlement take it: `FloorSearch`'s
+/// facts round, then a round a page, through the transition runner, outside
+/// any transaction.
+const TestingFloorWalk = struct {
+    pub const rounds = transition.rounds(.{
+        .facts = .{ .always, error.CorruptStore },
+        .page = .{ .paged, error.CorruptStore },
+    });
+    pub const round_budget = 1;
+    pub const commit: transition.Commit = .none;
+    pub const begin: ?rounds.At = null;
+    pub const Input = struct { operation: u64 };
+    pub const Result = ?history_floor_domain.Room;
+    pub const Ordinary = store_core.Ordinary.none;
+
+    input: Input,
+    search: history_floor_domain.FloorSearch = undefined,
+
+    pub fn step(t: *TestingFloorWalk, r: *transition.Round(TestingFloorWalk), ran: ?rounds.At) !transition.Next(TestingFloorWalk) {
+        if (ran == null) {
+            t.search = .{ .operation = t.input.operation };
+            t.search.start(r);
+            return .{ .round = .facts };
+        }
+        if (t.search.next(r)) return .{ .round = .page };
+        return .{ .done = t.search.room() };
+    }
+
+    fn deeper(store: *Store, operation: u64) !?history_floor_domain.Room {
+        const entry = try store_core.enter(store, .none);
+        defer entry.release();
+        var walk: TestingFloorWalk = .{ .input = .{ .operation = operation } };
+        return transition.run(&entry, TestingFloorWalk, &walk, .{});
+    }
+};
+
 test "a compaction's floor counts the output bytes a request sends, and none its base covers" {
     // A 200,000-byte answer with no usage passes level 2's 128,000 bytes,
     // unless a compaction base covers it and the request sends none of it.
@@ -9420,11 +9630,7 @@ test "a compaction's floor counts the output bytes a request sends, and none its
         const call = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
         try storage.settleModelAttemptFailure(call, .{ .uncorrelated = "provider_context_overflow" }, .context_overflow, .{});
         const compaction = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-        const entry = try store_core.enter(&storage, .none);
-        defer entry.release();
-        var a: historical_domain.ReadAccess = .open(&entry);
-        defer a.deinit();
-        const room = try history_floor_domain.deeperFloor(&a, compaction.operation_id);
+        const room = try TestingFloorWalk.deeper(&storage, compaction.operation_id);
         if (covered) {
             try std.testing.expect(room == null);
         } else {
@@ -9434,6 +9640,31 @@ test "a compaction's floor counts the output bytes a request sends, and none its
             try std.testing.expect(room.?.choice.floor >= position);
         }
     }
+}
+
+test "a compaction's floor walk reads past its first page to the level that drops least" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try tests.configureTestSessionAsk(&storage, "floor-pages-config");
+    // After the first, twenty 30,000-byte Messages: level 1's 512,000
+    // bytes are past at the eighteenth from the newest, on the second page.
+    const text = try std.testing.allocator.alloc(u8, 30_000);
+    defer std.testing.allocator.free(text);
+    @memset(text, 'p');
+    try submitTestMessage(&storage, &tmp, "floor-pages-first", "floor-pages-first", session.slice(), "first");
+    var key: [32]u8 = undefined;
+    for (0..20) |index| {
+        const name = try std.fmt.bufPrint(&key, "floor-pages-{d}", .{index});
+        try submitTestMessage(&storage, &tmp, name, name, session.slice(), text);
+    }
+    const call = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try storage.settleModelAttemptFailure(call, .{ .uncorrelated = "provider_context_overflow" }, .context_overflow, .{});
+    const compaction = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    const room = (try TestingFloorWalk.deeper(&storage, compaction.operation_id)).?;
+    try std.testing.expectEqual(@as(u8, 1), room.choice.level);
 }
 
 test "a compaction's floor read costs the same however long its Session's history" {
@@ -9463,11 +9694,7 @@ test "a compaction's floor read costs the same however long its Session's histor
             return counter.steps;
         }
         fn deeper(store: *Store, operation: u64) !?history_floor_domain.Room {
-            const entry = try store_core.enter(store, .none);
-            defer entry.release();
-            var a: historical_domain.ReadAccess = .open(&entry);
-            defer a.deinit();
-            return history_floor_domain.deeperFloor(&a, operation);
+            return TestingFloorWalk.deeper(store, operation);
         }
         /// 1,000 more copies of the big Message, older than the rest: the
         /// first Message moves past them, as the walk keeps it either way.
@@ -11117,7 +11344,7 @@ test "schema 55 migrates recovery index and wire 8 together to the current schem
     defer storage.close() catch unreachable;
     try std.testing.expectEqual(@as(u64, schema_version), try store_testing.sqlite_only.queryU64(&storage, "SELECT CAST(meta_value AS INTEGER) FROM store_meta WHERE meta_key='format'", .{}));
     try std.testing.expectEqual(schema_version, try sqlite.pragmaInt(storage.sqliteDatabase(), "PRAGMA user_version"));
-    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM store_meta WHERE meta_key='wire_version' AND meta_value=?1", .{protocol.wire_version}));
+    try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM store_meta WHERE meta_key='wire_version'", .{}));
     try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM sqlite_schema WHERE type='index' AND name='action_operation_indeterminate'", .{}));
     try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM pragma_foreign_key_check", .{}));
 }
@@ -11376,7 +11603,7 @@ test "skills schema 56 wire 9 upgrades populated rows to the current Store" {
         defer storage.close() catch unreachable;
         try std.testing.expectEqual(store_schema.schema_version, try sqlite.pragmaInt(storage.sqliteDatabase(), "PRAGMA user_version"));
         try std.testing.expectEqual(@as(u64, store_schema.schema_version), try store_testing.sqlite_only.queryU64(&storage, "SELECT CAST(meta_value AS INTEGER) FROM store_meta WHERE meta_key='format'", .{}));
-        try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM store_meta WHERE meta_key='wire_version' AND meta_value=?1", .{protocol.wire_version}));
+        try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM store_meta WHERE meta_key='wire_version'", .{}));
         try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_skill_catalog", .{}));
         try std.testing.expectEqual(@as(u64, 3), try store_testing.queryU64(&storage, "SELECT count(*) FROM conversation_entry WHERE source_catalog_position IS NULL AND turn_id IS NOT NULL", .{}));
         try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM pragma_foreign_key_check", .{}));
@@ -11495,7 +11722,7 @@ test "skills schema 58 wire 10 upgrades populated archive and refusal rows to th
         try Extra.expectSaved(storage.sqliteDatabase(), &archive, &refused);
         try std.testing.expectEqual(store_schema.schema_version, try sqlite.pragmaInt(storage.sqliteDatabase(), "PRAGMA user_version"));
         try std.testing.expectEqual(@as(u64, store_schema.schema_version), try store_testing.sqlite_only.queryU64(&storage, "SELECT CAST(meta_value AS INTEGER) FROM store_meta WHERE meta_key='format'", .{}));
-        try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM store_meta WHERE meta_key='wire_version' AND meta_value=?1", .{protocol.wire_version}));
+        try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM store_meta WHERE meta_key='wire_version'", .{}));
         try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_skill_catalog", .{}));
         try std.testing.expectEqual(@as(u64, 3), try store_testing.queryU64(&storage, "SELECT count(*) FROM conversation_entry WHERE source_catalog_position IS NULL AND turn_id IS NOT NULL", .{}));
         try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM pragma_foreign_key_check", .{}));

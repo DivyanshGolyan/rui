@@ -14,7 +14,7 @@ const socket_suffix = ".sock";
 pub const max_runtime_directory_bytes = runtime_prefix.len + max_uid_bytes;
 pub const max_socket_path_bytes = max_runtime_directory_bytes + "/".len + 32 + socket_suffix.len;
 /// A launched Host binds its socket in the caller's runtime directory
-/// (launch_frame.zig); macOS binds at most this many path bytes.
+/// (host_settings.zig); macOS binds at most this many path bytes.
 pub const max_launch_socket_path_bytes = @import("host_settings.zig").max_launch_socket_path_bytes;
 
 pub const Kind = @import("store_target.zig").Kind;
@@ -24,7 +24,7 @@ pub const Paths = struct {
     store: protocol.Bounded(protocol.max_store_bytes) = .{},
     database: protocol.Bounded(max_database_path_bytes) = .{},
     scratch: protocol.Bounded(max_scratch_path_bytes) = .{},
-    socket: protocol.Bounded(@max(max_socket_path_bytes, max_launch_socket_path_bytes)) = .{},
+    socket: @import("host_settings.zig").OsBytes(@max(max_socket_path_bytes, max_launch_socket_path_bytes)) = .{},
 
     /// The socket's spelling may be a short alias for a long canonical path.
     /// Only MySQL children need this non-secret client routing hint.
@@ -371,73 +371,90 @@ pub fn mysqlClientPaths(io: std.Io, store: []const u8, runtime: []const u8) !Pat
 /// must fit after canonicalizing their nearest existing parent. Serving still
 /// checks the actual created directory and acquires its lease against races.
 pub fn validateStoreDestination(io: std.Io, supplied_path: []const u8) !void {
+    var buffer: [protocol.max_store_bytes]u8 = undefined;
+    _ = try canonicalStoreDestination(io, supplied_path, &buffer);
+}
+
+/// Return the same read-only destination proof to callers that retain its
+/// canonical value. Creation/lease acquisition still rechecks against races.
+pub noinline fn canonicalStoreDestination(io: std.Io, supplied_path: []const u8, buffer: *[protocol.max_store_bytes]u8) ![]const u8 {
     if (supplied_path.len == 0 or !std.unicode.utf8ValidateSlice(supplied_path)) return error.InvalidStorePath;
     for (supplied_path) |byte| if (byte < 0x20 or byte == 0x7f) return error.InvalidStorePath;
-    _ = resolveClientPaths(io, supplied_path) catch |err| switch (err) {
-        error.FileNotFound => {
-            var parent = supplied_path;
-            while (true) {
-                parent = std.fs.path.dirname(parent) orelse ".";
-                var directory: ?std.Io.Dir = std.Io.Dir.cwd().openDir(io, parent, .{}) catch |parent_err| switch (parent_err) {
-                    error.FileNotFound => continue,
-                    else => return parent_err,
-                };
-                defer if (directory) |dir| dir.close(io);
-                var canonical: [std.Io.Dir.max_path_bytes + 1]u8 = undefined;
-                var length = try directory.?.realPath(io, &canonical);
-                var name_max = c.fpathconf(directory.?.handle, c._PC_NAME_MAX);
-                if (name_max <= 0) return error.StoreComponentLimitUnavailable;
-                // The handle anchors the existing prefix. Missing depth tracks
-                // virtual directories only; canceling them resumes real checks.
-                // Creation traverses even components later canceled by '..'.
-                var missing_depth: usize = 0;
-                const suffix = if (std.mem.eql(u8, parent, ".")) supplied_path else supplied_path[parent.len..];
-                var components = std.mem.tokenizeScalar(u8, suffix, '/');
-                while (components.next()) |component| {
-                    if (component.len > name_max) return error.NameTooLong;
-                    if (missing_depth == 0 and c.faccessat(directory.?.handle, ".", c.X_OK, 0) != 0) return error.AccessDenied;
-                    if (std.mem.eql(u8, component, ".")) continue;
-                    if (std.mem.eql(u8, component, "..")) {
-                        length = if (std.fs.path.dirname(canonical[0..length])) |up| up.len else 1;
-                        if (missing_depth != 0) {
-                            missing_depth -= 1;
-                            continue;
-                        }
-                    } else {
-                        const separator: usize = if (length == 1) 0 else 1;
-                        if (length + separator + component.len > canonical.len) return error.NameTooLong;
-                        if (separator != 0) canonical[length] = '/';
-                        @memcpy(canonical[length + separator ..][0..component.len], component);
-                        length += separator + component.len;
-                        if (missing_depth != 0) {
-                            missing_depth += 1;
-                            continue;
-                        }
-                        const stat = std.Io.Dir.cwd().statFile(io, canonical[0..length], .{ .follow_symlinks = false }) catch |stat_err| switch (stat_err) {
-                            error.FileNotFound => {
-                                if (c.faccessat(directory.?.handle, ".", c.W_OK | c.X_OK, 0) != 0) return error.AccessDenied;
-                                missing_depth = 1;
-                                continue;
-                            },
-                            else => return stat_err,
-                        };
-                        // Recursive creation rejects an existing symlink at a
-                        // prefix it visits, unlike opening the initial ancestor.
-                        if (stat.kind != .directory) return error.NotDir;
-                    }
-                    directory.?.close(io);
-                    directory = null;
-                    directory = try std.Io.Dir.cwd().openDir(io, canonical[0..length], .{});
-                    name_max = c.fpathconf(directory.?.handle, c._PC_NAME_MAX);
-                    if (name_max <= 0) return error.StoreComponentLimitUnavailable;
-                }
-                if (missing_depth == 0) try validatePrivateDirectory(directory.?, io);
-                try validateCanonicalPath(canonical[0..length]);
-                return;
-            }
-        },
-        else => return err,
+    return existingStoreDestination(io, supplied_path, buffer) catch |err| switch (err) {
+        error.FileNotFound => missingStoreDestination(io, supplied_path, buffer),
+        else => err,
     };
+}
+
+// These workspaces are sequential, not resident together. Keep the existing
+// Paths result out of the missing-parent walk's canonicalization workspace.
+noinline fn existingStoreDestination(io: std.Io, supplied_path: []const u8, buffer: *[protocol.max_store_bytes]u8) ![]const u8 {
+    const paths = try resolveClientPaths(io, supplied_path);
+    @memcpy(buffer[0..paths.store.len], paths.store.slice());
+    return buffer[0..paths.store.len];
+}
+noinline fn missingStoreDestination(io: std.Io, supplied_path: []const u8, buffer: *[protocol.max_store_bytes]u8) ![]const u8 {
+    var parent = supplied_path;
+    while (true) {
+        parent = std.fs.path.dirname(parent) orelse ".";
+        var directory: ?std.Io.Dir = std.Io.Dir.cwd().openDir(io, parent, .{}) catch |parent_err| switch (parent_err) {
+            error.FileNotFound => continue,
+            else => return parent_err,
+        };
+        defer if (directory) |dir| dir.close(io);
+        var canonical: [std.Io.Dir.max_path_bytes + 1]u8 = undefined;
+        var length = try directory.?.realPath(io, &canonical);
+        var name_max = c.fpathconf(directory.?.handle, c._PC_NAME_MAX);
+        if (name_max <= 0) return error.StoreComponentLimitUnavailable;
+        // The handle anchors the existing prefix. Missing depth tracks
+        // virtual directories only; canceling them resumes real checks.
+        // Creation traverses even components later canceled by '..'.
+        var missing_depth: usize = 0;
+        const suffix = if (std.mem.eql(u8, parent, ".")) supplied_path else supplied_path[parent.len..];
+        var components = std.mem.tokenizeScalar(u8, suffix, '/');
+        while (components.next()) |component| {
+            if (component.len > name_max) return error.NameTooLong;
+            if (missing_depth == 0 and c.faccessat(directory.?.handle, ".", c.X_OK, 0) != 0) return error.AccessDenied;
+            if (std.mem.eql(u8, component, ".")) continue;
+            if (std.mem.eql(u8, component, "..")) {
+                length = if (std.fs.path.dirname(canonical[0..length])) |up| up.len else 1;
+                if (missing_depth != 0) {
+                    missing_depth -= 1;
+                    continue;
+                }
+            } else {
+                const separator: usize = if (length == 1) 0 else 1;
+                if (length + separator + component.len > canonical.len) return error.NameTooLong;
+                if (separator != 0) canonical[length] = '/';
+                @memcpy(canonical[length + separator ..][0..component.len], component);
+                length += separator + component.len;
+                if (missing_depth != 0) {
+                    missing_depth += 1;
+                    continue;
+                }
+                const stat = std.Io.Dir.cwd().statFile(io, canonical[0..length], .{ .follow_symlinks = false }) catch |stat_err| switch (stat_err) {
+                    error.FileNotFound => {
+                        if (c.faccessat(directory.?.handle, ".", c.W_OK | c.X_OK, 0) != 0) return error.AccessDenied;
+                        missing_depth = 1;
+                        continue;
+                    },
+                    else => return stat_err,
+                };
+                // Recursive creation rejects an existing symlink at a
+                // prefix it visits, unlike opening the initial ancestor.
+                if (stat.kind != .directory) return error.NotDir;
+            }
+            directory.?.close(io);
+            directory = null;
+            directory = try std.Io.Dir.cwd().openDir(io, canonical[0..length], .{});
+            name_max = c.fpathconf(directory.?.handle, c._PC_NAME_MAX);
+            if (name_max <= 0) return error.StoreComponentLimitUnavailable;
+        }
+        if (missing_depth == 0) try validatePrivateDirectory(directory.?, io);
+        try validateCanonicalPath(canonical[0..length]);
+        @memcpy(buffer[0..length], canonical[0..length]);
+        return buffer[0..length];
+    }
 }
 
 fn pathsFromOpenStore(store_dir: std.Io.Dir, io: std.Io) !Paths {
@@ -1207,4 +1224,18 @@ test "Host socket Store hint proves absence only with trusted mapping and free l
     try lease.retireSocket();
     try std.testing.expectError(error.FileNotFound, std.Io.Dir.openFileAbsolute(io, hint_path, .{}));
     try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().statFile(io, socket.slice(), .{ .follow_symlinks = false }));
+}
+
+test "runtime socket storage preserves every non-NUL OS byte" {
+    var paths: Paths = .{};
+    for (1..256) |value| {
+        const byte: [1]u8 = .{@intCast(value)};
+        try paths.socket.set(&byte);
+        try std.testing.expectEqualSlices(u8, &byte, paths.socket.slice());
+    }
+    try std.testing.expectError(error.SettingsInvalid, paths.socket.set(&.{0}));
+    try std.testing.expectEqualSlices(u8, &.{255}, paths.socket.slice());
+    const over: [@max(max_socket_path_bytes, max_launch_socket_path_bytes) + 1]u8 = @splat('x');
+    try std.testing.expectError(error.SettingsInvalid, paths.socket.set(&over));
+    try std.testing.expectEqualSlices(u8, &.{255}, paths.socket.slice());
 }

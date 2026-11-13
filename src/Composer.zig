@@ -42,7 +42,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const self: *Self = @ptrCast(@alignCast(raw));
     const width = ctx.max.width.?;
     const height = ctx.max.height.?;
-    if (width == 0 or height == 0) return vxfw.Surface.init(ctx.arena, self.widget(), .{});
+    if (width == 0 or height == 0) return vxfw.Surface.init(ctx.cell_arena, self.widget(), .{});
     const rule: u16 = if (height >= 3) 1 else 0;
     // One column of margin, as every line of the screen has, then the mark.
     const prefix: u16 = if (width >= 4) 3 else 0;
@@ -55,7 +55,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     var lines: [layout.max_rows]layout.Line = undefined;
     const shown = layout.fit(pieces, width - prefix, self.editor.cursor, shape, height - 2 * rule, &lines);
     self.anchor = lines[0].start;
-    var surface = try vxfw.Surface.init(ctx.arena, self.widget(), .{ .width = width, .height = shown.rows + 2 * rule });
+    var surface = try vxfw.Surface.init(ctx.cell_arena, self.widget(), .{ .width = width, .height = shown.rows + 2 * rule });
     @memset(surface.buffer, .{ .style = self.style });
     var screen: vaxis.Screen = .{
         .width = surface.size.width,
@@ -103,7 +103,7 @@ test "Composer keeps the caret visible between rules without changing draft byte
     var composer: Self = .{ .editor = &editor };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 5 }, .cell_size = .{} };
+    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 5 }, .cell_size = .{} };
     const tail = try composer.widget().draw(ctx);
     try std.testing.expectEqual(@as(u16, 5), tail.size.height);
     try std.testing.expectEqualStrings("f", tail.readCell(3, 1).char.grapheme);
@@ -133,7 +133,7 @@ test "Composer draws between paste fragments that join the original suffix" {
         var composer: Self = .{ .editor = &editor };
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
-        const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 8 }, .cell_size = .{} };
+        const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 8 }, .cell_size = .{} };
         _ = editor.appEvent(keys, .paste_start, true);
         _ = editor.appEvent(keys, .{ .key_press = .{ .codepoint = 0, .text = case.first } }, true);
         const joined = try composer.widget().draw(ctx);
@@ -155,7 +155,7 @@ test "Composer empty draft shows the screen's placeholder and an input cursor" {
     var composer: Self = .{ .editor = &editor, .placeholder = "Type a task", .style = .{ .bg = .{ .index = 19 } }, .quiet = .{ .dim = true, .bg = .{ .index = 19 } } };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    const surface = try composer.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 10 }, .cell_size = .{} });
+    const surface = try composer.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 10 }, .cell_size = .{} });
     try std.testing.expectEqual(@as(u16, 3), surface.size.height);
     try std.testing.expectEqualStrings("T", surface.readCell(3, 1).char.grapheme);
     try std.testing.expect(surface.readCell(3, 1).style.dim);
@@ -175,6 +175,7 @@ test "Composer clips wide text at every small size without moving its logical ca
             defer arena.deinit();
             const surface = try composer.widget().draw(.{
                 .arena = arena.allocator(),
+                .cell_arena = arena.allocator(),
                 .min = .{},
                 .max = .{ .width = @intCast(width), .height = @intCast(height) },
                 .cell_size = .{},
@@ -199,7 +200,7 @@ test "Composer empty chat shows only its prompt and rules" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     for ([_]u16{ 140, 46 }) |width| {
-        const shown = try composer.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 3 }, .cell_size = .{} });
+        const shown = try composer.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 3 }, .cell_size = .{} });
         try std.testing.expectEqual(@as(u16, 3), shown.size.height);
         try std.testing.expectEqualStrings("›", shown.readCell(1, 1).char.grapheme);
         for (3..width) |col| try std.testing.expectEqualStrings(" ", shown.readCell(col, 1).char.grapheme);
@@ -213,7 +214,7 @@ test "Composer inactive prompt uses quiet style and no caret without dimming dra
     var composer: Self = .{ .editor = &editor, .style = .{}, .quiet = .{ .dim = true } };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 5 }, .cell_size = .{} };
+    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 5 }, .cell_size = .{} };
     const focused = try composer.widget().draw(ctx);
     try std.testing.expect(focused.cursor != null);
     try std.testing.expect(!focused.readCell(1, 1).style.dim);

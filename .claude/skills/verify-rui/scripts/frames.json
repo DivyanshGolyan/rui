@@ -81,7 +81,7 @@
     },
     {
       "name": "inputtint-night-new-selected",
-      "note": "Wait for the listing before Home selects New Session; its active composer uses the shared input surface",
+      "note": "Home then Enter opens New Session's input; its composer uses the shared input surface",
       "theme": "night",
       "open": "overview",
       "steps": [
@@ -90,22 +90,22 @@
         },
         {
           "keys": [
-            "Home"
+            "Home",
+            "Enter"
           ]
         },
         {
-          "wait": "enter start"
+          "wait": "Type a task"
         }
       ],
       "expect": [
-        "+ New Session",
-        "Settings",
         "\u203a Type a task",
-        "enter start"
+        "alt+i info"
       ],
       "absent": [
         "Browsing \u00b7 Esc returns",
-        "enter retry"
+        "enter retry",
+        "enter start"
       ],
       "expect_background": {
         "\u203a Type a task": "#1a2246"
@@ -199,7 +199,7 @@
     },
     {
       "name": "inputtint-day-new-selected",
-      "note": "Wait for the listing before Home selects New Session; its active composer uses the shared input surface",
+      "note": "Home then Enter opens New Session's input; its composer uses the shared input surface",
       "theme": "day",
       "open": "overview",
       "steps": [
@@ -208,22 +208,22 @@
         },
         {
           "keys": [
-            "Home"
+            "Home",
+            "Enter"
           ]
         },
         {
-          "wait": "enter start"
+          "wait": "Type a task"
         }
       ],
       "expect": [
-        "+ New Session",
-        "Settings",
         "\u203a Type a task",
-        "enter start"
+        "alt+i info"
       ],
       "absent": [
         "Browsing \u00b7 Esc returns",
-        "enter retry"
+        "enter retry",
+        "enter start"
       ],
       "expect_background": {
         "\u203a Type a task": "#e6ddc8"
@@ -248,6 +248,537 @@
       "absent": [
         "Browsing \u00b7 Esc returns",
         "enter retry"
+      ]
+    },
+    {
+      "name": "quiet-person",
+      "note": "A real person message supplies the sender for peer-seeded quiet specimens",
+      "open": "overview",
+      "cast": [
+        {
+          "label": "You wrote",
+          "workspace": "code/quiet",
+          "messages": [
+            "Ready."
+          ],
+          "mode": "bypass"
+        }
+      ],
+      "steps": [
+        {
+          "wait": "You wrote"
+        }
+      ],
+      "expect": [
+        "You wrote"
+      ],
+      "absent": [
+        "No Sessions yet."
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
+    },
+    {
+      "name": "quiet-overview",
+      "note": "Whole rows, including marks, ages and folders, dim only for never-written finished and working chats; approval stays loud",
+      "open": "overview",
+      "cast": [
+        {
+          "label": "Agent done",
+          "workspace": "code/quiet",
+          "messages": [
+            "Ready."
+          ],
+          "mode": "bypass",
+          "sender": "You wrote"
+        },
+        {
+          "label": "Agent approval",
+          "workspace": "code/quiet",
+          "messages": [
+            "consent check"
+          ],
+          "mode": "ask",
+          "sender": "You wrote",
+          "settle": "pending"
+        },
+        {
+          "label": "Agent working",
+          "workspace": "code/quiet",
+          "messages": [
+            "hold answer"
+          ],
+          "mode": "bypass",
+          "sender": "You wrote",
+          "settle": "pending"
+        }
+      ],
+      "steps": [
+        {
+          "wait": "Agent working"
+        },
+        {
+          "wait": "Thinking"
+        },
+        {
+          "wait": "set -eu"
+        }
+      ],
+      "expect": [
+        "You wrote",
+        "Agent done",
+        "Agent approval",
+        "Agent working",
+        "Thinking"
+      ],
+      "absent": [
+        "No Sessions yet.",
+        "Host stopped"
+      ],
+      "expect_dim": [
+        {
+          "text": "✓ Agent done",
+          "dim": true
+        },
+        {
+          "text": "The deadline check",
+          "dim": true
+        },
+        {
+          "text": "⠹ Agent working",
+          "dim": true
+        },
+        {
+          "text": "Thinking",
+          "dim": true
+        },
+        {
+          "text": "Agent approval",
+          "dim": false
+        },
+        {
+          "text": "You wrote",
+          "dim": false
+        }
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
+    },
+    {
+      "name": "quiet-sidebar",
+      "note": "The shared row owner dims the open-chat sidebar; narrow view naturally shows only the conversation",
+      "open": "You wrote",
+      "steps": [
+        {
+          "wait": "Peer message delivered."
+        },
+        {
+          "wait": "Agent done",
+          "min_columns": 140
+        },
+        {
+          "wait": "Thinking",
+          "min_columns": 140
+        },
+        {
+          "wait": "set -eu",
+          "min_columns": 140
+        }
+      ],
+      "expect": [
+        "Peer message delivered."
+      ],
+      "absent": [
+        "Host stopped"
+      ],
+      "expect_dim": [
+        {
+          "text": "✓ Agent done",
+          "dim": true,
+          "min_columns": 140
+        },
+        {
+          "text": "The deadline check",
+          "dim": true,
+          "min_columns": 140
+        },
+        {
+          "text": "⠹ Agent working",
+          "dim": true,
+          "min_columns": 140
+        },
+        {
+          "text": "Thinking",
+          "dim": true,
+          "min_columns": 140
+        },
+        {
+          "text": "Agent approval",
+          "dim": false,
+          "min_columns": 140
+        },
+        {
+          "text": "You wrote",
+          "dim": false,
+          "min_columns": 140
+        }
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
+    },
+    {
+      "name": "appcmds-conversation",
+      "note": "All chat commands are listed beside skills with their descriptions",
+      "open": "App command replacements",
+      "cast": [
+        {
+          "label": "App command replacements",
+          "workspace": "code/rui",
+          "messages": [
+            "Ready."
+          ],
+          "mode": "bypass"
+        }
+      ],
+      "steps": [
+        {
+          "text": "/"
+        },
+        {
+          "wait": "/archive"
+        }
+      ],
+      "expect": [
+        "/archive        archive this chat",
+        "/clear          start a new chat",
+        "/copy           copy the last answer",
+        "/effort         change effort",
+        "/model          change model",
+        "/new            start a new chat",
+        "/reload-skills  reload skills",
+        "/rename         rename this chat",
+        "/requests       recover a lost request",
+        "/result         show a saved answer",
+        "/setup          defaults for new chats",
+        "/unarchive      restore this chat"
+      ],
+      "absent": [
+        "/configure",
+        "/status",
+        "/discard",
+        "/recover",
+        "archive this Session",
+        "change this Session",
+        "future defaults",
+        "stop active work",
+        "code its",
+        "append catal"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+      ]
+    },
+    {
+      "name": "appcmds-conversation-end",
+      "note": "The end selection keeps every short chat command phrase visible",
+      "open": "App command replacements",
+      "steps": [
+        {
+          "text": "/"
+        },
+        {
+          "wait": "/archive"
+        },
+        {
+          "keys": [
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down"
+          ]
+        },
+        {
+          "wait": "/unarchive"
+        }
+      ],
+      "expect": [
+        "/archive        archive this chat",
+        "/clear          start a new chat",
+        "/copy           copy the last answer",
+        "/effort         change effort",
+        "/model          change model",
+        "/new            start a new chat",
+        "/reload-skills  reload skills",
+        "/rename         rename this chat",
+        "/requests       recover a lost request",
+        "/result         show a saved answer",
+        "/setup          defaults for new chats",
+        "/unarchive      restore this chat"
+      ],
+      "absent": [
+        "/configure",
+        "/status",
+        "/discard",
+        "/recover",
+        "archive this Session",
+        "change this Session",
+        "future defaults",
+        "stop active work",
+        "code its",
+        "append catal"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+      ]
+    },
+    {
+      "name": "appcmds-skill-escape",
+      "note": "Esc on the list of a Message's leading /skill closes the list and keeps the Message",
+      "open": "Skill draft kept",
+      "cast": [
+        {
+          "label": "Skill draft kept",
+          "workspace": "code/appcmds-skill-escape",
+          "messages": [
+            "Seed a fresh chat."
+          ],
+          "mode": "bypass",
+          "skills": [
+            "review"
+          ]
+        }
+      ],
+      "steps": [
+        {
+          "text": "/review this change"
+        },
+        {
+          "keys": [
+            "Home",
+            "Right",
+            "Right"
+          ]
+        },
+        {
+          "sleep": 1.0
+        },
+        {
+          "keys": [
+            "Esc"
+          ]
+        },
+        {
+          "sleep": 0.5
+        }
+      ],
+      "expect": [
+        "› /review this change"
+      ],
+      "absent": [
+        "Unknown command",
+        "Usage:",
+        "enter pick"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
+    },
+    {
+      "name": "appcmds-agent-commands",
+      "note": "Short chat phrases plus a long loaded-skill description, ellipsized at narrow width",
+      "open": "New chat navigation",
+      "cast": [
+        {
+          "label": "New chat navigation",
+          "workspace": "code/rui",
+          "messages": [
+            "Old chat remains."
+          ],
+          "mode": "bypass",
+          "model": "gpt-5.5",
+          "effort": "low",
+          "skills": [
+            "review"
+          ]
+        }
+      ],
+      "steps": [
+        {
+          "text": "/"
+        },
+        {
+          "wait": "/archive"
+        },
+        {
+          "keys": [
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down"
+          ]
+        },
+        {
+          "wait": "/review"
+        }
+      ],
+      "expect": [
+        "/archive        archive this chat",
+        "/clear          start a new chat",
+        "/copy           copy the last answer",
+        "/effort         change effort",
+        "/model          change model",
+        "/new            start a new chat",
+        "/reload-skills  reload skills",
+        "/rename         rename this chat",
+        "/requests       recover a lost request",
+        "/result         show a saved answer",
+        "/setup          defaults for new chats",
+        "/unarchive      restore this chat",
+        "/review",
+        "Verify the project and review"
+      ],
+      "absent": [
+        "/configure",
+        "/status",
+        "/discard",
+        "/recover",
+        "archive this Session",
+        "change this Session",
+        "future defaults",
+        "stop active work",
+        "code its",
+        "append catal"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$",
+        "/review +Verify the project and review\\s*$"
+      ]
+    },
+    {
+      "name": "appcmds-model",
+      "note": "Typed model opens the same Session picker as footer and info",
+      "open": "New chat navigation",
+      "steps": [
+        {
+          "text": "/model"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Model"
+        },
+        {
+          "wait": "gpt-5.5"
+        }
+      ],
+      "expect": [
+        "Model",
+        "gpt-5.5",
+        "esc close"
+      ],
+      "absent": [
+        "Unknown command",
+        "Usage:"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+      ]
+    },
+    {
+      "name": "appcmds-new",
+      "note": "Alias opens an empty chat, not a first Message",
+      "open": "New chat navigation",
+      "steps": [
+        {
+          "text": "/new"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Type a task"
+        },
+        {
+          "wait": "\u25cb New Session",
+          "min_columns": 140
+        },
+        {
+          "gone": "Old chat remains."
+        }
+      ],
+      "expect": [
+        "Type a task",
+        "~/code/rui",
+        "alt+i info"
+      ],
+      "absent": [
+        "Old chat remains.",
+        "/new",
+        "/clear"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+      ]
+    },
+    {
+      "name": "appcmds-clear",
+      "note": "Alias opens an empty chat, not a first Message",
+      "open": "New chat navigation",
+      "steps": [
+        {
+          "text": "/clear"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Type a task"
+        },
+        {
+          "wait": "\u25cb New Session",
+          "min_columns": 140
+        },
+        {
+          "gone": "Old chat remains."
+        }
+      ],
+      "expect": [
+        "Type a task",
+        "~/code/rui",
+        "alt+i info"
+      ],
+      "absent": [
+        "Old chat remains.",
+        "/new",
+        "/clear"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]
     },
     {
@@ -287,33 +818,9 @@
         "/unarchive",
         "{session:Archive audit}",
         "Archived Archive audit"
-      ]
-    },
-    {
-      "name": "archived-list",
-      "note": "Archived rows show their name without a redundant archive tag or raw id",
-      "open": "overview",
-      "steps": [
-        {
-          "text": "/sessions archived"
-        },
-        {
-          "keys": [
-            "Enter"
-          ]
-        },
-        {
-          "wait": "Archive audit"
-        }
       ],
-      "expect": [
-        "\u2713 Archive audit"
-      ],
-      "absent": [
-        "[Archived]",
-        "/unarchive",
-        "{session:Archive audit}",
-        "\u00b7 archived"
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]
     },
     {
@@ -341,37 +848,14 @@
         "Archived Archive audit",
         "/unarchive",
         "{session:Archive audit}"
-      ]
-    },
-    {
-      "name": "transient-overview",
-      "note": "An overview command error occupies Footer once, without a separate reply row",
-      "open": "overview",
-      "steps": [
-        {
-          "text": "/nope"
-        },
-        {
-          "keys": [
-            "Enter"
-          ]
-        },
-        {
-          "wait": "Unknown command /nope"
-        }
       ],
-      "expect": [
-        "Unknown command /nope"
-      ],
-      "absent": [
-        "Archived Archive audit",
-        "/unarchive",
-        "{session:Archive audit}"
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]
     },
     {
       "name": "first-run",
-      "note": "No credentials: sign-in choice occupies the input row",
+      "note": "No credentials: sign-in choice occupies the input row, ChatGPT selected",
       "open": "overview",
       "first_run": true,
       "steps": [
@@ -389,12 +873,13 @@
         "Host stopped",
         "Type a task",
         "[ChatGPT]",
-        "[API key]"
+        "[API key]",
+        "Codex"
       ]
     },
     {
-      "name": "first-run-codex",
-      "note": "Fake device login: clickable link and code, no network",
+      "name": "first-run-browser",
+      "note": "Browser sign-in on the loopback fixture issuer: short link, masked address entry, Tab offered; no browser opens",
       "open": "overview",
       "first_run": true,
       "env": {
@@ -410,6 +895,48 @@
           ]
         },
         {
+          "wait": "Sign in at 127.0.0.1:1"
+        }
+      ],
+      "expect": [
+        "Sign in at 127.0.0.1:1",
+        "Or paste the address your browser ended on",
+        "tab device code · esc back"
+      ],
+      "absent": [
+        "Provider: [c]",
+        "[ChatGPT]",
+        "[API key]",
+        "Codex",
+        "oauth/authorize"
+      ]
+    },
+    {
+      "name": "first-run-codex",
+      "note": "Tab from the browser sign-in to the fake device login: clickable link and code, no network",
+      "open": "overview",
+      "first_run": true,
+      "env": {
+        "RUI_TEST_LOGIN": "waiting"
+      },
+      "steps": [
+        {
+          "wait": "› ChatGPT    API key"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Sign in at 127.0.0.1:1"
+        },
+        {
+          "keys": [
+            "Tab"
+          ]
+        },
+        {
           "wait": "BDL9-KI88H"
         }
       ],
@@ -421,6 +948,7 @@
         "Provider: [c]",
         "[ChatGPT]",
         "[API key]",
+        "Sign in at",
         "Open auth.openai.com",
         "and enter"
       ]
@@ -463,14 +991,54 @@
     },
     {
       "name": "start-empty",
-      "note": "01-overview-empty",
+      "note": "01-overview-empty: pinned actions without an editor or copied chat facts",
       "open": "overview",
       "steps": [],
       "expect": [
-        "Type a task",
+        "+ New Session",
         "Settings",
+        "enter open"
+      ],
+      "absent": [
+        "Type a task",
         "enter start",
         "gpt-6.1-sol \u00b7 low"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+      ]
+    },
+    {
+      "name": "chat-empty",
+      "note": "01a-new-empty-chat: New Session opens the only input and its Session footer facts",
+      "open": "overview",
+      "steps": [
+        {
+          "keys": [
+            "Home",
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Type a task"
+        },
+        {
+          "wait": "\u25cb New Session",
+          "min_columns": 140
+        }
+      ],
+      "expect": [
+        "Type a task",
+        "gpt-6.1-sol \u00b7 low",
+        "code/rui",
+        "alt+i info"
+      ],
+      "absent": [
+        "enter start",
+        "Configured."
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]
     },
     {
@@ -511,113 +1079,9 @@
       "absent": [
         "\u203a /effort",
         "enter pick"
-      ]
-    },
-    {
-      "name": "all-sessions",
-      "note": "Mixed archive states retain a quiet archived suffix; the archived-only list does not",
-      "open": "overview",
-      "steps": [
-        {
-          "text": "/sessions all"
-        },
-        {
-          "keys": [
-            "Enter"
-          ]
-        },
-        {
-          "wait": "Archive audit \u00b7 archived"
-        }
       ],
-      "expect": [
-        "Archive audit \u00b7 archived",
-        "Draft lifecycle"
-      ],
-      "absent": [
-        "[Archived]",
-        "Draft lifecycle \u00b7 archived",
-        "{session:Archive audit}",
-        "{session:Draft lifecycle}"
-      ]
-    },
-    {
-      "name": "draft-overview-choice-escape",
-      "note": "B05: overview shares command choice cancellation",
-      "open": "overview",
-      "steps": [
-        {
-          "text": "/configure --permission-mode "
-        },
-        {
-          "wait": "bypass"
-        },
-        {
-          "keys": [
-            "Esc"
-          ]
-        },
-        {
-          "sleep": 0.5
-        }
-      ],
-      "expect": [
-        "Settings",
-        "Draft lifecycle"
-      ],
-      "absent": [
-        "\u203a /configure",
-        "enter pick"
-      ]
-    },
-    {
-      "name": "draft-overview-unknown",
-      "note": "B06: an unknown command reports its error without retaining its draft",
-      "open": "overview",
-      "steps": [
-        {
-          "text": "/nope"
-        },
-        {
-          "keys": [
-            "Enter"
-          ]
-        },
-        {
-          "wait": "Unknown command /nope"
-        }
-      ],
-      "expect": [
-        "Unknown command /nope",
-        "Settings"
-      ],
-      "absent": [
-        "\u203a /nope"
-      ]
-    },
-    {
-      "name": "draft-chat-unknown",
-      "note": "B06: conversation counterpart uses the same draft-ending rule",
-      "open": "Draft lifecycle",
-      "steps": [
-        {
-          "text": "/nope"
-        },
-        {
-          "keys": [
-            "Enter"
-          ]
-        },
-        {
-          "wait": "Unknown command /nope"
-        }
-      ],
-      "expect": [
-        "Unknown command /nope",
-        "Draft lifecycle"
-      ],
-      "absent": [
-        "\u203a /nope"
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]
     },
     {
@@ -644,6 +1108,12 @@
         "Sign-in",
         "Version",
         "Keys"
+      ],
+      "absent": [
+        "Type a task"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]
     },
     {
@@ -683,7 +1153,11 @@
       ],
       "absent": [
         "Filter:",
-        "\u2191 "
+        "\u2191 ",
+        "Type a task"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]
     },
     {
@@ -729,7 +1203,11 @@
       "absent": [
         "Filter:",
         "\u2191 ",
-        "gpt-5.5"
+        "gpt-5.5",
+        "Type a task"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]
     },
     {
@@ -761,13 +1239,32 @@
         "Notifications",
         "Sign-in",
         "Version"
+      ],
+      "absent": [
+        "Type a task"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]
     },
     {
       "name": "start-model",
-      "note": "New-chat model word opens the shared Model choice alone above the input",
+      "note": "Empty-chat model word opens the shared Model choice alone above the input",
       "open": "overview",
       "steps": [
+        {
+          "keys": [
+            "Home",
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Type a task"
+        },
+        {
+          "wait": "\u25cb New Session",
+          "min_columns": 140
+        },
         {
           "mouse": {
             "at": "gpt-6.1-sol",
@@ -791,6 +1288,9 @@
         "click to change",
         "\u25be",
         "Filter:"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]
     },
     {
@@ -798,6 +1298,19 @@
       "note": "Tab Tab Enter opens the shared Effort choice alone above the input",
       "open": "overview",
       "steps": [
+        {
+          "keys": [
+            "Home",
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Type a task"
+        },
+        {
+          "wait": "\u25cb New Session",
+          "min_columns": 140
+        },
         {
           "keys": [
             "Tab",
@@ -825,13 +1338,29 @@
         "click to change",
         "\u25be",
         "Filter:"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]
     },
     {
       "name": "start-picked",
-      "note": "Picking xhigh in the new-chat Effort choice saves the default and closes the choice",
+      "note": "Picking xhigh in the empty-chat Effort choice saves this Session\u2019s effort and closes the choice",
       "open": "overview",
       "steps": [
+        {
+          "keys": [
+            "Home",
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Type a task"
+        },
+        {
+          "wait": "\u25cb New Session",
+          "min_columns": 140
+        },
         {
           "keys": [
             "Tab",
@@ -854,16 +1383,221 @@
       ],
       "expect": [
         "gpt-6.1-sol \u00b7 xhigh",
-        "Type a task",
-        "enter start"
+        "Type a task"
       ],
       "absent": [
         "gpt-6.1-sol \u00b7 high",
         "Effort",
-        "\u2713",
+        "\u2713 xhigh",
         "click to change",
         "\u25be"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]
+    },
+    {
+      "name": "empty-chat-left",
+      "note": "Creating and leaving without a Message keeps the Session stored but leaves no empty overview row",
+      "open": "overview",
+      "cast": [
+        {
+          "label": "Existing conversation",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "messages": [
+            "Keep this conversation visible."
+          ]
+        }
+      ],
+      "steps": [
+        {
+          "wait": "Existing conversation"
+        },
+        {
+          "keys": [
+            "Home",
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Type a task"
+        },
+        {
+          "keys": [
+            "Esc"
+          ]
+        },
+        {
+          "wait": "enter open"
+        }
+      ],
+      "expect": [
+        "+ New Session",
+        "Settings",
+        "enter open",
+        "Existing conversation"
+      ],
+      "absent": [
+        "Type a task",
+        "enter start"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+      ],
+      "sizes": [
+        "140x40",
+        "46x30"
+      ],
+      "first_frame": true
+    },
+    {
+      "name": "empty-chat-model-left",
+      "note": "Picking a different model without sending a Message still leaves no empty overview row",
+      "open": "overview",
+      "steps": [
+        {
+          "wait": "Existing conversation"
+        },
+        {
+          "keys": [
+            "Home",
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Type a task"
+        },
+        {
+          "mouse": {
+            "at": "gpt-6.1-sol",
+            "do": "click"
+          }
+        },
+        {
+          "wait": "Model"
+        },
+        {
+          "text": "ter"
+        },
+        {
+          "wait": "ter\n"
+        },
+        {
+          "wait": "gpt-6.1-terra"
+        },
+        {
+          "keys": [
+            "Down",
+            "Enter"
+          ]
+        },
+        {
+          "gone": "Model"
+        },
+        {
+          "wait": "gpt-6.1-terra \u00b7"
+        },
+        {
+          "keys": [
+            "Esc"
+          ]
+        },
+        {
+          "wait": "enter open"
+        }
+      ],
+      "expect": [
+        "+ New Session",
+        "Settings",
+        "enter open",
+        "Existing conversation"
+      ],
+      "absent": [
+        "Type a task",
+        "enter start"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+      ],
+      "sizes": [
+        "140x40",
+        "46x30"
+      ],
+      "first_frame": true
+    },
+    {
+      "name": "empty-chat-two-left",
+      "note": "Two abandoned empty chats leave both existing conversations visible and no raw-ID rows",
+      "open": "overview",
+      "cast": [
+        {
+          "label": "Existing second conversation",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "messages": [
+            "Keep this second conversation visible."
+          ]
+        }
+      ],
+      "steps": [
+        {
+          "wait": "Existing second conversation"
+        },
+        {
+          "keys": [
+            "Home",
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Type a task"
+        },
+        {
+          "keys": [
+            "Esc"
+          ]
+        },
+        {
+          "wait": "enter open"
+        },
+        {
+          "keys": [
+            "Home",
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Type a task"
+        },
+        {
+          "keys": [
+            "Esc"
+          ]
+        },
+        {
+          "wait": "enter open"
+        }
+      ],
+      "expect": [
+        "+ New Session",
+        "Settings",
+        "enter open",
+        "Existing conversation",
+        "Existing second conversation"
+      ],
+      "absent": [
+        "Type a task",
+        "enter start"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+      ],
+      "sizes": [
+        "140x40",
+        "46x30"
+      ],
+      "first_frame": true
     },
     {
       "name": "mouse-settings",
@@ -894,6 +1628,12 @@
         "Notifications",
         "Sign-in",
         "Version"
+      ],
+      "absent": [
+        "Type a task"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]
     },
     {
@@ -980,6 +1720,12 @@
         "Schema migration",
         "Settings",
         "\u25a0"
+      ],
+      "absent": [
+        "Type a task"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]
     },
     {
@@ -1005,6 +1751,12 @@
         "Settings",
         "\u25a0",
         "Release notes for 0.60"
+      ],
+      "absent": [
+        "Type a task"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]
     },
     {
@@ -1029,6 +1781,12 @@
         "Schema migration",
         "Settings",
         "\u25a0"
+      ],
+      "absent": [
+        "Type a task"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]
     },
     {
@@ -1078,11 +1836,17 @@
         "Docs build",
         "Benchmark idle memory",
         "Settings"
+      ],
+      "absent": [
+        "Type a task"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]
     },
     {
       "name": "chat",
-      "note": "10-conversation: tool rows stay folded, with named failed exits",
+      "note": "10-conversation: active chat keeps tool folds and has no sidebar composer",
       "open": "Fix retry deadline",
       "steps": [
         {
@@ -1113,7 +1877,12 @@
       "absent": [
         "asks before Bash/MCP",
         "Type a message",
-        "enter sends"
+        "enter sends",
+        "Type a task",
+        "enter start"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]
     },
     {
@@ -1154,6 +1923,9 @@
         "Configured.",
         "click to change",
         "\u25be"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]
     },
     {
@@ -1199,6 +1971,9 @@
         "enter sends",
         " \u00b7 exit 127",
         " \u00b7 exit 1"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]
     },
     {
@@ -1214,7 +1989,7 @@
           ]
         },
         {
-          "wait": "    stderr tail:"
+          "wait": "    stderr:"
         },
         {
           "gone": "Opening tool output\u2026"
@@ -1236,7 +2011,7 @@
         "\u00d7 Fail with exit 127 \u00b7 127",
         "\u00d7 Fail with an excerpt \u00b7 1",
         "    Bash failed. Exit code: 1.",
-        "    stderr tail:",
+        "    stderr:",
         "    usage: example",
         "    unknown option --help"
       ],
@@ -1244,7 +2019,10 @@
         "46x30",
         "140x40"
       ],
-      "note": "10a-tool-open: Ctrl-O selects the lowest tool; output is indented on its band, other rows folded; no extra mark; literal stored envelope in quiet colour"
+      "note": "10a-tool-open: Ctrl-O selects the lowest tool; output is indented on its band, other rows folded; no extra mark; literal stored envelope in quiet colour",
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+      ]
     },
     {
       "name": "tool-open-two",
@@ -1259,7 +2037,7 @@
           ]
         },
         {
-          "wait": "    stderr tail:"
+          "wait": "    stderr:"
         },
         {
           "gone": "Opening tool output\u2026"
@@ -1322,13 +2100,13 @@
       "expect": [
         "\u2713 List project files",
         "    Bash succeeded. Exit code: 0.",
-        "    stdout tail:",
+        "    stdout:",
         "    README.md",
         "    src",
         "\u00d7 Fail with exit 127 \u00b7 127",
         "\u00d7 Fail with an excerpt \u00b7 1",
         "    Bash failed. Exit code: 1.",
-        "    stderr tail:",
+        "    stderr:",
         "    usage: example",
         "    unknown option --help"
       ],
@@ -1340,6 +2118,9 @@
       "absent": [
         " \u00b7 exit 127",
         " \u00b7 exit 1"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]
     },
     {
@@ -1377,7 +2158,7 @@
       "expect": [
         "\u2713 Print thirty-two lines",
         "    Bash succeeded. Exit code: 0.",
-        "    stdout tail:",
+        "    stdout:",
         "    output line 18",
         "    \u2026 14 more lines"
       ],
@@ -1385,7 +2166,10 @@
         "46x30",
         "140x40"
       ],
-      "note": "10c-tool-open-long: twenty quiet stored-result rows, including status and label, then fourteen remaining lines"
+      "note": "10c-tool-open-long: twenty quiet stored-result rows, including status and label, then fourteen remaining lines",
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+      ]
     },
     {
       "name": "tool-open-nocolor",
@@ -1403,7 +2187,7 @@
           ]
         },
         {
-          "wait": "    stderr tail:"
+          "wait": "    stderr:"
         },
         {
           "gone": "Opening tool output\u2026"
@@ -1425,7 +2209,7 @@
         "\u00d7 Fail with exit 127 \u00b7 127",
         "\u00d7 Fail with an excerpt \u00b7 1",
         "    Bash failed. Exit code: 1.",
-        "    stderr tail:",
+        "    stderr:",
         "    usage: example",
         "    unknown option --help"
       ],
@@ -1433,7 +2217,10 @@
         "46x30",
         "140x40"
       ],
-      "note": "10d-tool-open-nocolor: the same open tool is indented without selection or output backgrounds; no extra mark; literal stored envelope in quiet colour"
+      "note": "10d-tool-open-nocolor: the same open tool is indented without selection or output backgrounds; no extra mark; literal stored envelope in quiet colour",
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+      ]
     },
     {
       "name": "chat-draft-kept",
@@ -1451,7 +2238,7 @@
           ]
         },
         {
-          "wait": "Type a task"
+          "wait": "enter open"
         },
         {
           "keys": [
@@ -1462,7 +2249,10 @@
           "wait": "Keep this chat draft"
         }
       ],
-      "expect": "Keep this chat draft"
+      "expect": "Keep this chat draft",
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+      ]
     },
     {
       "name": "chat-scrolled",
@@ -1480,6 +2270,9 @@
       ],
       "expect": [
         "\u2193"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]
     },
     {
@@ -1502,6 +2295,9 @@
       "expect": [
         "The retry loop waits",
         "\u2193"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]
     },
     {
@@ -1535,6 +2331,9 @@
         "The retry loop waits",
         "\u2193",
         "new"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]
     },
     {
@@ -1563,6 +2362,9 @@
         "pub fn next",
         "Late request  waits 30 s  fails at once",
         "retry policy notes"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]
     },
     {
@@ -1586,6 +2388,9 @@
         "expired",
         "Late request  waits 30 s  fails at once",
         "retry policy notes"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]
     },
     {
@@ -1625,6 +2430,9 @@
       ],
       "absent": [
         "Waiting"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]
     },
     {
@@ -1663,6 +2471,9 @@
       ],
       "absent": [
         "No code block in the last answer."
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]
     },
     {
@@ -1708,6 +2519,9 @@
       ],
       "absent": [
         "Waiting"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]
     },
     {
@@ -1747,6 +2561,9 @@
             "Ready."
           ]
         }
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]
     },
     {
@@ -1798,7 +2615,10 @@
       "first_frame": true,
       "expect_next": {
         "\u25a0 Stop the slow job": "   Stopped"
-      }
+      },
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+      ]
     },
     {
       "name": "stop-narrow",
@@ -1844,7 +2664,10 @@
       "sizes": [
         "46x30"
       ],
-      "first_frame": true
+      "first_frame": true,
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+      ]
     },
     {
       "name": "stopped",
@@ -1854,6 +2677,9 @@
         {
           "wait": "\u25a0 Stopped"
         }
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]
     },
     {
@@ -1869,6 +2695,9 @@
         "asks before Bash/MCP",
         "Type a message",
         "enter sends"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]
     },
     {
@@ -1891,6 +2720,9 @@
         "Type a message",
         "enter sends",
         "more lines \u00b7 shift+\u2193"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]
     },
     {
@@ -1919,6 +2751,9 @@
       ],
       "expect": [
         "Deny"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]
     },
     {
@@ -1942,6 +2777,9 @@
       ],
       "absent": [
         "more lines \u00b7 shift+\u2193"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]
     },
     {
@@ -1963,11 +2801,14 @@
         {
           "wait": "Allow once"
         }
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]
     },
     {
       "name": "keys",
-      "note": "20-keys: shared key reference, aligned pairs at 140 and one column at 46",
+      "note": "Shared key reference, aligned pairs at 140 and one column at 46",
       "open": "overview",
       "steps": [
         {
@@ -1995,7 +2836,7 @@
         }
       ],
       "expect": [
-        "enter    send / open",
+        "enter    open / send",
         "esc      back",
         "\u21e7enter   new line",
         "ctrl+x   stop",
@@ -2008,7 +2849,7 @@
         "ctrl+c   leave",
         "next panel/footer field",
         "previous panel/footer field",
-        "list/chat \u00b7 info actions"
+        "list/chat · info actions"
       ],
       "absent": [
         "/help",
@@ -2032,7 +2873,11 @@
         "scroll / select",
         "/status",
         "/configure",
-        "/model"
+        "/model",
+        "Type a task"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]
     },
     {
@@ -2063,6 +2908,9 @@
         "/status",
         "/configure",
         "/model"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]
     },
     {
@@ -2090,32 +2938,52 @@
         "/copy",
         "code \u00b7 file",
         "/effort"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]
     },
     {
-      "name": "slash-overview",
-      "note": "Overview slash list: names only with quiet fixed-choice words",
+      "name": "overview-printable-ignored",
+      "note": "The list ignores printable input and has no command path",
       "open": "overview",
       "steps": [
         {
-          "text": "/"
+          "text": "/nope"
         },
         {
-          "wait": "/sessions"
+          "keys": [
+            "End",
+            "Enter"
+          ]
         },
         {
-          "gone": "/configure [OPTIONS]"
+          "wait": "Notifications"
+        },
+        {
+          "keys": [
+            "Esc"
+          ]
+        },
+        {
+          "wait": "enter open"
         }
       ],
       "expect": [
-        "/archive",
-        "/sessions",
-        "unarchived \u00b7 archived \u00b7 all",
-        "/unarchive"
+        "+ New Session",
+        "Settings",
+        "enter open"
       ],
       "absent": [
-        "/help",
-        "/model"
+        "Type a task",
+        "/nope",
+        "Unknown command",
+        "/sessions",
+        "/archive",
+        "/configure"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]
     },
     {
@@ -2129,24 +2997,9 @@
         {
           "wait": "/copy"
         }
-      ]
-    },
-    {
-      "name": "unknown-command",
-      "note": "25-unknown-command",
-      "open": "Release notes for 0.60",
-      "steps": [
-        {
-          "text": "/nope"
-        },
-        {
-          "keys": [
-            "Enter"
-          ]
-        },
-        {
-          "wait": "Unknown command /nope"
-        }
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]
     },
     {
@@ -2176,6 +3029,9 @@
         {
           "wait": "Usage: /requests"
         }
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]
     },
     {
@@ -2227,6 +3083,9 @@
             "Give a chat info specimen summarizing the retry deadline fix."
           ]
         }
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]
     },
     {
@@ -2276,6 +3135,9 @@
         "alt+i info",
         "Filter:",
         "\u2191 "
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]
     },
     {
@@ -2313,7 +3175,11 @@
       ],
       "absent": [
         "Filter:",
-        "\u2191 "
+        "\u2191 ",
+        "Type a task"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]
     },
     {
@@ -2357,24 +3223,43 @@
       ],
       "absent": [
         "Filter:",
-        "\u2191 "
+        "\u2191 ",
+        "Type a task"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]
     },
     {
       "name": "start-draft",
-      "note": "48-overview-draft",
+      "note": "48-new-chat-draft: task typing happens only after New Session opens",
       "open": "overview",
       "steps": [
+        {
+          "keys": [
+            "Home",
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Type a task"
+        },
         {
           "text": "Add a --json flag to rui session list"
         },
         {
-          "wait": "enter start"
+          "wait": "Add a --json flag"
         }
       ],
       "expect": [
-        "Settings",
+        "Add a --json flag",
+        "gpt-6.1-sol \u00b7 low"
+      ],
+      "absent": [
         "enter start"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]
     },
     {
@@ -2400,6 +3285,12 @@
       "expect": [
         "Migrate the billing",
         "Settings"
+      ],
+      "absent": [
+        "Type a task"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]
     },
     {
@@ -2431,7 +3322,11 @@
       ],
       "absent": [
         "\u2191",
-        "\u2193 0 more"
+        "\u2193 0 more",
+        "Type a task"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]
     },
     {
@@ -2483,7 +3378,11 @@
       ],
       "absent": [
         "\u2191 0 more",
-        "\u2193 0 more"
+        "\u2193 0 more",
+        "Type a task"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]
     },
     {
@@ -2517,7 +3416,11 @@
       ],
       "absent": [
         "\u2193",
-        "\u2191 0 more"
+        "\u2191 0 more",
+        "Type a task"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]
     },
     {
@@ -2535,7 +3438,10 @@
           ]
         },
         {
-          "wait": "Settings"
+          "wait": "\u2191"
+        },
+        {
+          "gone": "\u2193"
         }
       ],
       "sizes": [
@@ -2550,7 +3456,11 @@
       ],
       "absent": [
         "\u2193",
-        "\u2191 0 more"
+        "\u2191 0 more",
+        "Type a task"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]
     },
     {
@@ -2587,6 +3497,9 @@
           "mode": "bypass",
           "effort": "high"
         }
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]
     },
     {
@@ -2610,6 +3523,9 @@
       "expect_last": "alt+i info",
       "absent": [
         "+ New Session"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]
     },
     {
@@ -2619,8 +3535,17 @@
       "steps": [],
       "theme": "day",
       "expect": [
+        "+ New Session",
+        "Settings",
+        "enter open"
+      ],
+      "absent": [
         "Type a task",
-        "Settings"
+        "enter start",
+        "gpt-6.1-sol \u00b7 low"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]
     },
     {
@@ -2639,6 +3564,9 @@
         "pub fn next",
         "Late request  waits 30 s  fails at once",
         "retry policy notes"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]
     },
     {
@@ -2658,6 +3586,9 @@
       "theme": "mist",
       "expect": [
         "\u2193"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]
     },
     {
@@ -2678,6 +3609,9 @@
         "pub fn next",
         "Late request  waits 30 s  fails at once",
         "retry policy notes"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]
     },
     {
@@ -2691,6 +3625,12 @@
         {
           "wait": "Host stopped"
         }
+      ],
+      "absent": [
+        "Type a task"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]
     },
     {
@@ -2715,7 +3655,10 @@
         "46x30",
         "140x40"
       ],
-      "expect": "Host stopped"
+      "expect": "Host stopped",
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+      ]
     },
     {
       "name": "host-back",
@@ -2729,7 +3672,13 @@
           "gone": "Host stopped"
         }
       ],
-      "expect": "Batch job"
+      "expect": "Batch job",
+      "absent": [
+        "Type a task"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+      ]
     },
     {
       "name": "exit",
@@ -2752,7 +3701,10 @@
         "46x30",
         "140x40"
       ],
-      "expect": "Detached. Host work continues."
+      "expect": "Detached. Host work continues.",
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+      ]
     },
     {
       "name": "chat-info-archive",
@@ -2804,6 +3756,9 @@
             "Give a chat info specimen summarizing the retry deadline fix."
           ]
         }
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -2854,6 +3809,9 @@
             "Give a chat info specimen summarizing the retry deadline fix."
           ]
         }
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -2867,10 +3825,10 @@
       ],
       "expect": [
         "Focus navigation audit",
-        "\u203a"
+        "›"
       ],
       "absent": [
-        "Opening\u2026"
+        "Opening…"
       ],
       "cast": [
         {
@@ -2884,11 +3842,14 @@
       ],
       "sizes": [
         "140x40"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
       "name": "left-to-list",
-      "note": "Left on an empty draft focuses the list; wide keeps feed, narrow is the existing Esc return.",
+      "note": "Left on an empty draft focuses the list beside a wide chat, keeping the feed; narrow has no list beside the chat, so Left leaves it. Esc always leaves.",
       "open": "Focus navigation audit",
       "steps": [
         {
@@ -2908,7 +3869,10 @@
         "Settings"
       ],
       "absent": [
-        "Opening\u2026"
+        "Opening…"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -2934,10 +3898,13 @@
       "expect": [
         "Focus navigation audit",
         "The retry draft is ready.",
-        "\u203a"
+        "›"
       ],
       "absent": [
-        "Opening\u2026"
+        "Opening…"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -2960,66 +3927,16 @@
       ],
       "expect": [
         "Focus navigation audit",
-        "\u203a"
+        "›"
       ],
       "absent": [
-        "Opening\u2026"
+        "Opening…"
       ],
       "sizes": [
         "140x40"
-      ]
-    },
-    {
-      "name": "list-retained-draft-resume",
-      "note": "List activation ignores the retained overview draft and resumes the selected chat without submitting it.",
-      "open": "overview",
-      "steps": [
-        {
-          "wait": "Retained draft audit"
-        },
-        {
-          "text": "do not submit retained draft"
-        },
-        {
-          "mouse": {
-            "at": "Retained draft audit",
-            "do": "click"
-          }
-        },
-        {
-          "wait": "The retry draft is ready."
-        },
-        {
-          "keys": [
-            "Left",
-            "Right"
-          ]
-        },
-        {
-          "wait": "The retry draft is ready."
-        },
-        {
-          "sleep": 0.2
-        }
       ],
-      "expect": [
-        "The retry draft is ready.",
-        "\u203a"
-      ],
-      "absent": [
-        "do not submit retained draft",
-        "Opening\u2026"
-      ],
-      "cast": [
-        {
-          "label": "Retained draft audit",
-          "workspace": "code/rui",
-          "mode": "bypass",
-          "effort": "high",
-          "messages": [
-            "Give a chat info specimen summarizing the retry deadline fix."
-          ]
-        }
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -3084,6 +4001,208 @@
             "Give a chat info specimen summarizing the retry deadline fix."
           ]
         }
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
+    },
+    {
+      "name": "appcmds-skill-without-preview",
+      "note": "Whole-line bracketed paste uses normal Message admission, never the suggestion preview",
+      "open": "Skill catalog authority",
+      "cast": [
+        {
+          "label": "Skill catalog authority",
+          "workspace": "code/appcmds-skill-without-preview",
+          "messages": [
+            "Seed a fresh chat."
+          ],
+          "mode": "bypass",
+          "skills": [
+            "review"
+          ]
+        }
+      ],
+      "steps": [
+        {
+          "text": "\u001b[200~/review this change\u001b[201~"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "The deadline check now runs"
+        }
+      ],
+      "expect": [
+        "/review this change",
+        "The deadline check now runs"
+      ],
+      "absent": [
+        "Unknown command",
+        "Usage:"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+      ]
+    },
+    {
+      "name": "appcmds-unknown-name-message",
+      "note": "Whole-line bracketed paste uses normal Message admission, never the suggestion preview",
+      "open": "Unknown name text",
+      "cast": [
+        {
+          "label": "Unknown name text",
+          "workspace": "code/appcmds-unknown-name-message",
+          "messages": [
+            "Seed a fresh chat."
+          ],
+          "mode": "bypass",
+          "skills": []
+        }
+      ],
+      "steps": [
+        {
+          "text": "\u001b[200~/genuinely-unknown this change\u001b[201~"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "The deadline check now runs"
+        }
+      ],
+      "expect": [
+        "/genuinely-unknown this change",
+        "The deadline check now runs"
+      ],
+      "absent": [
+        "Unknown command",
+        "Usage:"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+      ]
+    },
+    {
+      "name": "appcmds-hidden-discard-collision",
+      "note": "The complete grammar reserves hidden commands; noncolliding skills still complete",
+      "open": "Hidden discard collision",
+      "cast": [
+        {
+          "label": "Hidden discard collision",
+          "workspace": "code/appcmds-hidden-discard-collision",
+          "messages": [
+            "Seed a fresh chat."
+          ],
+          "mode": "bypass",
+          "skills": [
+            "discard",
+            "discarded"
+          ]
+        }
+      ],
+      "steps": [
+        {
+          "text": "/dis"
+        },
+        {
+          "wait": "/discarded"
+        }
+      ],
+      "expect": [
+        "/discarded"
+      ],
+      "absent_regex": [
+        "^\\s*/discard\\s+",
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+      ]
+    },
+    {
+      "name": "appcmds-hidden-recover-collision",
+      "note": "The complete grammar reserves hidden commands; noncolliding skills still complete",
+      "open": "Hidden recover collision",
+      "cast": [
+        {
+          "label": "Hidden recover collision",
+          "workspace": "code/appcmds-hidden-recover-collision",
+          "messages": [
+            "Seed a fresh chat."
+          ],
+          "mode": "bypass",
+          "skills": [
+            "recover",
+            "recovering"
+          ]
+        }
+      ],
+      "steps": [
+        {
+          "text": "/reco"
+        },
+        {
+          "wait": "/recovering"
+        }
+      ],
+      "expect": [
+        "/recovering"
+      ],
+      "absent_regex": [
+        "^\\s*/recover\\s+",
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+      ]
+    },
+    {
+      "name": "draft-chat-misused",
+      "note": "B06: conversation counterpart uses the same draft-ending rule",
+      "open": "Draft lifecycle",
+      "steps": [
+        {
+          "text": "/new unexpected"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Usage: /new"
+        }
+      ],
+      "expect": [
+        "Usage: /new",
+        "The deadline check now runs"
+      ],
+      "absent": [
+        "\u203a /new unexpected"
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+      ]
+    },
+    {
+      "name": "misused-navigation-command",
+      "note": "Known navigation-command misuse stays local and takes the draft",
+      "open": "Release notes for 0.60",
+      "steps": [
+        {
+          "text": "/new unexpected"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Usage: /new"
+        }
+      ],
+      "absent_regex": [
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
       ]
     }
   ]

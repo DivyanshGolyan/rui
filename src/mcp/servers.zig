@@ -1,9 +1,10 @@
-//! Launch-frame configuration kept at one Host-owned address until shutdown.
+//! MCP settings kept at one Host-owned address until shutdown.
 const std = @import("std");
-const frame = @import("../launch_frame.zig");
+const hs = @import("../host_settings.zig");
+const Connection = @import("../server_mcp_settings.zig").Server;
 const http = @import("../http1/request.zig");
 
-pub const default_timeout_ms = frame.default_mcp_call_timeout_ms;
+pub const default_timeout_ms = hs.default_mcp_call_timeout_ms;
 pub const Server = struct {
     name: []u8,
     url: []u8,
@@ -15,7 +16,7 @@ pub const Server = struct {
 pub const Servers = struct {
     entries: []Server = &.{},
 
-    pub fn init(self: *Servers, allocator: std.mem.Allocator, input: []const frame.Frame.McpServer) !void {
+    pub fn init(self: *Servers, allocator: std.mem.Allocator, input: []const Connection) !void {
         self.entries = try allocator.alloc(Server, input.len);
         var initialized: usize = 0;
         errdefer {
@@ -59,7 +60,7 @@ pub const Servers = struct {
 
 test "MCP Host configurations own target strings and wipe tokens" {
     const gpa = std.testing.allocator;
-    const source = try gpa.create(frame.Frame.McpServer);
+    const source = try gpa.create(Connection);
     defer gpa.destroy(source);
     source.* = .{};
     defer source.bearer_token.wipe();
@@ -71,7 +72,7 @@ test "MCP Host configurations own target strings and wipe tokens" {
     defer gpa.free(memory);
     var fixed: std.heap.FixedBufferAllocator = .init(memory);
     var configs: Servers = .{};
-    try configs.init(fixed.allocator(), @as(*[1]frame.Frame.McpServer, @ptrCast(source)));
+    try configs.init(fixed.allocator(), @as(*[1]Connection, @ptrCast(source)));
     source.bearer_token.wipe();
     try source.url.set("http://127.0.0.1:1/changed");
     const token = configs.entries[0].token;

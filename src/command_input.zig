@@ -20,40 +20,6 @@ const validToolName = tool_name.valid;
 pub const max_preset_name_bytes = 64;
 pub const max_sender_handle_bytes = 32;
 
-/// The command draft ends at cancellation or submission, not at a particular
-/// command's success branch. A hold has not submitted anything. Cancelling
-/// skill suggestions or recovery rows does not consume an ordinary Message.
-pub const DraftEnd = enum { cancelled, submitted, held };
-
-pub fn consumesDraft(text: []const u8, end: DraftEnd) bool {
-    return switch (end) {
-        .cancelled => text.len != 0 and text[0] == '/' and !std.mem.startsWith(u8, text, "//"),
-        .submitted => true,
-        .held => false,
-    };
-}
-
-test "command draft lifecycle over chat and overview cancellation and command outcomes" {
-    const Screen = enum { chat, overview };
-    const End = enum { choice_escape, unknown_enter, known_run, known_failed };
-    for (std.enums.values(Screen)) |screen| {
-        for (std.enums.values(End)) |end| {
-            const command = switch (end) {
-                .choice_escape => if (screen == .chat) "/effort " else "/configure --permission-mode ",
-                .unknown_enter => "/nope",
-                .known_run => if (screen == .chat) "/discard" else "/sessions all",
-                .known_failed => if (screen == .chat) "/effort nope" else "/sessions nope",
-            };
-            const draft = if (consumesDraft(command, if (end == .choice_escape) .cancelled else .submitted)) "" else command;
-            try std.testing.expectEqualStrings("", draft);
-            // Refusal to admit a command is not a command ending.
-            try std.testing.expect(!consumesDraft(command, .held));
-        }
-    }
-    for ([_][]const u8{ "", "ordinary draft", "please /skill", "//literal" }) |text|
-        try std.testing.expect(!consumesDraft(text, .cancelled));
-}
-
 pub fn Commands(comptime Custody: type) type {
     return struct {
         pub const ContentField = ContentFieldOf(Custody);

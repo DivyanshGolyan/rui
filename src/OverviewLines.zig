@@ -80,7 +80,7 @@ test "overview header draws no counts view name or Host-stopped band" {
     var header: Header = .{ .state = &state };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 50, .height = 6 }, .cell_size = .{} };
+    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 50, .height = 6 }, .cell_size = .{} };
     const plain = try header.widget().draw(ctx);
     try std.testing.expectEqual(@as(u16, 0), plain.size.height);
     state.archive = .archived;
@@ -92,6 +92,7 @@ test "overview header draws no counts view name or Host-stopped band" {
 /// Pinned list tail, with a click target only on the Settings row.
 pub const Settings = struct {
     selected: bool,
+    memory: ?overview_view.Memory = null,
     hover: Hover = .{},
     size: vxfw.Size = .{ .width = 0, .height = 0 },
     caps: overview_view.Caps,
@@ -120,16 +121,21 @@ pub const Settings = struct {
         const target: Hover.Rect = .{ .row = 1, .width = size.width };
         self.hover.targets = if (height == 2 and size.width > 0) try ctx.arena.dupe(Hover.Rect, &.{target}) else &.{};
         const ground: overview_view.Background = if (self.selected) .selection else if (self.hover.targets.len != 0 and self.hover.contains(target)) .hover else .ground;
-        const surface = try vxfw.Surface.init(ctx.arena, self.widget(), .{ .width = size.width, .height = height });
+        const surface = try vxfw.Surface.init(ctx.cell_arena, self.widget(), .{ .width = size.width, .height = height });
         @memset(surface.buffer, .{ .style = widget_style.of(self.caps, .{}) });
         if (height == 0 or size.width == 0) return surface;
         for (0..size.width) |x| surface.writeCell(@intCast(x), 0, .{ .char = .{ .grapheme = if (self.caps.unicode) "─" else "-", .width = 1 }, .style = widget_style.of(self.caps, .{ .colour = .quiet }) });
         if (height < 2) return surface;
         const style = widget_style.of(self.caps, .{ .colour = .quiet, .background = ground });
-        const footer: @import("widgets/Footer.zig") = .{ .left = "", .right = @import("transport_options").version ++ " ", .style = style };
+        const version = @import("transport_options").version ++ " ";
+        const label_text = "  Settings";
+        // Settings and the version keep their space, each two columns from memory.
+        const memory = try @import("memory_text.zig").fit(ctx.arena, self.memory, self.caps.unicode, size.width -| @as(u16, label_text.len + 2 + 2 + version.len));
+        const right = if (memory.len == 0) version else try std.fmt.allocPrint(ctx.arena, "{s}  {s}", .{ memory, version });
+        const footer: @import("widgets/Footer.zig") = .{ .left = "", .right = right, .style = style };
         const drawn = try footer.widget().draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = 1 }));
         @memcpy(surface.buffer[size.width..], drawn.buffer);
-        const name: vxfw.RichText = .{ .text = &.{.{ .text = "  Settings", .style = widget_style.of(self.caps, .{ .colour = if (self.selected) .strong else .normal, .bold = self.selected, .background = ground }) }}, .softwrap = false };
+        const name: vxfw.RichText = .{ .text = &.{.{ .text = label_text, .style = widget_style.of(self.caps, .{ .colour = if (self.selected) .strong else .normal, .bold = self.selected, .background = ground }) }}, .softwrap = false };
         const label = try name.widget().draw(ctx.withConstraints(.{}, .{ .width = size.width -| @as(u16, @intCast(@import("transport_options").version.len + 2)), .height = 1 }));
         if (label.size.height > 0) @memcpy(surface.buffer[size.width..][0..label.size.width], label.buffer[0..label.size.width]);
         return surface;
@@ -142,7 +148,7 @@ test "overview Settings row is pinned selected and opens only on its second line
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     for ([_]u16{ 40, 140 }) |width| {
-        const surface = try settings.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 8 }, .cell_size = .{} });
+        const surface = try settings.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 8 }, .cell_size = .{} });
         try std.testing.expectEqual(@as(u16, 2), surface.size.height);
         try std.testing.expectEqualStrings("─", surface.readCell(0, 0).char.grapheme);
         const text = try cells(arena.allocator(), surface, 1);
@@ -157,7 +163,7 @@ test "overview Settings row is pinned selected and opens only on its second line
     try std.testing.expectEqual(overview_view.Click.settings, clicks.got.?);
     try std.testing.expect(events.consume_event);
     for (0..4) |height| for (0..12) |width| {
-        const tiny = try settings.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = @intCast(width), .height = @intCast(height) }, .cell_size = .{} });
+        const tiny = try settings.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = @intCast(width), .height = @intCast(height) }, .cell_size = .{} });
         try std.testing.expect(tiny.size.width <= width and tiny.size.height <= height);
     };
 }
@@ -167,7 +173,7 @@ test "overview Settings hover follows only its drawn row without selecting or fo
     var settings: Settings = .{ .selected = false, .caps = .{}, .userdata = &clicks, .on_click = Clicks.take };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 2 }, .cell_size = .{} };
+    const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 2 }, .cell_size = .{} };
     const plain = try settings.widget().draw(draw_ctx);
     var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
     try settings.widget().handleEvent(&events, .mouse_enter);
@@ -197,4 +203,30 @@ test "overview Settings hover follows only its drawn row without selecting or fo
     try settings.widget().handleEvent(&events, .{ .mouse = .{ .col = 3, .row = 1, .button = .none, .type = .motion, .mods = .{} } });
     const both = try settings.widget().draw(draw_ctx);
     try std.testing.expectEqual(widget_style.of(settings.caps, .{ .background = .selection }).bg, both.readCell(3, 1).style.bg);
+}
+
+test "overview Settings memory gets the columns between the label and the version" {
+    var clicks: Clicks = .{};
+    var settings: Settings = .{ .selected = false, .caps = .{}, .userdata = &clicks, .on_click = Clicks.take, .memory = .{ .rui = 38 * overview_view.mib, .tools = 120 * overview_view.mib } };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const version = @import("transport_options").version ++ " ";
+    // memory_text owns which form fits; this row owns only the columns it gives memory.
+    const full_width = "  Settings".len + 2 + 24 + 2 + version.len;
+    const rui_width = "  Settings".len + 2 + 9 + 2 + version.len;
+    for ([_]struct { width: usize, expected: []const u8 }{
+        .{ .width = full_width, .expected = "rui 38 MB · tools 120 MB" },
+        .{ .width = full_width - 1, .expected = "rui 38 MB" },
+        .{ .width = rui_width, .expected = "rui 38 MB" },
+        .{ .width = rui_width - 1, .expected = "" },
+    }) |case| {
+        const surface = try settings.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = @intCast(case.width), .height = 2 }, .cell_size = .{} });
+        const text = try cells(arena.allocator(), surface, 1);
+        try std.testing.expect(std.mem.startsWith(u8, text, "  Settings"));
+        try std.testing.expect(std.mem.endsWith(u8, text, version));
+        if (case.expected.len > 0) {
+            try std.testing.expect(std.mem.endsWith(u8, text, try std.fmt.allocPrint(arena.allocator(), "{s}  {s}", .{ case.expected, version })));
+        } else try std.testing.expect(std.mem.indexOf(u8, text, "rui ") == null);
+        if (case.expected.len == 9) try std.testing.expect(std.mem.indexOf(u8, text, "tools ") == null);
+    }
 }

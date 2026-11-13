@@ -33,7 +33,6 @@ overview: vxfw.Widget,
 /// probes) hands those events to the `overview` widget instead.
 overview_keys: ?Keys = null,
 list: vxfw.Widget,
-compose: vxfw.Widget,
 divider: Split.Divider = .{},
 session: ?vxfw.Widget = null,
 /// The open Session's key owner, which `openSession` and `closeSession`
@@ -69,7 +68,7 @@ const Layout = struct {
 fn chooseLayout(self: *const Self) Layout {
     std.debug.assert(!self.input.layer.signInOpen() or self.sign_in != null);
     return .{
-        .split = self.size.width >= split_at,
+        .split = self.size.width >= split_at and app_input.mainPane(self.input, self.session != null, self.size.width >= split_at) != .overview,
         .pane = app_input.mainPane(self.input, self.session != null, self.size.width >= split_at),
     };
 }
@@ -94,6 +93,12 @@ pub fn showMain(self: *Self, ctx: *vxfw.EventContext) !void {
     try self.navigate(ctx, .show_main);
 }
 
+/// List activation resumes the open chat as a chat-pane click does: focus
+/// moves, and nothing the chat presents closes.
+pub fn focusChat(self: *Self, ctx: *vxfw.EventContext) !void {
+    try self.navigate(ctx, .focus_chat);
+}
+
 /// Settings takes the place of the main pane; it is no content of a feed.
 /// The page reloads first, so a failed reload leaves the layer as it was.
 pub fn openSettings(self: *Self, ctx: *vxfw.EventContext) !void {
@@ -105,7 +110,7 @@ pub fn openSettings(self: *Self, ctx: *vxfw.EventContext) !void {
 /// The sign-in page covers the main pane or settings until it closes back.
 pub fn openSignIn(self: *Self, ctx: *vxfw.EventContext) !void {
     self.closeMainPresentation();
-    self.settings_page.closeStandaloneChoice();
+    self.settings_page.cancelChoice();
     try self.navigate(ctx, .open_sign_in);
 }
 
@@ -148,7 +153,7 @@ fn apply(self: *Self, ctx: *vxfw.EventContext, effects: app_input.Effects, route
         .cancel_choice => self.settings_page.cancelChoice(),
         .reset => {
             self.closeMainPresentation();
-            self.settings_page.closeStandaloneChoice();
+            self.settings_page.cancelChoice();
             self.settings_page.keys_open = false;
         },
     }
@@ -183,10 +188,10 @@ fn apply(self: *Self, ctx: *vxfw.EventContext, effects: app_input.Effects, route
     if (effects.redraw) ctx.redraw = true;
 }
 
-/// The guarded Session close path asks the input core whether the visible
-/// sidebar can take focus without retiring the chat. Narrow retains departure.
-pub fn focusList(self: *Self, ctx: *vxfw.EventContext, draft_empty: bool) !bool {
-    const effect = app_input.step(&self.input, self.facts(null), .{ .back_to_list = draft_empty });
+/// Left on an empty chat draft asks whether a visible sidebar can take
+/// focus without retiring the chat. With none (narrow), the chat leaves.
+pub fn focusList(self: *Self, ctx: *vxfw.EventContext) !bool {
+    const effect = app_input.step(&self.input, self.facts(null), .back_to_list);
     try self.apply(ctx, effect, null);
     return effect.focus == .list;
 }
@@ -197,7 +202,7 @@ pub fn closeSession(self: *Self, ctx: *vxfw.EventContext) !void {
     self.closeMainPresentation();
     self.session = null;
     self.session_keys = null;
-    if (!self.input.layer.settingsOpen()) self.settings_page.closeStandaloneChoice();
+    if (!self.input.layer.settingsOpen()) self.settings_page.cancelChoice();
     try self.navigate(ctx, .session_closed);
     ctx.redraw = true;
 }
@@ -206,7 +211,7 @@ pub fn closeSession(self: *Self, ctx: *vxfw.EventContext) !void {
 fn capture(raw: *anyopaque, ctx: *vxfw.EventContext, routed: vxfw.Event) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     const input: app_input.Input = switch (routed) {
-        .key_press => |key| .{ .key = .{ .named = @import("TerminalEditor.zig").named(key), .right = key.matches(vaxis.Key.right, .{}), .enter = key.matches(vaxis.Key.enter, .{}) } },
+        .key_press => |key| .{ .key = .{ .named = @import("TerminalEditor.zig").named(key) } },
         .paste_start => .paste_start,
         .paste_end => .paste_end,
         .mouse => |mouse| .{ .mouse = switch (mouse.button) {
@@ -273,7 +278,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const children = try ctx.arena.alloc(vxfw.SubSurface, 1);
     const layout = self.chooseLayout();
     const pane = switch (layout.pane) {
-        .overview => if (layout.split) self.compose else self.overview,
+        .overview => self.overview,
         .session => self.session.?,
         .sign_in => self.sign_in.?,
         .settings => self.settings_page.widget(),
@@ -299,11 +304,12 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
 test "App root switches between overview and Session without retaining the hidden screen" {
     const overview: vxfw.Text = .{ .text = "Overview" };
     const session: vxfw.Text = .{ .text = "Session" };
-    var root: Self = .{ .overview = overview.widget(), .list = overview.widget(), .compose = overview.widget() };
+    var root: Self = .{ .overview = overview.widget(), .list = overview.widget() };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const draw_context: vxfw.DrawContext = .{
         .arena = arena.allocator(),
+        .cell_arena = arena.allocator(),
         .min = .{},
         .max = .{ .width = 80, .height = 24 },
         .cell_size = .{},
@@ -325,7 +331,7 @@ test "App root switches between overview and Session without retaining the hidde
     try std.testing.expectEqualStrings("O", closed.children[0].surface.buffer[0].char.grapheme);
 }
 
-test "App root places list and compose or the open child at desktop and phone widths" {
+test "App root keeps the overview whole and places the list beside an open child at desktop widths" {
     const Pane = struct {
         fn widget(self: *@This()) vxfw.Widget {
             return .{ .userdata = self, .drawFn = @This().draw };
@@ -337,19 +343,18 @@ test "App root places list and compose or the open child at desktop and phone wi
     };
     var whole: Pane = .{};
     var list: Pane = .{};
-    var compose: Pane = .{};
     var opened: Pane = .{};
-    var root: Self = .{ .overview = whole.widget(), .list = list.widget(), .compose = compose.widget() };
+    var root: Self = .{ .overview = whole.widget(), .list = list.widget() };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     for ([_]bool{ false, true }) |active| {
         root.session = if (active) opened.widget() else null;
         for ([_]vxfw.Size{ .{ .width = 140, .height = 40 }, .{ .width = 46, .height = 26 }, .{ .width = 0, .height = 1 }, .{ .width = 1, .height = 1 }, .{ .width = 41, .height = 1 }, .{ .width = 99, .height = 1 }, .{ .width = 100, .height = 1 }, .{ .width = 100, .height = 0 } }) |size| {
-            const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = size.width, .height = size.height }, .cell_size = .{} };
+            const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = size.width, .height = size.height }, .cell_size = .{} };
             const surface = try root.widget().draw(ctx);
             try std.testing.expectEqual(size, surface.size);
             const layout = surface.children[0].surface;
-            if (size.width >= 100 and size.height > 0) {
+            if (active and size.width >= split_at and size.height > 0) {
                 try std.testing.expectEqual(@as(usize, 3), layout.children.len);
                 try std.testing.expect(layout.children[0].surface.widget.eql(list.widget()));
                 try std.testing.expectEqual(vxfw.RelativePoint{ .row = 0, .col = 0 }, layout.children[0].origin);
@@ -358,8 +363,8 @@ test "App root places list and compose or the open child at desktop and phone wi
                 try std.testing.expectEqualStrings("│", layout.children[1].surface.buffer[0].char.grapheme);
                 try std.testing.expectEqual(vxfw.RelativePoint{ .row = 0, .col = 41 }, layout.children[2].origin);
                 try std.testing.expectEqual(size.width - 41, layout.children[2].surface.size.width);
-                try std.testing.expect(layout.children[2].surface.widget.eql(if (active) opened.widget() else compose.widget()));
-            } else if (size.width < 100) {
+                try std.testing.expect(layout.children[2].surface.widget.eql(if (active) opened.widget() else whole.widget()));
+            } else if (!active or size.width < split_at) {
                 try std.testing.expect(layout.widget.eql(if (active) opened.widget() else whole.widget()));
                 try std.testing.expectEqual(size.width, layout.size.width);
             }
@@ -391,9 +396,8 @@ test "App root resizing keeps the open child's draft scroll and focus without an
     };
     var whole: Pane = .{};
     var list: Pane = .{};
-    var compose: Pane = .{};
     var opened: Pane = .{};
-    var root: Self = .{ .overview = whole.widget(), .list = list.widget(), .compose = compose.widget() };
+    var root: Self = .{ .overview = whole.widget(), .list = list.widget() };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
@@ -401,7 +405,7 @@ test "App root resizing keeps the open child's draft scroll and focus without an
     try std.testing.expectEqual(@as(usize, 1), events.cmds.items.len);
     try std.testing.expect(events.cmds.items[0].request_focus.eql(opened.widget()));
     for ([_]u16{ 140, 46, 99, 100, 46, 140 }) |width| {
-        const surface = try root.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 26 }, .cell_size = .{} });
+        const surface = try root.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 26 }, .cell_size = .{} });
         try std.testing.expect(root.session.?.eql(opened.widget()));
         try std.testing.expectEqual(@as(usize, 1), events.cmds.items.len);
         try std.testing.expectEqual(@as(usize, 1), opened.inits);
@@ -409,7 +413,7 @@ test "App root resizing keeps the open child's draft scroll and focus without an
         try std.testing.expectEqual(@as(u16, 7), opened.scroll);
         var screen: vaxis.Screen = try .init(arena.allocator(), .{ .cols = width, .rows = 26, .x_pixel = 0, .y_pixel = 0 });
         const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = 26, .screen = &screen };
-        surface.render(window, opened.widget());
+        try surface.render(window, opened.widget());
         try std.testing.expect(screen.cursor_vis);
         try std.testing.expectEqual(@as(u16, if (width >= 100) 41 else 0), screen.cursor.col);
     }
@@ -459,13 +463,12 @@ test "App root opens settings in both layouts and Escape closes the choice, then
     };
     var whole: Pane = .{};
     var list: Pane = .{};
-    var compose: Pane = .{};
     var session: Pane = .{};
     var data: u8 = 0;
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     for ([_]u16{ 140, 46 }) |width| {
-        var root: Self = .{ .overview = whole.widget(), .list = list.widget(), .compose = compose.widget(), .settings_page = .{ .backend = .{
+        var root: Self = .{ .overview = whole.widget(), .list = list.widget(), .settings_page = .{ .backend = .{
             .context = &data,
             .read = Backend.read,
             .save = Backend.save,
@@ -474,7 +477,7 @@ test "App root opens settings in both layouts and Escape closes the choice, then
             .run = Backend.run,
             .caps = Backend.caps,
         } } };
-        const draw_context: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} };
+        const draw_context: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} };
         var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
         _ = try root.widget().draw(draw_context);
         try root.openSettings(&ctx);
@@ -489,7 +492,7 @@ test "App root opens settings in both layouts and Escape closes the choice, then
         try std.testing.expectEqual(@as(u16, if (width >= split_at) 99 else 46), page.size.width);
         if (width >= split_at) try std.testing.expect(layout.children[0].surface.widget.eql(list.widget()));
         // The page takes the pane's place: nothing is drawn under it.
-        try std.testing.expect(!containsWidget(opened, if (width >= split_at) compose.widget() else whole.widget()));
+        try std.testing.expect(!containsWidget(opened, whole.widget()));
 
         // Root captures Escape ahead of the focused page.
         const escape: vxfw.Event = .{ .key_press = .{ .codepoint = vaxis.Key.escape } };
@@ -517,8 +520,10 @@ test "App root opens settings in both layouts and Escape closes the choice, then
         try std.testing.expect(ctx.cmds.items[ctx.cmds.items.len - 1].request_focus.eql(whole.widget()));
         const closed = try root.widget().draw(draw_context);
         const closed_layout = closed.children[0].surface;
-        try std.testing.expect((if (width >= split_at) closed_layout.children[2].surface.widget else closed_layout.widget).eql(if (width >= split_at) compose.widget() else whole.widget()));
-        // With no page open, Escape is the overview's, which Root hands it.
+        try std.testing.expect(closed_layout.widget.eql(whole.widget()));
+        try std.testing.expectEqual(width, closed_layout.size.width);
+        try std.testing.expect(root.listVisible());
+        // With no page open, Escape is the focused screen's.
         ctx.consume_event = false;
         try root.widget().captureEvent(&ctx, escape);
         try std.testing.expect(ctx.consume_event and !root.input.layer.settingsOpen());
@@ -598,7 +603,7 @@ test "App root gives Escape to a cancellable Upgrade after a choice and before c
     defer arena.deinit();
     for (runs) |run| for ([_]bool{ false, true }) |choice| {
         var fixture: Fixture = .{ .run = run };
-        var root: Self = .{ .overview = fixture.widget(), .list = fixture.widget(), .compose = fixture.widget(), .settings_page = .{ .backend = .{
+        var root: Self = .{ .overview = fixture.widget(), .list = fixture.widget(), .settings_page = .{ .backend = .{
             .context = &fixture,
             .read = Fixture.read,
             .save = Fixture.save,
@@ -655,7 +660,7 @@ test "App root gives Escape to a cancellable Upgrade after a choice and before c
     };
     // Without a text editor, no pasted key reaches the page or closes it.
     var pasted: Fixture = .{};
-    var page: Self = .{ .overview = pasted.widget(), .list = pasted.widget(), .compose = pasted.widget() };
+    var page: Self = .{ .overview = pasted.widget(), .list = pasted.widget() };
     var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty, .phase = .capturing };
     try page.openSettings(&events);
     try page.widget().captureEvent(&events, .paste_start);
@@ -679,7 +684,7 @@ test "App root gives Escape to a cancellable Upgrade after a choice and before c
     // With settings closed Escape is the main pane's to decide: Root hands
     // it to the overview, or to the open Session, once and stops it.
     var fixture: Fixture = .{ .run = .checking };
-    var root: Self = .{ .overview = fixture.widget(), .list = fixture.widget(), .compose = fixture.widget() };
+    var root: Self = .{ .overview = fixture.widget(), .list = fixture.widget() };
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty, .phase = .capturing };
     try root.widget().captureEvent(&ctx, escape);
     try std.testing.expect(ctx.consume_event);
@@ -714,7 +719,7 @@ test "App root keeps settings focus while a hidden Session ticks and retains oth
     };
     const whole: vxfw.Text = .{ .text = "Overview" };
     var hidden: Hidden = .{};
-    var root: Self = .{ .overview = whole.widget(), .list = whole.widget(), .compose = whole.widget(), .session = hidden.widget(), .input = .{ .layer = .settings } };
+    var root: Self = .{ .overview = whole.widget(), .list = whole.widget(), .session = hidden.widget(), .input = .{ .layer = .settings } };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
@@ -762,7 +767,7 @@ test "App root relaunch departure stops child ticks and scheduling at the first 
             var overview: Pane = .{ .quit = quitter == .overview };
             var session: Pane = .{ .quit = quitter == .session };
             var sign_in: Pane = .{ .quit = quitter == .sign_in };
-            var root: Self = .{ .overview = overview.widget(), .list = overview.widget(), .compose = overview.widget(), .session = session.widget(), .sign_in = sign_in.widget(), .input = .{ .layer = .{ .sign_in = .{ .over = if (settings) .settings else .main } } } };
+            var root: Self = .{ .overview = overview.widget(), .list = overview.widget(), .session = session.widget(), .sign_in = sign_in.widget(), .input = .{ .layer = .{ .sign_in = .{ .over = if (settings) .settings else .main } } } };
             var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = std.testing.allocator, .cmds = .empty };
             defer ctx.cmds.deinit(std.testing.allocator);
             try root.widget().handleEvent(&ctx, .tick);
@@ -777,7 +782,7 @@ test "App root relaunch departure stops child ticks and scheduling at the first 
 
 test "App root routes Model filter typing to settings and Escape closes only its choice" {
     var text: vxfw.Text = .{ .text = "overview" };
-    var root: Self = .{ .overview = text.widget(), .list = text.widget(), .compose = text.widget(), .input = .{ .layer = .settings } };
+    var root: Self = .{ .overview = text.widget(), .list = text.widget(), .input = .{ .layer = .settings } };
     root.settings_page.model_choice.open(null, .codex, "");
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -843,7 +848,7 @@ test "App root routes typed and pasted settings text only to the Model filter wi
     for (std.enums.values(Choice)) |choice| for ([_]bool{ false, true }) |pasted| {
         errdefer std.debug.print("settings text choice={s}, pasted={}\n", .{ @tagName(choice), pasted });
         var fixture: Fixture = .{};
-        var root: Self = .{ .overview = fixture.widget(), .list = fixture.widget(), .compose = fixture.widget(), .settings_page = .{ .backend = fixture.backend() } };
+        var root: Self = .{ .overview = fixture.widget(), .list = fixture.widget(), .settings_page = .{ .backend = fixture.backend() } };
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
@@ -883,12 +888,12 @@ test "App root routes typed and pasted settings text only to the Model filter wi
     };
 }
 
-test "Sign-in frames keep the list at 140 columns and the code link and masked key at 46" {
+test "Sign-in frames keep the list at 140 columns and the code link, browser link, masked entries and failure at 46" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const empty: vxfw.Text = .{ .text = "" };
     const list: vxfw.Text = .{ .text = " rui" };
-    var root: Self = .{ .overview = empty.widget(), .list = list.widget(), .compose = empty.widget(), .input = .{ .layer = .{ .sign_in = .{ .over = .main } } } };
+    var root: Self = .{ .overview = empty.widget(), .list = list.widget(), .input = .{ .layer = .{ .sign_in = .{ .over = .main } } } };
     // As the page's owner does: the page names the app only when the
     // screen's list, whose header names it, is not shown.
     const Owner = struct {
@@ -899,17 +904,27 @@ test "Sign-in frames keep the list at 140 columns and the code link and masked k
     };
     var page: @import("SignIn.zig") = .{ .userdata = &root, .list_visible = Owner.listVisible };
     root.sign_in = page.widget();
+    const SignIn = @import("SignIn.zig");
+    const browser = try @import("os/pages.zig").Mapped(SignIn.Browser).map();
+    defer browser.unmap();
+    const link = "https://auth.openai.com/api/accounts/authorize?client_id=app_made_up&state=made-up";
+    const pasted = "http://127.0.0.1:1455/auth/callback?code=made-up-grant";
     for ([_]u16{ 140, 46 }) |width| {
-        for ([_]@import("sign_in.zig").Stage{ .choice, .codex_waiting, .key_entry }) |stage| {
-            page.state.stage = stage;
+        for ([_]@import("sign_in.zig").Stage{ .choice, .browser_waiting, .codex_waiting, .key_entry, .failed }) |stage| {
+            page.state = .{ .stage = stage, .failure = .answer };
             try page.code.set("BDL9-KI88H");
             const secret = "sk-secret";
             @memcpy(page.key.bytes[0..secret.len], secret);
             page.key.len = secret.len;
-            const surface = try root.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 12 }, .cell_size = .{} });
+            browser.value.init();
+            try browser.value.link.set(link);
+            browser.value.edit(.{ .append = pasted });
+            page.browser = if (stage == .browser_waiting) browser else null;
+            defer page.browser = null;
+            const surface = try root.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 12 }, .cell_size = .{} });
             try std.testing.expectEqual(width >= split_at, root.listVisible());
             var screen = try vaxis.Screen.init(arena.allocator(), .{ .cols = width, .rows = 12, .x_pixel = 0, .y_pixel = 0 });
-            surface.render(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = 12, .screen = &screen }, root.widget());
+            try surface.render(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = 12, .screen = &screen }, root.widget());
             var dump: std.Io.Writer.Allocating = .init(arena.allocator());
             var linked: usize = 0;
             var titles: usize = 0;
@@ -919,8 +934,9 @@ test "Sign-in frames keep the list at 140 columns and the code link and masked k
                     const cell = screen.readCell(@intCast(col), @intCast(row)).?;
                     try line.writer.writeAll(cell.char.grapheme);
                     if (cell.link.uri.len != 0) {
-                        try std.testing.expectEqualStrings("https://auth.openai.com/codex/device", cell.link.uri);
-                        try std.testing.expect(std.mem.indexOf(u8, "auth.openai.com/codex/device", cell.char.grapheme) != null);
+                        // The browser's link is its whole address behind its host.
+                        try std.testing.expectEqualStrings(if (stage == .browser_waiting) link else "https://auth.openai.com/codex/device", cell.link.uri);
+                        try std.testing.expect(std.mem.indexOf(u8, if (stage == .browser_waiting) "auth.openai.com" else "auth.openai.com/codex/device", cell.char.grapheme) != null);
                         linked += 1;
                     }
                 }
@@ -933,8 +949,17 @@ test "Sign-in frames keep the list at 140 columns and the code link and masked k
             try std.testing.expectEqual(@as(usize, 1), titles);
             try std.testing.expect(std.mem.startsWith(u8, text, " rui"));
             try std.testing.expect(std.mem.indexOf(u8, text, secret) == null);
+            try std.testing.expect(std.mem.indexOf(u8, text, "made-up-grant") == null);
+            // Tab offers the device code while the browser waits and after it failed.
+            try std.testing.expectEqual(stage == .browser_waiting or stage == .failed, std.mem.indexOf(u8, text, "tab device code · esc back") != null);
             switch (stage) {
                 .choice => try std.testing.expect(std.mem.indexOf(u8, text, "› ChatGPT    API key") != null),
+                .browser_waiting => {
+                    try std.testing.expectEqual(@as(usize, "auth.openai.com".len), linked);
+                    try std.testing.expect(std.mem.indexOf(u8, text, "••••••••••") != null);
+                },
+                // SignIn's own test checks the failure line fits.
+                .failed => {},
                 .codex_waiting => {
                     try std.testing.expect(std.mem.indexOf(u8, text, "auth.openai.com/codex/device · BDL9-KI88H") != null);
                     try std.testing.expectEqual(@as(usize, "auth.openai.com/codex/device".len), linked);
@@ -942,7 +967,6 @@ test "Sign-in frames keep the list at 140 columns and the code link and masked k
                 .key_entry => try std.testing.expect(std.mem.indexOf(u8, text, "•••••••••") != null),
                 else => unreachable,
             }
-            std.debug.print("\nSIGN-IN {s} {d}x12\n{s}END SIGN-IN\n", .{ @tagName(stage), width, text });
         }
     }
 }
@@ -950,7 +974,7 @@ test "Sign-in frames keep the list at 140 columns and the code link and masked k
 test "Sign-in input stays with the row over settings and a previously focused list" {
     const empty: vxfw.Text = .{ .text = "" };
     var page: @import("SignIn.zig") = .{};
-    var root: Self = .{ .overview = empty.widget(), .list = empty.widget(), .compose = empty.widget(), .sign_in = page.widget(), .input = .{ .layer = .{ .sign_in = .{ .over = .settings } } } };
+    var root: Self = .{ .overview = empty.widget(), .list = empty.widget(), .sign_in = page.widget(), .input = .{ .layer = .{ .sign_in = .{ .over = .settings } } } };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty, .phase = .capturing };
@@ -979,7 +1003,7 @@ test "Sign-in takes every click at each stage, over settings or not, and changes
     const Stage = @import("sign_in.zig").Stage;
     for ([_]bool{ false, true }) |settings_open| for (std.enums.values(Stage)) |stage| {
         var page: @import("SignIn.zig") = .{ .state = .{ .stage = stage } };
-        var root: Self = .{ .overview = empty.widget(), .list = empty.widget(), .compose = empty.widget(), .sign_in = page.widget(), .input = .{ .layer = .{ .sign_in = .{ .over = if (settings_open) .settings else .main } } } };
+        var root: Self = .{ .overview = empty.widget(), .list = empty.widget(), .sign_in = page.widget(), .input = .{ .layer = .{ .sign_in = .{ .over = if (settings_open) .settings else .main } } } };
         var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty, .phase = .capturing };
         for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| {
             ctx.consume_event = false;
@@ -1008,7 +1032,7 @@ test "Root navigation closes the composed main presentation before focusing anot
     };
     const empty: vxfw.Text = .{ .text = "" };
     var owner: Owner = .{};
-    var root: Self = .{ .overview = empty.widget(), .list = empty.widget(), .compose = empty.widget(), .main_presentation = .{ .context = &owner, .close = Owner.close } };
+    var root: Self = .{ .overview = empty.widget(), .list = empty.widget(), .main_presentation = .{ .context = &owner, .close = Owner.close } };
     owner.root = &root;
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -1039,13 +1063,38 @@ test "Root navigation closes the composed main presentation before focusing anot
     try std.testing.expectEqual(@as(usize, 7), owner.closes);
 }
 
+test "Root resumes the open chat from the list by key or click without closing its presentation" {
+    const Owner = struct {
+        closes: usize = 0,
+        fn close(raw: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.closes += 1;
+        }
+    };
+    const pane: vxfw.Text = .{ .text = "" };
+    var owner: Owner = .{};
+    var root: Self = .{ .overview = pane.widget(), .list = pane.widget(), .session = pane.widget(), .size = .{ .width = 140, .height = 40 }, .main_presentation = .{ .context = &owner, .close = Owner.close } };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    for ([_]bool{ false, true }) |click| {
+        try std.testing.expect(try root.focusList(&ctx));
+        if (click) {
+            try root.widget().captureEvent(&ctx, .{ .mouse = .{ .col = 100, .row = 10, .button = .left, .type = .press, .mods = .{} } });
+        } else try root.focusChat(&ctx);
+        try std.testing.expect(!root.input.list_focused);
+        try std.testing.expect(ctx.cmds.items[ctx.cmds.items.len - 1].request_focus.eql(root.session.?));
+    }
+    try std.testing.expectEqual(@as(usize, 0), owner.closes);
+}
+
 test "App root hands list activation unchanged to its one core" {
     const Selection = struct {
         calls: usize = 0,
         fn take(raw: *anyopaque, _: *vxfw.EventContext, input: vxfw.Event, delivery: app_input.Effects.Delivery) !void {
             const self: *@This() = @ptrCast(@alignCast(raw));
             try std.testing.expect(input.key_press.matches(vaxis.Key.enter, .{}) or input.key_press.matches(vaxis.Key.right, .{}));
-            try std.testing.expect(delivery.list_focus);
+            try std.testing.expect(delivery.under == .main and !delivery.pasted);
             self.calls += 1;
         }
     };
@@ -1055,7 +1104,6 @@ test "App root hands list activation unchanged to its one core" {
     var root: Self = .{
         .overview = overview.widget(),
         .list = overview.widget(),
-        .compose = overview.widget(),
         .session = session.widget(),
         .size = .{ .width = 140, .height = 40 },
         .overview_keys = .{ .context = &selection, .take = Selection.take },
@@ -1064,7 +1112,7 @@ test "App root hands list activation unchanged to its one core" {
     defer arena.deinit();
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
     for ([_]u21{ vaxis.Key.right, vaxis.Key.enter }) |key| {
-        try std.testing.expect(try root.focusList(&ctx, true));
+        try std.testing.expect(try root.focusList(&ctx));
         const target = ctx.cmds.items[ctx.cmds.items.len - 1].request_focus;
         try std.testing.expect(target.eventHandler != null);
         try std.testing.expect(target.eql(root.widget()));
@@ -1074,7 +1122,7 @@ test "App root hands list activation unchanged to its one core" {
         try std.testing.expect(!root.input.list_focused);
     }
     try std.testing.expectEqual(@as(usize, 2), selection.calls);
-    _ = try root.focusList(&ctx, true);
+    _ = try root.focusList(&ctx);
     // Only a left press transfers pane focus; hover, drag releases and
     // context clicks retain the current key owner.
     for ([_]vaxis.Mouse{

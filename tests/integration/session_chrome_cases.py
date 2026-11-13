@@ -11,6 +11,8 @@ Feed/page/activity rows have one gutter column; input, footer and state
 retain their own margins."""
 import json
 import os
+import pathlib
+import re
 import select
 import shutil
 import subprocess
@@ -160,11 +162,14 @@ class Chrome:
 
 
 def composing(screen, draft):
-    """The composer shows `draft` on its row between the rules."""
+    """The composer shows `draft`; an empty editor may show its placeholder."""
     shown = [composer_line(screen, index) for index in range(len(rows(screen)))]
     bounds = composer_bounds(screen)
+    expected = {(" › " + draft).rstrip()}
+    if not draft:
+        expected.add(" › Type a task")
     return (len(shown) == ROWS and bounds is not None and bounds[1] == bounds[0] + 2
-            and shown[bounds[0] + 1].rstrip() == (" › " + draft).rstrip())
+            and shown[bounds[0] + 1].rstrip() in expected)
 
 
 def latest(screen, text):
@@ -632,16 +637,10 @@ def keys_case():
                 gesture = b"\x1b[F\r"
             chrome.frame(master, gesture, lambda screen: "Notifications" in screen and "Version" in screen)
             keys = chrome.frame(master, b"\x1b[B" * 6 + b"\r", lambda screen: "earlier message" in screen)
-            expected = (
-                ("enter", "send"), ("esc", "back"), ("⇧enter", "new line"),
-                ("tab", "next footer field"), ("⇧tab", "previous footer field"),
-                ("ctrl+x", "stop"), ("↑↓", "scroll"), ("ctrl+o", "tool output"),
-                ("ctrl+p", "earlier message"), ("ctrl+r", "retry"),
-                ("/", "skills"), ("alt+a", "archive"), ("ctrl+c", "leave"),
-            )
+            expected = keys_reference()
             # Judge actual row-major content independently of padding. The
             # shared KeyList aligns each column after its widest key; a longer
-            # meaning (such as previous footer field) expands the left column.
+            # meaning expands the left column.
             columns = 2 if width == 140 else 1
             key_widths = [max(len(key) for key, _ in expected[column::columns])
                           for column in range(columns)]
@@ -676,7 +675,17 @@ def keys_case():
             else:
                 chrome.frame(master, b"\x1b", lambda screen: "Settings" in screen and "Rui · settings" not in screen and not any(line.startswith(" ‹ ") for line in rows(screen)))
             chrome.leave(master, caller)
-    print("session chrome: Settings > Keys has thirteen aligned entries including Tab and Shift+Tab, paired at 140 columns and one column at 46; Enter/text are inert and Esc returns one layer, preserving a wide conversation", flush=True)
+    print("session chrome: Settings > Keys shows src/keymap.zig's reference rows aligned, paired at 140 columns and one column at 46; Enter/text are inert and Esc returns one layer, preserving a wide conversation", flush=True)
+
+
+def keys_reference():
+    """Settings > Keys rows as (key, meaning), read from their one owner,
+    src/keymap.zig's `list`, so a keymap change needs no fixture edit."""
+    source = (pathlib.Path(__file__).resolve().parents[2] / "src/keymap.zig").read_text()
+    body = source.split("pub const list = [_]Reference{", 1)[1].split("\n};", 1)[0]
+    rows = tuple(re.findall(r'^    \.\{ \.key = "([^"\\]*)", \.meaning = "([^"\\]*)"', body, re.MULTILINE))
+    assert rows and len(rows) == body.count(".key ="), "src/keymap.zig: teach keys_reference this list"
+    return rows
 
 
 def notice_case():
@@ -685,10 +694,10 @@ def notice_case():
     with Chrome("rui-chrome-notice.", []) as chrome:
         session = chrome.session()
         master, caller, _ = chrome.open(session, lambda screen: True)
-        unknown = chrome.frame(master, b"/nosuch\r", lambda screen: footer(screen).endswith("! Unknown command /nosuch"))
-        assert composing(unknown, ""), unknown
+        misused = chrome.frame(master, b"/new unexpected\r", lambda screen: footer(screen).endswith("! Usage: /new"))
+        assert composing(misused, ""), misused
         gone = chrome.frame(master, b"a", lambda screen: composing(screen, "a"))
-        assert status(gone) == "" and "Unknown command" not in footer(gone) and footer(gone).strip().startswith("‹ "), gone
+        assert status(gone) == "" and "Usage:" not in footer(gone) and footer(gone).strip().startswith("‹ "), gone
         os.write(master, b"\x15")
         chrome.frame(master, b"", lambda screen: composing(screen, ""))
         question = chrome.frame(master, b"?", lambda screen: composing(screen, "?"))

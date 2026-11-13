@@ -4,6 +4,17 @@ import pr_overlap
 
 
 class OverlapTest(unittest.TestCase):
+    def test_reads_owner_and_name_from_every_origin_url_shape(self):
+        for url in ("https://github.com/DivyanshGolyan/rui.git\n",
+                    "https://github.com/DivyanshGolyan/rui",
+                    "git@github.com:DivyanshGolyan/rui.git",
+                    "ssh://git@github.com/DivyanshGolyan/rui.git",
+                    "http://local_proxy@127.0.0.1:43215/git/DivyanshGolyan/rui"):
+            with self.subTest(url=url):
+                self.assertEqual(pr_overlap.repo_from_remote(url), "DivyanshGolyan/rui")
+        with self.assertRaises(ValueError):
+            pr_overlap.repo_from_remote("rui")
+
     def test_lists_shared_and_renamed_paths_and_skips_own_pr(self):
         prs = [
             {"number": 1, "head": {"ref": "mine", "repo": {"full_name": "a/r"}}},

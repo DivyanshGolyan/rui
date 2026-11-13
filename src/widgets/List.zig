@@ -139,7 +139,7 @@ const Lazy = struct {
         const self: *Lazy = @ptrCast(@alignCast(raw));
         try self.load(ctx.arena);
         const row = self.row.?;
-        const surface = try vxfw.Surface.init(ctx.arena, self.widget(), .{ .width = ctx.max.width.?, .height = @intCast(row.lines.len) });
+        const surface = try vxfw.Surface.init(ctx.cell_arena, self.widget(), .{ .width = ctx.max.width.?, .height = @intCast(row.lines.len) });
         @memset(surface.buffer, .{ .style = self.base_style });
         if (surface.size.width == 0) return surface;
         for (row.lines, 0..) |line, y| {
@@ -159,6 +159,7 @@ fn selection(style: vaxis.Style, selected: vaxis.Style) vaxis.Style {
     var result = style;
     result.bg = selected.bg;
     result.reverse = selected.reverse;
+    result.dim = false;
     return result;
 }
 
@@ -347,7 +348,7 @@ fn indicator(self: *const Self, ctx: vxfw.DrawContext, words: *const fn (u32, st
 
 const Testing = struct {
     fn context(arena: std.mem.Allocator, height: u16) vxfw.DrawContext {
-        return .{ .arena = arena, .min = .{}, .max = .{ .width = 20, .height = height }, .cell_size = .{} };
+        return .{ .arena = arena, .cell_arena = arena, .min = .{}, .max = .{ .width = 20, .height = height }, .cell_size = .{} };
     }
 
     fn below(count: u32, arena: std.mem.Allocator) std.mem.Allocator.Error!Line {
@@ -590,8 +591,8 @@ test "List wheel scrolls without changing selection and presses match the visibl
 
 test "List preserves each segment foreground while selecting every line and blank cell" {
     const rows: []const Row = &.{.{ .lines = &.{
-        &.{ .{ .text = "!", .style = .{ .fg = .{ .index = 1 }, .bold = true } }, .{ .text = " name", .style = .{ .fg = .{ .index = 3 } } } },
-        &.{.{ .text = "detail", .style = .{ .fg = .{ .index = 4 } } }},
+        &.{ .{ .text = "!", .style = .{ .fg = .{ .index = 1 }, .bold = true } }, .{ .text = " name", .style = .{ .fg = .{ .index = 3 }, .dim = true } } },
+        &.{.{ .text = "detail", .style = .{ .fg = .{ .index = 4 }, .dim = true } }},
         &.{},
     }, .target = 1 }};
     var list: Self = .{ .rows = .of(&rows), .selected = 0, .selection_style = .{ .bg = .{ .index = 2 } } };
@@ -606,7 +607,12 @@ test "List preserves each segment foreground while selecting every line and blan
     try std.testing.expectEqual(vaxis.Color{ .index = 4 }, cells.readCell(0, 1).style.fg);
     try std.testing.expect(cells.readCell(0, 0).style.bold);
     try std.testing.expect(!cells.readCell(2, 0).style.bold);
-    for (cells.buffer) |cell| try std.testing.expectEqual(vaxis.Color{ .index = 2 }, cell.style.bg);
+    for (cells.buffer) |cell| {
+        try std.testing.expectEqual(vaxis.Color{ .index = 2 }, cell.style.bg);
+        try std.testing.expect(!cell.style.dim);
+    }
+    try std.testing.expect(!hovering(.{ .dim = true }, .{}).dim);
+    try std.testing.expect(hovering(.{ .dim = true }, .{}).ul_style == .off);
     list.selection_style = .{ .reverse = true };
     const plain = try list.widget().draw(ctx);
     for (plain.children[0].surface.buffer) |cell| try std.testing.expect(cell.style.reverse);
@@ -778,7 +784,7 @@ test "List every two-line scroll offset shows whole rows and accounts for every 
                 try std.testing.expect(list.shown.first <= index and index < list.shown.end);
             }
             var screen: vaxis.Screen = try .init(alloc, .{ .cols = width, .rows = height, .x_pixel = 0, .y_pixel = 0 });
-            surface.render(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = height, .screen = &screen }, list.widget());
+            try surface.render(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = height, .screen = &screen }, list.widget());
             var above: u32 = 0;
             var below: u32 = 0;
             var first_lines: u32 = 0;

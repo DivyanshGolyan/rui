@@ -8,7 +8,7 @@ module `@import("sqlite")` reaches past the engine.
 
 Outside test blocks, a domain file that imports the engine, the Queue or the
 binding, or reaches them through the Store (`.engine`, `.queue()`, and the
-Store's `enter`, `fence` and `followCommit`), counts against `DOMAIN_REACH`.
+Store's `enter` and `fence`), counts against `DOMAIN_REACH`.
 
 Comments and strings are inert. Both lists only shrink: an entry above what
 the tree holds must be lowered or removed.
@@ -40,7 +40,7 @@ ALLOWED = {
 DOMAIN = "src/store/domain"
 DOMAIN_RULE = "src/store/domain reaches the engine or the Queue only through the transition runner"
 DOMAIN_IMPORTS = ('"../engine.zig"', '"../queue.zig"', '"../sqlite.zig"')
-STORE_REACH = ("enter", "fence", "followCommit")
+STORE_REACH = ("enter", "fence")
 
 # Shrink-only: occurrences per (domain file, reach) today.
 DOMAIN_REACH = {
@@ -49,11 +49,9 @@ DOMAIN_REACH = {
     ("content.zig", ".queue()"): 2,
     ("content.zig", "Store.enter"): 2,
     ("content.zig", "Store.fence"): 1,
-    ("historical.zig", ".queue()"): 9,
-    ("historical.zig", "Store.enter"): 9,
+    ("historical.zig", ".queue()"): 8,
+    ("historical.zig", "Store.enter"): 8,
     ("historical.zig", "Store.fence"): 8,
-    ("model_admission.zig", ".engine"): 1,
-    ("model_admission.zig", "Store.followCommit"): 2,
     ("model_settlement.zig", ".engine"): 1,
     ("model_settlement.zig", ".queue()"): 1,
     ("model_settlement.zig", "Store.enter"): 1,
@@ -160,10 +158,9 @@ class DomainReachTest(unittest.TestCase):
                   'const q = @import("../queue.zig");\nconst e = @import("../engine/Sqlite.zig");\n'
                   'fn f() void {\n    _ = a.store.engine.batches();\n    const g = a.store.engine;\n'
                   '    self.queue().run(x, .{});\n    _ = store_core.enter(self, .none);\n'
-                  '    return core.fence(self.store, err);\n    store_core.followCommit(s, null);\n}\n')
+                  '    return core.fence(self.store, err);\n}\n')
         self.assertEqual(domain_reaches(source), {'@import("../queue.zig")': 1, '@import("../engine/Sqlite.zig")': 1,
-                                                  ".engine": 2, ".queue()": 1, "Store.enter": 1, "Store.fence": 1,
-                                                  "Store.followCommit": 1})
+                                                  ".engine": 2, ".queue()": 1, "Store.enter": 1, "Store.fence": 1})
         inert = ('const store_core = @import("../Store.zig");\n// a.store.engine.batches()\n'
                  'const s = "self.queue()";\nfn f() void {\n    read.queue(a);\n    _ = store_core.Faults;\n'
                  '    _ = store_core.readUnixMilliseconds(io);\n    _ = other.enter(x);\n}\n'
