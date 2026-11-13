@@ -36,6 +36,7 @@ STACK_FRAMES_GATE = "tests/ci/stack_frames.json"
 # build.zig's named modules that are repository files. Every other named
 # import must be a package or generated module, or the graph refuses it.
 MODULES = {
+    "url": "src/url.zig",
     "test_poll": "src/testing/poll.zig", "h2": "src/h2/h2.zig", "tls_client": "src/tls_client/tls_client.zig", "rui_client": CALLER, "client": CALLER,
     "mysql_connection": "src/store/wire/mysql_connection.zig", "preferences": "src/preferences.zig",
     "codex_credentials": "src/codex_credentials.zig", "AnswerRenderer": "src/AnswerRenderer.zig",
