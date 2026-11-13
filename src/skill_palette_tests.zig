@@ -30,7 +30,7 @@ test "the Palette draws a /word's skill rows with their descriptions" {
     var palette: Palette = .{ .shown = &shown };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 5 }, .cell_size = .{} };
+    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 5 }, .cell_size = .{} };
     const surface = try palette.widget().draw(ctx);
     try std.testing.expectEqual(.drawn, shown.seen);
     try std.testing.expectEqual(@as(u16, 1), surface.size.height);

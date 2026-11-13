@@ -60,7 +60,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const self: *Self = @ptrCast(@alignCast(raw));
     const max = ctx.max.size();
     const size: vxfw.Size = .{ .width = @min(self.width(), max.width), .height = @min(1, max.height) };
-    const surface = try vxfw.Surface.init(ctx.arena, self.widget(), size);
+    const surface = try vxfw.Surface.init(ctx.cell_arena, self.widget(), size);
     const style = if (self.hovered) self.hover else self.style;
     @memset(surface.buffer, .{ .style = style });
     _ = print(surface, self.method, 0, 0, self.label, style, size.width);
@@ -112,13 +112,13 @@ test "a Chip runs its action on press and release over it, and not when the poin
     try chip.widget().handleEvent(&ctx, .{ .mouse = motion });
     try std.testing.expectEqual(@as(usize, 1), count.clicks);
 
-    const drawn = try chip.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 3 }, .cell_size = .{} });
+    const drawn = try chip.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 3 }, .cell_size = .{} });
     try std.testing.expectEqual(vxfw.Size{ .width = 11, .height = 1 }, drawn.size);
     try std.testing.expectEqualStrings("c", drawn.readCell(0, 0).char.grapheme);
     try std.testing.expectEqualStrings("p", drawn.readCell(10, 0).char.grapheme);
     try std.testing.expect(drawn.readCell(0, 0).style.ul_style == .off);
     try chip.widget().handleEvent(&ctx, .mouse_enter);
-    const hovered = try chip.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 4, .height = 1 }, .cell_size = .{} });
+    const hovered = try chip.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 4, .height = 1 }, .cell_size = .{} });
     try std.testing.expectEqual(@as(u16, 4), hovered.size.width);
     try std.testing.expect(hovered.readCell(0, 0).style.ul_style == .single);
     try std.testing.expectEqual(@as(usize, 1), count.clicks);
