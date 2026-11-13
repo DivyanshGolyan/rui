@@ -9,15 +9,74 @@ const hiddenNumber = grammar.hiddenNumber;
 const hiddenFlag = grammar.hiddenFlag;
 pub const destination = &[_]Option{ value("store", "PATH"), grammar.hex("store-hex", "store", 492) };
 
-/// Temporary PR5 migration owner; remove in PR7. Never accepted as options.
+/// The Host flags this grammar retired, never accepted as options. Two
+/// readers: a typed flag is refused naming its replacement, and the argv of a
+/// Host that a previous release started is read through `currentArguments`.
+/// Remove when the oldest supported previous release no longer starts Hosts
+/// with these flags.
 pub const retired_options = &[_]grammar.RetiredOption{
-    .{ .name = "active-capacity", .replacement = "--set execution.activeCapacity=VALUE" },
-    .{ .name = "provider", .replacement = "--set providers.VALUE={} (one --set per provider; each adds to the set)" },
-    .{ .name = "provider-endpoint", .replacement = "--set providers.codex.endpoint=VALUE --set providers.codex.unauthenticated=true" },
-    .{ .name = "provider-ca-file", .replacement = "--set network.caFile=VALUE" },
-    .{ .name = "bash-path", .replacement = "--set tools.bash.path=VALUE" },
-    .{ .name = "bash-timeout-ms", .replacement = "--set tools.bash.timeoutMs=VALUE" },
+    grammar.retired("active-capacity", &.{"execution.activeCapacity=VALUE"}, ""),
+    grammar.retired("provider", &.{"providers.VALUE={}"}, " (one --set per provider; each adds to the set)"),
+    grammar.retired("provider-endpoint", &.{ "providers.codex.endpoint=VALUE", "providers.codex.unauthenticated=true" }, ""),
+    grammar.retired("provider-ca-file", &.{"network.caFile=VALUE"}, ""),
+    grammar.retired("bash-path", &.{"tools.bash.path=VALUE"}, ""),
+    grammar.retired("bash-timeout-ms", &.{"tools.bash.timeoutMs=VALUE"}, ""),
 };
+
+/// A running Host's `host serve` arguments in this grammar. Each retired flag
+/// and its value become the assignments that replace it, and an argv with a
+/// retired flag but no --settings first gets `providers={}`: those releases
+/// started such a Host serving only the providers its flags named. An argv
+/// with no retired flag is returned as it is. `arena` owns the result.
+pub fn currentArguments(arena: std.mem.Allocator, args: []const []const u8) error{ OutOfMemory, InvalidArguments }![]const []const u8 {
+    var flagged = false;
+    var settings = false;
+    var index: usize = 0;
+    while (index < args.len) : (index += 1) {
+        const arg = args[index];
+        if (std.mem.eql(u8, arg, "--")) break;
+        if (!std.mem.startsWith(u8, arg, "--")) continue;
+        if (retiredNamed(arg[2..]) != null) {
+            flagged = true;
+            index += 1;
+        } else if (definition.optionNamed(arg[2..])) |option| {
+            if (std.mem.eql(u8, option.name, "settings")) settings = true;
+            if (option.argument != null) index += 1;
+        }
+    }
+    if (!flagged) return args;
+    var out: std.ArrayList([]const u8) = .empty;
+    if (!settings) try out.appendSlice(arena, &.{ "--set", "providers={}" });
+    index = 0;
+    while (index < args.len) : (index += 1) {
+        const arg = args[index];
+        if (std.mem.eql(u8, arg, "--")) {
+            try out.appendSlice(arena, args[index..]);
+            break;
+        }
+        const old = if (std.mem.startsWith(u8, arg, "--")) retiredNamed(arg[2..]) else null;
+        if (old) |found| {
+            index += 1;
+            if (index == args.len) return error.InvalidArguments;
+            for (found.assignments) |assignment| {
+                const assigned = try std.mem.replaceOwned(u8, arena, assignment, "VALUE", args[index]);
+                try out.appendSlice(arena, &.{ "--set", assigned });
+            }
+            continue;
+        }
+        try out.append(arena, arg);
+        if (std.mem.startsWith(u8, arg, "--")) if (definition.optionNamed(arg[2..])) |option| if (option.argument != null and index + 1 < args.len) {
+            index += 1;
+            try out.append(arena, args[index]);
+        };
+    }
+    return out.items;
+}
+
+fn retiredNamed(name: []const u8) ?grammar.RetiredOption {
+    for (retired_options) |old| if (std.mem.eql(u8, old.name, name)) return old;
+    return null;
+}
 /// Hide the compatibility identity spelling on Host settings/start surfaces.
 pub const host_destination = &[_]Option{ value("store", "PATH"), blk: {
     var option = grammar.hex("store-hex", "store", 492);

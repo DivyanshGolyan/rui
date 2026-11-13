@@ -674,7 +674,9 @@ pub fn observeHostForUpgradeAtSocket(allocator: std.mem.Allocator, io: std.Io, s
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     var problem: @import("cli_grammar.zig").Refusal = undefined;
-    const parsed = @import("serve_grammar.zig").definition.parseSyntax(snapshot.argv[3..], arena.allocator(), &problem) catch return error.HostServeArgumentsUnreadable;
+    const serve_grammar = @import("serve_grammar.zig");
+    const arguments = serve_grammar.currentArguments(arena.allocator(), snapshot.argv[3..]) catch return error.HostServeArgumentsUnreadable;
+    const parsed = serve_grammar.definition.parseSyntax(arguments, arena.allocator(), &problem) catch return error.HostServeArgumentsUnreadable;
     const supplied = parsed.get("store") orelse return error.HostServeStoreMissing;
     // A relative argv path is not relative to this client. Without a verified
     // canonical identity, report it rather than probing a guessed Store.

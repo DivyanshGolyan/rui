@@ -61,6 +61,7 @@ The selected build must report a verified release version; an unversioned source
 
 The Upgrade restart may interrupt work in all Sessions across every affected Store, not only the client's selected Store.
 A running Host keeps its configured capacity through the restart.
+A Host that an earlier release started with its retired flags (`--provider`, `--active-capacity` and the others) restarts with the `--set` assignments that replace them, serving the same providers.
 Installation and activation are reported separately.
 Unsupported or application-owned Hosts remain running with an explained successful skip. A failed or unconfirmed Host restart returns `host_restart_failed` (exit 6) after the installation receipt; the binary upgrade is not rolled back.
 Automatic activation supports released and source managed `host serve` launches whose public settings can be preserved and whose executable reports a verified numeric version.

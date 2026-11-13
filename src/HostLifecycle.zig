@@ -9,6 +9,7 @@ const process = @import("upgrade_process.zig");
 const Installation = @import("Installation.zig");
 const candidate = @import("release_candidate.zig");
 const cli_args = @import("cli_args.zig");
+const serve_grammar = @import("serve_grammar.zig");
 const host_start = @import("host_start.zig");
 const product_defaults = @import("product_defaults.zig");
 
@@ -176,7 +177,13 @@ fn deriveLaunch(allocator: std.mem.Allocator, argv: []const []const u8) !LaunchS
     defer scratch.deinit();
     const grammar = comptime cli_args.Command.host_serve.definition();
     var problem: cli_args.Refusal = undefined;
-    const parsed = try grammar.parseSyntax(argv[3..], scratch.allocator(), &problem);
+    // A Host a previous release started names retired flags; serve_grammar
+    // reads them as the assignments that replace them.
+    const arguments = serve_grammar.currentArguments(scratch.allocator(), argv[3..]) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.InvalidArguments => return error.UnsupportedHostConfiguration,
+    };
+    const parsed = try grammar.parseSyntax(arguments, scratch.allocator(), &problem);
     try parsed.validateValues(&problem);
     // Whether the settings reproduce in `/` is host_start.replayable's, at activation.
     if (parsed.help or parsed.missing() != null) return error.UnsupportedHostConfiguration;
@@ -648,6 +655,18 @@ test "upgrade lifecycle derives launch semantics before disruption" {
         try std.testing.expectEqualStrings(last, launch.options[1].value.?);
         try std.testing.expect(supportedByHelp(&launch, "rui host serve [--store PATH] [--set PATH=VALUE]\n"));
         try std.testing.expect(!supportedByHelp(&launch, "rui host serve [--store PATH]\n"));
+    }
+    // A Host a previous release's starter launched replays as assignments.
+    {
+        var launch = try deriveLaunch(allocator, &.{ "rui", "host", "serve", "--store", "/some/store", "--provider", "codex", "--provider", "openai", "--active-capacity", "4" });
+        defer launch.deinit(allocator);
+        const expected = [_][]const u8{ "providers={}", "providers.codex={}", "providers.openai={}", "execution.activeCapacity=4" };
+        try std.testing.expectEqual(expected.len, launch.options.len);
+        for (expected, launch.options) |value, option| {
+            try std.testing.expectEqualStrings("set", option.name);
+            try std.testing.expectEqualStrings(value, option.value.?);
+        }
+        try std.testing.expect(supportedByHelp(&launch, "rui host serve [--store PATH] [--set PATH=VALUE]\n"));
     }
     const repeat_limit = @as(cli_args.Parsed, undefined).repeats.len;
     var full: [3 + 2 * repeat_limit][]const u8 = undefined;

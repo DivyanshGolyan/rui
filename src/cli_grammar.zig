@@ -89,9 +89,17 @@ fn checkOptionName(comptime name: []const u8) void {
     if (name.len != 0 and !@import("cli_option_names.zig").contains(name)) @compileError("no CLI option is named --" ++ name);
 }
 
-/// Diagnostic-only migration. VALUE in replacement is filled from the following
-/// token when present; this table does not declare an accepted option.
-pub const RetiredOption = struct { name: []const u8, replacement: []const u8 };
+/// A retired flag and the --set assignments that replace it; VALUE stands for
+/// the flag's value. It never declares an accepted option: a typed one is
+/// refused with `replacement`, and serve_grammar translates a running Host's
+/// argv through `assignments`.
+pub const RetiredOption = struct { name: []const u8, assignments: []const []const u8, replacement: []const u8 };
+
+pub fn retired(comptime name: []const u8, comptime assignments: []const []const u8, comptime note: []const u8) RetiredOption {
+    comptime var replacement: []const u8 = "";
+    inline for (assignments, 0..) |assignment, n| replacement = replacement ++ (if (n == 0) "" else " ") ++ "--set " ++ assignment;
+    return .{ .name = name, .assignments = assignments, .replacement = replacement ++ note };
+}
 
 pub const Definition = struct {
     retired_options: []const RetiredOption = &.{},

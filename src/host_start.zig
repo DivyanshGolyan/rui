@@ -994,6 +994,58 @@ test "Host start explicit providers replace automatic defaults and MySQL keeps i
     try std.testing.expectEqual(start_report.Store.mysql, storeKind(settings));
 }
 
+test "Host start reads a previous release's retired flags as the settings those flags filled" {
+    const serve_grammar = @import("serve_grammar.zig");
+    const gpa = std.testing.allocator;
+    var environment: std.process.Environ.Map = .init(gpa);
+    defer environment.deinit();
+    try environment.put("HOME", "/nonexistent-host-start-test-home");
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const init = initForTest(&arena, &environment);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const dir = try testHostDir(&tmp, &root);
+    var failure: start_report.Failure = undefined;
+    // Each expected document is what the release's flag-only fill produced:
+    // no providers but the ones named, then each flag's leaf.
+    const Case = struct { args: []const []const u8, expected: []const u8 };
+    for ([_]Case{
+        .{ .args = &.{ "--active-capacity", "7" }, .expected = "{\"providers\":{},\"execution\":{\"activeCapacity\":7}}" },
+        .{ .args = &.{ "--provider", "codex" }, .expected = "{\"providers\":{\"codex\":{}}}" },
+        .{ .args = &.{ "--provider", "codex", "--provider", "chatgpt", "--provider", "openai" }, .expected = "{\"providers\":{\"codex\":{},\"chatgpt\":{},\"openai\":{}}}" },
+        .{ .args = &.{ "--provider-endpoint", "http://127.0.0.1:9/responses" }, .expected = "{\"providers\":{\"codex\":{\"endpoint\":\"http://127.0.0.1:9/responses\",\"unauthenticated\":true}}}" },
+        .{ .args = &.{ "--provider-ca-file", "/private/ca.pem" }, .expected = "{\"providers\":{},\"network\":{\"caFile\":\"/private/ca.pem\"}}" },
+        .{ .args = &.{ "--bash-path", "/bin/bash" }, .expected = "{\"providers\":{},\"tools\":{\"bash\":{\"path\":\"/bin/bash\"}}}" },
+        .{ .args = &.{ "--bash-timeout-ms", "1500" }, .expected = "{\"providers\":{},\"tools\":{\"bash\":{\"timeoutMs\":1500}}}" },
+        // The starter's own argv, and every flag together, with --store.
+        .{ .args = &.{ "--store", dir, "--provider", "codex", "--provider", "openai", "--active-capacity", "4" }, .expected = "{\"providers\":{\"codex\":{},\"openai\":{}},\"execution\":{\"activeCapacity\":4}}" },
+        .{
+            .args = &.{ "--store", dir, "--active-capacity", "3", "--provider-endpoint", "http://127.0.0.1:9/responses", "--provider-ca-file", "/private/ca.pem", "--bash-path", "/bin/bash", "--bash-timeout-ms", "1500" },
+            .expected = "{\"providers\":{\"codex\":{\"endpoint\":\"http://127.0.0.1:9/responses\",\"unauthenticated\":true}},\"execution\":{\"activeCapacity\":3},\"network\":{\"caFile\":\"/private/ca.pem\"},\"tools\":{\"bash\":{\"path\":\"/bin/bash\",\"timeoutMs\":1500}}}",
+        },
+    }) |case| {
+        const replayed = try gpa.create(hs.Settings);
+        defer gpa.destroy(replayed);
+        replayed.* = .{};
+        defer replayed.deinit();
+        const parsed = try parseForTest(arena.allocator(), try serve_grammar.currentArguments(arena.allocator(), case.args));
+        var fixtures: providers.Fixtures = .{};
+        try fillAt(init, &parsed, dir, replayed, &fixtures, &failure);
+        const expected = try gpa.create(hs.Settings);
+        defer gpa.destroy(expected);
+        expected.* = .{};
+        defer expected.deinit();
+        try hs.apply(expected, gpa, case.expected, .file, checkPreset, &failure);
+        try expectJsonEqual(try complete(arena.allocator(), expected, &failure), try complete(arena.allocator(), replayed, &failure));
+    }
+    // An argv in this grammar is read as it is; a retired flag needs its value.
+    const current: []const []const u8 = &.{ "--store", dir, "--set", "providers.codex={}" };
+    try std.testing.expectEqual(current.ptr, (try serve_grammar.currentArguments(arena.allocator(), current)).ptr);
+    try std.testing.expectError(error.InvalidArguments, serve_grammar.currentArguments(arena.allocator(), &.{ "--store", dir, "--provider" }));
+}
+
 test "Host start refused JSON input allocations erase secret bytes before release" {
     const Observer = struct {
         child: std.mem.Allocator,

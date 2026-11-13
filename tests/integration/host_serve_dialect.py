@@ -1,4 +1,5 @@
 """Installed Host grammar shared by historical-release process diagnostics."""
+import pathlib
 import re
 import subprocess
 
@@ -13,7 +14,9 @@ def help_text(binary, *command):
 
 class HostServeDialect:
     def __init__(self, binary):
-        self.binary = binary
+        # Pin the build whose grammar was probed: an installed link such as
+        # ~/.local/bin/rui moves to the candidate when it is installed.
+        self.binary = pathlib.Path(binary).resolve()
         self.resource_first = bool(help_text(binary, "request", "inspect"))
         self.host_settings = bool(re.search(r"--set(?:\s|=|\])", help_text(binary, *self.serve())))
 
