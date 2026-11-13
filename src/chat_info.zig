@@ -1189,7 +1189,7 @@ test "Chat info footer stays plain in both themes and widths" {
     defer arena.deinit();
     for ([_]?view.Rgb{ null, .{ 255, 255, 255 } }) |background| for ([_]u16{ 140, 46 }) |width| {
         fixture.background = background;
-        const surface = try page.footerWidget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 1 }, .cell_size = .{} });
+        const surface = try page.footerWidget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 1 }, .cell_size = .{} });
         const plain = widget_style.of(fixture.backend().caps(&fixture), .{ .colour = .quiet });
         for (surface.buffer) |cell| try std.testing.expectEqual(plain, cell.style);
     };

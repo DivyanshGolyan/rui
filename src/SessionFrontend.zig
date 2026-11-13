@@ -9233,7 +9233,7 @@ test "chat input surface grows with draft while rules and footer stay plain in b
                         held.root.input.list_focused = list_focused;
                         const surface = try held.draw();
                         var rendered: vaxis.Screen = try .init(held.arena.allocator(), .{ .rows = size.height, .cols = size.width, .x_pixel = 0, .y_pixel = 0 });
-                        surface.render(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = size.width, .height = size.height, .screen = &rendered }, held.self.app_input.composer.widget());
+                        try surface.render(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = size.width, .height = size.height, .screen = &rendered }, held.self.app_input.composer.widget());
                         const input_style = style.of(held.self.app_caps, .{ .background = .input_surface });
                         const quiet_input = style.of(held.self.app_caps, .{ .colour = .quiet, .background = .input_surface });
                         const plain = style.of(held.self.app_caps, .{ .colour = .quiet });

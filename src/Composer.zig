@@ -241,7 +241,7 @@ test "Composer surface role covers New Session and chat drafts in both themes an
                     editor.cursor = editor.length;
                     var composer: Self = .{ .editor = &editor, .placeholder = placeholder, .caret = caret };
                     composer.setCaps(caps);
-                    const surface = try composer.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 10 }, .cell_size = .{} });
+                    const surface = try composer.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 10 }, .cell_size = .{} });
                     try std.testing.expectEqual(@as(u16, if (has_draft) 5 else 3), surface.size.height);
                     for (0..width) |col| {
                         for (1..surface.size.height - 1) |row| try std.testing.expectEqual(input.bg, surface.readCell(col, row).style.bg);
