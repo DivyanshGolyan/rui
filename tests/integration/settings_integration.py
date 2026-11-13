@@ -189,6 +189,100 @@ def source_modes(root, good):
         assert not path.exists()
 
 
+NO_KEY = "\nrui: no OpenAI API key; save one with `rui auth login openai`, then start the Host again.\n"
+PROXY = "\nrui: https_proxy/HTTPS_PROXY names a scheme other than http://; Rui tunnels only through an http:// proxy. The Host did not start.\n"
+
+
+def flag_start_failures(root):
+    """Start failures that flags and the environment reach without a document
+    keep main's exit, caller code, own diagnostic and empty stdout;
+    settings_invalid is only for a leaf refusal, the change pr4 lists.
+    Expectations were recorded from the merge-base build, not derived from
+    this one. The caller line's prose belongs to src/caller_error.zig."""
+    home = root / "flag-home"
+    home.mkdir(mode=0o700)
+    key = root / "flag-key"
+    key.write_text("sk-flag-start\n")
+    key.chmod(0o644)
+    bad_key = root / "flag-bad-key"
+    bad_key.write_text("not a key \x01\n")
+    bad_key.chmod(0o600)
+    endpoint = "http://127.0.0.1:9/responses"
+    credential = {"RUI_CODEX_CREDENTIAL_FILE": str(root / "c.json"), "RUI_CHATGPT_CREDENTIAL_FILE": str(root / "c.json")}
+    absent = {"RUI_OPENAI_KEY_FILE": str(root / "absent")}
+    openai = ["--set", 'providers={"openai":{}}']
+    # (flags, environment changes, exit, caller code, diagnostic before it)
+    # Rows that used a retired flag spell it with --set, the replacement its
+    # refusal names, and keep the outcome main pinned for the flag.
+    unchanged = [
+        (["--test-openai-fixture-endpoint", endpoint], {}, 1, "internal_unexpected", ""),
+        (["--test-openai-fixture-endpoint", endpoint], absent, 6, "sign_in_required", NO_KEY),
+        (["--test-openai-fixture-endpoint", endpoint], {"RUI_OPENAI_KEY_FILE": str(key)}, 1, "internal_unexpected", ""),
+        (["--test-openai-fixture-endpoint", endpoint], {"RUI_OPENAI_KEY_FILE": str(bad_key)}, 1, "internal_unexpected", ""),
+        (["--test-openai-fixture-endpoint", endpoint, *openai], absent, 1, "internal_unexpected", ""),
+        (openai, {}, 6, "sign_in_required", NO_KEY),
+        (openai, {"HOME": None}, 6, "home_unavailable", ""),
+        (["--set", 'providers={"codex":{}}'], {"HOME": None}, 6, "home_unavailable", ""),
+        (["--set", 'providers={"chatgpt":{}}'], {"HOME": None}, 6, "home_unavailable", ""),
+        (["--test-codex-fixture-endpoint", endpoint], {}, 1, "internal_unexpected", ""),
+        (["--test-chatgpt-fixture-endpoint", endpoint], {}, 1, "internal_unexpected", ""),
+        (["--test-chatgpt-fixture-endpoint", "http://127.0.0.1:9/other"], credential, 2, "invocation_invalid", ""),
+        # The proxy has no caller code: its own sentence is the whole report.
+        (["--set", f"providers.openai.endpoint={endpoint}", "--set", "providers.openai.unauthenticated=true"],
+         {"HTTPS_PROXY": "https://proxy.example:1"}, 6, None, PROXY),
+    ]
+    # Each retired flag is refused before any start, naming its --set
+    # replacement; pr7 removes the migration table and these rows.
+    retired = [
+        ["--active-capacity", "2"],
+        ["--provider", "codex"],
+        ["--provider", "bogus"],
+        ["--provider", "codex", "--provider", "codex"],
+        ["--provider-endpoint", endpoint],
+        ["--provider-ca-file", "/ca.pem"],
+        ["--bash-path", "/bin/bash"],
+        ["--bash-timeout-ms", "0"],
+    ]
+    for flags in retired:
+        unchanged.append((flags, {}, 2, "host_option_retired", ""))
+    # Listed change: a value refused as its settings leaf. main reported
+    # these as internal_unexpected with exit 1 and no stdout, or, for the
+    # retired flags, a flag-level choice or count refusal.
+    leaf = [
+        (["--set", "providers.codex.endpoint=ftp://127.0.0.1/responses"], {}, "providers.codex.endpoint: invalid provider endpoint"),
+        (["--test-codex-fixture-endpoint", "ftp://x/responses"], credential, "providers.codex.endpoint: must be a valid HTTPS or loopback HTTP endpoint"),
+        (["--set", "tools.bash.path="], {}, "tools.bash.path: must be an absolute path"),
+        (["--set", 'providers={"bogus":{}}'], {}, "PENDING"),
+        (["--set", "tools.bash.timeoutMs=0"], {}, "PENDING"),
+    ]
+
+    def start(index, flags, changes):
+        environment = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(home), "TMPDIR": os.environ.get("TMPDIR", "/tmp")}
+        for name, value in changes.items():
+            if value is None:
+                environment.pop(name, None)
+            else:
+                environment[name] = value
+        return subprocess.run([RUI, "host", "serve", "--store", str(root / f"flag-store-{index}"), *flags], env=environment,
+                              stdin=subprocess.DEVNULL, capture_output=True, timeout=30)
+
+    for index, (flags, changes, status, code, diagnostic) in enumerate(unchanged):
+        done = start(index, flags, changes)
+        stderr = done.stderr.decode(errors="replace")
+        assert done.returncode == status and done.stdout == b"", (flags, changes, done)
+        assert stderr.startswith(diagnostic), (flags, changes, stderr)
+        caller = stderr[len(diagnostic):]
+        if code is None:
+            assert caller == "", (flags, stderr)
+        else:
+            assert caller.startswith("rui host serve: ") and caller.endswith(f" [{code}]\n") and caller.count("\n") == 1, (flags, stderr)
+    for index, (flags, changes, message) in enumerate(leaf, len(unchanged)):
+        done = start(index, flags, changes)
+        assert done.returncode == 2, (flags, done)
+        assert done.stderr.decode() == f"rui: the Host did not start: {message} [settings_invalid]\n", (flags, done)
+        assert json.loads(done.stdout) == {"rui_start_error": {"code": "settings_invalid", "message": message}}, (flags, done)
+
+
 def main(network, ci):
     root = host_process.canonical_fixture_root(tempfile.mkdtemp(prefix="rui-launch-"))
     store = root / "store"
@@ -211,6 +305,7 @@ def main(network, ci):
             assert b"sk-launch-test" not in pathlib.Path(f"/proc/{host.pid}/{name}").read_bytes(), name
 
     source_modes(root, good)
+    flag_start_failures(root)
 
     # A second Host on the same Store is refused while the first holds it.
     other = root / "other"

@@ -7,7 +7,6 @@ const session_settings = @import("../session_settings.zig");
 const store_path = @import("../store_path.zig");
 const tool_name = @import("../tool_name.zig");
 const Bounded = @import("../bounded.zig").Bounded;
-const wire_version = @import("../wire_version.zig").wire_version;
 const tool_defs = @import("../tool_record.zig");
 const prefix_seal = @import("../prefix_seal.zig");
 const retry_policy = @import("../retry_policy.zig");
@@ -60,7 +59,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 71, .digest = 0xa61e85ed49f9fa8b },
     .{ .schema_version = 72, .digest = 0x93ee71c21e7438ab },
     .{ .schema_version = 73, .digest = 0x515b60c7f5df332d },
-    .{ .schema_version = 74, .digest = 0x493062beb46c07ad },
+    .{ .schema_version = 74, .digest = 0xda8e267adbfcef45 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -685,13 +684,17 @@ pub const migrations = [_]Migration{
             "WITH RECURSIVE own_owed(session_ref,since) AS (SELECT t.session_ref,m.admitted_at AS since FROM turn t JOIN message_admission m ON m.admission_id=t.first_admission_id WHERE t.outcome_code IS NULL UNION SELECT m.session_ref,m.admitted_at FROM message_admission m WHERE m.turn_id IS NULL AND m.admission_id>coalesce((SELECT admission_cutoff FROM session_stop WHERE session_ref=m.session_ref ORDER BY admission_cutoff DESC LIMIT 1),0) UNION SELECT f.target_ref,m.admitted_at FROM session_forward f LEFT JOIN action_operation a ON f.kind=1 AND a.action_id=f.source_id LEFT JOIN model_operation op ON op.operation_id=a.parent_operation_id JOIN turn t ON t.turn_id=CASE WHEN f.kind=2 THEN f.source_id ELSE op.turn_id END JOIN message_admission m ON m.admission_id=t.first_admission_id WHERE f.position IS NULL OR f.message_delivered=0),owed(session_ref,since) AS (SELECT session_ref,since FROM own_owed UNION SELECT s.parent_ref,o.since FROM owed o JOIN session s ON s.session_ref=o.session_ref WHERE s.parent_ref IS NOT NULL) UPDATE session s JOIN (SELECT session_ref,min(since) AS since FROM owed GROUP BY session_ref) o ON o.session_ref=s.session_ref SET s.obligation_since=o.since",
         },
     },
+    // Schema 74: the Store keeps no wire label. Each wire check uses the wire
+    // the running Host reports (host_info), so a wire bump needs no format
+    // step. The key CHECK keeps the retired name: narrowing it on SQLite
+    // would rebuild store_meta, whose CREATE text open compares.
     .{
         .from = 73,
         .sqlite = &.{
-            "UPDATE store_meta SET meta_value='17' WHERE meta_key='wire_version' AND meta_value='16'",
+            "DELETE FROM store_meta WHERE meta_key='wire_version'",
         },
         .mysql = &.{
-            "UPDATE store_meta SET meta_value='17' WHERE meta_key='wire_version' AND meta_value='16'",
+            "DELETE FROM store_meta WHERE meta_key='wire_version'",
         },
     },
 };
@@ -732,15 +735,14 @@ pub fn mysqlMigration(comptime from: u32) [:0]const u8 {
 }
 
 /// All forward steps from a runtime-selected format, oldest first, without
-/// allocation. After the steps, finalize format and wire metadata once, as
-/// opening the migrated Store requires both to match this build. The current
-/// format needs no SQL; unsupported formats have no text.
+/// allocation. After the steps, set the format once, as opening the
+/// migrated Store requires it to match this build. The current format needs
+/// no SQL; unsupported formats have no text.
 pub fn mysqlMigrationFrom(from: u64) ?[:0]const u8 {
     const texts = comptime blk: {
         var result: [schema_version - migration_baseline + 1][:0]const u8 = undefined;
         result[result.len - 1] = "";
-        const metadata = "UPDATE store_meta SET meta_value='" ++ format_text ++ "' WHERE meta_key='format';\n" ++
-            "UPDATE store_meta SET meta_value='" ++ wire_version ++ "' WHERE meta_key='wire_version';\n";
+        const metadata = "UPDATE store_meta SET meta_value='" ++ format_text ++ "' WHERE meta_key='format';\n";
         var index = result.len - 1;
         while (index > 0) {
             index -= 1;
@@ -755,7 +757,7 @@ pub fn mysqlMigrationFrom(from: u64) ?[:0]const u8 {
     return texts[@intCast(from - migration_baseline)];
 }
 
-test "store schema --from prints every remaining MySQL migration then finalizes metadata once" {
+test "store schema --from prints every remaining MySQL migration then sets the format once" {
     for (migration_baseline..schema_version + 1) |from| {
         var expected: std.Io.Writer.Allocating = .init(std.testing.allocator);
         defer expected.deinit();
@@ -763,8 +765,8 @@ test "store schema --from prints every remaining MySQL migration then finalizes 
             if (step.from >= from) try expected.writer.writeAll(mysqlMigration(step.from));
         }
         if (from < schema_version) try expected.writer.print(
-            "UPDATE store_meta SET meta_value='{d}' WHERE meta_key='format';\nUPDATE store_meta SET meta_value='{s}' WHERE meta_key='wire_version';\n",
-            .{ schema_version, wire_version },
+            "UPDATE store_meta SET meta_value='{d}' WHERE meta_key='format';\n",
+            .{schema_version},
         );
         try std.testing.expectEqualStrings(expected.written(), mysqlMigrationFrom(@intCast(from)).?);
     }
@@ -914,13 +916,18 @@ const compaction_trigger_column: Column = .{ .name = "compaction_trigger", .type
 const reasoning_effort_column: Column = .{ .name = "reasoning_effort", .type = .{ .tag = &.{ "none", "low", "medium", "high", "xhigh", "max" } }, .nullable = true };
 const label_column: Column = .{ .name = "label", .type = .{ .text = .{ .min = 1, .max = 100 } }, .nullable = true };
 
-/// store_meta's keys, as bootstrap writes them: a closed set, so a key is
-/// a tag, which MySQL can key. `store_id` is the Store's own random id,
-/// drawn once when it is created and never changed (D204, format 54).
-pub const MetaKey = enum { wire_version, store_selector, format, store_id };
+/// store_meta's keys, as bootstrap writes them and open reads them: a
+/// closed set, so a key is a tag, which MySQL can key. `store_id` is the
+/// Store's own random id, drawn once when it is created and never changed
+/// (D204, format 54).
+pub const MetaKey = enum { store_selector, format, store_id };
+/// The keys store_meta's CHECK allows: `wire_version`, whose row format 74
+/// deletes and nothing writes or reads, then MetaKey's. Dropping it from the
+/// CHECK would rebuild store_meta on SQLite, so the CHECK keeps it.
 const meta_keys = blk: {
-    var names: [std.enums.values(MetaKey).len][]const u8 = undefined;
-    for (std.enums.values(MetaKey), 0..) |key, index| names[index] = @tagName(key);
+    var names: [1 + std.enums.values(MetaKey).len][]const u8 = undefined;
+    names[0] = "wire_version";
+    for (std.enums.values(MetaKey), 1..) |key, index| names[index] = @tagName(key);
     break :blk names;
 };
 pub const MetaPresence = std.EnumSet(MetaKey);
@@ -937,10 +944,9 @@ pub fn metaSeed(comptime dialect: rsql.Dialect) []const MetaSeed {
         var seed: []const MetaSeed = &.{};
         for (std.enums.values(MetaKey)) |key| {
             const value: @FieldType(MetaSeed, "value") = switch (key) {
-                .wire_version => if (dialect == .sqlite) .{ .binding = 1 } else .{ .literal = wire_version },
-                .store_selector => .{ .binding = 2 },
+                .store_selector => .{ .binding = 1 },
                 .format => .{ .literal = format_text },
-                .store_id => if (dialect == .sqlite) .random_id else .{ .binding = 1 },
+                .store_id => if (dialect == .sqlite) .random_id else .{ .binding = 2 },
             };
             seed = seed ++ .{MetaSeed{ .key = key, .value = value }};
         }
@@ -961,7 +967,7 @@ pub fn writeMissingMeta(w: *std.Io.Writer, seen: MetaPresence, id: *const [2 * s
         if (seen.contains(entry.key)) continue;
         const value = switch (entry.value) {
             .literal => |value| value,
-            .binding => |binding| if (binding == 2) selector else id,
+            .binding => |binding| if (binding == 1) selector else id,
             .random_id => unreachable,
         };
         if (entry.key == .store_selector) {
@@ -2459,8 +2465,7 @@ const identity_sql = std.fmt.comptimePrint("PRAGMA application_id={d}", .{applic
 const version_sql = std.fmt.comptimePrint("PRAGMA user_version={d}", .{schema_version});
 /// `schema_version` as store_meta's `format` row holds it.
 const format_text = std.fmt.comptimePrint("{d}", .{schema_version});
-/// The wire version is bound, not spliced: it has its own check on open, so
-/// a wire bump still appends a format step to migrate the saved label.
+/// The Store selector is bound, not spliced: it is the caller's path.
 /// The Store id is 16 bytes from SQLite's randomness, which it seeds from
 /// the OS, in lower-case hex, as `migrations` writes it too.
 pub fn sqliteMetaSeedSql() [:0]const u8 {
@@ -2586,8 +2591,7 @@ pub fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
     try sqlite.exec(database, version_sql);
     const statement = try sqlite.prepare(database, store_meta_sql);
     defer _ = c.sqlite3_finalize(statement);
-    try sqlite.bindText(statement, 1, wire_version);
-    try sqlite.bindText(statement, 2, selector);
+    try sqlite.bindText(statement, 1, selector);
     try sqlite.expectDone(statement);
     try sqlite.exec(database, "COMMIT");
 }
@@ -2643,10 +2647,6 @@ pub noinline fn migrate(io: std.Io, database: *c.sqlite3, selector: []const u8, 
     }
     try sqlite.exec(database, version_sql);
     try sqlite.exec(database, "UPDATE store_meta SET meta_value='" ++ format_text ++ "' WHERE meta_key='format'");
-    // v0.60 shipped format 60 / wire 11. Format 61 is already a forward
-    // migration, so finalize its wire label without rewriting shipped steps
-    // or taking another format number. Unknown labels still fail validation.
-    try sqlite.exec(database, "UPDATE store_meta SET meta_value='" ++ wire_version ++ "' WHERE meta_key='wire_version' AND meta_value='11'");
     try validateCurrent(database, selector, identity_mismatch);
     try sqlite.exec(database, "COMMIT");
 }
@@ -2750,14 +2750,6 @@ fn validateCurrent(database: *c.sqlite3, selector: []const u8, identity_mismatch
         if (matched != expected.len) return error.WrongStoreSchema;
     }
     if (!try metaEquals(database, "format", format_text)) return error.WrongStoreVersion;
-    {
-        const statement = try sqlite.prepare(database, "SELECT meta_value FROM store_meta WHERE meta_key='wire_version'");
-        defer _ = c.sqlite3_finalize(statement);
-        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.WrongStoreVersion;
-        var version: Bounded(16) = .{};
-        try sqlite.readText(statement, 0, &version);
-        if (!version.eql(wire_version)) return error.WrongStoreVersion;
-    }
     {
         const statement = try sqlite.prepare(database, "SELECT meta_value FROM store_meta WHERE meta_key='store_id'");
         defer _ = c.sqlite3_finalize(statement);
@@ -2973,15 +2965,17 @@ test "MySQL sessions read literals as rsql copies them, and strictly" {
     }
 }
 
-test "schema 74 migration updates only wire metadata on SQLite and MySQL" {
+test "schema 74 migration only deletes the saved wire label on SQLite and MySQL" {
     const step = migrations[73 - migration_baseline];
     try std.testing.expectEqual(@as(u32, 73), step.from);
     inline for (.{ rsql.Dialect.sqlite, rsql.Dialect.mysql }) |dialect| {
         const statements = if (dialect == .sqlite) step.sqlite else step.mysql;
         try std.testing.expectEqual(@as(usize, 1), statements.len);
-        for (statements) |statement| try std.testing.expectEqualStrings("UPDATE store_meta SET meta_value='17' WHERE meta_key='wire_version' AND meta_value='16'", statement);
+        try std.testing.expectEqualStrings("DELETE FROM store_meta WHERE meta_key='wire_version'", statements[0]);
     }
-    try std.testing.expectEqualStrings("UPDATE store_meta SET meta_value='17' WHERE meta_key='wire_version' AND meta_value='16';\n", mysqlMigration(73));
+    try std.testing.expectEqualStrings("DELETE FROM store_meta WHERE meta_key='wire_version';\n", mysqlMigration(73));
+    // Older formats' composed text ends with the format alone, never a wire label.
+    try std.testing.expect(std.mem.endsWith(u8, mysqlMigrationFrom(migration_baseline).?, "DELETE FROM store_meta WHERE meta_key='wire_version';\nUPDATE store_meta SET meta_value='" ++ format_text ++ "' WHERE meta_key='format';\n"));
 }
 
 test "schema 72 migration updates only wire metadata on SQLite and MySQL" {
@@ -3152,7 +3146,7 @@ test "schema 57 preserves Commands and stop references while adding nullable arc
     try std.testing.expect(!reopened.ended);
     try std.testing.expectEqual(schema_version, try sqlite.pragmaInt(database, "PRAGMA user_version"));
     try std.testing.expect(try metaEquals(database, "format", format_text));
-    try std.testing.expect(try metaEquals(database, "wire_version", wire_version));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM store_meta WHERE meta_key='wire_version'"));
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM original_commands EXCEPT SELECT * FROM core_command)"));
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM core_command EXCEPT SELECT * FROM original_commands)"));
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM original_stops EXCEPT SELECT command_key,session_ref,selected_turn_id,position,admission_cutoff,stopped_at FROM session_stop)"));
@@ -3266,7 +3260,7 @@ test "schema 61 migration preserves saved call rows and accepts 200 UTF-8 bytes"
     try openExisting(std.testing.io, database, root, null, null);
     try std.testing.expectEqual(schema_version, try sqlite.pragmaInt(database, "PRAGMA user_version"));
     try std.testing.expect(try metaEquals(database, "format", format_text));
-    try std.testing.expect(try metaEquals(database, "wire_version", wire_version));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM store_meta WHERE meta_key='wire_version'"));
     inline for (.{ "model_output_item", "model_tool_call", "model_output_part", "action_operation", "conversation_entry" }) |name| {
         try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM original_" ++ name ++ " EXCEPT SELECT * FROM " ++ name ++ ")"));
         try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM " ++ name ++ " EXCEPT SELECT * FROM original_" ++ name ++ ")"));

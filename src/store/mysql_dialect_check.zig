@@ -533,8 +533,8 @@ test "a MySQL Store at the migration baseline with its rows takes every migratio
     try load(migrated_database, store_testing.baseline_rows, true);
     const selector = "/mysql-migration-store";
     // A persisted format must advance, not be repaired as missing at open.
-    // This older wire predates the step-local 8 -> 9 -> ... updates, so the
-    // composed text must also finish wire-only changes between releases.
+    // This older wire label predates the step-local 8 -> 9 -> ... updates;
+    // format 74 deletes whatever label the Store saved.
     try load(migrated_database, std.fmt.comptimePrint(
         "INSERT INTO store_meta(meta_key,meta_value) VALUES('format','{d}'),('wire_version','7'),('store_selector','{s}')",
         .{ schema.migration_baseline, selector },
@@ -543,8 +543,8 @@ test "a MySQL Store at the migration baseline with its rows takes every migratio
     try load(fresh_database, schema.ddl(.mysql), false);
     try load(fresh_database, store_testing.expected_mysql_rows, true);
     try load(fresh_database, std.fmt.comptimePrint(
-        "INSERT INTO store_meta(meta_key,meta_value) VALUES('format','{d}'),('wire_version','{s}'),('store_selector','{s}')",
-        .{ schema.schema_version, wire_version, selector },
+        "INSERT INTO store_meta(meta_key,meta_value) VALUES('format','{d}'),('store_selector','{s}')",
+        .{ schema.schema_version, selector },
     ), false);
     try expectSameResults(comptime &shapeQueries(migrated_database), comptime &shapeQueries(fresh_database));
     try expectSameResults(comptime rowQueries(migrated_database), comptime rowQueries(fresh_database));
@@ -602,7 +602,7 @@ test "model call timing MySQL format 68 migration preserves format 67 resolution
     writeRecord();
 }
 
-test "schema 55 migrates recovery index and wire 8 together to the current schema and wire" {
+test "schema 55 migrates recovery index and wire 8 together to the current schema without a wire label" {
     const io = std.testing.io;
     mutex.lockUncancelable(io);
     defer mutex.unlock(io);
@@ -619,7 +619,7 @@ test "schema 55 migrates recovery index and wire 8 together to the current schem
     var result: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer result.deinit();
     try writeResult("SELECT meta_value FROM store_meta WHERE meta_key='wire_version'", &result.writer);
-    try std.testing.expectEqualStrings(std.fmt.comptimePrint("\n {d}:{s}", .{ wire_version.len, wire_version }), result.written());
+    try std.testing.expectEqualStrings("", result.written());
     try expectCatalog(migrated_database);
     done.migrations += 1;
     writeRecord();
@@ -671,8 +671,7 @@ test "skills schema 56 wire 9 MySQL migration preserves ordinary rows and reache
     var result: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer result.deinit();
     try writeResult("SELECT meta_value FROM store_meta WHERE meta_key='wire_version'", &result.writer);
-    const current_wire = wire_version;
-    try std.testing.expectEqualStrings(std.fmt.comptimePrint("\n {d}:{s}", .{ current_wire.len, current_wire }), result.written());
+    try std.testing.expectEqualStrings("", result.written());
     var after: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer after.deinit();
     try writeResult(ordinary_rows, &after.writer);
@@ -739,8 +738,7 @@ test "skills schema 58 wire 10 MySQL migration preserves archive refusal and ord
     var result: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer result.deinit();
     try writeResult("SELECT meta_value FROM store_meta WHERE meta_key='wire_version'", &result.writer);
-    const current_wire = wire_version;
-    try std.testing.expectEqualStrings(std.fmt.comptimePrint("\n {d}:{s}", .{ current_wire.len, current_wire }), result.written());
+    try std.testing.expectEqualStrings("", result.written());
     var after: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer after.deinit();
     try writeResult(ordinary_rows, &after.writer);
@@ -781,14 +779,14 @@ test "metadata seed MySQL missing masks retain canonical selector and id" {
     const id = "0123456789abcdef0123456789abcdef".*;
     const selector = "/canonical/'\\é";
     const expected = [_][]const u8{
-        "INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version','" ++ wire_version ++ "');",
         "INSERT INTO store_meta(meta_key,meta_value) VALUES('store_selector',_utf8mb4 X'2f63616e6f6e6963616c2f275cc3a9' COLLATE utf8mb4_0900_bin);",
         "INSERT INTO store_meta(meta_key,meta_value) VALUES('format','" ++ std.fmt.comptimePrint("{d}", .{schema.schema_version}) ++ "');",
         "INSERT INTO store_meta(meta_key,meta_value) VALUES('store_id','0123456789abcdef0123456789abcdef');",
     };
-    // Independent domain: every subset of all four repaired keys.
-    const repaired = [_]schema.MetaKey{ .wire_version, .store_selector, .format, .store_id };
-    for (0..16) |mask| {
+    // Independent domain: every subset of all three repaired keys. Format
+    // 74 retired the wire label, so no subset repairs one.
+    const repaired = [_]schema.MetaKey{ .store_selector, .format, .store_id };
+    for (0..8) |mask| {
         var seen: schema.MetaPresence = .empty;
         var wanted: std.Io.Writer.Allocating = .init(std.testing.allocator);
         defer wanted.deinit();
@@ -846,7 +844,7 @@ test "frozen context window schema 69 MySQL migration pins legacy policy and pre
     writeRecord();
 }
 
-test "schema 74 MySQL migration updates the saved wire label and preserves ordinary rows" {
+test "schema 74 MySQL migration deletes the saved wire label, and the Store opens without one" {
     const io = std.testing.io;
     mutex.lockUncancelable(io);
     defer mutex.unlock(io);
@@ -858,19 +856,32 @@ test "schema 74 MySQL migration updates the saved wire label and preserves ordin
     inline for (schema.migrations) |step| {
         if (step.from < 73) try load(migrated_database, schema.mysqlMigration(step.from), false);
     }
-    try load(migrated_database, "INSERT INTO store_meta(meta_key,meta_value) VALUES('format','73'),('wire_version','16')", false);
+    const selector = "/mysql-wire-retirement";
+    try load(migrated_database, "INSERT INTO store_meta(meta_key,meta_value) VALUES('format','73'),('wire_version','16'),('store_selector','" ++ selector ++ "')", false);
     try load(migrated_database, schema.mysqlMigration(73), false);
     try expectSameResults(&.{
-        "SELECT meta_value FROM store_meta WHERE meta_key='wire_version'",
+        "SELECT count(*) FROM store_meta WHERE meta_key='wire_version'",
         "SELECT meta_value FROM store_meta WHERE meta_key='format'",
         "SELECT count(*) FROM session WHERE session_ref='d8mv7p'",
     }, &.{
-        "SELECT '17'",
+        "SELECT 0",
         "SELECT '73'",
         "SELECT 1",
     });
     try load(migrated_database, schema.mysqlMigrationFrom(73).?, false);
     try expectCatalog(migrated_database);
+    // The production admission path opens it with no label and writes none.
+    const config = (try configured()).?;
+    const probe = try std.testing.allocator.create(mysql_connection.Connection);
+    defer std.testing.allocator.destroy(probe);
+    var refusal: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer refusal.deinit();
+    try probe.open(.{ .address = .{ .unix_socket = config.socket }, .user = "root", .password = config.password, .database = migrated_database }, &refusal.writer);
+    defer probe.close();
+    var found: u32 = 0;
+    _ = try @import("engine/mysql_open.zig").open(probe, io, .{ .database = migrated_database, .found_schema_version = &found }, selector);
+    try std.testing.expectEqual(schema.schema_version, found);
+    try expectSameResults(&.{"SELECT count(*) FROM " ++ migrated_database ++ ".store_meta WHERE meta_key='wire_version'"}, &.{"SELECT 0"});
     done.migrations += 1;
     writeRecord();
 }

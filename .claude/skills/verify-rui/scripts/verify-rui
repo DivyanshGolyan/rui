@@ -168,6 +168,9 @@ def store_arg(run):
 
 
 def cmd_build(args):
+    jobs = os.environ.get("RUI_BUILD_JOBS", "2")
+    if not re.fullmatch(r"[0-9]+", jobs) or int(jobs) < 1:
+        die("RUI_BUILD_JOBS must be a positive integer")
     sha = args.sha
     if not re.fullmatch(r"[0-9a-f]{40}", sha):
         die("build needs a full 40-hex commit SHA")
@@ -195,11 +198,11 @@ def cmd_build(args):
     log = build / "build.log"
     started = time.monotonic()
     with open(log, "w") as handle:
-        result = subprocess.run(["zig", "build", "-Doptimize=ReleaseSafe", "-j2", "--summary", "all"], cwd=source,
+        result = subprocess.run(["zig", "build", "-Doptimize=ReleaseSafe", f"-j{jobs}", "--summary", "all"], cwd=source,
                                 env=env, stdout=handle, stderr=subprocess.STDOUT)
         if result.returncode == 0 and not args.no_screen:
             # The committed-screen observer's terminal emulator, for the tap.
-            result = subprocess.run(["zig", "build", "screen-emulator", "-j2", "--prefix", str(build / "screen"), "--summary", "all"],
+            result = subprocess.run(["zig", "build", "screen-emulator", f"-j{jobs}", "--prefix", str(build / "screen"), "--summary", "all"],
                                     cwd=source, env=env, stdout=handle, stderr=subprocess.STDOUT)
     if result.returncode != 0:
         die(f"zig build failed (rc={result.returncode}); see {log}")
@@ -2120,6 +2123,9 @@ def validate_scenario(data, sizes=None):
             require(type(entry.get("count", 1)) is int and entry.get("count", 1) > 0, f"{name}: count must be positive")
             require("count" not in entry or "{n}" in label, f"{name}: counted label must contain {{n}}")
             require(all(isinstance(entry.get(k, ""), str) for k in ("model", "effort")), f"{name}: invalid model/effort")
+            skills = entry.get("skills", [])
+            require(isinstance(skills, list) and all(isinstance(skill, str) and re.fullmatch(r"[a-z][a-z0-9-]{0,63}", skill) for skill in skills)
+                    and len(set(skills)) == len(skills), f"{name}: invalid cast skills")
             messages = entry.get("messages")
             require(isinstance(messages, list) and bool(messages) and all(isinstance(m, str) and m for m in messages), f"{name}: messages must be nonempty strings")
         for entry in cast_entries(cast):
@@ -2230,6 +2236,10 @@ def seed_cast(run, entries):
         workspace.mkdir(parents=True, exist_ok=True)
         (workspace / "README.md").write_text("verify-rui project\n")
         (workspace / "src").mkdir(exist_ok=True)
+        for skill in entry.get("skills", []):
+            folder = workspace / ".agents" / "skills" / skill
+            folder.mkdir(parents=True, exist_ok=True)
+            (folder / "SKILL.md").write_text(f"---\nname: {skill}\ndescription: Verify the project and review the implementation\n---\nReview the project.\n")
         sid = None
         for i, text in enumerate(entry["messages"]):
             if sid is None:
@@ -2557,13 +2567,19 @@ def frames_index(out, frames, png):
                                     'img{max-width:100%}iframe{width:100%;height:900px;border:0}</style>' + "\n".join(sections))
 
 
+def frame_capture_selected(state, selected):
+    """Only selected states produce and compare saved captures."""
+    return state["name"] in selected
+
+
 def cmd_frames(args):
     try:
         scenario = load_scenario(args.scenario, args.sizes)
         selected = set(args.only.split(",")) if args.only else {s["name"] for s in scenario["states"]}
         unknown = selected - {s["name"] for s in scenario["states"]}
         if unknown:
-            raise ValueError("unknown states: " + ", ".join(sorted(unknown)))
+            raise ValueError("unknown states: " + ", ".join(sorted(unknown)) +
+                             "; valid states: " + ", ".join(s["name"] for s in scenario["states"]))
     except (OSError, ValueError, TypeError) as error:
         die(str(error))
     build = load_build(args.sha)
@@ -2620,33 +2636,35 @@ def cmd_frames(args):
             opened = False
             failure_capture = None
             first_record = len(records)
+            is_selected = frame_capture_selected(state, selected)
             try:
                 seed_cast(run, state.get("cast", []))
+                steps = state["steps"]
                 target = FrameTerminal(run, state, state_sizes[0])
                 opened = True
                 # Initial readiness is a committed Rui frame, not elapsed wall
                 # time or a terminal query. State-specific waits own later readiness.
                 stopped_marker = next((step["wait"] for step in state["steps"]
                                        if "The Host stopped." in step.get("wait", "")), None)
-                first_wait = state["steps"][0].get("wait") if state["steps"] else None
+                first_wait = steps[0].get("wait") if steps else None
                 frame_initial_ready(target, first_wait, allow_exit=bool(stopped_marker))
-                exiting = frame_steps(run, target, state["steps"], exiting=bool(stopped_marker))
+                exiting = frame_steps(run, target, steps, exiting=bool(stopped_marker))
                 frame_ready(target, state, allow_exit=exiting, sessions=run.meta.get("sessions", {}))
             except (Exception, SystemExit) as error:
                 reason = str(error)
-                if state["name"] in selected:
+                if is_selected:
                     failed = True
                     print(f"verify-rui: {state['name']}: {reason}", file=sys.stderr)
                 else:
                     print(f"verify-rui: warning: {state['name']}: {reason} "
                           "(not selected; its failure does not fail this run)", file=sys.stderr)
-                if opened and state["name"] in selected:
+                if opened and is_selected:
                     try:
                         failure_capture = frame_capture(run, target, out, state, state_sizes[0], reason)
                     except (Exception, SystemExit):
                         pass  # The capture error below retains the primary state failure.
             try:
-                if state["name"] in selected:
+                if is_selected:
                     for index, size in enumerate(state_sizes):
                         if failure_capture and index == 0:
                             records.append(failure_capture)
@@ -2673,7 +2691,7 @@ def cmd_frames(args):
                     try:
                         target.close()
                     except (Exception, SystemExit) as error:
-                        if state["name"] in selected:
+                        if is_selected:
                             failed = True
                             # Disposal can discover an error after the last
                             # capture. Keep its files, but never publish ok.
@@ -2683,7 +2701,7 @@ def cmd_frames(args):
                         else:
                             print(f"verify-rui: warning: {state['name']}: disposal failed: {error} "
                                   "(not selected; its failure does not fail this run)", file=sys.stderr)
-                if state["name"] in selected:
+                if is_selected:
                     frames_index(out, records, False)
         if not args.no_png:
             movies = []

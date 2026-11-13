@@ -415,20 +415,27 @@ pub fn resolveProviders(init: std.process.Init, settings: *hs.Settings, fixtures
         if (@field(settings.providers.entries, @tagName(provider))) |*entry| {
             switch (comptime provider.facts().credential) {
                 .api_key => if (!entry.unauthenticated.value or fixtures.openai) {
+                    // A source the document names is a document refusal. The
+                    // saved default is the flag Host's environment, so it keeps
+                    // that Host's existing diagnostics, causes and exits.
                     if (entry.key.source == .default) {
                         var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-                        const path = api_key.path(init.environ_map, &path_buffer) catch |err| return resolutionFailure(failure, "providers." ++ @tagName(provider) ++ ".key", err);
+                        const path = api_key.path(init.environ_map, &path_buffer) catch |err| return if (err == error.HomeRequired) error.HomeUnavailable else err;
                         entry.key.source = .{ .file = .{} };
-                        entry.key.source.file.text.set(path) catch |err| return resolutionFailure(failure, "providers." ++ @tagName(provider) ++ ".key", err);
-                    }
-                    resolve(init, &entry.key) catch |err| return resolutionFailure(failure, "providers." ++ @tagName(provider) ++ ".key", err);
+                        try entry.key.source.file.text.set(path);
+                        resolve(init, &entry.key) catch |err| {
+                            if (err == error.ApiKeyMissing) stderr.diagnostic("rui: no OpenAI API key; save one with `" ++ comptime protocol.Provider.openai.login().? ++ "`, then start the Host again.\n", .{});
+                            return err;
+                        };
+                    } else resolve(init, &entry.key) catch |err| return resolutionFailure(failure, "providers." ++ @tagName(provider) ++ ".key", err);
                 },
+                // Only the saved default is resolved here, as before documents.
                 .sign_in => if (!entry.unauthenticated.value or (provider == .codex and fixtures.codex) or (provider == .chatgpt and fixtures.chatgpt_token_endpoint != null)) {
                     if (entry.credential_file == null) {
                         var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-                        const path = provider_login.credentialPath(init, provider, &path_buffer, false) catch |err| return resolutionFailure(failure, "providers." ++ @tagName(provider) ++ ".credentialFile", err);
+                        const path = provider_login.credentialPath(init, provider, &path_buffer, false) catch |err| return if (err == error.HomeRequired) error.HomeUnavailable else err;
                         entry.credential_file = .{};
-                        entry.credential_file.?.text.set(path) catch |err| return resolutionFailure(failure, "providers." ++ @tagName(provider) ++ ".credentialFile", err);
+                        try entry.credential_file.?.text.set(path);
                     }
                 },
             }
@@ -492,24 +499,18 @@ pub fn storeKind(settings: *const hs.Settings) start_report.Store {
     return if (settings.store == .mysql) .mysql else .sqlite;
 }
 
-/// Shared --check/serve pipeline. The caller selects the Host directory using
-/// platform policy; an explicit document Adapter keeps its own Store location.
-pub fn admit(init: std.process.Init, parsed: *const cli_args.Parsed, dir: []const u8, settings: *hs.Settings, fixtures: *providers.Fixtures, failure: *start_report.Failure) !hs.Prepared {
+/// Shared --check/serve intake: every source, then provider credentials. The
+/// caller checks process-environment preconditions before `admitSelected`.
+pub fn intake(init: std.process.Init, parsed: *const cli_args.Parsed, dir: []const u8, settings: *hs.Settings, fixtures: *providers.Fixtures, failure: *start_report.Failure) !void {
     try fillAt(init, parsed, dir, settings, fixtures, failure);
     try resolveProviders(init, settings, fixtures.*, failure);
-    const served = providers.fromSettings(settings, fixtures.*);
-    if (try served.proxyRefusal(init.gpa)) |reason| {
-        failure.code = .settings_invalid;
-        const message = try std.fmt.bufPrint(&failure.message.bytes, "network: https_proxy/HTTPS_PROXY {s}; Rui tunnels only through an http:// proxy", .{reason});
-        failure.message.len = message.len;
-        return error.UnsupportedProxyScheme;
-    }
-    if (settings.store == .sqlite) {
-        if (settings.store.sqlite.dir.anchored) {
-            try selectStore(init, settings, dir, false, failure);
-        }
-    }
-    return prepare(init, settings, fixtures.*, failure);
+}
+
+/// The caller selects the Host directory using platform policy; an explicit
+/// document Adapter keeps its own Store location.
+pub fn admitSelected(init: std.process.Init, dir: []const u8, settings: *hs.Settings, fixtures: providers.Fixtures, failure: *start_report.Failure) !hs.Prepared {
+    if (settings.store == .sqlite and settings.store.sqlite.dir.anchored) try selectStore(init, settings, dir, false, failure);
+    return prepare(init, settings, fixtures, failure);
 }
 
 fn parseForTest(gpa: std.mem.Allocator, args: []const []const u8) !cli_args.Parsed {
@@ -558,7 +559,11 @@ test "Host start resolves environment private file and saved credential sources"
     try std.testing.expectEqualStrings("/tmp/./codex-\xff.json", settings.providers.entries.codex.?.credential_file.?.slice());
     try std.testing.expectEqualStrings("/tmp/./chatgpt-\xff.json", settings.providers.entries.chatgpt.?.credential_file.?.slice());
     try private.setFilePermissions(std.testing.io, "openai.key", .fromMode(0o644), .{});
+    // The saved default keeps the flag Host's own cause; only a source the
+    // document names is a leaf-scoped document refusal.
     try assign(settings, arena.allocator(), "providers.openai.key", "null", &failure);
+    try std.testing.expectError(error.InsecureCredentialFile, prepare(init, settings, .{}, &failure));
+    try assign(settings, arena.allocator(), "providers.openai.key", try std.fmt.allocPrint(arena.allocator(), "file:{s}", .{path}), &failure);
     try std.testing.expectError(error.SettingsInvalid, prepare(init, settings, .{}, &failure));
     try std.testing.expect(std.mem.startsWith(u8, failure.message.slice(), "providers.openai.key:"));
 }
@@ -1118,29 +1123,36 @@ pub fn launchReady(result: *HostLaunchResult, ready: @import("protocol_reply.zig
 
 const moved = "bare rui and rui host start reach only a Host that listens in its Host directory; start this one with rui host serve --store DIR";
 
-/// Read source descriptions only: no secret is resolved and no login made.
-/// A Host whose settings listen elsewhere could start but never be reached
-/// through `dir`, so the starter refuses it before launching anything.
-pub fn checkReachable(init: std.process.Init, dir: []const u8, request: Spawn, failure: *start_report.Failure) !void {
+/// The layers a `host serve --store DIR [--settings FILE] [--set ...]` launch
+/// applies, in its order: saved host.json, the document, then each --set.
+/// Source descriptions only: no secret is resolved and no login made.
+pub fn readLaunch(init: std.process.Init, request: Spawn, settings: *hs.Settings, failure: *start_report.Failure) !void {
     var wiping: secret_value.WipingAllocator = .{ .backing = init.gpa };
     var memory: std.heap.ArenaAllocator = .init(wiping.allocator());
     defer memory.deinit();
-    const settings = try init.gpa.create(hs.Settings);
-    defer init.gpa.destroy(settings);
-    settings.* = .{};
-    defer settings.deinit();
-    _ = try saved(init, memory.allocator(), dir, settings, failure);
+    _ = try saved(init, memory.allocator(), request.dir, settings, failure);
     if (request.settings_file) |file| _ = try readDocumentAt(init, file, settings, failure);
     for (request.assignments) |assignment| {
         const equals = std.mem.indexOfScalar(u8, assignment, '=') orelse return invalid(failure, "settings", "--set requires PATH=VALUE");
         try input(init, settings, assignment[0..equals], assignment[equals + 1 ..], failure);
     }
+}
+
+/// Read source descriptions only: no secret is resolved and no login made.
+/// A Host whose settings listen elsewhere could start but never be reached
+/// through `dir`, so the starter refuses it before launching anything.
+pub fn checkReachable(init: std.process.Init, request: Spawn, failure: *start_report.Failure) !void {
+    const settings = try init.gpa.create(hs.Settings);
+    defer init.gpa.destroy(settings);
+    settings.* = .{};
+    defer settings.deinit();
+    try readLaunch(init, request, settings, failure);
     if (settings.store == .mysql) return invalid(failure, "store.mysql", moved);
     if (!settings.interface.dir.anchored) return invalid(failure, "interface.dir", moved);
     if (!settings.store.sqlite.dir.anchored) {
         var host: [protocol.max_store_bytes]u8 = undefined;
         var chosen: [protocol.max_store_bytes]u8 = undefined;
-        const a = try platform.canonicalStoreDestination(init.io, dir, &host);
+        const a = try platform.canonicalStoreDestination(init.io, request.dir, &host);
         const b = platform.canonicalStoreDestination(init.io, settings.store.sqlite.dir.slice(), &chosen) catch return invalid(failure, "store.sqlite.dir", moved);
         if (!std.mem.eql(u8, a, b)) return invalid(failure, "store.sqlite.dir", moved);
     }
@@ -1164,7 +1176,7 @@ pub noinline fn spawn(init: std.process.Init, request: Spawn, ops: Ops, progress
     if (selection == .mysql) return launchFailure(result, .mysql_unavailable, error.MysqlHostUnavailable, null);
     // Refuse before any effect: an invalid or unreachable start creates no Store.
     var reach_failure: start_report.Failure = .init(.settings_invalid, "settings: could not be read");
-    checkReachable(init, selected, request, &reach_failure) catch |err| {
+    checkReachable(init, request, &reach_failure) catch |err| {
         var canonical: [protocol.max_store_bytes]u8 = undefined;
         launchFailure(result, .child_refused, if (err == error.SettingsInvalid) error.HostStartupFailed else err, platform.canonicalStoreDestination(io, selected, &canonical) catch null);
         result.outcome.failed.refusal = reach_failure;
@@ -1313,13 +1325,13 @@ test "Host start starter refuses settings that move the Host away from its direc
         var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const dir = root[0..try host.realPath(init.io, &root)];
         var failure: start_report.Failure = undefined;
-        try checkReachable(init, dir, .{ .dir = dir }, &failure);
+        try checkReachable(init, .{ .dir = dir }, &failure);
         const value = if (std.mem.eql(u8, case.value, "SELF")) dir else case.value;
         // Saved and one-off assignments reach the same verdict.
         const assignment = try std.fmt.allocPrint(arena.allocator(), "{s}={s}", .{ case.path, value });
-        const once = checkReachable(init, dir, .{ .dir = dir, .assignments = &.{assignment} }, &failure);
+        const once = checkReachable(init, .{ .dir = dir, .assignments = &.{assignment} }, &failure);
         try savedEdit(init, dir, case.path, value, &failure);
-        const saved_result = checkReachable(init, dir, .{ .dir = dir }, &failure);
+        const saved_result = checkReachable(init, .{ .dir = dir }, &failure);
         if (case.refused) |prefix| {
             try std.testing.expectError(error.SettingsInvalid, once);
             try std.testing.expectError(error.SettingsInvalid, saved_result);

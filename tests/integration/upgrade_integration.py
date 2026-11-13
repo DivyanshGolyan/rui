@@ -835,10 +835,13 @@ def restart_all_cases(root, binary, releases):
                 listener.listen(1)
                 output = first.run("host", "restart", "--all", expect=6)
                 assert "Store unknown (socket " in output and "failed at discovery:" in output, output
+                # The report names why discovery failed, so a red run shows its cause.
+                assert re.search(r"Host state is unconfirmed \([A-Za-z]+\);", output), output
                 assert "[host_restart_failed]" in output, output
                 assert "3 Hosts: 0 restarted, 2 already current, 0 left unchanged, 1 failed." in output, output
             output = first.run("host", "restart", "--all", expect=6)
             assert str(unreadable) in output and "Host state is unconfirmed" in output, output
+            assert re.search(r"Host state is unconfirmed \([A-Za-z]+\);", output), output
             assert "3 Hosts: 0 restarted, 2 already current, 0 left unchanged, 1 failed." in output, output
             assert "[host_restart_failed]" in output, output
         finally:

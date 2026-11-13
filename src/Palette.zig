@@ -4,11 +4,12 @@ const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 const commands = @import("slash_commands.zig");
+const overview = @import("overview_view.zig");
 const Self = @This();
 const Hover = @import("widgets/Hover.zig");
 
 shown: *commands.Shown,
-method: vaxis.gwidth.Method = .unicode,
+caps: overview.Caps = .{ .width = .unicode },
 style: vaxis.Style = .{},
 quiet: vaxis.Style = .{ .dim = true },
 /// The pointer's row: only its background, reverse and underline apply, and the highlighted
@@ -61,9 +62,9 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     self.hover.targets = &.{};
     self.shown.drew(width > 2 and height != 0);
     if (self.shown.seen != .drawn) return .empty(self.widget());
-    const surface = try vxfw.Surface.init(ctx.arena, self.widget(), .{ .width = width, .height = height });
+    const surface = try vxfw.Surface.init(ctx.cell_arena, self.widget(), .{ .width = width, .height = height });
     @memset(surface.buffer, .{ .style = self.style });
-    var screen: vaxis.Screen = .{ .width = width, .height = height, .width_method = self.method, .buf = surface.buffer };
+    var screen: vaxis.Screen = .{ .width = width, .height = height, .width_method = self.caps.width, .buf = surface.buffer };
     const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = height, .screen = &screen };
     const list = &self.shown.list;
     const count = commands.named(list.count, height);
@@ -87,7 +88,8 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
             var description = self.quiet;
             description.reverse = style.reverse;
             if (hovered) hovering(&description, self.hover_style);
-            _ = line.child(.{ .x_off = @intCast(column) }).printSegment(.{ .text = entry.description, .style = description }, .{ .wrap = .none });
+            const fitted = try overview.fitted(ctx.arena, self.caps, entry.description, width - column, .head);
+            _ = line.child(.{ .x_off = @intCast(column) }).printSegment(.{ .text = fitted.bytes, .style = description }, .{ .wrap = .none });
         }
     }
     if (count < list.count and count < height) {
@@ -109,7 +111,7 @@ test "Palette keeps the selected command visible at one row and hides closed or 
     var palette: Self = .{ .shown = &shown };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 1 }, .cell_size = .{} };
+    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 1 }, .cell_size = .{} };
     const surface = try palette.widget().draw(ctx);
     try std.testing.expectEqual(.drawn, shown.seen);
     try std.testing.expectEqual(@as(u16, 1), surface.size.height);
@@ -146,7 +148,7 @@ test "Palette hover is transient and clicks activate only visible command rows" 
     var palette: Self = .{ .shown = &shown, .userdata = &selected, .on_select = Selected.select, .style = .{ .fg = .{ .index = 3 } } };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 3 }, .cell_size = .{} };
+    const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 3 }, .cell_size = .{} };
     const initial = try palette.widget().draw(draw_ctx);
     try std.testing.expect(!initial.readCell(0, 1).style.reverse);
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
@@ -200,16 +202,16 @@ test "Palette hover is transient and clicks activate only visible command rows" 
     try std.testing.expect(selected.index == null);
 }
 
-test "Palette renders the names-only conversation slash list" {
+test "Palette renders every chat command with its quiet description" {
     const cases = .{
-        .{ commands.conversation, &[_][]const u8{ "/archive", "/copy           code · file", "/effort", "/reload-skills", "/rename", "/setup", "/unarchive" } },
+        .{ commands.conversation, &[_][]const u8{ "/archive", "/clear", "/copy", "/effort", "/model", "/new", "/reload-skills", "/rename", "/requests", "/result", "/setup", "/unarchive" } },
     };
     inline for (cases) |case| {
         var shown = commands.Shown.next(null, 1, case[0].suggest("/", .{})).?;
         var palette: Self = .{ .shown = &shown };
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
-        const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 24 }, .cell_size = .{} };
+        const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 24 }, .cell_size = .{} };
         const surface = try palette.widget().draw(ctx);
         try std.testing.expectEqual(case[1].len, surface.size.height);
         std.debug.print("\n{s} / list:\n", .{"Conversation"});
@@ -221,12 +223,89 @@ test "Palette renders the names-only conversation slash list" {
                 used += cell.char.grapheme.len;
             }
             const line = std.mem.trimEnd(u8, text[0..used], " ");
-            try std.testing.expectEqualStrings(expected, line);
+            try std.testing.expect(std.mem.startsWith(u8, line, expected));
+            try std.testing.expect(shown.list.entries[row].description.len != 0);
+            try std.testing.expect(std.mem.indexOf(u8, line, shown.list.entries[row].description[0..@min(20, shown.list.entries[row].description.len)]) != null);
             std.debug.print("{s}\n", .{line});
-            if (std.mem.indexOf(u8, expected, " · ") != null) {
+            if (shown.list.entries[row].description.len != 0) {
                 try std.testing.expect(!surface.readCell(0, @intCast(row)).style.dim);
                 try std.testing.expect(surface.readCell(@intCast(shown.list.descriptionColumn()), @intCast(row)).style.dim);
             }
+        }
+    }
+}
+
+test "Palette description clipping ends with the list row ellipsis at every width and selection" {
+    const description = "Verify the project and review the implementation";
+    for ([_]bool{ true, false }) |unicode| {
+        for (0..2) |selected| {
+            for (0..81) |width| {
+                var shown = commands.Shown.next(null, 1, commands.conversation.suggest("/", .{})).?;
+                shown.list.count = 2;
+                shown.highlight = selected;
+                for (shown.list.entries[0..2]) |*entry| entry.description = description;
+                var palette: Self = .{ .shown = &shown, .caps = .{ .unicode = unicode, .width = .unicode } };
+                var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+                defer arena.deinit();
+                const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = @intCast(width), .height = 2 }, .cell_size = .{} };
+                const surface = try palette.widget().draw(ctx);
+                try std.testing.expect(surface.size.width <= width);
+                const column = shown.list.descriptionColumn();
+                const room = width -| column;
+                if (room == 0) continue;
+                const clipped = description.len > room;
+                const kept = @min(description.len, room - @intFromBool(clipped));
+                for (0..2) |row| {
+                    for (description[0..kept], 0..) |byte, index| {
+                        const cell = surface.readCell(@intCast(column + index), @intCast(row));
+                        try std.testing.expectEqualStrings(&.{byte}, cell.char.grapheme);
+                        try std.testing.expect(cell.style.dim);
+                        try std.testing.expectEqual(row == selected, cell.style.reverse);
+                    }
+                    if (clipped) {
+                        const cell = surface.readCell(@intCast(width - 1), @intCast(row));
+                        try std.testing.expectEqualStrings(if (unicode) "…" else ".", cell.char.grapheme);
+                        try std.testing.expect(cell.style.dim);
+                        try std.testing.expectEqual(row == selected, cell.style.reverse);
+                    }
+                }
+            }
+        }
+    }
+}
+
+test "Palette description fitting keeps whole wide and combining clusters" {
+    const cases = [_]struct { text: []const u8, room: u16, expected: []const u8, unicode: bool = true }{
+        .{ .text = "archive this chat", .room = 8, .expected = "archive…" },
+        .{ .text = "archive this chat", .room = 1, .expected = "…" },
+        .{ .text = "archive this chat", .room = 17, .expected = "archive this chat" },
+        .{ .text = "界ab界c", .room = 6, .expected = "界ab…" },
+        .{ .text = "e\u{301}clair", .room = 5, .expected = "e\u{301}cla…" },
+        .{ .text = "archive this chat", .room = 8, .expected = "archive.", .unicode = false },
+        .{ .text = "界abcd", .room = 3, .expected = "?a.", .unicode = false },
+        .{ .text = "", .room = 1, .expected = "" },
+    };
+    for (std.enums.values(vaxis.gwidth.Method)) |method| {
+        for (cases) |case| {
+            var shown = commands.Shown.next(null, 1, commands.conversation.suggest("/", .{})).?;
+            shown.list.count = 1;
+            shown.list.entries[0].description = case.text;
+            const column = shown.list.descriptionColumn();
+            const width: u16 = @intCast(column + case.room);
+            var palette: Self = .{ .shown = &shown, .caps = .{ .unicode = case.unicode, .width = method } };
+            var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer arena.deinit();
+            const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 1 }, .cell_size = .{} };
+            const surface = try palette.widget().draw(ctx);
+            var text: std.Io.Writer.Allocating = .init(arena.allocator());
+            var col = column;
+            while (col < width) {
+                const cell = surface.readCell(@intCast(col), 0);
+                try std.testing.expect(col + cell.char.width <= width);
+                try text.writer.writeAll(cell.char.grapheme);
+                col += @max(1, cell.char.width);
+            }
+            try std.testing.expectEqualStrings(case.expected, std.mem.trimEnd(u8, text.written(), " "));
         }
     }
 }
