@@ -2830,7 +2830,7 @@ pub fn rowSegments(arena: Allocator, state: *const State, at: usize, width: u16,
     else
         "";
     const name_room: usize = name_end -| 3;
-    const name_cells = try built.put(3, name, name_room -| built.measure(archived), .{ .colour = if (selected) .strong else .normal, .bold = selected });
+    const name_cells = try built.put(3, name, name_room -| built.measure(archived), .{ .colour = if (selected) .strong else .normal, .bold = selected, .dim = rowQuiet(state, row) });
     _ = try built.put(3 + name_cells, archived, name_room -| name_cells, .{ .colour = .quiet });
     _ = try built.put(end -| age_cells, age, age_cells, .{ .colour = .quiet });
     return segmentsOf(arena, try built.finish(), width, .{});
@@ -2846,7 +2846,7 @@ pub fn rowSecondSegments(arena: Allocator, state: *const State, at: usize, width
     const folder_cells = @min(built.measure(folder), end -| 3);
     const folder_start = end -| folder_cells;
     var buffer: [max_second_line_bytes]u8 = undefined;
-    _ = try built.put(3, secondLine(state, row, &buffer), folder_start -| 1 -| 3, .{ .colour = .quiet });
+    _ = try built.put(3, secondLine(state, row, &buffer), folder_start -| 1 -| 3, .{ .colour = .quiet, .dim = rowQuiet(state, row) });
     _ = try built.putTail(folder_start, folder, folder_cells, .{ .colour = .quiet });
     return segmentsOf(arena, try built.finish(), width, .{});
 }
@@ -2859,6 +2859,16 @@ pub fn markSpins(state: *const State, item: Item, caps: Caps) bool {
     if (item != .row or state.list_stale or !caps.unicode or caps.depth == .none) return false;
     const row = &state.rows.items[state.order.items[item.row]];
     return row.from_person_at != null and rules.get(shownKind(state, row)).spins;
+}
+
+/// Chats you have never written in recede unless their work needs attention.
+/// The open empty chat is yours even before its first Message is admitted.
+pub fn rowQuiet(state: *const State, row: *const Row) bool {
+    if (row.first == null or row.from_person_at != null) return false;
+    return switch (shownKind(state, row)) {
+        .approval, .failed, .stopped => false,
+        else => true,
+    };
 }
 
 /// Provider recovery bands above the list. Archive views remain reachable
@@ -4834,16 +4844,6 @@ test "overview idle rows never fold" {
     try std.testing.expect(std.mem.indexOf(u8, text, " more") == null);
 }
 
-test "overview sender does not change ended title styling" {
-    var state = try opened(&.{ session("k7m2qx", .{ .finished = ago(60) }, .{ .label = "Fix it", .yours = true }), session("r4t9vw", .{ .finished = ago(90) }, .{ .label = "Map it" }) });
-    defer state.deinit();
-    state.selected = .new_session;
-    var screen = try Frame.of(&state, 80, 24, .{}, 0);
-    defer screen.deinit();
-    try std.testing.expectEqual(Style{ .colour = .normal }, screen.styleAt(2, 4).?);
-    try std.testing.expectEqual(Style{ .colour = .normal }, screen.styleAt(4, 4).?);
-}
-
 test "the overview indexed palettes retain every colour" {
     const expected = [_]struct { skin: Skin, colours: [9]u8, backgrounds: [5]u8 }{
         .{ .skin = .day, .colours = .{ 235, 17, 239, 60, 103, 187, 94, 124, 233 }, .backgrounds = .{ 255, 253, 254, 253, 214 } },
@@ -5349,6 +5349,50 @@ test "overview second line queues due retries and uses waiting Bash commands fir
     try std.testing.expectEqualStrings("", secondLine(&state, state.find(bash.reference).?, &buffer));
     _ = try step(&state, .{ .command = .{ .reference = bash.reference, .action = 7, .text = "echo allowed" } });
     try std.testing.expectEqualStrings("echo allowed", secondLine(&state, state.find(bash.reference).?, &buffer));
+}
+
+test "overview quiet rows cover sender work selection and the open empty chat" {
+    // Independent attention expectations, including Bash with a pending decision.
+    const cases = .{
+        .{ kind_cases[0].state, true, "Last answer" },
+        .{ kind_cases[1].state, true, "Queued" },
+        .{ kind_cases[2].state, true, "Thinking" },
+        .{ kind_cases[3].state, true, "Provider error" },
+        .{ kind_cases[4].state, true, "Run the logic tests" },
+        .{ kind_cases[5].state, false, "Allow: echo yes" },
+        .{ kind_cases[6].state, true, "Stopping" },
+        .{ kind_cases[7].state, true, "Last answer" },
+        .{ kind_cases[8].state, false, "Last answer" },
+        .{ kind_cases[9].state, false, "Last answer" },
+        .{ WorkState{ .bash = .{ .since = test_now_s, .call = 0, .description = null, .running = 1, .approvals = 1 } }, false, "Allow: echo yes" },
+    };
+    inline for (cases) |case| for ([_]bool{ false, true }) |wrote| for ([_]bool{ false, true }) |selected| for ([_]u16{ 46, 140 }) |width| {
+        var listed = session("k7m2qx", case[0], .{ .label = "Quiet row", .yours = wrote, .first_action = 7 });
+        listed.last_line = .{ .position = 1, .text = "Last answer" };
+        var state = try opened(&.{listed});
+        defer state.deinit();
+        if (!case[1] and (case[0] == .approval or case[0] == .bash)) {
+            _ = try step(&state, .{ .command = .{ .reference = listed.reference, .action = 7, .text = "Allow: echo yes" } });
+        }
+        state.selected = if (selected) .{ .session = listed.reference } else .new_session;
+        const quiet = !wrote and case[1];
+        try std.testing.expectEqual(quiet, rowQuiet(&state, state.find(listed.reference).?));
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const first = try listSegments(arena.allocator(), &state, .{ .row = 0 }, width, .{}, 0);
+        const name = try styleOf(first.segments, "Quiet row");
+        try std.testing.expectEqual(quiet, name.dim);
+        try std.testing.expectEqual(selected, first.selected);
+        try std.testing.expectEqual(selected, name.bold);
+        try std.testing.expectEqual(if (selected) Colour.strong else Colour.normal, name.colour);
+        const second = try rowSecondSegments(arena.allocator(), &state, 0, width, .{});
+        try std.testing.expectEqual(quiet, (try styleOf(second, case[2])).dim);
+        try std.testing.expect(!(try styleOf(second, "rui")).dim);
+    };
+    var empty = try opened(&.{session("newone", .{ .idle = ago(0) }, .{ .first = null })});
+    defer empty.deinit();
+    _ = try step(&empty, .{ .conversation = "newone".* });
+    try std.testing.expect(!rowQuiet(&empty, empty.find("newone".*).?));
 }
 
 // PR3: independent layout expectations for the two-line list contract.

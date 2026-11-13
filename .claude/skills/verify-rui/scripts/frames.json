@@ -5,6 +5,185 @@
   ],
   "states": [
     {
+      "name": "quiet-person",
+      "note": "A real person message supplies the sender for peer-seeded quiet specimens",
+      "open": "overview",
+      "cast": [
+        {
+          "label": "You wrote",
+          "workspace": "code/quiet",
+          "messages": [
+            "Ready."
+          ],
+          "mode": "bypass"
+        }
+      ],
+      "steps": [
+        {
+          "wait": "You wrote"
+        }
+      ],
+      "expect": [
+        "You wrote"
+      ],
+      "absent": [
+        "No Sessions yet."
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
+    },
+    {
+      "name": "quiet-overview",
+      "note": "Names and last lines dim only for never-written finished and working chats; approval stays loud",
+      "open": "overview",
+      "cast": [
+        {
+          "label": "Agent done",
+          "workspace": "code/quiet",
+          "messages": [
+            "Ready."
+          ],
+          "mode": "bypass",
+          "sender": "You wrote"
+        },
+        {
+          "label": "Agent approval",
+          "workspace": "code/quiet",
+          "messages": [
+            "consent check"
+          ],
+          "mode": "ask",
+          "sender": "You wrote",
+          "settle": "pending"
+        },
+        {
+          "label": "Agent working",
+          "workspace": "code/quiet",
+          "messages": [
+            "hold answer"
+          ],
+          "mode": "bypass",
+          "sender": "You wrote",
+          "settle": "pending"
+        }
+      ],
+      "steps": [
+        {
+          "wait": "Agent working"
+        },
+        {
+          "wait": "Thinking"
+        },
+        {
+          "wait": "set -eu"
+        }
+      ],
+      "expect": [
+        "You wrote",
+        "Agent done",
+        "Agent approval",
+        "Agent working",
+        "Thinking"
+      ],
+      "absent": [
+        "No Sessions yet.",
+        "Host stopped"
+      ],
+      "expect_dim": [
+        {
+          "text": "Agent done",
+          "dim": true
+        },
+        {
+          "text": "The deadline check",
+          "dim": true
+        },
+        {
+          "text": "Agent working",
+          "dim": true
+        },
+        {
+          "text": "Thinking",
+          "dim": true
+        },
+        {
+          "text": "Agent approval",
+          "dim": false
+        },
+        {
+          "text": "You wrote",
+          "dim": false
+        }
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
+    },
+    {
+      "name": "quiet-sidebar",
+      "note": "The shared row owner dims the open-chat sidebar; narrow view naturally shows only the conversation",
+      "open": "You wrote",
+      "steps": [
+        {
+          "wait": "Peer message delivered."
+        },
+        {
+          "wait": "Agent done",
+          "min_columns": 140
+        },
+        {
+          "wait": "Thinking",
+          "min_columns": 140
+        },
+        {
+          "wait": "set -eu",
+          "min_columns": 140
+        }
+      ],
+      "expect": [
+        "Peer message delivered."
+      ],
+      "absent": [
+        "Host stopped"
+      ],
+      "expect_dim": [
+        {
+          "text": "Agent done",
+          "dim": true,
+          "min_columns": 140
+        },
+        {
+          "text": "The deadline check",
+          "dim": true,
+          "min_columns": 140
+        },
+        {
+          "text": "Agent working",
+          "dim": true,
+          "min_columns": 140
+        },
+        {
+          "text": "Thinking",
+          "dim": true,
+          "min_columns": 140
+        },
+        {
+          "text": "Agent approval",
+          "dim": false,
+          "min_columns": 140
+        },
+        {
+          "text": "You wrote",
+          "dim": false,
+          "min_columns": 140
+        }
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
+    },
+    {
       "name": "appcmds-conversation",
       "note": "Conversation slash is for the agent; app names are absent",
       "open": "App command replacements",

@@ -5,7 +5,7 @@ const view = @import("overview_view.zig");
 const theme = @import("theme.zig");
 
 pub fn of(caps: view.Caps, role: view.Style) vaxis.Style {
-    var style: vaxis.Style = .{ .bold = role.bold, .reverse = role.reverse };
+    var style: vaxis.Style = .{ .bold = role.bold, .reverse = role.reverse, .dim = role.dim };
     if (caps.depth == .none) {
         style.bold = role.bold or role.background == .band;
         style.reverse = role.background == .band or role.background == .selection;
@@ -65,6 +65,10 @@ test "widget styles resolve theme colours and preserve NO_COLOR" {
     try std.testing.expectEqual(vaxis.Color{ .rgb = .{ 0x62, 0x5a, 0x4c } }, selvedge.fg);
     const attention = of(.{ .depth = .indexed, .background = .{ 255, 255, 255 } }, .{ .colour = .attention, .background = .bar });
     try std.testing.expectEqual(vaxis.Color{ .index = 58 }, attention.fg);
+    for ([_]view.Caps.Depth{ .direct, .indexed, .none }) |depth| {
+        try std.testing.expect(of(.{ .depth = depth }, .{ .dim = true }).dim);
+        try std.testing.expect(!of(.{ .depth = depth }, .{}).dim);
+    }
     const selected = of(.{ .depth = .indexed }, .{ .background = .selection });
     try std.testing.expectEqual(vaxis.Color{ .index = 237 }, selected.bg);
     for (std.enums.values(view.Colour)) |colour| for (std.enums.values(view.Background)) |background| {
