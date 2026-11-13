@@ -5018,6 +5018,158 @@ test "a call id repeated in a later call batch fails the settlement" {
     }.run);
 }
 
+/// One reasoning item of 300 summary texts, more identities than a
+/// settlement batch holds (`batch_identities`), and an answer. Part 280
+/// repeats part 3's text, one the first batch collected, and part 290
+/// repeats part 285's, which it did not.
+const OversizedItem = struct {
+    const parts = 300;
+    const answer = "done";
+    reasoning: [16384]u8 = undefined,
+    reasoning_length: usize = 0,
+
+    fn text(index: usize, buffer: *[16]u8) []const u8 {
+        const shown: usize = switch (index) {
+            280 => 3,
+            290 => 285,
+            else => index,
+        };
+        return std.fmt.bufPrint(buffer, "summary {d}", .{shown}) catch unreachable;
+    }
+
+    fn build(item: *OversizedItem) !void {
+        var writer = std.Io.Writer.fixed(&item.reasoning);
+        try writer.writeAll("{\"type\":\"reasoning\",\"id\":\"wide\",\"summary\":[");
+        for (0..parts) |index| {
+            var buffer: [16]u8 = undefined;
+            try writer.print("{s}{{\"type\":\"summary_text\",\"text\":\"{s}\"}}", .{ if (index == 0) "" else ",", text(index, &buffer) });
+        }
+        try writer.writeAll("],\"encrypted_content\":\"opaque\"}");
+        item.reasoning_length = writer.end;
+    }
+
+    fn items(item: *const OversizedItem) [2][]const u8 {
+        return .{ item.reasoning[0..item.reasoning_length], "{\"type\":\"message\",\"id\":\"answer\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}" };
+    }
+
+    /// Settles the item and the answer, as `settleItemsForTesting` does,
+    /// but first makes the source's copy of part `changed`'s text differ
+    /// from what its metadata recorded, when given.
+    fn settle(item: *const OversizedItem, storage: *Store, tmp: *std.testing.TmpDir, binding: AttemptBinding, changed: ?usize) !void {
+        const both = item.items();
+        const source = try tmp.dir.createFile(std.testing.io, "oversized-output", .{ .read = true, .truncate = true });
+        defer source.close(std.testing.io);
+        var root: [protocol.max_store_bytes]u8 = undefined;
+        const root_length = try tmp.dir.realPath(std.testing.io, &root);
+        var used: std.atomic.Value(u64) = .init(0);
+        var retained: ?named_scratch.Owner = null;
+        var metadata = try OutputMetadataWriter.init(std.testing.io, root[0..root_length], "oversized-metadata", .{ .used = &used, .limit = 1 << 20 }, false, &retained);
+        defer metadata.deinit();
+        var offset: u64 = 0;
+        for (both, 0..) |bytes, ordinal| {
+            try source.writeStreamingAll(std.testing.io, bytes);
+            try source.sync(std.testing.io);
+            _ = try output_decode.recordItemForTesting(&metadata, source, offset, bytes.len, ordinal, .assistant_response);
+            offset += bytes.len;
+        }
+        try metadata.sealForRead();
+        if (changed) |index| {
+            var buffer: [16]u8 = undefined;
+            var needle: [24]u8 = undefined;
+            const quoted = try std.fmt.bufPrint(&needle, "\"{s}\"", .{text(index, &buffer)});
+            const at = std.mem.find(u8, both[0], quoted).?;
+            // Same length, other bytes: only the digest check sees it.
+            try source.writePositionalAll(std.testing.io, "#", at + 1);
+            try source.sync(std.testing.io);
+        }
+        try storage.settleModelSuccess(binding, &.{
+            .source = source,
+            .source_length = offset,
+            .metadata = metadata.file,
+            .item_count = both.len,
+            .call_count = 0,
+            .answer_item_ordinal = 1,
+            .answer_length = answer.len,
+            .answer_digest = protocol.contentDigest(answer),
+            .response_id = .{},
+            .model_evidence = testing_absent_model_evidence,
+            .request_id = .{},
+        }, .{});
+    }
+};
+
+test "an item with more content than a batch holds saves each part's own text, and shares repeated ones" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try configureTestSession(&storage, "oversized-config");
+            try submitTestMessage(&storage, &tmp, "oversized-input", "oversized-key", session.slice(), "wide");
+            const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            var item: OversizedItem = .{};
+            try item.build();
+            const contents = try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{});
+            try item.settle(&storage, &tmp, binding, null);
+            const operation = binding.operation_id;
+            for (0..OversizedItem.parts) |index| {
+                var buffer: [16]u8 = undefined;
+                const text = OversizedItem.text(index, &buffer);
+                const digest = protocol.contentDigest(text);
+                // Each part, in order, names a private row of its own text.
+                try std.testing.expectEqual(1, try store_testing.queryU64(&storage, "SELECT count(*) FROM model_output_part p JOIN content c ON c.content_id=p.text_content_id " ++
+                    "WHERE p.operation_id=?1 AND p.item_ordinal=0 AND p.part_ordinal=?2 AND p.part_kind=3 AND p.text_length IS NULL AND c.digest=?3 AND c.byte_length=?4 AND c.private=1", .{ operation, index, store_testing.Blob{ .bytes = &digest }, text.len }));
+                var reader: ContentReader = undefined;
+                reader.open(try content_domain.openContentIdentity(&storage, .{ .digest = digest, .length = text.len }, true));
+                defer reader.close();
+                var bytes: [16]u8 = undefined;
+                try std.testing.expectEqualStrings(text, bytes[0..try reader.read(0, &bytes)]);
+            }
+            // Repeated texts share a row; every part's bag is one row.
+            try std.testing.expectEqual(OversizedItem.parts - 2, try store_testing.queryU64(&storage, "SELECT count(DISTINCT text_content_id) FROM model_output_part WHERE operation_id=?1 AND item_ordinal=0", .{operation}));
+            try std.testing.expectEqual(1, try store_testing.queryU64(&storage, "SELECT count(DISTINCT extras_content_id) FROM model_output_part WHERE operation_id=?1 AND item_ordinal=0", .{operation}));
+            try std.testing.expectEqual(OversizedItem.parts + 1, try store_testing.queryU64(&storage, "SELECT count(*) FROM model_output_part WHERE operation_id=?1", .{operation}));
+            try std.testing.expectEqual(1, try store_testing.queryU64(&storage, "SELECT count(*) FROM model_output_item i JOIN content c ON c.content_id=i.extras_content_id " ++
+                "WHERE i.operation_id=?1 AND i.item_ordinal=0 AND i.part_count=?2 AND i.message_content_id IS NULL AND c.private=1", .{ operation, OversizedItem.parts }));
+            try std.testing.expectEqual(2, try store_testing.queryU64(&storage, "SELECT count(*) FROM model_output_item WHERE operation_id=?1", .{operation}));
+            try std.testing.expectEqual(1, try store_testing.queryU64(&storage, "SELECT count(*) FROM conversation_entry e JOIN model_output_item i ON i.operation_id=e.source_operation_id AND i.item_ordinal=e.source_item_ordinal " ++
+                "WHERE e.source_operation_id=?1 AND e.source_item_ordinal=1 AND i.session_position=e.session_position", .{operation}));
+            try std.testing.expectEqual(1, try store_testing.queryU64(&storage, "SELECT count(*) FROM model_operation WHERE operation_id=?1 AND resolution_code IS NOT NULL AND output_item_count=2", .{operation}));
+            // 298 texts, the shared part bag, the item's bag, and the
+            // answer's text and bags, as the settlement saved them on main.
+            try std.testing.expectEqual(contents + 302, try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
+            try std.testing.expect(!storage.isFenced());
+        }
+    }.run);
+}
+
+test "an item with more content than a batch holds saves nothing when a part after the batch's own fails" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try configureTestSession(&storage, "oversized-fail-config");
+            try submitTestMessage(&storage, &tmp, "oversized-fail-input", "oversized-fail-key", session.slice(), "wide");
+            const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            var item: OversizedItem = .{};
+            try item.build();
+            const contents = try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{});
+            // Part 295's text is past the 257 identities the first batch holds.
+            try std.testing.expectError(error.OutputSourceChanged, item.settle(&storage, &tmp, binding, 295));
+            try std.testing.expect(storage.isFenced());
+            try std.testing.expectEqual(contents, try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
+            try std.testing.expectEqual(0, try store_testing.queryU64(&storage, "SELECT count(*) FROM model_output_part", .{}));
+            try std.testing.expectEqual(0, try store_testing.queryU64(&storage, "SELECT count(*) FROM model_output_item", .{}));
+            try std.testing.expectEqual(1, try store_testing.queryU64(&storage, "SELECT count(*) FROM model_operation WHERE operation_id=?1 AND resolution_code IS NULL", .{binding.operation_id}));
+        }
+    }.run);
+}
+
 test "a success settlement sends its rows twenty statements a pass" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
