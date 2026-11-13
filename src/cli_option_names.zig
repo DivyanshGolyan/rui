@@ -1,4 +1,6 @@
 //! Names accepted by the option accessors. cli_args checks this against its definitions.
+const std = @import("std");
+
 pub const names = [_][]const u8{
     "action",
     "active-capacity",
@@ -88,13 +90,7 @@ pub const names = [_][]const u8{
 
 pub fn contains(name: []const u8) bool {
     for (names) |candidate| {
-        if (equal(candidate, name)) return true;
+        if (std.mem.eql(u8, candidate, name)) return true;
     }
     return false;
-}
-
-fn equal(a: []const u8, b: []const u8) bool {
-    if (a.len != b.len) return false;
-    for (a, b) |x, y| if (x != y) return false;
-    return true;
 }

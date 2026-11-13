@@ -3,6 +3,7 @@ const std = @import("std");
 const Store = @import("Store.zig").Store;
 const testing = @import("testing.zig");
 const schema = @import("schema.zig");
+const validStoreId = @import("../store_id.zig").valid;
 const sqlite = @import("sqlite.zig");
 const wire = @import("wire/mysql_connection.zig");
 const literal = @import("mysql_literal.zig");
@@ -568,7 +569,7 @@ test "store.mysql live metadata repair rolls back with a refused ownership updat
     }
     var repaired = try admitMetadata(name, name);
     const id = repaired.state.store_id;
-    try std.testing.expect(schema.isStoreId(&id));
+    try std.testing.expect(validStoreId(&id));
     try std.testing.expectEqual(epoch + 1, repaired.state.epoch);
     try repaired.close();
     try root.query("SELECT count(*) FROM store_meta");
@@ -791,7 +792,7 @@ test "Store target MySQL owns admitted identity routes and neutral diagnostics" 
     try std.testing.expectEqual(.mysql, storage.kind());
     const id = storage.engine.mysql.state.store_id;
     try std.testing.expectEqualStrings(&id, storage.storeId());
-    try std.testing.expect(@import("../store_id.zig").valid(storage.storeId()));
+    try std.testing.expect(validStoreId(storage.storeId()));
     const diagnostic = storage.diagnostic();
     try std.testing.expect(diagnostic == .mysql);
     try std.testing.expectEqualStrings(diagnostic.mysql.doublewrite.slice(), storage.admissionDiagnostic().doublewrite.?);

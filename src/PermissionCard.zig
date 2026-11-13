@@ -10,7 +10,6 @@ const Hover = @import("widgets/Hover.zig");
 const Self = @This();
 
 consent: *Consent,
-description: []const u8,
 body: vxfw.Widget,
 userdata: *anyopaque,
 on_decision: *const fn (*anyopaque, *vxfw.EventContext, Policy.Decision) anyerror!void,
@@ -147,7 +146,7 @@ test "PermissionCard decides the drawn request at tiny sizes and ignores pasted 
     var owner: Owner = .{};
     var consent: Consent = .{};
     const body: vxfw.Text = .{ .text = "$ zig build test\nsecond line\nthird line" };
-    var card: Self = .{ .consent = &consent, .description = "Run the tests", .body = body.widget(), .userdata = &owner, .on_decision = Owner.decide };
+    var card: Self = .{ .consent = &consent, .body = body.widget(), .userdata = &owner, .on_decision = Owner.decide };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty, .redraw = false };
@@ -222,7 +221,7 @@ test "PermissionCard takes no choice from a key handed inside a paste, across re
     var owner: Owner = .{};
     var consent: Consent = .{};
     const text: vxfw.Text = .{ .text = "Kept draft" };
-    var card: Self = .{ .consent = &consent, .description = "Run", .body = text.widget(), .userdata = &owner, .on_decision = Owner.decide };
+    var card: Self = .{ .consent = &consent, .body = text.widget(), .userdata = &owner, .on_decision = Owner.decide };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
@@ -251,7 +250,7 @@ test "PermissionCard hover is quieter than the choice selection and changes neit
     var owner: Owner = .{};
     var consent: Consent = .{};
     const text: vxfw.Text = .{ .text = "Run tests" };
-    var card: Self = .{ .consent = &consent, .description = "Run", .body = text.widget(), .userdata = &owner, .on_decision = Owner.decide, .style = .{ .fg = .{ .index = 2 } } };
+    var card: Self = .{ .consent = &consent, .body = text.widget(), .userdata = &owner, .on_decision = Owner.decide, .style = .{ .fg = .{ .index = 2 } } };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };

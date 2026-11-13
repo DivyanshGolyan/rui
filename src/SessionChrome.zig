@@ -226,15 +226,11 @@ fn drawFooter(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vx
     for (spans.spans[0..spans.len]) |span| {
         const width = ctx.stringWidth(span.text);
         if (span.field) |field| {
-            const chip = switch (field) {
-                .model => &self.facts.model,
-                .effort => &self.facts.effort,
+            const chip, const selected = switch (field) {
+                .model => .{ &self.facts.model, self.facts.focus == .model },
+                .effort => .{ &self.facts.effort, self.facts.focus == .effort },
             };
             chip.label = span.text;
-            const selected = switch (field) {
-                .model => self.facts.focus == .model,
-                .effort => self.facts.focus == .effort,
-            };
             if (identity_col + width <= right_col) {
                 children[count] = try footerChip(chip, if (selected) self.facts.selected else self.facts.style, self.facts.method, ctx, @intCast(identity_col), @intCast(width));
                 count += 1;

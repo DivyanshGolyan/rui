@@ -1046,7 +1046,7 @@ pub fn recordItemForTesting(metadata: *output_format.OutputMetadataWriter, sourc
     });
     try grammar.event(&stream, &testing_interpret.scratch, data, 0, 0);
     if (grammar.item_count != ordinal + 1) return error.TestUnexpectedResult;
-    var reader = try output_format.OutputMetadataReader.init(io, file, 1);
+    var reader = try output_format.OutputMetadataReader.init(io, file);
     while (try reader.next()) |record| {
         var moved = record;
         switch (record.tag) {
@@ -1351,7 +1351,7 @@ fn validateTestingOperation(tmp: *std.testing.TmpDir, bytes: []const u8, metadat
     defer event_data.deinit();
     const validated = try validate(source, bytes.len, &metadata, &event_data, operation);
     const metadata_bytes = used.load(.acquire);
-    var reader = try output_format.OutputMetadataReader.init(std.testing.io, metadata.file, validated.item_count);
+    var reader = try output_format.OutputMetadataReader.init(std.testing.io, metadata.file);
     var result: TestingValidation = undefined;
     result.output = validated;
     result.metadata_bytes = metadata_bytes;
@@ -2001,7 +2001,7 @@ test "provider reasoning strings preserve raw items" {
         try std.testing.expectEqual(@as(u64, 0), accepted.call_count);
         try std.testing.expectEqual(@as(u64, 2), accepted.answer_length);
         try std.testing.expectEqualSlices(u8, &protocol.contentDigest("ok"), &accepted.answer_digest);
-        var reader = try output_format.OutputMetadataReader.init(std.testing.io, metadata.file, accepted.item_count);
+        var reader = try output_format.OutputMetadataReader.init(std.testing.io, metadata.file);
         const item = (try reader.nextItem()).?;
         try std.testing.expectEqual(output_format.OutputItemKind.reasoning, item.kind);
         try std.testing.expectEqual(@as(u64, 0), item.ordinal);

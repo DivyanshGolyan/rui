@@ -1205,10 +1205,6 @@ fn camel(arena: std.mem.Allocator, snake: []const u8) ![]const u8 {
 /// Writes `shape` with an example value in each hole: the hole's default,
 /// or the JSON `examples` gives for its index, as `.{ index, json }` pairs.
 /// A third entry overrides the example when optional members are absent.
-pub fn writeExample(out: *std.Io.Writer, comptime shape: anytype, comptime examples: anytype) !void {
-    return writeExampleWith(out, shape, examples, true);
-}
-
 fn writeExampleWith(out: *std.Io.Writer, comptime shape: anytype, comptime examples: anytype, optional: bool) anyerror!void {
     return writeExampleFrom(out, shape, examples, optional, 0);
 }

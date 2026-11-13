@@ -1212,8 +1212,7 @@ fn readHostInfo(io: std.Io, paths: *const platform.Paths, deadline: ?i128) proto
     var body: protocol.RequestBuffer = .{};
     body.appendShape(protocol.host_info_request, .{paths.store.slice()}) catch unreachable;
     var reply_buffer: ReplyBuffer = .{};
-    const probe_end = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + std.time.ns_per_s;
-    const until = @min(probe_end, deadline orelse probe_end);
+    const until = hostObservationDeadline(io, deadline);
     const reply = sendSource(.{ .io = io }, paths, "/v1/host-info", .{}, body.len, null, body.slice(), null, null, &reply_buffer, until).get() catch |err| return switch (err) {
         error.AccessDenied, error.PermissionDenied => .access_failure,
         error.WrongWireVersion, error.InvalidResponse, error.ResponseHeaderTooLarge, error.ResponseTooLarge, error.InvalidCharacter, error.Overflow => .incompatible,

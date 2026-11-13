@@ -302,7 +302,6 @@ pub const Job = struct {
         command_stderr_restored: bool = false,
         info_saved: bool = false,
         action: ?u64 = null,
-        summary: View.ActionSummary = .{},
         // Bytes of live output staged in the inspection scratch file.
         output_length: u64 = 0,
         copied: Copied = .no_answer,
@@ -581,7 +580,7 @@ pub fn permission(raw: *anyopaque, task: *Task) !void {
         var output: DisplayCapture = .{ .task = task, .file = job.files.action };
         // A target resolved between reads is the same as a scan with no
         // pending Action: leave result.action empty and refresh, without consent.
-        job.result.summary = (try View.permission(task.requests(), job.store, job.session, action, job.files.scratch, &output, job.colour)) orelse return;
+        _ = (try View.permission(task.requests(), job.store, job.session, action, job.files.scratch, &output, job.colour)) orelse return;
         job.result.action = action;
     }
 }

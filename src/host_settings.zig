@@ -305,11 +305,6 @@ fn pathDefault(comptime text: []const u8) OsBytes(max_path_bytes) {
     result.set(text) catch @compileError("invalid default path");
     return result;
 }
-fn textDefault(comptime capacity: usize, comptime value: []const u8) Text(capacity) {
-    var text: Text(capacity) = .{};
-    text.set(value) catch @compileError("invalid default text");
-    return text;
-}
 
 /// Structured JSON Schema facts passed to a visitor. Secret objects are a
 /// choice of exactly one source; literals are pipe-only and never written.

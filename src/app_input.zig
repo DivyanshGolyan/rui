@@ -107,7 +107,7 @@ pub const Effects = struct {
         reset,
     };
     /// Always the top visible layer after the input: never a hidden pane.
-    pub const Focus = enum { main, settings, sign_in };
+    pub const Focus = std.meta.Tag(Layer);
     /// What a key the overview takes arrived under, and whether it is
     /// pasted text.
     pub const Delivery = struct { under: Layer.Covered, pasted: bool };
@@ -144,12 +144,7 @@ pub fn pane(layer: Layer, session_open: bool) Pane {
 
 /// A layer change: the page change it makes, focus on the top layer, a redraw.
 fn navigated(layer: Layer, page: Effects.Page) Effects {
-    const top: Effects.Focus = switch (layer) {
-        .main => .main,
-        .settings => .settings,
-        .sign_in => .sign_in,
-    };
-    return .{ .page = page, .focus = top, .redraw = true };
+    return .{ .page = page, .focus = std.meta.activeTag(layer), .redraw = true };
 }
 
 /// Root reloads the settings page before it sends `open_settings`, so a

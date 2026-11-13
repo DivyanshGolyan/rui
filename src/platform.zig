@@ -2,6 +2,8 @@ const std = @import("std");
 const protocol = @import("protocol.zig");
 const named_scratch = @import("named_scratch.zig");
 const store_path = @import("store_path.zig");
+/// Store ids are distinct from SQLite's canonical absolute paths.
+const validStoreId = @import("store_id.zig").valid;
 const c = @import("posix");
 
 pub const database_suffix = store_path.database_suffix;
@@ -339,11 +341,6 @@ pub fn resolveClientPaths(io: std.Io, supplied_path: []const u8) !Paths {
     return resolveClientSelection(supplied_path).paths(io);
 }
 
-/// Store ids are distinct from SQLite's canonical absolute paths.
-pub fn isOpaqueStoreId(text: []const u8) bool {
-    return @import("store_id.zig").valid(text);
-}
-
 /// Without this explicit non-secret hint, a relative SQLite directory whose
 /// name happens to be 32 hex characters keeps its existing path semantics.
 pub fn mysqlRuntimeDirectory(store: []const u8) ?[]const u8 {
@@ -355,7 +352,7 @@ pub fn mysqlRuntimeDirectory(store: []const u8) ?[]const u8 {
 
 /// A routing hint, not Store authority: the Host checks `store` on every call.
 pub fn mysqlClientPaths(io: std.Io, store: []const u8, runtime: []const u8) !Paths {
-    if (!isOpaqueStoreId(store) or !std.fs.path.isAbsolute(runtime)) return error.InvalidStorePath;
+    if (!validStoreId(store) or !std.fs.path.isAbsolute(runtime)) return error.InvalidStorePath;
     var dir = try std.Io.Dir.cwd().openDir(io, runtime, .{});
     defer dir.close(io);
     try validatePrivateDirectory(dir, io);
@@ -1108,8 +1105,8 @@ test "MySQL runtime lease owns no host.lock and routes an opaque Store id" {
     try std.testing.expectEqualStrings(id, paths.store.slice());
     try std.testing.expectEqualStrings(address.path, paths.socket.slice());
     try std.testing.expectEqualStrings(lease.paths.scratch.slice(), paths.scratch.slice());
-    try std.testing.expect(!isOpaqueStoreId("/sqlite/store"));
-    try std.testing.expect(!isOpaqueStoreId("0123456789abcdef0123456789abcdeF"));
+    try std.testing.expect(!validStoreId("/sqlite/store"));
+    try std.testing.expect(!validStoreId("0123456789abcdef0123456789abcdeF"));
 }
 
 test "Store target paths keep SQLite routing with a separately launched runtime" {

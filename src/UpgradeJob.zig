@@ -121,8 +121,7 @@ fn finish(self: *Self) void {
 pub fn cancel(self: *Self) void {
     if (self.finished) return;
     if (self.gate.cmpxchgStrong(.open, .cancelled, .acq_rel, .acquire)) |gate| if (gate == .committed) return;
-    self.cancelling = true;
-    if (self.started) self.task.cancel();
+    self.abandon();
 }
 
 /// Leaving the overview requests a stop, publication or not. The independent

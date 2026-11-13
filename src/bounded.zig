@@ -32,3 +32,10 @@ pub fn Bounded(comptime capacity: usize) type {
         }
     };
 }
+
+/// Whether `T` is a `Bounded` text.
+pub fn isBounded(comptime T: type) bool {
+    if (@typeInfo(T) != .@"struct" or !@hasField(T, "bytes")) return false;
+    const bytes = @typeInfo(@FieldType(T, "bytes"));
+    return bytes == .array and T == Bounded(bytes.array.len);
+}

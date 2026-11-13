@@ -11,7 +11,7 @@ const pages = @import("../../os/pages.zig");
 const activity_facts = @import("../../activity_facts.zig");
 const conversation_read = @import("../../conversation_read.zig");
 const activity_read = @import("../../activity_read.zig");
-const session_field = @import("../../session_field.zig");
+const session_settings = @import("../../session_settings.zig");
 const tool_proposal = @import("../../tool_proposal.zig");
 const workspace_path = @import("../../workspace_path.zig");
 const outcome_code = @import("../../outcome_code.zig");
@@ -410,15 +410,6 @@ fn readNextPosition(a: *ReadAccess, session: []const u8) !?u64 {
     a.read(next_position, .{ .session = session }, &row);
     try store_access.runAs(a, error.SessionReadFailed);
     return if (row) |found| found.next_position.get() else null;
-}
-
-/// The public metadata of the content row `content_id`, in a round of its
-/// own. A failed step is `CorruptStore`, main's answer for it.
-fn readPublicMetadata(a: *ReadAccess, content_id: u64) !ContentMetadata {
-    var row: content_metadata.Row = undefined;
-    a.read(content_metadata, .{ .content_id = content_id }, &row);
-    try store_access.runAs(a, error.CorruptStore);
-    return content_domain.publicMetadata(&row);
 }
 
 /// Round 1 reads the saved Session; round 2 its instructions' and output
@@ -948,19 +939,6 @@ fn finishPresentation(result: *tool_presentation.ToolPresentation, code: ?tool_p
     };
 }
 
-/// `PresentationRead` alone, in rounds of its own.
-fn toolPresentation(a: *ReadAccess, operation: u64, ordinal: u64, publication_position: ?u64) !tool_presentation.ToolPresentation {
-    var presentation: tool_presentation.ToolPresentation = undefined;
-    var read: PresentationRead = .init(operation, ordinal, publication_position, &presentation);
-    read.queue(a);
-    try runRows(a);
-    try read.checkCall();
-    read.queueProposal(a);
-    try runRows(a);
-    try read.finish();
-    return presentation;
-}
-
 /// The hosted call at a position, with whether an accepted Operation
 /// recorded it.
 const hosted_call = rsql.Read(.{
@@ -1457,7 +1435,7 @@ const approval_request = rsql.Read(.{
 const session_change = rsql.Read(.{
     .sql = "SELECT revision,field,changed_at,provider_text FROM session_change WHERE session_ref=?1 AND position=?2 AND ordinal=?3",
     .Args = struct { session: []const u8, position: u64, ordinal: u64 },
-    .Row = struct { revision: rsql.Positive, field: session_field.SessionField, changed_at: rsql.Positive, provider_text: *?Bounded(outcome_code.max_report_bytes) },
+    .Row = struct { revision: rsql.Positive, field: session_settings.SessionField, changed_at: rsql.Positive, provider_text: *?Bounded(outcome_code.max_report_bytes) },
     .cardinality = .optional,
 });
 
