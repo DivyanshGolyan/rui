@@ -853,11 +853,12 @@ def main():
             pids = wait_for_processes(store, 1)
             assert pids[0] not in launcher_pids, "Host remained the CLI launcher process"
             if os_semantics.PROC_FS:
-                for descriptor in range(2):
-                    assert os.readlink(f"/proc/{pids[0]}/fd/{descriptor}") == "/dev/null"
-                # The private startup error channel is not a retained caller
-                # pipe: all launchers already drained their own stderr to EOF.
-                assert os.readlink(f"/proc/{pids[0]}/fd/2").startswith("pipe:[")
+                assert os.readlink(f"/proc/{pids[0]}/fd/0") == "/dev/null"
+                # The private startup report (stdout) and error (stderr) channels
+                # are not retained caller pipes: all launchers already drained
+                # their own output to EOF.
+                for descriptor in (1, 2):
+                    assert os.readlink(f"/proc/{pids[0]}/fd/{descriptor}").startswith("pipe:[")
                 assert os.readlink(f"/proc/{pids[0]}/cwd") == "/", "detached Host retained launcher cwd"
                 assert os.getsid(pids[0]) not in launcher_pids
             assert not credential.exists(), "Host startup opened or created credentials"
