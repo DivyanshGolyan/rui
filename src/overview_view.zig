@@ -2552,7 +2552,7 @@ const Spans = struct {
         try self.pad(column, wanted);
         const room = @min(limit, self.width -| self.column);
         if (room == 0) return 0;
-        const shown = try fitted(self.arena, self.caps, self.glyphs, bytes, room, keep);
+        const shown = try fitted(self.arena, self.caps, bytes, room, keep);
         self.push(shown.bytes, shown.cells, wanted);
         return shown.cells;
     }
@@ -2569,7 +2569,7 @@ const Spans = struct {
     }
 };
 
-const Keep = enum { head, tail };
+pub const Keep = enum { head, tail };
 
 /// `wanted` as a terminal without colour shows it: only bold and reverse
 /// remain, the band and the selection reverse, and every other ground is
@@ -2585,7 +2585,9 @@ fn plain(caps: Caps, wanted: Style) Style {
 /// `bytes` made terminal-safe and clipped to `room` cells, as `Pieces`
 /// shows it, with an ellipsis where it was cut: at the end, or at the
 /// start when keeping the tail.
-fn fitted(arena: Allocator, caps: Caps, glyphs: Glyphs, bytes: []const u8, room: usize, keep: Keep) error{OutOfMemory}!Piece {
+pub fn fitted(arena: Allocator, caps: Caps, bytes: []const u8, room: usize, keep: Keep) error{OutOfMemory}!Piece {
+    if (room == 0) return .{ .bytes = "", .cells = 0 };
+    const glyphs = if (caps.unicode) unicode_glyphs else ascii_glyphs;
     const total = measured(caps, glyphs, bytes);
     const ellipsis = glyphs.ellipsis;
     const budget = if (total <= room) total else room - 1;
@@ -2635,7 +2637,7 @@ fn standIn(caps: Caps, glyphs: Glyphs, codepoint: u21) ?[]const u8 {
     return null;
 }
 
-const Piece = struct { bytes: []const u8, cells: usize };
+pub const Piece = struct { bytes: []const u8, cells: usize };
 
 /// Text as the terminal draws it: whole grapheme clusters, measured as the
 /// terminal measures them, with a one-cell stand-in for each code point
@@ -6307,4 +6309,14 @@ test "Overview list Right does not create or open Settings and clicks share resu
         try std.testing.expect(effect != .open);
     }
     try std.testing.expectEqual(@as(usize, 1), resumes);
+}
+
+test "the shared row fitter handles no description cells without allocating or underflowing" {
+    for ([_]Keep{ .head, .tail }) |keep| {
+        var storage: [0]u8 = .{};
+        var fixed: std.heap.FixedBufferAllocator = .init(&storage);
+        const shown = try fitted(fixed.allocator(), .{}, "description", 0, keep);
+        try std.testing.expectEqualStrings("", shown.bytes);
+        try std.testing.expectEqual(@as(usize, 0), shown.cells);
+    }
 }
