@@ -202,7 +202,7 @@ test "Composer inactive prompt uses quiet style and no caret without dimming dra
     var composer: Self = .{ .editor = &editor, .style = .{}, .quiet = .{ .dim = true } };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 5 }, .cell_size = .{} };
+    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 5 }, .cell_size = .{} };
     const focused = try composer.widget().draw(ctx);
     try std.testing.expect(focused.cursor != null);
     try std.testing.expect(!focused.readCell(1, 1).style.dim);

@@ -387,7 +387,7 @@ test "GroupedList selected row uses the owner's focused or inactive background" 
     var list: Self = .{ .rows = .of(&rows), .selected = 0, .caps = .{ .depth = .direct } };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 5 }, .cell_size = .{} };
+    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 5 }, .cell_size = .{} };
     for ([_]@import("overview_style.zig").Background{ .selection, .bar }) |background| {
         list.selection_background = background;
         _ = try list.widget().draw(ctx);
