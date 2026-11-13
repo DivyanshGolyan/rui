@@ -13,11 +13,11 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 
-import { pipeSettings, type HostSettings } from "./settings.ts";
+import { prepareSettings, type HostSettings, type PreparedSettings } from "./settings.ts";
 import { SessionNotifications } from "./notifications.ts";
 import { resolveBinary } from "./binary.ts";
 import { RuiStartError, RuiUnavailableError } from "./errors.ts";
-import { agentSpec, models, Session, Sessions, setPaused, type AgentSpec, type ModelSummary } from "./sessions.ts";
+import { models, Session, Sessions, setPaused, type AgentSpec, type ModelSummary } from "./sessions.ts";
 import { ConnectionError, post, WIRE_VERSION, type ReplyLimits } from "./transport.ts";
 import type { components } from "./wire.ts";
 
@@ -77,7 +77,7 @@ interface Waiter {
 interface Launch {
 	binary: string;
 	document: Buffer;
-	interfaceDir: NonNullable<NonNullable<Schemas["HostSettings"]["interface"]>["dir"]>;
+	interfaceDir: PreparedSettings["interfaceDir"];
 	aliasReady?: Promise<void>;
 	detached: boolean;
 	socketPath: string;
@@ -307,33 +307,7 @@ export function launchFor(settings: HostSettings, runtimeDir: string, options: C
 		const value = process.env[name];
 		if (value !== undefined) env[name] = value;
 	}
-	let document = pipeSettings(settings, (source, path) => {
-		const name = environmentName(source, path);
-		if (name === undefined) return;
-		const value = process.env[name];
-		if (value !== undefined) env[name] = value;
-	});
-	let interfaceDir: Launch["interfaceDir"] = runtimeDir;
-	let detached = false;
-	if (document !== null && typeof document === "object" && !Array.isArray(document)) {
-		if (Object.hasOwn(document, "presets") && document.presets !== undefined) {
-			// Presets retain their existing friendly spec writer after settings normalization.
-			const presets = document.presets as HostSettings["presets"];
-			document = { ...document, presets: Object.fromEntries(Object.entries(presets!).map(([name, spec]) => [name, presetFor(spec)])) };
-		}
-		const supplied = Object.hasOwn(document, "interface") && document.interface !== undefined ? document.interface : {};
-		if (supplied !== null && typeof supplied === "object" && !Array.isArray(supplied)) {
-			// Choose client defaults once, from canonical own data; invalid groups reach the Host unchanged.
-			const selected = {
-				...supplied,
-				...(!Object.hasOwn(supplied, "dir") || supplied.dir == null ? { dir: runtimeDir } : {}),
-				...(!Object.hasOwn(supplied, "lifetime") || supplied.lifetime === undefined ? { lifetime: "stdin" as const } : {}),
-			};
-			document = { ...document, interface: selected };
-			interfaceDir = selected.dir!; // The single default choice above supplies every omitted/null directory.
-			detached = selected.lifetime !== "stdin";
-		}
-	}
+	const { document, interfaceDir, detached } = prepareSettings(settings, runtimeDir, env);
 	return {
 		binary: resolveBinary(options.binary), document: encodeSettings(document), interfaceDir,
 		socketPath: join(runtimeDir, "interface", SOCKET_NAME), env, detached,
@@ -344,33 +318,6 @@ export function launchFor(settings: HostSettings, runtimeDir: string, options: C
 function disposeLaunch(launch: Launch): void {
 	launch.document.fill(0);
 	for (const name of Object.keys(launch.env)) delete launch.env[name];
-}
-
-/** Consume the byte codec's canonical JSON value before allowing any Node environment lookup.
- * Malformed values stay in the document for Host refusal; Host bounds remain its own. */
-function environmentName(source: unknown, path: string): string | undefined {
-	let name: string;
-	if (typeof source === "string") name = source;
-	else {
-		if (source === null || typeof source !== "object") return undefined;
-		const fields = Object.keys(source);
-		if (fields.length !== 1 || fields[0] !== "hex") return undefined;
-		const hex = (source as { hex?: unknown }).hex;
-		if (typeof hex !== "string") return undefined;
-		if (hex.length % 2 !== 0 || /[^0-9a-f]/.test(hex)) return undefined;
-		try {
-			name = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(Buffer.from(hex, "hex"));
-		} catch {
-			throw new RuiStartError("settings_invalid", `${path}: Node requires UTF-8 environment names; use a file source for OS-byte names`);
-		}
-	}
-	// Node truncates NUL and replaces lone UTF-16 surrogates; neither may choose another key.
-	return name.length !== 0 && !/[\0=\uD800-\uDFFF]/u.test(name) ? name : undefined;
-}
-
-/** Presets and Session mutation requests use the same wire writer. */
-function presetFor(spec: AgentSpec): Schemas["AgentSpec"] {
-	return agentSpec(spec) as Schemas["AgentSpec"];
 }
 
 /** Starts one child and resolves once it answers host-info, or throws AttemptFailed. */
