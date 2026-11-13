@@ -9,6 +9,8 @@ const h2 = @import("h2");
 const api_key = @import("api_key.zig");
 const codex_auth = @import("codex_auth.zig");
 const codex_credentials = @import("codex_credentials.zig");
+const chatgpt_plan_wire = @import("chatgpt_plan_wire.zig");
+const model_list = @import("model_list.zig");
 const credential_policy = @import("codex_credential_policy.zig");
 const provider_transport = @import("provider.zig");
 const turn_states = @import("turn_states.zig");
@@ -17,11 +19,15 @@ const Provider = protocol.Provider;
 
 /// The ChatGPT subscription's Responses endpoint, the only one a signed-in
 /// account's token goes to (a fixture's loopback aside).
-pub const managed_endpoint = "https://chatgpt.com/backend-api/codex/responses";
+pub const managed_endpoint = @import("provider_name.zig").managed_endpoint;
 
-/// OpenAI's own Responses endpoint: an API key's default, and the only one
-/// a ChatGPT plan sign-in's token goes to (a fixture's loopback aside).
-pub const api_endpoint = "https://api.openai.com/v1/responses";
+/// OpenAI's own Responses endpoint: an API key's default, and where a
+/// ChatGPT plan sign-in's token goes (a fixture's loopback aside).
+pub const api_endpoint = @import("provider_name.zig").api_endpoint;
+
+/// The model list beside `api_endpoint`: the only other place a ChatGPT
+/// plan sign-in's token goes.
+pub const api_models_endpoint = responsesBase(api_endpoint).? ++ "/models";
 
 /// A sign-in the Host serves: its credential file, the token wire its
 /// refresh speaks and where that refresh goes. The Host's sign-in worker runs
@@ -70,10 +76,7 @@ pub fn acceptsOutputSchema(route: protocol.Route) bool {
 
 /// A provider's own endpoint, the only one its credential is sent to.
 pub fn endpoint(provider: Provider) []const u8 {
-    return switch (provider) {
-        .codex => managed_endpoint,
-        .openai, .chatgpt => api_endpoint,
-    };
+    return provider.facts().endpoint;
 }
 
 /// The environment variable naming an OpenAI-compatible base URL, such as
@@ -89,18 +92,7 @@ pub fn openAiEndpoint(environ: *const std.process.Environ.Map, allocator: std.me
 
 /// The Responses endpoint under `base`, allocated with `allocator`, which
 /// both endpoint and key rules admit. Trailing slashes are dropped.
-pub fn endpointUnder(allocator: std.mem.Allocator, base: []const u8) ![]const u8 {
-    // `/responses` is appended to the path: with no host the path would
-    // become one, and a query would swallow it.
-    const uri = std.Uri.parse(base) catch return error.InvalidBaseUrl;
-    if (uri.host == null or uri.host.?.isEmpty() or uri.query != null) return error.InvalidBaseUrl;
-    const trimmed = std.mem.trimEnd(u8, base, "/");
-    const under = try std.fmt.allocPrint(allocator, "{s}/responses", .{trimmed});
-    errdefer allocator.free(under);
-    provider_transport.validateEndpoint(under) catch return error.InvalidBaseUrl;
-    validateKeyEndpoint(under, null, false) catch return error.InvalidBaseUrl;
-    return under;
-}
+pub const endpointUnder = @import("endpoint_value.zig").endpointUnder;
 
 /// The base a Responses endpoint sits under (`BASE` of `BASE/responses`),
 /// whose model list (`BASE/models`) its key may also reach, or null when
@@ -119,7 +111,8 @@ pub const Credential = union(enum) {
     /// sign-in worker leases.
     chatgpt_device: SignIn,
     /// A ChatGPT plan sign-in to OpenAI's API, leased the same way. Its
-    /// token goes only to `api_endpoint`, as a bearer alone.
+    /// token goes only to `api_endpoint` and the model list beside it
+    /// (`api_models_endpoint`), as a bearer alone.
     chatgpt_plan: SignIn,
     /// An API key, borrowed for the Host's life. It goes only to its entry's
     /// endpoint, over https; `fixture` admits a loopback endpoint instead.
@@ -208,6 +201,18 @@ pub const Credential = union(enum) {
         };
     }
 
+    /// How this route's model list (`GET BASE/models` beside its Responses
+    /// endpoint) reads, or null when it has none: an API key reads OpenAI's
+    /// list shape, a ChatGPT plan its own. The device sign-in's backend
+    /// publishes none, and a development endpoint takes no credential.
+    pub fn listing(self: Credential) ?Listing {
+        return switch (self) {
+            .none, .chatgpt_device => null,
+            .chatgpt_plan => .chatgpt_plan,
+            .key_file => .openai,
+        };
+    }
+
     pub fn route(self: Credential) protocol.Route {
         return switch (self) {
             .none => .endpoint,
@@ -218,11 +223,24 @@ pub const Credential = union(enum) {
     }
 };
 
-fn fixtureEndpoint(target: []const u8, ca_file: ?[]const u8) bool {
-    return std.mem.startsWith(u8, target, "http://127.0.0.1:") or
-        std.mem.startsWith(u8, target, "http://[::1]:") or
-        (std.mem.startsWith(u8, target, "https://localhost:") and ca_file != null);
-}
+/// The shape of a route's model list answer, which names the IDs it offers.
+pub const Listing = enum {
+    /// `{"data":[{"id":...},...]}`, every entry offered.
+    openai,
+    /// `{"models":[{"slug":...,"visibility":...},...]}`, only listed entries.
+    chatgpt_plan,
+
+    /// The IDs `body` offers, in its order, under `model_list`'s bounds,
+    /// written to `out`. `scratch` holds the parse.
+    pub fn parse(self: Listing, scratch: std.mem.Allocator, body: []const u8, out: *model_list.IdBuffer) !model_list.Ids {
+        return switch (self) {
+            .openai => model_list.parseOpenAi(scratch, body, out),
+            .chatgpt_plan => chatgpt_plan_wire.parseModels(scratch, body, out),
+        };
+    }
+};
+
+const fixtureEndpoint = @import("endpoint_value.zig").fixtureEndpoint;
 
 /// A fixture sign-in goes only to loopback: its requests, and the token
 /// endpoint that stands in for its issuer.
@@ -235,12 +253,7 @@ fn validateAuthenticationEndpoint(target: []const u8, ca_file: ?[]const u8, auth
     }
 }
 
-/// An API key goes over https, or to a loopback fixture when `fixture`.
-fn validateKeyEndpoint(target: []const u8, ca_file: ?[]const u8, fixture: bool) !void {
-    if (fixture) {
-        if (!fixtureEndpoint(target, ca_file)) return error.InvalidKeyFixtureEndpoint;
-    } else if (!std.mem.startsWith(u8, target, "https://")) return error.InsecureKeyEndpoint;
-}
+const validateKeyEndpoint = @import("endpoint_value.zig").validateKeyEndpoint;
 
 /// The fields the Host writes after the codec's headers: the credential's,
 /// which its sign-in source writes (`Credential.fields`), and user-agent,
@@ -296,7 +309,8 @@ pub const Headers = struct {
             if (!fixtureEndpoint(target, ca_file) or
                 !std.mem.eql(u8, credential.record.client_id.slice(), credential_policy.fixture_client_id))
                 return error.InvalidManagedFixture;
-        } else if (!std.mem.eql(u8, target, api_endpoint)) return error.ManagedEndpointMismatch;
+        } else if (!std.mem.eql(u8, target, api_endpoint) and !std.mem.eql(u8, target, api_models_endpoint))
+            return error.ManagedEndpointMismatch;
         if (access.len == 0) return error.InvalidCredentialHeader;
         for (access) |byte| if (byte < 0x21 or byte > 0x7e) return error.InvalidCredentialHeader;
         const shared = try shared_credentials.share(access, "");
@@ -396,12 +410,22 @@ pub const Providers = struct {
         return out;
     }
 
-    /// The OpenAI key whose model list the Host fetches at start: served,
-    /// with a Responses endpoint the list sits beside. ChatGPT has none.
-    pub fn modelListKey(self: *const Providers) ?*const Served {
-        const served = self.get(.openai) orelse return null;
-        if (served.credential != .key_file or responsesBase(served.endpoint) == null) return null;
+    /// `provider`, when the Host fetches its live list: its list is live
+    /// (`Facts.model_list`), it is served over a route that has one
+    /// (`Credential.listing`), and its Responses endpoint has the list beside
+    /// it. Otherwise its picker shows the catalog.
+    pub fn liveList(self: *const Providers, provider: Provider) ?*const Served {
+        if (provider.facts().model_list != .live) return null;
+        const served = self.get(provider) orelse return null;
+        if (served.credential.listing() == null or responsesBase(served.endpoint) == null) return null;
         return served;
+    }
+
+    /// How many live lists the Host fetches, each on its own socket.
+    pub fn liveLists(self: *const Providers) usize {
+        var count: usize = 0;
+        for (std.enums.values(Provider)) |provider| count += @intFromBool(self.liveList(provider) != null);
+        return count;
     }
 
     /// Whether a Session of `provider` can be admitted here.
@@ -557,9 +581,22 @@ test "a ChatGPT plan sign-in sends a bearer and user-agent, only to OpenAI's API
         try std.testing.expectEqualStrings("user-agent", entries[1].name);
         for (entries) |entry| try std.testing.expect(provider_transport.hostField(entry.name));
     }
+    {
+        // The model list beside it takes the same bearer.
+        var headers: Headers = .{};
+        defer headers.deinit();
+        try plan.fields(api_models_endpoint, null, &lease, &credentials, &headers);
+        try std.testing.expectEqualStrings("https://api.openai.com/v1/models", api_models_endpoint);
+        try std.testing.expectEqualStrings("Bearer plan-access", headers.fields()[0].value);
+    }
     var refused: Headers = .{};
-    // Not to the Codex backend, a base URL's endpoint or a loopback.
-    for ([_][]const u8{ managed_endpoint, "https://proxy.example/v1/responses", "http://127.0.0.1:9/responses" }) |target|
+    // Not to the Codex backend, a base URL's endpoint or list, another path
+    // of OpenAI's API or a loopback.
+    for ([_][]const u8{
+        managed_endpoint,                  "https://proxy.example/v1/responses", "https://proxy.example/v1/models",
+        "https://api.openai.com/v1/files", "https://api.openai.com/v1/models/x", "http://api.openai.com/v1/models",
+        "http://127.0.0.1:9/responses",
+    }) |target|
         try std.testing.expectError(error.ManagedEndpointMismatch, plan.fields(target, null, &lease, &credentials, &refused));
     // A fixture takes only a record issued to the fixture client, at loopback.
     const fixture: Credential = .{ .chatgpt_plan = .{ .path = "/p", .refresh = .{ .fixture_endpoint = "http://127.0.0.1:9/token" } } };
@@ -599,28 +636,44 @@ test "a sign-in's routing owner is its account and FedRAMP binding, which a refr
     try std.testing.expectEqualSlices(u8, &keyed.routingOwner(null), &Credential.routingOwner(.none, null));
 }
 
-test "a base URL names the https Responses endpoint under it, or nothing" {
-    const allocator = std.testing.allocator;
-    for ([_][2][]const u8{
-        .{ "https://api.openai.com/v1", "https://api.openai.com/v1/responses" },
-        .{ "https://proxy.example:8443/openai/v1/", "https://proxy.example:8443/openai/v1/responses" },
-        .{ "https://host//", "https://host/responses" },
-        .{ "https://[::1]/v1", "https://[::1]/v1/responses" },
-    }) |case| {
-        const under = try endpointUnder(allocator, case[0]);
-        defer allocator.free(under);
-        try std.testing.expectEqualStrings(case[1], under);
-    }
-    for ([_][]const u8{
-        "http://api.openai.com/v1", "http://127.0.0.1:9/v1",   "https://",            "https:///v1",
-        "https://:443/v1",          "https://user:pw@host/v1", "https://host/v1?x=1", "https://host/v1#f",
-        "ftp://host",               "api.openai.com/v1",
-    }) |bad| try std.testing.expectError(error.InvalidBaseUrl, endpointUnder(allocator, bad));
-    const long = "https://h/" ++ @as([provider_transport.max_endpoint_bytes]u8, @splat('a'));
-    try std.testing.expectError(error.InvalidBaseUrl, endpointUnder(allocator, long));
-}
-
 test "the model list sits beside the Responses endpoint" {
     try std.testing.expectEqualStrings("https://api.openai.com/v1", responsesBase(endpoint(.openai)).?);
     try std.testing.expectEqual(@as(?[]const u8, null), responsesBase("https://host/v1/chat"));
+}
+
+test "each route says how its model list reads, and a provider's list is live only over one that has a list" {
+    const plan: Credential = .{ .chatgpt_plan = .{ .path = "/p" } };
+    const keyed: Credential = .{ .key_file = .{ .key = "sk-test" } };
+    const device: Credential = .{ .chatgpt_device = .{ .path = "/c" } };
+    try std.testing.expectEqual(@as(?Listing, .chatgpt_plan), plan.listing());
+    try std.testing.expectEqual(@as(?Listing, .openai), keyed.listing());
+    try std.testing.expectEqual(@as(?Listing, null), device.listing());
+    try std.testing.expectEqual(@as(?Listing, null), Credential.listing(.none));
+    // Each reads its own shape: a plan offers only listed entries.
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var out: model_list.IdBuffer = undefined;
+    const plan_body = "{\"models\":[{\"slug\":\"gpt-6-sol\",\"visibility\":\"list\"},{\"slug\":\"hidden\",\"visibility\":\"hide\"}]}";
+    const key_body = "{\"data\":[{\"id\":\"gpt-6-luna\"}]}";
+    try std.testing.expectEqualStrings("gpt-6-sol\n", (try Listing.chatgpt_plan.parse(arena.allocator(), plan_body, &out)).bytes);
+    try std.testing.expectError(error.InvalidModelList, Listing.chatgpt_plan.parse(arena.allocator(), key_body, &out));
+    try std.testing.expectEqualStrings("gpt-6-luna\n", (try Listing.openai.parse(arena.allocator(), key_body, &out)).bytes);
+    try std.testing.expectError(error.InvalidModelList, Listing.openai.parse(arena.allocator(), plan_body, &out));
+
+    var providers: Providers = .{};
+    for (std.enums.values(Provider)) |name| try std.testing.expect(providers.liveList(name) == null);
+    try std.testing.expectEqual(@as(usize, 0), providers.liveLists());
+    providers.table.set(.codex, .{ .endpoint = endpoint(.codex), .credential = device });
+    providers.table.set(.openai, .{ .endpoint = endpoint(.openai), .credential = keyed });
+    providers.table.set(.chatgpt, .{ .endpoint = endpoint(.chatgpt), .credential = plan });
+    // The device sign-in's list is the catalog's; the key's and the plan's are live.
+    try std.testing.expect(providers.liveList(.codex) == null);
+    try std.testing.expectEqual(providers.get(.openai).?, providers.liveList(.openai).?);
+    try std.testing.expectEqual(providers.get(.chatgpt).?, providers.liveList(.chatgpt).?);
+    try std.testing.expectEqual(@as(usize, 2), providers.liveLists());
+    // No credential, or an endpoint with no list beside it, has none.
+    providers.table.set(.openai, .{ .endpoint = "http://127.0.0.1:9/responses", .credential = .none });
+    providers.table.set(.chatgpt, .{ .endpoint = "http://127.0.0.1:9/chat", .credential = plan });
+    try std.testing.expect(providers.liveList(.openai) == null and providers.liveList(.chatgpt) == null);
+    try std.testing.expectEqual(@as(usize, 0), providers.liveLists());
 }

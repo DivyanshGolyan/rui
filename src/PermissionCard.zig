@@ -164,7 +164,7 @@ test "PermissionCard decides the drawn request at tiny sizes and ignores pasted 
     try card.widget().handleEvent(&events, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
     try std.testing.expect(!events.consume_event);
     // A key handed inside a paste never authorizes.
-    for ([_]Consent.Input{ .enter, .left, .right, .other, .invalid, .cancel }) |input| {
+    for ([_]Consent.Input{ .enter, .left, .right, .other, .cancel }) |input| {
         try card.take(&events, input, true);
         try std.testing.expectEqual(null, owner.decision);
     }

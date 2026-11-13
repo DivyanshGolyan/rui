@@ -15,7 +15,7 @@ pub const max_runtime_directory_bytes = runtime_prefix.len + max_uid_bytes;
 pub const max_socket_path_bytes = max_runtime_directory_bytes + "/".len + 32 + socket_suffix.len;
 /// A launched Host binds its socket in the caller's runtime directory
 /// (launch_frame.zig); macOS binds at most this many path bytes.
-pub const max_launch_socket_path_bytes = 103;
+pub const max_launch_socket_path_bytes = @import("host_settings.zig").max_launch_socket_path_bytes;
 
 pub const Kind = @import("store_target.zig").Kind;
 

@@ -23,7 +23,10 @@ ROOTS = ("src/cli.zig",)
 # guarantee. The test-only roots name their imports from tests, so each
 # of their imports counts; a module root counts only what its tests name.
 TEST_ONLY_ROOTS = ("src/tests.zig", "src/logic_tests.zig", "src/parser_fuzz_tests.zig", "tests/integration/mysql_wire_test.zig")
-MODULE_TEST_ROOTS = ("src/h2/h2.zig", "src/store/wire/pg.zig")
+# The shared URL value module is named by the logic cores and HTTP/2 tests.
+# Its named import preserves module identity, so path-only traversal cannot
+# discover it through those roots.
+MODULE_TEST_ROOTS = ("src/h2/h2.zig", "src/store/wire/pg.zig", "src/url.zig")
 BASELINE = Path(__file__).with_name("import_cycles.json")
 STORE_DIRECTORY = "src/store/"
 STORE_FACADE = "src/store.zig"

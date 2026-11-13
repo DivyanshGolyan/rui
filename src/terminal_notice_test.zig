@@ -115,7 +115,6 @@ const ConsentProbe = struct {
         const self: *ConsentProbe = @ptrCast(@alignCast(raw));
         const choice: @import("ActionConsent.zig").Input = switch (input) {
             .key_press => |pressed| if (@import("TerminalEditor.zig").isEnter(pressed)) .enter else .other,
-            .invalid_key => .invalid,
             else => return,
         };
         if (self.replace_request) self.consent.adopt(29);

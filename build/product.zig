@@ -128,7 +128,9 @@ fn configureTransportWithIdentity(
     const test_poll = addTestPoll(b);
     compile.root_module.addImport("test_poll", test_poll);
     const optimize = compile.root_module.optimize.?;
-    const tls_client = addTlsClient(b, target, optimize, maybe_pinned) orelse return;
+    const url = addUrl(b);
+    compile.root_module.addImport("url", url);
+    const tls_client = addTlsClient(b, target, optimize, maybe_pinned, url) orelse return;
     compile.root_module.addImport("tls_client", tls_client);
     compile.root_module.addImport("h2", addH2(b, target, optimize, maybe_pinned, test_poll, tls_client));
 }
@@ -137,6 +139,11 @@ fn configureTransportWithIdentity(
 /// share one copy of the file.
 pub fn addTestPoll(b: *std.Build) *std.Build.Module {
     return b.createModule(.{ .root_source_file = b.path("src/testing/poll.zig") });
+}
+
+/// Pure URL values shared by a root and its transport modules.
+pub fn addUrl(b: *std.Build) *std.Build.Module {
+    return b.createModule(.{ .root_source_file = b.path("src/url.zig") });
 }
 
 /// TLS client settings, host naming and trust loading, linked against the
@@ -148,6 +155,7 @@ pub fn addTlsClient(
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     maybe_pinned: ?PinnedTransport,
+    url: *std.Build.Module,
 ) ?*std.Build.Module {
     if (!transportEnabled(target)) return null;
     const module = b.createModule(.{
@@ -156,6 +164,7 @@ pub fn addTlsClient(
         .optimize = optimize,
         .link_libc = true,
     });
+    module.addImport("url", url);
     const bindings = addBindings(b, module, "openssl_c",
         \\#include <openssl/ssl.h>
         \\#include <openssl/err.h>
@@ -189,6 +198,7 @@ pub fn addH2(
         .optimize = optimize,
         .link_libc = true,
     });
+    module.addImport("url", tls_client.import_table.get("url").?);
     module.addImport("test_poll", test_poll);
     module.addImport("tls_client", tls_client);
     const bindings = addBindings(b, module, "h2_c",

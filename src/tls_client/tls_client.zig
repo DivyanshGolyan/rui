@@ -5,8 +5,8 @@
 //! certificate directory and bundles and `--provider-ca-file` mean the same
 //! everywhere.
 //!
-//! A self-contained build module, like h2: it imports nothing from Rui and
-//! links OpenSSL, so each binary carries one copy. It holds no verification
+//! A transport build module, like h2: it shares only the value-only URL
+//! module with Rui and links OpenSSL once per binary. It holds no verification
 //! of its own beyond OpenSSL's: Apple SecTrust, which h2 uses for system
 //! trust on macOS, stays with h2.
 //!
@@ -40,7 +40,7 @@ pub const socket = struct {
 };
 
 /// The longest DNS name; IP literals are shorter.
-pub const max_host_bytes = 253;
+pub const max_host_bytes = @import("url").max_host_bytes;
 
 /// What a peer's certificate chain is checked against.
 pub const Trust = union(enum) {

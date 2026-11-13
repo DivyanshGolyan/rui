@@ -4,6 +4,11 @@
 //! a provider too.
 const std = @import("std");
 
+/// The subscription backend endpoint.
+pub const managed_endpoint = "https://chatgpt.com/backend-api/codex/responses";
+/// The API Responses endpoint.
+pub const api_endpoint = "https://api.openai.com/v1/responses";
+
 /// A provider a Host can serve.
 pub const Provider = enum {
     codex,
@@ -36,6 +41,12 @@ pub const Provider = enum {
         };
     }
 
+    /// Where a person whose plan limit stopped this provider raises it, as
+    /// a line to show, or null when Rui knows no such place for it.
+    pub fn usage(self: Provider) ?[]const u8 {
+        return self.facts().usage;
+    }
+
     /// Whether this provider runs the tool `name` itself, as it runs
     /// hosted `web_search`.
     pub fn runsTool(self: Provider, name: []const u8) bool {
@@ -46,30 +57,17 @@ pub const Provider = enum {
     /// The table: the one switch on which provider it is.
     pub fn facts(self: Provider) Facts {
         return switch (self) {
-            .codex => .{ .codec = .@"openai-responses/2", .shown = "ChatGPT (device code)", .sign_in = "Codex", .credential = .sign_in, .login = true, .model_list = .catalog, .runs_tools = &.{"web_search"} },
-            .openai => .{ .codec = .@"openai-responses/2", .shown = "OpenAI", .sign_in = "API key", .credential = .api_key, .login = true, .model_list = .live, .runs_tools = &.{"web_search"} },
-            .chatgpt => .{ .codec = .@"openai-responses/3", .shown = "ChatGPT", .sign_in = "ChatGPT", .credential = .sign_in, .login = false, .model_list = .catalog, .runs_tools = &.{"web_search"} },
+            .codex => .{ .endpoint = managed_endpoint, .codec = .@"openai-responses/2", .shown = "ChatGPT (device code)", .sign_in = "Codex", .credential = .sign_in, .login = true, .model_list = .catalog, .usage = null, .runs_tools = &.{"web_search"} },
+            .openai => .{ .endpoint = api_endpoint, .codec = .@"openai-responses/2", .shown = "OpenAI", .sign_in = "API key", .credential = .api_key, .login = true, .model_list = .live, .usage = null, .runs_tools = &.{"web_search"} },
+            .chatgpt => .{ .endpoint = api_endpoint, .codec = .@"openai-responses/3", .shown = "ChatGPT", .sign_in = "ChatGPT", .credential = .sign_in, .login = true, .model_list = .live, .usage = "Manage usage: https://chatgpt.com/settings/usage", .runs_tools = &.{"web_search"} },
         };
-    }
-
-    /// The one provider whose model list is fetched live: the Host keeps
-    /// one live list, so a second one is a compile error.
-    pub fn onlyLiveList() Provider {
-        return comptime only("model_list", Facts.ModelList.live);
-    }
-
-    fn only(comptime field: []const u8, comptime value: anytype) Provider {
-        var found: ?Provider = null;
-        for (std.enums.values(Provider)) |provider| if (@field(provider.facts(), field) == value) {
-            if (found != null) @compileError("more than one provider has " ++ field ++ " " ++ @tagName(value));
-            found = provider;
-        };
-        return found orelse @compileError("no provider has " ++ field ++ " " ++ @tagName(value));
     }
 };
 
 /// What a provider fixes for every Host that serves it.
 pub const Facts = struct {
+    /// The provider-owned destination for its credential.
+    endpoint: []const u8,
     codec: Codec,
     shown: []const u8,
     sign_in: []const u8,
@@ -77,6 +75,9 @@ pub const Facts = struct {
     /// Whether `rui auth login` signs this provider in.
     login: bool,
     model_list: ModelList,
+    /// Where a person raises the plan limit that refused a request, as the
+    /// line a quota refusal shows; null sends them to Settings.
+    usage: ?[]const u8,
     /// The tools the provider runs on its side, by the names a `tools` list
     /// gives them. A Session of another provider cannot name them.
     runs_tools: []const []const u8,
@@ -85,7 +86,8 @@ pub const Facts = struct {
     /// renews, or a key that only a new key replaces.
     pub const Credential = enum { sign_in, api_key };
     /// Where the model picker's list comes from: Rui's catalog, or the
-    /// provider's own list, fetched once as the Host starts.
+    /// provider's own list, fetched as the Host starts and again on each
+    /// model-list request when the route it is served over has one.
     pub const ModelList = enum { catalog, live };
 };
 
@@ -100,10 +102,6 @@ test "every OpenAI provider runs web_search, and none runs bash" {
         try std.testing.expect(provider.runsTool("web_search"));
         try std.testing.expect(!provider.runsTool("bash"));
     }
-}
-
-test "one provider fetches its model list live" {
-    try std.testing.expectEqual(Provider.openai, comptime Provider.onlyLiveList());
 }
 
 test "every provider's name and sign-in read apart from the others', and only a provider with a login names one" {
@@ -121,9 +119,16 @@ test "every provider's name and sign-in read apart from the others', and only a 
     try std.testing.expectEqualStrings("ChatGPT", Provider.chatgpt.signIn());
     try std.testing.expectEqualStrings("API key", Provider.openai.signIn());
     try std.testing.expectEqualStrings("rui auth login codex", Provider.codex.login().?);
-    try std.testing.expectEqual(@as(?[]const u8, null), Provider.chatgpt.login());
+    try std.testing.expectEqualStrings("rui auth login chatgpt", Provider.chatgpt.login().?);
 }
 
 fn firstWord(text: []const u8) []const u8 {
     return text[0 .. std.mem.indexOfScalar(u8, text, ' ') orelse text.len];
+}
+
+test "every provider owns an HTTPS endpoint" {
+    for (std.enums.values(Provider)) |provider| {
+        try std.testing.expect(std.mem.startsWith(u8, provider.facts().endpoint, "https://"));
+        try std.testing.expect(std.mem.endsWith(u8, provider.facts().endpoint, "/responses"));
+    }
 }
