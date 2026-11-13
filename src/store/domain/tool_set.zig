@@ -456,26 +456,35 @@ pub const Member = struct {
     digest: [32]u8,
 };
 
-/// Intern a name-ordered effective offer. All members and their names must
-/// outlive the Access's next round.
-pub fn internMembers(a: anytype, members: []const Member) !u64 {
-    var digest: tool_record.SetDigest = .init();
-    var count: usize = 0;
-    for (members) |*member| {
-        digest.add(&member.digest);
-        count += 1;
+/// Interns a name-ordered effective offer in the rounds its caller runs:
+/// `queue` queues the lookup of the set by its digest, and `finish`, after
+/// that round, answers the saved set's id, or takes a new id and queues the
+/// set's rows. All members and their names must outlive the round that
+/// runs those rows.
+pub const Interning = struct {
+    digest: [32]u8 = undefined,
+    saved: lookup_set.Result = null,
+    /// Whether `finish` queued a new set's rows.
+    inserted: bool = false,
+
+    pub fn queue(interning: *Interning, a: anytype, members: []const Member) void {
+        var digest: tool_record.SetDigest = .init();
+        for (members) |*member| digest.add(&member.digest);
+        interning.digest = digest.final();
+        a.read(lookup_set, .{ .digest = interning.digest }, &interning.saved);
     }
-    const value = digest.final();
-    var saved: lookup_set.Result = null;
-    a.read(lookup_set, .{ .digest = value }, &saved);
-    try a.run();
-    if (saved) |row| return row.tool_set_id.get();
-    const id = try a.identity(.tool_set_id);
-    a.write(insert_set, .{ .id = id, .digest = value, .count = count });
-    var ordinal: u64 = 0;
-    for (members) |*member| {
-        a.writeCount(insert_selected_member, .{ .set = id, .ordinal = ordinal, .source = member.source, .name = member.name.slice() }, 1);
-        ordinal += 1;
+
+    /// After `queue`'s round.
+    pub fn finish(interning: *Interning, a: anytype, members: []const Member) !u64 {
+        if (interning.saved) |row| return row.tool_set_id.get();
+        const id = try a.identity(.tool_set_id);
+        a.write(insert_set, .{ .id = id, .digest = interning.digest, .count = members.len });
+        var ordinal: u64 = 0;
+        for (members) |*member| {
+            a.writeCount(insert_selected_member, .{ .set = id, .ordinal = ordinal, .source = member.source, .name = member.name.slice() }, 1);
+            ordinal += 1;
+        }
+        interning.inserted = true;
+        return id;
     }
-    return id;
-}
+};
