@@ -250,20 +250,27 @@ pub fn resolveProviders(init: std.process.Init, settings: *hs.Settings, fixtures
         if (@field(settings.providers.entries, @tagName(provider))) |*entry| {
             switch (comptime provider.facts().credential) {
                 .api_key => if (!entry.unauthenticated.value or fixtures.openai) {
+                    // A source the document names is a document refusal. The
+                    // saved default is the flag Host's environment, so it keeps
+                    // that Host's existing diagnostics, causes and exits.
                     if (entry.key.source == .default) {
                         var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-                        const path = api_key.path(init.environ_map, &path_buffer) catch |err| return resolutionFailure(failure, "providers." ++ @tagName(provider) ++ ".key", err);
+                        const path = api_key.path(init.environ_map, &path_buffer) catch |err| return if (err == error.HomeRequired) error.HomeUnavailable else err;
                         entry.key.source = .{ .file = .{} };
-                        entry.key.source.file.text.set(path) catch |err| return resolutionFailure(failure, "providers." ++ @tagName(provider) ++ ".key", err);
-                    }
-                    resolve(init, &entry.key) catch |err| return resolutionFailure(failure, "providers." ++ @tagName(provider) ++ ".key", err);
+                        try entry.key.source.file.text.set(path);
+                        resolve(init, &entry.key) catch |err| {
+                            if (err == error.ApiKeyMissing) stderr.diagnostic("rui: no OpenAI API key; save one with `" ++ comptime protocol.Provider.openai.login().? ++ "`, then start the Host again.\n", .{});
+                            return err;
+                        };
+                    } else resolve(init, &entry.key) catch |err| return resolutionFailure(failure, "providers." ++ @tagName(provider) ++ ".key", err);
                 },
+                // Only the saved default is resolved here, as before documents.
                 .sign_in => if (!entry.unauthenticated.value or (provider == .codex and fixtures.codex) or (provider == .chatgpt and fixtures.chatgpt_token_endpoint != null)) {
                     if (entry.credential_file == null) {
                         var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-                        const path = provider_login.credentialPath(init, provider, &path_buffer, false) catch |err| return resolutionFailure(failure, "providers." ++ @tagName(provider) ++ ".credentialFile", err);
+                        const path = provider_login.credentialPath(init, provider, &path_buffer, false) catch |err| return if (err == error.HomeRequired) error.HomeUnavailable else err;
                         entry.credential_file = .{};
-                        entry.credential_file.?.text.set(path) catch |err| return resolutionFailure(failure, "providers." ++ @tagName(provider) ++ ".credentialFile", err);
+                        try entry.credential_file.?.text.set(path);
                     }
                 },
             }
@@ -437,7 +444,11 @@ test "Host start resolves environment private file and saved credential sources"
     try std.testing.expectEqualStrings("/tmp/./codex-\xff.json", settings.providers.entries.codex.?.credential_file.?.slice());
     try std.testing.expectEqualStrings("/tmp/./chatgpt-\xff.json", settings.providers.entries.chatgpt.?.credential_file.?.slice());
     try private.setFilePermissions(std.testing.io, "openai.key", .fromMode(0o644), .{});
+    // The saved default keeps the flag Host's own cause; only a source the
+    // document names is a leaf-scoped document refusal.
     try assign(settings, arena.allocator(), "providers.openai.key", "null", &failure);
+    try std.testing.expectError(error.InsecureCredentialFile, prepare(init, settings, .{}, &failure));
+    try assign(settings, arena.allocator(), "providers.openai.key", try std.fmt.allocPrint(arena.allocator(), "file:{s}", .{path}), &failure);
     try std.testing.expectError(error.SettingsInvalid, prepare(init, settings, .{}, &failure));
     try std.testing.expect(std.mem.startsWith(u8, failure.message.slice(), "providers.openai.key:"));
 }

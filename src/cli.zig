@@ -2203,10 +2203,11 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     };
     const served = providers.fromSettings(settings, tuning.fixtures);
     if (try served.proxyRefusal(std.heap.c_allocator)) |reason| {
-        var refusal_buffer: [start_report.max_refusal_message_bytes]u8 = undefined;
-        const text = try std.fmt.bufPrint(&refusal_buffer, "network: https_proxy/HTTPS_PROXY {s}; Rui tunnels only through an http:// proxy", .{reason});
-        const failure: start_report.Failure = .init(.settings_invalid, text);
-        return writeRefusal(io, &failure, .environment);
+        // The proxy is process environment, not a settings leaf, and has no
+        // StartError code: keep its stderr-only diagnostic and exit.
+        stderr.diagnostic("rui: https_proxy/HTTPS_PROXY {s}; Rui tunnels only through an http:// proxy. The Host did not start.\n", .{reason});
+        recordExit(.environment);
+        return error.Reported;
     }
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     if (settings.store == .sqlite or parsed.get("store") != null) {
