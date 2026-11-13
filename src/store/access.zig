@@ -1065,7 +1065,7 @@ pub fn failedName(a: anytype, comptime named: anytype) ?NamedErrors(named) {
 
 /// The errors `A.run` returns.
 fn RunError(comptime A: type) type {
-    return @typeInfo(@typeInfo(@TypeOf(A.run)).@"fn".return_type.?).error_union.error_set;
+    return @import("../error_set.zig").Of(A.run);
 }
 
 /// The errors `runNamed`'s and `failedName`'s pairs name.

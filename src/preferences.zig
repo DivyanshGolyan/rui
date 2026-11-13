@@ -984,7 +984,7 @@ test "any built-in provider can be saved, and a model alone needs one ready prov
 
 /// Legacy stdout login receipts are outside the CLI stderr migration. Derive
 /// their unchanged reason vocabulary from this owner's closed error set.
-pub fn loginDefaultFailureReason(err: @typeInfo(@typeInfo(@TypeOf(fillProviderAfterLogin)).@"fn".return_type.?).error_union.error_set) []const u8 {
+pub fn loginDefaultFailureReason(err: @import("error_set.zig").Of(fillProviderAfterLogin)) []const u8 {
     switch (err) {
         error.SavedPreferenceStoreInvalid => return "InvalidPreferenceStore",
         error.SavedPreferenceProviderInvalid => return "InvalidPreferenceProvider",

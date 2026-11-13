@@ -375,9 +375,7 @@ fn RowsRead(comptime Visitor: type) type {
     };
 }
 
-fn ErrorOf(comptime function: anytype) type {
-    return @typeInfo(@typeInfo(@TypeOf(function)).@"fn".return_type.?).error_union.error_set;
-}
+const ErrorOf = @import("../../error_set.zig").Of;
 
 /// The plain values of the shown row `index`, checked in main's order.
 /// They borrow `row`, `sorted` and `last_text`.
