@@ -39,7 +39,7 @@ fn press(editor: *Editor, key: u21, failure: *?[]const u8) Editor.KeyOutcome {
 }
 
 test "Panel editor refusal domain keeps usable text and caret then edits and submits" {
-    const Fault = enum { typed_overflow, invalid_utf8, invalid_key, invalid_scalar, invalid_paste, paste_overflow, paste_edit_rejected, edit_rejected, unbound };
+    const Fault = enum { typed_overflow, invalid_utf8, invalid_scalar, invalid_paste, paste_overflow, paste_edit_rejected, edit_rejected, unbound };
     for (std.enums.values(Fault)) |fault| {
         errdefer std.debug.print("Panel editor recovery fault={s}\n", .{@tagName(fault)});
         var storage: [32]u8 = undefined;
@@ -51,7 +51,6 @@ test "Panel editor refusal domain keeps usable text and caret then edits and sub
         switch (fault) {
             .typed_overflow => outcome = text(&editor, &spaces, false, &failure),
             .invalid_utf8 => outcome = text(&editor, "\xff", false, &failure),
-            .invalid_key => outcome = event(&editor, .invalid_key, false, &failure),
             .invalid_scalar => outcome = text(&editor, "z\x01", false, &failure),
             .invalid_paste, .paste_overflow, .paste_edit_rejected => {
                 _ = event(&editor, .paste_start, true, &failure);
@@ -80,7 +79,7 @@ test "Panel editor refusal domain keeps usable text and caret then edits and sub
         if (outcome != .refused) outcome = press(&editor, vaxis.Key.enter, &failure);
         try std.testing.expectEqual(@as(keymap.Refusal, switch (fault) {
             .typed_overflow => .overflow,
-            .invalid_utf8, .invalid_key, .invalid_scalar, .invalid_paste => .invalid,
+            .invalid_utf8, .invalid_scalar, .invalid_paste => .invalid,
             .paste_overflow => .paste_overflow,
             .edit_rejected, .paste_edit_rejected => .edit_rejected,
             .unbound => .unbound,

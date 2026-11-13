@@ -1392,13 +1392,7 @@ pub const Store = struct {
     }
 
     fn settleSkillToolHeld(self: *Store, binding: ActionAttemptBinding, allocator: std.mem.Allocator, captured: *const skills_domain.Capture, faults: Faults) !bool {
-        const entry = try enter(self, .none);
-        defer entry.release();
-        var access: Access(.write, Ordinary.action_attempt) = .open(&entry);
-        defer access.deinit();
-        // A reload allocates from `allocator` inside the write; running out
-        // of it rolls back cleanly and is the caller's to retry.
-        return entry.finishTransaction(Ordinary.action_attempt || error{OutOfMemory}, faults, access.end(faults, skills_domain.runTool(&access, allocator, binding, captured, faults)));
+        return transition.apply(self, skills_domain.SettleTool, .{ .binding = binding, .allocator = allocator, .captured = captured }, faults);
     }
 
     /// Fails the core tool call `binding` names with `result`, in one

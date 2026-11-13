@@ -47,6 +47,14 @@ pub const Provider = enum {
         return self.facts().usage;
     }
 
+    /// The provider a sign-in to this one supersedes: the same account,
+    /// signed in an older way. Signing in to this provider replaces that
+    /// one as the saved default for new Sessions; null when it supersedes
+    /// none.
+    pub fn supersedes(self: Provider) ?Provider {
+        return self.facts().supersedes;
+    }
+
     /// Whether this provider runs the tool `name` itself, as it runs
     /// hosted `web_search`.
     pub fn runsTool(self: Provider, name: []const u8) bool {
@@ -57,9 +65,9 @@ pub const Provider = enum {
     /// The table: the one switch on which provider it is.
     pub fn facts(self: Provider) Facts {
         return switch (self) {
-            .codex => .{ .endpoint = managed_endpoint, .codec = .@"openai-responses/2", .shown = "ChatGPT (device code)", .sign_in = "Codex", .credential = .sign_in, .login = true, .model_list = .catalog, .usage = null, .runs_tools = &.{"web_search"} },
-            .openai => .{ .endpoint = api_endpoint, .codec = .@"openai-responses/2", .shown = "OpenAI", .sign_in = "API key", .credential = .api_key, .login = true, .model_list = .live, .usage = null, .runs_tools = &.{"web_search"} },
-            .chatgpt => .{ .endpoint = api_endpoint, .codec = .@"openai-responses/3", .shown = "ChatGPT", .sign_in = "ChatGPT", .credential = .sign_in, .login = true, .model_list = .live, .usage = "Manage usage: https://chatgpt.com/settings/usage", .runs_tools = &.{"web_search"} },
+            .codex => .{ .endpoint = managed_endpoint, .codec = .@"openai-responses/2", .shown = "ChatGPT (device code)", .sign_in = "Codex", .credential = .sign_in, .login = true, .model_list = .catalog, .usage = null, .runs_tools = &.{"web_search"}, .supersedes = null },
+            .openai => .{ .endpoint = api_endpoint, .codec = .@"openai-responses/2", .shown = "OpenAI", .sign_in = "API key", .credential = .api_key, .login = true, .model_list = .live, .usage = null, .runs_tools = &.{"web_search"}, .supersedes = null },
+            .chatgpt => .{ .endpoint = api_endpoint, .codec = .@"openai-responses/3", .shown = "ChatGPT", .sign_in = "ChatGPT", .credential = .sign_in, .login = true, .model_list = .live, .usage = "Manage usage: https://chatgpt.com/settings/usage", .runs_tools = &.{"web_search"}, .supersedes = .codex },
         };
     }
 };
@@ -81,6 +89,9 @@ pub const Facts = struct {
     /// The tools the provider runs on its side, by the names a `tools` list
     /// gives them. A Session of another provider cannot name them.
     runs_tools: []const []const u8,
+    /// The older sign-in of the same account that this provider's sign-in
+    /// replaces as the saved default, or null.
+    supersedes: ?Provider,
 
     /// What a person gives Rui to use this provider: a sign-in the Host
     /// renews, or a key that only a new key replaces.
@@ -120,6 +131,19 @@ test "every provider's name and sign-in read apart from the others', and only a 
     try std.testing.expectEqualStrings("API key", Provider.openai.signIn());
     try std.testing.expectEqualStrings("rui auth login codex", Provider.codex.login().?);
     try std.testing.expectEqualStrings("rui auth login chatgpt", Provider.chatgpt.login().?);
+}
+
+test "a provider supersedes only another sign-in, which supersedes none" {
+    for (std.enums.values(Provider)) |provider| {
+        const older = provider.supersedes() orelse continue;
+        try std.testing.expect(older != provider);
+        try std.testing.expectEqual(Facts.Credential.sign_in, provider.facts().credential);
+        try std.testing.expectEqual(Facts.Credential.sign_in, older.facts().credential);
+        try std.testing.expectEqual(@as(?Provider, null), older.supersedes());
+    }
+    try std.testing.expectEqual(@as(?Provider, .codex), Provider.chatgpt.supersedes());
+    try std.testing.expectEqual(@as(?Provider, null), Provider.codex.supersedes());
+    try std.testing.expectEqual(@as(?Provider, null), Provider.openai.supersedes());
 }
 
 fn firstWord(text: []const u8) []const u8 {
