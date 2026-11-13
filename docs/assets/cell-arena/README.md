@@ -40,7 +40,7 @@ Main's binary SHA-256 was `d50dca9d274605cac1e017ca4f2e27ca5625414bf676320054219
 The branch binary SHA-256 was `a7ad9baebb09365bcbd919bfb566111700401d2cc9dacb4bf6d7a3f5fa2d815e`.
 This saves between-frame memory; peak frame-construction memory and CPU were not measured.
 
-## Current-main merge follow-up
+## Earlier ground-strip merge follow-up (historical)
 
 Main `271491cb7987ccc35bb7156c7cff240a883c9fdb` was merged, without rebasing, in branch merge commit `89451d4161f34c61e2c2bbab93172fbe50e4178f`.
 Both builds now retain #1403's uncovered-ground-strip design and #1409's covered-pane test correction.
@@ -65,3 +65,31 @@ The owned memory run was cleaned up and its Store archived.
 The new strip allocator test failed when Ground.strip was deliberately put back on the general arena; that mutation was restored.
 `python3 tests/ci/prepush.py` passed all 83 development steps (3,664 tests passed, 3 skipped) and all 55 macOS type-check steps under the isolated ordinary test account.
 Scrolled memory, fresh post-merge screenshots, peak memory, CPU, physical input, and macOS runtime behavior were not rerun in this follow-up.
+
+## Current-main Root/sign-in merge follow-up
+
+Merged main `c5cfe9276381d5838a03ad1ac97616c0e0268be6` in merge commit `08e2751354cfce0df950918aab01c01b5d6259ec`, without rebasing.
+Root retains main's browser-sign-in setup and callback state; its new test DrawContext and SignIn's new test DrawContext supply cell_arena.
+All 38 surface-buffer allocation sites use cell allocators; metadata stays on the general arena.
+Main also changed SignIn.draw, so the idle A/B was rerun rather than reusing old memory results.
+
+Both pinned builds used Zig 0.17.1 ReleaseSafe through zb, with the external launcher enforcing -j1.
+The same deep-dive harness alternated main and branch, three repetitions per size, with the same 63 answered fixture turns and five-second settling plus sync before reading smaps Private_Dirty.
+All 12 samples completed without errors; drawn row/character counts match for each pair, and no samples were excluded.
+This table supersedes earlier tables for current-main claims; the PNG pairs above remain historical, not fresh post-merge captures.
+
+| Size | Main c5cfe927 KiB median [min, max] | Branch 08e27513 KiB median [min, max] | Saved KiB |
+| --- | --- | --- | --- |
+| 120×40 idle | 5,044 [5,044, 5,048] | 3,876 [3,876, 3,880] | 1,168 (23.2%) |
+| 250×70 idle | 10,040 [10,040, 10,044] | 5,976 [5,976, 5,980] | 4,064 (40.5%) |
+
+Main binary SHA-256: `551fb8d89a8764e3fa814e4f77d1deb3743adb6b701200923c07184edee850b3`.
+Branch binary SHA-256: `34def74bc68657eff5a535ca0b467f5fe8e5a2de6fb5623b4fe0dbf836d81265`.
+Full evidence is under `/mnt/project-files/libvaxis-memory/pin-pr/root-merge-followup/`.
+The run `/home/rui-cell/.cache/verify-rui/runs/20261113T121347-c5cfe92-11926` passed doctor and was cleaned up with its Store archived.
+
+`zb zig build -j1` passed under the ordinary rui-cell account with Python 3.12.
+`zb zig build test -j1 -Dtest-filter=Root -Dtest-filter=SignIn -Dtest-filter=sign_in -Dtest-filter=app_settings -Dtest-filter=model_choice -Dtest-filter=model_picker -Dtest-filter=provider_name -Dtest-filter=Overview -Dtest-filter=SessionFrontend -Dtest-filter=AppScreen -Dtest-filter='Stack keeps every composed cell' --summary all` passed 46/46 steps and 395/395 tests, including both allocator regressions.
+`zb python3 tests/ci/prepush.py` passed 690 policy tests (7 skipped), 42 installer cases, 83/83 development steps (3,673 tests passed / 3 skipped), and 55/55 macOS type-check steps.
+TypeScript wire.ts regeneration was skipped because clients/ts/node_modules is absent; no wire change is authored here.
+As before, fresh screenshots, scrolled memory, peak memory, CPU, physical input, and macOS runtime behavior were not rerun.
