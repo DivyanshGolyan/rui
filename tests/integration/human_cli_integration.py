@@ -878,8 +878,10 @@ def persistent_copy_case():
             # The chat info action uses the same last-answer clipboard owner.
             copied = len(capture.clipboard)
             chat_info_open(master)
+            # Down stops on the action row beside its actions and walks the
+            # stacked row to Copy last answer; Right then walks the beside row.
             panel_frame(master, lambda frame: len(capture.clipboard) == copied + 1,
-                        b"\x1b[B" * 6 + b"\r")
+                        b"\x1b[B" * 6 + b"\x1b[C" * 2 + b"\r")
             assert capture.clipboard[-1] == osc52(answer), capture.clipboard
             panel_frame(master, lambda frame: "Copy last answer" not in frame, b"\x1b")
             assert sent("/copy code") == osc52("print('é')")
@@ -2648,6 +2650,8 @@ def main(selected="all"):
             keys = keyed_frame(master, b"\x1b[B" * 6 + b"\r", lambda screen, x, y: "earlier message" in screen)
             for expected in ('enter    open / send', 'esc      back', '⇧enter   new line', 'ctrl+x   stop', '↑↓       scroll', 'ctrl+o   tool output', 'ctrl+p   earlier message', 'ctrl+r   retry', '/        skills', 'alt+a    archive', 'ctrl+c   leave'):
                 assert expected in keys, (expected, keys)
+            for key, meaning in (('tab', 'next panel/footer field'), ('⇧tab', 'previous panel/footer field'), ('←→', 'list/chat · info actions')):
+                assert any(key in row and meaning in row for row in keys.splitlines()), (key, meaning, keys)
             assert all(stale not in keys for stale in ("/help", "Commands", "Marks", "Esc returns", "Ctrl-X twice", "shift+enter or ctrl+j", "‹ Rui · settings", 'ctrl+g', 'ctrl+d', 'ctrl+n', 'ctrl+end', 'ctrl+c/d', 'pgup/pgdn', 'first session', 'latest / last', 'scroll / select')), keys
             settings = keyed_frame(master, b"\x1b", lambda screen, x, y: "Notifications" in screen and "Version" in screen)
             assert "earlier message" not in settings, settings

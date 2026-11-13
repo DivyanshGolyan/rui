@@ -21,6 +21,10 @@ pub const Key = enum {
     alt_a,
     up,
     down,
+    /// The bare arrows; the draft moves its caret with them, and a choice
+    /// drawn in place of the draft takes any its screen leaves unbound.
+    left,
+    right,
     shift_up,
     shift_down,
     /// With or without Shift.
@@ -124,10 +128,13 @@ pub const list = [_]Reference{
     .{ .key = "enter", .meaning = "open / send" },
     .{ .key = "esc", .meaning = "back", .keys = &.{.escape}, .aliases = &.{.ctrl_g} },
     .{ .key = "⇧enter", .meaning = "new line" },
-    .{ .key = "tab", .meaning = "next footer field" },
-    .{ .key = "⇧tab", .meaning = "previous footer field" },
+    .{ .key = "tab", .meaning = "next panel/footer field" },
+    .{ .key = "⇧tab", .meaning = "previous panel/footer field" },
     .{ .key = "ctrl+x", .meaning = "stop", .keys = &.{.ctrl_x} },
     .{ .key = "↑↓", .meaning = "scroll", .keys = &.{ .up, .down }, .aliases = &.{ .shift_up, .shift_down, .page_up, .page_down, .home, .end, .ctrl_end } },
+    // Left (an empty draft back to the list) and the info panel's actions
+    // are handled apart from the screen keymaps, so only Right is checked.
+    .{ .key = "←→", .meaning = "list/chat · info actions", .keys = &.{.right} },
     .{ .key = "ctrl+o", .meaning = "tool output", .keys = &.{.ctrl_o} },
     .{ .key = "ctrl+p", .meaning = "earlier message", .keys = &.{.ctrl_p}, .aliases = &.{.ctrl_n} },
     .{ .key = "ctrl+r", .meaning = "retry", .keys = &.{.ctrl_r} },
@@ -161,15 +168,23 @@ fn referenceError(rows: []const Reference, maps: anytype) ?ListError {
     return if (shown.eql(bound)) null else .missing_bound_key;
 }
 
+/// Every key as itself except Left, which no screen's table binds: an
+/// empty draft and the info panel take it apart from the tables.
+const bindable: Keymap(Key) = blk: {
+    var map = every;
+    map.meanings.set(.left, null);
+    break :blk map;
+};
+
 test "keys reference rejects unbound rows and covers every screen key" {
-    try std.testing.expectEqual(@as(?ListError, null), listError(.{every}));
-    var missing = every;
+    try std.testing.expectEqual(@as(?ListError, null), listError(.{bindable}));
+    var missing = bindable;
     missing.meanings.set(.ctrl_x, null);
     try std.testing.expectEqual(@as(?ListError, .unbound_row), listError(.{missing}));
-    try std.testing.expectEqual(@as(?ListError, null), listError(.{ missing, every }));
-    try std.testing.expectEqual(@as(?ListError, .missing_bound_key), referenceError(list[0 .. list.len - 1], .{every}));
+    try std.testing.expectEqual(@as(?ListError, null), listError(.{ missing, bindable }));
+    try std.testing.expectEqual(@as(?ListError, .missing_bound_key), referenceError(list[0 .. list.len - 1], .{bindable}));
     const duplicate = list ++ .{list[list.len - 1]};
-    try std.testing.expectEqual(@as(?ListError, .duplicate_key), referenceError(&duplicate, .{every}));
+    try std.testing.expectEqual(@as(?ListError, .duplicate_key), referenceError(&duplicate, .{bindable}));
 }
 
 test "keys reference gives Enter both its list and chat meanings" {
@@ -178,7 +193,7 @@ test "keys reference gives Enter both its list and chat meanings" {
 }
 
 test "keys reference aliases are explicit under their listed rows" {
-    try std.testing.expectEqual(@as(usize, 13), list.len);
+    try std.testing.expectEqual(@as(usize, 14), list.len);
     for ([_]struct { key: Key, row: []const u8 }{
         .{ .key = .ctrl_g, .row = "esc" },
         .{ .key = .ctrl_d, .row = "ctrl+c" },
@@ -200,13 +215,13 @@ test "keys reference aliases are explicit under their listed rows" {
     }
     var missing_alias = list;
     missing_alias[1].aliases = &.{};
-    try std.testing.expectEqual(@as(?ListError, .missing_bound_key), referenceError(&missing_alias, .{every}));
+    try std.testing.expectEqual(@as(?ListError, .missing_bound_key), referenceError(&missing_alias, .{bindable}));
     var duplicate = list;
     duplicate[1].aliases = &.{ .ctrl_g, .escape };
-    try std.testing.expectEqual(@as(?ListError, .duplicate_key), referenceError(&duplicate, .{every}));
+    try std.testing.expectEqual(@as(?ListError, .duplicate_key), referenceError(&duplicate, .{bindable}));
     duplicate[1].aliases = &.{ .ctrl_g, .ctrl_g };
-    try std.testing.expectEqual(@as(?ListError, .duplicate_key), referenceError(&duplicate, .{every}));
-    var unbound = every;
+    try std.testing.expectEqual(@as(?ListError, .duplicate_key), referenceError(&duplicate, .{bindable}));
+    var unbound = bindable;
     unbound.meanings.set(.ctrl_g, null);
     try std.testing.expectEqual(@as(?ListError, .unbound_row), referenceError(&list, .{unbound}));
 }

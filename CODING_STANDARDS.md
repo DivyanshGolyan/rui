@@ -184,9 +184,10 @@ Keep unrelated cleanup separate; exclude personal style, speculative extensibili
 ## Evidence
 
 Use [canonical gates](VERIFICATION.md#canonical-gates) for required commands, focused checks, cache conditions and assembled-versus-independently-merged cadence; confirm commands in `build.zig`.
+This is the one list of local checks.
 Before every push, including review-fix rounds and after merging main, run only these checks:
 
-- `python3 tests/ci/prepush.py`, which selects local feedback from the committed diff against the merge base.
+- `python3 tests/ci/prepush.py` (the default), which selects local feedback from the committed diff against the merge base.
   Use `--plan` to inspect its commands without executing them.
   It checks whitespace, formatting for changed Zig files, undefined names in changed Python files, and caller-error coverage for changed CLI owners.
   Whitespace errors in committed lines, a stale `openapi.json` and a stale `clients/ts/src/wire.ts` are fixed in the working tree and still fail the run until the fix is committed.
@@ -198,7 +199,14 @@ Before every push, including review-fix rounds and after merging main, run only 
   Zig and manifest changes select the macOS type check only when those inputs have build targets of their own.
   Deleted files still select owner checks, and mixed changes union checks without repeating them.
   Commands read working-tree contents; unstaged and untracked-only changes do not select checks.
+  When history since the merge base holds a merge of `origin/main`, it also compiles the unit binaries unfiltered with CI's unit producer command, `zig build ci-build -Dci-targets=test -Dci-part=unit`, because a filtered build never analyzes a test the merge brought back.
+  Each run writes a receipt to the checkout's git directory with HEAD's tree, the merge base its diff came from, the mode and each command's exit code; a working tree that differs from HEAD records no tree, so its receipt matches no push.
   Orb setup installs it as a git pre-push hook that runs `--quick`, everything above except the Zig builds; elsewhere install it once with `python3 tests/ci/prepush.py --install-hook`.
+  The hook runs nothing when the receipt holds the pushed tree and its merge base with `origin/main`, and records at least one command, every one of which passed, so pushing the same tree again does not repeat the checks.
+- `python3 tests/ci/prepush.py --full`, which runs the default checks plus the unfiltered unit compile, `zig build -j1 stack-frames -Dcpu=baseline` and, when `RUI_TEST_MYSQL_SOCKET` and `RUI_TEST_MYSQL_ROOT_PASSWORD` name a reachable MySQL, each selected live need whose own target reads it, with `RUI_TEST_REQUIRE_ENGINES=mysql`.
+  `select_tests.py` reports each live need with the one target that runs only its tests (`live_needs`), such as `test-store` for the Store's dialect check; a need with no such target, such as native `forEachEngine` tests inside the whole native root, never runs here.
+  Without that server it says so, skips only that part and records the skip in the receipt.
+  Every other live need, one with no such target or one needing Postgres or `mysql-wire-integration`'s own Docker server, is recorded as skipped for CI, never as passed.
 - the touched owners' focused tests (`-Dtest-filter`)
 - a mutation that reverts each fix and shows its new test fails
 
@@ -214,7 +222,7 @@ A concurrent test peer records what it observed before it replies or exits, so c
 Order test actors with a gate or event, never a sleep.
 Tests wait for a condition only through `wait_for` in `tests/integration/host_process.py` or `waitUntil` in `src/testing/poll.zig`, which accept only a check that finishes before the deadline; `tests/ci/test_harness_contracts.py` counts every other sleep in a fixture, a Zig `test` block or a test-only Zig file against a shrink-only allowlist.
 
-Shared fixture owners hold the I/O and platform cases that broke fixtures before, and `tests/ci` lints name the owner when a fixture bypasses one: Store fixture SQL passes the Store's own statement grammar (`rsql.fixtureError`), a child's stdin closes through `host_process.close_stdin`, a refusing TCP port comes from `socket_fixture.refusedPort`, a `std.testing.tmpDir` a test chmods or lists opens with `.iterate = true`, and trust in a fixture CA goes explicitly through `--provider-ca-file` or the launch frame's `caFile`, or through `os_semantics.system_trust` on Linux only.
+Shared fixture owners hold the I/O and platform cases that broke fixtures before, and `tests/ci` lints name the owner when a fixture bypasses one: Store fixture SQL passes the Store's own statement grammar (`rsql.fixtureError`), a child's stdin closes through `host_process.close_stdin`, a refusing TCP port comes from `socket_fixture.refusedPort`, a `std.testing.tmpDir` a test chmods or lists opens with `.iterate = true`, and trust in a fixture CA goes explicitly through `--provider-ca-file` or the settings document's `network.caFile`, or through `os_semantics.system_trust` on Linux only.
 A fixture module, one with a main block or one that `build.zig` or `check.sh` launches, imports no other: fixtures share helpers through library modules such as `control_fixture.py`, and cases another script also runs live in a `*_cases.py` library behind a thin entry script.
 `FixtureImportTest` in `tests/ci/test_harness_contracts.py` enforces it, so a change to one fixture selects only the targets that run it.
 

@@ -1914,7 +1914,7 @@
           ]
         },
         {
-          "wait": "    stderr tail:"
+          "wait": "    stderr:"
         },
         {
           "gone": "Opening tool output\u2026"
@@ -1936,7 +1936,7 @@
         "\u00d7 Fail with exit 127 \u00b7 127",
         "\u00d7 Fail with an excerpt \u00b7 1",
         "    Bash failed. Exit code: 1.",
-        "    stderr tail:",
+        "    stderr:",
         "    usage: example",
         "    unknown option --help"
       ],
@@ -1962,7 +1962,7 @@
           ]
         },
         {
-          "wait": "    stderr tail:"
+          "wait": "    stderr:"
         },
         {
           "gone": "Opening tool output\u2026"
@@ -2025,13 +2025,13 @@
       "expect": [
         "\u2713 List project files",
         "    Bash succeeded. Exit code: 0.",
-        "    stdout tail:",
+        "    stdout:",
         "    README.md",
         "    src",
         "\u00d7 Fail with exit 127 \u00b7 127",
         "\u00d7 Fail with an excerpt \u00b7 1",
         "    Bash failed. Exit code: 1.",
-        "    stderr tail:",
+        "    stderr:",
         "    usage: example",
         "    unknown option --help"
       ],
@@ -2083,7 +2083,7 @@
       "expect": [
         "\u2713 Print thirty-two lines",
         "    Bash succeeded. Exit code: 0.",
-        "    stdout tail:",
+        "    stdout:",
         "    output line 18",
         "    \u2026 14 more lines"
       ],
@@ -2112,7 +2112,7 @@
           ]
         },
         {
-          "wait": "    stderr tail:"
+          "wait": "    stderr:"
         },
         {
           "gone": "Opening tool output\u2026"
@@ -2134,7 +2134,7 @@
         "\u00d7 Fail with exit 127 \u00b7 127",
         "\u00d7 Fail with an excerpt \u00b7 1",
         "    Bash failed. Exit code: 1.",
-        "    stderr tail:",
+        "    stderr:",
         "    usage: example",
         "    unknown option --help"
       ],
@@ -2733,7 +2733,7 @@
     },
     {
       "name": "keys",
-      "note": "20-keys: thirteen entries, aligned pairs at 140 and one column at 46",
+      "note": "Shared key reference, aligned pairs at 140 and one column at 46",
       "open": "overview",
       "steps": [
         {
@@ -2771,7 +2771,10 @@
         "ctrl+r   retry",
         "/        skills",
         "alt+a    archive",
-        "ctrl+c   leave"
+        "ctrl+c   leave",
+        "next panel/footer field",
+        "previous panel/footer field",
+        "list/chat · info actions"
       ],
       "absent": [
         "/help",
@@ -3626,6 +3629,306 @@
       "expect": "Detached. Host work continues.",
       "absent_regex": [
         "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+      ]
+    },
+    {
+      "name": "chat-info-archive",
+      "note": "Arrow focus on the horizontal action row; copied feedback uses the existing notice lifetime.",
+      "open": "Action focus audit",
+      "steps": [
+        {
+          "wait": "The retry draft is ready."
+        },
+        {
+          "keys": [
+            "M-i"
+          ]
+        },
+        {
+          "wait": "Copy last answer"
+        },
+        {
+          "wait": "run without asking"
+        },
+        {
+          "keys": [
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Right"
+          ]
+        },
+        {
+          "sleep": 0.2
+        }
+      ],
+      "expect": [
+        "Rename",
+        "Archive",
+        "Copy last answer"
+      ],
+      "absent": [
+        "Copied"
+      ],
+      "cast": [
+        {
+          "label": "Action focus audit",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "effort": "high",
+          "messages": [
+            "Give a chat info specimen summarizing the retry deadline fix."
+          ]
+        }
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
+    },
+    {
+      "name": "chat-info-copied",
+      "note": "Arrow focus on the horizontal action row; copied feedback uses the existing notice lifetime.",
+      "open": "Copy feedback audit",
+      "steps": [
+        {
+          "wait": "The retry draft is ready."
+        },
+        {
+          "keys": [
+            "M-i"
+          ]
+        },
+        {
+          "wait": "Copy last answer"
+        },
+        {
+          "wait": "run without asking"
+        },
+        {
+          "mouse": {
+            "at": "Copy last answer",
+            "do": "click"
+          }
+        },
+        {
+          "wait": "Copied"
+        }
+      ],
+      "expect": [
+        "Rename",
+        "Archive",
+        "Copied"
+      ],
+      "absent": [
+        "Copy last answer",
+        "couldn't copy"
+      ],
+      "cast": [
+        {
+          "label": "Copy feedback audit",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "effort": "high",
+          "messages": [
+            "Give a chat info specimen summarizing the retry deadline fix."
+          ]
+        }
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
+    },
+    {
+      "name": "focus-chat",
+      "note": "Comparison screen: chat input focused with bright prompt and caret, list selection inactive.",
+      "open": "Focus navigation audit",
+      "steps": [
+        {
+          "wait": "The retry draft is ready."
+        }
+      ],
+      "expect": [
+        "Focus navigation audit",
+        "›"
+      ],
+      "absent": [
+        "Opening…"
+      ],
+      "cast": [
+        {
+          "label": "Focus navigation audit",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "messages": [
+            "Give a chat info specimen summarizing the retry deadline fix."
+          ]
+        }
+      ],
+      "sizes": [
+        "140x40"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
+    },
+    {
+      "name": "left-to-list",
+      "note": "Left on an empty draft focuses the list beside a wide chat, keeping the feed; narrow has no list beside the chat, so Left leaves it. Esc always leaves.",
+      "open": "Focus navigation audit",
+      "steps": [
+        {
+          "wait": "The retry draft is ready."
+        },
+        {
+          "keys": [
+            "Left"
+          ]
+        },
+        {
+          "sleep": 0.2
+        }
+      ],
+      "expect": [
+        "Focus navigation audit",
+        "Settings"
+      ],
+      "absent": [
+        "Opening…"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
+    },
+    {
+      "name": "focus-list-A",
+      "note": "Ship A: focused list row, no chat caret, quiet prompt, unchanged feed.",
+      "sizes": [
+        "140x40"
+      ],
+      "open": "Focus navigation audit",
+      "steps": [
+        {
+          "wait": "The retry draft is ready."
+        },
+        {
+          "keys": [
+            "Left"
+          ]
+        },
+        {
+          "sleep": 0.2
+        }
+      ],
+      "expect": [
+        "Focus navigation audit",
+        "The retry draft is ready.",
+        "›"
+      ],
+      "absent": [
+        "Opening…"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
+    },
+    {
+      "name": "list-to-chat",
+      "note": "Right on the open row returns to its retained input, without reopening the feed.",
+      "open": "Focus navigation audit",
+      "steps": [
+        {
+          "wait": "The retry draft is ready."
+        },
+        {
+          "keys": [
+            "Left",
+            "Right"
+          ]
+        },
+        {
+          "sleep": 0.2
+        }
+      ],
+      "expect": [
+        "Focus navigation audit",
+        "›"
+      ],
+      "absent": [
+        "Opening…"
+      ],
+      "sizes": [
+        "140x40"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
+    },
+    {
+      "name": "chat-info-stacked-actions",
+      "note": "A refused archive expands labels; Down follows the vertically stacked drawn actions at 46 columns.",
+      "sizes": [
+        "46x30"
+      ],
+      "open": "Stacked action audit",
+      "steps": [
+        {
+          "wait": "The retry draft is ready."
+        },
+        {
+          "keys": [
+            "M-i"
+          ]
+        },
+        {
+          "wait": "Copy last answer"
+        },
+        {
+          "wait": "run without asking"
+        },
+        {
+          "host": "pause"
+        },
+        {
+          "mouse": {
+            "at": "Archive",
+            "do": "click"
+          }
+        },
+        {
+          "wait": "couldn't archive"
+        },
+        {
+          "keys": [
+            "Up",
+            "Down"
+          ]
+        },
+        {
+          "sleep": 0.2
+        }
+      ],
+      "expect": [
+        "Archive: couldn't archive",
+        "Rename",
+        "Copy last answer"
+      ],
+      "absent": [
+        "Copied"
+      ],
+      "cast": [
+        {
+          "label": "Stacked action audit",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "effort": "high",
+          "messages": [
+            "Give a chat info specimen summarizing the retry deadline fix."
+          ]
+        }
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {

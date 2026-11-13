@@ -125,7 +125,22 @@ pub const marks = state_marks.marks;
 /// Your own Session's active mark turns through the shared frames.
 pub const spinner = state_marks.spinner;
 
-pub const Action = enum { previous, next, select_previous, select_next, first, last, clear, exit, stop, archive };
+pub const Action = enum {
+    previous,
+    next,
+    select_previous,
+    select_next,
+    first,
+    last,
+    clear,
+    exit,
+    stop,
+    archive,
+    /// Right: a Session row opens as Enter opens it; on the pinned New
+    /// Session row it moves to Archived while that is offered; other rows do
+    /// nothing.
+    open_session,
+};
 
 /// The one key table.
 pub const keys: keymap.Keymap(Action) = .init(.{
@@ -141,6 +156,8 @@ pub const keys: keymap.Keymap(Action) = .init(.{
     .alt_a = .archive,
     .up = .previous,
     .down = .next,
+    .left = null,
+    .right = .open_session,
     .shift_up = .select_previous,
     .shift_down = .select_next,
     .page_up = null,
@@ -155,9 +172,10 @@ test "keys list covers both screens without unbound or duplicate keys" {
 }
 
 /// Semantic list input: printable text has no editing route. The bare
-/// arrows `left` and `right` are a choice's own, as `keymap.Selection` reads
-/// them; they move only within the pinned New Session row.
-pub const Input = union(enum) { action: Action, enter, left, right, ignored };
+/// `left` the key table leaves unbound is a choice's own, as
+/// `keymap.Selection` reads it; it moves only within the pinned New Session
+/// row. Right is the table's `open_session`.
+pub const Input = union(enum) { action: Action, enter, left, ignored };
 
 /// The screen and paste context captured when this semantic key arrived.
 /// Covered Settings admits only exit and a still-cancellable Upgrade Escape.
@@ -605,6 +623,7 @@ pub const Effect = union(enum) {
     /// Copied prospective configuration; the model bytes do not borrow state.
     create: ?Default,
     open: Reference,
+    focus_chat,
     open_settings,
 
     stop: Reference,
@@ -2092,14 +2111,18 @@ fn listInput(state: *State, delivery: InputDelivery, effects: *Effects) error{Ou
     switch (input) {
         .ignored => unreachable,
         .enter => try enter(state, effects),
-        .right => if (state.selected == .new_session and offersArchived(state)) {
-            state.selected = .archived;
-        },
         .left => if (state.selected == .archived) {
             state.selected = .new_session;
         },
         .action => |action| switch (action) {
             .exit => unreachable,
+            .open_session => switch (state.selected) {
+                .session => try enter(state, effects),
+                .new_session => if (offersArchived(state)) {
+                    state.selected = .archived;
+                },
+                .archived, .settings => {},
+            },
             .clear => {
                 state.notice = null;
                 // Esc leaves the archived view for the usual list.
@@ -2124,6 +2147,11 @@ fn enter(state: *State, effects: *Effects) error{OutOfMemory}!void {
         return;
     }
     if (state.selected == .archived) return toggleArchiveView(state, effects);
+    // Resuming the drawn open chat is navigation, not a new Host intent.
+    if (state.selected == .session) if (state.conversing) |open| if (std.mem.eql(u8, &state.selected.session, &open)) {
+        effects.add(.focus_chat);
+        return;
+    };
     if (!admitHostRequest(state)) return;
     switch (state.selected) {
         .settings, .archived => unreachable,
@@ -2818,6 +2846,16 @@ pub fn selectedLine(state: *const State) ?usize {
     return if (position(state, ref)) |at| at + firstRowLine(state) else null;
 }
 
+/// Keyboard list focus projects its selected row; otherwise the open chat
+/// supplies the inactive highlight. The shell reads no parallel predicates.
+pub fn focusedLine(state: *const State, list_focused: bool) ?usize {
+    if (!list_focused) return selectedLine(state);
+    return switch (state.selected) {
+        .session => |ref| if (position(state, ref)) |at| at + firstRowLine(state) else null,
+        .new_session, .settings => null,
+    };
+}
+
 /// The open chat owns sidebar selection, independently of list navigation.
 /// Until its canonical listing arrives there is no projected line to select.
 fn selectedSession(state: *const State) ?Reference {
@@ -3224,7 +3262,7 @@ fn expectEffects(expected: []const Effect, actual: Effects) !void {
                     try std.testing.expectEqual(x.action, y.action);
                 }
             },
-            .list_models, .cancel_upgrade, .open_settings, .exit => {},
+            .list_models, .cancel_upgrade, .open_settings, .focus_chat, .exit => {},
             .create => |binding| {
                 try std.testing.expectEqual(binding == null, got.create == null);
                 if (binding) |expected_binding| try std.testing.expect(expected_binding.eql(&got.create.?));
@@ -5673,7 +5711,7 @@ test "shared model reads respect every Upgrade hold for opening and loading retr
 test "list input has no text domain and ignored printable or slash input preserves state" {
     const ignored: Input = .ignored;
     try std.testing.expect(switch (ignored) {
-        .action, .enter, .left, .right => false,
+        .action, .enter, .left => false,
         .ignored => true,
     });
     var state = try opened(&.{session("aaaaaa", .{ .idle = ago(1) }, .{})});
@@ -5724,7 +5762,8 @@ test "pinned row Archived: arrows, Enter, clicks and Esc over the archived fact 
         try std.testing.expectEqual(some, offersArchived(&state));
         const shown: Start = if (start == .archived and !some) .new_session else start;
         const expected: Outcome = switch (input) {
-            .right => .{ .selected = if (shown == .new_session and some) .archived else shown },
+            // Right on a chat opens it, as Enter does.
+            .right => if (shown == .chat) .open else .{ .selected = if (shown == .new_session and some) .archived else shown },
             .left => .{ .selected = if (shown == .archived) .new_session else shown },
             .enter => switch (shown) {
                 .new_session => .create,
@@ -5743,7 +5782,7 @@ test "pinned row Archived: arrows, Enter, clicks and Esc over the archived fact 
             _ = try respond(&state, .full, testToken(4), &.{});
         }
         const effects = try step(&state, switch (input) {
-            .right => .{ .input = .{ .key = .right } },
+            .right => .{ .input = .{ .key = .{ .action = .open_session } } },
             .left => .{ .input = .{ .key = .left } },
             .enter => .{ .input = .{ .key = .enter } },
             .click_new_session => .{ .clicked = .{ .target = .new_session } },
@@ -5789,7 +5828,7 @@ test "pinned row draws Archived quietly at its right end only while offered" {
         var state = try opened(&.{});
         defer state.deinit();
         try answerArchived(&state, 2, some);
-        if (chosen) _ = try step(&state, .{ .input = .{ .key = .right } });
+        if (chosen) _ = try step(&state, .{ .input = .{ .key = .{ .action = .open_session } } });
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         const row = try listSegments(arena.allocator(), &state, .new_session, width, .{}, 0);
@@ -6420,10 +6459,9 @@ test "semantic list admission owns covered Settings paste creation and Upgrade p
     };
     const creations = enum { none, pending, uncertain };
     // The entire semantic key domain, independent of the terminal decoder.
-    var inputs: [std.enums.values(Action).len + 4]Input = undefined;
+    var inputs: [std.enums.values(Action).len + 3]Input = undefined;
     for (std.enums.values(Action), 0..) |action, at| inputs[at] = .{ .action = action };
-    inputs[inputs.len - 4] = .left;
-    inputs[inputs.len - 3] = .right;
+    inputs[inputs.len - 3] = .left;
     inputs[inputs.len - 2] = .enter;
     inputs[inputs.len - 1] = .ignored;
     for ([_]bool{ false, true }) |under| for ([_]bool{ false, true }) |pasted| for (std.enums.values(creations)) |creation| for (phases) |phase| for (inputs) |key| {
@@ -6462,7 +6500,7 @@ test "semantic list admission owns covered Settings paste creation and Upgrade p
         } else switch (key) {
             .ignored => unreachable,
             // Nothing is archived here, so the pinned row holds one choice.
-            .left, .right => {
+            .left => {
                 try expectEffects(&.{}, effects);
                 try std.testing.expect(std.meta.eql(before_notice, state.notice));
                 try std.testing.expectEqual(Selection.new_session, state.selected);
@@ -6483,6 +6521,9 @@ test "semantic list admission owns covered Settings paste creation and Upgrade p
                 try std.testing.expectEqual(before_requests, state.request_count);
                 switch (action) {
                     .exit => unreachable,
+                    // New Session is selected and nothing is archived: Right
+                    // neither creates, clears nor moves.
+                    .open_session => try std.testing.expect(std.meta.eql(before_notice, state.notice)),
                     .clear => try expectNotice(&state, null),
                     .stop, .archive => try expectNotice(&state, if (phase.held) upgrade_recovery else no_selection),
                     .previous, .next, .first, .last, .select_previous, .select_next => {
@@ -6496,6 +6537,48 @@ test "semantic list admission owns covered Settings paste creation and Upgrade p
             },
         }
     };
+}
+
+test "Overview list activation resumes same or opens other chat at wide and narrow widths" {
+    for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |same| for ([_]Input{ .enter, .{ .action = .open_session } }) |key| {
+        var state = try opened(&mixed);
+        defer state.deinit();
+        _ = try step(&state, .{ .resized = .{ .width = width, .height = 30 } });
+        _ = try step(&state, .{ .conversation = "b2c3d4".* });
+        state.selected = .{ .session = if (same) "b2c3d4".* else "g7h8j9".* };
+        const effects = try step(&state, .{ .input = .{ .key = key } });
+        var opens: usize = 0;
+        var resumes: usize = 0;
+        for (effects.slice()) |effect| switch (effect) {
+            .open => |reference| {
+                opens += 1;
+                try std.testing.expectEqualStrings("g7h8j9", &reference);
+            },
+            .focus_chat => resumes += 1,
+            .create => return error.UnexpectedCreate,
+            else => {},
+        };
+        try std.testing.expectEqual(@as(usize, @intFromBool(!same)), opens);
+        try std.testing.expectEqual(@as(usize, @intFromBool(same)), resumes);
+    };
+}
+
+test "Overview list Right does not create or open Settings and clicks share resume owner" {
+    var state = try opened(&mixed);
+    defer state.deinit();
+    for ([_]Selection{ .new_session, .settings }) |selection| {
+        state.selected = selection;
+        const effects = try step(&state, .{ .input = .{ .key = .{ .action = .open_session } } });
+        for (effects.slice()) |effect| try std.testing.expect(effect != .create and effect != .open_settings);
+    }
+    _ = try step(&state, .{ .conversation = "b2c3d4".* });
+    const effects = try step(&state, .{ .clicked = .{ .target = .{ .open = "b2c3d4".* } } });
+    var resumes: usize = 0;
+    for (effects.slice()) |effect| {
+        if (effect == .focus_chat) resumes += 1;
+        try std.testing.expect(effect != .open);
+    }
+    try std.testing.expectEqual(@as(usize, 1), resumes);
 }
 
 test "the shared row fitter handles no description cells without allocating or underflowing" {

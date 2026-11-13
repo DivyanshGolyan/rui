@@ -1078,6 +1078,135 @@ export interface components {
             store: string;
             paused: boolean;
         };
+        /** @description Host settings. */
+        HostSettings: {
+            /** @description Where the Host keeps canonical facts. One Adapter. */
+            store?: {
+                /** @description SQLite Store. */
+                sqlite: {
+                    dir?: (string | {
+                        hex: string;
+                    }) | null;
+                };
+            } | {
+                /** @description MySQL Store. */
+                mysql: {
+                    url?: ({
+                        env: string | {
+                            hex: string;
+                        };
+                    } | {
+                        file: string | {
+                            hex: string;
+                        };
+                    } | {
+                        value: string;
+                    } | {
+                        /** @constant */
+                        owner: true;
+                    }) | null;
+                };
+            };
+            /** @description The providers served, exactly the listed set when present. */
+            providers?: {
+                codex?: {
+                    endpoint?: string | null;
+                    credentialFile?: (string | {
+                        hex: string;
+                    }) | null;
+                    /** @description Send no credential to a development endpoint. */
+                    unauthenticated?: boolean;
+                } | null;
+                openai?: {
+                    endpoint?: string | null;
+                    key?: ({
+                        env: string | {
+                            hex: string;
+                        };
+                    } | {
+                        file: string | {
+                            hex: string;
+                        };
+                    } | {
+                        value: string;
+                    } | {
+                        /** @constant */
+                        owner: true;
+                    }) | null;
+                    /** @description Send no credential to a development endpoint. */
+                    unauthenticated?: boolean;
+                } | null;
+                chatgpt?: {
+                    endpoint?: string | null;
+                    credentialFile?: (string | {
+                        hex: string;
+                    }) | null;
+                    /** @description Send no credential to a development endpoint. */
+                    unauthenticated?: boolean;
+                } | null;
+            };
+            /** @description Host-wide transport trust. */
+            network?: {
+                caFile?: (string | {
+                    hex: string;
+                }) | null;
+            };
+            /** @description The tool Adapters offered to Sessions. */
+            tools?: {
+                /** @description The built-in Bash tool. */
+                bash?: {
+                    path?: (string | {
+                        hex: string;
+                    }) | null;
+                    /** @description The longest one Bash call may run. */
+                    timeoutMs?: number;
+                };
+                /** @description Named MCP servers whose tools Sessions may use. */
+                mcp?: {
+                    [key: string]: {
+                        url?: string | null;
+                        bearerToken?: ({
+                            env: string | {
+                                hex: string;
+                            };
+                        } | {
+                            file: string | {
+                                hex: string;
+                            };
+                        } | {
+                            value: string;
+                        } | {
+                            /** @constant */
+                            owner: true;
+                        }) | null;
+                        /** @description The longest one tool call may run. */
+                        callTimeoutMs?: number;
+                    };
+                };
+            };
+            /** @description Where clients reach the Host and what ends it. */
+            interface?: {
+                dir?: (string | {
+                    hex: string;
+                }) | null;
+                /**
+                 * @description detached: until stopped; stdin: also stop when stdin closes.
+                 * @enum {string}
+                 */
+                lifetime?: "detached" | "stdin";
+            };
+            /** @description How Turns run. */
+            execution?: {
+                /** @description How many Turns may run at once. */
+                activeCapacity?: number;
+                /** @description Open with Turns held, as after host_pause. */
+                paused?: boolean;
+            };
+            /** @description Named creation specs held only by this Host. */
+            presets?: {
+                [key: string]: components["schemas"]["AgentSpec"];
+            };
+        };
         HostStopReply: {
             /** @constant */
             version: "17";
@@ -1205,30 +1334,6 @@ export interface components {
         LastLineFields: {
             position: components["schemas"]["Decimal"];
             text: string | null;
-        };
-        LaunchFrame: {
-            /** @constant */
-            v: 1;
-            store: string;
-            provider: {
-                /** @constant */
-                kind: "openai_key";
-                baseUrl: string;
-                key: string;
-                caFile?: string | null;
-            };
-            runtimeDir: string;
-            activeCapacity?: number | null;
-            paused?: boolean;
-            presets?: {
-                [key: string]: components["schemas"]["AgentSpec"];
-            };
-            mcpServers?: {
-                name: string;
-                url: string;
-                bearerToken: string;
-                callTimeoutMs?: number;
-            }[];
         };
         ListSessionsReply: {
             /** @constant */
@@ -2859,7 +2964,7 @@ export interface components {
         StartError: {
             rui_start_error: {
                 /** @enum {string} */
-                code: "launch_frame_invalid" | "settings_invalid" | "invalid_preset" | "store_locked" | "store_schema_missing" | "store_schema_behind" | "mysql_version" | "mariadb" | "read_only_replica" | "durability_innodb_flush_log_at_trx_commit" | "durability_sync_binlog" | "binlog_statement" | "mysql_unreachable" | "mysql_login" | "store_fenced" | "runtime_dir_unusable" | "tool_name_collision";
+                code: "settings_invalid" | "invalid_preset" | "store_locked" | "store_schema_missing" | "store_schema_behind" | "mysql_version" | "mariadb" | "read_only_replica" | "durability_innodb_flush_log_at_trx_commit" | "durability_sync_binlog" | "binlog_statement" | "mysql_unreachable" | "mysql_login" | "store_fenced" | "runtime_dir_unusable" | "tool_name_collision";
                 message: string;
             };
         };

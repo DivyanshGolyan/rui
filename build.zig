@@ -56,6 +56,7 @@ pub fn build(b: *std.Build) void {
             .optimize = .Debug,
         }),
     });
+    openapi_emitter.root_module.addImport("url", product.addUrl(b));
     const emit_openapi = b.addRunArtifact(openapi_emitter);
     const update_openapi = b.addUpdateSourceFiles();
     update_openapi.addCopyFileToSource(emit_openapi.addOutputFileArg("openapi.json"), "openapi.json");
@@ -337,23 +338,24 @@ pub fn build(b: *std.Build) void {
     const upgrade_step = b.step("upgrade-integration", "Run isolated release publication and exact Host upgrade lifecycle cases");
     upgrade_step.dependOn(&upgrade_integration.step);
 
-    const launch_frame_integration = b.addSystemCommand(&.{"python3"});
-    launch_frame_integration.addFileArg(b.path("tests/integration/launch_frame_integration.py"));
-    launch_frame_integration.addFileArg(ci.path(release_safe));
-    launch_frame_integration.addArg("--require-mcp-sdk");
-    const mysql_launch_integration = b.addSystemCommand(&.{"python3"});
-    mysql_launch_integration.addFileArg(b.path("tests/integration/launch_frame_mysql_integration.py"));
-    mysql_launch_integration.addFileArg(ci.path(release_safe));
-    mysql_launch_integration.addFileArg(ci.path(mysql_launch_admin));
-    const launch_frame_step = b.step("launch-frame-integration", "Run SQLite and MySQL launch frames: readiness, safe credentials, ownership and stdin liveness");
-    launch_frame_step.dependOn(&launch_frame_integration.step);
-    launch_frame_step.dependOn(&mysql_launch_integration.step);
+    const settings_integration = b.addSystemCommand(&.{"python3"});
+    settings_integration.addFileArg(b.path("tests/integration/settings_integration.py"));
+    settings_integration.addFileArg(ci.path(release_safe));
+    settings_integration.addArg("--require-mcp-sdk");
+    const mysql_settings_integration = b.addSystemCommand(&.{"python3"});
+    mysql_settings_integration.addFileArg(b.path("tests/integration/settings_mysql_integration.py"));
+    mysql_settings_integration.addFileArg(ci.path(release_safe));
+    mysql_settings_integration.addFileArg(ci.path(mysql_launch_admin));
+    const settings_step = b.step("settings-integration", "Run SQLite and MySQL settings documents: readiness, safe credentials, ownership and stdin liveness");
+    settings_step.dependOn(&settings_integration.step);
+    settings_step.dependOn(&mysql_settings_integration.step);
 
     // The TypeScript client against the Rui this build makes; Node strips the types.
     const ts_client = b.addSystemCommand(&.{"python3"});
     ts_client.addFileArg(b.path("tests/integration/host_process.py"));
     ts_client.addArgs(&.{ "exec", "env" });
     ts_client.addPrefixedFileArg("RUI_BINARY=", ci.path(release_safe));
+    ts_client.addPrefixedFileArg("RUI_TEST_MYSQL_ADMIN=", ci.path(mysql_launch_admin));
     ts_client.addArgs(&.{ "node", "--experimental-strip-types", "--test", "--test-concurrency=1", "test/*.test.ts" });
     ts_client.setCwd(b.path("clients/ts"));
     b.step("ts-client", "Run the TypeScript client against a built Rui (needs Node 22.6 or later)").dependOn(&ts_client.step);

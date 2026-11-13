@@ -742,6 +742,7 @@ test "upgrade Host information profiles retain the entire strict shape" {
     try std.testing.expectEqualStrings("9", HostInfoProfile.released_9.wire());
     try std.testing.expectEqualStrings("13", HostInfoProfile.released_13.wire());
     try std.testing.expectEqualStrings("14", HostInfoProfile.released_14.wire());
+    try std.testing.expectEqualStrings("16", HostInfoProfile.released_16.wire());
     try std.testing.expectEqualStrings("15", HostInfoProfile.released_15.wire());
     try std.testing.expectEqualStrings("16", HostInfoProfile.released_16.wire());
     // Provider additions do not relax wire identity: neither profile reads

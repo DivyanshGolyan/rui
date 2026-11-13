@@ -51,6 +51,7 @@ pub const Press = struct {
 
 rows: Rows = .none,
 selected: ?u32 = null,
+selection_background: @import("overview_style.zig").Background = .selection,
 on_press: ?Press = null,
 caps: overview_view.Caps = .{},
 inner: List = .{},
@@ -89,7 +90,7 @@ const Frame = struct {
         const segments = try arena.alloc(vaxis.Segment, built.segments.len);
         for (built.segments, segments) |segment, *dest| {
             var role = segment.style;
-            if (selected) role.background = .selection;
+            if (selected) role.background = owner.selection_background;
             dest.* = .{ .text = segment.text, .style = widget_style.of(owner.caps, role) };
         }
         const target_id: ?u32 = if (built.target) |target| blk: {
@@ -143,7 +144,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     self.inner.selected = self.selected;
     self.inner.on_press = if (self.on_press != null) .{ .userdata = frame, .pressed = reportPress } else null;
     self.inner.base_style = widget_style.of(self.caps, .{});
-    self.inner.selection_style = widget_style.of(self.caps, .{ .background = .selection });
+    self.inner.selection_style = widget_style.of(self.caps, .{ .background = self.selection_background });
     self.inner.hover_style = widget_style.of(self.caps, .{ .background = .hover });
     const size = ctx.max.size();
     const tail_rows = if (self.tail) |tail| @min(tail.rows, size.height) else 0;
@@ -434,4 +435,18 @@ test "GroupedList markers count Sessions not the New Session entry and stay quie
         try std.testing.expectEqualStrings(if (selected == 0) "           ↓ 4 more           " else "           ↑ 3 more           ", text.items);
         try std.testing.expectEqual(widget_style.of(list.caps, .{ .colour = .quiet }).fg, indicator.surface.readCell(11, 0).style.fg);
     };
+}
+
+test "GroupedList selected row uses the owner's focused or inactive background" {
+    const row = [_]Row{.{ .segments = &.{.{ .text = "Open chat", .style = .{} }} }};
+    const rows: []const Row = &row;
+    var list: Self = .{ .rows = .of(&rows), .selected = 0, .caps = .{ .depth = .direct } };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 5 }, .cell_size = .{} };
+    for ([_]@import("overview_style.zig").Background{ .selection, .bar }) |background| {
+        list.selection_background = background;
+        _ = try list.widget().draw(ctx);
+        try std.testing.expectEqual(widget_style.of(list.caps, .{ .background = background }).bg, list.inner.selection_style.bg);
+    }
 }
