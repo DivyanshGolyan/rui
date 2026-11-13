@@ -10,7 +10,8 @@ Every review stage (first review, Codex-clean, rounds) derives from one list
 of review outcomes: formal Codex reviews (findings), Codex receipt comments (no
 findings), the mutable summary at its Code Review completion time (updated_at in
 its older format), and a maintainer's interim opus-review-state:v1 marker at its
-updated_at. Rounds count reviews, receipts and interim markers; the summary is
+created_at (each interim review is a new comment; a later edit, even after the
+merge, does not move it). Rounds count reviews, receipts and interim markers; the summary is
 only a fallback for a head without a review or receipt. Codex-clean is the time
 of the last outcome before merge when it is clean, on any head: landing.md lets
 test-only fixes, merges of main and stacked heads merge without another review,
@@ -165,7 +166,7 @@ def review_outcomes(comments, reviews, number, warn=warning):
         if row["user"]["login"] == CODEX:
             markers.append(("summary", SUMMARY, ("code_review",), lambda: utc(code_review_time(row))))
         if row.get("author_association") in MAINTAINERS:
-            markers.append(("interim", INTERIM, (), lambda: utc(row["updated_at"])))
+            markers.append(("interim", INTERIM, (), lambda: utc(row["created_at"])))
         for source, pattern, path, time_of in markers:
             try:
                 state = marker_state(pattern, row, path, ("commit_sha", "has_unresolved_findings")

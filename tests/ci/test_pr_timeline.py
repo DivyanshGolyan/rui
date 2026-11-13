@@ -105,10 +105,11 @@ class TimelineTest(unittest.TestCase):
         data["comments"].remove(receipt)
         self.assertIsNone(timeline.stages(**data)["stages"]["codex_clean"])
 
-    def interim(self, when, findings=False, association="OWNER"):
+    def interim(self, when, findings=False, association="OWNER", edited="2026-11-13T23:59:00Z"):
+        # Edited later than posted, so the posting time must be the one read.
         state = {"commit_sha": "7ba38bdf89613a8cf19174af1cc3dc840f92bfa9", "has_unresolved_findings": findings}
         return {"user": {"login": "DivyanshGolyan"}, "author_association": association,
-                "created_at": when, "updated_at": when,
+                "created_at": when, "updated_at": edited,
                 "body": "## Opus review\n<!-- opus-review-state:v1 " + json.dumps(state) + " -->"}
 
     def test_interim_only_review_gives_every_review_stage(self):
@@ -127,6 +128,16 @@ class TimelineTest(unittest.TestCase):
                 row = timeline.stages(**data)
                 self.assertIsNone(row["stages"]["codex_clean"])
                 self.assertEqual(row["codex_rounds"], 0 if "association" in change else 1)
+
+    def test_interim_edited_after_merge_keeps_its_posting_time(self):
+        data = self.snapshot(1418)  # Merged 11:06:41.
+        data["comments"] = [c for c in data["comments"] if c["user"]["login"] != timeline.CODEX]
+        data["reviews"] = []
+        data["comments"].append(self.interim("2026-11-13T10:51:00Z", edited="2026-11-13T12:00:00Z"))
+        row = timeline.stages(**data)
+        self.assertEqual(row["stages"]["codex_reviewed"], "2026-11-13T10:51:00Z")
+        self.assertEqual(row["stages"]["codex_clean"], "2026-11-13T10:51:00Z")
+        self.assertEqual(row["codex_rounds"], 1)
 
     def test_mixed_codex_and_interim_outcomes_share_one_record(self):
         data = self.snapshot(1418)  # Codex receipt 10:43:48 and summary 10:45:43 on one head.
