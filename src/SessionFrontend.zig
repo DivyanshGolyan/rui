@@ -2789,8 +2789,8 @@ fn showRecalled(self: *Self) !void {
             self.notice = "Passed over a sent message the draft cannot hold.";
         },
         .show => |found| {
-            const held = try self.input.fill(self.init.io, self.files.scratch, found);
-            if (passed or !held) self.notice = "Passed over a sent message the draft cannot hold.";
+            try self.input.fill(self.init.io, self.files.scratch, found);
+            if (passed) self.notice = "Passed over a sent message the draft cannot hold.";
         },
     }
 }

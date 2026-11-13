@@ -292,7 +292,7 @@ pub fn land(self: *Self, step: Step, found: ?Found) Landing {
 /// would, so Enter sends it rather than running a command. False when the
 /// draft cannot hold that text, such as a mark with nothing to join: the
 /// draft is then empty, and the recall moves past the Message.
-pub fn fill(self: *Self, io: std.Io, file: std.Io.File, found: Found) !bool {
+pub fn fill(self: *Self, io: std.Io, file: std.Io.File, found: Found) !void {
     const editor = &self.editors[self.active];
     editor.* = self.empty(self.active);
     const bank = &self.banks[self.active];
@@ -300,10 +300,10 @@ pub fn fill(self: *Self, io: std.Io, file: std.Io.File, found: Found) !bool {
     if (found.slash) bank[0] = '/';
     if (try file.readPositionalAll(io, bank[start..][0..found.length], 0) != found.length) return error.TruncatedDisplayScratch;
     const length = start + found.length;
-    const held = editor.set(bank[0..length], length) == null;
+    // The recall worker staged only text the draft's own check takes.
+    std.debug.assert(editor.set(bank[0..length], length) == null);
     self.revision +%= 1;
     self.recall.shown = found.at;
-    return held;
 }
 
 /// The submission owner retains this immutable loan through capture and join.
@@ -340,7 +340,7 @@ test "SessionInput snapshot restore keeps recall anchor completion and submitted
     defer file.close(io);
     try file.writePositionalAll(io, "aéZ", 0);
     const found: Found = .{ .at = .{ .position = 7, .end = 9 }, .length = "aéZ".len, .slash = false };
-    try std.testing.expect(try input.fill(io, file, found));
+    try input.fill(io, file, found);
     _ = input.typed("\x1b[D");
     var saved = input.snapshot();
     const bytes = try gpa.dupe(u8, saved.bytes);
@@ -422,7 +422,7 @@ test "a recalled Message is the draft until an edit, never a caret move" {
     var input: Self = undefined;
     input.init();
     const found: Found = .{ .at = .{ .position = 7, .end = 9 }, .length = "/copy\nagain".len, .slash = true };
-    try std.testing.expect(try input.fill(io, file, found));
+    try input.fill(io, file, found);
     try std.testing.expectEqualStrings("//copy\nagain", input.composition().bytes);
     try std.testing.expectEqual(@as(usize, 12), input.composition().cursor);
     _ = input.typed("\x1b[A\x1b[D\x1b[C\x01\x05\x1b[B");
@@ -430,13 +430,13 @@ test "a recalled Message is the draft until an edit, never a caret move" {
     // Each edit, even one that keeps the length (a paste rolled back as a
     // whole), makes it an ordinary draft.
     for ([_][]const u8{ "x", "\x7f", "\x01\x1b[3~", "\x15", "\x1b[200~p\x1b[201~", "\xff", "\xc3\xa9", "\x1b[200~\n\xcc\x81\x1b[201~" }) |edit| {
-        try std.testing.expect(try input.fill(io, file, found));
+        try input.fill(io, file, found);
         const revision = input.revision;
         _ = input.typed(edit);
         try std.testing.expect(input.recall.shown == null);
         try std.testing.expect(input.revision != revision);
     }
-    try std.testing.expect(try input.fill(io, file, .{ .at = found.at, .length = 5, .slash = false }));
+    try input.fill(io, file, .{ .at = found.at, .length = 5, .slash = false });
     try std.testing.expectEqualStrings("/copy", input.composition().bytes);
     // Without the second slash, text whose first word names a command runs as one.
     try std.testing.expectEqual(.command, std.meta.activeTag(input.typed("\r")));
@@ -472,7 +472,7 @@ test "a recall step lands only on the draft it began from, one at a time" {
     _ = input.press(true);
     step = input.nextStep().?;
     try std.testing.expectEqual(Landing{ .show = newest }, input.land(step, newest));
-    try std.testing.expect(try input.fill(io, file, newest));
+    try input.fill(io, file, newest);
     _ = input.press(true);
     step = input.nextStep().?;
     try std.testing.expectEqual(@as(?Recalled, newest.at), step.from);
@@ -490,7 +490,7 @@ test "a recall step lands only on the draft it began from, one at a time" {
     step = input.nextStep().?;
     for (0..2) |_| _ = input.press(true);
     _ = input.press(false);
-    try std.testing.expect(try input.fill(io, file, input.land(step, newest).show));
+    try input.fill(io, file, input.land(step, newest).show);
     step = input.nextStep().?;
     try std.testing.expect(step.older and input.nextStep() == null);
     // Nothing older: the draft stays and no older press waits; a newer one

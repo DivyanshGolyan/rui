@@ -3,7 +3,6 @@
 //! The draft editor is DraftEditor, over libvaxis's TextArea.
 const std = @import("std");
 const termios = @import("posix");
-const keymap = @import("keymap.zig");
 
 // libc's termios is not the Linux kernel ABI used by std.posix.termios.
 // Keep the native type at this boundary, including speeds and all cc entries.
@@ -87,14 +86,6 @@ pub fn setAttributes(action: std.posix.TCSA, attributes: Attributes) std.posix.T
         .IO => return error.ProcessOrphaned,
         else => |err| return std.posix.unexpectedErrno(err),
     };
-}
-
-/// Literal command-line text is not keyboard input or a permission choice.
-pub fn validateText(bytes: []const u8) !void {
-    var characters = (try std.unicode.Utf8View.init(bytes)).iterator();
-    while (characters.nextCodepoint()) |point| {
-        if (!keymap.textScalar(point, true)) return error.InvalidTerminalInput;
-    }
 }
 
 /// Returns a slice borrowed from buffer until its caller next reuses it.

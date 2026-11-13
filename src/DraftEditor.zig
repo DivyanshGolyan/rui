@@ -29,6 +29,7 @@ paste_appends: bool = false,
 /// a `Key` the editor had no use for. `appEvent` gives that key the
 /// screen's meaning.
 pub const KeyOutcome = keymap.Outcome(Key);
+pub const TextCheck = TextArea.TextCheck;
 
 /// An empty draft in `buffer`, which it borrows for its lifetime.
 pub fn init(buffer: []u8) Editor {
@@ -51,6 +52,12 @@ pub fn initText(buffer: []u8, bytes: []const u8, caret: usize) Editor {
 /// decided before insertion.
 fn acceptScalar(_: ?*anyopaque, point: u21) bool {
     return keymap.textScalar(point, true);
+}
+
+/// Whether the draft would take text held elsewhere, fed in pieces: the
+/// check `set` makes, without storage for the text. Capacity is the caller's.
+pub fn textCheck() TextCheck {
+    return init(&.{}).area.textCheck();
 }
 
 /// The draft's bytes, borrowed until it next changes.
