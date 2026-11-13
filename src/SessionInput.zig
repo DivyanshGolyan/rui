@@ -289,9 +289,9 @@ pub fn land(self: *Self, step: Step, found: ?Found) Landing {
 
 /// Replaces the draft with a found Message's bytes from `file`, the caret at
 /// their end. Text that begins with `/` takes a second one, as typing it
-/// would, so Enter sends it rather than running a command. False when the
-/// draft cannot hold that text, such as a mark with nothing to join: the
-/// draft is then empty, and the recall moves past the Message.
+/// would, so Enter sends it rather than running a command. The recall worker
+/// staged only text `DraftEditor.textCheck()` accepts, so the draft always
+/// holds it.
 pub fn fill(self: *Self, io: std.Io, file: std.Io.File, found: Found) !void {
     const editor = &self.editors[self.active];
     editor.* = self.empty(self.active);

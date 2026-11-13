@@ -49,6 +49,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const area = &self.editor.area;
     area.style = self.style;
     area.show_cursor = true;
+    area.width_method = self.method;
     const text = try area.draw(ctx.withConstraints(.{}, .{ .width = width - prefix, .height = height - 2 * rule }));
     const shown = area.viewport();
     var surface = try vxfw.Surface.init(ctx.cell_arena, self.widget(), .{ .width = width, .height = text.size.height + 2 * rule });
@@ -118,6 +119,38 @@ test "Composer keeps the caret visible between rules without changing draft byte
     try std.testing.expectEqualStrings("o", head.readCell(3, 1).char.grapheme);
     try std.testing.expectEqual(@as(u16, 1), head.cursor.?.row);
     try std.testing.expectEqualStrings("one\ntwo\nthree\nfour\nfive\nsix", &bytes);
+}
+
+test "Composer wraps and places the caret by its caps' width, whatever the frame's" {
+    const draft = "a👩‍💻b";
+    const methods = [_]vaxis.gwidth.Method{ .wcwidth, .unicode, .no_zwj };
+    // The frame's method is process-wide; leave it at its default after.
+    defer vxfw.DrawContext.init(.unicode);
+    for (methods) |method| for (methods) |frame| {
+        if (frame == method) continue;
+        vxfw.DrawContext.init(frame);
+        var bytes: [32]u8 = undefined;
+        var editor: Editor = .initText(&bytes, draft, draft.len);
+        var composer: Self = .{ .editor = &editor };
+        composer.setCaps(.{ .width = method });
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const emoji: u16 = @intCast(vaxis.gwidth.gwidth("👩‍💻", method));
+        const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 6 }, .cell_size = .{} };
+        errdefer std.debug.print("method={t} frame={t}\n", .{ method, frame });
+        const wide = try composer.widget().draw(ctx);
+        try std.testing.expectEqual(@as(u16, 3), wide.size.height);
+        try std.testing.expectEqual(emoji, wide.readCell(4, 1).char.width);
+        try std.testing.expectEqualStrings("b", wide.readCell(4 + emoji, 1).char.grapheme);
+        try std.testing.expectEqual(@as(u16, 1), wide.cursor.?.row);
+        try std.testing.expectEqual(4 + emoji + 1, wide.cursor.?.col);
+        // Exactly as wide as the prompt, "a" and the emoji: "b" wraps.
+        const narrow = try composer.widget().draw(ctx.withConstraints(.{}, .{ .width = 4 + emoji, .height = 6 }));
+        try std.testing.expectEqual(@as(u16, 4), narrow.size.height);
+        try std.testing.expectEqualStrings("b", narrow.readCell(3, 2).char.grapheme);
+        try std.testing.expectEqual(@as(u16, 2), narrow.cursor.?.row);
+        try std.testing.expectEqual(@as(u16, 4), narrow.cursor.?.col);
+    };
 }
 
 test "Composer draws between paste fragments that join the original suffix" {
