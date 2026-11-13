@@ -17,6 +17,8 @@
 //!   `store_access.runNamed` does.
 //! - `round_budget`: its `.always` rounds plus its commit, checked here.
 //! - `commit`: how it commits (`Commit`). One that does not cannot ask to.
+//! - optionally `pass`: how many statements one engine pass of its
+//!   transaction steps (`Pass`), `.ordinary` when left out.
 //! - `begin`: the round its transaction opens before, or null when its
 //!   writes ride the commit round. Rounds before it read outside the
 //!   transaction; from it on, reads and writes share the transaction.
@@ -71,6 +73,16 @@ pub const Commit = enum {
     /// autocommit under the Entry lock, a batching engine in an
     /// ownership-fenced transaction (`Access`'s `.single`).
     single,
+};
+
+/// How many statements one engine pass of a transaction steps, each pass a
+/// round trip on a batching engine.
+pub const Pass = enum {
+    /// A write's twelve.
+    ordinary,
+    /// A settlement's twenty, for a transaction whose rows for one answer
+    /// outnumber a write's queue.
+    wide,
 };
 
 /// The rounds `spec` declares, in order: its tag enum `At`, each tag's
@@ -150,15 +162,15 @@ fn NextOf(comptime At: type, comptime commit: Commit, comptime Result: type) typ
 /// the same rounds, commit, guards and begin share it, so one can step
 /// through another.
 pub fn Round(comptime T: type) type {
-    return RoundOf(T.rounds, T.commit, GuardsOf(T), beginIndex(T));
+    return RoundOf(T.rounds, T.commit, GuardsOf(T), beginIndex(T), passOf(T));
 }
 
-fn RoundOf(comptime R: type, comptime commit: Commit, comptime Guards: type, comptime begin: ?u8) type {
+fn RoundOf(comptime R: type, comptime commit: Commit, comptime Guards: type, comptime begin: ?u8, comptime pass: Pass) type {
     return struct {
         const Self = @This();
         core: *anyopaque,
 
-        fn get(r: *Self) *Core(R, commit, Guards, begin) {
+        fn get(r: *Self) *Core(R, commit, Guards, begin, pass) {
             return @ptrCast(@alignCast(r.core));
         }
 
@@ -187,6 +199,14 @@ fn RoundOf(comptime R: type, comptime commit: Commit, comptime Guards: type, com
         pub fn readEach(r: *Self, comptime S: type, args: S.Args, limit: u64, visitor: anytype) void {
             const core = r.get();
             if (core.inside()) core.writer.readEach(S, args, limit, visitor) else core.reader.readEach(S, args, limit, visitor);
+        }
+
+        /// `Access.readEachFrom`: `readEach` with Args too large to copy
+        /// into a frame. Their fixed values are copied when queued, so
+        /// `args` may go once this returns; `visitor` as for `readEach`.
+        pub fn readEachFrom(r: *Self, comptime S: type, args: *const S.Args, limit: u64, visitor: anytype) void {
+            const core = r.get();
+            if (core.inside()) core.writer.readEachFrom(S, args, limit, visitor) else core.reader.readEachFrom(S, args, limit, visitor);
         }
 
         /// `Access.write`: it runs in the commit round, or, from `begin`
@@ -274,6 +294,14 @@ fn RoundOf(comptime R: type, comptime commit: Commit, comptime Guards: type, com
             return r.get().writer.attemptTimings(operation);
         }
 
+        /// Whether the transaction is open with no failure, once the step
+        /// queued a statement from `begin` on (`Access.transactionOpen`).
+        /// Before `begin` nothing opens it, so it is false.
+        pub fn transactionOpen(r: *Self) bool {
+            transacts("opens a transaction");
+            return r.get().writer.transactionOpen();
+        }
+
         /// The faults this run injects; a step checks its own.
         pub fn faults(r: *Self) Faults {
             return r.get().faults;
@@ -287,6 +315,11 @@ fn beginIndex(comptime T: type) ?u8 {
     return @backingInt(at);
 }
 
+/// `T.pass`, or `.ordinary`.
+fn passOf(comptime T: type) Pass {
+    return if (@hasDecl(T, "pass")) T.pass else .ordinary;
+}
+
 /// `T.Guards`, or none when it commits nothing.
 fn GuardsOf(comptime T: type) type {
     return if (T.commit == .none) error{} else T.Guards;
@@ -294,21 +327,22 @@ fn GuardsOf(comptime T: type) type {
 
 /// `Core` for `T`.
 fn CoreFor(comptime T: type) type {
-    return Core(T.rounds, T.commit, GuardsOf(T), beginIndex(T));
+    return Core(T.rounds, T.commit, GuardsOf(T), beginIndex(T), passOf(T));
 }
 
 /// The runner's state: a read Access for the rounds before `begin`, and
 /// the writer `commit` names, which runs the rounds from `begin` on. A
 /// transition whose transaction opens before its first round has no read
-/// Access; one that commits nothing has no writer.
-fn Core(comptime R: type, comptime commit: Commit, comptime Guards: type, comptime begin: ?u8) type {
+/// Access; one that commits nothing has no writer. A `.wide` pass's
+/// writer is a settlement Access, whose queue holds twenty statements.
+fn Core(comptime R: type, comptime commit: Commit, comptime Guards: type, comptime begin: ?u8, comptime pass: Pass) type {
     const reads_outside = (begin orelse 1) > 0;
     return struct {
         const Self = @This();
         reader: if (reads_outside) store_access.Access(.read, error{}) else void,
         writer: switch (commit) {
             .none => void,
-            .transaction => store_access.Access(.write, Guards),
+            .transaction => store_access.Access(if (pass == .wide) .settlement else .write, Guards),
             .single => store_access.Access(.single, Guards),
         },
         faults: Faults,
@@ -345,6 +379,7 @@ fn check(comptime T: type) void {
         "{s} is {d} bytes; a transition value holds at most 1 KiB",
         .{ @typeName(T), @sizeOf(T) },
     ));
+    if (passOf(T) == .wide and T.commit != .transaction) @compileError(@typeName(T) ++ ": only a transaction steps a wide pass");
     if (beginIndex(T)) |begin| {
         if (T.commit == .none) @compileError(@typeName(T) ++ " opens a transaction but commits nothing");
         for (0..begin) |i| if (T.rounds.kind(@fromBackingInt(@intCast(i))) != .always)
@@ -364,69 +399,92 @@ fn check(comptime T: type) void {
 pub noinline fn run(entry: *const store_core.Entry, comptime T: type, t: *T, faults: Faults) !T.Result {
     comptime check(T);
     const State = CoreFor(T);
-    var core: State = .{
-        .reader = if (@FieldType(State, "reader") == void) {} else .open(entry),
-        .writer = if (T.commit == .none) {} else .open(entry),
-        .faults = faults,
-    };
+    // Each Access opens in place: one returned by value is built in this
+    // frame and copied, twice its size here.
+    var core: State = undefined;
+    core.faults = faults;
+    core.last = null;
+    core.raw = null;
+    if (@FieldType(State, "reader") != void) core.reader.init(entry);
+    if (T.commit != .none) core.writer.init(entry);
     defer if (@FieldType(State, "reader") != void) core.reader.deinit();
     defer if (T.commit != .none) core.writer.deinit();
     const result = drive(T, t, &core);
     if (comptime @hasDecl(T, "failed")) if (result) |_| {} else |_| T.failed(t);
-    if (T.commit != .none) return core.writer.end(faults, result) else return result;
+    if (T.commit != .none) return end(T, &core, result) else return result;
 }
 
+/// The steps, one after another, in `run`'s frame. What runs a round, the
+/// commit or an abandon is a frame of its own beside the step, so the
+/// step's chain carries only the Accesses and this loop.
 fn drive(comptime T: type, t: *T, core: *CoreFor(T)) !T.Result {
     var round: Round(T) = .{ .core = core };
     while (true) switch (try T.step(t, &round, core.last)) {
-        .round => |at| {
-            if (builtin.is_test and !T.rounds.follows(core.last, at)) std.debug.panic(
-                "{s} asked for round {s} after {s}: rounds run in declared order, and only a .paged one repeats",
-                .{ @typeName(T), @tagName(at), if (core.last) |before| @tagName(before) else "none" },
-            );
-            const begin = comptime beginIndex(T);
-            const inside = if (begin) |first| @backingInt(at) >= first else false;
-            // Reads queued where the round runs them.
-            std.debug.assert(inside == core.opened());
-            if (T.rounds.kind(at) == .raw) {
-                const window = core.raw orelse @panic("a raw round reads the window Round.readRaw asked for");
-                core.raw = null;
-                if (@FieldType(CoreFor(T), "reader") != void and !inside) {
-                    core.reader.readRaw(window.content_id, window.offset, window.destination) catch |err| return named(T, at, err, &core.reader);
-                } else if (T.commit != .none) {
-                    core.writer.readRaw(window.content_id, window.offset, window.destination) catch |err| return named(T, at, err, &core.writer);
-                } else unreachable;
-            } else if (core.raw != null) {
-                @panic("a window Round.readRaw asked for is read only by a .raw round");
-            } else if (@FieldType(CoreFor(T), "reader") != void and !inside) {
-                // Before `begin`, writes ride the commit round.
-                if (T.commit != .none) std.debug.assert(core.writer.queued == 0);
-                core.reader.run() catch |err| return named(T, at, err, &core.reader);
-            } else {
-                core.writer.run() catch |err| return named(T, at, err, &core.writer);
-            }
-            core.last = at;
-        },
-        .commit => if (T.commit == .none) unreachable else {
-            // Reads queued outside the transaction would never run.
-            if (@FieldType(CoreFor(T), "reader") != void) std.debug.assert(core.reader.queued == 0);
-            std.debug.assert(core.raw == null);
-            const committing = if (comptime @hasDecl(T, "follow")) core.writer.commitFollowed(T.follow(t)) else core.writer.commit();
-            committing catch |err| {
-                if (comptime @typeInfo(T.Declined).error_set.error_names.?.len != 0) if (declinedBy(T, err)) |declined| {
-                    try core.writer.abandon(core.faults);
-                    return T.declined(t, declined);
-                };
-                return err;
-            };
-            if (comptime @hasDecl(T, "announced")) if (T.announced(t)) |announcement| store_core.announce(core.writer.store, announcement);
-            return T.committed(t);
-        },
+        .round => |at| try runRound(T, core, at),
+        .commit => if (T.commit == .none) unreachable else return commitRun(T, t, core),
         .done => |result| {
-            if (T.commit != .none) try core.writer.abandon(core.faults);
+            if (T.commit != .none) try abandon(T, core);
             return result;
         },
     };
+}
+
+/// Runs the round `at` the step asked for.
+noinline fn runRound(comptime T: type, core: *CoreFor(T), at: T.rounds.At) !void {
+    if (builtin.is_test and !T.rounds.follows(core.last, at)) std.debug.panic(
+        "{s} asked for round {s} after {s}: rounds run in declared order, and only a .paged one repeats",
+        .{ @typeName(T), @tagName(at), if (core.last) |before| @tagName(before) else "none" },
+    );
+    const begin = comptime beginIndex(T);
+    const inside = if (begin) |first| @backingInt(at) >= first else false;
+    // Reads queued where the round runs them.
+    std.debug.assert(inside == core.opened());
+    if (T.rounds.kind(at) == .raw) {
+        const window = core.raw orelse @panic("a raw round reads the window Round.readRaw asked for");
+        core.raw = null;
+        if (@FieldType(CoreFor(T), "reader") != void and !inside) {
+            core.reader.readRaw(window.content_id, window.offset, window.destination) catch |err| return named(T, at, err, &core.reader);
+        } else if (T.commit != .none) {
+            core.writer.readRaw(window.content_id, window.offset, window.destination) catch |err| return named(T, at, err, &core.writer);
+        } else unreachable;
+    } else if (core.raw != null) {
+        @panic("a window Round.readRaw asked for is read only by a .raw round");
+    } else if (@FieldType(CoreFor(T), "reader") != void and !inside) {
+        // Before `begin`, writes ride the commit round.
+        if (T.commit != .none) std.debug.assert(core.writer.queued == 0);
+        core.reader.run() catch |err| return named(T, at, err, &core.reader);
+    } else {
+        core.writer.run() catch |err| return named(T, at, err, &core.writer);
+    }
+    core.last = at;
+}
+
+/// The commit the step asked for: `committed`, or `declined` when a
+/// `Declined` guard stops it.
+noinline fn commitRun(comptime T: type, t: *T, core: *CoreFor(T)) !T.Result {
+    // Reads queued outside the transaction would never run.
+    if (@FieldType(CoreFor(T), "reader") != void) std.debug.assert(core.reader.queued == 0);
+    std.debug.assert(core.raw == null);
+    const committing = if (comptime @hasDecl(T, "follow")) core.writer.commitFollowed(T.follow(t)) else core.writer.commit();
+    committing catch |err| {
+        if (comptime @typeInfo(T.Declined).error_set.error_names.?.len != 0) if (declinedBy(T, err)) |declined| {
+            try core.writer.abandon(core.faults);
+            return T.declined(t, declined);
+        };
+        return err;
+    };
+    if (comptime @hasDecl(T, "announced")) if (T.announced(t)) |announcement| store_core.announce(core.writer.store, announcement);
+    return T.committed(t);
+}
+
+/// Drops what the steps queued and rolls back, for a step that ended done.
+noinline fn abandon(comptime T: type, core: *CoreFor(T)) !void {
+    try core.writer.abandon(core.faults);
+}
+
+/// `result`, after abandoning the writer when it is an error (`Access.end`).
+noinline fn end(comptime T: type, core: *CoreFor(T), result: anytype) @TypeOf(result) {
+    return core.writer.end(core.faults, result);
 }
 
 /// A round's failure: a failed statement is the error the round names

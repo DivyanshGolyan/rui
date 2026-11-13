@@ -522,7 +522,7 @@ pub const Store = struct {
 
     /// Model settlement's batch table, in the Store's scratch beside its
     /// change ring (`OutOfLine`), so no frame on the engine thread holds
-    /// it. Only `settleModelSuccess` uses it.
+    /// it. Only `SettleSuccess` uses it.
     pub fn settlementBatch(self: *Store) *model_settlement_domain.Batch {
         return @ptrCast(self.scratch(.settlement));
     }
@@ -1626,10 +1626,9 @@ pub const Store = struct {
     ) !void {
         const entry = try enter(self, .fromSettlement(faults.settlement_trace));
         defer entry.release();
-        var access: Access(.settlement, Ordinary.model_success) = undefined;
-        access.init(&entry);
-        defer access.deinit();
-        return entry.finishTransaction(Ordinary.model_success, faults, access.end(faults, model_settlement_domain.settleModelSuccess(&access, self.io, binding, output, faults)));
+        const Settle = model_settlement_domain.SettleSuccess;
+        var settlement: Settle = .{ .input = .{ .io = self.io, .binding = binding, .output = output, .faults = faults, .batch = self.settlementBatch() } };
+        return entry.finishTransaction(Ordinary.model_success, faults, transition.run(&entry, Settle, &settlement, faults));
     }
 
     pub fn openContent(self: *Store, reference: ContentReference) !ContentLocation {
@@ -1848,7 +1847,7 @@ pub const Ordinary = struct {
     const result = error{ ResultNotFound, ResultNotReady, ResultFailed };
     pub const attempt_binding = error{ StaleAttemptBinding, SupersededByControl };
     pub const historical_entry = error{HistoricalPending};
-    const model_success = attempt_binding || error{InvalidProviderEnvelope};
+    pub const model_success = attempt_binding || error{InvalidProviderEnvelope};
     pub const action_attempt = error{StaleActionAttemptBinding};
     const action_dispatch = action_attempt || error{SupersededByControl};
     /// A creation updates no Session, but shares configure's error set.

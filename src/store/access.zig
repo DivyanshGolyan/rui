@@ -431,6 +431,17 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
             return a.failed_sql == S.sql.ptr;
         }
 
+        /// Whether this write Access's transaction is open with no failure:
+        /// BEGIN ran when its first statement was queued, and on a batching
+        /// engine rides the next pass. A trace that marks a transaction
+        /// active asks it.
+        pub fn transactionOpen(a: *const Self) bool {
+            comptime std.debug.assert(transacts);
+            if (a.phase != .opened or a.failure != null) return false;
+            std.debug.assert(a.store.engine.inWriteTransaction());
+            return true;
+        }
+
         /// Records that this Access changes `head`'s Session, and returns
         /// its position claimer.
         pub fn positions(a: *Self, head: rsql.SessionHead) error{TooManyPositionClaims}!*Positions {
