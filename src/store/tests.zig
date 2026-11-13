@@ -1248,7 +1248,15 @@ fn TestingConfiguring(comptime Check: type) type {
         } = .prepare,
 
         pub fn step(b: *Self, r: anytype, _: u32) !TestingAsk {
-            const request: configuration_domain.Request = .of(b.storage, b.storage.io, b.session, b.configuration, null, &b.saved);
+            const request: configuration_domain.Request = .{
+                .io = b.storage.io,
+                .tools = b.storage.hostTools(),
+                .served = b.storage.served,
+                .session = b.session,
+                .configuration = b.configuration,
+                .initial_skills = null,
+                .saved = &b.saved,
+            };
             while (true) switch (b.at) {
                 .prepare => {
                     b.reads = r.configurationReads();
@@ -16858,7 +16866,7 @@ test "inline skills initial failure preserves all ordinary configuration refusal
 }
 
 test "inline skills configuration validation borrows one Store-owned plan through content imports" {
-    const Ready = @FieldType(configuration_domain.ConfigurationValidation, "ready");
+    const Ready = @FieldType(configuration_domain.Validation, "ready");
     // The validation-only phase must not return another Settings value onto
     // the Host's creation/import chain. This is an ownership API contract.
     try std.testing.expect(Ready == *const configuration_domain.ValidatedConfiguration);
