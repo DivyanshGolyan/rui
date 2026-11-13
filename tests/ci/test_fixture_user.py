@@ -206,13 +206,15 @@ class FixtureUserTest(unittest.TestCase):
     def interpreter(self, directory, *, builds_venv=True, mode=0o755, reports=None):
         """A python3.12 in `directory` (made with `mode`) that can or cannot import venv.
 
-        It reports running `reports`, or itself, as a shim reports the interpreter it runs.
+        It reports running `reports`, or itself, as a shim reports the interpreter it runs, and
+        that interpreter's prefix as its sys.base_prefix.
         """
         directory.mkdir(parents=True, exist_ok=True)
         os.chmod(directory, mode)
         python = directory / fixture_user.PYTHON
-        report = f"'{reports}'" if reports else '"$0"'
-        python.write_text(f"#!/bin/sh\necho {report}\n" if builds_venv else "#!/bin/sh\nexit 1\n")
+        runs = reports or python
+        python.write_text(f"#!/bin/sh\necho '{runs}'\necho '{runs.parents[1]}'\n" if builds_venv
+                          else "#!/bin/sh\nexit 1\n")
         python.chmod(0o755)
         return python
 
@@ -225,11 +227,12 @@ class FixtureUserTest(unittest.TestCase):
         broken = self.interpreter(self.root / "broken/bin", builds_venv=False)
         cases = {
             # The search path: the installation the lane's environment comes from, or None.
-            "public": ((public.parent,), Install(public.resolve(), public.resolve().parents[1])),
-            "root-private": ((private.parent,), Install(private.resolve(), private.resolve().parents[1])),
-            "a shim names what it runs": ((shim.parent,), Install(private.resolve(), private.resolve().parents[1])),
+            "public": ((public.parent,), Install(public.resolve(), (public.resolve().parents[1],))),
+            "root-private": ((private.parent,), Install(private.resolve(), (private.resolve().parents[1],))),
+            "a shim names what it runs": ((shim.parent,),
+                                          Install(private.resolve(), (private.resolve().parents[1],))),
             "one without venv is passed over": ((broken.parent, public.parent),
-                                                Install(public.resolve(), public.resolve().parents[1])),
+                                                Install(public.resolve(), (public.resolve().parents[1],))),
             "none": ((broken.parent,), None),
         }
         for name, (search, expected) in cases.items():
@@ -270,34 +273,51 @@ class FixtureUserTest(unittest.TestCase):
         self.git("-C", str(private / "repository"), "worktree", "add", "--quiet", "--detach",
                  str(public / "linked"), "HEAD")
 
-        def install(parent, tool, binary, data):
-            """A toolchain whose binary prints itself, then, with no arguments, a file from its installation.
+        def install(parent, tool, binary, data, report, beside=()):
+            """A toolchain that, asked with arguments, answers `report` (its trees, as the real tool reports them).
 
-            Python's probe passes arguments and reads only the binary, as from sys.executable. Every
-            directory and file takes the umask's modes, as an install root builds does.
+            With no arguments it prints itself, then a file of its installation found from its own place,
+            as a toolchain finds its lib. `beside` are files in its prefix that it reports no tree for.
+            Every directory and file takes the umask's modes, as an install root builds does.
             """
-            program = parent / tool / binary
+            home = parent / tool
+            program = home / binary
             program.parent.mkdir(parents=True)
-            (parent / tool / data).parent.mkdir(parents=True, exist_ok=True)
-            (parent / tool / data).write_text(f"{tool} data\n")
+            for path, text in ((data, f"{tool} data\n"), *((path, "unrelated\n") for path in beside)):
+                (home / path).parent.mkdir(parents=True, exist_ok=True)
+                (home / path).write_text(text)
             up = "/.." * (len(Path(binary).parts) - 1)
-            program.write_text(f'#!/bin/sh\necho "$0"\n[ $# -eq 0 ] || exit 0\ncat "$(dirname "$0"){up}/{data}"\n')
+            answer = report(program, home)
+            program.write_text(f"#!/bin/sh\n[ $# -eq 0 ] || {{ printf '%s\\n' '{answer}'; exit 0; }}\n"
+                               f'echo "$0"\ncat "$(dirname "$0"){up}/{data}"\n')
             umask = os.umask(0)
             os.umask(umask)
             program.chmod(0o777 & ~umask)
             return program
 
-        def installs(parent):
-            return {fixture_user.PYTHON: install(parent / "tools", fixture_user.PYTHON, "bin/python3.12",
-                                                 "lib/python3.12/os.py"),
-                    "zig": install(parent / "tools", "zig", "zig", "lib/std/std.zig"),
-                    "go": install(parent / "tools", "go", "bin/go", "src/runtime/runtime.go")}
+        def installs(parent, zig):
+            tools = parent / "tools"
+            return {fixture_user.PYTHON: install(tools, fixture_user.PYTHON, "bin/python3.12", "lib/python3.12/os.py",
+                                                 lambda program, home: f"{program}\n{home}"),
+                    "zig": zig(tools),
+                    "go": install(tools, "go", "bin/go", "src/runtime/runtime.go", lambda program, home: str(home))}
 
-        tools = {public: installs(public)}
+        def release_zig(tools):
+            """Zig's release archive: the binary beside lib/, reported in ZON as `zig env` does."""
+            return install(tools, "zig", "zig", "lib/std/std.zig",
+                           lambda program, home: f'.{{\n    .lib_dir = "{home}/lib",\n}}')
+
+        def prefix_zig(tools):
+            """Zig installed into a prefix (Nix, Homebrew, cmake): bin/zig and lib/zig/, beside unrelated files."""
+            return install(tools, "zig", "bin/zig", "lib/zig/std/std.zig",
+                           lambda program, home: f'{{\n "lib_dir": "{home}/lib/zig"\n}}',
+                           beside=("lib/unrelated.so", "share/unrelated/README"))
+
+        tools = {public: installs(public, release_zig)}
         # Root-private installs built under umask 077: bin/ and lib/ are 0700 and every file 0600 or 0700.
         umask = os.umask(0o077)
         try:
-            tools[private] = installs(private)
+            tools[private] = installs(private, prefix_zig)
         finally:
             os.umask(umask)
         self.assertEqual(stat.S_IMODE(os.stat(private / "tools/zig/lib").st_mode), 0o700)
@@ -358,6 +378,7 @@ class FixtureUserTest(unittest.TestCase):
                     for item in (path, *(path.rglob("*") if path.is_dir() else ())):
                         self.assertFalse(item.is_symlink(), f"{item} leads back to where root keeps it")
                         self.assertTrue(lane_reads(item, gid), f"the lane cannot read {item}")
+                        self.assertNotIn("unrelated", item.name, f"{item} is in no tree its tool reports")
 
                 # Each trust variable the caller set names its copy in the lane's directory; the run sets
                 # exactly those, and PIP_CERT keeps its own corporate bundle.
@@ -401,28 +422,60 @@ class FixtureUserTest(unittest.TestCase):
                 self.assertEqual(self.git("--git-dir", str(placed.source), "rev-parse", "refs/heads/fixture"), later)
 
     def test_an_install_whose_binary_is_in_the_systems_own_places_is_used_in_place(self):
-        """Every user already runs these, and root never copies them, whatever root find_tool computes.
+        """Every user already runs these, and root never copies them, whatever trees they report.
 
-        The system Python's root is all of /usr; a packaged Zig in /usr/local/bin keeps its lib in
-        /usr/local/lib/zig, outside the directory find_tool takes as its root.
+        The system Python's prefix is all of /usr; a packaged Zig in /usr/local/bin keeps its lib in
+        /usr/local/lib/zig.
         """
         tools_dir = self.root / "tools"
         tools_dir.mkdir()
         cases = {
-            # The resolved binary and the install root computed for it.
+            # The resolved binary and the tree the tool reports.
             "system Python": ("/usr/bin/python3.12", "/usr"),
             "Python in /usr/local": ("/usr/local/bin/python3.12", "/usr/local"),
-            "Python in /bin": ("/bin/python3.12", "/"),
-            "Zig in /usr/local/bin, lib in /usr/local/lib/zig": ("/usr/local/bin/zig", "/usr/local/bin"),
-            "Zig in /usr/bin": ("/usr/bin/zig", "/usr/bin"),
-            "Go in /usr/bin": ("/usr/bin/go", "/usr"),
+            "Python in /bin": ("/bin/python3.12", "/usr"),
+            "Zig in /usr/local/bin, lib in /usr/local/lib/zig": ("/usr/local/bin/zig", "/usr/local/lib/zig"),
+            "Zig in /usr/bin": ("/usr/bin/zig", "/usr/lib/zig"),
+            "Go in /usr/bin": ("/usr/bin/go", "/usr/lib/go"),
             "Go in /usr/local/go": ("/usr/local/go/bin/go", "/usr/local/go"),
             "Go in /usr/lib/go": ("/usr/lib/go-1.27/bin/go", "/usr/lib/go-1.27"),
         }
-        for name, (binary, root) in cases.items():
+        for name, (binary, tree) in cases.items():
             with self.subTest(name):
-                self.assertEqual(fixture_user.place_install(Install(Path(binary), Path(root)), tools_dir), Path(binary))
+                self.assertEqual(fixture_user.place_install(Install(Path(binary), (Path(tree),)), tools_dir),
+                                 Path(binary))
         self.assertEqual(list(tools_dir.iterdir()), [])
+
+    def test_a_toolchain_is_the_binary_and_the_trees_it_reports(self):
+        """Zig's lib_dir in ZON or JSON, and Go's GOROOT, wherever they lie; a tool that reports none is refused."""
+        def tool(name, answer):
+            directory = self.root / name
+            directory.mkdir()
+            program = directory / name.split("-")[0]
+            program.write_text(f"#!/bin/sh\nprintf '%s\\n' '{answer}'\n")
+            program.chmod(0o755)
+            return program
+
+        prefix = self.root.resolve() / "prefix"
+        cases = {
+            "zig-zon": ('.{\n    .zig_exe = "/x/zig",\n    .lib_dir = "%s/lib/zig",\n}' % prefix,
+                        (prefix / "lib/zig",)),
+            "zig-json": ('{\n "zig_exe": "/x/zig",\n "lib_dir": "%s/lib/zig"\n}' % prefix, (prefix / "lib/zig",)),
+            "go-goroot": (str(prefix / "go"), (prefix / "go",)),
+            "zig-silent": ("", None),
+            "go-silent": ("", None),
+        }
+        for name, (answer, trees) in cases.items():
+            with self.subTest(name):
+                program = tool(name, answer)
+                if trees is None:
+                    with self.assertRaises(SystemExit):
+                        fixture_user.find_tool(program.name, str(program.parent))
+                else:
+                    self.assertEqual(fixture_user.find_tool(program.name, str(program.parent)),
+                                     Install(program.resolve(), trees))
+        self.assertEqual(Install(prefix / "bin/zig", (prefix / "lib/zig",)).root, prefix)
+        self.assertEqual(Install(prefix / "go/bin/go", (prefix / "go",)).parts, (prefix / "go",))
 
     def git(self, *args):
         """Run git with a fixed identity and return its output, stripped."""

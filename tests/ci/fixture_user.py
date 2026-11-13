@@ -15,12 +15,14 @@ lane's lock:
   - root reads `Inputs`: the commit REF (default HEAD) names, this checkout's
     common git directory, origin's URL, the file or directory each of the
     caller's trust variables names (network_variables.TRUST and TOOL_TRUST)
-    and the python3.12, zig and go the caller would run;
+    and the python3.12, zig and go the caller would run, each with the trees
+    it reports reading (`sys.base_prefix`, `zig env`'s lib_dir, `go env GOROOT`);
   - root places them (`place`): it fetches REF, origin/main and the v* tags
     (this repository's, then origin's) into a bare repository in
     /var/lib/rui-fixture/lanes/LANE, copies the trust files there, and uses an
-    install from the system's own prefixes in place, as every user does, and
-    any other as a copy every user can read under /var/lib/rui-fixture/tools.
+    install whose binary lies in the system's own places in place, as every
+    user does, and copies any other binary and its reported trees where every
+    user can read them under /var/lib/rui-fixture/tools.
     The lane's directory is root's and only
     the lane's group reads it, so the lane cannot change what root reads next
     run and other lanes cannot read it;
@@ -85,8 +87,10 @@ TRUST_LISTS = ("SSL_CERT_DIR",)
 # Passed through unchanged when the caller sets them: the proxy, which listens
 # on loopback for every user, and the terminal and text decoding.
 PASSED = (*network_variables.PROXY, "TERM", "LANG", "LC_ALL", "LC_CTYPE")
-# Each toolchain's install root, as directories above its binary.
-TOOLS = {"zig": 1, "go": 2}
+# Each toolchain's own report of the trees it reads besides its binary: the arguments that ask
+# it, and the pattern that finds each tree in its answer. `zig env` answers in ZON or JSON.
+TOOLS = {"zig": (("env",), re.compile(r'\blib_dir"?\s*[:=]\s*"([^"]+)"')),
+         "go": (("env", "GOROOT"), re.compile(r"^(/.*)$", re.M))}
 BASE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 # The system's own places: an install whose binary resolves under one of them serves every user already.
 # /usr holds /usr/local; BASE_PATH adds /bin and /sbin, never all of /.
@@ -107,36 +111,55 @@ def user_for(lane):
 
 
 class Install(NamedTuple):
-    """An executable a lane runs: its resolved binary and the directory tree it needs."""
+    """An executable a lane runs: its resolved binary and the trees the tool itself reports reading."""
     binary: Path
-    root: Path
+    trees: tuple
+
+    @property
+    def parts(self):
+        """The binary and trees to place, none inside another."""
+        paths = (self.binary, *self.trees)
+        return tuple(sorted({path for path in paths
+                             if not any(path != other and path.is_relative_to(other) for other in paths)}))
+
+    @property
+    def root(self):
+        """The deepest directory holding every part; a copy keeps each part at its place below it."""
+        return Path(os.path.commonpath([self.binary.parent, *self.trees]))
 
 
 def find_python(search):
     """The first python3.12 on `search` that can build a venv, as an Install; None when there is none.
 
-    The binary is the one the interpreter reports running, so a shim or a venv
-    on the search path names the real installation.
+    The binary is the one the interpreter reports running and the tree its
+    `sys.base_prefix`, so a shim or a venv on the search path names the real
+    installation.
     """
     for entry in search.split(os.pathsep):
         candidate = Path(entry) / PYTHON if entry else None
         if candidate is None or not candidate.is_file() or not os.access(candidate, os.X_OK):
             continue
-        probe = subprocess.run([str(candidate), "-c", "import ensurepip, sys, venv; print(sys.executable)"],
+        probe = subprocess.run([str(candidate), "-c",
+                                "import ensurepip, sys, venv; print(sys.executable); print(sys.base_prefix)"],
                                capture_output=True, text=True)
-        if probe.returncode == 0 and probe.stdout.strip():
-            binary = Path(probe.stdout.strip()).resolve()
-            return Install(binary, binary.parents[1])
+        reported = probe.stdout.splitlines()
+        if probe.returncode == 0 and len(reported) == 2 and all(reported):
+            return Install(Path(reported[0]).resolve(), (Path(reported[1]).resolve(),))
     return None
 
 
 def find_tool(tool, search):
-    """The caller's `tool` as an Install, or None."""
+    """The caller's `tool` as an Install of the trees it reports reading, or None; refuses a tool that reports none."""
     found = shutil.which(tool, path=search)
     if found is None:
         return None
     binary = Path(found).resolve()
-    return Install(binary, binary.parents[TOOLS[tool] - 1])
+    arguments, tree = TOOLS[tool]
+    report = subprocess.run([str(binary), *arguments], capture_output=True, text=True)
+    trees = tuple(Path(match).resolve() for match in tree.findall(report.stdout)) if report.returncode == 0 else ()
+    if not trees:
+        raise SystemExit(f"{COMMAND}: {binary} {' '.join(arguments)} reported no tree to place")
+    return Install(binary, trees)
 
 
 def requirement_stamp(texts):
@@ -356,21 +379,30 @@ def place_install(install, tools_dir):
     """The binary the lane runs for `install`.
 
     An install whose binary resolves under one of SYSTEM_PLACES is used in
-    place, as every user uses it, whatever its computed root: the system
-    Python's root is all of /usr, and /usr/local/bin/zig keeps its lib in
-    /usr/local/lib/zig, outside its root. Any other is copied into `tools_dir`
-    once per binary identity, and the copy is made readable by every user
-    whatever modes the source has.
+    place, as every user uses it, whatever trees it reports: the system
+    Python's prefix is all of /usr. Any other is copied into `tools_dir` once
+    per binary identity: the binary and each reported tree, each at its own
+    place below the install's root, so the binary finds its trees as it does
+    at home and nothing else beside them is copied. The copy is made readable
+    by every user whatever modes the source has.
     """
     if any(install.binary.is_relative_to(place) for place in SYSTEM_PLACES):
         return install.binary
     identity = os.stat(install.binary)
-    key = hashlib.sha256(f"{install.root}\0{identity.st_dev}:{identity.st_ino}:{identity.st_size}:"
+    parts = "\0".join(map(str, install.parts))
+    key = hashlib.sha256(f"{parts}\0{identity.st_dev}:{identity.st_ino}:{identity.st_size}:"
                          f"{identity.st_mtime_ns}\0readable copy".encode()).hexdigest()[:12]
     copy = tools_dir / f"{install.root.name}-{key}"
     if not copy.is_dir():
         staging = Path(tempfile.mkdtemp(dir=tools_dir))
-        subprocess.run(["cp", "-a", f"{install.root}/.", str(staging)], check=True)
+        for part in install.parts:
+            target = staging / part.relative_to(install.root)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if part.is_dir():
+                target.mkdir(exist_ok=True)
+                subprocess.run(["cp", "-a", f"{part}/.", str(target)], check=True)
+            else:
+                subprocess.run(["cp", "-a", str(part), str(target)], check=True)
         subprocess.run(["chmod", "-R", "a+rX", str(staging)], check=True)
         try:
             staging.rename(copy)
@@ -397,8 +429,9 @@ def place(inputs, lane_dir, tools_dir, gid):
 
     The git objects and the trust files and directories always go to
     `lane_dir`, which stays the caller's and only `gid` reads, so the lane
-    never changes what root reads next. An install every user reaches is used
-    in place; any other is copied under `tools_dir`, which every user reads.
+    never changes what root reads next. An install whose binary lies in the
+    system's own places is used in place; any other binary and the trees it
+    reports are copied under `tools_dir`, which every user reads.
     """
     public_dir(lane_dir.parent)
     public_dir(tools_dir)
