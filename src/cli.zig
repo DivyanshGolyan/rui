@@ -630,7 +630,7 @@ fn planLogin(init: std.process.Init, fixture_endpoint: ?[]const u8) !void {
     var interrupt = LoginInterrupt.init();
     defer interrupt.deinit();
     const issuer = try planIssuer(init, fixture_endpoint);
-    provider_login.chatgpt(init, issuer, loginInterrupted, struct {
+    provider_login.chatgpt(init, issuer, planDisplay, .{ .fd = std.Io.File.stdin().handle, .read = readStdin }, loginInterrupted, struct {
         fn publish() bool {
             return login_state.cmpxchgStrong(.cancellable, .publishing, .acq_rel, .acquire) == null;
         }
@@ -641,6 +641,82 @@ fn planLogin(init: std.process.Init, fixture_endpoint: ?[]const u8) !void {
     const outcome = try finishLogin(init, .chatgpt, "Rui: Signed in to ChatGPT.\n") orelse return;
     try std.Io.File.stdout().writeStreamingAll(init.io, "A running Host that serves ChatGPT uses this sign-in from its next request; one started before you signed in needs a restart to serve it.\n");
     try std.Io.File.stdout().writeStreamingAll(init.io, conversationStart(.chatgpt, outcome));
+}
+
+/// The terminal's rendering of what the plan sign-in shows, on stderr.
+fn planDisplay(shown: chatgpt_plan_login.Shown) !void {
+    std.debug.print("{f}", .{PlanShown{ .shown = shown }});
+}
+
+/// The terminal text of one `chatgpt_plan_login.Shown`.
+const PlanShown = struct {
+    shown: chatgpt_plan_login.Shown,
+
+    pub fn format(self: PlanShown, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        const again = " Nothing was saved; run rui auth login chatgpt again.\n";
+        switch (self.shown) {
+            .link => |link| try writer.print(
+                \\Sign in with ChatGPT. Open this link in a browser where you are already signed in to ChatGPT:
+                \\
+                \\{s}
+                \\
+                \\If the page says "Your session has ended", sign in to ChatGPT, then open the link again.
+                \\If the browser ends on a page that cannot load, copy its address and paste it here, then press Enter.
+                \\Waiting for the browser (Ctrl+C cancels)...
+                \\
+            , .{link}),
+            .stray_paste => |port| try writer.print("rui: that is not the address the browser ended on. Paste the whole address, which starts with http://127.0.0.1:{d}/auth/callback\n", .{port}),
+            .failed => |failure| switch (failure) {
+                .invalid_host_id => |path| try writer.print("rui: {s} does not hold a host id Rui wrote; move it aside and sign in again.\n", .{path}),
+                .refused => |code| try writer.print("rui: ChatGPT did not grant the sign-in ({s}). Nothing was saved.\n", .{code}),
+                .timed_out => try writer.print("rui: no sign-in answer arrived in {d} minutes." ++ again, .{chatgpt_plan_login.wait_minutes}),
+                .no_answer_source => try writer.writeAll("rui: input ended and Rui could not listen for the browser, so no sign-in answer can arrive. Nothing was saved.\n"),
+                .callback => |cause| try writer.print("rui: {s}" ++ again, .{switch (cause) {
+                    .state_mismatch => "That answer is not from this sign-in.",
+                    .client_id_mismatch => "ChatGPT answered for another app registration than the one Rui saved.",
+                    .missing_client_id => "ChatGPT's answer did not name Rui's app registration.",
+                    .damaged => "The sign-in answer was incomplete or damaged.",
+                }}),
+                .unreachable_service => |err| try writer.print("rui: could not reach ChatGPT's sign-in service ({s})." ++ again, .{@errorName(err)}),
+                .exchange => |cause| try writer.print("rui: {s} Nothing was saved.\n", .{switch (cause) {
+                    .plan_scope_missing => "You signed in, but ChatGPT did not let Rui use your plan. Allow it on the ChatGPT page, then run rui auth login chatgpt again.",
+                    .code_refused => "ChatGPT refused the sign-in code. Run rui auth login chatgpt again for a new link.",
+                    .not_for_this_sign_in => "ChatGPT's answer was not for this sign-in.",
+                    .unreadable => "ChatGPT's answer could not be read.",
+                }}),
+            },
+        }
+    }
+};
+
+test "the terminal shows each plan sign-in value in the words the login printed before it took a display" {
+    // Expected text is the base commit's literals, written out by hand.
+    for ([_]struct { chatgpt_plan_login.Shown, []const u8 }{
+        .{ .{ .link = "https://example.test/x" }, "Sign in with ChatGPT. Open this link in a browser where you are already signed in to ChatGPT:\n\nhttps://example.test/x\n\nIf the page says \"Your session has ended\", sign in to ChatGPT, then open the link again.\nIf the browser ends on a page that cannot load, copy its address and paste it here, then press Enter.\nWaiting for the browser (Ctrl+C cancels)...\n" },
+        .{ .{ .stray_paste = 1455 }, "rui: that is not the address the browser ended on. Paste the whole address, which starts with http://127.0.0.1:1455/auth/callback\n" },
+        .{ .{ .failed = .{ .invalid_host_id = "/h/host-id" } }, "rui: /h/host-id does not hold a host id Rui wrote; move it aside and sign in again.\n" },
+        .{ .{ .failed = .{ .refused = "access_denied" } }, "rui: ChatGPT did not grant the sign-in (access_denied). Nothing was saved.\n" },
+        .{ .{ .failed = .timed_out }, "rui: no sign-in answer arrived in 30 minutes. Nothing was saved; run rui auth login chatgpt again.\n" },
+        .{ .{ .failed = .no_answer_source }, "rui: input ended and Rui could not listen for the browser, so no sign-in answer can arrive. Nothing was saved.\n" },
+        .{ .{ .failed = .{ .callback = .state_mismatch } }, "rui: That answer is not from this sign-in. Nothing was saved; run rui auth login chatgpt again.\n" },
+        .{ .{ .failed = .{ .callback = .client_id_mismatch } }, "rui: ChatGPT answered for another app registration than the one Rui saved. Nothing was saved; run rui auth login chatgpt again.\n" },
+        .{ .{ .failed = .{ .callback = .missing_client_id } }, "rui: ChatGPT's answer did not name Rui's app registration. Nothing was saved; run rui auth login chatgpt again.\n" },
+        .{ .{ .failed = .{ .callback = .damaged } }, "rui: The sign-in answer was incomplete or damaged. Nothing was saved; run rui auth login chatgpt again.\n" },
+        .{ .{ .failed = .{ .unreachable_service = error.TransportFailed } }, "rui: could not reach ChatGPT's sign-in service (TransportFailed). Nothing was saved; run rui auth login chatgpt again.\n" },
+        .{ .{ .failed = .{ .exchange = .plan_scope_missing } }, "rui: You signed in, but ChatGPT did not let Rui use your plan. Allow it on the ChatGPT page, then run rui auth login chatgpt again. Nothing was saved.\n" },
+        .{ .{ .failed = .{ .exchange = .code_refused } }, "rui: ChatGPT refused the sign-in code. Run rui auth login chatgpt again for a new link. Nothing was saved.\n" },
+        .{ .{ .failed = .{ .exchange = .not_for_this_sign_in } }, "rui: ChatGPT's answer was not for this sign-in. Nothing was saved.\n" },
+        .{ .{ .failed = .{ .exchange = .unreadable } }, "rui: ChatGPT's answer could not be read. Nothing was saved.\n" },
+    }) |case| {
+        var bytes: [1024]u8 = undefined;
+        try std.testing.expectEqualStrings(case[1], try std.fmt.bufPrint(&bytes, "{f}", .{PlanShown{ .shown = case[0] }}));
+    }
+}
+
+/// The plan sign-in's paste source on the terminal: stdin, which a read
+/// error ends as its end does.
+fn readStdin(buffer: []u8) ?usize {
+    return std.posix.read(std.Io.File.stdin().handle, buffer) catch 0;
 }
 
 /// `rui auth logout chatgpt`: revoke, then remove the tokens, keeping the
