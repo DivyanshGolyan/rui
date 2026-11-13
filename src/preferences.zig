@@ -162,13 +162,12 @@ pub fn update(home: []const u8, edit: Edit, readiness: *const Readinesses) !Valu
 }
 
 /// What `rui auth login` did to the default provider for new Sessions.
-pub const LoginDefault = union(enum) {
+pub const LoginDefault = enum {
     /// None was saved; the signed-in provider is now the default.
     filled,
-    /// The saved default was the sign-in this provider supersedes, and is
-    /// now this provider. Like any provider replacement, it clears the
-    /// model pinned for the old one; `cleared_pin` says whether one was.
-    replaced: struct { previous: protocol.Provider, cleared_pin: bool },
+    /// The saved default was the other sign-in to the same account, and is
+    /// now this provider, keeping the model saved with it.
+    replaced,
     /// The signed-in provider already was the default.
     already,
     /// Another saved choice stays, even an unsupported one.
@@ -176,34 +175,37 @@ pub const LoginDefault = union(enum) {
 };
 
 /// After `rui auth login`, under the same preference lock as setup: fill an
-/// unset provider default, or replace the one this provider supersedes,
-/// and keep any other choice. Credentials are owned separately.
+/// unset provider default, or replace the other sign-in to the same
+/// account, and keep any other choice. Credentials are owned separately.
 pub fn fillProviderAfterLogin(home: []const u8, provider: protocol.Provider) !LoginDefault {
     const readiness: Readinesses = .initFill(.configured);
     return (try save(home, .{ .provider = .{ .set = @tagName(provider) } }, &readiness, provider)).login.?;
 }
 
 /// What a sign-in to `provider` did, from the locked snapshot `before` and
-/// the values it published, or null when it published none.
-fn loginOutcome(before: *const Values, after: ?*const Values, provider: protocol.Provider) LoginDefault {
-    const published = after orelse return if (before.provider.eql(@tagName(provider))) .already else .kept;
-    if (before.provider.len == 0) return .filled;
-    return .{ .replaced = .{
-        .previous = std.meta.stringToEnum(protocol.Provider, before.provider.slice()).?,
-        .cleared_pin = before.model.len != 0 and published.model.len == 0,
-    } };
+/// whether it published new values.
+fn loginOutcome(before: *const Values, published: bool, provider: protocol.Provider) LoginDefault {
+    if (!published) return if (before.provider.eql(@tagName(provider))) .already else .kept;
+    return if (before.provider.len == 0) .filled else .replaced;
 }
 
 /// Whether a sign-in to `provider` may make it the default in place of the
-/// saved provider `saved`: when none is saved, or when it supersedes it.
+/// saved provider `saved`: when none is saved, or when `saved` is the other
+/// sign-in to the same account.
 fn loginMayReplace(saved: []const u8, provider: protocol.Provider) bool {
-    if (saved.len == 0) return true;
-    const older = provider.supersedes() orelse return false;
-    return std.mem.eql(u8, saved, @tagName(older));
+    return saved.len == 0 or otherWayIn(saved, provider);
+}
+
+/// Whether the saved provider `saved` is the other sign-in to `provider`'s
+/// account, as `Provider.sameAccount` says.
+fn otherWayIn(saved: []const u8, provider: protocol.Provider) bool {
+    const other = provider.sameAccount() orelse return false;
+    return std.mem.eql(u8, saved, @tagName(other));
 }
 
 /// Saves `provider` as the default after the sign-in screen signed it in:
-/// the person chose it there, so it replaces any saved provider.
+/// the person chose it there, so it replaces any saved provider, and like
+/// any provider change keeps the saved model only within the same account.
 pub fn saveProviderAfterLogin(home: []const u8, provider: protocol.Provider) !void {
     const readiness: Readinesses = .initFill(.configured);
     _ = try save(home, .{ .provider = .{ .set = @tagName(provider) } }, &readiness, null);
@@ -227,7 +229,11 @@ fn apply(saved: Values, edit: Edit, readiness: *const Readinesses) !Values {
         values.store.set(paths.store.slice()) catch return error.InvalidPreferenceStore;
     }
     if (edit.provider == .set) {
-        if (!saved.provider.eql(edit.provider.set)) values.model = .{};
+        // A model saved for another account's provider is dropped; within
+        // one account it carries over, as both ways in name OpenAI's model
+        // IDs. `save` admitted only a known provider name.
+        const chosen = std.meta.stringToEnum(protocol.Provider, edit.provider.set).?;
+        if (!saved.provider.eql(edit.provider.set) and !otherWayIn(saved.provider.slice(), chosen)) values.model = .{};
         values.provider.set(edit.provider.set) catch unreachable;
     }
     if (edit.notifications) |on| values.notifications = on;
@@ -337,7 +343,7 @@ fn saveWithSync(home: []const u8, edit: Edit, readiness: *const Readinesses, log
     const saved = try read(dir);
     try validateSaved(&saved);
     if (login) |provider| {
-        if (!loginMayReplace(saved.provider.slice(), provider)) return .{ .values = saved, .login = loginOutcome(&saved, null, provider) };
+        if (!loginMayReplace(saved.provider.slice(), provider)) return .{ .values = saved, .login = loginOutcome(&saved, false, provider) };
     }
     const values = try apply(saved, edit, readiness);
     try validate(&values);
@@ -377,7 +383,7 @@ fn saveWithSync(home: []const u8, edit: Edit, readiness: *const Readinesses, log
         try dir.rename("preferences.tmp", dir, "preferences", io);
     }
     if (directory_sync.sync(dir.handle) != 0) return error.PreferenceDirectorySyncFailed;
-    return .{ .values = values, .login = if (login) |provider| loginOutcome(&saved, &values, provider) else null };
+    return .{ .values = values, .login = if (login) |provider| loginOutcome(&saved, true, provider) else null };
 }
 
 fn openPreferenceFile(dir: std.Io.Dir, name: []const u8) !std.Io.File {
@@ -517,7 +523,7 @@ test "login fills only a missing provider under the preference lock" {
     try std.testing.expect(saved.provider.eql("legacy") and saved.model.eql("legacy-model"));
 }
 
-test "a login fills an unset default, replaces only the sign-in it supersedes, and keeps every other choice" {
+test "a login fills an unset default, replaces the other sign-in to its account keeping the model, and keeps every other choice" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -525,66 +531,114 @@ test "a login fills an unset default, replaces only the sign-in it supersedes, a
     _ = try update(home, .{}, &.initFill(.configured));
     var config = try tmp.dir.openDir(io, ".config/rui", .{});
     defer config.close(io);
-    const Expected = union(enum) { filled, replaced: protocol.Provider, already, kept, refused };
-    // Written out from the accepted rule, not derived from the code under
-    // test: only a ChatGPT sign-in replaces, and only a saved Codex default.
-    const Case = struct { login: protocol.Provider, saved: []const u8, expected: Expected };
-    const cases = [_]Case{
-        .{ .login = .chatgpt, .saved = "", .expected = .filled },
-        .{ .login = .chatgpt, .saved = "codex", .expected = .{ .replaced = .codex } },
-        .{ .login = .chatgpt, .saved = "openai", .expected = .kept },
-        .{ .login = .chatgpt, .saved = "chatgpt", .expected = .already },
-        .{ .login = .chatgpt, .saved = "legacy", .expected = .kept },
-        .{ .login = .chatgpt, .saved = "unreadable", .expected = .refused },
-        .{ .login = .codex, .saved = "", .expected = .filled },
-        .{ .login = .codex, .saved = "codex", .expected = .already },
-        .{ .login = .codex, .saved = "openai", .expected = .kept },
-        .{ .login = .codex, .saved = "chatgpt", .expected = .kept },
-        .{ .login = .codex, .saved = "legacy", .expected = .kept },
-        .{ .login = .codex, .saved = "unreadable", .expected = .refused },
-        .{ .login = .openai, .saved = "", .expected = .filled },
-        .{ .login = .openai, .saved = "codex", .expected = .kept },
-        .{ .login = .openai, .saved = "openai", .expected = .already },
-        .{ .login = .openai, .saved = "chatgpt", .expected = .kept },
-        .{ .login = .openai, .saved = "legacy", .expected = .kept },
-        .{ .login = .openai, .saved = "unreadable", .expected = .refused },
+    const pin = "gpt-6-luna";
+    // What the file holds afterwards: the same bytes, or a published
+    // provider and model with every other choice kept.
+    const Expected = union(enum) {
+        unchanged: LoginDefault,
+        saved: struct { outcome: LoginDefault, provider: []const u8, model: []const u8 },
+        refused: anyerror,
     };
-    for (cases) |case| for ([_][]const u8{ "", "gpt-6-luna" }) |pin| {
-        if (case.saved.len == 0 and pin.len != 0) continue; // A pin needs a provider.
+    // Written out by hand from the owner's decision of 2026-11-13, not
+    // derived from the code under test: the two ChatGPT sign-ins (codex by
+    // device code, chatgpt in a browser) replace each other in both
+    // directions and keep the saved model; openai and an unsupported name
+    // stay; nothing saved is filled.
+    const Case = struct { saved: []const u8, pinned: bool, login: protocol.Provider, expected: Expected };
+    const cases = [_]Case{
+        .{ .saved = "", .pinned = false, .login = .codex, .expected = .{ .saved = .{ .outcome = .filled, .provider = "codex", .model = "" } } },
+        .{ .saved = "", .pinned = false, .login = .chatgpt, .expected = .{ .saved = .{ .outcome = .filled, .provider = "chatgpt", .model = "" } } },
+        .{ .saved = "", .pinned = false, .login = .openai, .expected = .{ .saved = .{ .outcome = .filled, .provider = "openai", .model = "" } } },
+        // A pin with no provider is a broken file, left for the person.
+        .{ .saved = "", .pinned = true, .login = .codex, .expected = .{ .refused = error.SavedPreferenceProviderRequired } },
+        .{ .saved = "", .pinned = true, .login = .chatgpt, .expected = .{ .refused = error.SavedPreferenceProviderRequired } },
+        .{ .saved = "", .pinned = true, .login = .openai, .expected = .{ .refused = error.SavedPreferenceProviderRequired } },
+        .{ .saved = "codex", .pinned = false, .login = .codex, .expected = .{ .unchanged = .already } },
+        .{ .saved = "codex", .pinned = false, .login = .chatgpt, .expected = .{ .saved = .{ .outcome = .replaced, .provider = "chatgpt", .model = "" } } },
+        .{ .saved = "codex", .pinned = false, .login = .openai, .expected = .{ .unchanged = .kept } },
+        .{ .saved = "codex", .pinned = true, .login = .codex, .expected = .{ .unchanged = .already } },
+        .{ .saved = "codex", .pinned = true, .login = .chatgpt, .expected = .{ .saved = .{ .outcome = .replaced, .provider = "chatgpt", .model = pin } } },
+        .{ .saved = "codex", .pinned = true, .login = .openai, .expected = .{ .unchanged = .kept } },
+        .{ .saved = "chatgpt", .pinned = false, .login = .codex, .expected = .{ .saved = .{ .outcome = .replaced, .provider = "codex", .model = "" } } },
+        .{ .saved = "chatgpt", .pinned = false, .login = .chatgpt, .expected = .{ .unchanged = .already } },
+        .{ .saved = "chatgpt", .pinned = false, .login = .openai, .expected = .{ .unchanged = .kept } },
+        .{ .saved = "chatgpt", .pinned = true, .login = .codex, .expected = .{ .saved = .{ .outcome = .replaced, .provider = "codex", .model = pin } } },
+        .{ .saved = "chatgpt", .pinned = true, .login = .chatgpt, .expected = .{ .unchanged = .already } },
+        .{ .saved = "chatgpt", .pinned = true, .login = .openai, .expected = .{ .unchanged = .kept } },
+        .{ .saved = "openai", .pinned = false, .login = .codex, .expected = .{ .unchanged = .kept } },
+        .{ .saved = "openai", .pinned = false, .login = .chatgpt, .expected = .{ .unchanged = .kept } },
+        .{ .saved = "openai", .pinned = false, .login = .openai, .expected = .{ .unchanged = .already } },
+        .{ .saved = "openai", .pinned = true, .login = .codex, .expected = .{ .unchanged = .kept } },
+        .{ .saved = "openai", .pinned = true, .login = .chatgpt, .expected = .{ .unchanged = .kept } },
+        .{ .saved = "openai", .pinned = true, .login = .openai, .expected = .{ .unchanged = .already } },
+        .{ .saved = "retired", .pinned = false, .login = .codex, .expected = .{ .unchanged = .kept } },
+        .{ .saved = "retired", .pinned = false, .login = .chatgpt, .expected = .{ .unchanged = .kept } },
+        .{ .saved = "retired", .pinned = false, .login = .openai, .expected = .{ .unchanged = .kept } },
+        .{ .saved = "retired", .pinned = true, .login = .codex, .expected = .{ .unchanged = .kept } },
+        .{ .saved = "retired", .pinned = true, .login = .chatgpt, .expected = .{ .unchanged = .kept } },
+        .{ .saved = "retired", .pinned = true, .login = .openai, .expected = .{ .unchanged = .kept } },
+    };
+    // Every saved value, login and pin, once each.
+    try std.testing.expectEqual(5 * std.enums.values(protocol.Provider).len * 2, cases.len);
+    for (cases) |case| {
         var text_buffer: [256]u8 = undefined;
-        const text = if (std.mem.eql(u8, case.saved, "unreadable"))
-            "version=9\nstore=\nprovider=codex\nmodel=\n"
-        else
-            try std.fmt.bufPrint(&text_buffer, "version=3\nstore=\nprovider={s}\nmodel={s}\nnotifications=off\nreasoning_effort=high\n", .{ case.saved, pin });
+        const text = try std.fmt.bufPrint(&text_buffer, "version=3\nstore=\nprovider={s}\nmodel={s}\nnotifications=off\nreasoning_effort=high\n", .{ case.saved, if (case.pinned) pin else "" });
         const file = try config.createFile(io, "preferences", .{ .permissions = .fromMode(0o600) });
         try file.writeStreamingAll(io, text);
         file.close(io);
         const outcome = fillProviderAfterLogin(home, case.login);
         var bytes: [256]u8 = undefined;
         switch (case.expected) {
-            .refused => {
-                try std.testing.expectError(error.UnsupportedPreferencesVersion, outcome);
+            .refused => |err| {
+                try std.testing.expectError(err, outcome);
                 try std.testing.expectEqualStrings(text, try savedFile(config, &bytes));
             },
-            .filled, .replaced => {
-                const expected: LoginDefault = switch (case.expected) {
-                    .replaced => |previous| .{ .replaced = .{ .previous = previous, .cleared_pin = pin.len != 0 } },
-                    else => .filled,
-                };
+            .unchanged => |expected| {
                 try std.testing.expectEqual(expected, try outcome);
-                // The provider changes and its old pin goes; every other
-                // choice stays.
+                try std.testing.expectEqualStrings(text, try savedFile(config, &bytes));
+            },
+            .saved => |expected| {
+                try std.testing.expectEqual(expected.outcome, try outcome);
                 const saved = try load(home);
-                try std.testing.expectEqualStrings(@tagName(case.login), saved.provider.slice());
-                try std.testing.expectEqualStrings("", saved.model.slice());
+                try std.testing.expectEqualStrings(expected.provider, saved.provider.slice());
+                try std.testing.expectEqualStrings(expected.model, saved.model.slice());
                 try std.testing.expect(!saved.notifications and saved.reasoning_effort == .high);
             },
-            .already, .kept => {
-                try std.testing.expectEqual(@as(LoginDefault, if (case.expected == .already) .already else .kept), try outcome);
-                try std.testing.expectEqualStrings(text, try savedFile(config, &bytes));
-            },
         }
-    };
+    }
+    // A file this Rui cannot read is never overwritten, whoever signs in.
+    for (std.enums.values(protocol.Provider)) |login| {
+        const text = "version=9\nstore=\nprovider=codex\nmodel=\n";
+        const file = try config.createFile(io, "preferences", .{ .permissions = .fromMode(0o600) });
+        try file.writeStreamingAll(io, text);
+        file.close(io);
+        try std.testing.expectError(error.UnsupportedPreferencesVersion, fillProviderAfterLogin(home, login));
+        var bytes: [256]u8 = undefined;
+        try std.testing.expectEqualStrings(text, try savedFile(config, &bytes));
+    }
+}
+
+test "the sign-in screen's save keeps the model only within one account" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const home = home_buffer[0..try tmp.dir.realPath(io, &home_buffer)];
+    const all: Readinesses = .initFill(.configured);
+    // From, to, the model kept: written out by hand.
+    for ([_]struct { []const u8, protocol.Provider, []const u8 }{
+        .{ "codex", .chatgpt, "gpt-6-luna" },
+        .{ "chatgpt", .codex, "gpt-6-luna" },
+        .{ "codex", .codex, "gpt-6-luna" },
+        .{ "codex", .openai, "" },
+        .{ "openai", .chatgpt, "" },
+        .{ "openai", .codex, "" },
+    }) |case| {
+        _ = try update(home, .{ .provider = .{ .set = case[0] }, .model = .{ .set = "gpt-6-luna" } }, &all);
+        try saveProviderAfterLogin(home, case[1]);
+        const saved = try load(home);
+        try std.testing.expectEqualStrings(@tagName(case[1]), saved.provider.slice());
+        try std.testing.expectEqualStrings(case[2], saved.model.slice());
+    }
 }
 
 test "preference edits distinguish model keep set and clear without publishing recommendations" {
@@ -785,6 +839,12 @@ test "preference edits persist explicit choices rather than recommendations" {
         .{ "legacy", "retired-model", Edit{ .provider = .{ .set = "codex" }, .model = .{ .set = "new-pin" } }, "codex", "new-pin" },
         .{ "", "", Edit{ .model = .{ .set = "gpt-6-luna" } }, "codex", "gpt-6-luna" },
         .{ "legacy", "retired-model", Edit{}, "legacy", "retired-model" },
+        // Changing how one signs in to the same account keeps the model;
+        // moving to another account drops it.
+        .{ "codex", "gpt-6-luna", Edit{ .provider = .{ .set = "chatgpt" } }, "chatgpt", "gpt-6-luna" },
+        .{ "chatgpt", "gpt-6-luna", Edit{ .provider = .{ .set = "codex" } }, "codex", "gpt-6-luna" },
+        .{ "codex", "gpt-6-luna", Edit{ .provider = .{ .set = "openai" } }, "openai", "" },
+        .{ "openai", "gpt-6-luna", Edit{ .provider = .{ .set = "chatgpt" } }, "chatgpt", "" },
     };
     inline for (cases) |case| {
         const file = try config.createFile(io, "preferences", .{ .permissions = .fromMode(0o600) });
