@@ -6293,7 +6293,9 @@ test "semantic list admission owns covered Settings paste creation and Upgrade p
 
 test "the shared row fitter handles no description cells without allocating or underflowing" {
     for ([_]Keep{ .head, .tail }) |keep| {
-        const shown = try fitted(std.testing.failing_allocator, .{}, "description", 0, keep);
+        var storage: [0]u8 = .{};
+        var fixed: std.heap.FixedBufferAllocator = .init(&storage);
+        const shown = try fitted(fixed.allocator(), .{}, "description", 0, keep);
         try std.testing.expectEqualStrings("", shown.bytes);
         try std.testing.expectEqual(@as(usize, 0), shown.cells);
     }
