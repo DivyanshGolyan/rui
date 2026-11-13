@@ -1,24 +1,32 @@
 //! Foreground Host serve options and conflicts.
 const std = @import("std");
 const grammar = @import("cli_grammar.zig");
-const product_defaults = @import("product_defaults.zig");
-const provider_name = @import("provider_name.zig");
 const retention_capacity = @import("retention_capacity.zig");
 const Option = grammar.Option;
-const Conflict = grammar.Conflict;
 const value = grammar.value;
-const repeatedChoice = grammar.repeatedChoice;
 const hiddenValue = grammar.hiddenValue;
 const hiddenNumber = grammar.hiddenNumber;
 const hiddenFlag = grammar.hiddenFlag;
 pub const destination = &[_]Option{ value("store", "PATH"), grammar.hex("store-hex", "store", 492) };
 
-const endpoint_conflicts = &[_]Conflict{
-    .{ .code = .provider_excludes_endpoint, .a = "provider", .b = "provider-endpoint" },
-    .{ .code = .provider_excludes_ca_file, .a = "provider", .b = "provider-ca-file" },
-    .{ .code = .provider_excludes_codex_fixture, .a = "provider", .b = "test-codex-fixture-endpoint" },
-    .{ .code = .codex_fixture_excludes_endpoint, .a = "test-codex-fixture-endpoint", .b = "provider-endpoint" },
-    .{ .code = .openai_fixture_excludes_endpoint, .a = "test-openai-fixture-endpoint", .b = "provider-endpoint" },
+/// Temporary PR5 migration owner; remove in PR7. Never accepted as options.
+pub const retired_options = &[_]grammar.RetiredOption{
+    .{ .name = "active-capacity", .replacement = "--set execution.activeCapacity=VALUE" },
+    .{ .name = "provider", .replacement = "--set providers='{\"VALUE\":{}}'" },
+    .{ .name = "provider-endpoint", .replacement = "--set providers.LABEL.endpoint=VALUE --set providers.LABEL.unauthenticated=true (replace LABEL with the provider name)" },
+    .{ .name = "provider-ca-file", .replacement = "--set network.caFile=VALUE" },
+    .{ .name = "bash-path", .replacement = "--set tools.bash.path=VALUE" },
+    .{ .name = "bash-timeout-ms", .replacement = "--set tools.bash.timeoutMs=VALUE" },
+};
+/// Hide the compatibility identity spelling on Host settings/start surfaces.
+pub const host_destination = &[_]Option{ value("store", "PATH"), blk: {
+    var option = grammar.hex("store-hex", "store", 492);
+    option.hidden = true;
+    break :blk option;
+} };
+pub const settings_options = host_destination ++ &[_]Option{
+    value("settings", "FILE|-"),
+    .{ .name = "set", .argument = "PATH=VALUE", .repeated = true },
 };
 /// Host fault injection and observation, consumed only by host serve.
 const serve_test = &[_]Option{
@@ -60,4 +68,28 @@ const serve_test = &[_]Option{
     hiddenNumber("test-request-preparation-advance-delay-ms", 0, std.math.maxInt(i64)),
 };
 
-pub const definition: grammar.Definition = .{ .resource = .host, .name = "serve", .description = std.fmt.comptimePrint("Run a foreground Host. Provider credentials belong to this Host, not its peer callers. Each --provider LABEL serves that provider at its own endpoint with its own credential. Without --settings, --provider or a development endpoint it makes no model requests. --active-capacity defaults to {d}. --settings FILE reads a private settings document; --settings - reads one length-prefixed document on stdin. Serve flags override the document. interface.lifetime selects whether closing stdin stops the Host. A MySQL TCP Store URL accepts only ssl-ca=<absolute PEM path> (percent escapes allowed) for exclusive CA trust; sockets refuse it and verification cannot be disabled.", .{product_defaults.active_capacity}), .options = destination ++ &[_]Option{ value("active-capacity", "N"), repeatedChoice("provider", provider_name.Provider), value("provider-endpoint", "URL"), value("provider-ca-file", "PATH"), value("bash-path", "PATH"), value("bash-timeout-ms", "MILLISECONDS"), value("settings", "FILE|-") } ++ serve_test, .conflicts = endpoint_conflicts };
+pub const definition: grammar.Definition = .{
+    .resource = .host,
+    .name = "serve",
+    .description = "Run a foreground Host. Apply saved Host settings, then --settings FILE|- and repeated --set PATH=VALUE in order. Provider credentials belong to this Host, not its peer callers.",
+    .options = settings_options ++ serve_test,
+    .retired_options = retired_options,
+};
+
+comptime {
+    @setEvalBranchQuota(10_000);
+    var visible: usize = 0;
+    for (definition.options) |option| {
+        if (option.hidden) continue;
+        if (!std.mem.eql(u8, option.name, "store") and !std.mem.eql(u8, option.name, "settings") and !std.mem.eql(u8, option.name, "set")) @compileError("unexpected visible Host serve option");
+        visible += 1;
+    }
+    if (visible != 3) @compileError("Host serve must expose exactly store, settings, set");
+    for ([_][]const u8{ "store", "settings", "set" }) |name| {
+        var count: usize = 0;
+        for (definition.options) |option| {
+            if (!option.hidden and std.mem.eql(u8, name, option.name)) count += 1;
+        }
+        if (count != 1) @compileError("Host serve visible options must each appear once");
+    }
+}

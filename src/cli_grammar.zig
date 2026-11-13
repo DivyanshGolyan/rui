@@ -49,8 +49,6 @@ pub fn value(comptime name: []const u8, argument: []const u8) Option {
         return numeric(name, argument, 1, std.math.maxInt(i64), .id_malformed);
     if (comptime std.mem.eql(u8, name, "attempt")) return numeric(name, argument, 1, std.math.maxInt(i64), .count_malformed);
     if (comptime std.mem.eql(u8, name, "ordinal")) return numeric(name, argument, 0, std.math.maxInt(i64), .count_malformed);
-    if (comptime std.mem.eql(u8, name, "active-capacity")) return numeric(name, argument, 0, std.math.maxInt(usize), .count_malformed);
-    if (comptime std.mem.eql(u8, name, "bash-timeout-ms")) return numeric(name, argument, 1, std.math.maxInt(i64), .count_malformed);
     return .{ .name = name, .argument = argument };
 }
 pub fn numeric(name: []const u8, argument: []const u8, comptime min: u64, comptime max: u64, code: caller_error.Code) Option {
@@ -91,7 +89,14 @@ fn checkOptionName(comptime name: []const u8) void {
     if (name.len != 0 and !@import("cli_option_names.zig").contains(name)) @compileError("no CLI option is named --" ++ name);
 }
 
+/// Diagnostic-only migration. VALUE in replacement is filled from the following
+/// token when present; this table does not declare an accepted option.
+pub const RetiredOption = struct { name: []const u8, replacement: []const u8 };
+
 pub const Definition = struct {
+    retired_options: []const RetiredOption = &.{},
+    /// Optional second positional; requires the first declaration.
+    positional_tail: ?[]const u8 = null,
     resource: Resource,
     name: []const u8,
     description: []const u8,
@@ -99,7 +104,7 @@ pub const Definition = struct {
     options: []const Option = &.{},
     positional: ?[]const u8 = null,
     mutation: bool = false,
-    /// Each group needs one of its alternatives; "" names the positional.
+    /// Each group needs one alternative; "" names the first positional, "#2" the second.
     requires: []const []const []const u8 = &.{},
     /// Option pairs an invocation may not combine.
     conflicts: []const Conflict = &.{},
@@ -115,6 +120,7 @@ pub const Definition = struct {
             try writer.writeByte(']');
         }
         if (self.positional) |positional| try writer.print(" [{s}]", .{positional});
+        if (self.positional_tail) |tail| try writer.print(" [{s}]", .{tail});
         try writer.print("\n{s}\n", .{self.description});
         if (self.requires.len != 0) {
             try writer.writeAll("Requires:");
@@ -152,6 +158,10 @@ pub const Definition = struct {
             if (n != 0) try writer.writeAll(" or ");
             if (name.len == 0) {
                 try writer.writeAll(self.positional.?);
+                continue;
+            }
+            if (std.mem.eql(u8, name, "#2")) {
+                try writer.writeAll(self.positional_tail.?);
                 continue;
             }
             try writer.print("--{s}", .{name});
@@ -209,7 +219,7 @@ pub const Definition = struct {
                 continue;
             }
             if (literal or !std.mem.startsWith(u8, arg, "--")) {
-                if (self.positional == null or parsed.positional != null or (!literal and arg.len > 1 and arg[0] == '-')) {
+                if (self.positional == null or (parsed.positional != null and (self.positional_tail == null or parsed.positional_tail != null)) or (!literal and arg.len > 1 and arg[0] == '-')) {
                     var code: caller_error.Code = if (self.resource == .session and (std.mem.eql(u8, self.name, "start") or std.mem.eql(u8, self.name, "send"))) .message_not_stdin else .positional_unexpected;
                     if (self.positional == null and session_id.valid(arg)) {
                         if (self.indexOf("to") != null and !self.selectorPresent(args, "to")) {
@@ -221,11 +231,25 @@ pub const Definition = struct {
                     problem.* = .{ .code = code, .token = arg, .option = false };
                     return error.InvalidArguments;
                 }
-                parsed.positional = arg;
-                parsed.literal_positional = literal;
+                if (parsed.positional == null) {
+                    parsed.positional = arg;
+                    parsed.literal_positional = literal;
+                } else parsed.positional_tail = arg;
                 continue;
             }
             const n = self.indexOf(arg[2..]) orelse {
+                for (self.retired_options) |old| {
+                    if (std.mem.eql(u8, arg[2..], old.name)) {
+                        problem.* = .{
+                            .code = .host_option_retired,
+                            .token = arg,
+                            .option = false,
+                            .value = if (index + 1 < args.len and !std.mem.startsWith(u8, args[index + 1], "--")) args[index + 1] else null,
+                            .accepted = .{ .grammar = old.replacement },
+                        };
+                        return error.UnknownArgument;
+                    }
+                }
                 problem.* = .{ .code = .option_unknown, .token = arg, .option = false };
                 return error.UnknownArgument;
             };
@@ -327,6 +351,8 @@ pub const Parsed = struct {
     repeat_options: [16]usize = undefined,
     repeat_count: usize = 0,
     positional: ?[]const u8 = null,
+    /// Second declared positional, preserving the first-position API.
+    positional_tail: ?[]const u8 = null,
     /// The positional followed `--`, so a lone dash is literal text.
     literal_positional: bool = false,
     help: bool = false,
@@ -352,6 +378,7 @@ pub const Parsed = struct {
     /// Runtime lookup for names from a table; "" still names the positional.
     pub fn hasNamed(self: *const Parsed, name: []const u8) bool {
         if (name.len == 0) return self.positional != null;
+        if (std.mem.eql(u8, name, "#2")) return self.positional_tail != null;
         const n = self.definition.indexOf(name) orelse return false;
         return self.seen & (@as(u64, 1) << @as(u6, @intCast(n))) != 0;
     }
