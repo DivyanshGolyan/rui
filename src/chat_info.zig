@@ -1905,3 +1905,21 @@ test "Chat info focus consumes drawn action layout across pending failures and C
         try std.testing.expectEqual(@as(usize, 6), page.panel.selected);
     };
 }
+
+test "Chat info contains only chat settings and never an app Memory row" {
+    var fixture: Fixture = .{};
+    fixture.init();
+    var page: Self = .{ .backend = fixture.backend() };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    for ([_]?u64{ null, 18 }) |context| for ([_]u16{ 46, 99 }) |width| {
+        fixture.session.context_estimate = context;
+        page.refresh();
+        const text = try dump(&page, arena.allocator(), width, 20);
+        try std.testing.expect(std.mem.indexOf(u8, text, "Memory") == null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "Permissions") != null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "Copy last answer") != null);
+        try std.testing.expectEqual(@as(usize, 6), page.fields.len);
+        _ = arena.reset(.retain_capacity);
+    };
+}
