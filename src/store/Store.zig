@@ -2066,17 +2066,17 @@ pub fn commitsWithWrites(self: *Store) bool {
 /// is kept only beside a writer that did not fail, and only when that one
 /// round gave it: checks that need more rounds are left to the Host's own
 /// `dispatchWork`. A read that fails after COMMIT fences, as it does when
-/// the Host asks, and the commit stands.
-pub noinline fn commitWithSurvey(self: *Store, writer: anytype) void {
+/// the Host asks, and the commit stands. `follow`'s reads, when the
+/// writer has any (`Access.commitFollowed`), ride ahead of the survey's
+/// on the same terms.
+pub noinline fn commitWithSurvey(self: *Store, writer: anytype, follow: anytype) void {
     const kept = &self.identities().survey;
-    const follow = self.identities().follow;
-    self.identities().follow = null;
     const surveyed = kept.asked != .never;
     if (!surveyed and follow == null) return writer.passCommit(null);
     kept.kept = .none;
     var reads: store_access.Access(.survey, error{}) = .{ .store = self, .tail = true };
     defer reads.deinit();
-    if (follow) |after| after.queue(after.context, &reads);
+    if (follow) |after| after.queue(&reads);
     var survey: model_admission_domain.DispatchSurvey = .{};
     if (surveyed) survey.queue(&reads, kept.asked == .paused);
     if (reads.failure != null) {
@@ -2089,7 +2089,7 @@ pub noinline fn commitWithSurvey(self: *Store, writer: anytype) void {
         @as(anyerror!void, fence(self, err)) catch {};
         return;
     }
-    if (follow) |after| after.settle(after.context);
+    if (follow) |after| after.followed();
     if (!surveyed) return;
     const found = (survey.work() catch |err| {
         @as(anyerror!void, fence(self, err)) catch {};
@@ -2102,23 +2102,6 @@ pub noinline fn commitWithSurvey(self: *Store, writer: anytype) void {
     kept.tool_continuation = found.tool_continuation;
     kept.retry = found.retry;
     kept.kept = .fresh;
-}
-
-/// Reads a write asks to follow its COMMIT in the same message, ahead of
-/// the dispatch survey: `queue` binds them, and `settle` takes their
-/// answers once the message ran with no failure. They ride whole or not
-/// at all, as the survey does, so their owner must be able to read them
-/// in a round of its own.
-pub const Follow = struct {
-    context: *anyopaque,
-    queue: *const fn (*anyopaque, *store_access.Access(.survey, error{})) void,
-    settle: *const fn (*anyopaque) void,
-};
-
-/// Sets, or with null clears, the reads the holder's next commit carries
-/// (`commitWithSurvey`). The write that set them clears them when it ends.
-pub fn followCommit(self: *Store, follow: ?Follow) void {
-    self.identities().follow = follow;
 }
 
 /// `Queue.Batch.closed`: the batch's COMMIT already ran.
@@ -2372,8 +2355,6 @@ const HostValues = struct {
     /// and advances the generation, then `ready` until the next advance.
     /// It fits the padding after `admitted_len`.
     survey: Survey = .{},
-    /// The reads the holder's next commit carries after it (`followCommit`).
-    follow: ?Follow = null,
 };
 
 const Survey = packed struct(u16) {

@@ -1859,6 +1859,94 @@ test "a transition's round names the failed step of each statement it names, and
     }.run);
 }
 
+/// Dates a Session and, where `follow`, reads its date back after COMMIT
+/// in the commit's message: the reads a transition's `follow` names.
+const TestingFollow = struct {
+    pub const rounds = transition.rounds(.{ .head = .{ .always, error.TestingRead } });
+    pub const round_budget = 2;
+    pub const commit: transition.Commit = .transaction;
+    pub const begin: ?rounds.At = null;
+    pub const Input = struct { session: []const u8, follow: bool };
+    /// The date the follow read, or null where it did not ride.
+    pub const Result = ?u64;
+    pub const Ordinary = error{};
+    pub const Guards = error{TestingGuard};
+    pub const Declined = error{};
+    const created = rsql.Read(.{
+        .sql = "SELECT created_at FROM session WHERE session_ref=?1",
+        .Args = struct { session_ref: []const u8 },
+        .Row = struct { created_at: u64 },
+        .cardinality = .one,
+    });
+
+    input: Input,
+    loaded: TestingRound.head.Result = undefined,
+    after: After = .{},
+
+    const After = struct {
+        session: []const u8 = &.{},
+        row: created.Row = undefined,
+        seen: ?u64 = null,
+
+        pub fn queue(after: *After, reads: anytype) void {
+            reads.read(created, .{ .session_ref = after.session }, &after.row);
+        }
+
+        pub fn followed(after: *After) void {
+            after.seen = after.row.created_at;
+        }
+    };
+
+    pub fn step(t: *TestingFollow, r: *transition.Round(TestingFollow), ran: ?rounds.At) !transition.Next(TestingFollow) {
+        if (ran == null) {
+            r.read(TestingRound.head, .{ .session_ref = t.input.session }, &t.loaded);
+            return .{ .round = .head };
+        }
+        r.write(TestingRound.date_session, .{ .session = t.loaded.head, .revision = 1 });
+        t.after.session = t.input.session;
+        return .commit;
+    }
+
+    pub fn follow(t: *TestingFollow) ?*After {
+        return if (t.input.follow) &t.after else null;
+    }
+
+    pub fn committed(t: *const TestingFollow) Result {
+        return t.after.seen;
+    }
+
+    /// The body a queued write runs, so the commit is its batch's first.
+    fn held(storage: *Store, session: []const u8, follows: bool) !Result {
+        return transition.apply(storage, TestingFollow, .{ .session = session, .follow = follows }, .{});
+    }
+};
+
+test "a transition's follow reads ride its commit's message where that message carries reads, and cost no round" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try configureTestSession(&storage, "transition-follow");
+            for ([_]bool{ false, true }) |follows| {
+                const rounds = storage.testing_content_work.rounds;
+                const seen = try storage.queue().write(TestingFollow.held, .{ &storage, session.slice(), follows });
+                // A rerun commits at its batch's end, with nothing after it.
+                if (case.rerun) continue;
+                // The head's round, then the commit, which the reads ride.
+                try std.testing.expectEqual(rounds + 2, storage.testing_content_work.rounds);
+                // Only a network engine's lone write sends COMMIT with reads after it.
+                if (follows and case.engine == .mysql) {
+                    try std.testing.expectEqual(try store_testing.queryU64(&storage, "SELECT created_at FROM session", .{}), seen.?);
+                } else try std.testing.expectEqual(@as(?u64, null), seen);
+            }
+            try std.testing.expect(!storage.isFenced());
+        }
+    }.run);
+}
+
 /// Reads a Session's head once outside its transaction and once inside,
 /// noting each time whether the transaction is open, then dates the
 /// Session where its revision is `revision`.

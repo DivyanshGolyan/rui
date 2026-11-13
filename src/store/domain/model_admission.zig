@@ -779,10 +779,8 @@ noinline fn commitAdmission(writer: anytype, queued: *const QueuedAdmission, sta
     if (opened) {
         request = .init(start.?.view, start.?.settings);
         request.readAhead(start.?, &queued.session, queued.position);
-        store_core.followCommit(writer.store, request.follow());
     }
-    defer if (opened) store_core.followCommit(writer.store, null);
-    writer.commit() catch |err| {
+    writer.commitFollowed(if (opened) &request else null) catch |err| {
         if (opened) start.?.view.close();
         return err;
     };

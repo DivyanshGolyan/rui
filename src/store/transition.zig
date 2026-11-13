@@ -27,6 +27,10 @@
 //! - `committed(t)`, the result once its commit stands.
 //! - optionally `announced(t)`, what the Host hears once its commit stands
 //!   and before the Store runs anything else (`Store.announce`).
+//! - optionally `follow(t)`, the reads its commit carries after COMMIT in
+//!   the same message where that message carries reads, or null
+//!   (`Access.commitFollowed`): a pointer to a value with `queue(reads)`
+//!   and `followed()`, which the value keeps until the commit ends.
 //! - optionally `deinit(t)`, which frees what its steps allocated, once
 //!   `apply` ends on any path.
 //!
@@ -396,7 +400,8 @@ fn drive(comptime T: type, t: *T, core: *CoreFor(T)) !T.Result {
             // Reads queued outside the transaction would never run.
             if (@FieldType(CoreFor(T), "reader") != void) std.debug.assert(core.reader.queued == 0);
             std.debug.assert(core.raw == null);
-            core.writer.commit() catch |err| {
+            const committing = if (comptime @hasDecl(T, "follow")) core.writer.commitFollowed(T.follow(t)) else core.writer.commit();
+            committing catch |err| {
                 if (comptime @typeInfo(T.Declined).error_set.error_names.?.len != 0) if (declinedBy(T, err)) |declined| {
                     try core.writer.abandon(core.faults);
                     return T.declined(t, declined);

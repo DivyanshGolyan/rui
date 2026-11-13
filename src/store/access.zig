@@ -180,6 +180,13 @@ pub const Tail = struct {
     step: *const fn (*anyopaque) bool,
 };
 
+/// A commit that carries no reads of its own after COMMIT
+/// (`Access.commitFollowed`).
+const Unfollowed = struct {
+    pub fn queue(_: *Unfollowed, _: anytype) void {}
+    pub fn followed(_: *Unfollowed) void {}
+};
+
 fn fences(err: anyerror) bool {
     return err == error.StoreConnectionLost or err == error.CommitOutcomeUnknown or err == error.OwnershipLost;
 }
@@ -599,6 +606,17 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// COMMIT. A SQLite `.single` uses its one write's autocommit;
         /// a batching engine keeps its ownership fence in the transaction.
         pub fn commit(a: *Self) Error!void {
+            return a.commitFollowed(@as(?*Unfollowed, null));
+        }
+
+        /// `commit`, with `follow`'s reads after COMMIT in its message
+        /// where that message carries reads (`Store.commitWithSurvey`):
+        /// null, or a pointer to a value whose `queue(reads)` queues them
+        /// on the survey's Access and whose `followed()` takes their
+        /// answers once the message ran with no failure. They ride whole
+        /// or not at all, so their owner must be able to read them in a
+        /// round of its own.
+        pub fn commitFollowed(a: *Self, follow: anytype) Error!void {
             comptime std.debug.assert(transacts or mode == .single);
             if (@import("builtin").is_test) a.store.testing_content_work.rounds += 1;
             if (mode == .single and a.failure == null and a.queued != 1)
@@ -609,7 +627,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
                 a.phase = .ended;
                 return;
             }
-            try a.finishWrites();
+            try a.finishWrites(follow);
             store_core.commit(a.store) catch |err| {
                 a.failure = err;
                 return err;
@@ -664,7 +682,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// network engine's COMMIT rides the same round when the write is
         /// its batch's only one (`store_core.commitsWithWrites`): each
         /// write's guard stops the round before it (`Engine.appendCommit`).
-        fn finishWrites(a: *Self) Error!void {
+        fn finishWrites(a: *Self, follow: anytype) Error!void {
             a.ensureOpen();
             if (!a.store.engine.batches()) a.pass();
             if (a.failure) |err| return err;
@@ -673,7 +691,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
                 _ = a.queueStatement(advance, &.{ .session = claim.head, .expected = expected, .next = expected + claim.taken }, runWrite(advance), .{ .none = {} });
             };
             const commits = a.bindCommit();
-            if (commits and transacts) store_core.commitWithSurvey(a.store, a) else a.pass();
+            if (commits and transacts) store_core.commitWithSurvey(a.store, a, follow) else a.pass();
             a.claimed = 0;
             if (commits) {
                 if (a.store.engine.settleCommit()) |_| {
