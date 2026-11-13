@@ -24,13 +24,21 @@ interface Kind {
 /** Normalize only generated schema leaves. Arbitrary preset JSON is not interpreted. */
 export function pipeSettings(value: HostSettings, environmentSource?: (name: unknown, path: string) => void): components["schemas"]["HostSettings"] {
 	function visit(value: unknown, codec: Kind | undefined, path: string): unknown {
-		if (codec?.kind === "secret") {
-			if (typeof value === "string") return { value };
-			if (value && typeof value === "object" && Object.hasOwn(value, "env")) environmentSource?.((value as { env: unknown }).env, `${path}.env`);
+		if (codec?.kind === "secret" && typeof value === "string") return { value };
+		if (codec?.kind === "bytes") {
+			if (value instanceof Uint8Array) return { hex: Buffer.from(value.buffer, value.byteOffset, value.byteLength).toString("hex") };
+			if (value !== null && typeof value === "object") {
+				// Project only this byte leaf once, preserving toJSON(key) and omitted-field semantics.
+				const key = path.slice(path.lastIndexOf(".") + 1);
+				const projected = JSON.parse(JSON.stringify({ [key]: value })) as Record<string, unknown>;
+				return Object.hasOwn(projected, key) ? projected[key] : undefined;
+			}
+			return value;
 		}
-		if (codec?.kind === "bytes" && value instanceof Uint8Array) return { hex: Buffer.from(value.buffer, value.byteOffset, value.byteLength).toString("hex") };
 		if (!codec?.fields || value === null || typeof value !== "object" || Array.isArray(value)) return value;
-		return Object.fromEntries(Object.entries(value).map(([name, field]) => [name, visit(field, codec.fields && Object.hasOwn(codec.fields, name) ? codec.fields[name] : codec.fields?.["*"], path ? `${path}.${name}` : name)]));
+		const normalized = Object.fromEntries(Object.entries(value).map(([name, field]) => [name, visit(field, codec.fields && Object.hasOwn(codec.fields, name) ? codec.fields[name] : codec.fields?.["*"], path ? `${path}.${name}` : name)]));
+		if (codec.kind === "secret" && Object.hasOwn(normalized, "env")) environmentSource?.(normalized.env, `${path}.env`);
+		return normalized;
 	}
 	return visit(value, SETTINGS_KINDS, "") as components["schemas"]["HostSettings"];
 }

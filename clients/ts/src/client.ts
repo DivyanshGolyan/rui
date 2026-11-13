@@ -316,7 +316,9 @@ export function launchFor(settings: HostSettings, runtimeDir: string, options: C
 		}),
 	}, (source, path) => {
 		const name = environmentName(source, path);
-		if (name !== undefined && process.env[name] !== undefined) env[name] = process.env[name];
+		if (name === undefined) return;
+		const value = process.env[name];
+		if (value !== undefined) env[name] = value;
 	});
 	const dir = document.interface?.dir;
 	const interfaceDir = typeof dir === "object" && dir !== null ? Buffer.from(dir.hex, "hex") : (dir ?? runtimeDir);
@@ -333,18 +335,26 @@ function disposeLaunch(launch: Launch): void {
 	for (const name of Object.keys(launch.env)) delete launch.env[name];
 }
 
-/** Node cannot represent arbitrary OS-byte environment keys; never select a replacement key. */
+/** Consume the byte codec's canonical JSON value before allowing any Node environment lookup.
+ * Malformed values stay in the document for Host refusal; Host bounds remain its own. */
 function environmentName(source: unknown, path: string): string | undefined {
-	if (typeof source === "string") return source;
-	let bytes: Uint8Array;
-	if (source instanceof Uint8Array) bytes = source;
-	else if (source && typeof source === "object" && "hex" in source && typeof source.hex === "string" && /^(?:[0-9a-f]{2})+$/.test(source.hex)) bytes = Buffer.from(source.hex, "hex");
-	else return undefined; // Malformed sources are refused by the Host, with their leaf path.
-	try {
-		return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
-	} catch {
-		throw new RuiStartError("settings_invalid", `${path}: Node requires UTF-8 environment names; use a file source for OS-byte names`);
+	let name: string;
+	if (typeof source === "string") name = source;
+	else {
+		if (source === null || typeof source !== "object") return undefined;
+		const fields = Object.keys(source);
+		if (fields.length !== 1 || fields[0] !== "hex") return undefined;
+		const hex = (source as { hex?: unknown }).hex;
+		if (typeof hex !== "string") return undefined;
+		if (hex.length % 2 !== 0 || /[^0-9a-f]/.test(hex)) return undefined;
+		try {
+			name = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(Buffer.from(hex, "hex"));
+		} catch {
+			throw new RuiStartError("settings_invalid", `${path}: Node requires UTF-8 environment names; use a file source for OS-byte names`);
+		}
 	}
+	// Node truncates NUL and replaces lone UTF-16 surrogates; neither may choose another key.
+	return name.length !== 0 && !/[\0=\uD800-\uDFFF]/u.test(name) ? name : undefined;
 }
 
 /** Presets and Session mutation requests use the same wire writer. */

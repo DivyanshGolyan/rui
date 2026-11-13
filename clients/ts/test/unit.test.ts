@@ -132,7 +132,7 @@ test("only explicitly named secret environment sources join the base child envir
 });
 
 test("environment names preserve reserved keys, Unicode and a UTF-8 BOM byte for byte", () => {
-	for (const selected of ["__proto__", "constructor", "toString", "RUI_TS_É", "\uFEFFRUI_TS_BOM"]) {
+	for (const selected of ["__proto__", "constructor", "toString", "RUI_TS_É", "RUI_TS_😀", "\uFEFFRUI_TS_BOM"]) {
 		const old = process.env[selected];
 		process.env[selected] = "selected-private-value";
 		try {
@@ -149,6 +149,172 @@ test("environment names preserve reserved keys, Unicode and a UTF-8 BOM byte for
 		} finally {
 			if (old === undefined) delete process.env[selected]; else process.env[selected] = old;
 		}
+	}
+});
+
+test("byte sources use their serialized data once rather than JavaScript representation", () => {
+	const selected = "RUI_TS_SERIALIZED_SOURCE";
+	const ignored = "RUI_TS_UNSERIALIZED_SOURCE";
+	const hex = Buffer.from(selected).toString("hex");
+	const ignoredHex = Buffer.from(ignored).toString("hex");
+	const oldSelected = process.env[selected];
+	const oldIgnored = process.env[ignored];
+	process.env[selected] = "selected-private-value";
+	process.env[ignored] = "unselected-private-value";
+	try {
+		for (const kind of ["class", "getter", "symbol", "toJSON", "string-toJSON", "omitted-toJSON", "extra-toJSON"] as const) {
+			for (const seam of ["openai", "mysql", "mcp"] as const) {
+				let getters = 0;
+				let projections = 0;
+				const source = kind === "class" ? new class { hex = hex; }()
+					: kind === "getter" ? { get hex() { getters++; return getters === 1 ? hex : ignoredHex; } }
+					: kind === "symbol" ? { hex, [Symbol("ignored")]: true }
+					: { hex: ignoredHex, toJSON(key: string) {
+						projections++;
+						assert.equal(key, "env");
+						return kind === "omitted-toJSON" ? undefined : kind === "string-toJSON" ? selected : kind === "extra-toJSON" ? { hex, extra: true } : { hex };
+					} };
+				const settings = seam === "openai" ? { providers: { openai: { key: { env: source } } } }
+					: seam === "mysql" ? { store: { mysql: { url: { env: source } } } }
+					: { tools: { mcp: { source: { url: "http://127.0.0.1:1", bearerToken: { env: source } } } } };
+				const launch = launchFor(settings as HostSettings, "/r");
+				try {
+					assert.equal(launch.env[selected], kind === "omitted-toJSON" || kind === "extra-toJSON" ? undefined : "selected-private-value", "forward only the serialized source name");
+					assert.equal(launch.env[ignored], undefined, "never forward an unserialized representation's name");
+					const document = JSON.parse(launch.document.subarray(4).toString("utf8"));
+					const secret = seam === "openai" ? document.providers.openai.key : seam === "mysql" ? document.store.mysql.url : document.tools.mcp.source.bearerToken;
+					assert.deepEqual(secret, kind === "omitted-toJSON" ? {} : { env: kind === "string-toJSON" ? selected : kind === "extra-toJSON" ? { hex, extra: true } : { hex } }, "serialized document must use the same canonical byte source");
+					assert.equal(getters, kind === "getter" ? 1 : 0, "the byte getter must run exactly once");
+					assert.equal(projections, kind.endsWith("toJSON") ? 1 : 0, "the byte toJSON must run exactly once");
+				} finally {
+					launch.document.fill(0);
+				}
+			}
+		}
+	} finally {
+		if (oldSelected === undefined) delete process.env[selected]; else process.env[selected] = oldSelected;
+		if (oldIgnored === undefined) delete process.env[ignored]; else process.env[ignored] = oldIgnored;
+	}
+});
+
+test("an omitted byte source never inherits an environment name from Object.prototype", () => {
+	const name = "RUI_TS_PROTOTYPE_UNSELECTED";
+	const previous = Object.getOwnPropertyDescriptor(Object.prototype, "env");
+	const environment = process.env;
+	let lookups = 0;
+	let projections = 0;
+	let launch: ReturnType<typeof launchFor> | undefined;
+	Object.defineProperty(Object.prototype, "env", { value: name, writable: true, configurable: true });
+	process.env = new Proxy(environment, {
+		get(target, key) {
+			if (key === name) {
+				lookups++;
+				return "private-unselected-value";
+			}
+			return Reflect.get(target, key);
+		},
+	});
+	try {
+		launch = launchFor({ providers: { openai: { key: { env: { hex: "", toJSON() { projections++; return undefined; } } } } } } as HostSettings, "/r", { binary: "/fixture/rui" });
+		assert.equal(lookups, 0, "an omitted source must never look up an inherited environment name");
+		assert.equal(Object.hasOwn(launch.env, name), false);
+		const document = JSON.parse(launch.document.subarray(4).toString("utf8"));
+		assert.deepEqual(document.providers.openai.key, {});
+		assert.equal(Object.hasOwn(document.providers.openai.key, "env"), false, "an omitted source must stay omitted on the wire");
+		assert.equal(projections, 1);
+	} finally {
+		launch?.document.fill(0);
+		process.env = environment;
+		if (previous) Object.defineProperty(Object.prototype, "env", previous);
+		else Reflect.deleteProperty(Object.prototype, "env");
+	}
+});
+
+test("canonical non-hex sources never read an inherited hex getter", () => {
+	const previous = Object.getOwnPropertyDescriptor(Object.prototype, "hex");
+	let reads = 0;
+	Object.defineProperty(Object.prototype, "hex", { get() { reads++; return "616e792d6e616d65"; }, configurable: true });
+	try {
+		for (const env of [{}, { unexpected: true }]) {
+			const launch = launchFor({ providers: { openai: { key: { env } } } } as HostSettings, "/r");
+			try {
+				assert.equal(reads, 0, "a non-hex serialized source must not read the prototype getter");
+			} finally {
+				launch.document.fill(0);
+			}
+		}
+	} finally {
+		if (previous) Object.defineProperty(Object.prototype, "hex", previous);
+		else Reflect.deleteProperty(Object.prototype, "hex");
+	}
+});
+
+test("path byte leaves project once without serializing secret literal objects", () => {
+	let paths = 0;
+	let secrets = 0;
+	const key = { value: "secret-literal", toJSON() { secrets++; return { value: "secret-literal" }; } };
+	const document = pipeSettings({
+		network: { caFile: { hex: "2f7472757374", toJSON(name: string) { paths++; assert.equal(name, "caFile"); return { hex: "2f7472757374" }; } } },
+		providers: { openai: { key } },
+	} as HostSettings);
+	assert.deepEqual(document.network?.caFile, { hex: "2f7472757374" });
+	assert.equal(paths, 1);
+	assert.equal(secrets, 0, "byte projection must not serialize credential source/literal objects");
+});
+
+test("malformed environment sources are never looked up or forwarded", () => {
+	const selected = "RUI_TS_EXACT_SOURCE";
+	const hex = Buffer.from(selected).toString("hex");
+	const sources: unknown[] = [];
+	for (const name of ["", `${selected}\0UNSELECTED`, `${selected}=UNSELECTED`]) {
+		sources.push(name, Buffer.from(name), { hex: Buffer.from(name).toString("hex") });
+	}
+	sources.push(
+		`${selected}\uD800UNSELECTED`, `${selected}\uDFFFUNSELECTED`,
+		{ hex, extra: true }, Object.create({ hex }),
+		Object.defineProperty({}, "hex", { value: hex, enumerable: false }),
+		{ hex: `${hex}\n` }, { hex: `${hex}\n\n` }, { hex: hex.slice(0, -1) },
+		{ hex: hex.toUpperCase() }, { hex: 123 },
+	);
+	const environment = process.env;
+	const lookups: string[] = [];
+	let observing = false;
+	// This catches Node's aliasing getter BEFORE the child environment is constructed.
+	process.env = new Proxy(environment, {
+		get(target, name) {
+			if (observing && typeof name === "string") lookups.push(name);
+			return typeof name === "string" && name.startsWith(selected) ? "private-unselected-value" : Reflect.get(target, name);
+		},
+	});
+	try {
+		for (const source of sources) {
+			for (const settings of [
+				{ providers: { openai: { key: { env: source } } } },
+				{ store: { mysql: { url: { env: source } } } },
+				{ tools: { mcp: { source: { url: "http://127.0.0.1:1", bearerToken: { env: source } } } } },
+			]) {
+				lookups.length = 0;
+				observing = true;
+				let launch: ReturnType<typeof launchFor>;
+				try {
+					// Leave invalid key bytes for the Host's settings_invalid refusal, without aliasing them.
+					launch = launchFor(settings as HostSettings, "/r", { binary: "/fixture/rui" });
+				} finally {
+					observing = false;
+				}
+				try {
+					assert.deepEqual(lookups, ["PATH", "HOME", "TMPDIR"], "a malformed source must never trigger any secret environment lookup");
+					assert.ok(!Object.values(launch.env).includes("private-unselected-value"), "a malformed source must never forward another variable's value");
+					const wireSource = source instanceof Uint8Array ? { hex: Buffer.from(source.buffer, source.byteOffset, source.byteLength).toString("hex") } : source;
+					const expected = JSON.parse(JSON.stringify(settings, (name, value) => name === "env" ? wireSource : value));
+					assert.deepEqual(JSON.parse(launch.document.subarray(4).toString("utf8")), { ...expected, interface: { dir: "/r", lifetime: "stdin" } }, "Host refusal must see the original malformed key, with byte arrays encoded losslessly");
+				} finally {
+					launch.document.fill(0);
+				}
+			}
+		}
+	} finally {
+		process.env = environment;
 	}
 });
 
