@@ -48,7 +48,7 @@ test("the packed tarballs install and start a Host from the platform package", {
 			join(app, "run.mjs"),
 			`import { readlinkSync } from "node:fs";
 import { Rui } from "ruicode";
-const rui = await Rui.connect({ database: ${JSON.stringify(join(work, "store"))}, provider: { baseUrl: "https://api.openai.com/v1", key: "sk-test" } });
+const rui = await Rui.connect({ store: { sqlite: { dir: ${JSON.stringify(join(work, "store"))} } }, providers: { openai: { endpoint: "https://api.openai.com/v1/responses", key: "sk-test" } } });
 const executable = process.platform === "linux" ? readlinkSync(\`/proc/\${rui.pid}/exe\`) : null;
 console.log(JSON.stringify({ executable }));
 await rui.close();

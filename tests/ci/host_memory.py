@@ -28,7 +28,7 @@ from typing import Callable, NamedTuple
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tests/integration"))
 import host_process
-import launch_frame_fixture
+import settings_fixture
 import os_semantics
 from product_defaults import compaction_trigger
 
@@ -143,7 +143,7 @@ def model_listing(binary, root, store):
 
 @contextlib.contextmanager
 def mcp_listing(binary, root, store):
-    # As in launch_frame_integration: a server that accepts and never answers
+    # As in settings_integration: a server that accepts and never answers
     # holds the Host in its start-up tools/list.
     silent = socket.socket()
     try:
@@ -151,14 +151,16 @@ def mcp_listing(binary, root, store):
         silent.listen(1)
         silent.settimeout(10)
         runtime = Path(tempfile.mkdtemp(dir=root))
-        frame = {"v": 1, "store": str(store), "runtimeDir": str(runtime), "activeCapacity": AGENTS,
-                 "provider": {"kind": "openai_key", "baseUrl": "https://127.0.0.1:1/v1", "key": "sk-synthetic"},
-                 "mcpServers": [{"name": "silent", "url": f"http://127.0.0.1:{silent.getsockname()[1]}/mcp",
-                                 "bearerToken": "t"}]}
-        host = subprocess.Popen([binary, "host", "serve", "--launch-frame"], stdin=subprocess.PIPE,
+        document = {"store": {"sqlite": {"dir": str(store)}},
+                    "interface": {"dir": str(runtime), "lifetime": "stdin"},
+                    "execution": {"activeCapacity": AGENTS},
+                    "providers": {"openai": {"endpoint": "https://127.0.0.1:1/v1/responses", "key": {"value": "sk-synthetic"}}},
+                    "tools": {"mcp": {"silent": {"url": f"http://127.0.0.1:{silent.getsockname()[1]}/mcp",
+                                                 "bearerToken": {"value": "t"}}}}}
+        host = subprocess.Popen([binary, "host", "serve", "--settings", "-"], stdin=subprocess.PIPE,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
-            host.stdin.write(launch_frame_fixture.frame(frame))
+            host.stdin.write(settings_fixture.frame(document))
             host.stdin.flush()
             held, _ = silent.accept()
             with held:

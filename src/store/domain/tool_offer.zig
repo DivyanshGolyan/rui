@@ -6,6 +6,7 @@ const tool_name = @import("../../tool_name.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
 const rsql = @import("../rsql.zig");
 const tool_set = @import("tool_set.zig");
+const tool_offer = @This();
 
 /// One relational projection for current offers. Intent supplies membership;
 /// the Host supplies MCP identities, while built-in identities remain frozen.
@@ -77,18 +78,41 @@ pub const stale_sql = "EXISTS(SELECT 1 FROM tool_set_member tm JOIN tool_record 
     "WHERE tm.tool_set_id=" ++ tool_set.offeredSetSql("s") ++ " AND tool.owner='mcp' AND tm.tool_record_id NOT IN " ++
     "(SELECT hm.tool_record_id FROM host_tool_set host JOIN tool_set_member hm ON hm.tool_set_id=host.tool_set_id WHERE host.slot=1))";
 
-/// Only Operation admission saves the effective offer. Intent that is not
-/// `stale` (see `stale_sql`) already names it, requiring no additional round.
-/// Scratch is reused Store memory; callers cannot hold another scratch lease.
-pub fn freeze(a: anytype, allowed: u64, loaded: ?u64, stale: bool) !u64 {
-    if (!stale) return loaded orelse allowed;
-    const scratch = a.store.reportScratch(Projection);
-    scratch.* = .{};
-    project(a, allowed, loaded, scratch);
-    try a.run();
-    if (scratch.invalid) return error.CorruptStore;
-    const set = try tool_set.internMembers(a, scratch.members[0..scratch.count]);
-    // Consume queued borrowed member names before the scratch can be reused.
-    try a.run();
-    return set;
-}
+/// Only Operation admission saves the effective offer, in the rounds its
+/// caller runs. Intent that is not `stale` (see `stale_sql`) already names
+/// it, requiring no additional round (`unchanged`). Otherwise `project`
+/// queues the projection; after its round, `intern` queues the lookup of
+/// the projected set; after that round, `set` answers its id, having
+/// queued a new set's rows when none was saved: a round of their own then
+/// runs them (`Interning.inserted`), so the queued member names it borrows
+/// are consumed before the caller's storage changes. Over 14 KiB: its
+/// caller keeps it in the Store's scratch.
+pub const Freeze = struct {
+    projection: Projection = .{},
+    interning: tool_set.Interning = .{},
+
+    /// The offer when the intent is not `stale`, or null.
+    pub fn unchanged(allowed: u64, loaded: ?u64, stale: bool) ?u64 {
+        return if (stale) null else loaded orelse allowed;
+    }
+
+    pub fn project(freeze: *Freeze, a: anytype, allowed: u64, loaded: ?u64) void {
+        freeze.* = .{};
+        tool_offer.project(a, allowed, loaded, &freeze.projection);
+    }
+
+    /// After `project`'s round.
+    pub fn intern(freeze: *Freeze, a: anytype) !void {
+        if (freeze.projection.invalid) return error.CorruptStore;
+        freeze.interning.queue(a, freeze.members());
+    }
+
+    /// After `intern`'s round.
+    pub fn set(freeze: *Freeze, a: anytype) !u64 {
+        return freeze.interning.finish(a, freeze.members());
+    }
+
+    fn members(freeze: *const Freeze) []const tool_set.Member {
+        return freeze.projection.members[0..freeze.projection.count];
+    }
+};

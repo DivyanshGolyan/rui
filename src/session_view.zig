@@ -1311,9 +1311,12 @@ test "tool header hides all body lines for every outcome and first-line split" {
             self.length += bytes.len;
         }
     };
-    const body = "Bash failed. Exit code: 7.\nProcess-group signaling reported a failure.\n" ++
-        "Capture may be incomplete.\nstdout tail:\nhidden\nstderr tail:\n\x1b[2Jhidden\n" ++
-        "[earlier output omitted]\nFull stdout: /secret\nOpen the tool row for saved output.\n";
+    const bodies = .{
+        "Bash failed. Exit code: 7.\nProcess-group signaling reported a failure.\n" ++
+            "Capture may be incomplete.\nstdout tail:\nhidden\nstderr tail:\n\x1b[2Jhidden\n" ++
+            "[earlier output omitted]\nFull stdout: /secret\nOpen the tool row for saved output.\n",
+        "Bash failed. Exit code: 7.\nCapture may be incomplete.\nstdout:\nhead\n[123 bytes left out]\ntail\nstderr:\n\x1b[2Jhidden\nFull stdout: /secret\nFull stderr: /secret-err\n",
+    };
     const cases = .{
         .{ protocol.ToolPresentation.Code.unresolved, "⠹ Tool call" },
         .{ protocol.ToolPresentation.Code.pending_permission, "? Tool call" },
@@ -1330,31 +1333,33 @@ test "tool header hides all body lines for every outcome and first-line split" {
         .{ protocol.ToolPresentation.Code.invalid_arguments, "× Tool call · rejected" },
     };
     try std.testing.expectEqual(std.enums.values(protocol.ToolPresentation.Code).len, cases.len);
-    inline for (cases) |case| {
-        for (0..body.len + 1) |split| {
-            for ([_]bool{ false, true }) |colour| {
-                var scan: ToolHeaderScan = .{};
-                try scan.feed(body[0..split]);
-                try scan.feed(body[split..]);
-                var sink: Sink = .{};
-                const presentation: protocol.ToolPresentation = .{ .description = null, .code = case[0], .publication_position = null };
-                try toolResult(presentation, scan.facts(case[0]), &sink, colour);
-                var expected: Sink = .{};
-                const glyph_end = std.mem.indexOfScalar(u8, case[1], ' ').?;
-                if (colour) try expected.feed(switch (case[0]) {
-                    .unresolved => "\x1b[94m",
-                    .pending_permission => "\x1b[33m",
-                    .succeeded => "\x1b[90m",
-                    .denied, .cancelled => "\x1b[39m",
-                    else => "\x1b[91m",
-                });
-                try expected.feed(case[1][0..glyph_end]);
-                if (colour) try expected.feed("\x1b[39m");
-                try expected.feed(case[1][glyph_end..]);
-                try expected.feed("\n");
-                try std.testing.expectEqualStrings(expected.bytes[0..expected.length], sink.bytes[0..sink.length]);
-                try std.testing.expectEqual(case[0] == .succeeded, tight(.{ .tool_result = .{ .content = .{ .length = 0, .digest = @splat(0) }, .presentation = presentation } }));
-                try std.testing.expectEqual(case[0] == .succeeded, tight(.{ .hosted_call = presentation }));
+    inline for (bodies) |body| {
+        inline for (cases) |case| {
+            for (0..body.len + 1) |split| {
+                for ([_]bool{ false, true }) |colour| {
+                    var scan: ToolHeaderScan = .{};
+                    try scan.feed(body[0..split]);
+                    try scan.feed(body[split..]);
+                    var sink: Sink = .{};
+                    const presentation: protocol.ToolPresentation = .{ .description = null, .code = case[0], .publication_position = null };
+                    try toolResult(presentation, scan.facts(case[0]), &sink, colour);
+                    var expected: Sink = .{};
+                    const glyph_end = std.mem.indexOfScalar(u8, case[1], ' ').?;
+                    if (colour) try expected.feed(switch (case[0]) {
+                        .unresolved => "\x1b[94m",
+                        .pending_permission => "\x1b[33m",
+                        .succeeded => "\x1b[90m",
+                        .denied, .cancelled => "\x1b[39m",
+                        else => "\x1b[91m",
+                    });
+                    try expected.feed(case[1][0..glyph_end]);
+                    if (colour) try expected.feed("\x1b[39m");
+                    try expected.feed(case[1][glyph_end..]);
+                    try expected.feed("\n");
+                    try std.testing.expectEqualStrings(expected.bytes[0..expected.length], sink.bytes[0..sink.length]);
+                    try std.testing.expectEqual(case[0] == .succeeded, tight(.{ .tool_result = .{ .content = .{ .length = 0, .digest = @splat(0) }, .presentation = presentation } }));
+                    try std.testing.expectEqual(case[0] == .succeeded, tight(.{ .hosted_call = presentation }));
+                }
             }
         }
     }

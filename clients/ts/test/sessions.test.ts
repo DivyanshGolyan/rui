@@ -13,10 +13,9 @@ const skip = binary ? false : "set RUI_BINARY to a built rui";
 async function connect(): Promise<Rui> {
 	const root = realpathSync(mkdtempSync(join(tmpdir(), "rui-ts-")));
 	return Rui.connect({
-		database: join(root, "store"),
-		provider: { baseUrl: "https://api.openai.com/v1", key: "sk-ts-client-test" },
-		binary: binary ?? "rui",
-	});
+		store: { sqlite: { dir: join(root, "store") } },
+		providers: { openai: { endpoint: "https://api.openai.com/v1/responses", key: "sk-ts-client-test" } },
+	}, { binary: binary ?? "rui" });
 }
 
 const spec: AgentSpec = { workspace: tmpdir(), provider: "openai", model: "gpt-6.1-sol", effort: "low", compactAt: 100000, tools: ["bash" as const], permissionMode: "ask" as const, label: "first" };

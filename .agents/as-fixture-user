@@ -1,0 +1,5 @@
+#!/bin/sh
+# Run COMMAND as this lane's own non-root fixture user; tests/ci/fixture_user.py documents it.
+# Usage (as root): .agents/as-fixture-user LANE [--ref REF] [--keep NAME]... -- COMMAND...
+#                  .agents/as-fixture-user --remove LANE
+exec python3 "$(dirname -- "$0")/../tests/ci/fixture_user.py" "$@"

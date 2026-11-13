@@ -79,10 +79,7 @@ fn readEvents(io: std.Io, allocator: std.mem.Allocator, file: std.Io.File, progr
     var output = file.readerStreaming(io, &buffer);
     var entries: std.ArrayList(restart_all.Entry) = .empty;
     errdefer {
-        for (entries.items) |entry| {
-            allocator.free(entry.socket);
-            if (entry.store) |store| allocator.free(store);
-        }
+        for (entries.items) |entry| entry.deinit(allocator);
         entries.deinit(allocator);
     }
     var result: restart_all.Batch = .{};
@@ -102,7 +99,10 @@ fn readEvents(io: std.Io, allocator: std.mem.Allocator, file: std.Io.File, progr
                 errdefer allocator.free(socket);
                 const store = if (entry.store) |path| try allocator.dupe(u8, path) else null;
                 errdefer if (store) |path| allocator.free(path);
-                try entries.append(allocator, .{ .socket = socket, .store = store, .state = entry.state });
+                var state = entry.state;
+                if (state == .failed) state.failed.cause = try allocator.dupe(u8, state.failed.cause);
+                errdefer if (state == .failed) allocator.free(state.failed.cause);
+                try entries.append(allocator, .{ .socket = socket, .store = store, .state = state });
             },
             .done => {
                 result.entries = try entries.toOwnedSlice(allocator);
@@ -186,8 +186,8 @@ test "coordinator transfers every batch outcome and progress without reduction" 
     try expectRoundTrip(outcomeEvent(.{ .ready = .{ .pid = 123, .instance = @splat(42) } }));
     try expectRoundTrip(outcomeEvent(.{ .already_ready = .{ .pid = 456, .instance = @splat(17) } }));
     try expectRoundTrip(outcomeEvent(.{ .client_incompatible = 789 }));
-    inline for (std.enums.values(restart_all.Failure)) |failure| {
-        try expectRoundTrip(Event{ .entry = .{ .socket = "/socket", .state = .{ .failed = failure } } });
+    inline for (std.enums.values(restart_all.Stage)) |stage| {
+        try expectRoundTrip(Event{ .entry = .{ .socket = "/socket", .state = .{ .failed = .{ .stage = stage, .cause = "HostSocketStoreMismatch" } } } });
     }
     try expectRoundTrip(Event{ .failure = .cancelled });
     try expectRoundTrip(Event{ .failure = .unconfirmed });
@@ -199,4 +199,32 @@ test "coordinator task pins only routing target and reporting not an activation 
         try expectRoundTrip(Task{ .home = "/home/雪\n", .report = report });
         try expectRoundTrip(Task{ .home = "/home/雪\n", .target = .{ .build = "/pinned/build", .version = .{ .schema = 3, .patch = 4 } }, .report = report });
     }
+}
+
+test "coordinator events keep each failed Host's cause after the line is freed" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var lines: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer lines.deinit();
+    for ([_]Event{
+        .{ .entry = .{ .socket = "/discovery.sock", .state = .{ .failed = .{ .stage = .discovery, .cause = "HostPeerPidMismatch" } } } },
+        .{ .entry = .{ .socket = "/observed.sock", .store = "/store", .state = .{ .failed = .{ .stage = .observation, .cause = "ConnectionRefused" } } } },
+        .done,
+    }) |value| {
+        try std.json.Stringify.value(value, .{}, &lines.writer);
+        try lines.writer.writeByte('\n');
+    }
+    try tmp.dir.writeFile(io, .{ .sub_path = "events", .data = lines.written() });
+    const file = try tmp.dir.openFile(io, "events", .{});
+    defer file.close(io);
+    var batch = try readEvents(io, std.testing.allocator, file, null);
+    defer batch.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("HostPeerPidMismatch", batch.entries[0].state.failed.cause);
+    try std.testing.expectEqualStrings("ConnectionRefused", batch.entries[1].state.failed.cause);
+    var buffer: [1024]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    try batch.write(&writer);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Host state is unconfirmed (HostPeerPidMismatch)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "failed at observation (ConnectionRefused)") != null);
 }

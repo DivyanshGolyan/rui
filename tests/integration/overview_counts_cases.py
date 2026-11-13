@@ -56,7 +56,12 @@ def rows_by_mark():
             assert lines[queued].strip() == "◌ q1", frame
             assert lines[queued + 1].startswith("   Queued"), frame
             assert lines[queued + 1].rstrip().endswith("workspace"), frame
-            assert "slots " not in frame and not re.search(r"rui \d+ MB", frame), frame
+            assert "slots " not in frame, frame
+            # Live app memory belongs only on the pinned Settings row, not
+            # the Session rows or a replacement counts/status line.
+            for line in lines:
+                if not line.startswith("  Settings"):
+                    assert not re.search(r"(?:rui|tools) \d+(?:\.\d+)? (?:MB|GB)\b", line), frame
             assert screen.style("? Asking").fg != screen.style("× Failing").fg, frame
             holds["w1"].set()
             screen.wait(lambda f: "✓ w1" in f and "◌ q1" not in f, "queue admission")

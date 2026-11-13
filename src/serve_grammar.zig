@@ -8,24 +8,11 @@ const Option = grammar.Option;
 const Conflict = grammar.Conflict;
 const value = grammar.value;
 const repeatedChoice = grammar.repeatedChoice;
-const flag = grammar.flag;
 const hiddenValue = grammar.hiddenValue;
 const hiddenNumber = grammar.hiddenNumber;
 const hiddenFlag = grammar.hiddenFlag;
 pub const destination = &[_]Option{ value("store", "PATH"), grammar.hex("store-hex", "store", 492) };
 
-/// The managed endpoint and development endpoints are exclusive.
-/// A launch frame on stdin names the Store, the provider and the capacity.
-const launch_conflicts = &[_]Conflict{
-    .{ .code = .launch_frame_excludes_store, .a = "launch-frame", .b = "store" },
-    .{ .code = .launch_frame_excludes_store, .a = "launch-frame", .b = "store-hex" },
-    .{ .code = .launch_frame_excludes_provider, .a = "launch-frame", .b = "provider" },
-    .{ .code = .launch_frame_excludes_provider_endpoint, .a = "launch-frame", .b = "provider-endpoint" },
-    .{ .code = .launch_frame_excludes_provider_ca_file, .a = "launch-frame", .b = "provider-ca-file" },
-    .{ .code = .launch_frame_excludes_active_capacity, .a = "launch-frame", .b = "active-capacity" },
-    .{ .code = .launch_frame_excludes_codex_fixture, .a = "launch-frame", .b = "test-codex-fixture-endpoint" },
-    .{ .code = .launch_frame_excludes_openai_fixture, .a = "launch-frame", .b = "test-openai-fixture-endpoint" },
-};
 const endpoint_conflicts = &[_]Conflict{
     .{ .code = .provider_excludes_endpoint, .a = "provider", .b = "provider-endpoint" },
     .{ .code = .provider_excludes_ca_file, .a = "provider", .b = "provider-ca-file" },
@@ -73,4 +60,4 @@ const serve_test = &[_]Option{
     hiddenNumber("test-request-preparation-advance-delay-ms", 0, std.math.maxInt(i64)),
 };
 
-pub const definition: grammar.Definition = .{ .resource = .host, .name = "serve", .description = std.fmt.comptimePrint("Run a foreground Host. Provider credentials belong to this Host, not its peer callers. Each --provider LABEL serves that provider at its own endpoint with its own credential. Without --provider or a development endpoint it makes no model requests. --active-capacity defaults to {d}. --launch-frame reads the Store, the OpenAI key and the runtime directory from one frame on stdin instead, and the Host stops when stdin closes. A MySQL TCP Store URL accepts only ssl-ca=<absolute PEM path> (percent escapes allowed) for exclusive CA trust; sockets refuse it and verification cannot be disabled.", .{product_defaults.active_capacity}), .options = destination ++ &[_]Option{ value("active-capacity", "N"), repeatedChoice("provider", provider_name.Provider), value("provider-endpoint", "URL"), value("provider-ca-file", "PATH"), value("bash-path", "PATH"), value("bash-timeout-ms", "MILLISECONDS"), flag("launch-frame") } ++ serve_test, .conflicts = endpoint_conflicts ++ launch_conflicts };
+pub const definition: grammar.Definition = .{ .resource = .host, .name = "serve", .description = std.fmt.comptimePrint("Run a foreground Host. Provider credentials belong to this Host, not its peer callers. Each --provider LABEL serves that provider at its own endpoint with its own credential. Without --settings, --provider or a development endpoint it makes no model requests. --active-capacity defaults to {d}. --settings FILE reads a private settings document; --settings - reads one length-prefixed document on stdin. Serve flags override the document. interface.lifetime selects whether closing stdin stops the Host. A MySQL TCP Store URL accepts only ssl-ca=<absolute PEM path> (percent escapes allowed) for exclusive CA trust; sockets refuse it and verification cannot be disabled.", .{product_defaults.active_capacity}), .options = destination ++ &[_]Option{ value("active-capacity", "N"), repeatedChoice("provider", provider_name.Provider), value("provider-endpoint", "URL"), value("provider-ca-file", "PATH"), value("bash-path", "PATH"), value("bash-timeout-ms", "MILLISECONDS"), value("settings", "FILE|-") } ++ serve_test, .conflicts = endpoint_conflicts };

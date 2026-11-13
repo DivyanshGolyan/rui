@@ -11,7 +11,7 @@
     ".": "./src/index.ts"
   },
   "scripts": {
-    "generate": "openapi-typescript ../../openapi.json --output src/wire.ts",
+    "generate": "openapi-typescript ../../openapi.json --output src/wire.ts && node scripts/generate-settings.mjs",
     "check": "node scripts/check.mjs",
     "test": "node --experimental-strip-types --test --test-concurrency=1 \"test/*.test.ts\""
   },

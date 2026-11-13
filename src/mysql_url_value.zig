@@ -13,7 +13,7 @@ pub fn ValueWith(comptime ca_file_bytes: usize) type {
         host: Bounded(253) = .{},
         socket: Bounded(107) = .{},
         database: Bounded(64) = .{},
-        // Same path bound as the provider launch frame and TLS loader.
+        // Same path bound as Host settings and TLS loader.
         ca_file: Bounded(ca_file_bytes) = .{},
         port: u16 = default_port,
 

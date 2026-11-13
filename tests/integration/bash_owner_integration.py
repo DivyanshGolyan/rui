@@ -81,7 +81,7 @@ def prove_timeout_feedback(state):
             if effective is None:
                 # The model and the saved result get exactly the outcome and the
                 # nonempty stream: no empty stderr section, no retirement note.
-                assert result == f"Bash succeeded. Exit code: 0.\nstdout tail:\n{workspace}", result
+                assert result == f"Bash succeeded. Exit code: 0.\nstdout:\n{workspace}", result
             else:
                 expected = (
                     f"Execution timed out after a {effective} ms total budget from process start; output does not reset it. "
@@ -91,7 +91,7 @@ def prove_timeout_feedback(state):
                 )
                 assert result.startswith("Bash timed_out."), result
                 assert expected in result, result
-                assert "stdout tail:\nbefore" in result, result
+                assert "stdout:\nbefore" in result, result
                 assert marker.read_text() == "x" * (index + 1)
                 assert bash_fixture.result_text(store, session) == result
         print("Bash timeout feedback: default 500 ms, override 800 ms, saved/model result identity and success control passed")
@@ -192,11 +192,11 @@ def main():
         first_session, first_action = stage_action(
             state, retention_store, "retention-first",
             # Paths are named only for truncated streams: truncate both.
-            "head -c 10001 /dev/zero | tr '\\0' o; head -c 10001 /dev/zero | tr '\\0' e >&2",
+            "head -c 20001 /dev/zero | tr '\\0' o; head -c 20001 /dev/zero | tr '\\0' e >&2",
         )
         second_session, second_action = stage_action(
             state, retention_store, "retention-second",
-            "head -c 10001 /dev/zero | tr '\\0' c; printf current",
+            "head -c 20001 /dev/zero | tr '\\0' c; printf current",
         )
         endpoint, endpoint_thread, continuations = continuation_endpoint(
             ("retention-first", "retention-second")
@@ -255,7 +255,7 @@ def main():
         second_result = bash_fixture.result_text(
             retention_store, second_session
         )
-        assert second_result.endswith("current\n[earlier output omitted]\n\nFull output was not retained.\n"), second_result
+        assert second_result.endswith("current\nFull output was not retained.\n"), second_result
         # Optional retention failure occurs after canonical settlement. Both
         # saved answers must remain byte-identical when read again; neither
         # the failed eviction nor the unavailable new paths may rewrite them.

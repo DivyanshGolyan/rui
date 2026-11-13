@@ -54,7 +54,7 @@ def main():
 
         # Isolate provider-fixed Model persistence from the Sign-in journey,
         # whose first-run choices are covered by human_cli_integration.
-        for sign_in, provider in (("API key", "openai"), ("Codex", "codex")):
+        for sign_in, provider in (("API key", "openai"), ("ChatGPT", "codex")):
             changed = subprocess.run(
                 [str(fixture.RUI), "defaults", "configure", "--store", str(store),
                  "--provider", provider, "--model", "gpt-5.5"],

@@ -3,7 +3,7 @@ const std = @import("std");
 const reply = @import("reply.zig");
 const document = @import("document.zig");
 
-// Kept equal to bash.zig's excerpt_bytes; Running tests check both owners.
+// MCP's own prefix budget; Bash's head-and-tail excerpt has a separate one.
 pub const excerpt_bytes = 10_000;
 pub const max_answer_bytes = 4 * 1024 * 1024;
 pub const Code = enum { succeeded, failed, spawn_failed, indeterminate, cancelled };

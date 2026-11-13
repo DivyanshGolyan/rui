@@ -103,11 +103,11 @@ FIXTURES = {
     "preference-policy-integration": ((I + "preference_policy_integration.py",), (I + "preference_policy.zig",), ()),
     "mysql-wire-integration": ((I + "mysql_wire_integration.py",), (), ()),
     "skills-integration": ((I + "skills_integration.py",), (), ("src/session_skills.zig",)),
-    "launch-frame-integration": ((I + "launch_frame_integration.py", I + "launch_frame_mysql_integration.py",
-                                  I + "store_rounds_cases.py"),
+    "settings-integration": ((I + "settings_integration.py", I + "settings_mysql_integration.py",
+                                  I + "settings_fixture.py", I + "store_rounds_cases.py"),
                                  (I + "mysql_launch_admin.zig",),
-                                 ("src/launch_frame.zig", "src/host_start.zig", "src/server_mcp_settings.zig", "src/mysql_url.zig", "src/mcp/Running.zig", "src/mcp/servers.zig")),
-    "ts-client": ((I + "host_process.py",), (), ("src/launch_frame.zig",)),
+                                 ("src/host_settings.zig", "src/host_start.zig", "src/server_mcp_settings.zig", "src/mysql_url.zig", "src/mcp/Running.zig", "src/mcp/servers.zig")),
+    "ts-client": ((I + "host_process.py", "clients/ts/test/settings-host.test.ts"), (), ("src/host_settings.zig",)),
     "request-wait-integration": ((I + "request_wait_integration.py",), (),
                                  (CALLER, "src/request_wait.zig", "src/server_host.zig", "src/cli_args.zig", "src/serve_grammar.zig",
                                   "src/caller_error.zig", "src/caller_exit.zig")),
@@ -225,6 +225,12 @@ class Graph:
                                       for module in (match[1] and [match[1]] or re.split(r"\s*,\s*", match[2]))}
                                      | set(SOURCE_READ.findall(strings))
                                      | {"src/" + joined for joined in SOURCE_JOIN.findall(source)}) & names - {name}
+            elif name in entries and name.endswith(".ts"):
+                # Explicit client fixture entries execute under Node rather than
+                # importing Python helpers; keep their live server use visible.
+                self.python[name] = set()
+                if "RUI_TEST_MYSQL_" in read(name):
+                    mysql_cases.add(name)
         # Every file a Zig compilation reads: sources, and what they import
         # or embed that is not Zig (openapi.json, SQL baselines, prompt text).
         self.compiled = set(self.every).union(*self.every.values())
@@ -503,9 +509,9 @@ RULES = (
     (("src/openapi*.zig", "openapi.json"), ("test",), ("test",),
      "The wire contract: openapi.json must equal what the wire types emit"),
     (("clients/ts/*",), ("ts-client",), ("ts-client",), "The TypeScript client and its launch of a real Host"),
-    (("tests/integration/mcp_sdk/*",), ("launch-frame-integration", "ts-client"), ("launch-frame-integration", "ts-client"),
-     "The MCP SDK servers a launch frame starts"),
-    (("src/mcp/*", "src/http1/*"), ("launch-frame-integration",), ("launch-frame-integration",),
+    (("tests/integration/mcp_sdk/*",), ("settings-integration", "ts-client"), ("settings-integration", "ts-client"),
+     "The MCP SDK servers a settings document starts"),
+    (("src/mcp/*", "src/http1/*"), ("settings-integration",), ("settings-integration",),
      "The MCP and HTTP/1.1 clients, value cores included, against the real MCP SDK servers"),
     (("src/environment.zig",), ("bash-integration", "bash-environment-integration"),
      ("bash-integration", "bash-environment-integration"),
@@ -582,10 +588,10 @@ LIVE_POSTGRES_TARGETS = frozenset({"test-pg", "check", "check-full"})
 # development too, or its green would say nothing about that server.
 # Development keeps the rule's own targets among them.
 LIVE_RULES = (
-    (("src/launch_frame.zig", "src/host_start.zig", "src/server_mcp_settings.zig", "src/mysql_url.zig", "tests/integration/launch_frame*", "tests/integration/mysql_launch_admin.zig"),
-     ("test", "launch-frame-integration"), ("launch-frame-integration",),
-     "The launch-frame Host opens a live MySQL Store on Linux; macOS skips the live server",
-     frozenset({"launch-frame-integration", "check", "check-full"})),
+    (("src/host_settings.zig", "src/host_start.zig", "src/server_mcp_settings.zig", "src/mysql_url.zig", "tests/integration/settings*", "tests/integration/mysql_launch_admin.zig"),
+     ("test", "settings-integration"), ("settings-integration",),
+     "The settings-document Host opens a live MySQL Store on Linux; macOS skips the live server",
+     frozenset({"settings-integration", "check", "check-full"})),
     (("src/store/wire/pg*.zig", "src/store/wire/scram.zig", "src/store/wire/tls.zig", "src/tls_client/*",
       "tests/integration/live_engines.py", "tests/ci/live_engine_step.py"),
      ("test-pg",), ("test-pg",), "The Postgres wire client's own tests, live against postgres:15 on Linux",
@@ -606,10 +612,10 @@ LIVE_RULES = (
 )
 RULES += tuple(rule[:4] for rule in LIVE_RULES)
 # The Store's MySQL round-trip budget runs against the live MySQL that
-# launch-frame-integration requires; development skips it.
+# settings-integration requires; development skips it.
 RULES += ((("src/store.zig", "src/store/*", "!src/store/wire/*", "src/server_execution.zig", "src/execution_turn.zig",
             "src/model_adapter.zig", "tests/integration/store_rounds_cases.py"),
-           ("launch-frame-integration",), (),
+           ("settings-integration",), (),
            "The Store's MySQL round trips per model operation and while idle stay within their budget"),)
 
 # build.zig wires every target, and the setup action installs the compiler and
@@ -728,7 +734,7 @@ SCREEN_TARGETS = frozenset({"check", "check-full", "terminal-restoration-integra
 def setup_requirements(targets):
     # Every runner installs the same fixture packages (tests/integration/requirements.txt)
     # for any target, so no fixture's import depends on a hand-kept target list.
-    return {"go": bool(({"measurement-check"} | set(RESOURCES)).intersection(targets)), "node": bool({"ts-client", "launch-frame-integration", "check", "check-full"}.intersection(targets)), "python": bool(targets), "screen": bool(SCREEN_TARGETS.intersection(targets)), "tmux": "upgrade-integration" in targets}
+    return {"go": bool(({"measurement-check"} | set(RESOURCES)).intersection(targets)), "node": bool({"ts-client", "settings-integration", "check", "check-full"}.intersection(targets)), "python": bool(targets), "screen": bool(SCREEN_TARGETS.intersection(targets)), "tmux": "upgrade-integration" in targets}
 
 
 def execution_batches(targets, check_part="all"):
@@ -794,6 +800,8 @@ def select(paths, phase, available, graph=None, contents=None, fixture_literals=
                               for path in paths)}
     targets, native_targets, reasons = set(), set(), set()
     live_targets, live_reasons = set(), set()
+    # Each live need as (the one target that runs only its tests, or None, reason).
+    live_needs = set()
     manual_checks = set()
     linux_memory_checks = False
     for path in paths:
@@ -825,10 +833,13 @@ def select(paths, phase, available, graph=None, contents=None, fixture_literals=
             if matches(path, patterns):
                 live_targets.update(set(checks) & served_by)
                 live_reasons.add((reason, served_by))
+                live_needs.update((root, reason) for root in set(checks) & served_by)
         if path in graph.live_conformance and path not in graph.reached["test-store"]:
             targets.add("test")
             native_targets.add("test")
             live_targets.add("test")
+            # These tests sit among the native root's others: no root runs only them.
+            live_needs.add((None, "Native Store conformance tests require live MySQL"))
             live_reasons.add(("Native Store conformance tests require live MySQL", LIVE_MYSQL_DIALECT_TARGETS))
             reasons.add("Native Store conformance tests require live MySQL")
             matched = True
@@ -939,6 +950,8 @@ def select(paths, phase, available, graph=None, contents=None, fixture_literals=
             "mysql_suites": sorted(graph.live_mysql),
             # The selected targets that start a live server in CI (`LIVE_RULES`).
             "server_targets": sorted((targets & live_targets) | ({"test"} if "test" in targets and "test-store" in live_targets else set())),
+            # Each live need: [the target that runs only its tests, or null, reason].
+            "live_needs": sorted(([root, reason] for root, reason in live_needs), key=lambda need: (need[0] or "", need[1])),
             "native_targets": sorted(native_targets), "native_required": bool(native_targets),
             "mac_required": mac_required, "upgrade_required": upgrade_required,
             # Store, recovery and upgrade changes fail for real; never rerun them.

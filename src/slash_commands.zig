@@ -67,6 +67,7 @@ pub const Context = struct {
 pub const Copy = enum { answer, code, file };
 
 pub const Command = struct {
+    description: []const u8 = "",
     argument: Argument = .none,
     /// Whether typing `/` lists the command.
     listed: bool = true,
@@ -88,9 +89,12 @@ const setup_options: Options = .of(cli_args.live_setup, &.{ "model", "provider",
 /// The conversation's commands, declared in list order.
 const ConversationName = enum {
     archive,
+    clear,
     copy,
     discard,
     effort,
+    model,
+    new,
     recover,
     @"reload-skills",
     rename,
@@ -102,18 +106,27 @@ const ConversationName = enum {
 
 /// A conversation's commands.
 pub const conversation = Commands(ConversationName, .{
-    .archive = .{},
-    .copy = .{ .argument = .{ .choice = copy_words } },
+    .archive = .{ .description = "archive this chat" },
+    .clear = .{ .description = "start a new chat" },
+    .copy = .{ .description = "copy the last answer", .argument = .{ .choice = copy_words } },
     .discard = .{ .listed = false },
-    .effort = .{ .argument = .effort },
+    .effort = .{ .description = "change effort", .argument = .effort },
+    .model = .{ .description = "change model" },
+    .new = .{ .description = "start a new chat" },
     .recover = .{ .argument = .{ .required = "KEY" }, .listed = false },
-    .@"reload-skills" = .{},
-    .rename = .{ .argument = .{ .required = "NAME" } },
-    .requests = .{ .listed = false },
-    .result = .{ .argument = .{ .required = "KEY" }, .listed = false },
-    .setup = .{ .argument = .{ .options = setup_options } },
-    .unarchive = .{},
+    .@"reload-skills" = .{ .description = "reload skills" },
+    .rename = .{ .description = "rename this chat", .argument = .{ .required = "NAME" } },
+    .requests = .{ .description = "recover a lost request" },
+    .result = .{ .description = "show a saved answer", .argument = .{ .required = "KEY" } },
+    .setup = .{ .description = "defaults for new chats", .argument = .{ .options = setup_options } },
+    .unarchive = .{ .description = "restore this chat" },
 });
+
+/// Whether a draft starts with the one `/` a command or a leading skill
+/// takes; `//` starts literal text.
+fn slashed(text: []const u8) bool {
+    return text.len != 0 and text[0] == '/' and !std.mem.startsWith(u8, text, "//");
+}
 
 /// What a conversation says for a line that names no command: the name typed,
 /// when it is short printable ASCII, and where the commands are.
@@ -230,11 +243,51 @@ pub fn Commands(comptime N: type, comptime commands: std.enums.EnumFieldStruct(N
             command: struct { name: Name, argument: []const u8 },
         };
 
-        /// Reads a draft line that starts with `/`.
+        /// A command name in the complete grammar, including unlisted actions.
+        /// Takes the bare name, without `/` or arguments; visibility is irrelevant.
+        pub fn nameOf(word: []const u8) ?Name {
+            return std.meta.stringToEnum(Name, word);
+        }
+
+        /// What a draft is, read from its bytes and this grammar alone.
+        /// Enter, Esc, completion and the list each ask here, so they agree.
+        pub const Draft = enum {
+            /// Text for the agent: Enter sends it and Esc never takes it.
+            /// A `/name` no command owns is text; the Host binds its skills.
+            message,
+            /// One unfinished `/word` and nothing else: the person is still
+            /// choosing a row. Enter with no list sends it; Esc on its list
+            /// takes it.
+            word,
+            /// The first word names a command, listed or not: `parse` reads
+            /// the line, Enter runs it and Esc on its list takes it.
+            command,
+        };
+
+        pub fn draftOf(text: []const u8) Draft {
+            if (!slashed(text)) return .message;
+            const end = std.mem.indexOfScalar(u8, text, ' ') orelse text.len;
+            if (nameOf(text[1..end]) != null) return .command;
+            return if (std.mem.indexOfAny(u8, text, " \t\n") == null) .word else .message;
+        }
+
+        /// The listed commands the name prefix `typed` starts, as a draft's
+        /// first word lists them.
+        pub fn starting(typed: []const u8) List {
+            var list: List = .{ .typed = typed, .column = description_column };
+            for (names) |name| {
+                const command = table.get(name);
+                if (!command.listed or !std.mem.startsWith(u8, @tagName(name), typed)) continue;
+                list.add(.{ .word = spaced.get(name)[1 .. spaced.get(name).len - @intFromBool(command.argument == .none)], .shown = spaced.get(name)[0 .. spaced.get(name).len - 1], .description = if (command.description.len != 0) command.description else choices_text.get(name), .runs = !requires(command.argument) });
+            }
+            return list;
+        }
+
+        /// Reads a command line: a draft `draftOf` calls a command.
         pub fn parse(text: []const u8) Parsed {
             std.debug.assert(text.len != 0 and text[0] == '/');
             const end = std.mem.indexOfScalar(u8, text, ' ') orelse text.len;
-            const name = std.meta.stringToEnum(Name, text[1..end]) orelse return .unknown;
+            const name = nameOf(text[1..end]) orelse return .unknown;
             const argument = trimmed(text[end..]);
             const admitted = switch (table.get(name).argument) {
                 .none => argument.len == 0,
@@ -264,20 +317,10 @@ pub fn Commands(comptime N: type, comptime commands: std.enums.EnumFieldStruct(N
         /// typed after a command's name starts. Null for any other draft,
         /// which shows no list and takes Tab as a tab.
         pub fn suggest(draft: []const u8, context: Context) ?List {
-            if (draft.len == 0 or draft[0] != '/' or std.mem.startsWith(u8, draft, "//")) return null;
-            if (std.mem.indexOfAny(u8, draft, "\t\n") != null) return null;
+            if (!slashed(draft) or std.mem.indexOfAny(u8, draft, "\t\n") != null) return null;
+            const end = std.mem.indexOfScalar(u8, draft, ' ') orelse return starting(draft[1..]);
             var list: List = .{ .typed = undefined };
-            const end = std.mem.indexOfScalar(u8, draft, ' ') orelse {
-                list.typed = draft[1..];
-                list.column = description_column;
-                for (names) |name| {
-                    const command = table.get(name);
-                    if (!command.listed or !std.mem.startsWith(u8, @tagName(name), list.typed)) continue;
-                    list.add(.{ .word = spaced.get(name)[1 .. spaced.get(name).len - @intFromBool(command.argument == .none)], .shown = spaced.get(name)[0 .. spaced.get(name).len - 1], .description = choices_text.get(name), .runs = !requires(command.argument) });
-                }
-                return list;
-            };
-            const name = std.meta.stringToEnum(Name, draft[1..end]) orelse return null;
+            const name = nameOf(draft[1..end]) orelse return null;
             const words = draft[end + 1 ..];
             // A quote or an escape starts text the list cannot follow.
             if (std.mem.indexOfAny(u8, words, "\"'\\") != null) return null;
@@ -341,7 +384,7 @@ pub const List = struct {
     column: ?usize = null,
 
     /// More than any screen's commands or options.
-    pub const capacity = 24;
+    pub const capacity = 36;
 
     fn add(self: *List, entry: Entry) void {
         std.debug.assert(std.mem.startsWith(u8, entry.word, self.typed));
@@ -678,6 +721,73 @@ test "a /requests list takes only keys the parser reads back as one word the lis
     for (shown.shown()) |entry| try std.testing.expectEqualStrings(entry.word["/result ".len..], conversation.parse(entry.word).command.argument);
 }
 
+test "a draft is a command line, one unfinished slash word, or a Message, by the whole grammar" {
+    // Written out, not read from the table: the two recovery actions are
+    // grammar although the list leaves them out.
+    const names = [_][]const u8{ "archive", "clear", "copy", "discard", "effort", "model", "new", "recover", "reload-skills", "rename", "requests", "result", "setup", "unarchive" };
+    try std.testing.expectEqual(std.enums.values(conversation.Name).len, names.len);
+    const Draft = conversation.Draft;
+    for (names) |name| {
+        var buffer: [80]u8 = undefined;
+        // The name alone, with a space, and with an argument its shape may
+        // refuse: misuse is still that command's line.
+        for ([_][]const u8{ "", " ", " argument", " two words", " a\nline" }) |rest| {
+            const draft = try std.fmt.bufPrint(&buffer, "/{s}{s}", .{ name, rest });
+            try std.testing.expectEqual(Draft.command, conversation.draftOf(draft));
+            try std.testing.expect(conversation.parse(draft) != .unknown);
+        }
+        // Every shorter or longer spelling is a word still being chosen;
+        // with anything after it, text for the agent.
+        for (0..name.len) |length| {
+            if (conversation.nameOf(name[0..length]) != null) continue;
+            const word = try std.fmt.bufPrint(&buffer, "/{s}", .{name[0..length]});
+            try std.testing.expectEqual(Draft.word, conversation.draftOf(word));
+            const text = try std.fmt.bufPrint(&buffer, "/{s} this change", .{name[0..length]});
+            try std.testing.expectEqual(Draft.message, conversation.draftOf(text));
+        }
+        const longer = try std.fmt.bufPrint(&buffer, "/{s}x", .{name});
+        try std.testing.expectEqual(Draft.word, conversation.draftOf(longer));
+        // The same name anywhere but first, or behind `//`, is text.
+        for ([_][]const u8{ "use /{s}", " /{s}", "//{s}", "//{s} now" }) |shape| {
+            var text: [80]u8 = undefined;
+            var writer = std.Io.Writer.fixed(&text);
+            var parts = std.mem.splitSequence(u8, shape, "{s}");
+            try writer.writeAll(parts.next().?);
+            try writer.writeAll(name);
+            try writer.writeAll(parts.next().?);
+            try std.testing.expectEqual(Draft.message, conversation.draftOf(writer.buffered()));
+        }
+    }
+    const cases = [_]struct { []const u8, Draft }{
+        .{ "", .message },
+        .{ "plain text", .message },
+        .{ "/", .word },
+        .{ "//", .message },
+        .{ "/review", .word },
+        .{ "/review this change", .message },
+        .{ "/review\tthis", .message },
+        .{ "/review\nthis change", .message },
+        .{ "/genuinely-unknown", .word },
+        .{ "/path/to/file", .word },
+        .{ "/path/to/file is broken", .message },
+        .{ "/Archive", .word },
+        .{ "/archive\n", .message },
+    };
+    for (cases) |case| try std.testing.expectEqual(case[1], conversation.draftOf(case[0]));
+}
+
+test "the first word's command rows are one list whether the grammar or the caret's word asks" {
+    for ([_][]const u8{ "", "a", "re", "rel", "requests", "discard", "zz", "model" }) |typed| {
+        var buffer: [80]u8 = undefined;
+        const draft = try std.fmt.bufPrint(&buffer, "/{s}", .{typed});
+        const listed = conversation.suggest(draft, .{}).?;
+        const starts = conversation.starting(typed);
+        try std.testing.expectEqual(listed.count, starts.count);
+        for (listed.shown(), starts.shown()) |left, right| try std.testing.expectEqualStrings(left.word, right.word);
+        for (starts.shown()) |entry| try std.testing.expect(std.mem.startsWith(u8, entry.word, starts.typed));
+    }
+}
+
 test "a command admits exactly the arguments its shape names" {
     const cases = .{
         .{ "/copy", conversation.Parsed{ .command = .{ .name = .copy, .argument = "" } } },
@@ -712,15 +822,15 @@ test "a command admits exactly the arguments its shape names" {
 test "the list names the listed commands a command word starts, and Tab puts the highlighted one in" {
     const Case = struct { draft: []const u8, shown: ?[]const []const u8, first: ?[]const u8 = null };
     const cases = [_]Case{
-        .{ .draft = "/", .shown = &.{ "archive", "copy ", "effort ", "reload-skills", "rename ", "setup ", "unarchive" } },
-        .{ .draft = "/c", .shown = &.{"copy "}, .first = "opy " },
+        .{ .draft = "/", .shown = &.{ "archive", "clear", "copy ", "effort ", "model", "new", "reload-skills", "rename ", "requests", "result ", "setup ", "unarchive" } },
+        .{ .draft = "/c", .shown = &.{ "clear", "copy " }, .first = "lear" },
         .{ .draft = "/cop", .shown = &.{"copy "}, .first = "y " },
         .{ .draft = "/st", .shown = &.{} },
-        .{ .draft = "/re", .shown = &.{ "reload-skills", "rename " } },
+        .{ .draft = "/re", .shown = &.{ "reload-skills", "rename ", "requests", "result " } },
         .{ .draft = "/rel", .shown = &.{"reload-skills"}, .first = "oad-skills" },
         .{ .draft = "/s", .shown = &.{"setup "}, .first = "etup " },
         // Recovery commands work, but the list leaves them out.
-        .{ .draft = "/req", .shown = &.{} },
+        .{ .draft = "/req", .shown = &.{"requests"} },
         .{ .draft = "/w", .shown = &.{} },
         .{ .draft = "/login", .shown = &.{} },
         .{ .draft = "/x", .shown = &.{} },
@@ -922,15 +1032,15 @@ test "older conversation is feed navigation, not a slash command" {
     try std.testing.expect(conversation.parse("/details") == .unknown);
 }
 
-test "chat info replaces conversation settings commands" {
-    for ([_][]const u8{ "/status", "/status now", "/configure", "/configure --label chat", "/model", "/model gpt-5.5" }) |line| {
+test "status and configure remain absent; model is a Session picker" {
+    for ([_][]const u8{ "/status", "/status now", "/configure", "/configure --label chat" }) |line| {
         try std.testing.expect(conversation.parse(line) == .unknown);
         if (conversation.suggest(line, .{})) |list| try std.testing.expectEqual(@as(usize, 0), list.count);
     }
 }
 
 test "command choices and options are names only and recovery stays unlisted" {
-    try std.testing.expect(!@hasField(Command, "description"));
+    try std.testing.expect(@hasField(Command, "description"));
     try std.testing.expect(!@hasField(Choice, "description"));
     try std.testing.expect(!conversation.table.get(.discard).listed);
     try std.testing.expect(!conversation.table.get(.recover).listed);

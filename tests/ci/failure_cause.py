@@ -31,7 +31,7 @@ INFRA_STEPS = frozenset({
     "Set up job",
     "Install the pinned packages tests/ci imports",
     "Install the pinned workflow linter",
-    "Start MySQL 8.4 for the live dialect and launch-frame checks",
+    "Start MySQL 8.4 for the live dialect and settings-document checks",
     "Wait for MySQL 8.4",
     "Start Postgres 15 with TLS for test-pg's live rounds",
     "Check out the previous known installed build",

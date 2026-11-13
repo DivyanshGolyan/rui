@@ -18,20 +18,20 @@ Each [GitHub release](https://github.com/DivyanshGolyan/rui/releases) also attac
 
 Alternatively, install the client with `--omit=optional` and put a matching standalone `rui` binary on `PATH`.
 The client looks for its platform package first, then `rui` on `PATH`.
-Pass `binary` to `Rui.connect` to choose an executable explicitly.
+Pass `binary` in the second argument to `Rui.connect(settings, options)` to choose an executable explicitly.
 Keep the client and binary versions matched.
 See [client installation](../clients/ts/README.md#install) for application-owned updates and custom binary options.
 
 ## Configure the provider
 
-A TypeScript-launched Host uses the OpenAI-compatible key provider.
-It does not reuse a ChatGPT sign-in from `rui auth login chatgpt`.
+Host settings select the provider Adapters, including OpenAI-compatible keys, Codex and ChatGPT sign-ins.
+This example selects the OpenAI-compatible key provider, not a saved sign-in from `rui auth login chatgpt`.
 Set `OPENAI_API_KEY` and `RUI_MODEL` in your application's environment.
 Choose a model your provider offers that accepts `low` reasoning effort for this example.
 Change `effort` if your selected model needs a different supported value.
 
 The example uses OpenAI's Responses API URL.
-For another compatible provider, change `provider.baseUrl` to that provider's HTTPS base URL and supply its key.
+For another compatible provider, change `providers.openai.endpoint` to that provider's full HTTPS Responses endpoint and supply its key.
 Set `compactAt` below the selected model's context window with room for the response.
 It is a compaction trigger, not a guarantee that every input fits.
 
@@ -52,8 +52,8 @@ function required(name: string): string {
 const model = required("RUI_MODEL");
 const key = required("OPENAI_API_KEY");
 const rui = await Rui.connect({
-	database: "./app-rui-store",
-	provider: { baseUrl: "https://api.openai.com/v1", key },
+	store: { sqlite: { dir: "./app-rui-store" } },
+	providers: { openai: { endpoint: "https://api.openai.com/v1/responses", key: { value: key } } },
 });
 
 try {
@@ -99,10 +99,11 @@ For an application retrying the same logical write, retain and reuse that write'
 
 ## Connect your application's tools and storage
 
-Supply a SQLite directory as `database`, as above, or an existing MySQL database URL with the [required schema](../clients/ts/README.md#install).
+Supply a SQLite directory as `store.sqlite.dir`, as above, or a MySQL URL source as `store.mysql.url` with the [required schema](../clients/ts/README.md#install).
+For example, `{ store: { mysql: { url: { value: mysqlUrl } } } }` sends a literal login only through the pipe.
 For MySQL TCP URLs, the only query option is `ssl-ca=/absolute/path/to/ca.pem` (the path may be percent-encoded), which replaces system trust with that PEM bundle alone; socket URLs and verification-disabling options are refused.
 `Rui.connect` starts an application-owned child Host and communicates over its local socket.
-The child lives while the application keeps the child's stdin pipe open.
+The client defaults `interface.lifetime` to `stdin`: the child lives while the application keeps that pipe open unless you explicitly choose `detached`.
 Calling `rui.close()` shuts it down, so do not close immediately after admitting work that you still want to run.
 
 Each Session needs `model`, `effort`, `compactAt`, `tools`, and `permissionMode`, or a complete named preset.
@@ -111,9 +112,9 @@ Bash runs with your user's full privileges, not in a sandbox.
 Approval settings are per Session.
 An `ask` Session needs your application to review `approval_requested` entries and call `session.decide` before the command can run.
 
-Use `ConnectOptions.tools` to register MCP servers and choose their discovered tool names in the Session's `tools`.
+Use `settings.tools.mcp` to register named MCP servers and choose their discovered tool names in the Session's `tools`.
 The API also accepts Session output schemas and connect-time presets.
-See the [client guide](../clients/ts/README.md), [connection options](../clients/ts/src/client.ts), [Session API](../clients/ts/src/sessions.ts), and [activity feed](../clients/ts/src/feed.ts) for those interfaces.
+See the [client guide](../clients/ts/README.md), [Host settings and client options](../clients/ts/src/client.ts), [Session API](../clients/ts/src/sessions.ts), and [activity feed](../clients/ts/src/feed.ts) for those interfaces.
 
 For a terminal conversation, return to [Start a conversation](../README.md#start-a-conversation).
 For agent coordination through the CLI, see [Using Rui from scripts and agents](scripting.md).

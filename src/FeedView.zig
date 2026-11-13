@@ -315,7 +315,7 @@ fn mouse(self: *Self, ctx: *vxfw.EventContext, value: vaxis.Mouse) !void {
 
 fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const self: *Self = @ptrCast(@alignCast(raw));
-    var surface = try vxfw.Surface.init(ctx.arena, self.widget(), ctx.max.size());
+    var surface = try vxfw.Surface.init(ctx.cell_arena, self.widget(), ctx.max.size());
     self.size = surface.size;
     // Measure with the same full pane regardless of the anchor. A scrolled
     // frame must not remove the tail and change its own scroll geometry.
@@ -352,7 +352,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
             }
         }
     }
-    try self.drawHover(ctx.arena, surface);
+    try self.drawHover(ctx, surface);
     if (self.selection) |*held| {
         const anchor = self.resolved(held.anchor) orelse {
             self.selection = null;
@@ -393,12 +393,13 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
 /// Build hover from the same clipped rows and retry decorator as hit testing.
 /// Tool rows take the hover look unless open, where the selection background wins;
 /// retry chips keep underline.
-fn drawHover(self: *Self, arena: std.mem.Allocator, surface: vxfw.Surface) !void {
+fn drawHover(self: *Self, ctx: vxfw.DrawContext, surface: vxfw.Surface) !void {
+    const arena = ctx.arena;
     self.hover.targets = &.{};
     const handler = self.handler orelse return;
     if (surface.size.width == 0) return;
     var targets: std.ArrayList(Hover.Rect) = .empty;
-    const scratch = try arena.alloc(vaxis.Cell, surface.size.width);
+    const scratch = try ctx.cell_arena.alloc(vaxis.Cell, surface.size.width);
     var rows = self.laidRows();
     for (0..surface.size.height) |row| {
         const position = (rows.next() orelse break) orelse continue;
@@ -436,7 +437,7 @@ fn drawHover(self: *Self, arena: std.mem.Allocator, surface: vxfw.Surface) !void
 
 fn testFrame(self: *Self, arena: std.mem.Allocator, width: u16, height: u16) !vxfw.Surface {
     vxfw.DrawContext.init(.unicode);
-    return self.widget().draw(.{ .arena = arena, .min = .{}, .max = .{ .width = width, .height = height }, .cell_size = .{} });
+    return self.widget().draw(.{ .arena = arena, .cell_arena = arena, .min = .{}, .max = .{ .width = width, .height = height }, .cell_size = .{} });
 }
 
 fn testWindow() !*Window {

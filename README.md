@@ -21,16 +21,18 @@ The client launches a child Host:
 ```ts
 import { Rui } from "ruicode";
 const rui = await Rui.connect({
-	database: "./app-rui-store",
-	provider: {
-		baseUrl: "https://api.openai.com/v1",
-		key: process.env.OPENAI_API_KEY!,
+	store: { sqlite: { dir: "./app-rui-store" } },
+	providers: {
+		openai: {
+			endpoint: "https://api.openai.com/v1/responses",
+			key: { value: process.env.OPENAI_API_KEY! },
+		},
 	},
 });
 ```
 
 Install with `npm install ruicode` on Node.js 22.6+; the package brings the matching `rui` executable for your platform.
-A TypeScript Host uses an OpenAI-compatible Responses API key, not the terminal's ChatGPT sign-in.
+This example uses an OpenAI-compatible Responses API key; Host settings can also select the Codex or ChatGPT sign-in providers.
 Provider usage may incur charges.
 
 ## How it works
@@ -60,9 +62,9 @@ See [upgrade and activation](docs/host.md#upgrade-and-activation) before updatin
 <a id="start-a-conversation"></a>
 
 Run `rui` in your project directory.
-The first run signs you in with your ChatGPT account or an OpenAI API key.
-`rui auth login chatgpt` signs in with ChatGPT in your browser; on a machine whose browser cannot reach back, paste the address the browser ends on, or add `--device-code` to sign in with a code instead.
-A code sign-in, which the first run also uses, needs Codex device code authorization turned on in ChatGPT security settings first, or your workspace admin to allow it; keep the printed code private.
+The first run signs you in with your ChatGPT account in your browser, or with an OpenAI API key.
+The first run and `rui auth login chatgpt` both open ChatGPT in your browser; on a machine whose browser cannot reach back, paste the address the browser ends on, or sign in with a code instead: press Tab on the first-run screen, or add `--device-code`.
+A code sign-in needs Codex device code authorization turned on in ChatGPT security settings first, or your workspace admin to allow it; keep the code private.
 The [Host guide](docs/host.md#run-in-the-foreground) covers signing in from scripts.
 
 Bash runs with your full privileges, without a sandbox, and defaults to running without approval (`bypass`).

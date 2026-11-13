@@ -102,7 +102,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const work_row = kept.work_row;
     const total: u16 = @intCast(kept.rows());
     const height = @min(total, max.height);
-    var surface = try vxfw.Surface.init(ctx.arena, self.widget(), .{ .width = max.width, .height = height });
+    var surface = try vxfw.Surface.init(ctx.cell_arena, self.widget(), .{ .width = max.width, .height = height });
     @memset(surface.buffer, .{ .style = self.styles.normal });
     if (max.width == 0 or height == 0) return surface;
     const width = max.width;
@@ -246,7 +246,7 @@ test "the activity tail puts the clock on the running call's own row, and the wo
     block.work = .{ .mark = "⠹", .tone = .normal, .words = "Run zig build test", .clock = .{ .elapsed = 42 }, .call = .{ .operation = 7, .ordinal = 2 } };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 20 }, .cell_size = .{} };
+    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 20 }, .cell_size = .{} };
     const drawn = try block.widget().draw(ctx);
     try std.testing.expectEqual(@as(u16, 4), drawn.size.height);
     try std.testing.expectEqualStrings("✓ Read src/overview_view.zig", try rowText(drawn, 0));
@@ -317,21 +317,21 @@ test "a narrow or short activity tail keeps the clock and the oldest calls" {
     block.queued = .{ .line = "and then summarize", .count = 3 };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    const narrow = try block.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 30, .height = 20 }, .cell_size = .{} });
+    const narrow = try block.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 30, .height = 20 }, .cell_size = .{} });
     try std.testing.expectEqualStrings("⠹ Run the whole store… · 1m 1s", try rowText(narrow, 1));
     try std.testing.expectEqualStrings("+28 more running · info", block.more.label);
     try std.testing.expectEqualStrings("◌ 3 · and then summarize", try rowText(narrow, 3));
-    _ = try block.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 21, .height = 20 }, .cell_size = .{} });
+    _ = try block.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 21, .height = 20 }, .cell_size = .{} });
     try std.testing.expectEqualStrings("+28 · info", block.more.label);
     // Two rows of room: the call carrying the clock is clipped, so the work
     // line keeps the clock above the waiting row.
-    const short = try block.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 30, .height = 2 }, .cell_size = .{} });
+    const short = try block.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 30, .height = 2 }, .cell_size = .{} });
     try std.testing.expectEqual(@as(u16, 2), short.size.height);
     try std.testing.expectEqualStrings("⠹ Run the whole store… · 1m 1s", try rowText(short, 0));
     try std.testing.expectEqualStrings("◌ 3 · and then summarize", try rowText(short, 1));
     // Three rows: the oldest call would leave the clock's call clipped, so
     // the work line takes the row and the overflow counts all 30.
-    const three = try block.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 30, .height = 3 }, .cell_size = .{} });
+    const three = try block.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 30, .height = 3 }, .cell_size = .{} });
     try std.testing.expectEqualStrings("+30 more running · info", block.more.label);
     try std.testing.expectEqualStrings("⠹ Run the whole store… · 1m 1s", try rowText(three, 1));
     try std.testing.expectEqualStrings("◌ 3 · and then summarize", try rowText(three, 2));
@@ -341,18 +341,18 @@ test "a narrow or short activity tail keeps the clock and the oldest calls" {
     block.work = null;
     // With no clock to keep, a short tail keeps the oldest call, as the
     // three retained are the oldest, and counts the other 29.
-    const oldest = try block.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 30, .height = 3 }, .cell_size = .{} });
+    const oldest = try block.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 30, .height = 3 }, .cell_size = .{} });
     try std.testing.expectEqualStrings("✓ Read src/overview_view.zig", try rowText(oldest, 0));
     try std.testing.expectEqualStrings("+29 more running · info", block.more.label);
     block.live.total = 2;
-    const clipped = try block.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 30, .height = 2 }, .cell_size = .{} });
+    const clipped = try block.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 30, .height = 2 }, .cell_size = .{} });
     try std.testing.expectEqual(@as(usize, 1), clipped.children.len);
     try std.testing.expectEqualStrings("+2 more running · info", block.more.label);
     try std.testing.expectEqualStrings("◌ 3 · and then summarize", try rowText(clipped, 1));
     block.live.total = 30;
     block.work = work;
     for ([_]vxfw.Size{ .{ .width = 0, .height = 4 }, .{ .width = 1, .height = 1 }, .{ .width = 4, .height = 0 } }) |size| {
-        const tiny = try block.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = size.width, .height = size.height }, .cell_size = .{} });
+        const tiny = try block.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = size.width, .height = size.height }, .cell_size = .{} });
         try std.testing.expect(tiny.size.width <= size.width and tiny.size.height <= size.height);
     }
 }

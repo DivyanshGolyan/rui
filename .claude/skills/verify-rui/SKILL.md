@@ -18,7 +18,7 @@ The helper is `scripts/verify-rui`. Set `V=.claude/skills/verify-rui/scripts/ver
    $V build FULLSHA --source ../rui-verify-pin-SHORT --pkg-dir "$ZIG_LOCAL_PKG_DIR"
    ```
 
-   The build refuses a dirty or mismatched checkout. It runs `zig build -Doptimize=ReleaseSafe` and copies `zig-out/bin` to `~/.cache/verify-rui/builds/SHA/bin`. It then runs `zig build screen-emulator`, which installs the libghostty-vt that decodes committed frames into `~/.cache/verify-rui/builds/SHA/screen`. It also writes `manifest.json` with the SHA, tree and binary and library sha256 values. A cold build takes about 5 minutes on an M-series Mac, plus about 5 for libghostty-vt. A line saying `failed command: sh ./src/build_transport.sh` in the log is normal when rc=0. Use `build FULLSHA --no-screen` to skip libghostty-vt: the manifest records `screen_library: null`. The tap, tapped `term`, `wait` and `frames` refuse such builds with one line; direct untapped tmux terminals still work. A build made before the library existed has none; rebuild it with `--force` to add it.
+   The build refuses a dirty or mismatched checkout. Set `RUI_BUILD_JOBS` to a positive integer to control parallelism for both builds (default `2`; use `1` on constrained containers). It runs `zig build -Doptimize=ReleaseSafe` and copies `zig-out/bin` to `~/.cache/verify-rui/builds/SHA/bin`. It then runs `zig build screen-emulator`, which installs the libghostty-vt that decodes committed frames into `~/.cache/verify-rui/builds/SHA/screen`. It also writes `manifest.json` with the SHA, tree and binary and library sha256 values. A cold build takes about 5 minutes on an M-series Mac, plus about 5 for libghostty-vt. A line saying `failed command: sh ./src/build_transport.sh` in the log is normal when rc=0. Use `build FULLSHA --no-screen` to skip libghostty-vt: the manifest records `screen_library: null`. The tap, tapped `term`, `wait` and `frames` refuse such builds with one line; direct untapped tmux terminals still work. A build made before the library existed has none; rebuild it with `--force` to add it.
 
 2. **New run, one per experiment.**
 
@@ -89,7 +89,7 @@ It also prints macOS Accessibility and Screen Recording status for information o
 
 ## Drive
 
-Typing `/` shows command names only, with fixed choices in quiet colour separated by ` · `; option and choice rows have no descriptions or argument placeholders. Check this in both the conversation and overview. Use the app settings **Version** row for Upgrade, and `C-c` to leave; `/upgrade`, `/exit`, `/login`, `/wait`, `/inspect-action` and `/help` are ordinary unknown commands. A typed `?` stays in the draft.
+Typing `/` in a chat shows the listed chat commands with one-line descriptions beside loaded skills; option and fixed-choice rows have no descriptions or argument placeholders. The overview has no input. Use the app settings **Version** row for Upgrade, and `C-c` to leave; `/upgrade`, `/exit`, `/login`, `/wait`, `/inspect-action` and `/help` are ordinary unknown commands. A typed `?` stays in the draft.
 
 For the full keys-only reference, open the overview and press End then Enter to open the pinned Settings row. Press Down six times to select the last **Keys** row (after Version), then Enter. In a wide conversation, click the pinned Settings row instead, without leaving the chat. The `keys` frame checks this at 140 and 46 columns. Check eleven strong key names with short meanings: aligned row-major pairs at 140 columns, one column at 46, including `ctrl+x` → `stop`; no title, footer, instructions, command list or stale help text. Esc returns to Settings, and another Esc returns to the original screen.
 
@@ -124,7 +124,8 @@ Fixture policy, chosen by the latest user text:
 - `long bash`: one Bash command that sleeps 8 s, so a Session runs Bash long enough to stop.
 - `show environment`: one Bash call that prints `CLIENT_MARK`, `HOST_SECRET`, `command -v brew` and `PATH`, so a run can show which terminal's environment Bash got.
 - `start a child`: one Bash call that starts Session `child` with `show environment` through `rui session start`.
-- `relay to ID`: one Bash call that sends `show environment` to Session ID through `rui session send`, so the recipient's Turn starts from a peer Message.
+- `relay to ID: TEXT`: one Bash call that sends `TEXT`, everything after the first `: `, to Session ID through `rui session send`, so the recipient's Turn starts from a peer Message. Without `: ` it sends `show environment`. Text that itself contains `show environment` runs that policy instead.
+- `hold answer`: no reply until the fixture closes at run cleanup, so the Turn stays working however long the run takes.
 - `parallel bash`: two Bash commands issued together that sleep 12 s and 20 s, so two calls run side by side.
 - `slow`: the answer streams for about 10 s.
 - `rate limit`: HTTP 429 with `Retry-After: 8` the first time that text arrives, then an echo. The Session retries for 8 s.

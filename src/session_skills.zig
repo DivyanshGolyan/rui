@@ -318,6 +318,28 @@ test "inline skills suggestions bound pages and retain prefix-independent revisi
     try std.testing.expectEqualStrings("beta", filtered.entries[0].name);
 }
 
+test "inline skills bind the complete catalog beyond a truncated suggestion preview" {
+    const skill_suggestions = @import("skill_suggestions.zig");
+    var names: [skill_suggestions.capacity][16]u8 = undefined;
+    var entries: [skill_suggestions.capacity + 1]catalog.Entry = undefined;
+    for (&names, entries[0..names.len], 0..) |*name, *entry, index| entry.* = .{
+        .name = try std.fmt.bufPrint(name, "earlier-{d:0>2}", .{index}),
+        .description = "Preview",
+        .path = "/never-read",
+    };
+    entries[entries.len - 1] = .{ .name = "review", .description = "Beyond the preview", .path = "/never-read" };
+    const found: catalog.Catalog = .{ .entries = &entries };
+    var preview = try selectSuggestions(std.testing.allocator, found, "");
+    defer preview.deinit(std.testing.allocator);
+    try std.testing.expectEqual(entries.len, preview.total);
+    try std.testing.expectEqual(skill_suggestions.capacity, preview.entries.len);
+    for (preview.entries) |entry| try std.testing.expect(!std.mem.eql(u8, "review", entry.name));
+    for ([_][]const u8{ "/review this change", "/genuinely-unknown this change" }, [_][]const []const u8{ &.{"review"}, &.{} }) |text, expected| {
+        const field: wire_request.ContentField = .{ .state = .value, .borrowed = text.ptr, .length = text.len };
+        try expectBound(&field, found, expected);
+    }
+}
+
 fn expectBound(text: *const wire_request.ContentField, found: catalog.Catalog, expected: []const []const u8) !void {
     var binder: Binder = .{ .allocator = std.testing.allocator, .found = found };
     defer binder.deinit();

@@ -8,7 +8,6 @@ const literal = @import("../mysql_literal.zig");
 const schema = @import("../schema.zig");
 const store_path = @import("../../store_path.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
-const wire_version = @import("../../wire_version.zig").wire_version;
 const policy = @import("mysql_refusal.zig");
 
 pub const Options = struct {
@@ -72,6 +71,10 @@ pub fn open(conn: *wire.Connection, io: std.Io, options: Options, selector: []co
     var meta_columns = try columns(Meta, conn);
     var store_id: [2 * schema.store_id_bytes]u8 = undefined;
     var seen: schema.MetaPresence = .empty;
+    // An unknown key is refused once every row is read, so a Store at
+    // another format, whose keys differ (format 73 still has its wire
+    // label), is told about its format whatever order the rows come in.
+    var unexpected_key = false;
     while (try nextRow(conn)) {
         var meta: Meta = undefined;
         // The decoder fills fields in order. Preserve the key if its value
@@ -81,7 +84,6 @@ pub fn open(conn: *wire.Connection, io: std.Io, options: Options, selector: []co
         rows.decodeRow(Meta, &meta_columns, conn, &meta) catch |err| switch (err) {
             error.CorruptStore => return switch (std.meta.stringToEnum(schema.MetaKey, meta.key.slice()) orelse return error.WrongStoreSchema) {
                 .format => error.MalformedStoreFormat,
-                .wire_version => error.WrongStoreVersion,
                 .store_id => error.WrongStoreIdentity,
                 .store_selector => error.WrongStoreIdentity,
             },
@@ -89,7 +91,10 @@ pub fn open(conn: *wire.Connection, io: std.Io, options: Options, selector: []co
         };
         const key = meta.key.slice();
         const value = meta.value.slice();
-        const meta_key = std.meta.stringToEnum(schema.MetaKey, key) orelse return error.WrongStoreSchema;
+        const meta_key = std.meta.stringToEnum(schema.MetaKey, key) orelse {
+            unexpected_key = true;
+            continue;
+        };
         switch (meta_key) {
             .format => {
                 const found = std.fmt.parseInt(u32, value, 10) catch return error.MalformedStoreFormat;
@@ -97,7 +102,6 @@ pub fn open(conn: *wire.Connection, io: std.Io, options: Options, selector: []co
                 if (found < schema.schema_version) return error.StoreSchemaBehind;
                 if (found > schema.schema_version) return error.StoreSchemaAhead;
             },
-            .wire_version => if (!std.mem.eql(u8, value, wire_version)) return error.WrongStoreVersion,
             // The canonical selector is checked independently of the durable id.
             .store_selector => if (!std.mem.eql(u8, value, selector)) return error.WrongStoreIdentity,
             .store_id => {
@@ -107,6 +111,7 @@ pub fn open(conn: *wire.Connection, io: std.Io, options: Options, selector: []co
         }
         seen.insert(meta_key);
     }
+    if (unexpected_key) return error.WrongStoreSchema;
     const Catalog = struct { line: Bounded(2048) };
     var catalog_columns = try columns(Catalog, conn);
     var digest: u64 = 0;

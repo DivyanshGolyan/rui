@@ -27,8 +27,10 @@ pub const Provider = enum {
     }
 
     /// The short label of what a person signed in with, where a sign-in is
-    /// chosen or read beside a model: the picker's control, the Session line
-    /// and the first-run choice. Short, so a narrow pane keeps it whole.
+    /// chosen or read beside a model, as app settings' Sign-in row does.
+    /// Short, so a narrow pane keeps it whole. Both ways into
+    /// one account read the same, "ChatGPT": a person signs in to ChatGPT,
+    /// and only prose that must tell the ways apart uses `shown`.
     pub fn signIn(self: Provider) []const u8 {
         return self.facts().sign_in;
     }
@@ -63,7 +65,7 @@ pub const Provider = enum {
     /// The table: the one switch on which provider it is.
     pub fn facts(self: Provider) Facts {
         return switch (self) {
-            .codex => .{ .endpoint = managed_endpoint, .codec = .@"openai-responses/2", .shown = "ChatGPT (device code)", .sign_in = "Codex", .credential = .sign_in, .login = "rui auth login chatgpt --device-code", .model_list = .catalog, .usage = null, .runs_tools = &.{"web_search"}, .same_account = .chatgpt },
+            .codex => .{ .endpoint = managed_endpoint, .codec = .@"openai-responses/2", .shown = "ChatGPT (device code)", .sign_in = "ChatGPT", .credential = .sign_in, .login = "rui auth login chatgpt --device-code", .model_list = .catalog, .usage = null, .runs_tools = &.{"web_search"}, .same_account = .chatgpt },
             .openai => .{ .endpoint = api_endpoint, .codec = .@"openai-responses/2", .shown = "OpenAI", .sign_in = "API key", .credential = .api_key, .login = "rui auth login openai", .model_list = .live, .usage = null, .runs_tools = &.{"web_search"}, .same_account = null },
             .chatgpt => .{ .endpoint = api_endpoint, .codec = .@"openai-responses/3", .shown = "ChatGPT", .sign_in = "ChatGPT", .credential = .sign_in, .login = "rui auth login chatgpt", .model_list = .live, .usage = "Manage usage: https://chatgpt.com/settings/usage", .runs_tools = &.{"web_search"}, .same_account = .codex },
         };
@@ -114,18 +116,20 @@ test "every OpenAI provider runs web_search, and none runs bash" {
     }
 }
 
-test "every provider's name and sign-in read apart from the others', and its login is a terminal command" {
+test "every provider's name reads apart, its sign-in reads the same exactly within its account, and its login is a terminal command" {
     for (std.enums.values(Provider), 0..) |provider, at| {
         for (std.enums.values(Provider)[at + 1 ..]) |other| {
-            try std.testing.expect(!std.mem.eql(u8, provider.signIn(), other.signIn()));
+            const one_account = provider.sameAccount() == other;
+            try std.testing.expectEqual(one_account, std.mem.eql(u8, provider.signIn(), other.signIn()));
             try std.testing.expect(!std.mem.eql(u8, provider.shown(), other.shown()));
-            // The typed /model word is a sign-in's first word.
-            try std.testing.expect(!std.ascii.eqlIgnoreCase(firstWord(provider.signIn()), firstWord(other.signIn())));
             if (provider.login()) |command| try std.testing.expect(!std.mem.eql(u8, command, other.login() orelse ""));
         }
         if (provider.login()) |command| try std.testing.expect(std.mem.startsWith(u8, command, "rui auth login "));
+        // No label a person reads names Codex.
+        try std.testing.expect(std.ascii.findIgnoreCase(provider.signIn(), "codex") == null);
+        try std.testing.expect(std.ascii.findIgnoreCase(provider.shown(), "codex") == null);
     }
-    try std.testing.expectEqualStrings("Codex", Provider.codex.signIn());
+    try std.testing.expectEqualStrings("ChatGPT", Provider.codex.signIn());
     try std.testing.expectEqualStrings("ChatGPT (device code)", Provider.codex.shown());
     try std.testing.expectEqualStrings("ChatGPT", Provider.chatgpt.signIn());
     try std.testing.expectEqualStrings("API key", Provider.openai.signIn());
@@ -147,10 +151,6 @@ test "two providers share an account only as each other's, and only as sign-ins"
     try std.testing.expectEqual(@as(?Provider, .chatgpt), Provider.codex.sameAccount());
     try std.testing.expectEqual(@as(?Provider, .codex), Provider.chatgpt.sameAccount());
     try std.testing.expectEqual(@as(?Provider, null), Provider.openai.sameAccount());
-}
-
-fn firstWord(text: []const u8) []const u8 {
-    return text[0 .. std.mem.indexOfScalar(u8, text, ' ') orelse text.len];
 }
 
 test "every provider owns an HTTPS endpoint" {

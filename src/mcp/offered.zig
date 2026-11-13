@@ -1,4 +1,4 @@
-//! The tools a Host offers at start: the built-ins and every `mcpServers`
+//! The tools a Host offers at start: the built-ins and every `tools.mcp`
 //! entry's tools (M3a, D110). A server that cannot be listed keeps the
 //! records the Host saved last, so a restart while a server is down does
 //! not change what a Session can be configured with (D147). A name two
@@ -10,7 +10,8 @@
 const std = @import("std");
 const protocol = @import("../protocol.zig");
 const tools = @import("../tools.zig");
-const launch_frame = @import("../launch_frame.zig");
+const hs = @import("../host_settings.zig");
+const Connection = @import("../server_mcp_settings.zig").Server;
 const http1 = @import("../http1/request.zig");
 const deadline = @import("../deadline.zig");
 const stderr = @import("../stderr.zig");
@@ -113,7 +114,7 @@ pub const Fetched = union(enum) {
 
 /// Lists one server's tools within `list_timeout_ms`, copying them into
 /// `arena`. Anything but a complete listing leaves the server unreachable.
-pub noinline fn fetch(io: std.Io, arena: std.mem.Allocator, scratch: std.mem.Allocator, server: launch_frame.Frame.McpServer, stop: ?std.posix.fd_t) Error!Fetched {
+pub noinline fn fetch(io: std.Io, arena: std.mem.Allocator, scratch: std.mem.Allocator, server: *const Connection, stop: ?std.posix.fd_t) Error!Fetched {
     const target = http1.parseTarget(server.url.slice()) catch return .unreachable_;
     const entries = try scratch.alloc(Listing.Entry, entries_per_server);
     defer scratch.free(entries);
@@ -149,8 +150,8 @@ pub noinline fn fetch(io: std.Io, arena: std.mem.Allocator, scratch: std.mem.All
             .{ .fd = stop orelse -1, .events = std.posix.POLL.IN, .revents = 0 },
         };
         _ = std.posix.poll(&fds, 100) catch return .unreachable_;
-        // A launched Host's stdin carries nothing after its frame: any event
-        // on it is the launcher going away.
+        // When lifetime is stdin, any event after document intake means
+        // its owner is going away.
         if (fds[1].revents != 0) return error.Stopped;
     }
     const copies = try arena.alloc(Listing.Entry, listing.entries().len);
@@ -172,13 +173,13 @@ pub noinline fn collect(
     io: std.Io,
     arena: std.mem.Allocator,
     scratch: std.mem.Allocator,
-    servers: []const launch_frame.Frame.McpServer,
+    servers: []const Connection,
     saved: ?*const tools.HostToolSet,
     collision: *Collision,
     stop: ?std.posix.fd_t,
 ) Error!tools.HostToolSet {
     const sources = try arena.alloc(Source, servers.len);
-    for (servers, sources) |server, *source| {
+    for (servers, sources) |*server, *source| {
         const name = try arena.dupe(u8, server.name.slice());
         source.* = .{ .server = name, .listed = null };
         switch (try fetch(io, arena, scratch, server, stop)) {
@@ -231,7 +232,7 @@ test "an unlisted server keeps its saved tools and a listed one replaces them" {
     try std.testing.expectEqualStrings("down", again.records[again.find("kept").?].server);
 }
 
-test "a server removed from the frame loses its saved tools" {
+test "a server removed from settings loses its saved tools" {
     var memory = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer memory.deinit();
     var collision: Collision = .{};
@@ -327,7 +328,7 @@ test "MCP missing tools maximum launch names fit the request and start_agent dia
     var memory: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer memory.deinit();
     var collision: Collision = .{};
-    var names: [launch_frame.Frame.max_mcp_servers][launch_frame.Frame.max_mcp_name_bytes]u8 = undefined;
+    var names: [hs.max_mcp_servers][hs.max_mcp_name_bytes]u8 = undefined;
     var sources: [names.len]Source = undefined;
     for (&names, &sources, 0..) |*name, *source, index| {
         @memset(name, @as(u8, 'a') + @as(u8, @intCast(index)));

@@ -71,6 +71,7 @@ class PlanTest(unittest.TestCase):
                     cache_execution=not documentation and name != 'draft',
                     typecheck_macos=not documentation and name != 'draft',
                     policy_skips=['test_unchanged'],
+                    compile_only=False,
                 )
                 self.assertEqual(result.outputs, expected)
                 self.assertEqual(original, before, 'the selector result is borrowed, not mutated')
@@ -130,6 +131,31 @@ class PlanTest(unittest.TestCase):
                 self.assertEqual(output['macos_split'], split)
                 self.assertEqual(output['macos_matrix'], shards(expected, 'macos', mysql_suites=[]))
                 self.assertFalse(output['linux_split'])
+
+    def test_compile_only_builds_every_gate_and_unit_root_and_runs_nothing(self):
+        # main-build.yml after a push: whatever the push selected, or did not.
+        for documentation, retry in product((False, True), (False, True)):
+            with self.subTest(documentation=documentation, retry=retry):
+                original = dict(selection(documentation), retry=retry)
+                before = deepcopy(original)
+                kind = ChangeKind.DOCUMENTATION if documentation else ChangeKind.NORMAL
+                output = plan(original, event_name='push', draft=False, promotion=False,
+                              change_kind=kind, compile_only=True).outputs
+                self.assertEqual(original, before)
+                self.assertEqual(output['change_kind'], 'normal')
+                self.assertEqual(output['targets'], ['check', 'test-logic'])
+                self.assertTrue(output['linux_split'], 'the unit roots compile on their own producer')
+                self.assertTrue(output['typecheck_macos'])
+                self.assertEqual(output['native_targets'], [])
+                self.assertFalse(output['native'])
+                self.assertEqual(output['macos_matrix'], shards([], 'macos', mysql_suites=[]))
+                for key in ('linux_codegen', 'upgrade', 'retry', 'cache_execution', 'linux_memory', 'draft_run'):
+                    self.assertFalse(output[key], key)
+                self.assertEqual(output['quarantine'], 'off')
+                self.assertTrue(output['compile_only'])
+        with self.assertRaises(ValueError):
+            plan(selection(), event_name='workflow_dispatch', draft=False, promotion=True,
+                 change_kind=ChangeKind.NORMAL, compile_only=True)
 
     def test_pr_codegen_selects_check_or_stack_or_both_without_changing_other_targets(self):
         for targets in (['check'], ['stack-frames'], ['check', 'stack-frames'], ['test-logic'], []):

@@ -11,7 +11,10 @@
 //! A transition declares:
 //! - `rounds`: `rounds(.{ .tag = .{ Kind, error.Named } })`, in the order
 //!   the rounds run. A failed statement in a round with a named error is
-//!   that error; `.{ Kind }` names none.
+//!   that error; `.{ Kind }` names none. A third element,
+//!   `.{ .{ S, error.Each }, ... }`, names the failure of statement `S`
+//!   (`Access.failedOn`) in that round, ahead of the round's own name, as
+//!   `store_access.runNamed` does.
 //! - `round_budget`: its `.always` rounds plus its commit, checked here.
 //! - `commit`: how it commits (`Commit`). One that does not cannot ask to.
 //! - `begin`: the round its transaction opens before, or null when its
@@ -24,6 +27,13 @@
 //! - `committed(t)`, the result once its commit stands.
 //! - optionally `announced(t)`, what the Host hears once its commit stands
 //!   and before the Store runs anything else (`Store.announce`).
+//! - optionally `follow(t)`, the reads its commit carries after COMMIT in
+//!   the same message where that message carries reads, or null
+//!   (`Access.commitFollowed`): a pointer to a value with `queue(reads)`
+//!   and `followed()`, which the value keeps until the commit ends.
+//! - optionally `failed(t)`, which lets go of what its steps took on that
+//!   only a commit hands on, such as a view its commit's reads fill, when
+//!   `run` ends with an error, before its transaction rolls back.
 //! - optionally `deinit(t)`, which frees what its steps allocated, once
 //!   `apply` ends on any path.
 //!
@@ -72,9 +82,13 @@ pub fn rounds(comptime spec: anytype) type {
     var Named: type = error{};
     for (&values, names, 0..) |*value, name, i| {
         value.* = i;
-        const declared: Kind = @field(spec, name)[0];
+        const round = @field(spec, name);
+        const declared: Kind = round[0];
         always_count += @intFromBool(declared == .always);
-        if (@field(spec, name).len == 2) Named = Named || @TypeOf(@field(spec, name)[1]);
+        if (round.len >= 2) Named = Named || @TypeOf(round[1]);
+        if (round.len == 3) for (round[2]) |pair| {
+            Named = Named || @TypeOf(pair[1]);
+        };
     }
     const Tags = @Enum(u8, .exhaustive, names, &values);
     const always_rounds = always_count;
@@ -93,10 +107,16 @@ pub fn rounds(comptime spec: anytype) type {
         }
 
         /// The error a failed statement in `at` answers, or null when the
-        /// round names none.
-        pub fn failed(at: At) ?Error {
+        /// round names none: the name of the statement whose step failed
+        /// in `access`, the Access that ran the round, if the round names
+        /// it (`store_access.failedName`), or else the round's.
+        pub fn failed(at: At, access: anytype) ?Error {
             return switch (at) {
-                inline else => |tag| if (@field(spec, @tagName(tag)).len == 2) @field(spec, @tagName(tag))[1] else null,
+                inline else => |tag| {
+                    const round = @field(spec, @tagName(tag));
+                    if (round.len == 3) if (store_access.failedName(access, round[2])) |name| return name;
+                    return if (round.len >= 2) round[1] else null;
+                },
             };
         }
 
@@ -338,8 +358,8 @@ fn check(comptime T: type) void {
 
 /// Runs `t` under `entry`'s lock: each round its steps ask for, then its
 /// commit, answering `committed`, or `declined` when a `Declined` guard
-/// stops the commit. On `.done` or an error it abandons what it queued.
-/// `t` lives in the caller's frame: a queued statement may read its bytes
+/// stops the commit. On `.done` or an error it abandons what it queued;
+/// on an error, after `failed` when `T` declares it. `t` lives in the caller's frame: a queued statement may read its bytes
 /// in place until the pass that steps it.
 pub noinline fn run(entry: *const store_core.Entry, comptime T: type, t: *T, faults: Faults) !T.Result {
     comptime check(T);
@@ -351,7 +371,9 @@ pub noinline fn run(entry: *const store_core.Entry, comptime T: type, t: *T, fau
     };
     defer if (@FieldType(State, "reader") != void) core.reader.deinit();
     defer if (T.commit != .none) core.writer.deinit();
-    if (T.commit != .none) return core.writer.end(faults, drive(T, t, &core)) else return drive(T, t, &core);
+    const result = drive(T, t, &core);
+    if (comptime @hasDecl(T, "failed")) if (result) |_| {} else |_| T.failed(t);
+    if (T.commit != .none) return core.writer.end(faults, result) else return result;
 }
 
 fn drive(comptime T: type, t: *T, core: *CoreFor(T)) !T.Result {
@@ -369,21 +391,19 @@ fn drive(comptime T: type, t: *T, core: *CoreFor(T)) !T.Result {
             if (T.rounds.kind(at) == .raw) {
                 const window = core.raw orelse @panic("a raw round reads the window Round.readRaw asked for");
                 core.raw = null;
-                const read = if (@FieldType(CoreFor(T), "reader") != void and !inside)
-                    core.reader.readRaw(window.content_id, window.offset, window.destination)
-                else if (T.commit != .none)
-                    core.writer.readRaw(window.content_id, window.offset, window.destination)
-                else
-                    unreachable;
-                read catch |err| return named(T, at, err);
+                if (@FieldType(CoreFor(T), "reader") != void and !inside) {
+                    core.reader.readRaw(window.content_id, window.offset, window.destination) catch |err| return named(T, at, err, &core.reader);
+                } else if (T.commit != .none) {
+                    core.writer.readRaw(window.content_id, window.offset, window.destination) catch |err| return named(T, at, err, &core.writer);
+                } else unreachable;
             } else if (core.raw != null) {
                 @panic("a window Round.readRaw asked for is read only by a .raw round");
             } else if (@FieldType(CoreFor(T), "reader") != void and !inside) {
                 // Before `begin`, writes ride the commit round.
                 if (T.commit != .none) std.debug.assert(core.writer.queued == 0);
-                core.reader.run() catch |err| return named(T, at, err);
+                core.reader.run() catch |err| return named(T, at, err, &core.reader);
             } else {
-                core.writer.run() catch |err| return named(T, at, err);
+                core.writer.run() catch |err| return named(T, at, err, &core.writer);
             }
             core.last = at;
         },
@@ -391,7 +411,8 @@ fn drive(comptime T: type, t: *T, core: *CoreFor(T)) !T.Result {
             // Reads queued outside the transaction would never run.
             if (@FieldType(CoreFor(T), "reader") != void) std.debug.assert(core.reader.queued == 0);
             std.debug.assert(core.raw == null);
-            core.writer.commit() catch |err| {
+            const committing = if (comptime @hasDecl(T, "follow")) core.writer.commitFollowed(T.follow(t)) else core.writer.commit();
+            committing catch |err| {
                 if (comptime @typeInfo(T.Declined).error_set.error_names.?.len != 0) if (declinedBy(T, err)) |declined| {
                     try core.writer.abandon(core.faults);
                     return T.declined(t, declined);
@@ -408,10 +429,10 @@ fn drive(comptime T: type, t: *T, core: *CoreFor(T)) !T.Result {
     };
 }
 
-/// A round's failure: a failed statement is the round's named error, if
-/// it names one.
-fn named(comptime T: type, at: T.rounds.At, err: anytype) (@TypeOf(err) || T.rounds.Error) {
-    if (err == error.StatementFailed) if (T.rounds.failed(at)) |failed| return failed;
+/// A round's failure: a failed statement is the error the round names
+/// for it in `access`, which ran the round, if it names one.
+fn named(comptime T: type, at: T.rounds.At, err: anytype, access: anytype) (@TypeOf(err) || T.rounds.Error) {
+    if (err == error.StatementFailed) if (T.rounds.failed(at, access)) |failed| return failed;
     return err;
 }
 

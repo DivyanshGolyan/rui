@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""The Host produces start failures; only its CLI door writes stdout."""
-import json
+"""Settings replaces the retired launch owner; only the CLI publishes failures."""
 import sys
 from pathlib import Path
 
@@ -10,22 +9,17 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def scan(source, path="src/server.zig"):
-    """Inspect production tokens, excluding comments, strings and test blocks."""
+    """Keep server I/O in production tokens; reject retired names everywhere."""
     tokens = production(lex(source))
     names = [error_identifier(token) if NAME.fullmatch(token.text) or token.text.startswith('@"')
              else token.text for token in tokens]
-    found = []
+    found = retired_names(source, path)
     # Origin is not a Host capability, including in the Host's owner tests.
     all_tokens = lex(source)
-    for index, token in enumerate(all_tokens):
+    for token in all_tokens:
         name = error_identifier(token) if NAME.fullmatch(token.text) or token.text.startswith('@"') else token.text
         if name == "launched":
             found.append(f"{path}:{token.line}: names launched; read the individual Prepared setting")
-        if token.text == "@import" and index + 3 < len(all_tokens):
-            argument = all_tokens[index + 2].text
-            if (all_tokens[index + 1].text == "(" and argument.startswith('"')
-                    and Path(json.loads(argument)).name == "launch_frame.zig"):
-                found.append(f"{path}:{token.line}: imports launch_frame; the Host consumes Prepared settings")
 
     for index, name in enumerate(names):
         if name == "writeRefusal":
@@ -35,9 +29,22 @@ def scan(source, path="src/server.zig"):
     return found
 
 
+def retired_names(source, path):
+    """The retired source owner and CLI switch cannot survive anywhere in src."""
+    return [f"{path}:{number}: names {name}; use the Host settings document"
+            for number, line in enumerate(source.splitlines(), 1)
+            for name in ("launch_frame", "--launch-frame") if name in line]
+
+
 def violations(root=ROOT):
-    return [item for path in sorted((root / "src").glob("server*.zig"))
-            for item in scan(path.read_text(), path.relative_to(root).as_posix())]
+    found = []
+    for path in sorted((root / "src").rglob("*.zig")):
+        relative = path.relative_to(root).as_posix()
+        inspect = scan if path.name.startswith("server") else retired_names
+        found.extend(inspect(path.read_text(), relative))
+        if "launch_frame" in path.name:
+            found.append(f"{relative}: names the retired launch_frame source owner")
+    return found
 
 
 if __name__ == "__main__":

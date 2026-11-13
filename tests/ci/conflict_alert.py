@@ -27,11 +27,17 @@ def github(method, path, fields=()):
     return json.loads(gh(*args) or "null")
 
 
-def pages(api, path):
-    """Every row of a paged list: `gh api --paginate` fails through the cloud sessions' proxy."""
+def pages(api, path, key=None):
+    """Every row of a paged list: `gh api --paginate` fails through the cloud sessions' proxy.
+
+    key names the list inside an object envelope, such as Actions' `workflow_runs`.
+    Rows arrive lazily, so a caller that stops early requests no further page.
+    """
     page = 1
     while True:
         batch = api("GET", f"{path}&per_page=100&page={page}")
+        if key is not None:
+            batch = batch[key]
         yield from batch
         if len(batch) < 100:
             return

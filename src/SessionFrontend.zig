@@ -49,7 +49,6 @@ const empty_app_text: vxfw.Text = .{ .text = "" };
 
 const reads = @import("session_reads.zig");
 const session_line = @import("session_line.zig");
-const command_input = @import("command_input.zig");
 const slash_commands_shared = @import("slash_commands.zig");
 const skill_completion = @import("skill_completion.zig");
 const skill_suggestions = @import("skill_suggestions.zig");
@@ -416,9 +415,9 @@ pub const Lender = struct {
 };
 
 /// How the frontend stopped. Either way it stopped only its own client waits;
-/// Host work it started continues. `returned` goes back to the overview that
-/// lent the terminal, which stays begun.
-pub const Outcome = enum { detached, interrupted, returned };
+/// Host work it started continues. Navigation returns to the overview that
+/// lent the terminal, which stays begun; new_session then opens an empty chat.
+pub const Outcome = enum { detached, interrupted, returned, new_session };
 
 pub fn begin(self: *Self, init: std.process.Init, store: []const u8, session: []const u8, directory: []const u8, files: Files, command: Command, requests: Requests, status: Status, screen: *Screen, interrupted: *client.Cancellation, lender: Lender) void {
     self.* = .{ .init = init, .home = init.environ_map.get("HOME") orelse "", .store = store, .session = session, .directory = directory, .files = files, .command = command, .requests = requests, .status = status, .screen = screen, .interrupted = interrupted, .lender = lender, .colour = screen.colour };
@@ -513,9 +512,14 @@ fn openInfo(self: *Self, _: *vxfw.EventContext) !void {
 }
 
 /// A drawn footer click steps the footer as its key does (`session_keys.footer`).
-fn footerClick(self: *Self, ctx: *vxfw.EventContext, field: ?session_chrome.FooterField) !void {
-    if (session_keys.footer(&self.footer, self.footerKeyFacts(), .{ .click = field }) == .open_choice) try self.startFooterChoice(ctx);
+fn requestFooterChoice(self: *Self, field: ?session_chrome.FooterField) void {
+    if (session_keys.footer(&self.footer, self.footerKeyFacts(), .{ .click = field }) == .open_choice) self.prepareFooterChoice();
     self.dirty = true;
+}
+
+fn footerClick(self: *Self, ctx: *vxfw.EventContext, field: ?session_chrome.FooterField) !void {
+    self.requestFooterChoice(field);
+    try self.openFooterChoice(ctx);
 }
 
 fn footerKeyFacts(self: *const Self) session_keys.FooterFacts {
@@ -527,11 +531,15 @@ fn hasEffort(self: *const Self) bool {
 }
 
 /// Opens the choice footer focus chose, once its read is ready.
-fn startFooterChoice(self: *Self, ctx: *vxfw.EventContext) !void {
+fn prepareFooterChoice(self: *Self) void {
     self.app_info.closeStandaloneChoice();
     if (self.inspection.status != null) self.app_info.refresh();
     self.inspection.status_requested = true;
     self.poll_at = 0;
+}
+
+fn startFooterChoice(self: *Self, ctx: *vxfw.EventContext) !void {
+    self.prepareFooterChoice();
     try self.openFooterChoice(ctx);
 }
 
@@ -629,7 +637,7 @@ fn infoBackend(self: *Self) ChatInfo.Backend {
         }
         fn copied(raw: *anyopaque) bool {
             const frontend = owner(raw);
-            return frontend.shown_notice.isCopy(frontend.nowMs());
+            return frontend.shown_notice.showsPanelCopy(frontend.nowMs());
         }
         fn caps(raw: *anyopaque) overview_view.Caps {
             return owner(raw).app_caps;
@@ -692,7 +700,7 @@ fn chromeClick(comptime click: Click) *const fn (*anyopaque, *vxfw.EventContext)
             if (self.leaving != null) return;
             self.shown_notice.dismiss();
             switch (click) {
-                .action => |action| try self.perform(ctx, action),
+                .action => |action| try self.perform(action),
                 .status => try self.openInfo(ctx),
                 .footer => |field| try self.footerClick(ctx, field),
                 .footer_close => try self.closeStandaloneChoice(ctx),
@@ -701,7 +709,7 @@ fn chromeClick(comptime click: Click) *const fn (*anyopaque, *vxfw.EventContext)
                 },
                 .details => try self.showSubmissionFailure(),
                 .needs => if (self.heldOriginal()) |held| if (session_notice.key(held)) |key| switch (key) {
-                    .retry => try self.perform(ctx, .recover),
+                    .retry => try self.perform(.recover),
                     .discard => try self.clickCommand("/discard"),
                     .status => try self.showSubmissionFailure(),
                 },
@@ -920,7 +928,10 @@ fn appKey(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event, delivery:
             try ctx.requestFocus(self.app_input.composer.widget());
             try self.showSubmissionFailure();
         },
-        .perform => |action| try self.perform(ctx, action),
+        .perform => |action| try self.perform(action),
+        // Left on an empty draft: the list beside a wide chat takes keys and
+        // the chat stays. With no list beside it, Left leaves as Esc does.
+        .back_to_list => if (!try self.app_hooks.root.focusList(ctx)) try self.perform(.close),
         .open_choice => try self.startFooterChoice(ctx),
         .start_host => {
             const host = self.app_hooks.host.?;
@@ -935,7 +946,7 @@ fn appKey(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event, delivery:
         .consent_draft => switch (self.input.appEvent(conversation_keys, event, delivery.pasted, false)) {
             .busy => self.notice = "Not sent: this Action needs a decision",
             .editor => |outcome| switch (outcome) {
-                .action => |action| try self.perform(ctx, action),
+                .action => |action| try self.perform(action),
                 .refused => |why| if (why != .unbound) {
                     self.notice = refusedNotice(why);
                 },
@@ -945,21 +956,20 @@ fn appKey(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event, delivery:
         },
         .take_row => {
             self.notice = null;
-            self.takeRow(shown.?);
+            try self.takeRow(shown.?);
         },
         .edit => |edit| {
             self.notice = null;
             switch (self.input.appEvent(conversation_keys, event, delivery.pasted, edit.send)) {
                 .message => |ticket| try self.beginMessage(.{ .message = ticket }),
-                .command => try self.commandLine(),
+                .command => try self.runLine(),
                 .busy => self.sayBusy(null, false),
                 .editor => |outcome| switch (outcome) {
-                    .action => |action| try self.perform(ctx, action),
+                    .action => |action| try self.perform(action),
                     .refused => |why| if (why != .unbound) {
                         self.notice = refusedNotice(why);
                     },
-                    .submit => if (self.shownCommands() != null) try self.commandLine(),
-                    .none, .append, .redraw => {},
+                    .none, .append, .redraw, .submit => {},
                 },
             }
         },
@@ -970,6 +980,7 @@ fn appKey(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event, delivery:
     ctx.consumeEvent();
     ctx.redraw = true;
     try self.afterInput(ctx);
+    try self.openFooterChoice(ctx);
 }
 
 /// The Session core's name for one terminal input. Bindings match exact
@@ -980,8 +991,6 @@ fn sessionKey(event: vxfw.Event) session_keys.Key {
         .paste_start => .paste_start,
         .paste_end => .paste_end,
         .key_press => |key| if (Editor.named(key)) |name| .{ .named = name } else if (Editor.isEnter(key)) .enter else if (key.matchExact(vaxis.Key.tab, .{})) .tab else if (key.matchExact(vaxis.Key.tab, .{ .shift = true })) .shift_tab else if (key.matches('i', .{ .alt = true })) .info else if (key.matches('d', .{ .alt = true })) .details else if (hostStartKey(key)) .host_start else switch (Editor.selectKey(conversation_keys, key)) {
-            .left => .left,
-            .right => .right,
             .text => .text,
             else => .other,
         },
@@ -1129,7 +1138,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     var palette: ?vxfw.Widget = null;
     if (self.app_consent.request == null) if (screen.commands) |*shown| {
         self.app_palette.shown = shown;
-        self.app_palette.method = self.app_caps.width;
+        self.app_palette.caps = self.app_caps;
         self.app_palette.style = normal;
         self.app_palette.quiet = quiet;
         self.app_palette.hover_style = hover;
@@ -1253,7 +1262,7 @@ test "App Session retains the draft across a permission card arriving during pas
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
-    const draw_context: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 24 }, .cell_size = .{} };
+    const draw_context: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 24 }, .cell_size = .{} };
     try seedFeed(screen, "\x1b[2mtheme witness\x1b[0m");
     for ([_]struct { caps: overview_view.Caps, ground: vaxis.Color, band: vaxis.Color }{
         .{ .caps = .{}, .ground = .{ .rgb = .{ 0x12, 0x19, 0x33 } }, .band = .{ .rgb = .{ 0x1a, 0x22, 0x46 } } },
@@ -1266,7 +1275,7 @@ test "App Session retains the draft across a permission card arriving during pas
         const surface = try widget_.draw(draw_context);
         var rendered: vaxis.Screen = try .init(arena.allocator(), .{ .rows = 24, .cols = 80, .x_pixel = 0, .y_pixel = 0 });
         const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 80, .height = 24, .screen = &rendered };
-        surface.render(window, self.app_input.composer.widget());
+        try surface.render(window, self.app_input.composer.widget());
         const user = rendered.readCell(1, @intCast(self.app_content.drawn.pad)).?;
         try std.testing.expectEqualStrings("t", user.char.grapheme);
         try std.testing.expectEqual(style.of(case.caps, .{ .colour = .quiet }).fg, user.style.fg);
@@ -1504,7 +1513,7 @@ test "App Session leaves from a permission card on Ctrl-C or Ctrl-D and keeps th
         self.reading.prepared_action = 17;
         self.live.work.first_action = 17;
         try widget_.handleEvent(&ctx, .tick);
-        _ = try widget_.draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 24 }, .cell_size = .{} });
+        _ = try widget_.draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 24 }, .cell_size = .{} });
         try std.testing.expectEqual(@as(?u64, 17), self.app_consent.request);
         // The key as App decodes it: the focused card first, then the Session.
         var parser: vaxis.Parser = .{};
@@ -1566,7 +1575,7 @@ test "App Session link click leaves for the peer only where Esc would leave" {
     defer arena.deinit();
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = std.testing.allocator, .cmds = .empty };
     defer ctx.cmds.deinit(std.testing.allocator);
-    const draw_context: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 24 }, .cell_size = .{} };
+    const draw_context: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 24 }, .cell_size = .{} };
     try seedFeed(screen, "\x1b[2;8m← Received message from " ++ TerminalText.link_open ++ TerminalText.session_link ++ "m3n4p5" ++ TerminalText.link_end ++ "\x1b[4mPlan" ++ TerminalText.link_close ++ "\x1b[0m\x1b[2;8m\x1b[0m\n");
     _ = try widget_.draw(draw_context);
     const content = self.app_content.widget();
@@ -1619,14 +1628,14 @@ pub const Back = union(enum) {
     ended: anyerror!Outcome,
 };
 
-/// After the Session left with `returned`, which Esc only asks for: settles the
+/// After Esc or a new-chat alias returns the Session for navigation: settles the
 /// stopped borrowers as `leave` does, while the terminal stays lent. Esc
 /// needs no running command or submission, so they observe their stop
 /// within one transport poll. A rejected original is released as /discard
 /// does. An unconfirmed one goes to the overview while it has `room` for
 /// it; otherwise, or on a failure, the frontend leaves as `leave` would.
 pub fn back(self: *Self, room: bool) Back {
-    std.debug.assert(self.leaving == .returned);
+    std.debug.assert(self.leaving == .returned or self.leaving == .new_session);
     const plan = departure.exit(self.settle({}), null, false);
     if (plan.failure) |err| return .{ .ended = err };
     if (self.reading.pending_diagnostic != null) return .{ .ended = .detached };
@@ -1796,6 +1805,8 @@ test "frontend exit guidance preserves accepted identity and never substitutes i
 
 /// What each slash command does here.
 const Slash = union(enum) {
+    new_session,
+    model,
     archive,
     unarchive,
     /// Waits for the reader, then shows its page; Host commands included.
@@ -1813,6 +1824,8 @@ fn parse(text: []const u8) Slash {
         .command => |command| command,
     };
     return switch (command.name) {
+        .new, .clear => .new_session,
+        .model => .model,
         .archive => .archive,
         .unarchive => .unarchive,
         .requests => .{ .inspection = .requests },
@@ -1839,7 +1852,9 @@ fn slashCommand(self: *Self, text: []const u8) !void {
         return;
     }
     switch (parsed) {
-        .archive => _ = try self.archive(),
+        .new_session => self.newChat(),
+        .model => self.requestFooterChoice(.model),
+        .archive => try self.perform(.archive),
         .unarchive => try self.converse(.unarchive),
         .inspection => self.input.queueCommand(text),
         .discard => {
@@ -1862,6 +1877,16 @@ fn slashCommand(self: *Self, text: []const u8) !void {
     }
 }
 
+fn newChat(self: *Self) void {
+    if (self.leaving != null) return;
+    const action = self.screen.action_view != null or self.live.work.first_action != null or self.reading.prepared_action != null;
+    const original: ?Submission.State = if (self.submission.view()) |submission| submission.state else null;
+    switch (session_notice.follow(original, self.submission.published(), self.draftSafeToLeave(), action, self.commandActive())) {
+        .stay => |why| self.notice = why,
+        .leave => self.leaving = .new_session,
+    }
+}
+
 fn unknownCommand(self: *Self, text: []const u8) void {
     self.notice = slash_commands_shared.unknown(self.notice_buffer[0..slash_commands_shared.unknown_bytes], text);
 }
@@ -1881,8 +1906,7 @@ test "frontend answers local and unknown commands in place and keeps Host comman
 
         .{ "/recover 01234567-89ab-4cde-8012-0123456789ab", "! Unknown command /recover" },
         .{ "/wait", "! Unknown command /wait" },
-        .{ "/model", "! Unknown command /model" },
-        .{ "/model gpt-5.5", "! Unknown command /model" },
+        .{ "/model gpt-5.5", "! Usage: /model" },
         .{ "/configure --permission-mode ask", "! Unknown command /configure" },
 
         .{ "/result 01234567-89ab-4cde-8012-0123456789ab", "" },
@@ -1937,17 +1961,13 @@ test "a Session lists the skills it saved for the caret's /word, and Tab or Ente
     defer held.destroy();
     held.self.session = "k7m2qx";
     held.self.skill_read = Fake.read;
-    // The draft's first word makes it a command line, which Enter runs:
-    // no skill is read or listed there.
-    try held.keys("/re");
-    try std.testing.expect(held.self.skill_task.thread == null);
-    try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "/recap") == null);
-    try held.keys("\x15");
-    // So are its arguments: Enter sends the whole line as the command.
-    try held.keys("/rename /re");
-    try held.settle();
-    try std.testing.expectEqual(@as(usize, 0), Fake.calls);
-    try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "/recap") == null);
+    // A leading slash shares the loaded skills with the listed commands.
+    try held.keys("/");
+    try Fake.answered(held);
+    try std.testing.expectEqual(@as(usize, 14), held.screen.commands.?.list.count);
+    try held.keys("re\x1b[B\x1b[B\x1b[B\x1b[B\r");
+    try std.testing.expectEqualStrings("/recap ", held.self.input.composition().bytes);
+    try std.testing.expect(held.self.submission.view() == null);
     try held.keys("\x15");
     // The draft Q2 typed in a real terminal: the caret moved back to just
     // after `/re`, in the middle of a Message. The page comes in while the
@@ -1982,6 +2002,141 @@ test "a Session lists the skills it saved for the caret's /word, and Tab or Ente
     try std.testing.expectEqualStrings("please /review now and /recap ", held.self.input.composition().bytes);
     try std.testing.expect(held.self.submission.view() == null);
     try std.testing.expectEqual(@as(usize, 1), Fake.calls);
+    try held.keys("\x15/review this change\r");
+    try std.testing.expect(held.self.submission.intent.? == .message);
+    try std.testing.expectEqualStrings("/review this change", try held.self.input.message(held.self.submission.intent.?.message));
+    // Another original holds the Message lane, just as for ordinary text.
+    try held.keys("/review another change\r");
+    try std.testing.expectEqualStrings("/review another change", held.self.input.composition().bytes);
+    try std.testing.expectEqualStrings("/review this change", try held.self.input.message(held.self.submission.intent.?.message));
+}
+
+test "Enter, Esc and Ctrl-G read every draft as the grammar does, with and without a drawn list" {
+    const entries = [_]skill_suggestions.Entry{.{ .name = "review", .description = "Review a change" }};
+    const Enter = union(enum) {
+        /// Nothing sent or run; the draft afterwards.
+        draft: []const u8,
+        /// Sent to the agent as these bytes; the draft is taken.
+        message: []const u8,
+        /// Run as a command; the draft is taken and no Message sent.
+        command,
+    };
+    const Case = struct {
+        text: []const u8,
+        caret: ?usize = null,
+        /// A frame draws a list for this draft and caret.
+        list: bool = false,
+        /// Esc or Ctrl-G on that list takes the draft.
+        cancel_takes: bool = false,
+        /// Enter with no list drawn.
+        plain: Enter,
+        /// Enter on the drawn list's first row.
+        row: Enter = .{ .draft = "" },
+    };
+    // Expected outcomes are written out per draft, not read from the grammar.
+    const cases = [_]Case{
+        .{ .text = "/copy", .list = true, .cancel_takes = true, .plain = .command, .row = .command },
+        .{ .text = "/effort", .list = true, .cancel_takes = true, .plain = .command, .row = .{ .draft = "/effort " } },
+        .{ .text = "/discard", .plain = .command },
+        .{ .text = "/new extra", .plain = .command },
+        .{ .text = "/re", .list = true, .cancel_takes = true, .plain = .{ .message = "/re" }, .row = .command },
+        .{ .text = "/review", .list = true, .cancel_takes = true, .plain = .{ .message = "/review" }, .row = .{ .draft = "/review " } },
+        .{ .text = "/review this change", .caret = "/review".len, .list = true, .plain = .{ .message = "/review this change" }, .row = .{ .draft = "/review this change" } },
+        .{ .text = "/review this change", .plain = .{ .message = "/review this change" } },
+        .{ .text = "/genuinely-unknown", .plain = .{ .message = "/genuinely-unknown" } },
+        .{ .text = "/genuinely-unknown this change", .plain = .{ .message = "/genuinely-unknown this change" } },
+        .{ .text = "please /review now", .caret = "please /review".len, .list = true, .plain = .{ .message = "please /review now" }, .row = .{ .draft = "please /review now" } },
+        .{ .text = "plain text", .plain = .{ .message = "plain text" } },
+        .{ .text = "//copy", .plain = .{ .message = "/copy" } },
+        .{ .text = "", .plain = .{ .draft = "" } },
+    };
+    for ([_][]const u8{ "\r", "\x1b", "\x07" }) |key| {
+        for ([_]bool{ false, true }) |drawn| {
+            for (cases) |case| {
+                const held = try HeldFrontend.create();
+                defer held.destroy();
+                const self = &held.self;
+                errdefer std.debug.print("draft domain: key={any} drawn={} draft={s}\n", .{ key, drawn, case.text });
+                // The preview is presentation: it holds the skill throughout.
+                defer _ = self.skills.reset();
+                try std.testing.expect(self.skills.answer(self.skills.ask("").?.read, .{ .entries = @constCast(&entries), .total = entries.len }, "") == null);
+                _ = self.input.append(case.text);
+                self.input.editors[self.input.active].cursor = case.caret orelse case.text.len;
+                if (drawn) _ = try held.draw();
+                const listed = drawn and case.list;
+                try std.testing.expectEqual(listed, self.shownCommands() != null);
+                try held.keys(key);
+                const expected: Enter = if (key[0] != '\r')
+                    .{ .draft = if (listed and case.cancel_takes) "" else case.text }
+                else if (listed) case.row else case.plain;
+                switch (expected) {
+                    .draft => |text| {
+                        try std.testing.expectEqualStrings(text, self.input.composition().bytes);
+                        try std.testing.expect(self.submission.intent == null);
+                    },
+                    .message => |text| {
+                        try std.testing.expectEqualStrings("", self.input.composition().bytes);
+                        try std.testing.expectEqualStrings(text, try self.input.message(self.submission.intent.?.message));
+                    },
+                    .command => {
+                        try std.testing.expectEqualStrings("", self.input.composition().bytes);
+                        try std.testing.expect(self.submission.intent == null);
+                    },
+                }
+                // Esc and Ctrl-G close a drawn list and never send.
+                if (key[0] != '\r' and listed) try std.testing.expect(self.shownCommands() == null);
+            }
+        }
+    }
+}
+
+test "Message routing ignores absent pending failed complete truncated and replaced skill previews" {
+    const Preview = enum { absent, pending, failed, complete, truncated, replaced };
+    const review = [_]skill_suggestions.Entry{.{ .name = "review", .description = "Review" }};
+    const other = [_]skill_suggestions.Entry{.{ .name = "unrelated", .description = "Other" }};
+    for (std.enums.values(Preview)) |preview| {
+        for ([_][]const u8{ "/review this change", "/genuinely-unknown this change" }) |text| {
+            const held = try HeldFrontend.create();
+            defer held.destroy();
+            const self = &held.self;
+            // These pages borrow the test's arrays, not heap allocations.
+            defer _ = self.skills.reset();
+            switch (preview) {
+                .absent => {},
+                .pending => _ = self.skills.ask(""),
+                .failed => self.skills.fail(self.skills.ask("").?.read),
+                .complete, .truncated, .replaced => {
+                    const first = self.skills.ask("").?;
+                    const page: skill_suggestions.Page = if (preview == .truncated)
+                        .{ .entries = @constCast(&other), .total = skill_suggestions.capacity + 1 }
+                    else
+                        .{ .entries = @constCast(&review), .total = if (preview == .complete) review.len else skill_suggestions.capacity + 1 };
+                    try std.testing.expect(self.skills.answer(first.read, page, "") == null);
+                    if (preview == .replaced) {
+                        // Another useful page replaced one containing review.
+                        const next = self.skills.ask("unrelated").?;
+                        try std.testing.expect(self.skills.answer(next.read, .{ .entries = @constCast(&other), .total = other.len }, "unrelated") != null);
+                    }
+                },
+            }
+            // A whole-line bracketed paste ends outside the skill word.
+            try held.keys("\x1b[200~");
+            try held.keys(text);
+            try held.keys("\x1b[201~");
+            try std.testing.expect(skill_completion.skillWordAt(self.input.composition().bytes, self.input.composition().cursor) == null);
+            try held.keys("\r");
+            try std.testing.expect(self.submission.intent != null);
+            try std.testing.expect(self.submission.intent.? == .message);
+            try std.testing.expectEqualStrings(text, try self.input.message(self.submission.intent.?.message));
+            try std.testing.expectEqualStrings("", self.input.composition().bytes);
+            // The ordinary Message hold preserves a second leading-slash draft.
+            try held.keys("\x1b[200~");
+            try held.keys(text);
+            try held.keys("\x1b[201~\r");
+            try std.testing.expectEqualStrings(text, self.input.composition().bytes);
+            try std.testing.expectEqualStrings(text, try self.input.message(self.submission.intent.?.message));
+        }
+    }
 }
 
 test "a Session's /reload-skills drops the skills it listed, and the next read lists the reloaded catalog" {
@@ -2328,7 +2483,7 @@ fn nextCommands(self: *Self, previous: ?slash_commands_shared.Shown) ?slash_comm
     // The Session's model offers its efforts once a read names it.
     const context: slash_commands_shared.Context = if (self.line.read != null) .{ .model = self.line.model.slice(), .effort = self.line.effort } else .{};
     const draft = self.input.composition().bytes;
-    if (draft.len != 0) return self.skills.shown(&self.skill_rows, draft, self.input.composition().cursor, self.input.revision, slash_commands.suggest(draft, context), previous);
+    if (draft.len != 0) return self.skills.shown(&self.skill_rows, draft, self.input.composition().cursor, self.input.revision, context, previous);
     // The rows change without the draft: other rows are another list.
     const rows = self.requestList() orelse return null;
     var named = std.hash.Wyhash.init(0);
@@ -2541,7 +2696,7 @@ fn commandActive(self: *const Self) bool {
 const ConversationAction = session_keys.Action;
 const conversation_keys = session_keys.keys;
 
-fn perform(self: *Self, ctx: *vxfw.EventContext, action: ConversationAction) !void {
+fn perform(self: *Self, action: ConversationAction) !void {
     if (self.upgradeHeld() and (action == .recover or action == .expand)) {
         self.notice = session_upgrade.refusal(self.upgradePhase());
         return;
@@ -2573,7 +2728,11 @@ fn perform(self: *Self, ctx: *vxfw.EventContext, action: ConversationAction) !vo
             // Esc closes only a list the person saw.
             if (action == .close) if (self.shownCommands()) |shown| {
                 shown.close();
-                if (command_input.consumesDraft(self.input.composition().bytes, .cancelled)) self.input.clear();
+                // The list goes; text for the agent stays.
+                switch (slash_commands.draftOf(self.input.composition().bytes)) {
+                    .word, .command => self.input.clear(),
+                    .message => {},
+                }
                 self.dirty = true;
                 return;
             };
@@ -2585,7 +2744,6 @@ fn perform(self: *Self, ctx: *vxfw.EventContext, action: ConversationAction) !vo
                 const original: ?Submission.State = if (self.submission.view()) |submission| submission.state else null;
                 switch (session_notice.close(original, self.submission.published(), self.draftSafeToLeave())) {
                     .leave => {
-                        if (try self.app_hooks.root.focusList(ctx, self.input.composition().bytes.len == 0)) return;
                         self.leaving = .returned;
                         return;
                     },
@@ -2820,42 +2978,38 @@ fn heldOriginal(self: *const Self) ?session_notice.Held {
 /// another follows. Only a list the latest frame drew for this draft: a
 /// screen too short for one shows none, and Enter there runs the line as
 /// typed.
-fn commandLine(self: *Self) !void {
-    if (self.shownCommands()) |shown| {
-        const taken = shown.list.enter(shown.highlight);
-        if (!taken.runs) return self.takeRow(shown);
-        switch (self.input.append(taken.rest)) {
-            .refused => |why| self.notice = refusedNotice(why),
-            else => if (taken.runs) try self.runLine(),
-        }
-    } else try self.runLine();
-}
-
-/// Runs the draft as a command and takes its line. A line a hold refused
-/// stays until the hold lifts.
+/// Runs the draft, a command line, and takes it. A line an Upgrade's hold
+/// refused stays until the hold lifts.
 fn runLine(self: *Self) !void {
-    const text = self.input.composition().bytes;
-    const end: command_input.DraftEnd = if (self.upgradeHeld()) .held else .submitted;
-    defer if (command_input.consumesDraft(text, end)) self.input.clear();
-    try self.slashCommand(text);
+    const held = self.upgradeHeld();
+    defer if (!held) self.input.clear();
+    try self.slashCommand(self.input.composition().bytes);
 }
 
-/// The list whose highlighted row Enter takes: one the latest frame drew
-/// for a Message draft. A command line's Enter goes to `commandLine`.
+/// The list whose highlighted row Enter takes: one the latest frame drew.
 fn shownRow(self: *Self) ?*slash_commands_shared.Shown {
     // A rejected line is the editor's to refuse and clear.
     if (self.input.editors[self.input.active].rejected != null) return null;
-    const draft = self.input.composition().bytes;
-    if (draft.len == 0 or (draft[0] == '/' and !std.mem.startsWith(u8, draft, "//"))) return null;
     return self.shownCommands();
 }
 
-/// Enter on a row that runs nothing: its word in place of the caret's
-/// `/word` name, or after the command's word, for the next.
-fn takeRow(self: *Self, shown: *slash_commands_shared.Shown) void {
+/// Enter or a click on the list's highlighted row, as `skill_completion`
+/// reads it: the row's word goes into the draft, and a row that runs then
+/// runs the line, admitted as a typed command is.
+fn takeRow(self: *Self, shown: *slash_commands_shared.Shown) !void {
     const draft = self.input.composition();
-    const change = skill_completion.edit(draft.bytes, draft.cursor, shown);
-    switch (self.input.replace(.{ .start = change.start, .end = change.end, .text = change.text })) {
+    const refused = switch (skill_completion.enter(draft.bytes, draft.cursor, shown)) {
+        .run => |rest| {
+            if (!self.input.admitsCommand()) return self.sayBusy(null, false);
+            switch (self.input.append(rest)) {
+                .refused => |why| self.notice = refusedNotice(why),
+                else => try self.runLine(),
+            }
+            return;
+        },
+        .edit => |change| self.input.replace(.{ .start = change.start, .end = change.end, .text = change.text }),
+    };
+    switch (refused) {
         .refused => |why| self.notice = refusedNotice(why),
         else => {},
     }
@@ -2961,13 +3115,16 @@ fn settleReader(self: *Self) !void {
     // a request left outstanding would refuse every later one.
     if (self.reading.phase == .recall and end != .complete) self.input.abandonStep();
     const phase = self.reading.phase;
+    // Chat info's own Copy last answer, not a typed /copy: only its outcome
+    // settles the panel's effect and labels the panel's action.
+    const panel_copy = phase == .inspection and self.info_effect == .copy;
     if (phase == .inspection and self.info_effect == .configure and self.job.info_edit != null) {
         self.info_effect = if (end == .complete and self.job.result.info_saved) .refreshing else .failed;
         if (self.info_effect == .refreshing) {
             self.inspection.status_requested = true;
             self.poll_at = 0;
         }
-    } else if (phase == .inspection and self.info_effect == .copy) {
+    } else if (panel_copy) {
         self.info_effect = if (end == .complete and self.job.result.copied == .clipboard) .saved else .failed;
     }
     // All terminal outcomes release the retry read, including supersession.
@@ -3004,7 +3161,7 @@ fn settleReader(self: *Self) !void {
         .recalled => try self.showRecalled(),
         .retried => try self.finishRetry(),
         .staged => try self.showStaged(),
-        .copy => try self.showCopy(),
+        .copy => try self.showCopy(if (panel_copy) .panel_copy else .other),
         .page => try self.showInspection(),
     };
     // Shown, or never written: exit no longer prints it.
@@ -3418,10 +3575,11 @@ fn showInspection(self: *Self) !void {
     self.notice = null;
 }
 
-/// A joined /copy. The clipboard's bytes go out between frames, so no frame
-/// splits the sequence.
-fn showCopy(self: *Self) !void {
-    errdefer if (self.info_effect == .saved) {
+/// A joined /copy; `answers` says whether Chat info's Copy last answer ran
+/// it. The clipboard's bytes go out between frames, so no frame splits the
+/// sequence.
+fn showCopy(self: *Self, answers: session_chrome.NoticeAnswers) !void {
+    errdefer if (answers == .panel_copy) {
         self.info_effect = .failed;
     };
     self.dirty = true;
@@ -3433,7 +3591,7 @@ fn showCopy(self: *Self) !void {
         .clipboard => |range| {
             try self.app_hooks.copy(self.app_hooks.context, self.files.scratch, range.start, range.length);
             self.notice = null;
-            self.shown_notice.showCopy(self.nowMs());
+            self.shown_notice.showCopy(self.nowMs(), answers);
             return;
         },
         .saved => saved: {
@@ -3608,7 +3766,7 @@ const HeldFrontend = struct {
     }
 
     fn draw(held: *HeldFrontend) !vxfw.Surface {
-        return held.self.widget().draw(.{ .arena = held.arena.allocator(), .min = .{}, .max = held.size, .cell_size = .{} });
+        return held.self.widget().draw(.{ .arena = held.arena.allocator(), .cell_arena = held.arena.allocator(), .min = .{}, .max = held.size, .cell_size = .{} });
     }
 
     /// Ground strips are inert siblings, not input rows. Find the input by
@@ -3626,7 +3784,7 @@ const HeldFrontend = struct {
         const surface = try held.draw();
         var screen: vaxis.Screen = try .init(gpa, .{ .rows = height, .cols = width, .x_pixel = 0, .y_pixel = 0 });
         const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = height, .screen = &screen };
-        surface.render(window, held.self.app_input.composer.widget());
+        try surface.render(window, held.self.app_input.composer.widget());
         var text: std.Io.Writer.Allocating = .init(gpa);
         for (0..height) |row| {
             for (0..width) |col| try text.writer.writeAll(screen.readCell(@intCast(col), @intCast(row)).?.char.grapheme);
@@ -3676,7 +3834,7 @@ test "App Session request overflow opens in place with Ctrl-O or a continuation 
                         _ = try held.draw();
                         try preview.widget().handleEvent(&ctx, .mouse_enter);
                         try preview.widget().handleEvent(&ctx, .{ .mouse = .{ .col = 2, .row = row, .button = .none, .type = .motion, .mods = .{} } });
-                        const hovered = try preview.widget().draw(.{ .arena = held.arena.allocator(), .min = .{}, .max = .{ .width = preview.size.width, .height = preview.size.height }, .cell_size = .{} });
+                        const hovered = try preview.widget().draw(.{ .arena = held.arena.allocator(), .cell_arena = held.arena.allocator(), .min = .{}, .max = .{ .width = preview.size.width, .height = preview.size.height }, .cell_size = .{} });
                         const role = style.of(held.self.app_caps, .{ .background = .hover });
                         for (0..hovered.size.width) |col| {
                             const cell = hovered.readCell(@intCast(col), @intCast(row)).style;
@@ -4119,14 +4277,20 @@ test "Esc at the latest view returns to the overview unless unsent text or a cho
 test "Up, Down and Enter take a row only from a list the latest frame drew" {
     const held = try HeldFrontend.create();
     defer held.destroy();
-    const self = &held.self;
     try held.settle();
     // The latest frame drew no list: Down scrolls rather than move a
     // highlight never seen, and Enter runs the line as typed.
     try stepKeys(held, "/\x1b[B");
     try std.testing.expectEqual(@as(usize, 0), held.screen.commands.?.highlight);
     try stepKeys(held, "\x15/un\r");
-    try std.testing.expectEqualStrings("! Unknown command /un", try barShows(held));
+    try std.testing.expect(held.self.submission.intent.? == .message);
+    try std.testing.expectEqualStrings("/un", try held.self.input.message(held.self.submission.intent.?.message));
+}
+
+test "Enter takes a drawn command through its existing conversation action" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
     // Drawn: Enter takes the highlighted /unarchive, through its existing conversation action.
     try stepKeys(held, "/un");
     try held.settle();
@@ -4196,7 +4360,14 @@ test "a key before a new Session's first frame finds no list the previous Sessio
     try std.testing.expectEqual(.drawn, held.screen.commands.?.seen);
     self.startInput();
     try stepKeys(held, "/set\r");
-    try std.testing.expectEqualStrings("! Unknown command /set", try barShows(held));
+    try std.testing.expect(self.submission.intent.? == .message);
+    try std.testing.expectEqualStrings("/set", try self.input.message(self.submission.intent.?.message));
+}
+
+test "a fresh Session draws its own command list after the first frame" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
     try stepKeys(held, "/set\t");
     try std.testing.expectEqualStrings("/set", self.input.composition().bytes);
     try std.testing.expectEqual(session_chrome.FooterFocus.model, self.footer.focus);
@@ -5931,7 +6102,7 @@ const ChromeFixture = struct {
     }
 
     fn draw(fixture: *ChromeFixture) !vxfw.Surface {
-        return fixture.widget.draw(.{ .arena = fixture.arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 24 }, .cell_size = .{} });
+        return fixture.widget.draw(.{ .arena = fixture.arena.allocator(), .cell_arena = fixture.arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 24 }, .cell_size = .{} });
     }
 
     fn press(fixture: *ChromeFixture, key: vaxis.Key) !void {
@@ -5961,7 +6132,7 @@ const ChromeFixture = struct {
         const surface = try fixture.draw();
         var screen: vaxis.Screen = try .init(arena, .{ .rows = 24, .cols = 80, .x_pixel = 0, .y_pixel = 0 });
         const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 80, .height = 24, .screen = &screen };
-        surface.render(window, fixture.self.app_input.composer.widget());
+        try surface.render(window, fixture.self.app_input.composer.widget());
         var result: [24][]const u8 = undefined;
         for (&result, 0..) |*line, row| {
             var out: std.Io.Writer.Allocating = .init(arena);
@@ -6012,10 +6183,10 @@ test "App Session shell gutter and back control follow list visibility through r
     try fixture.root.openSession(&fixture.ctx, fixture.widget, fixture.self.keyOwner());
     const arena = fixture.arena.allocator();
     for ([_]u16{ 140, 46, 100, 99, 140, 46 }) |width| {
-        const frame = try fixture.root.widget().draw(.{ .arena = arena, .min = .{}, .max = .{ .width = width, .height = 26 }, .cell_size = .{} });
+        const frame = try fixture.root.widget().draw(.{ .arena = arena, .cell_arena = arena, .min = .{}, .max = .{ .width = width, .height = 26 }, .cell_size = .{} });
         var screen: vaxis.Screen = try .init(arena, .{ .cols = width, .rows = 26, .x_pixel = 0, .y_pixel = 0 });
         const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = 26, .screen = &screen };
-        frame.render(window, self.app_input.composer.widget());
+        try frame.render(window, self.app_input.composer.widget());
         const wide = width >= 100;
         const start: u16 = if (wide) 41 else 0;
         try std.testing.expectEqual(wide, fixture.root.listVisible());
@@ -6036,7 +6207,7 @@ test "App Session shell gutter and back control follow list visibility through r
     }
     // The inset must remain bounded even when there is no room for feed text.
     for ([_]vxfw.Size{ .{ .width = 0, .height = 0 }, .{ .width = 0, .height = 1 }, .{ .width = 1, .height = 1 }, .{ .width = 1, .height = 26 } }) |size| {
-        const frame = try fixture.root.widget().draw(.{ .arena = arena, .min = .{}, .max = .{ .width = size.width, .height = size.height }, .cell_size = .{} });
+        const frame = try fixture.root.widget().draw(.{ .arena = arena, .cell_arena = arena, .min = .{}, .max = .{ .width = size.width, .height = size.height }, .cell_size = .{} });
         try std.testing.expectEqual(size, frame.size);
     }
 }
@@ -6394,7 +6565,7 @@ test "App Session copy notices are compact state phrases" {
     }) |case| {
         self.dirty = false;
         self.job.result.copied = case.result;
-        try self.showCopy();
+        try self.showCopy(.other);
         try std.testing.expectEqualStrings(case.words, self.notice orelse self.shown_notice.current(self.nowMs()).?);
         try std.testing.expect(self.dirty);
     }
@@ -6419,7 +6590,7 @@ test "App Session keeps its real draft browsing anchor and focused composer acro
     try fixture.init();
     defer fixture.deinit();
     try fixture.root.openSession(&fixture.ctx, fixture.widget, fixture.self.keyOwner());
-    const draw: vxfw.DrawContext = .{ .arena = fixture.arena.allocator(), .min = .{}, .max = .{ .width = 140, .height = 26 }, .cell_size = .{} };
+    const draw: vxfw.DrawContext = .{ .arena = fixture.arena.allocator(), .cell_arena = fixture.arena.allocator(), .min = .{}, .max = .{ .width = 140, .height = 26 }, .cell_size = .{} };
     _ = try fixture.root.widget().draw(draw);
     try fixture.press(.{ .codepoint = vaxis.Key.up, .mods = .{ .shift = true } });
     for ("kept") |byte| try fixture.press(.{ .codepoint = byte, .text = &.{byte} });
@@ -6441,7 +6612,7 @@ test "App Session keeps its real draft browsing anchor and focused composer acro
         try std.testing.expectEqual(commands, fixture.ctx.cmds.items.len);
         var screen: vaxis.Screen = try .init(fixture.arena.allocator(), .{ .cols = width, .rows = 26, .x_pixel = 0, .y_pixel = 0 });
         const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = 26, .screen = &screen };
-        surface.render(window, focused);
+        try surface.render(window, focused);
         try std.testing.expect(screen.cursor_vis);
         const col = screen.cursor.col - @as(u16, if (width >= 100) 41 else 0);
         if (caret_col) |expected| try std.testing.expectEqual(expected, col) else caret_col = col;
@@ -6462,11 +6633,11 @@ test "App Session footer takes list visibility from Root across desktop and phon
         .{ .width = 140, .list = true },
     }) |case| {
         const arena = fixture.arena.allocator();
-        const surface = try fixture.root.widget().draw(.{ .arena = arena, .min = .{}, .max = .{ .width = case.width, .height = 30 }, .cell_size = .{} });
+        const surface = try fixture.root.widget().draw(.{ .arena = arena, .cell_arena = arena, .min = .{}, .max = .{ .width = case.width, .height = 30 }, .cell_size = .{} });
         try std.testing.expectEqual(case.list, fixture.root.listVisible());
         var screen: vaxis.Screen = try .init(arena, .{ .rows = 30, .cols = case.width, .x_pixel = 0, .y_pixel = 0 });
         const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = case.width, .height = 30, .screen = &screen };
-        surface.render(window, fixture.self.app_input.composer.widget());
+        try surface.render(window, fixture.self.app_input.composer.widget());
         const chat_col: u16 = if (case.list) Root.list_width + 1 else 0;
         var row: std.Io.Writer.Allocating = .init(arena);
         for (chat_col..case.width) |col| try row.writer.writeAll(screen.readCell(@intCast(col), 29).?.char.grapheme);
@@ -9162,7 +9333,7 @@ test "App Session palette clicks follow Enter for command words options and valu
         // Parent redraws must not replace the widget's pointer state.
         _ = try held.draw();
         try std.testing.expect(held.self.app_palette.hover.pointing);
-        const palette = try widget_.draw(.{ .arena = held.arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 20 }, .cell_size = .{} });
+        const palette = try widget_.draw(.{ .arena = held.arena.allocator(), .cell_arena = held.arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 20 }, .cell_size = .{} });
         const cell = palette.readCell(2, @intCast(row));
         if (selected == index) try std.testing.expect(cell.style.reverse) else {
             try std.testing.expect(!cell.style.reverse);
@@ -9177,7 +9348,7 @@ test "App Session palette clicks follow Enter for command words options and valu
         _ = try held.draw();
         try std.testing.expect(!held.self.app_palette.hover.pointing);
         if (selected != index) {
-            const plain = try widget_.draw(.{ .arena = held.arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 20 }, .cell_size = .{} });
+            const plain = try widget_.draw(.{ .arena = held.arena.allocator(), .cell_arena = held.arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 20 }, .cell_size = .{} });
             try std.testing.expect(!plain.readCell(2, @intCast(row)).style.reverse);
         }
         try widget_.handleEvent(&events, .{ .mouse = .{ .col = 2, .row = row, .button = .left, .type = .press, .mods = .{} } });
@@ -9637,7 +9808,7 @@ test "chat standalone footer close clicks match Escape preserve paste and preser
                 self.app_info.backend.configure = configure;
             }
             _ = try held.draw();
-            const footer = try self.app_input.facts.draw(.{ .arena = held.arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 1 }, .cell_size = .{} });
+            const footer = try self.app_input.facts.draw(.{ .arena = held.arena.allocator(), .cell_arena = held.arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 1 }, .cell_size = .{} });
             const close = for (footer.children) |child| {
                 if (child.surface.widget.eql(self.chrome.close.widget())) break child;
             } else return error.TestExpectedCloseTarget;
@@ -9667,7 +9838,7 @@ test "chat standalone footer close clicks match Escape preserve paste and preser
         }
         try self.app_info.openStandaloneChoice(&ctx, row);
         _ = try held.draw();
-        const stale_footer = try self.app_input.facts.draw(.{ .arena = held.arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 1 }, .cell_size = .{} });
+        const stale_footer = try self.app_input.facts.draw(.{ .arena = held.arena.allocator(), .cell_arena = held.arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 1 }, .cell_size = .{} });
         const close = for (stale_footer.children) |child| {
             if (child.surface.widget.eql(self.chrome.close.widget())) break child;
         } else return error.TestExpectedCloseTarget;
@@ -9716,7 +9887,7 @@ test "chat standalone lifetime shared domain closes every phase through real scr
         if (case.phase == .save_failed) self.app_info.backend.configure = Fault.configure;
         try self.app_info.openStandaloneChoice(&ctx, row);
         _ = try held.draw();
-        const footer = try self.app_input.facts.draw(.{ .arena = held.arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 1 }, .cell_size = .{} });
+        const footer = try self.app_input.facts.draw(.{ .arena = held.arena.allocator(), .cell_arena = held.arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 1 }, .cell_size = .{} });
         const close = for (footer.children) |child| {
             if (child.surface.widget.eql(self.chrome.close.widget())) break child;
         } else return error.TestExpectedCloseTarget;
@@ -9776,39 +9947,85 @@ test "chat standalone accepted departure ends presentation before handing back a
     };
 }
 
-test "App Session copy button feedback follows clipboard completion and refusal" {
-    var fixture: ChromeFixture = undefined;
-    try fixture.init();
-    defer fixture.deinit();
-    const self = fixture.self;
-    const backend = self.infoBackend();
-    self.job.result.copied = .{ .clipboard = .{ .start = 0, .length = 0 } };
-    try self.showCopy();
-    try std.testing.expect(backend.copied(backend.context));
-    self.shown_notice.dismiss();
-    try std.testing.expect(!backend.copied(backend.context));
-    self.job.result.copied = .no_answer;
-    try self.showCopy();
-    try self.afterInput(&fixture.ctx);
-    try std.testing.expect(!backend.copied(backend.context));
-    self.app_hooks.copy = struct {
+test "App Session copy button feedback follows only its own clipboard completion and refusal" {
+    const Copies = struct {
+        var result: reads.Copied = .no_answer;
+        fn read(raw: *anyopaque, _: *Task) !void {
+            const job: *Job = @ptrCast(@alignCast(raw));
+            job.result.copied = result;
+        }
+        fn take(_: *anyopaque, _: std.Io.File, _: u64, _: u64) !void {}
         fn refuse(_: *anyopaque, _: std.Io.File, _: u64, _: u64) !void {
             return error.AccessDenied;
         }
-    }.refuse;
-    self.info_effect = .saved;
-    self.job.result.copied = .{ .clipboard = .{ .start = 0, .length = 0 } };
-    try std.testing.expectError(error.AccessDenied, self.showCopy());
+        /// One joined /copy read: Chat info's own when `effect` is `.copy`,
+        /// else a typed one beside whatever the panel last settled.
+        fn run(self: *Self, copy: reads.Copy, effect: @TypeOf(self.info_effect), copied: reads.Copied) !void {
+            self.inspection.kind = .{ .copy = copy };
+            self.info_effect = effect;
+            result = copied;
+            try self.launch(self.freeze(.inspection), read);
+            self.inspection.command_running = true;
+            try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(2)), self, struct {
+                fn done(frontend: *Self) !bool {
+                    return frontend.reader.completed();
+                }
+            }.done);
+            try self.settleReader();
+        }
+    };
+    const clipboard: reads.Copied = .{ .clipboard = .{ .start = 0, .length = 0 } };
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    self.app_hooks.copy = Copies.take;
+    const backend = self.infoBackend();
+
+    // The panel's own copy: Copied while its reply shows.
+    try Copies.run(self, .answer, .copy, clipboard);
+    try std.testing.expectEqual(.saved, self.info_effect);
+    try std.testing.expect(backend.copied(backend.context));
+    self.shown_notice.dismiss();
+    try std.testing.expect(!backend.copied(backend.context));
+
+    // A typed /copy code or /copy reaches the clipboard too, whether the
+    // panel last copied or never did; neither is the panel's copy.
+    for ([_]@TypeOf(self.info_effect){ .idle, .saved }) |before| {
+        for ([_]reads.Copy{ .code, .answer }) |copy| {
+            if (before == .saved) try Copies.run(self, .answer, .copy, clipboard);
+            try Copies.run(self, copy, before, clipboard);
+            try std.testing.expectEqualStrings("Sent to clipboard", self.shown_notice.current(self.nowMs()).?);
+            try std.testing.expectEqual(before, self.info_effect);
+            try std.testing.expect(!backend.copied(backend.context));
+        }
+    }
+
+    // The panel's copy that found no answer.
+    try Copies.run(self, .answer, .copy, .no_answer);
+    try std.testing.expectEqual(.failed, self.info_effect);
+    try std.testing.expect(!backend.copied(backend.context));
+
+    // A refused clipboard fails only the panel's own copy: a typed one
+    // leaves the panel's last outcome as it was.
+    self.app_hooks.copy = Copies.refuse;
+    try std.testing.expectError(error.AccessDenied, Copies.run(self, .code, .saved, clipboard));
+    try std.testing.expectEqual(.saved, self.info_effect);
+    try std.testing.expectError(error.AccessDenied, Copies.run(self, .answer, .copy, clipboard));
     try std.testing.expectEqual(.failed, self.info_effect);
     try std.testing.expect(!backend.copied(backend.context));
 }
 
-test "App Session Left and Esc reuse guarded empty draft return while nonempty Left edits" {
+test "App Session Left on an empty draft alone focuses the list while Esc leaves at every width" {
+    // Esc (and its Ctrl-G alias) keeps its accepted meaning: leave, whatever
+    // the width. Only Left on an empty draft focuses a list beside the chat;
+    // with no list beside it (narrow) Left leaves as Esc does.
+    const Key = enum { left, escape, ctrl_g };
     for ([_]u16{ 46, 140 }) |width| for ([_]struct { bytes: []const u8, cursor: usize }{
         .{ .bytes = "", .cursor = 0 },
         .{ .bytes = "draft", .cursor = 5 },
         .{ .bytes = "draft", .cursor = 0 },
-    }) |draft| for ([_][]const u8{ "\x1b[D", "\x07" }) |key| {
+    }) |draft| for (std.enums.values(Key)) |key| {
+        errdefer std.debug.print("width={d} draft='{s}'@{d} key={s}\n", .{ width, draft.bytes, draft.cursor, @tagName(key) });
         const held = try HeldFrontend.create();
         defer held.destroy();
         held.size = .{ .width = width, .height = 30 };
@@ -9816,20 +10033,28 @@ test "App Session Left and Esc reuse guarded empty draft return while nonempty L
         _ = try held.draw();
         _ = held.self.input.append(draft.bytes);
         held.self.input.editors[held.self.input.active].cursor = draft.cursor;
-        try held.keys(key);
-        if (draft.bytes.len == 0) {
-            try std.testing.expectEqual(width == 140, held.root.input.listFocused() and held.left == null);
-            try std.testing.expectEqual(if (width == 140) @as(?Outcome, null) else .returned, held.left);
-            if (width == 140) {
-                _ = try held.draw();
-                try std.testing.expect(!held.self.app_input.composer.caret);
-                try std.testing.expect(held.root.session != null);
-            }
+        try held.keys(switch (key) {
+            .left => "\x1b[D",
+            .escape => "\x1b",
+            .ctrl_g => "\x07",
+        });
+        const empty = draft.bytes.len == 0;
+        const to_list = key == .left and empty and width >= Root.split_at;
+        try std.testing.expectEqual(to_list, held.root.input.listFocused());
+        if (to_list) {
+            try std.testing.expectEqual(@as(?Outcome, null), held.left);
+            _ = try held.draw();
+            try std.testing.expect(!held.self.app_input.composer.caret);
+            try std.testing.expect(held.root.session != null);
+        } else if (empty) {
+            // Esc at both widths, and Left with no list beside the chat.
+            try std.testing.expectEqual(@as(?Outcome, .returned), held.left);
         } else {
-            try std.testing.expect(!held.root.input.listFocused());
+            // A nonempty Message draft: Left edits, and Esc's guarded
+            // departure keeps an unsaved draft where it is.
             try std.testing.expectEqual(@as(?Outcome, null), held.left);
             try std.testing.expectEqualStrings(draft.bytes, held.self.input.composition().bytes);
-            try std.testing.expectEqual(if (key[0] == 0x1b) draft.cursor -| 1 else draft.cursor, held.self.input.composition().cursor);
+            try std.testing.expectEqual(if (key == .left) draft.cursor -| 1 else draft.cursor, held.self.input.composition().cursor);
         }
     };
 }
@@ -9862,7 +10087,7 @@ test "empty chat composer placeholder follows current no-message facts" {
     fixture.self.line.folder = .{};
     try fixture.self.line.folder.?.set("/work");
     for ([_]u16{ 46, 140 }) |width| {
-        const ctx: vxfw.DrawContext = .{ .arena = fixture.arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 24 }, .cell_size = .{} };
+        const ctx: vxfw.DrawContext = .{ .arena = fixture.arena.allocator(), .cell_arena = fixture.arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 24 }, .cell_size = .{} };
         _ = try fixture.widget.draw(ctx);
         try std.testing.expectEqualStrings("Type a task", fixture.self.app_input.composer.placeholder);
         const composer = try fixture.self.app_input.composer.widget().draw(ctx.withConstraints(.{}, .{ .width = width, .height = 3 }));
@@ -9894,7 +10119,7 @@ test "App Session Tab projection visits only drawn input and chrome controls at 
         held.self.line.folder = .{};
         try held.self.line.folder.?.set("/work");
         _ = held.self.input.append("draft");
-        const ctx: vxfw.DrawContext = .{ .arena = held.arena.allocator(), .min = .{}, .max = held.size, .cell_size = .{} };
+        const ctx: vxfw.DrawContext = .{ .arena = held.arena.allocator(), .cell_arena = held.arena.allocator(), .min = .{}, .max = held.size, .cell_size = .{} };
         _ = try held.root.widget().draw(ctx);
         const order = try held.arena.allocator().dupe(focus.Target, held.root.focus_frame.slice());
         try std.testing.expect(std.mem.indexOfScalar(focus.Target, order, .input) != null);
@@ -9960,4 +10185,42 @@ test "App Session paste completion preserves retained draft caret after empty ne
         try std.testing.expectEqual(insert + 1, held.self.input.composition().cursor);
         try std.testing.expect(held.self.submission.intent == null and held.self.input.submitted == null);
     };
+}
+
+test "new and clear navigate without sending or changing the old chat and reject arguments" {
+    for ([_][]const u8{ "/new", "/clear" }) |name| {
+        var drafts: session_drafts.Drafts = .{};
+        const held = try HeldFrontend.createWithDrafts("k7m2qx", &drafts);
+        defer held.destroy();
+        held.self.line = .{ .read = .{ .revision = 7, .end = 10 }, .effort = .high, .first_position = 1 };
+        try held.self.line.model.set("gpt-5.5");
+        try seedFeed(held.screen, "OLD ANSWER\n");
+        const work = held.self.live.work;
+        const line = held.self.line;
+        try held.keys(name);
+        try held.keys(" foo\r");
+        try std.testing.expect(held.left == null and held.self.submission.intent == null);
+        try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "! Usage:") != null);
+        try held.keys(name);
+        try held.keys("\r");
+        try std.testing.expectEqual(@as(?Outcome, .new_session), held.left);
+        try std.testing.expect(held.self.submission.intent == null and held.self.input.queuedCommand() == null);
+        try std.testing.expectEqual(work, held.self.live.work);
+        try std.testing.expectEqual(line, held.self.line);
+        try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "OLD ANSWER") != null);
+    }
+}
+
+test "every listed chat command dispatches to its existing owner" {
+    const cases = .{
+        .{ "/archive", Slash.archive },                               .{ "/unarchive", Slash.unarchive },
+        .{ "/rename a name", Slash{ .inspection = .command } },       .{ "/copy", Slash{ .inspection = .{ .copy = .answer } } },
+        .{ "/copy code", Slash{ .inspection = .{ .copy = .code } } }, .{ "/copy file", Slash{ .inspection = .{ .copy = .file } } },
+        .{ "/effort high", Slash{ .inspection = .command } },         .{ "/setup", Slash{ .inspection = .command } },
+        .{ "/requests", Slash{ .inspection = .requests } },           .{ "/result key", Slash{ .inspection = .command } },
+        .{ "/reload-skills", Slash{ .inspection = .command } },       .{ "/new", Slash.new_session },
+        .{ "/clear", Slash.new_session },                             .{ "/model", Slash.model },
+        .{ "/configurex", Slash.unknown },
+    };
+    inline for (cases) |case| try std.testing.expectEqualDeep(case[1], parse(case[0]));
 }

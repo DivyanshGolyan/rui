@@ -236,7 +236,38 @@ def empty_list():
         print(f"overview clicks: {columns} columns: empty chats stay stored but vanish on leave; only the original sent Session becomes a named row", flush=True)
 
 
+def new_chat_aliases():
+    with world("new-chat-aliases", {"old task": answer("old", "Old answer retained")}) as w:
+        old = w.session("--label", "Old unchanged", "--reasoning-effort", "high")
+        w.run("session", "send", "--store", w.store, "--to", old, input="old task")
+        wait_for_host(w, [old], finished, "the old chat has canonical history")
+        before = w.inspect(old)
+        with w.overview(columns=WIDTH, rows=30) as screen:
+            for alias in ("/new", "/clear"):
+                listed = screen.contains("Old unchanged")
+                click_label(screen, listed, "Old unchanged")
+                screen.wait(conversation_of("Old unchanged"), "open the old chat")
+                screen.keys(alias + " foo\r")
+                screen.contains("! Usage:")
+                assert w.inspect(old) == before
+                screen.keys(alias + "\r")
+                screen.wait(lambda frame: not is_overview(frame) and "Type a task" in frame
+                            and "Old unchanged" not in frame, "alias opens a new empty chat")
+                assert w.inspect(old) == before
+                listed = back_to_overview(screen, "Old unchanged")
+                assert "Old unchanged" in listed
+        # Only the old Session and two Configure-created empty Sessions exist.
+        rows = json.loads(w.run("session", "list", "--store", w.store))["sessions"]
+        assert len(rows) == 3, rows
+        for row in rows:
+            if row["reference"] != old:
+                report = w.inspect(row["reference"])
+                assert report["work"]["state"]["kind"] == "idle", report
+    print("overview aliases: no Message and old Current unchanged", flush=True)
+
+
 def cases():
     opening_and_views()
     flat_list()
     empty_list()
+    new_chat_aliases()

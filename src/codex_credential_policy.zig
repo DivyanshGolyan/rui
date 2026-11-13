@@ -87,9 +87,10 @@ pub fn Required(comptime capacity: usize) type {
     };
 }
 
-/// `signed_out` is a ChatGPT plan sign-in after `rui auth logout chatgpt`:
-/// its tokens are gone, and it keeps only the account and the client id the
-/// issuer registered, which the next sign-in reuses (`signOut`).
+/// `signed_out` is either ChatGPT login after `rui auth logout chatgpt`: its
+/// tokens are gone, and it keeps only the account and, for the browser
+/// sign-in, the client id the issuer registered, which the next sign-in
+/// reuses (`signOut`).
 pub const State = enum { ready, refresh_pending, signed_out };
 
 /// Room to decode one compact token's claims: its payload and the JSON parse
@@ -199,13 +200,12 @@ pub fn requireReady(record: *const Record) !void {
     }
 }
 
-/// Signs a plan record out in place: its tokens are wiped and only its
-/// account and issued client id remain, for the next sign-in to name. The
-/// generation advances, as a login's does, so no lease of the old tokens
-/// outlives it. Only a plan sign-in, which has an issued client to keep,
-/// signs out this way.
+/// Signs a record out in place: its tokens are wiped and only its account
+/// and issued client id, if any, remain, for the next sign-in to name. A
+/// device-code (Codex) record has no issued client, so only its account
+/// remains. The generation advances, as a login's does, so no lease of the
+/// old tokens outlives it.
 pub fn signOut(record: *Record) !void {
-    if (record.client_id.len == 0) return error.MissingClientId;
     const generation = std.math.add(u64, record.generation, 1) catch return error.GenerationExhausted;
     record.id_token.wipe();
     record.access_token.wipe();
@@ -325,10 +325,9 @@ pub fn validateRecord(record: *const Record) !void {
     if (record.version != 3) return error.UnsupportedCredentialVersion;
     try validateText(record.account_id.slice(), false);
     try validateText(record.client_id.slice(), true);
-    // A signed-out record is exactly what `signOut` leaves: an account and
-    // an issued client, no tokens and no expiry.
+    // A signed-out record is exactly what `signOut` leaves: an account, the
+    // issued client a plan record has, no tokens and no expiry.
     if (record.state == .signed_out) {
-        if (record.client_id.len == 0) return error.MissingClientId;
         if (record.id_token.len != 0 or record.access_token.len != 0 or record.refresh_token.len != 0 or record.fedramp)
             return error.SignedOutHoldsTokens;
         if (record.expires_at != 0 or record.refreshed_at <= 0) return error.InvalidCredentialTime;
@@ -679,9 +678,23 @@ test "signing out keeps the account and issued client, and nothing selects the r
     var claims: ClaimScratch = undefined;
     var record: Record = undefined;
     try fixtureRecord(&record);
-    // A Codex record has no issued client to keep.
-    try std.testing.expectError(error.MissingClientId, signOut(&record));
-    try std.testing.expectEqual(State.ready, record.state);
+    // A Codex record has no issued client to keep: only its account stays.
+    var device = record;
+    try signOut(&device);
+    try std.testing.expectEqual(State.signed_out, device.state);
+    try std.testing.expectEqual(@as(u64, 6), device.generation);
+    try std.testing.expectEqualStrings(fixture_account_id, device.account_id.slice());
+    try std.testing.expectEqual(@as(usize, 0), device.client_id.len + device.id_token.len + device.access_token.len + device.refresh_token.len);
+    var device_bytes: [max_file_bytes]u8 = undefined;
+    const device_encoded = try encode(&device, &device_bytes);
+    try std.testing.expectEqualStrings("version=3\ngeneration=6\naccount_id=" ++ fixture_account_id ++
+        "\nfedramp=0\nid_token=\naccess_token=\nrefresh_token=\nexpires_at=0\nrefreshed_at=100\nstate=signed_out\n", device_encoded);
+    var device_decoded: Record = undefined;
+    try parseInto(device_encoded, &device_decoded);
+    try expectSameRecord(&device, &device_decoded);
+    try std.testing.expectError(error.SignedOut, select(&device, true, 0, &claims));
+    try std.testing.expectEqual(LocalStatus.missing, try localStatus(&device, 0, &claims));
+
     try record.client_id.set(fixture_client_id);
     try signOut(&record);
     try std.testing.expectEqual(State.signed_out, record.state);
@@ -716,15 +729,13 @@ test "signing out keeps the account and issued client, and nothing selects the r
     // A signed-out record cannot itself be installed as a login.
     try std.testing.expectError(error.InstallMustBeReady, validateReplacement(&record));
 
-    // Its file holds no token, no expiry and no FedRAMP routing, and always
-    // keeps its issued client.
+    // Its file holds no token, no expiry and no FedRAMP routing.
     for ([_][2][]const u8{
         .{ "id_token=\n", "id_token=x\n" },
         .{ "access_token=\n", "access_token=a.b.c\n" },
         .{ "refresh_token=\n", "refresh_token=r\n" },
         .{ "expires_at=0\n", "expires_at=5\n" },
         .{ "fedramp=0\n", "fedramp=1\n" },
-        .{ "client_id=" ++ fixture_client_id ++ "\n", "" },
     }) |case| {
         var edited: [max_file_bytes]u8 = undefined;
         const at = std.mem.indexOf(u8, encoded, case[0]).?;

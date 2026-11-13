@@ -61,7 +61,7 @@ PYTHON_PLATFORM = (("sys", "platform"), ("platform", "system"), ("os", "uname"))
 # Apple SecTrust on Darwin, which ignores them (#990, #997). A fixture that
 # trusts its CA through them passes only on Linux, so outside Mac paths a
 # fixture names neither: it hands the CA over explicitly (--provider-ca-file,
-# the launch frame's caFile), or asks os_semantics for system trust.
+# the settings document's network.caFile), or asks os_semantics for system trust.
 TRUST_VARIABLE = re.compile(r"\bSSL_CERT_(?:FILE|DIR)\b")
 # Python 3.12 splits f-strings into parts; earlier versions keep them whole.
 STRING_TOKENS = (tokenize.NAME, tokenize.STRING, getattr(tokenize, "FSTRING_MIDDLE", tokenize.STRING))

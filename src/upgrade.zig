@@ -354,7 +354,7 @@ test "upgrade restart results retain unknown failures and other Store guidance w
     // An unidentified socket may belong to this Store; known selected facts
     // remain usable, but its missing identity can never become an absence.
     entries[0].store = null;
-    entries[0].state = .{ .failed = .discovery };
+    entries[0].state = .{ .failed = .{ .stage = .discovery, .cause = "ConnectionRefused" } };
     try std.testing.expect(compatible(&result));
     result.hosts.entries = entries[0..1];
     try std.testing.expect(!compatible(&result));

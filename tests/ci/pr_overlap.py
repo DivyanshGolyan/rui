@@ -2,18 +2,31 @@
 """List open PRs sharing files with the committed branch before opening a PR,
 and those whose added lines use a name the branch renames or removes."""
 import argparse
-import json
 import re
 import subprocess
 import sys
 
-from conflict_alert import gh, github, pages
+from conflict_alert import github, pages
 
 # A top-level Zig or Python declaration, or a public Zig member of a nested
 # container: the names other files can use.
 DECLARATION = re.compile(r"^(?:(?:pub\s+)?(?:inline\s+|export\s+|extern\s+)?(?:fn|const|var)|def|class|\s+pub\s+(?:inline\s+)?(?:fn|const|var))"
                          r"\s+([A-Za-z_]\w*)")
 SOURCES = ("*.zig", "*.py")
+# The last two path segments of an https, ssh, scp-style or proxy remote URL.
+REMOTE = re.compile(r"[:/]([^/:]+)/([^/:]+?)(?:\.git)?/?$")
+
+
+def repo_from_remote(url):
+    """`owner/name` from a remote URL: `gh repo view` uses GraphQL, which cloud sessions are refused."""
+    match = REMOTE.search(url.strip())
+    if not match:
+        raise ValueError(f"Cannot read owner/name from the origin URL {url.strip()!r}")
+    return f"{match[1]}/{match[2]}"
+
+
+def origin_repo():
+    return repo_from_remote(subprocess.check_output(["git", "remote", "get-url", "origin"], text=True))
 
 
 def removed_names(diff, declared):
@@ -74,7 +87,7 @@ def main():
     parser.add_argument("--base", default="origin/main", help="base for the committed branch diff")
     args = parser.parse_args()
     try:
-        repo = json.loads(gh("repo", "view", "--json", "nameWithOwner"))["nameWithOwner"]
+        repo = origin_repo()
         branch = subprocess.check_output(["git", "branch", "--show-current"], text=True).strip()
         paths, removed = branch_changes(args.base)
         found = overlaps(github, repo, branch, paths, removed)

@@ -26,7 +26,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const self: *Self = @ptrCast(@alignCast(raw));
     const max = ctx.max.size();
     const size: vxfw.Size = .{ .width = max.width, .height = @min(1, max.height) };
-    var surface = try vxfw.Surface.init(ctx.arena, self.widget(), size);
+    var surface = try vxfw.Surface.init(ctx.cell_arena, self.widget(), size);
     @memset(surface.buffer, .{ .style = self.quiet });
     if (size.width == 0 or size.height == 0) return surface;
     const children = try ctx.arena.alloc(vxfw.SubSurface, 2);
@@ -81,7 +81,7 @@ test "the status row shows what needs the person with its key clickable, and the
     defer arena.deinit();
     const needs = "! Not confirmed · ctrl+r retries";
     row.bar = chrome.bar(.{ .needs = needs, .stoppable = true, .width = 80 });
-    const drawn = try row.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 1 }, .cell_size = .{} });
+    const drawn = try row.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 1 }, .cell_size = .{} });
     try std.testing.expectEqual(vxfw.Size{ .width = 80, .height = 1 }, drawn.size);
     try std.testing.expectEqualStrings("!", drawn.readCell(0, 0).char.grapheme);
     try std.testing.expectEqual(vaxis.Color{ .index = 3 }, drawn.readCell(0, 0).style.fg);
@@ -103,13 +103,13 @@ test "the status row shows what needs the person with its key clickable, and the
     release.type = .release;
     for ([_]vxfw.Widget{ row.key.widget(), row.stop.widget() }) |target| {
         try target.handleEvent(&ctx, .mouse_enter);
-        const hovered = try target.draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 1 }, .cell_size = .{} });
+        const hovered = try target.draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 1 }, .cell_size = .{} });
         try std.testing.expectEqual(.single, hovered.readCell(0, 0).style.ul_style);
         try std.testing.expectEqual(vaxis.Mouse.Shape.pointer, ctx.cmds.items[ctx.cmds.items.len - 1].set_mouse_shape);
         try target.handleEvent(&ctx, .{ .mouse = press });
         try target.handleEvent(&ctx, .{ .mouse = release });
         try target.handleEvent(&ctx, .mouse_leave);
-        const left = try target.draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 1 }, .cell_size = .{} });
+        const left = try target.draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 1 }, .cell_size = .{} });
         try std.testing.expectEqual(.off, left.readCell(0, 0).style.ul_style);
     }
     try std.testing.expectEqual(@as(usize, 1), actions.retried);
@@ -117,21 +117,21 @@ test "the status row shows what needs the person with its key clickable, and the
 
     // Notices belong to Footer: the persistent status row stays empty.
     row.bar = chrome.bar(.{ .notice = "Copied 12 lines", .width = 40 });
-    const notice = try row.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 1 }, .cell_size = .{} });
+    const notice = try row.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 1 }, .cell_size = .{} });
     try std.testing.expectEqual(@as(usize, 0), notice.children.len);
     try std.testing.expectEqualStrings(" ", notice.readCell(0, 0).char.grapheme);
     try std.testing.expectEqual(vaxis.Color{ .index = 8 }, notice.readCell(0, 0).style.fg);
 
     // Narrow: the left side wins, the stop key drops.
     row.bar = chrome.bar(.{ .needs = needs, .stoppable = true, .width = 30 });
-    const narrow = try row.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 30, .height = 1 }, .cell_size = .{} });
+    const narrow = try row.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 30, .height = 1 }, .cell_size = .{} });
     try std.testing.expectEqual(@as(usize, 1), narrow.children.len);
     try std.testing.expect(narrow.children[0].surface.widget.eql(row.key.widget()));
     try std.testing.expect(narrow.children[0].surface.size.width <= 30 - 18);
 
     for ([_]vxfw.Size{ .{ .width = 0, .height = 1 }, .{ .width = 1, .height = 0 }, .{ .width = 1, .height = 1 } }) |size| {
         row.bar = chrome.bar(.{ .needs = needs, .stoppable = true, .width = size.width });
-        const tiny = try row.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = size.width, .height = size.height }, .cell_size = .{} });
+        const tiny = try row.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = size.width, .height = size.height }, .cell_size = .{} });
         try std.testing.expect(tiny.size.width <= size.width and tiny.size.height <= size.height);
     }
 }

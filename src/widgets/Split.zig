@@ -32,7 +32,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const right_width = size.width - left_width - 1;
     const children = try ctx.arena.alloc(vxfw.SubSurface, 3);
     children[0] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = try self.left.draw(ctx.withConstraints(.{}, .{ .width = left_width, .height = size.height })) };
-    const divider = try vxfw.Surface.init(ctx.arena, self.widget(), .{ .width = 1, .height = size.height });
+    const divider = try vxfw.Surface.init(ctx.cell_arena, self.widget(), .{ .width = 1, .height = size.height });
     @memset(divider.buffer, .{ .char = .{ .grapheme = self.divider.grapheme, .width = 1 }, .style = self.divider.style });
     children[1] = .{ .origin = .{ .row = 0, .col = left_width }, .surface = divider };
     children[2] = .{ .origin = .{ .row = 0, .col = left_width + 1 }, .surface = try self.right.draw(ctx.withConstraints(.{}, .{ .width = right_width, .height = size.height })) };
@@ -45,7 +45,7 @@ test "Split divides cells and selects only the named narrow pane" {
     var split: Self = .{ .left = left.widget(), .right = right.widget(), .left_width = 3, .min_width = 8, .narrow = .right, .divider = .{ .grapheme = "┃", .style = .{ .bold = true } } };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 8, .height = 3 }, .cell_size = .{} };
+    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 8, .height = 3 }, .cell_size = .{} };
     const drawn = try split.widget().draw(ctx);
     try std.testing.expectEqual(@as(u16, 3), drawn.children[0].surface.size.width);
     try std.testing.expectEqual(@as(i17, 3), drawn.children[1].origin.col);

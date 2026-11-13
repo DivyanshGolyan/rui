@@ -323,14 +323,14 @@ fn dropObligationFrontier(storage: *Store) !void {
 }
 
 /// Reopen SQLite through its production upgrader; MySQL's operator applies the
-/// same published step before the runtime opens its SELECT/INSERT/UPDATE Store.
+/// text `rui store schema --engine mysql --from 72` prints, every step to the
+/// current format, before the runtime opens its SELECT/INSERT/UPDATE Store.
 pub fn stageObligationUpgrade(storage: *Store) !void {
     const schema = @import("schema.zig");
     try dropObligationFrontier(storage);
     if (storage.engine == .mysql) {
         try mysql_testing.rawExec(storage, "UPDATE store_meta SET meta_value='72' WHERE meta_key='format'");
-        for (schema.migrations[72 - schema.migration_baseline].mysql) |sql| try mysql_testing.rawExec(storage, sql);
-        try mysql_testing.rawExec(storage, "UPDATE store_meta SET meta_value='73' WHERE meta_key='format'");
+        try mysql_testing.rawExec(storage, schema.mysqlMigrationFrom(72).?);
     } else {
         try sqlite.exec(storage.sqliteDatabase(), "UPDATE store_meta SET meta_value='72' WHERE meta_key='format'");
         try sqlite.exec(storage.sqliteDatabase(), "PRAGMA user_version=72");

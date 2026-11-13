@@ -96,7 +96,7 @@ pub fn drawInput(self: *Self, ctx: vxfw.DrawContext, composer: ?vxfw.Widget) std
     const body_height = size.height - input_height;
     self.choice_column = if (size.width >= 6 and size.height >= 4) 2 else 0;
     self.choice_width = size.width - 2 * self.choice_column;
-    var surface = try vxfw.Surface.init(ctx.arena, self.widget(), size);
+    var surface = try vxfw.Surface.init(ctx.cell_arena, self.widget(), size);
     @memset(surface.buffer, .{ .style = self.style });
     var screen: vaxis.Screen = .{ .width = size.width, .height = size.height, .width_method = self.method, .buf = surface.buffer };
     const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = size.width, .height = size.height, .screen = &screen };
@@ -147,7 +147,7 @@ test "PermissionCard decides the drawn request at tiny sizes and ignores pasted 
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty, .redraw = false };
-    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 5 }, .cell_size = .{} };
+    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 5 }, .cell_size = .{} };
     consent.adopt(41);
     _ = try card.widget().draw(ctx);
     consent.adopt(52);
@@ -222,7 +222,7 @@ test "PermissionCard takes no choice from a key handed inside a paste, across re
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
-    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 5 }, .cell_size = .{} };
+    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 5 }, .cell_size = .{} };
     consent.adopt(17);
     _ = try card.widget().draw(ctx);
     try card.take(&events, .enter, true);
@@ -251,7 +251,7 @@ test "PermissionCard hover is quieter than the choice selection and changes neit
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
-    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 5 }, .cell_size = .{} };
+    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 5 }, .cell_size = .{} };
     consent.adopt(41);
     _ = try card.widget().draw(ctx);
     // Both choices take the hover look, retaining foreground, while the other keeps its reverse.

@@ -90,7 +90,7 @@ The completed cold benchmark (November 6, 2026):
 
 The cold baseline is the original stacked `b8382a1a` tree (1,906 tests); the
 completed after measurement is `a8647bcf` plus this split (1,908 tests, including
-two added upstream launch-frame tests). Fresh shared transport/translation/C
+two added upstream startup tests). Fresh shared transport/translation/C
 builds and build-runner bootstrap are included in producer wall time; unit
 window starts at the unit compiler invocation. Peaks sum descendant RSS sampled
 at 0.5-second intervals; maximum single-process `ru_maxrss` was 2.16 / 1.90 GiB

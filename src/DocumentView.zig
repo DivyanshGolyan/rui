@@ -274,7 +274,7 @@ fn spotAt(self: *const Self, gpa: std.mem.Allocator, at: Point) !Spot {
 fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const self: *Self = @ptrCast(@alignCast(raw));
     self.hover.targets = &.{};
-    const surface = try vxfw.Surface.init(ctx.arena, self.widget(), ctx.max.size());
+    const surface = try vxfw.Surface.init(ctx.cell_arena, self.widget(), ctx.max.size());
     self.size = surface.size;
     const shape: viewport.Layout = .{ .width = @max(1, self.size.width), .method = self.method };
     self.first = self.document.first(shape, self.size.height);
@@ -378,7 +378,7 @@ test "DocumentView user text keeps theme contrast without terminal dim" {
         var transcript: Self = .{ .document = document, .style = normal, .colours = .{ .quiet = quiet.fg } };
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
-        const surface = try transcript.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 20, .height = 2 }, .cell_size = .{} });
+        const surface = try transcript.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 20, .height = 2 }, .cell_size = .{} });
         const style = surface.readCell(0, 0).style;
         try std.testing.expect(!style.dim);
         try std.testing.expectEqual(quiet.fg, style.fg);
@@ -406,7 +406,7 @@ test "DocumentView forwards foreground roles and keeps its overflow state quiet"
         transcript.colour = colour;
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
-        const surface = try transcript.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 32, .height = 3 }, .cell_size = .{} });
+        const surface = try transcript.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 32, .height = 3 }, .cell_size = .{} });
         for ([_]vaxis.Color{ colours.user, colours.quiet, colours.attention, colours.failure }, 0..) |foreground, column| {
             try std.testing.expectEqual(if (colour) foreground else plain.fg, surface.readCell(@intCast(column), 0).style.fg);
         }
@@ -426,7 +426,7 @@ test "DocumentView draws only the requested rows and retains the first unread ro
     var transcript: Self = .{ .document = document, .style = .{ .bg = .{ .index = 19 } } };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    const surface = try transcript.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 8, .height = 2 }, .cell_size = .{} });
+    const surface = try transcript.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 8, .height = 2 }, .cell_size = .{} });
     try std.testing.expectEqual(@as(usize, 16), surface.buffer.len);
     try std.testing.expectEqualStrings("s", surface.readCell(0, 0).char.grapheme);
     try std.testing.expectEqualStrings("t", surface.readCell(0, 1).char.grapheme);
@@ -434,11 +434,11 @@ test "DocumentView draws only the requested rows and retains the first unread ro
     try std.testing.expectEqualStrings("first\nsecond\nthird\nfourth", document.text());
     for (surface.buffer) |cell| try std.testing.expectEqual(vaxis.Color{ .index = 19 }, cell.style.bg);
     for ([_]vxfw.Size{ .{ .width = 1, .height = 1 }, .{ .width = 0, .height = 1 }, .{ .width = 1, .height = 0 } }) |size| {
-        const resized = try transcript.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = size.width, .height = size.height }, .cell_size = .{} });
+        const resized = try transcript.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = size.width, .height = size.height }, .cell_size = .{} });
         try std.testing.expect(resized.size.width <= size.width and resized.size.height <= size.height);
         try std.testing.expectEqual(viewport.Position{ .offset = 6 }, document.top.?);
     }
-    const restored = try transcript.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 8, .height = 2 }, .cell_size = .{} });
+    const restored = try transcript.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 8, .height = 2 }, .cell_size = .{} });
     try std.testing.expectEqualDeep(surface.buffer, restored.buffer);
     try std.testing.expectEqual(viewport.Position{ .offset = 19 }, transcript.next);
 }
@@ -481,7 +481,7 @@ const Harness = struct {
     }
 
     fn frame(self: *Harness) !vxfw.Surface {
-        return self.transcript.widget().draw(.{ .arena = self.arena.allocator(), .min = .{}, .max = .{ .width = self.size.width, .height = self.size.height }, .cell_size = .{} });
+        return self.transcript.widget().draw(.{ .arena = self.arena.allocator(), .cell_arena = self.arena.allocator(), .min = .{}, .max = .{ .width = self.size.width, .height = self.size.height }, .cell_size = .{} });
     }
 
     fn send(self: *Harness, kind: vaxis.Mouse.Type, col: i16, row: i16) !void {
