@@ -364,6 +364,11 @@ test "chat table lists all commands with descriptions plus every loaded skill" {
         for (names, listed.shown()[0..names.len]) |name, entry| {
             try std.testing.expectEqualStrings(name, entry.shown[1..]);
             try std.testing.expect(entry.description.len != 0);
+            if (std.mem.eql(u8, name, "new") or std.mem.eql(u8, name, "clear")) {
+                try std.testing.expectEqualStrings("start a new chat", entry.description);
+            } else if (std.mem.eql(u8, name, "model")) {
+                try std.testing.expectEqualStrings("change this Session's model", entry.description);
+            }
         }
         for (entries[0..count], listed.shown()[names.len..]) |skill, entry| {
             try std.testing.expectEqualStrings(skill.name, std.mem.trimEnd(u8, entry.word, " "));

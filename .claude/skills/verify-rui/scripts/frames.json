@@ -32,13 +32,18 @@
         "/copy",
         "/effort",
         "/model",
-        "/new"
+        "/new",
+        "/clear          start a new chat",
+        "/new            start a new chat",
+        "/model          change this Session's model"
       ],
       "absent": [
         "/configure",
         "/status",
         "/discard",
-        "/recover"
+        "/recover",
+        "Start a new chat",
+        "Change this Session's model"
       ],
       "absent_regex": [
         "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
@@ -143,11 +148,16 @@
         "/result",
         "/setup",
         "/unarchive",
-        "/review"
+        "/review",
+        "/clear          start a new chat",
+        "/new            start a new chat",
+        "/model          change this Session's model"
       ],
       "absent": [
         "/configure",
-        "/status"
+        "/status",
+        "Start a new chat",
+        "Change this Session's model"
       ],
       "absent_regex": [
         "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"

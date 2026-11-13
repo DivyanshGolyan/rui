@@ -107,12 +107,12 @@ const ConversationName = enum {
 /// A conversation's commands.
 pub const conversation = Commands(ConversationName, .{
     .archive = .{ .description = "stop active work and archive this Session" },
-    .clear = .{ .description = "Start a new chat" },
+    .clear = .{ .description = "start a new chat" },
     .copy = .{ .description = "copy the last answer; code its last block, file saves it here", .argument = .{ .choice = copy_words } },
     .discard = .{ .listed = false },
     .effort = .{ .description = "this Session's effort, also the default for new ones", .argument = .effort },
-    .model = .{ .description = "Change this Session's model" },
-    .new = .{ .description = "Start a new chat" },
+    .model = .{ .description = "change this Session's model" },
+    .new = .{ .description = "start a new chat" },
     .recover = .{ .argument = .{ .required = "KEY" }, .listed = false },
     .@"reload-skills" = .{ .description = "rescan skills and append catalog changes without model work" },
     .rename = .{ .description = "name this Session", .argument = .{ .required = "NAME" } },
