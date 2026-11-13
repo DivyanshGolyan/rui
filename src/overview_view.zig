@@ -101,21 +101,30 @@ pub const Rule = struct {
     /// A failed row names its failure's cause.
     cause: bool = false,
 
+    /// The work waits on the person: a decision to make or a failure to
+    /// read. Such a row never recedes, even in a chat they never wrote in.
+    needs_person: bool = false,
+
+    /// The row's priority class in the list order.
+    order: OrderClass,
+
     stoppable: bool,
 };
 
 /// The one per-kind table. `step` and `render` read it and switch on no kind.
+/// Counts, order and quietness read it at `heldKind`; marks, colours and
+/// words at `shownKind`.
 pub const rules = std.enums.EnumArray(Kind, Rule).init(.{
-    .idle = .{ .mark = .waiting, .colour = .normal, .word = "idle", .stoppable = false },
-    .pending = .{ .mark = .queued, .colour = .quiet, .stoppable = true },
-    .working = .{ .mark = .active, .colour = .ink, .spins = true, .stoppable = true },
-    .retrying = .{ .mark = .active, .colour = .ink, .says = true, .stoppable = true },
-    .bash = .{ .mark = .active, .colour = .ink, .says = true, .spins = true, .stoppable = true },
-    .approval = .{ .mark = .needs_you, .colour = .attention, .stoppable = true },
-    .stopping = .{ .mark = .active, .colour = .ink, .says = true, .stoppable = false },
-    .finished = .{ .mark = .finished, .colour = .mark, .word = "finished", .stoppable = false },
-    .failed = .{ .mark = .failed, .colour = .failure, .word = "failed", .cause = true, .stoppable = false },
-    .stopped = .{ .mark = .stopped, .colour = .normal, .word = "stopped", .stoppable = false },
+    .idle = .{ .mark = .waiting, .colour = .normal, .word = "idle", .order = .done, .stoppable = false },
+    .pending = .{ .mark = .queued, .colour = .quiet, .order = .queued, .stoppable = true },
+    .working = .{ .mark = .active, .colour = .ink, .spins = true, .order = .working, .stoppable = true },
+    .retrying = .{ .mark = .active, .colour = .ink, .says = true, .order = .working, .stoppable = true },
+    .bash = .{ .mark = .active, .colour = .ink, .says = true, .spins = true, .order = .working, .stoppable = true },
+    .approval = .{ .mark = .needs_you, .colour = .attention, .needs_person = true, .order = .needs_you, .stoppable = true },
+    .stopping = .{ .mark = .active, .colour = .ink, .says = true, .order = .working, .stoppable = false },
+    .finished = .{ .mark = .finished, .colour = .mark, .word = "finished", .order = .done, .stoppable = false },
+    .failed = .{ .mark = .failed, .colour = .failure, .word = "failed", .cause = true, .needs_person = true, .order = .done, .stoppable = false },
+    .stopped = .{ .mark = .stopped, .colour = .normal, .word = "stopped", .order = .done, .stoppable = false },
 });
 
 pub const marks = state_marks.marks;
@@ -1878,10 +1887,11 @@ fn arrange(state: *State) error{OutOfMemory}!void {
     for (state.order.items, state.sort_keys.items) |*slot, key| slot.* = key.index;
 }
 
-/// How many rows show each mark the counts line counts.
+/// How many rows hold each mark the counts line counts. A decision still
+/// awaited counts as needs-you while its stop is pending.
 fn counts(state: *const State) Counts {
     var result: Counts = .{};
-    for (state.rows.items) |*row| if (visible(state, row)) switch (rules.get(shownKind(state, row)).mark) {
+    for (state.rows.items) |*row| if (visible(state, row)) switch (rules.get(heldKind(state, row)).mark) {
         .needs_you => result.needs_you += 1,
         .active => result.working += 1,
         .queued => result.queued += 1,
@@ -1892,13 +1902,7 @@ fn counts(state: *const State) Counts {
 }
 
 fn orderClass(state: *const State, row: *const Row) OrderClass {
-    if (needsDecision((&row.state))) return .needs_you;
-    return switch (shownKind(state, row)) {
-        .approval => .needs_you,
-        .working, .bash, .retrying, .stopping => .working,
-        .finished, .failed, .stopped, .idle => .done,
-        .pending => .queued,
-    };
+    return rules.get(heldKind(state, row)).order;
 }
 
 fn position(state: *const State, ref: Reference) ?usize {
@@ -2020,6 +2024,14 @@ fn stoppable(state: *const State, ref: Reference, work: Kind) bool {
 fn shownKind(state: *const State, row: *const Row) Kind {
     if (state.openStop(row.reference) == null and needsDecision((&row.state))) return .approval;
     return kindShown(state, row.reference, (&row.state).asOf(state.now_ms));
+}
+
+/// What a row's work holds for the person: its shown kind, except that a
+/// decision still awaited stays approval while its stop is pending, since
+/// the approval is pending until the stop lands. Counts, order and
+/// quietness read the rules at this kind.
+fn heldKind(state: *const State, row: *const Row) Kind {
+    return if (needsDecision(&row.state)) .approval else shownKind(state, row);
 }
 
 /// When the row's shown state began: a retry that has fallen due waits
@@ -2860,17 +2872,18 @@ pub fn rowSecondSegments(arena: Allocator, state: *const State, at: usize, width
 pub fn markSpins(state: *const State, item: Item, caps: Caps) bool {
     if (item != .row or state.list_stale or !caps.unicode or caps.depth == .none) return false;
     const row = &state.rows.items[state.order.items[item.row]];
-    return row.from_person_at != null and rules.get(shownKind(state, row)).spins;
+    return yours(row) and rules.get(shownKind(state, row)).spins;
 }
 
-/// Chats you have never written in recede unless their work needs attention.
-/// The open empty chat is yours even before its first Message is admitted.
+/// The person wrote in this chat. The open empty chat is theirs even before
+/// its first Message is admitted.
+fn yours(row: *const Row) bool {
+    return row.first == null or row.from_person_at != null;
+}
+
+/// Chats you have never written in recede unless their work needs you.
 pub fn rowQuiet(state: *const State, row: *const Row) bool {
-    if (row.first == null or row.from_person_at != null) return false;
-    return switch (shownKind(state, row)) {
-        .approval, .failed, .stopped => false,
-        else => true,
-    };
+    return !yours(row) and !rules.get(heldKind(state, row)).needs_person;
 }
 
 /// Provider recovery bands above the list. Archive views remain reachable
@@ -5394,33 +5407,49 @@ test "overview second line queues due retries and uses waiting Bash commands fir
     try std.testing.expectEqualStrings("echo allowed", secondLine(&state, state.find(bash.reference).?, &buffer));
 }
 
-test "overview quiet rows cover sender work selection and the open empty chat" {
-    // Independent attention expectations, including Bash with a pending decision.
+test "overview quiet rows cover every kind, sender, selection, a pending stop and the open empty chat" {
+    // Independent expectations from the approved mock: a chat the person
+    // never wrote in recedes unless it waits for approval or failed. The
+    // second column is quiet when never written in; the third says whether
+    // the row needs you, which a pending stop keeps until it lands.
     const cases = .{
-        .{ kind_cases[0].state, true, "Last answer" },
-        .{ kind_cases[1].state, true, "Queued" },
-        .{ kind_cases[2].state, true, "Thinking" },
-        .{ kind_cases[3].state, true, "Provider error" },
-        .{ kind_cases[4].state, true, "Run the logic tests" },
-        .{ kind_cases[5].state, false, "Allow: echo yes" },
-        .{ kind_cases[6].state, true, "Stopping" },
-        .{ kind_cases[7].state, true, "Last answer" },
-        .{ kind_cases[8].state, false, "Last answer" },
-        .{ kind_cases[9].state, false, "Last answer" },
-        .{ WorkState{ .bash = .{ .since = test_now_s, .call = 0, .description = null, .running = 1, .approvals = 1 } }, false, "Allow: echo yes" },
+        .{ kind_cases[0].state, true, false, "Last answer" },
+        .{ kind_cases[1].state, true, false, "Queued" },
+        .{ kind_cases[2].state, true, false, "Thinking" },
+        .{ kind_cases[3].state, true, false, "Provider error" },
+        .{ kind_cases[4].state, true, false, "Run the logic tests" },
+        .{ kind_cases[5].state, false, true, "Allow: echo yes" },
+        .{ kind_cases[6].state, true, false, "Stopping" },
+        .{ kind_cases[7].state, true, false, "Last answer" },
+        .{ kind_cases[8].state, false, false, "Last answer" },
+        .{ kind_cases[9].state, true, false, "Last answer" },
+        .{ WorkState{ .bash = .{ .since = test_now_s, .call = 0, .description = null, .running = 1, .approvals = 1 } }, false, true, "Allow: echo yes" },
     };
-    inline for (cases) |case| for ([_]bool{ false, true }) |wrote| for ([_]bool{ false, true }) |selected| for ([_]u16{ 46, 140 }) |width| for ([_]Caps.Depth{ .direct, .indexed, .none }) |depth| {
+    comptime std.debug.assert(cases.len == std.enums.values(Kind).len + 1);
+    inline for (cases) |case| for ([_]bool{ false, true }) |stop| for ([_]bool{ false, true }) |wrote| for ([_]bool{ false, true }) |selected| for ([_]u16{ 46, 140 }) |width| for ([_]Caps.Depth{ .direct, .indexed, .none }) |depth| {
         const caps: Caps = .{ .depth = depth };
         var listed = session("k7m2qx", case[0], .{ .label = "Quiet row", .yours = wrote, .first_action = 7 });
         listed.last_line = .{ .position = 1, .text = "Last answer" };
         var state = try opened(&.{listed});
         defer state.deinit();
-        if (!case[1] and (case[0] == .approval or case[0] == .bash)) {
+        if (case[2]) {
             _ = try step(&state, .{ .command = .{ .reference = listed.reference, .action = 7, .text = "Allow: echo yes" } });
         }
+        // A pending stop: asked for and not yet reported by the Host.
+        const stopping = stop and rules.get(std.meta.activeTag(case[0])).stoppable;
+        if (stopping) {
+            state.selected = .{ .session = listed.reference };
+            _ = try press(&state, .stop);
+            _ = try press(&state, .stop);
+            try std.testing.expect(state.openStop(listed.reference) != null);
+        }
         state.selected = if (selected) .{ .session = listed.reference } else .new_session;
+        const row = state.find(listed.reference).?;
         const quiet = !wrote and case[1];
-        try std.testing.expectEqual(quiet, rowQuiet(&state, state.find(listed.reference).?));
+        try std.testing.expectEqual(quiet, rowQuiet(&state, row));
+        // Counts, order and dimming agree on what needs you.
+        try std.testing.expectEqual(@intFromBool(case[2]), state.summary.counts.needs_you);
+        try std.testing.expectEqual(case[2], orderClass(&state, row) == .needs_you);
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         const first = try listSegments(arena.allocator(), &state, .{ .row = 0 }, width, caps, 0);
@@ -5433,7 +5462,7 @@ test "overview quiet rows cover sender work selection and the open empty chat" {
         // Main's folder role is quiet, exactly like the detail and age.
         // Quiet rows add dim without replacing that existing muted role.
         const muted: Style = .{ .colour = .quiet, .dim = quiet };
-        try std.testing.expectEqual(muted, try styleOf(second, case[2]));
+        try std.testing.expectEqual(muted, try styleOf(second, if (stopping) "Stopping" else case[3]));
         try std.testing.expectEqual(muted, try styleOf(second, "rui"));
         // The mark, age, folder and padding share the name/detail's value.
         for (first.segments) |segment| try std.testing.expectEqual(quiet, segment.style.dim);
