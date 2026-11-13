@@ -34,9 +34,12 @@ pub const Limitation = enum {
 pub const LaunchOption = struct { name: []const u8, value: ?[]const u8 };
 pub const LaunchSpecification = struct {
     options: []LaunchOption,
+    /// The option values: a translated retired flag's are not argv bytes.
+    values: []u8 = &.{},
 
     fn deinit(self: *const LaunchSpecification, allocator: std.mem.Allocator) void {
         allocator.free(self.options);
+        allocator.free(self.values);
     }
 };
 
@@ -201,7 +204,17 @@ fn deriveLaunch(allocator: std.mem.Allocator, argv: []const []const u8) !LaunchS
             try options.append(allocator, .{ .name = option.name, .value = parsed.getNamed(option.name) });
         }
     }
-    return .{ .options = try options.toOwnedSlice(allocator) };
+    var size: usize = 0;
+    for (options.items) |option| size += if (option.value) |value| value.len else 0;
+    const values = try allocator.alloc(u8, size);
+    var at: usize = 0;
+    for (options.items) |*option| if (option.value) |value| {
+        @memcpy(values[at..][0..value.len], value);
+        option.value = values[at..][0..value.len];
+        at += value.len;
+    };
+    errdefer allocator.free(values);
+    return .{ .options = try options.toOwnedSlice(allocator), .values = values };
 }
 
 // host_launch starts the replacement in `/` with stdin closed; host_start
