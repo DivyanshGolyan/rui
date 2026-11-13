@@ -214,7 +214,6 @@ test "Palette renders every chat command with its quiet description" {
         const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 24 }, .cell_size = .{} };
         const surface = try palette.widget().draw(ctx);
         try std.testing.expectEqual(case[1].len, surface.size.height);
-        std.debug.print("\n{s} / list:\n", .{"Conversation"});
         for (case[1], 0..) |expected, row| {
             var text: [256]u8 = undefined;
             var used: usize = 0;
@@ -226,7 +225,6 @@ test "Palette renders every chat command with its quiet description" {
             try std.testing.expect(std.mem.startsWith(u8, line, expected));
             try std.testing.expect(shown.list.entries[row].description.len != 0);
             try std.testing.expect(std.mem.indexOf(u8, line, shown.list.entries[row].description[0..@min(20, shown.list.entries[row].description.len)]) != null);
-            std.debug.print("{s}\n", .{line});
             if (shown.list.entries[row].description.len != 0) {
                 try std.testing.expect(!surface.readCell(0, @intCast(row)).style.dim);
                 try std.testing.expect(surface.readCell(@intCast(shown.list.descriptionColumn()), @intCast(row)).style.dim);
@@ -247,7 +245,7 @@ test "Palette description clipping ends with the list row ellipsis at every widt
                 var palette: Self = .{ .shown = &shown, .caps = .{ .unicode = unicode, .width = .unicode } };
                 var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
                 defer arena.deinit();
-                const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = @intCast(width), .height = 2 }, .cell_size = .{} };
+                const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = @intCast(width), .height = 2 }, .cell_size = .{} };
                 const surface = try palette.widget().draw(ctx);
                 try std.testing.expect(surface.size.width <= width);
                 const column = shown.list.descriptionColumn();
@@ -295,7 +293,7 @@ test "Palette description fitting keeps whole wide and combining clusters" {
             var palette: Self = .{ .shown = &shown, .caps = .{ .unicode = case.unicode, .width = method } };
             var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
             defer arena.deinit();
-            const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 1 }, .cell_size = .{} };
+            const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 1 }, .cell_size = .{} };
             const surface = try palette.widget().draw(ctx);
             var text: std.Io.Writer.Allocating = .init(arena.allocator());
             var col = column;
