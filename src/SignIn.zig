@@ -8,6 +8,9 @@ const ClientTask = @import("ClientTask.zig");
 const api_key = @import("api_key.zig");
 const codex_auth = @import("codex_auth.zig");
 const provider_login = @import("provider_login.zig");
+const plan_login = @import("chatgpt_plan_login.zig");
+const plan_wire = @import("chatgpt_plan_wire.zig");
+const pages = @import("os/pages.zig");
 const preferences = @import("preferences.zig");
 const selection = @import("new_session_selection.zig");
 const Footer = @import("widgets/Footer.zig");
@@ -27,6 +30,107 @@ pub const Ready = *const fn (std.process.Init) core.Readinesses;
 const Published = struct { defaults: anyerror!void, activation: anyerror!Activation };
 const Outcome = union(enum) { cancelled, failed: anyerror, published: Published };
 const Presentation = union(enum) { screen: *vxfw.EventContext, departure: *std.Io.Writer };
+
+/// What a browser sign-in shows and the address the person pastes for it.
+/// It exists only while that attempt runs: mapped as the attempt begins,
+/// wiped and unmapped once it settles. The worker writes the link, `stray`,
+/// `checking` and `failure`; the screen writes the entry; both under the
+/// task mutex while the worker runs.
+pub const Browser = struct {
+    link: @import("bounded.zig").Bounded(plan_login.max_link_bytes),
+    /// Typed address bytes. The first `confirmed` end with Enter's newline
+    /// and wait for the login to read them; the rest are still being typed.
+    entry: [plan_wire.max_request_line_bytes]u8,
+    len: usize,
+    confirmed: usize,
+    /// More was typed than any address can be; Enter discards it.
+    overflow: bool,
+    /// The login read the last confirmed lines and none was the address.
+    stray: bool,
+    /// An address was confirmed and no answer about it has come.
+    checking: bool,
+    /// What the login showed as its failure, for the row once it settles.
+    failure: ?core.Failure,
+
+    /// The small fields; the buffers stay as mapped.
+    pub fn init(self: *Browser) void {
+        self.link.len = 0;
+        self.len = 0;
+        self.confirmed = 0;
+        self.overflow = false;
+        self.stray = false;
+        self.checking = false;
+        self.failure = null;
+    }
+
+    fn take(browser: *Browser, buffer: []u8) ?usize {
+        const moved = @min(browser.confirmed, buffer.len);
+        if (moved == 0) return null;
+        @memcpy(buffer[0..moved], browser.entry[0..moved]);
+        const rest = browser.len - moved;
+        std.mem.copyForwards(u8, browser.entry[0..rest], browser.entry[moved..browser.len]);
+        std.crypto.secureZero(u8, browser.entry[rest..browser.len]);
+        browser.len = rest;
+        browser.confirmed -= moved;
+        return moved;
+    }
+
+    /// One edit of the address entry, as the key entry edits the key.
+    pub fn edit(browser: *Browser, change: Edit) void {
+        switch (change) {
+            .append => |text| {
+                browser.stray = false;
+                browser.checking = false;
+                // One byte stays for Enter's newline.
+                if (browser.overflow or text.len >= browser.entry.len - browser.len) {
+                    browser.overflow = true;
+                    return;
+                }
+                @memcpy(browser.entry[browser.len..][0..text.len], text);
+                browser.len += text.len;
+            },
+            .erase => {
+                if (browser.overflow) return browser.discard();
+                if (browser.len == browser.confirmed) return;
+                browser.len -= 1;
+                browser.entry[browser.len] = 0;
+            },
+            .confirm => {
+                // Nothing that long is an address; say so rather than cut it.
+                if (browser.overflow) {
+                    browser.discard();
+                    browser.stray = true;
+                    return;
+                }
+                if (browser.len == browser.confirmed) return;
+                browser.entry[browser.len] = '\n';
+                browser.len += 1;
+                browser.confirmed = browser.len;
+                browser.checking = true;
+            },
+            .clear => {
+                std.crypto.secureZero(u8, browser.entry[0..browser.len]);
+                browser.len = 0;
+                browser.confirmed = 0;
+                browser.overflow = false;
+                browser.stray = false;
+                browser.checking = false;
+            },
+        }
+    }
+
+    /// Wipes what is typed and not yet confirmed.
+    fn discard(browser: *Browser) void {
+        std.crypto.secureZero(u8, browser.entry[browser.confirmed..browser.len]);
+        browser.len = browser.confirmed;
+        browser.overflow = false;
+    }
+};
+
+/// The loopback issuer the browser attempt uses under `RUI_TEST_LOGIN`. Its
+/// token service refuses, so the fixture saves nothing.
+const test_issuer = "http://127.0.0.1:1";
+
 state: core.State = .{},
 init: ?std.process.Init = null,
 selectors: selection.Intent = .{},
@@ -48,9 +152,11 @@ task: ClientTask = .{},
 /// publication wins, Escape cannot claim that the saved sign-in was undone.
 gate: std.atomic.Value(enum(u8) { cancellable, cancelled, publishing }) = .init(.cancellable),
 code: @import("protocol.zig").Bounded(64) = .{},
-/// A pending publication wakes one UI frame, even after Connecting drew.
-/// Guarded with code by the task mutex; not another copy of the code.
-code_pending: bool = false,
+/// A pending display wakes one UI frame, even after Connecting drew.
+/// Guarded with code and `browser` by the task mutex; not another copy.
+shown_pending: bool = false,
+/// The running browser attempt's storage, null otherwise.
+browser: ?pages.Mapped(Browser) = null,
 attempt: core.Attempt = .existing,
 outcome: ?Outcome = null,
 launch_report: ?host_launch.Summary = null,
@@ -61,11 +167,11 @@ pub fn widget(self: *Self) vxfw.Widget {
 }
 
 pub fn reset(self: *Self) void {
-    std.debug.assert(self.task.thread == null);
+    std.debug.assert(self.task.thread == null and self.browser == null);
     self.key.wipe();
     self.key_rejected = false;
     self.code.len = 0;
-    self.code_pending = false;
+    self.shown_pending = false;
     self.state = .{};
     self.launch_report = null;
 }
@@ -105,8 +211,56 @@ fn display(code: []const u8) !void {
     self.task.mutex.lockUncancelable(init.io);
     defer self.task.mutex.unlock(init.io);
     try self.code.set(code);
-    self.code_pending = true;
+    self.shown_pending = true;
 }
+
+/// The browser sign-in's display, on the worker: what the row needs, copied
+/// into the attempt's storage.
+fn show(shown: plan_login.Shown) !void {
+    const self = current;
+    const init = self.init.?;
+    self.task.mutex.lockUncancelable(init.io);
+    defer self.task.mutex.unlock(init.io);
+    const browser = self.browser.?.value;
+    switch (shown) {
+        .link => |link| try browser.link.set(link),
+        .stray_paste => {
+            browser.stray = true;
+            browser.checking = false;
+        },
+        .failed => |failure| browser.failure = browserFailure(failure),
+    }
+    self.shown_pending = true;
+}
+
+/// The browser sign-in's paste source, on the worker: moves the confirmed
+/// address lines into `buffer` and wipes them here. Null while none waits.
+fn pasted(buffer: []u8) ?usize {
+    const self = current;
+    const init = self.init.?;
+    self.task.mutex.lockUncancelable(init.io);
+    defer self.task.mutex.unlock(init.io);
+    return self.browser.?.value.take(buffer);
+}
+
+/// The row's plain words for each way the browser sign-in can fail.
+fn browserFailure(failure: plan_login.Failure) core.Failure {
+    return switch (failure) {
+        .invalid_host_id => .host_id,
+        .refused => .denied,
+        .timed_out => .expired,
+        .no_answer_source => .login,
+        .callback => .answer,
+        .unreachable_service => .unreachable_service,
+        .exchange => |cause| switch (cause) {
+            .plan_scope_missing => .plan,
+            .code_refused => .denied,
+            .not_for_this_sign_in, .unreadable => .answer,
+        },
+    };
+}
+
+pub const Edit = union(enum) { append: []const u8, erase, confirm, clear };
 
 fn work(raw: *anyopaque, _: *ClientTask) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
@@ -118,10 +272,15 @@ fn work(raw: *anyopaque, _: *ClientTask) !void {
 
 fn runAttempt(self: *Self) !Published {
     const init = self.init.?;
+    const fixture = std.mem.eql(u8, init.environ_map.get("RUI_TEST_LOGIN") orelse "", "waiting");
     switch (self.attempt) {
+        .chatgpt => {
+            // Explicit fixture only: a loopback issuer, which opens no browser.
+            try provider_login.chatgpt(init, if (fixture) .{ .fixture = test_issuer } else .openai, show, .{ .read = pasted }, cancelled, publish);
+        },
         .codex => {
             // Explicit fixture only: no credential, token or network operation.
-            if (std.mem.eql(u8, init.environ_map.get("RUI_TEST_LOGIN") orelse "", "waiting")) {
+            if (fixture) {
                 try display("BDL9-KI88H");
                 while (!cancelled()) try init.io.sleep(.fromMilliseconds(20), .awake);
                 return error.LoginInterrupted;
@@ -139,28 +298,53 @@ fn runAttempt(self: *Self) !Published {
     return .{ .defaults = defaults, .activation = self.activate.?(init, self.selectors) };
 }
 
+/// Maps the browser attempt's storage; only while no worker runs.
+fn openBrowser(self: *Self) !void {
+    std.debug.assert(self.task.thread == null and self.browser == null);
+    const mapped = try pages.Mapped(Browser).map();
+    mapped.value.init();
+    self.browser = mapped;
+}
+
+/// Wipes and unmaps the browser attempt's storage once its worker has
+/// joined, returning the failure it showed.
+fn closeBrowser(self: *Self) ?core.Failure {
+    std.debug.assert(self.task.thread == null);
+    const mapped = self.browser orelse return null;
+    self.browser = null;
+    const failure = mapped.value.failure;
+    std.crypto.secureZero(u8, std.mem.asBytes(mapped.value));
+    mapped.unmap();
+    return failure;
+}
+
 fn begin(self: *Self, ctx: *vxfw.EventContext, attempt: core.Attempt) void {
     if (attempt != .key) self.key.wipe();
     self.attempt = attempt;
     self.code.len = 0;
-    self.code_pending = false;
+    self.shown_pending = false;
     self.outcome = null;
     self.launch_report = null;
     self.gate.store(.cancellable, .release);
     const init = self.init orelse return; // UI-only rendering has no effects.
-    self.task.start(init.io, self, work) catch {
-        self.key.wipe();
-        self.key_rejected = false;
-        _ = self.state.step(.{ .failed = .login });
-    };
+    started: {
+        if (attempt == .chatgpt) self.openBrowser() catch break :started;
+        self.task.start(init.io, self, work) catch break :started;
+        ctx.redraw = true;
+        return;
+    }
+    _ = self.closeBrowser();
+    self.key.wipe();
+    self.key_rejected = false;
+    _ = self.state.step(.{ .failed = .login });
     ctx.redraw = true;
 }
 
 fn advance(self: *Self, ctx: *vxfw.EventContext) !void {
     if (self.task.thread == null) return;
     self.task.mutex.lockUncancelable(self.init.?.io);
-    const pending = self.code_pending;
-    self.code_pending = false;
+    const pending = self.shown_pending;
+    self.shown_pending = false;
     self.task.mutex.unlock(self.init.?.io);
     ctx.redraw = ctx.redraw or pending;
     if (!self.task.completed()) return;
@@ -172,14 +356,19 @@ fn advance(self: *Self, ctx: *vxfw.EventContext) !void {
 /// failed default save, and a failed activation cannot hide it either.
 fn settle(self: *Self, presentation: Presentation) !void {
     if (self.task.thread == null) return;
-    try self.task.join();
+    const joined = self.task.join();
+    // The browser attempt's storage lives exactly as long as its worker.
+    const shown = self.closeBrowser();
+    try joined;
     self.key.wipe();
     self.key_rejected = false;
     const outcome = self.outcome.?;
     self.outcome = null;
     switch (outcome) {
-        .cancelled => {},
+        // A cancelled browser attempt may have been cancelled for a device code.
+        .cancelled => if (presentation == .screen) try self.apply(presentation.screen, self.state.step(.cancelled)),
         .failed => |err| try self.reportFailure(presentation, switch (err) {
+            error.Reported => shown orelse .login,
             error.LoginExpired => .expired,
             error.LoginDenied => .denied,
             else => .login,
@@ -215,7 +404,8 @@ fn settle(self: *Self, presentation: Presentation) !void {
 fn reportFailure(self: *Self, presentation: Presentation, failure: core.Failure, err: anyerror) !void {
     switch (presentation) {
         .screen => |ctx| {
-            _ = self.state.step(.{ .failed = failure });
+            // A browser attempt cancelled for a device code begins it now.
+            try self.apply(ctx, self.state.step(.{ .failed = failure }));
             ctx.redraw = true;
         },
         .departure => |writer| {
@@ -223,6 +413,20 @@ fn reportFailure(self: *Self, presentation: Presentation, failure: core.Failure,
             try writer.writeByte('\n');
             return err;
         },
+    }
+}
+
+/// Applies what the core decided.
+fn apply(self: *Self, ctx: *vxfw.EventContext, effect: core.Effect) !void {
+    switch (effect) {
+        .chatgpt => self.begin(ctx, .chatgpt),
+        .codex => self.begin(ctx, .codex),
+        .key => self.begin(ctx, .key),
+        .existing => self.begin(ctx, .existing),
+        .close => if (self.on_close) |close| try close(self.userdata.?, ctx),
+        // Escape and Tab claimed the gate before the core stepped; the
+        // cancelled attempt settles on a later tick.
+        .cancel, .none => {},
     }
 }
 
@@ -235,6 +439,16 @@ fn appendKey(self: *Self, text: []const u8) void {
     @memcpy(self.key.bytes[self.key.len..][0..text.len], text);
     self.key.len += text.len;
     self.state.stage = .key_entry;
+}
+
+/// Edits the browser attempt's address entry, under the task mutex while
+/// its worker runs.
+fn editAddress(self: *Self, change: Edit) void {
+    const mapped = self.browser orelse return;
+    const locked = self.task.thread != null;
+    if (locked) self.task.mutex.lockUncancelable(self.init.?.io);
+    defer if (locked) self.task.mutex.unlock(self.init.?.io);
+    mapped.value.edit(change);
 }
 
 fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
@@ -260,6 +474,10 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
             const key = input.key_press;
             if (key.matches(vaxis.Key.enter, .{})) self.appendKey("\n") else if (key.text) |text| self.appendKey(text);
             ctx.consumeAndRedraw();
+        } else if (self.state.stage == .browser_waiting) {
+            // A paste never confirms the address; the person's Enter does.
+            if (input.key_press.text) |text| self.editAddress(.{ .append = text });
+            ctx.consumeAndRedraw();
         }
         return;
     }
@@ -273,11 +491,24 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
         if (self.task.thread != null and self.state.stage == .choice) return;
         // Leave the running publication visible until its definite answer.
         if (self.task.thread != null and self.gate.cmpxchgStrong(.cancellable, .cancelled, .acq_rel, .acquire) == .publishing) return;
+        self.editAddress(.clear);
         effect = self.state.step(.escape);
         if (self.task.thread == null) {
             self.key.wipe();
             self.key_rejected = false;
         }
+    } else if (key.matches(vaxis.Key.tab, .{})) {
+        if (!self.state.offersDeviceCode()) return;
+        // As Escape: once publication wins, the browser sign-in stands.
+        if (self.task.thread != null and self.gate.cmpxchgStrong(.cancellable, .cancelled, .acq_rel, .acquire) == .publishing) return;
+        self.editAddress(.clear);
+        effect = self.state.step(.device_code);
+    } else if (self.state.stage == .browser_waiting) {
+        if (key.matches(vaxis.Key.enter, .{})) {
+            self.editAddress(.confirm);
+        } else if (key.matches(vaxis.Key.backspace, .{})) {
+            self.editAddress(.erase);
+        } else if (key.text) |text| self.editAddress(.{ .append = text });
     } else if (self.task.thread != null) {
         return;
     } else if (key.matches(vaxis.Key.enter, .{})) {
@@ -300,13 +531,7 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
             self.state.stage = .key_entry;
         } else if (key.text) |text| self.appendKey(text);
     }
-    switch (effect) {
-        .codex => self.begin(ctx, .codex),
-        .key => self.begin(ctx, .key),
-        .existing => self.begin(ctx, .existing),
-        .close => if (self.on_close) |close| try close(self.userdata.?, ctx),
-        .cancel, .none => {},
-    }
+    try self.apply(ctx, effect);
     ctx.consumeAndRedraw();
 }
 
@@ -316,7 +541,8 @@ fn writeFailure(self: *Self, writer: *std.Io.Writer, failure: core.Failure, retr
             return host_launch.writeSignIn(writer, report, failure == .defaults_and_host, retry_hint);
     }
     try writer.writeAll(failureText(failure));
-    if (retry_hint) try writer.writeAll(" · enter tries again");
+    // The host id file names its own remedy, and its path leaves no room.
+    if (retry_hint and failure != .host_id) try writer.writeAll(" · enter tries again");
 }
 
 fn failureLine(self: *Self, alloc: std.mem.Allocator) std.mem.Allocator.Error![]const u8 {
@@ -329,11 +555,40 @@ fn failureText(failure: core.Failure) []const u8 {
     return switch (failure) {
         .expired => "ChatGPT sign-in expired",
         .denied => "ChatGPT sign-in denied",
+        .unreachable_service => "Couldn't reach ChatGPT",
+        .answer => "Sign-in answer not valid",
+        .plan => "Plan use not allowed",
+        .host_id => "Unusable ~/.config/rui/host-id",
         .login => "Sign-in failed",
         .defaults => "Sign-in saved; couldn't save default",
         .host => "Sign-in saved; Host didn't start",
         .defaults_and_host => "Sign-in saved; default not saved; Host didn't start",
     };
+}
+
+/// What the browser row shows, copied from the attempt's storage.
+const BrowserView = struct { link: []const u8 = "", typed: usize = 0, stray: bool = false, checking: bool = false };
+
+fn browserView(self: *Self, alloc: std.mem.Allocator) std.mem.Allocator.Error!BrowserView {
+    const mapped = self.browser orelse return .{};
+    const locked = self.task.thread != null;
+    if (locked) self.task.mutex.lockUncancelable(self.init.?.io);
+    defer if (locked) self.task.mutex.unlock(self.init.?.io);
+    const browser = mapped.value;
+    return .{ .link = try alloc.dupe(u8, browser.link.slice()), .typed = browser.len - browser.confirmed, .stray = browser.stray, .checking = browser.checking };
+}
+
+/// The link's short readable form: its host, without scheme, path or query.
+fn linkHost(link: []const u8) []const u8 {
+    const after = if (std.mem.indexOf(u8, link, "://")) |at| link[at + 3 ..] else link;
+    return after[0 .. std.mem.indexOfAny(u8, after, "/?#") orelse after.len];
+}
+
+fn masked(alloc: std.mem.Allocator, count: usize) std.mem.Allocator.Error![]const u8 {
+    const text = try alloc.alloc(u8, "  ".len + count * "•".len);
+    @memcpy(text[0..2], "  ");
+    for (0..count) |i| @memcpy(text[2 + i * 3 ..][0..3], "•");
+    return text;
 }
 
 fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
@@ -346,9 +601,9 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const list_visible = if (self.list_visible) |visible| visible(self.userdata.?) else false;
     header.* = .{ .text = if (list_visible) "" else " rui", .style = self.style };
     const row: u16 = size.height -| 4;
-    const children = try ctx.arena.alloc(vxfw.SubSurface, 3);
+    var children: std.ArrayList(vxfw.SubSurface) = try .initCapacity(ctx.arena, 4);
     const one = ctx.withConstraints(.{}, .{ .width = size.width, .height = 1 });
-    children[0] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = try header.widget().draw(one) };
+    children.appendAssumeCapacity(.{ .origin = .{ .row = 0, .col = 0 }, .surface = try header.widget().draw(one) });
     if (size.height >= 4) {
         for (0..size.width) |col| {
             surface.writeCell(@intCast(col), row, .{ .char = .{ .grapheme = "─", .width = 1 }, .style = self.quiet });
@@ -361,8 +616,10 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         code = self.code;
         self.task.mutex.unlock(self.init.?.io);
     } else code = self.code;
+    const browser: BrowserView = if (self.state.stage == .browser_waiting) try self.browserView(ctx.arena) else .{};
     const line: []const vaxis.Cell.Segment = switch (self.state.stage) {
         .choice => try ctx.arena.dupe(vaxis.Cell.Segment, &choice_row.segments(.{ "ChatGPT", "API key" }, .{ if (self.state.selected != .openai) .selected else .plain, if (self.state.selected == .openai) .selected else .plain }, self.style, .{}, true)),
+        .switching => &.{.{ .text = "  Connecting to ChatGPT", .style = self.style }},
         .codex_waiting => if (code.len == 0) &.{.{ .text = "  Connecting to ChatGPT", .style = self.style }} else line: {
             const segments = try ctx.arena.alloc(vaxis.Cell.Segment, 3);
             segments[0] = .{ .text = "  ", .style = self.style };
@@ -370,11 +627,19 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
             segments[2] = .{ .text = try std.fmt.allocPrint(ctx.arena, " · {s}", .{code.slice()}), .style = self.style };
             break :line segments;
         },
-        .key_entry => line: {
-            const masked = try ctx.arena.alloc(u8, self.key.len * "•".len);
-            for (0..self.key.len) |i| @memcpy(masked[i * 3 ..][0..3], "•");
-            break :line try ctx.arena.dupe(vaxis.Cell.Segment, &.{.{ .text = if (self.key.len == 0) "  API key" else try std.fmt.allocPrint(ctx.arena, "  {s}", .{masked}), .style = self.style }});
-        },
+        // The entry shows a mask, as the key entry does; never the address.
+        // A long paste stops short of the right edge, keeping the indent there too.
+        .browser_waiting => try ctx.arena.dupe(vaxis.Cell.Segment, &.{.{ .text = if (browser.link.len == 0)
+            "  Connecting to ChatGPT"
+        else if (browser.typed != 0)
+            try masked(ctx.arena, @min(browser.typed, size.width -| 4))
+        else if (browser.stray)
+            "  Not the sign-in address · paste again"
+        else if (browser.checking)
+            "  Checking the address"
+        else
+            "  Or paste the address your browser ended on", .style = self.style }}),
+        .key_entry => try ctx.arena.dupe(vaxis.Cell.Segment, &.{.{ .text = if (self.key.len == 0) "  API key" else try masked(ctx.arena, self.key.len), .style = self.style }}),
         .key_invalid => &.{.{ .text = "  Invalid API key · edit and enter", .style = self.style }},
         .saving => &.{.{ .text = "  Saving sign-in", .style = self.style }},
         .done => &.{.{ .text = "", .style = self.style }},
@@ -382,15 +647,25 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     };
     const rich = try ctx.arena.create(vxfw.RichText);
     rich.* = .{ .text = line, .softwrap = false, .width_basis = .parent };
-    children[1] = .{ .origin = .{ .row = @intCast(@min(row + 1, size.height - 1)), .col = 0 }, .surface = try rich.widget().draw(one) };
+    children.appendAssumeCapacity(.{ .origin = .{ .row = @intCast(@min(row + 1, size.height - 1)), .col = 0 }, .surface = try rich.widget().draw(one) });
     const footer = try ctx.arena.create(Footer);
     footer.* = .{
-        .left = if (self.state.stage == .codex_waiting) " Waiting for ChatGPT" else " Sign in",
-        .right = if (self.state.stage == .choice) "←→ choose · enter " else "esc back ",
+        .left = if (self.state.stage == .codex_waiting or self.state.stage == .switching) " Waiting for ChatGPT" else " Sign in",
+        .right = if (self.state.stage == .choice) "←→ choose · enter " else if (self.state.offersDeviceCode()) "tab device code · esc back " else "esc back ",
         .style = self.quiet,
     };
-    children[2] = .{ .origin = .{ .row = @intCast(size.height - 1), .col = 0 }, .surface = try footer.widget().draw(one) };
-    surface.children = children;
+    children.appendAssumeCapacity(.{ .origin = .{ .row = @intCast(size.height - 1), .col = 0 }, .surface = try footer.widget().draw(one) });
+    // The sign-in link sits above the entry, as a short form whose target is
+    // the whole link, so a long link never wraps the row.
+    if (browser.link.len != 0 and row >= 2) {
+        const segments = try ctx.arena.alloc(vaxis.Cell.Segment, 2);
+        segments[0] = .{ .text = "  Sign in at ", .style = self.style };
+        segments[1] = ConversationViewport.linkedSegment(linkHost(browser.link), self.style, browser.link);
+        const link = try ctx.arena.create(vxfw.RichText);
+        link.* = .{ .text = segments, .softwrap = false, .width_basis = .parent };
+        children.appendAssumeCapacity(.{ .origin = .{ .row = row - 1, .col = 0 }, .surface = try link.widget().draw(one) });
+    }
+    surface.children = children.items;
     return surface;
 }
 
@@ -538,7 +813,7 @@ test "Sign-in worker reports installation default activation and cancellation ou
 
 test "Sign-in choices use approval background selection with and without colour" {
     for ([_]bool{ false, true }) |colour| {
-        for ([_]core.Provider{ .codex, .openai }) |provider| {
+        for ([_]core.Provider{ .chatgpt, .openai }) |provider| {
             var page: Self = .{};
             page.state.selected = provider;
             if (colour) page.style = .{ .fg = .{ .rgb = .{ 200, 210, 220 } }, .bg = .{ .rgb = .{ 20, 30, 40 } } };
@@ -548,7 +823,7 @@ test "Sign-in choices use approval background selection with and without colour"
             var text = std.Io.Writer.Allocating.init(arena.allocator());
             for (surface.children[1].surface.buffer, 0..) |cell, column| {
                 try text.writer.writeAll(cell.char.grapheme);
-                const selected = if (column >= 2 and column <= 10) provider == .codex else if (column >= 13 and column <= 21) provider == .openai else false;
+                const selected = if (column >= 2 and column <= 10) provider == .chatgpt else if (column >= 13 and column <= 21) provider == .openai else false;
                 try std.testing.expectEqual(selected, cell.style.reverse);
             }
             try std.testing.expectEqualStrings(" › ChatGPT    API key", std.mem.trimEnd(u8, text.written(), " "));
@@ -814,4 +1089,306 @@ test "Sign-in device publication after Connecting wakes exactly one frame while 
     ctx.redraw = false;
     try page.widget().handleEvent(&ctx, .tick);
     try std.testing.expectEqual(false, ctx.redraw);
+}
+
+test "Sign-in paste source moves confirmed lines across reads, keeps typing, and wipes what it moved" {
+    const mapped = try pages.Mapped(Browser).map();
+    defer mapped.unmap();
+    const browser = mapped.value;
+    browser.init();
+    var buffer: [8]u8 = undefined;
+    // Nothing waits until Enter confirms what was typed.
+    try std.testing.expectEqual(@as(?usize, null), browser.take(&buffer));
+    browser.edit(.{ .append = "not it" });
+    try std.testing.expectEqual(@as(?usize, null), browser.take(&buffer));
+    browser.edit(.confirm);
+    browser.edit(.{ .append = "http://127.0.0.1:1455/" });
+    browser.edit(.{ .append = "auth/callback?code=c" });
+    browser.edit(.confirm);
+    // Typing after Enter stays in the entry, unread.
+    browser.edit(.{ .append = "still typing" });
+    var moved: std.ArrayList(u8) = .empty;
+    defer moved.deinit(std.testing.allocator);
+    var reads: usize = 0;
+    while (browser.take(&buffer)) |count| {
+        try std.testing.expect(count != 0);
+        try moved.appendSlice(std.testing.allocator, buffer[0..count]);
+        reads += 1;
+    }
+    try std.testing.expect(reads > 1);
+    try std.testing.expectEqualStrings("not it\nhttp://127.0.0.1:1455/auth/callback?code=c\n", moved.items);
+    try std.testing.expectEqualStrings("still typing", browser.entry[0..browser.len]);
+    // What moved is wiped here; only the unconfirmed typing remains.
+    for (browser.entry[browser.len..]) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
+    // Backspace edits only what is unconfirmed.
+    browser.edit(.erase);
+    try std.testing.expectEqualStrings("still typin", browser.entry[0..browser.len]);
+    // Too much for any address: Enter discards it and reads as no address.
+    for (0..browser.entry.len / 64 + 1) |_| browser.edit(.{ .append = &@as([64]u8, @splat('x')) });
+    try std.testing.expect(browser.overflow);
+    browser.edit(.confirm);
+    try std.testing.expect(browser.stray and !browser.overflow);
+    try std.testing.expectEqual(@as(usize, 0), browser.len);
+    try std.testing.expectEqual(@as(?usize, null), browser.take(&buffer));
+    for (browser.entry) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
+    // Typing again clears the stray line; Escape's clear wipes everything.
+    browser.edit(.{ .append = "abc" });
+    browser.edit(.confirm);
+    try std.testing.expect(!browser.stray and browser.checking);
+    browser.edit(.{ .append = "def" });
+    browser.edit(.clear);
+    try std.testing.expectEqual(@as(usize, 0), browser.len);
+    try std.testing.expectEqual(@as(?usize, null), browser.take(&buffer));
+    for (browser.entry) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
+}
+
+/// One browser attempt on the worker, against the loopback fixture issuer
+/// in a private HOME.
+const BrowserRig = struct {
+    tmp: std.testing.TmpDir,
+    env: std.process.Environ.Map,
+    arena: std.heap.ArenaAllocator,
+    argv: [1][*:0]const u8 = .{"rui"},
+    page: Self = .{},
+    ctx: vxfw.EventContext = undefined,
+
+    fn open(self: *BrowserRig) !void {
+        self.tmp = std.testing.tmpDir(.{});
+        errdefer self.tmp.cleanup();
+        var home_bytes: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const home = home_bytes[0..try self.tmp.dir.realPath(std.testing.io, &home_bytes)];
+        self.env = .init(std.testing.allocator);
+        errdefer self.env.deinit();
+        try self.env.put("HOME", home);
+        try self.env.put("RUI_TEST_LOGIN", "waiting");
+        self.arena = .init(std.testing.allocator);
+        const init: std.process.Init = .{ .minimal = .{ .args = .{ .vector = &self.argv }, .environ = .empty }, .arena = &self.arena, .gpa = std.testing.allocator, .io = std.testing.io, .environ_map = &self.env, .preopens = .empty };
+        self.page = .{ .init = init, .ready = missing };
+        self.ctx = .{ .io = std.testing.io, .alloc = self.arena.allocator(), .cmds = .empty };
+    }
+
+    fn close(self: *BrowserRig) void {
+        self.page.stop() catch @panic("browser attempt escaped its test");
+        std.debug.assert(self.page.browser == null);
+        self.arena.deinit();
+        self.env.deinit();
+        self.tmp.cleanup();
+    }
+
+    fn missing(_: std.process.Init) core.Readinesses {
+        return .initFill(.missing);
+    }
+
+    fn send(self: *BrowserRig, bytes: []const u8) !void {
+        var events: @import("testing/app_events.zig").Events = .init(bytes);
+        while (events.next()) |input| try self.page.widget().handleEvent(&self.ctx, input);
+    }
+
+    fn wait(self: *BrowserRig, comptime condition: fn (*Self) bool) !void {
+        const poll = @import("test_poll");
+        try poll.waitUntil(std.testing.io, poll.after(std.testing.io, .fromSeconds(10)), &self.page, condition);
+    }
+
+    fn browserField(page: *Self, comptime field: []const u8) bool {
+        page.task.mutex.lockUncancelable(page.init.?.io);
+        defer page.task.mutex.unlock(page.init.?.io);
+        const browser = (page.browser orelse return false).value;
+        return if (comptime std.mem.eql(u8, field, "link")) browser.link.len != 0 else @field(browser, field);
+    }
+
+    fn linked(page: *Self) bool {
+        return browserField(page, "link");
+    }
+
+    fn strayed(page: *Self) bool {
+        return browserField(page, "stray");
+    }
+
+    fn completed(page: *Self) bool {
+        return page.task.completed();
+    }
+
+    fn codeShown(page: *Self) bool {
+        page.task.mutex.lockUncancelable(page.init.?.io);
+        defer page.task.mutex.unlock(page.init.?.io);
+        return page.code.len != 0;
+    }
+
+    /// The redirect port the shown link names.
+    fn port(self: *BrowserRig) ![]const u8 {
+        const link = self.page.browser.?.value.link.slice();
+        const at = (std.mem.indexOf(u8, link, "127.0.0.1%3A") orelse return error.TestUnexpectedResult) + "127.0.0.1%3A".len;
+        var end = at;
+        while (end < link.len and std.ascii.isDigit(link[end])) end += 1;
+        return try self.arena.allocator().dupe(u8, link[at..end]);
+    }
+};
+
+test "Sign-in browser attempt shows its link, a stray paste and a long pasted answer's failure, then Tab begins the device code" {
+    var rig: BrowserRig = .{ .tmp = undefined, .env = undefined, .arena = undefined };
+    try rig.open();
+    defer rig.close();
+    const page = &rig.page;
+    // ChatGPT is chosen by default; with nothing usable Enter begins the browser.
+    try rig.send("\r");
+    try std.testing.expectEqual(core.Stage.browser_waiting, page.state.stage);
+    try std.testing.expectEqual(core.Attempt.chatgpt, page.attempt);
+    try rig.wait(BrowserRig.linked);
+    try page.widget().handleEvent(&rig.ctx, .tick);
+    const port = try rig.port();
+    // A line that is no address, typed key by key, is shown as stray.
+    try rig.send("hello\r");
+    try rig.wait(BrowserRig.strayed);
+    try page.widget().handleEvent(&rig.ctx, .tick);
+    try std.testing.expectEqual(core.Stage.browser_waiting, page.state.stage);
+    // Another attempt's answer, pasted whole with a long code, ends it.
+    var address: std.Io.Writer.Allocating = .init(rig.arena.allocator());
+    try address.writer.print("\x1b[200~http://127.0.0.1:{s}/auth/callback?code={s}&state=AAAA&client_id=oaiapp_x\r\x1b[201~", .{ port, &@as([1800]u8, @splat('c')) });
+    try rig.send(address.written());
+    // The paste alone confirms nothing; Enter does.
+    try std.testing.expect(!BrowserRig.completed(page));
+    try std.testing.expect(!BrowserRig.browserField(page, "checking"));
+    try rig.send("\r");
+    try rig.wait(BrowserRig.completed);
+    try page.widget().handleEvent(&rig.ctx, .tick);
+    try std.testing.expectEqual(core.Stage.failed, page.state.stage);
+    try std.testing.expectEqual(core.Failure.answer, page.state.failure);
+    try std.testing.expect(page.task.thread == null and page.browser == null);
+    try std.testing.expect(page.state.offersDeviceCode());
+    // Tab now begins the device code without the browser.
+    try rig.send("\t");
+    try std.testing.expectEqual(core.Stage.codex_waiting, page.state.stage);
+    try std.testing.expectEqual(core.Attempt.codex, page.attempt);
+    try rig.wait(BrowserRig.codeShown);
+    try rig.send("\x1b");
+    try rig.wait(BrowserRig.completed);
+    try page.widget().handleEvent(&rig.ctx, .tick);
+    try std.testing.expectEqual(core.Stage.choice, page.state.stage);
+    try std.testing.expectEqual(core.Provider.chatgpt, page.state.selected);
+}
+
+test "Sign-in Tab while the browser waits cancels it, wipes the entry, and begins the device code only once it settled" {
+    var rig: BrowserRig = .{ .tmp = undefined, .env = undefined, .arena = undefined };
+    try rig.open();
+    defer rig.close();
+    const page = &rig.page;
+    try rig.send("\r");
+    try rig.wait(BrowserRig.linked);
+    try rig.send("http://127.0.0.1/typed-not-sent");
+    try rig.send("\t");
+    // The browser login is cancelled through the gate; nothing new runs yet.
+    try std.testing.expectEqual(.cancelled, page.gate.load(.acquire));
+    try std.testing.expectEqual(core.Stage.switching, page.state.stage);
+    try std.testing.expectEqual(core.Attempt.chatgpt, page.attempt);
+    {
+        page.task.mutex.lockUncancelable(page.init.?.io);
+        defer page.task.mutex.unlock(page.init.?.io);
+        const browser = page.browser.?.value;
+        try std.testing.expectEqual(@as(usize, 0), browser.len);
+        for (browser.entry) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
+    }
+    // Keys wait for the switch; a second Tab changes nothing.
+    try rig.send("\t");
+    try std.testing.expectEqual(core.Stage.switching, page.state.stage);
+    try rig.wait(BrowserRig.completed);
+    try page.widget().handleEvent(&rig.ctx, .tick);
+    try std.testing.expectEqual(core.Stage.codex_waiting, page.state.stage);
+    try std.testing.expectEqual(core.Attempt.codex, page.attempt);
+    try std.testing.expect(page.browser == null and page.task.thread != null);
+    try rig.wait(BrowserRig.codeShown);
+    try rig.send("\x1b");
+}
+
+test "Sign-in Escape while the browser waits cancels it and returns to the choice" {
+    var rig: BrowserRig = .{ .tmp = undefined, .env = undefined, .arena = undefined };
+    try rig.open();
+    defer rig.close();
+    const page = &rig.page;
+    try rig.send("\r");
+    try rig.wait(BrowserRig.linked);
+    try rig.send("partial\x1b");
+    try std.testing.expectEqual(.cancelled, page.gate.load(.acquire));
+    try std.testing.expectEqual(core.Stage.choice, page.state.stage);
+    try rig.wait(BrowserRig.completed);
+    try page.widget().handleEvent(&rig.ctx, .tick);
+    try std.testing.expectEqual(core.Stage.choice, page.state.stage);
+    try std.testing.expect(page.task.thread == null and page.browser == null);
+}
+
+test "Sign-in browser failures map to plain words, never error names, and offer the device code" {
+    for (std.enums.values(std.meta.Tag(plan_login.Failure))) |tag| {
+        const failure: plan_login.Failure = switch (tag) {
+            .invalid_host_id => .{ .invalid_host_id = "/h/.config/rui/host-id" },
+            .refused => .{ .refused = "access_denied" },
+            .timed_out => .timed_out,
+            .no_answer_source => .no_answer_source,
+            .callback => .{ .callback = .state_mismatch },
+            .unreachable_service => .{ .unreachable_service = "TransportFailed" },
+            .exchange => .{ .exchange = .plan_scope_missing },
+        };
+        const shown = browserFailure(failure);
+        try std.testing.expect(!shown.saved());
+        var page: Self = .{ .state = .{ .stage = .failed, .failure = shown } };
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const line = try page.failureLine(arena.allocator());
+        for ([_][]const u8{ "TransportFailed", "access_denied", "state_mismatch", "plan_scope_missing", "/h/" }) |raw| try std.testing.expect(std.mem.indexOf(u8, line, raw) == null);
+        try std.testing.expect(page.state.offersDeviceCode());
+    }
+    for (std.enums.values(plan_login.ExchangeFailure)) |cause| try std.testing.expect(!browserFailure(.{ .exchange = cause }).saved());
+    for (std.enums.values(plan_login.CallbackFailure)) |cause| try std.testing.expectEqual(core.Failure.answer, browserFailure(.{ .callback = cause }));
+}
+
+test "Sign-in browser row, entry, failure and footer fit at 46 columns and wide" {
+    const mapped = try pages.Mapped(Browser).map();
+    const link = "https://auth.openai.com/api/accounts/authorize?client_id=app_made_up&redirect_uri=http%3A%2F%2F127.0.0.1%3A1455%2Fauth%2Fcallback&state=" ++ @as([43]u8, @splat('s')) ++ "&code_challenge=" ++ @as([43]u8, @splat('c'));
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const Case = enum { connecting, waiting, typed, stray, checking, failed };
+    for ([_]u16{ 46, 100 }) |width| for (std.enums.values(Case)) |case| for (std.enums.values(core.Failure)) |failure| {
+        if (case != .failed and failure != .login) continue;
+        // A saved sign-in's line is the launch owner's, unchanged here.
+        if (failure.saved()) continue;
+        errdefer std.debug.print("width={d} case={t} failure={t}\n", .{ width, case, failure });
+        var page: Self = .{ .state = .{ .stage = if (case == .failed) .failed else .browser_waiting, .failure = failure } };
+        page.browser = mapped;
+        mapped.value.init();
+        if (case != .connecting) try mapped.value.link.set(link);
+        switch (case) {
+            .typed => mapped.value.edit(.{ .append = "http://127.0.0.1:1455/auth/callback?code=" ++ @as([200]u8, @splat('x')) }),
+            .stray => mapped.value.stray = true,
+            .checking => mapped.value.checking = true,
+            else => {},
+        }
+        const draw_context: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 12 }, .cell_size = .{} };
+        const surface = try page.widget().draw(draw_context);
+        page.browser = null;
+        var texts: usize = 0;
+        for (surface.children[1..]) |child| {
+            if (child.surface.widget.drawFn == @as(*const Footer, undefined).widget().drawFn) {
+                const footer: *const Footer = @ptrCast(@alignCast(child.surface.widget.userdata));
+                try std.testing.expect(draw_context.stringWidth(footer.left) + draw_context.stringWidth(footer.right) <= width);
+                try std.testing.expectEqual(page.state.offersDeviceCode(), std.mem.indexOf(u8, footer.right, "tab device code") != null);
+                continue;
+            }
+            const rich: *vxfw.RichText = @ptrCast(@alignCast(child.surface.widget.userdata));
+            var used: usize = 0;
+            for (rich.text) |segment| {
+                used += draw_context.stringWidth(segment.text);
+                // The pasted address never reaches a frame.
+                try std.testing.expect(std.mem.indexOf(u8, segment.text, "callback") == null);
+                if (segment.link.uri.len != 0) {
+                    try std.testing.expectEqualStrings(link, segment.link.uri);
+                    try std.testing.expectEqualStrings("auth.openai.com", segment.text);
+                }
+            }
+            try std.testing.expect(used <= width);
+            // A long paste's mask keeps the two-column margin on both sides.
+            if (std.mem.indexOf(u8, rich.text[0].text, "•") != null) try std.testing.expectEqual(width - 2, used);
+            texts += 1;
+        }
+        // The link row shows once the link is known, above the entry.
+        try std.testing.expectEqual(@as(usize, if (case == .connecting or case == .failed) 1 else 2), texts);
+    };
+    mapped.unmap();
 }

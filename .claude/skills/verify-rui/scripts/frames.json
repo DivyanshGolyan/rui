@@ -296,6 +296,59 @@
       ]
     },
     {
+      "name": "appcmds-skill-escape",
+      "note": "Esc on the list of a Message's leading /skill closes the list and keeps the Message",
+      "open": "Skill draft kept",
+      "cast": [
+        {
+          "label": "Skill draft kept",
+          "workspace": "code/appcmds-skill-escape",
+          "messages": [
+            "Seed a fresh chat."
+          ],
+          "mode": "bypass",
+          "skills": [
+            "review"
+          ]
+        }
+      ],
+      "steps": [
+        {
+          "text": "/review this change"
+        },
+        {
+          "keys": [
+            "Home",
+            "Right",
+            "Right"
+          ]
+        },
+        {
+          "sleep": 1.0
+        },
+        {
+          "keys": [
+            "Esc"
+          ]
+        },
+        {
+          "sleep": 0.5
+        }
+      ],
+      "expect": [
+        "› /review this change",
+        "Skill draft kept"
+      ],
+      "absent": [
+        "Unknown command",
+        "Usage:",
+        "enter pick"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
+    },
+    {
       "name": "appcmds-agent-commands",
       "note": "Short chat phrases plus a long loaded-skill description, ellipsized at narrow width",
       "open": "New chat navigation",
@@ -557,7 +610,7 @@
     },
     {
       "name": "first-run",
-      "note": "No credentials: sign-in choice occupies the input row",
+      "note": "No credentials: sign-in choice occupies the input row, ChatGPT selected",
       "open": "overview",
       "first_run": true,
       "steps": [
@@ -575,12 +628,13 @@
         "Host stopped",
         "Type a task",
         "[ChatGPT]",
-        "[API key]"
+        "[API key]",
+        "Codex"
       ]
     },
     {
-      "name": "first-run-codex",
-      "note": "Fake device login: clickable link and code, no network",
+      "name": "first-run-browser",
+      "note": "Browser sign-in on the loopback fixture issuer: short link, masked address entry, Tab offered; no browser opens",
       "open": "overview",
       "first_run": true,
       "env": {
@@ -596,6 +650,48 @@
           ]
         },
         {
+          "wait": "Sign in at 127.0.0.1:1"
+        }
+      ],
+      "expect": [
+        "Sign in at 127.0.0.1:1",
+        "Or paste the address your browser ended on",
+        "tab device code · esc back"
+      ],
+      "absent": [
+        "Provider: [c]",
+        "[ChatGPT]",
+        "[API key]",
+        "Codex",
+        "oauth/authorize"
+      ]
+    },
+    {
+      "name": "first-run-codex",
+      "note": "Tab from the browser sign-in to the fake device login: clickable link and code, no network",
+      "open": "overview",
+      "first_run": true,
+      "env": {
+        "RUI_TEST_LOGIN": "waiting"
+      },
+      "steps": [
+        {
+          "wait": "› ChatGPT    API key"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Sign in at 127.0.0.1:1"
+        },
+        {
+          "keys": [
+            "Tab"
+          ]
+        },
+        {
           "wait": "BDL9-KI88H"
         }
       ],
@@ -607,6 +703,7 @@
         "Provider: [c]",
         "[ChatGPT]",
         "[API key]",
+        "Sign in at",
         "Open auth.openai.com",
         "and enter"
       ]

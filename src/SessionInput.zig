@@ -164,9 +164,13 @@ fn accept(self: *Self, comptime Action: type, outcome: keymap.Outcome(Action), s
     const bytes = self.composition().bytes;
     // An empty draft's Enter stays the editor's, for a list the caller shows.
     if (bytes.len == 0) return .{ .editor = outcome };
-    // A slash command stays in the draft; the caller clears it once it runs.
+    // A command line stays in the draft; the caller clears it once it runs.
     // While another waits, every draft command waits too, local ones included.
-    if (bytes[0] == '/' and !std.mem.startsWith(u8, bytes, "//")) return if (self.admitsCommand()) .command else .busy;
+    // Any other draft, a leading `/skill` included, is a Message.
+    switch (slash_commands.draftOf(bytes)) {
+        .command => return if (self.admitsCommand()) .command else .busy,
+        .message, .word => {},
+    }
     if (!selected or self.submitted != null) return .busy;
     return .{ .message = self.seal(false) };
 }
@@ -194,12 +198,12 @@ pub fn takeCommand(self: *Self) ?[]const u8 {
     return text;
 }
 
-/// Literal text, including a loaded leading skill or validated command-line
-/// input, uses the same retained submission bank. May borrow the active draft.
+/// Command-line text was validated before Session creation. It is literal,
+/// including leading slashes, and uses the same retained submission bank.
 pub fn submitText(self: *Self, text: []const u8) Ticket {
     std.debug.assert(self.submitted == null and text.len <= capacity);
     const editor = &self.editors[self.active];
-    @memmove(editor.buffer[0..text.len], text);
+    @memcpy(editor.buffer[0..text.len], text);
     editor.length = text.len;
     editor.cursor = text.len;
     return self.seal(true);
@@ -411,12 +415,12 @@ test "a recalled Message is the draft until an edit, never a caret move" {
     defer tmp.cleanup();
     const file = try tmp.dir.createFile(io, "recalled", .{ .read = true });
     defer file.close(io);
-    try file.writePositionalAll(io, "/sent\nagain", 0);
+    try file.writePositionalAll(io, "/copy\nagain", 0);
     var input: Self = undefined;
     input.init();
-    const found: Found = .{ .at = .{ .position = 7, .end = 9 }, .length = "/sent\nagain".len, .slash = true };
+    const found: Found = .{ .at = .{ .position = 7, .end = 9 }, .length = "/copy\nagain".len, .slash = true };
     try input.fill(io, file, found);
-    try std.testing.expectEqualStrings("//sent\nagain", input.composition().bytes);
+    try std.testing.expectEqualStrings("//copy\nagain", input.composition().bytes);
     try std.testing.expectEqual(@as(usize, 12), input.composition().cursor);
     _ = input.typed("\x1b[A\x1b[D\x1b[C\x01\x05\x1b[B");
     try std.testing.expectEqual(found.at, input.recall.shown.?);
@@ -430,8 +434,8 @@ test "a recalled Message is the draft until an edit, never a caret move" {
         try std.testing.expect(input.revision != revision);
     }
     try input.fill(io, file, .{ .at = found.at, .length = 5, .slash = false });
-    try std.testing.expectEqualStrings("/sent", input.composition().bytes);
-    // Without the second slash, text that begins with one runs as a command.
+    try std.testing.expectEqualStrings("/copy", input.composition().bytes);
+    // Without the second slash, text whose first word names a command runs as one.
     try std.testing.expectEqual(.command, std.meta.activeTag(input.typed("\r")));
     input.clear();
     try std.testing.expect(input.recall.shown == null);
