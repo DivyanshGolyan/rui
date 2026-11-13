@@ -90,6 +90,8 @@ pub fn classify(store: Store, err: anyerror) ?Failure {
     if (store == .mysql) if (mysqlRefusal(err)) |refusal| return refusal;
     return switch (err) {
         error.StoreAlreadyOwned => .init(.store_locked, "another Host owns this Store"),
+        error.WrongStoreVersion => .init(.store_schema_behind, "the SQLite Store format or wire metadata is not supported by this build"),
+        error.StoreIdentityMismatch => .init(.store_fenced, "the SQLite Store is not at its saved canonical location"),
         error.RuntimeDirectoryInUse => .init(.runtime_dir_unusable, "another Host owns this runtimeDir"),
         error.RuntimeDirectoryUnusable => .init(.runtime_dir_unusable, "runtimeDir must be a private (mode 0700) directory this Host can lock"),
         else => null,
@@ -133,6 +135,8 @@ fn mysqlRefusal(err: anyerror) ?Failure {
 test "a launched Host's start failure is refused with its Store's codes only" {
     const cases = [_]struct { store: Store, err: anyerror, code: ?StartError }{
         .{ .store = .sqlite, .err = error.StoreAlreadyOwned, .code = .store_locked },
+        .{ .store = .sqlite, .err = error.WrongStoreVersion, .code = .store_schema_behind },
+        .{ .store = .sqlite, .err = error.StoreIdentityMismatch, .code = .store_fenced },
         .{ .store = .mysql, .err = error.StoreAlreadyOwned, .code = .store_locked },
         .{ .store = .mysql, .err = error.StoreLocked, .code = .store_locked },
         .{ .store = .sqlite, .err = error.StoreLocked, .code = null },

@@ -1,6 +1,7 @@
 //! A settled Host launch and its reporting policy. Terminal adapters keep
 //! the complete transcript and context; screens borrow one safe semantic line.
 const std = @import("std");
+const start_report = @import("start_report.zig");
 const protocol = @import("protocol.zig");
 const protocol_reply = @import("protocol_reply.zig");
 const HostStartupWait = @import("HostStartupWait.zig");
@@ -28,6 +29,7 @@ pub const Summary = union(enum) {
         kind: Kind,
         /// Terminal exit classification is retained, never shown as UI text.
         err: anyerror,
+        refusal_code: ?start_report.StartError = null,
 
         pub const Kind = enum { setup, worker, os_launch, child_refused, child_closed, startup_full, readiness_timeout, incompatible, store_access, store_identity, mysql_unavailable, interrupted, provider_unserved, store_format };
 
@@ -89,6 +91,7 @@ pub const Result = struct {
         cause: Cause,
         store: protocol.Bounded(protocol.max_store_bytes) = .{ .len = 0 },
         os_error: ?c_int = null,
+        refusal: ?start_report.Failure = null,
     };
 
     pub fn failed(kind: Cause.Kind, err: anyerror) Result {
@@ -117,7 +120,7 @@ pub fn writeDiagnostics(result: *const Result, writer: *std.Io.Writer, shown: us
     if (result.warning != null) try writer.writeAll(invalid_base_url ++ "; this Host starts without OpenAI.\n");
     switch (result.outcome) {
         .ready => {
-            if (result.startup_len != 0 and std.mem.indexOf(u8, result.startup(), "[store_locked]\n") == null) try writer.writeAll(result.startup()[shown..]);
+            if (result.startup_len != 0) try writer.writeAll(result.startup()[shown..]);
         },
         .failed => |*failure| switch (failure.cause.kind) {
             .os_launch => {
@@ -132,6 +135,7 @@ pub fn writeDiagnostics(result: *const Result, writer: *std.Io.Writer, shown: us
                 try path_text.finish(writer);
                 try writer.writeAll(":\n");
                 try writer.writeAll(result.startup()[shown..]);
+                if (result.startup_len == 0) if (failure.refusal) |*refusal| try writer.print("rui: the Host did not start: {f} [{s}]\n", .{ std.zig.fmtString(refusal.message.slice()), @tagName(refusal.code) });
                 if (failure.cause.kind == .child_closed) try writer.writeAll("Child closed its startup channel before readiness; exit status unavailable.\n");
                 if (failure.cause.kind == .startup_full) try writer.writeAll("Startup output reached 8 KiB; readiness and exit status remain unconfirmed.\n");
             },
