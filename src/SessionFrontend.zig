@@ -25,7 +25,7 @@ const Submission = @import("SessionSubmission.zig");
 const original_state = @import("submission_state.zig");
 const Task = @import("ClientTask.zig");
 const Screen = @import("SessionScreen.zig");
-const Editor = @import("TerminalEditor.zig");
+const Editor = @import("DraftEditor.zig");
 const keymap = @import("keymap.zig");
 const overview_view = @import("overview_view.zig");
 const test_poll = @import("test_poll");
@@ -946,7 +946,7 @@ fn sessionKey(event: vxfw.Event) session_keys.Key {
     return switch (event) {
         .paste_start => .paste_start,
         .paste_end => .paste_end,
-        .key_press => |key| if (Editor.named(key)) |name| .{ .named = name } else if (Editor.isEnter(key)) .enter else if (key.matchExact(vaxis.Key.tab, .{})) .tab else if (key.matchExact(vaxis.Key.tab, .{ .shift = true })) .shift_tab else if (key.matches('i', .{ .alt = true })) .info else if (key.matches('d', .{ .alt = true })) .details else if (hostStartKey(key)) .host_start else switch (Editor.selectKey(conversation_keys, key)) {
+        .key_press => |key| if (keymap.named(key)) |name| .{ .named = name } else if (keymap.isEnter(key)) .enter else if (key.matchExact(vaxis.Key.tab, .{})) .tab else if (key.matchExact(vaxis.Key.tab, .{ .shift = true })) .shift_tab else if (key.matches('i', .{ .alt = true })) .info else if (key.matches('d', .{ .alt = true })) .details else if (hostStartKey(key)) .host_start else switch (keymap.selectKey(conversation_keys, key)) {
             .left => .left,
             .right => .right,
             .text => .text,
@@ -1237,7 +1237,7 @@ test "App Session retains the draft across a permission card arriving during pas
     }
     self.app_caps = .{ .depth = .none };
     _ = self.input.append("headTAIL");
-    self.input.editors[self.input.active].cursor = 4;
+    self.input.editors[self.input.active].setCursor(4);
     // Root hands the Session's core its keys with the paste they arrive in.
     const pasted: @import("app_input.zig").Effects.Delivery = .{ .under = .main, .pasted = true };
     const typed: @import("app_input.zig").Effects.Delivery = .{ .under = .main, .pasted = false };
@@ -1278,7 +1278,7 @@ test "App Session approval keeps typed abc through Esc and Allow once with its c
         const self = &held.self;
         if (existing_draft) {
             _ = self.input.append("leftTAIL");
-            self.input.editors[self.input.active].cursor = 4;
+            self.input.editors[self.input.active].setCursor(4);
         }
         const file = try held.adopt(3);
         defer file.close(std.testing.io);
@@ -1316,7 +1316,7 @@ test "App Session approval pastes into the kept draft and draft arrows never mov
     defer held.destroy();
     const self = &held.self;
     _ = self.input.append("leftTAIL");
-    self.input.editors[self.input.active].cursor = 4;
+    self.input.editors[self.input.active].setCursor(4);
     const file = try held.adopt(3);
     defer file.close(std.testing.io);
     try held.keys("\x1b[200~abc\r\nxyz\x1b[201~");
@@ -1357,7 +1357,7 @@ test "App Session approval routing gives the draft editor first refusal for sing
         _ = normal.appEvent(conversation_keys, .{ .key_press = .{ .codepoint = 0, .text = draft.text } }, true, true);
         _ = normal.appEvent(conversation_keys, .paste_end, false, true);
         try std.testing.expectEqualStrings(draft.text, normal.composition().bytes);
-        normal.editors[normal.active].cursor = draft.cursor;
+        normal.editors[normal.active].setCursor(draft.cursor);
         const outcome = normal.appEvent(conversation_keys, .{ .key_press = case.press }, false, true);
         const vertical = case.key == .up or case.key == .down;
         const falls_through = vertical and !draft.multiline;
@@ -1377,7 +1377,7 @@ test "App Session approval routing gives the draft editor first refusal for sing
         try held.keys(draft.text);
         try held.keys("\x1b[201~");
         try std.testing.expectEqualStrings(draft.text, self.input.composition().bytes);
-        self.input.editors[self.input.active].cursor = draft.cursor;
+        self.input.editors[self.input.active].setCursor(draft.cursor);
         const file = try held.adopt(100);
         defer file.close(std.testing.io);
         if (row == .draft) try held.keys("x\x7f"); // Enter the draft row without changing its contents.
@@ -1460,7 +1460,7 @@ test "App Session leaves from a permission card on Ctrl-C or Ctrl-D and keeps th
         // A hidden draft with its caret at the start: leaving never deletes
         // what the card hides.
         _ = self.input.append("kept");
-        self.input.editors[self.input.active].cursor = 0;
+        self.input.editors[self.input.active].setCursor(0);
         self.reading.prepared_action = 17;
         self.live.work.first_action = 17;
         try widget_.handleEvent(&ctx, .tick);
@@ -2627,8 +2627,8 @@ fn showRecalled(self: *Self) !void {
             self.notice = "Passed over a sent message the draft cannot hold.";
         },
         .show => |found| {
-            try self.input.fill(self.init.io, self.files.scratch, found);
-            if (passed) self.notice = "Passed over a sent message the draft cannot hold.";
+            const held = try self.input.fill(self.init.io, self.files.scratch, found);
+            if (passed or !held) self.notice = "Passed over a sent message the draft cannot hold.";
         },
     }
 }
@@ -4727,11 +4727,11 @@ test "chat info owns typed keys before Host restart across every modal editor an
         switch (mode) {
             .rename => {
                 try std.testing.expect(page.renaming);
-                try std.testing.expectEqualStrings("Beforerra", page.rename_editor.buffer[0..page.rename_editor.length]);
+                try std.testing.expectEqualStrings("Beforerra", page.rename_editor.text());
             },
             .model => {
                 try std.testing.expect(page.model_choice.active);
-                try std.testing.expectEqualStrings("rra", page.model_choice.editor.buffer[0..page.model_choice.editor.length]);
+                try std.testing.expectEqualStrings("rra", page.model_choice.editor.text());
             },
             .rows => try std.testing.expect(!page.hasChoice()),
             .effort, .permissions, .tools => try std.testing.expect(page.panel.choice != null),

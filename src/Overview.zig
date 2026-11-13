@@ -48,7 +48,6 @@ const SessionInput = @import("SessionInput.zig");
 const SessionScreen = @import("SessionScreen.zig");
 const session_id = @import("session_id.zig");
 const Follow = @import("session_follow.zig").Follow;
-const TerminalEditor = @import("TerminalEditor.zig");
 const TerminalText = @import("TerminalText.zig");
 const keymap = @import("keymap.zig");
 const session_view = @import("session_view.zig");
@@ -664,7 +663,7 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
 /// Root captures the covered screen and paste state before routing list keys.
 fn appKey(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event, delivery: @import("app_input.zig").Effects.Delivery) anyerror!void {
     const self: *Self = @ptrCast(@alignCast(raw));
-    const selected = TerminalEditor.selectEvent(view.keys, input, delivery.pasted);
+    const selected = keymap.selectEvent(view.keys, input, delivery.pasted);
     const semantic: view.Input = switch (selected) {
         .action => |action| .{ .action = action },
         .enter => .enter,

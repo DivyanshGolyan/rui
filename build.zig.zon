@@ -24,10 +24,6 @@
             .url = "https://github.com/openssl/openssl/releases/download/openssl-3.6.3/openssl-3.6.3.tar.gz",
             .hash = "N-V-__8AAJgLCgiTl2NEdxbc2QusROj0-GIN3jrv7BgQDGwM",
         },
-        .utf8proc = .{
-            .url = "https://github.com/JuliaStrings/utf8proc/archive/refs/tags/v2.11.3.tar.gz",
-            .hash = "N-V-__8AACywKABFCj0r_Y-jIWsk9ahy10zlk78hjn6S-39g",
-        },
         .vaxis = .{
             .url = "git+https://github.com/DivyanshGolyan/libvaxis#83a29dac31f04703d014880c9eeab4588744efce",
             .hash = "vaxis-0.6.0-BWNV_E7QDwB3jh5AQUKJmfnGEw1R9dn5HEDCOcWArmFg",

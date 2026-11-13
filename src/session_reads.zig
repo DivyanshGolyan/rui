@@ -13,7 +13,7 @@ const Input = @import("SessionInput.zig");
 const Submission = @import("SessionSubmission.zig");
 const Task = @import("ClientTask.zig");
 const View = @import("session_view.zig");
-const Editor = @import("TerminalEditor.zig");
+const TerminalEditor = @import("TerminalEditor.zig");
 const History = @import("session_history.zig");
 const departure = @import("session_departure.zig");
 const TerminalText = @import("TerminalText.zig");
@@ -491,7 +491,7 @@ const RecallStaging = struct {
             self.scalar[self.have] = byte;
             self.have += 1;
             if (self.have != self.need) continue;
-            Editor.validateText(self.scalar[0..self.have]) catch {
+            TerminalEditor.validateText(self.scalar[0..self.have]) catch {
                 self.editable = false;
             };
             self.have = 0;

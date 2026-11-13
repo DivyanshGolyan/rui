@@ -2849,6 +2849,7 @@ A command the Host received completes there, and the output it wrote before the 
 No borrower is joined while the terminal is raw, except the reader of a conversation that returned to the overview: with no command or submission running, it waits at most for the transport's cancellation poll.
 
 One invocation owns two 65,536-byte draft banks with independent grapheme cursors and one same-size command snapshot.
+Each bank's editing mechanism is libvaxis's `vxfw.TextArea`; Rui's `DraftEditor` adapter keeps every key meaning, Tab completion and refusal, and Composer keeps the rules, prompt and hidden-line label around it.
 Submission seals the original bank while the other remains editable through capture and Admission.
 A second Enter cannot create replacement intent while the original is unresolved.
 Only a joined, validated Host acceptance releases the submitted bank.

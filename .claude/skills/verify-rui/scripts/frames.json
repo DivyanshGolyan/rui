@@ -1506,6 +1506,28 @@
       ]
     },
     {
+      "name": "chat-draft-multiline",
+      "note": "chat composer with a wrapped multi-line draft and the caret moved up a line",
+      "open": "Fix retry deadline",
+      "steps": [
+        {
+          "text": "First line of a multi-line draft\nsecond line long enough to wrap at forty-six columns of the narrow layout\nthird"
+        },
+        {
+          "keys": [
+            "Up"
+          ]
+        },
+        {
+          "wait": "third"
+        }
+      ],
+      "expect": [
+        "First line of a multi-line draft",
+        "third"
+      ]
+    },
+    {
       "name": "chat-scrolled",
       "note": "11-conversation-scrolled",
       "open": "Fix retry deadline",
