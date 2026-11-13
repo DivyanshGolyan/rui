@@ -32,7 +32,7 @@ pub const Edit = union(enum) {
 
 /// Borrowed for the widget's lifetime. read fills the same inspection facts as
 /// /status. configure submits the existing Session configure request; archive
-/// and copy_last_answer delegate to the existing archive and clipboard owners.
+/// and copy_last_answer delegate to the existing archive and /copy owners.
 /// Only admitted effects remain pending until state supplies a definite answer.
 /// Archive refusals are values; unexpected archive-owner errors must propagate.
 /// models supplies a revisioned source: replacement or release changes its

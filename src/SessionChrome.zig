@@ -34,8 +34,6 @@ pub const Actions = struct {
     back: *const fn (*anyopaque, *vxfw.EventContext) anyerror!void,
     /// `↓`: the latest view, as Esc.
     latest: *const fn (*anyopaque, *vxfw.EventContext) anyerror!void,
-    /// Restore the archived chat.
-    unarchive: *const fn (*anyopaque, *vxfw.EventContext) anyerror!void,
     /// The chat info panel.
     status_page: *const fn (*anyopaque, *vxfw.EventContext) anyerror!void,
 };
@@ -106,7 +104,6 @@ marker: Chip,
 marker_text: [chrome.marker_bytes]u8 = undefined,
 state: vxfw.Text = .{ .text = "", .softwrap = false, .overflow = .clip, .width_basis = .parent },
 info: Chip,
-unarchive: Chip,
 pick: Chip,
 close: Chip,
 keys: chrome.FooterKeys = chrome.footerKeys(.closed),
@@ -126,7 +123,6 @@ pub fn init(actions: Actions) Self {
         .activity = .{ .more = chip(actions.status_page, actions.userdata) },
         .marker = chip(actions.latest, actions.userdata),
         .info = chip(actions.status_page, actions.userdata),
-        .unarchive = chip(actions.unarchive, actions.userdata),
         .pick = chip(actions.pick orelse actions.status_page, actions.userdata),
         .close = chip(actions.close orelse actions.status_page, actions.userdata),
         .details = chip(actions.details orelse actions.key, actions.userdata),
@@ -173,7 +169,6 @@ fn stateText(text: []const u8, key: []const u8) []const u8 {
 /// those same cells, using the same actions as the keyboard.
 fn drawFooter(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const self: *Self = @ptrCast(@alignCast(raw));
-    self.unarchive.label = if (self.keys.other_actions and self.facts.identity.archive == .archived) "Restore" else "";
     self.status.stop.label = if (self.keys.other_actions and self.stoppable) chrome.stop_key else "";
     const primary = if (self.keys.choice) |keys| self.choiceChip(keys.actions[0].action) else switch (self.keys.action) {
         .info => &self.info,
@@ -190,9 +185,9 @@ fn drawFooter(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vx
     if (self.facts.identity.current) |facts| {
         if (facts.folder != null) self.details.label = "";
     }
-    const primary_width = primary.width() + self.status.key.width() + self.unarchive.width() + self.status.stop.width() + 9;
+    const primary_width = primary.width() + self.status.key.width() + self.status.stop.width() + 9;
     if (primary_width + self.details.width() > ctx.max.width.?) self.details.label = "";
-    const keys = [_]*Chip{ primary, secondary, &self.details, &self.status.key, &self.unarchive, &self.status.stop };
+    const keys = [_]*Chip{ primary, secondary, &self.details, &self.status.key, &self.status.stop };
     var right: std.ArrayList(u8) = .empty;
     for (keys) |key| if (key.label.len != 0) {
         if (right.items.len != 0) try right.appendSlice(ctx.arena, " · ");
@@ -278,7 +273,7 @@ fn footerChip(chip: *Chip, style: vaxis.Style, method: vaxis.gwidth.Method, ctx:
 }
 
 const Recorder = struct {
-    const Action = enum { key, stop, back, latest, status_page, model, effort, pick, close, unarchive };
+    const Action = enum { key, stop, back, latest, status_page, model, effort, pick, close };
     clicked: std.enums.EnumArray(Action, usize) = .initFill(0),
     fn on(comptime which: anytype) *const fn (*anyopaque, *vxfw.EventContext) anyerror!void {
         return struct {
@@ -289,7 +284,7 @@ const Recorder = struct {
         }.click;
     }
     fn actions(self: *Recorder) Actions {
-        return .{ .userdata = self, .key = on(.key), .stop = on(.stop), .back = on(.back), .latest = on(.latest), .status_page = on(.status_page), .model = on(.model), .effort = on(.effort), .pick = on(.pick), .close = on(.close), .unarchive = on(.unarchive) };
+        return .{ .userdata = self, .key = on(.key), .stop = on(.stop), .back = on(.back), .latest = on(.latest), .status_page = on(.status_page), .model = on(.model), .effort = on(.effort), .pick = on(.pick), .close = on(.close) };
     }
     fn event(_: *anyopaque, _: *vxfw.EventContext, _: vxfw.Event) !void {}
 };
@@ -656,9 +651,9 @@ test "SessionChrome footer and new-entry chips underline on hover without acting
     defer arena.deinit();
     const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 100, .height = 1 }, .cell_size = .{} };
     const footer = try drawFooter(&self, draw_ctx);
-    try std.testing.expectEqual(@as(usize, 5), footer.children.len);
+    try std.testing.expectEqual(@as(usize, 4), footer.children.len);
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
-    for ([_]*Chip{ &self.facts.back, &self.status.key, &self.unarchive, &self.status.stop, &self.marker }) |chip| {
+    for ([_]*Chip{ &self.facts.back, &self.status.key, &self.status.stop, &self.marker }) |chip| {
         try chip.widget().handleEvent(&ctx, .mouse_enter);
         const hovered = try chip.widget().draw(draw_ctx);
         try std.testing.expectEqual(.single, hovered.readCell(0, 0).style.ul_style);
@@ -744,7 +739,7 @@ test "SessionChrome standalone choice footer offers bounded existing pick and cl
     var text: std.Io.Writer.Allocating = .init(arena.allocator());
     for (footer.buffer) |cell| try text.writer.writeAll(cell.char.grapheme);
     try std.testing.expect(std.mem.endsWith(u8, text.written(), "enter pick · esc close"));
-    for ([_][]const u8{ "alt+i", "alt+d", "ctrl+r", "ctrl+x", "/unarchive", "Restore" }) |blocked| try std.testing.expect(std.mem.indexOf(u8, text.written(), blocked) == null);
+    for ([_][]const u8{ "alt+i", "alt+d", "ctrl+r", "ctrl+x", "/unarchive" }) |blocked| try std.testing.expect(std.mem.indexOf(u8, text.written(), blocked) == null);
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
     try clickAt(footer, arena.allocator(), &ctx, 0, 45);
     try std.testing.expectEqual(@as(usize, 1), recorder.clicked.get(.close));
@@ -768,28 +763,5 @@ test "SessionChrome empty chat footer preserves model effort folder at both widt
         for (0..width) |col| try text.appendSlice(arena.allocator(), footer.readCell(col, 0).char.grapheme);
         try std.testing.expect(std.mem.indexOf(u8, text.items, "gpt-6.1-sol · low · ~/code/rui") != null);
         try std.testing.expect(std.mem.indexOf(u8, text.items, "reference") == null);
-    };
-}
-
-test "SessionChrome Restore remains a drawn semantic action only for an archived chat without a modal choice" {
-    for ([_]u16{ 46, 140 }) |width| for ([_]@import("protocol.zig").SessionArchiveState{ .active, .archiving, .archived }) |archive| for ([_]chrome.ChoiceState{ .closed, .pick, .retry }) |choice| {
-        var recorder: Recorder = .{};
-        var self: Self = .init(recorder.actions());
-        self.facts.identity = .{ .name = "Chat", .archive = archive };
-        self.keys = chrome.footerKeys(choice);
-        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-        defer arena.deinit();
-        const footer = try drawFooter(&self, .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 1 }, .cell_size = .{} });
-        var drawn = false;
-        var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
-        defer ctx.cmds.deinit(arena.allocator());
-        for (footer.children) |child| if (child.surface.widget.eql(self.unarchive.widget())) {
-            drawn = true;
-            try std.testing.expectEqualStrings("Restore", self.unarchive.label);
-            try clickAt(footer, arena.allocator(), &ctx, 0, @intCast(child.origin.col));
-        };
-        const wanted = archive == .archived and choice == .closed;
-        try std.testing.expectEqual(wanted, drawn);
-        try std.testing.expectEqual(@as(usize, @intFromBool(wanted)), recorder.clicked.get(.unarchive));
     };
 }

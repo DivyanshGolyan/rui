@@ -13,11 +13,24 @@ There is no `/help` command.
 
 ## Commands
 
-At the chat’s `›` prompt, typing `/` lists loaded skills, `/reload-skills`, `/new` and `/clear`. The overview has no input or slash commands. A skill row fills its name into the Message; `/reload-skills` refreshes skills. App actions are clicks and keys: chat info contains Rename, Archive and Copy last answer, and Settings contains defaults and Version.
+Enter these at the chat’s `›` prompt. The overview has no input or slash commands. Typing `/` lists chat commands with their descriptions beside loaded skills. Choice and option rows show their admitted names. `/discard` and `/recover KEY` stay unlisted behind the failed-send line.
 
-`/new` and `/clear` both open a new empty chat, just like **+ New Session**. The old chat stays unchanged in the list. The cursor starts in the new input, and its footer shows model · effort · folder. These commands accept no arguments; `/new foo` is misuse, not a Message.
+| Command | What it does |
+| --- | --- |
+| `/archive` | Stops active work and archives this Session, confirming when required. |
+| `/unarchive` | Restores this Session without restarting work. |
+| `/rename NAME` | Names this Session. |
+| `/copy [code\|file]` | Copies the last answer; `code` copies its last code block; `file` saves it here. |
+| `/effort LEVEL` | Changes this Session’s effort and the default for new Sessions. |
+| `/model` | Opens this Session’s model picker, the same one as the footer model button and chat info. Choose a model to save it. |
+| `/setup` | Shows or changes defaults for future Sessions, not the current one. |
+| `/requests` | Lists saved requests for recovery. |
+| `/result KEY` | Reads a saved answer. |
+| `/reload-skills` | Rescans skills and appends catalog changes without model work. |
+| `/new` | Starts a new empty chat; keeps the old chat unchanged. |
+| `/clear` | Same as `/new`: starts a new empty chat, not deletion of history. |
 
-`/requests` remains an unlisted chat action until it has a drawn entry point. Failed-send retry and discard remain on the failed-send line. The overview has no command input.
+Both `/new` and `/clear` use **+ New Session**’s creation owner. They send no Message until you type and send one in the new chat. Extra text, such as `/new foo`, is misuse. Loaded skill rows insert their names into the Message; they do not run an app command.
 
 While the model works on a reply, the work line says `Thinking` with elapsed time.
 Rate-limited retries keep their countdown, and running tools show their descriptions.
@@ -155,9 +168,16 @@ Existing Sessions keep their saved settings, including approval mode and model.
 
 ### Archive Sessions
 
-Select a Session in the overview and press **Alt+A**, or use **Archive** in its chat info panel. Alt+A also works inside a conversation and keeps your draft intact. If it has work, confirm **Stop and archive**; it stays visible until the stop completes. Press Enter to confirm or Esc to cancel; neither sends or clears your draft.
+Select a Session in the overview and press **Alt+A**.
+If it has work, confirm **Stop and archive**.
+The Session stays visible until the stop completes.
+You can also press **Alt+A** or enter `/archive` inside its conversation.
+Alt+A keeps your draft intact.
+For **Stop and archive**, press Enter to confirm or Esc to cancel; neither sends or clears your draft.
 
-The overview shows unarchived Sessions and has no archive-view commands. Use the shell commands below to list archived Sessions or restore one without starting work. An open archived chat has **Restore** in its footer.
+The overview shows unarchived Sessions; its former `/sessions`, `/archive`, `/unarchive` and other overview slash commands are gone.
+Use the shell commands below to list archived Sessions or restore one without starting work.
+Inside an open chat, `/archive` and `/unarchive` still act on that Session.
 
 Archive keeps history, saved results, settings, and files.
 Opening an archived Session does not restore it.
@@ -201,10 +221,11 @@ App settings changes saved defaults without changing existing Sessions.
 The Permissions row, between Effort and Notifications, offers **run without asking** and **ask first**.
 Press Enter to open the choices, then Enter to save one.
 
-From the shell, `rui defaults configure` accepts `--store PATH`, `--provider PROVIDER`, `--model ID`, `--clear-model`,
+From the shell, use `rui defaults configure`; in a chat’s composer, use `/setup`.
+Both accept `--store PATH`, `--provider PROVIDER`, `--model ID`, `--clear-model`,
 `--reasoning-effort LEVEL|default`, `--permission-mode ask|bypass`, and `--notifications on|off`.
 `--clear-model` cannot be combined with `--model`.
-For example, `rui defaults configure --permission-mode ask` makes new Sessions ask before running Bash.
+For example, `/setup --permission-mode ask` makes new Sessions ask before running Bash.
 An explicit `--permission-mode` on a new Session wins over the saved choice; without either, Rui runs without asking.
 `rui defaults inspect` reads the saved defaults without changing them.
 
@@ -214,7 +235,7 @@ When the terminal running Rui is out of focus, the overview or an open conversat
 Other terminals, and tmux, get a bell.
 Rui learns about focus only from the terminal's focus reports, so a terminal or multiplexer that sends none gets no notifications.
 In tmux, set `focus-events on` to get them.
-To turn them off, run `rui defaults configure --notifications off`, or select **Notifications** in Settings.
+To turn them off, run `rui defaults configure --notifications off`, or enter `/setup --notifications off`.
 
 ## Context compaction
 

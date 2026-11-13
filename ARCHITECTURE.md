@@ -2394,18 +2394,22 @@ Captured requests retain their recorded Store across preference edits.
 
 `rui defaults inspect` reads defaults without writing; `rui defaults configure` saves explicit Store/provider/model, notification, effort and permission edits.
 A saved Store is the global default for commands without `--store` (captured requests keep their recorded Store), so `defaults configure --store` names it on stderr; stdout and exit status are unchanged.
+Interactive `/setup` keeps the same future-default capability.
 After a successful change in a conversation it prints one line, `Saved defaults for future Sessions. Active Session unchanged.`, and follows it with the Store, provider and sign-in report only when the next Session cannot start as saved; app settings shows the saved defaults themselves.
+The overview’s `/setup` keeps the full report.
 `--notifications on|off` on either saves whether an open overview or conversation sends [desktop notifications](#desktop-notifications); it is on by default and changes no Session.
 `--reasoning-effort LEVEL` on either saves the effort new Sessions start at, and `default` clears it.
 A new Session that takes the saved defaults (its start leaves out `--provider` or `--model`) and whose model offers the saved effort starts with it as its override; one whose model does not, or a start that names its own effort, keeps the model's default or the named one.
 A start naming both `--provider` and `--model` ignores saved binding and effort; an overview opened with `--store`, `--provider` and `--model` starts its Sessions the same way.
 Permissions are independent: without an explicit `--permission-mode`, every fresh Session reads the saved permission mode, then Rui's product default (`bypass`) if none is saved.
 An explicit permission mode wins; naming both binding selectors and permissions lets a start bypass unused preferences.
-`--permission-mode ask|bypass` on `rui defaults configure` saves that new-Session default, never changing existing Sessions.
+`--permission-mode ask|bypass` on `rui defaults configure` or `/setup` saves that new-Session default, never changing existing Sessions.
 The defaults report includes the saved `permission_mode` (null when absent); the app settings Permissions row between Effort and Notifications shows `run without asking` for bypass and `ask first` for ask.
 Enter opens those two choices, and picking publishes through the same preferences writer as the other settings rows.
 `rui session configure` creating a Session and each overview start read it at that moment, so a choice made since an overview opened applies.
-When saved defaults change, the overview resolves its prospective provider/model through `new_session_selection`, retaining explicit launch selectors; fully explicit launch bindings do not follow unused saved defaults. Chat info and footer buttons edit the current Session.
+When saved defaults change, the overview resolves its prospective provider/model through `new_session_selection`, retaining explicit launch selectors; fully explicit launch bindings do not follow unused saved defaults.
+`/setup` remains chat-local and has no overview command path or held per-start override.
+`/effort LEVEL` in a conversation saves LEVEL the same way once the Session accepts it, because the effort a person picks is the one they want next time; chat info’s Effort field changes only its Session.
 These edits never change an existing Session's saved binding or permission mode.
 An explicitly edited Store is validated and canonicalized before publication, allowing replacement of a deleted saved Store.
 An unchanged saved Store retains syntax validation but its availability is checked only when selected for work.
@@ -2413,6 +2417,7 @@ Independent provider/model inspection or publication does not require an unused 
 Inspection reports unavailable prospective destinations without selecting an alternate.
 HOME and the private preference path must still be valid.
 Interactive defaults output escapes dynamic fields without changing stored bytes.
+The chat’s `/setup` accepts double-quoted values and escaped quotes, backslashes or spaces without shell expansion; invalid quoting rejects before mutation.
 
 The versioned private file under `$HOME/.config/rui/preferences` contains only these three optional values, the notification choice, the new-Session effort and permission mode, not credentials, Session lists or work status.
 Versions 1–3 have no saved permission mode.
@@ -2449,11 +2454,12 @@ The stopping Host leaves a stop record beside its Store lease, which every Host 
 At most one automatic start runs per overview: a failed start or a second crash leaves the line’s start control available, with no retry or backoff.
 
 The overview refreshes about once a second with `session list` `since`, keeping its rows and replacing those reported changed.
-The overview has no input, slash-command parser or archive-view commands. Alt-A and chat info use the existing archive owner, confirming Stop and archive when required. Shell archive/list/unarchive commands remain available; an open archived chat exposes the footer’s Restore action.
+The overview has no slash-command parser or view command surface; the former `/sessions` archive-view commands and counts-line view-name click are removed.
+Alt-A puts away the selected Session through the existing archive owner, stopping its work first when required. Shell archive/list/unarchive commands remain available, and `/archive` and `/unarchive` in an open chat retain their existing Session-local behavior.
 A row remains visible with archive progress until the server reports it archived.
 Archived rows and exact conversations show their archive state.
-Chat info’s Archive action, Alt-A, and the archived footer’s Restore action forward semantic intents for the exact open Session even when it is absent from the listing.
-The overview core owns their archive/restore request ledger and worker effects; conversation actions never run a separate CLI archive mutation.
+Conversations also expose `/archive` and `/unarchive`; these validated commands and Alt-A forward semantic intents for the exact open Session even when it is absent from the listing.
+The overview core owns their archive/restore request ledger and worker effects; conversation slash commands never run a separate CLI archive mutation.
 Alt-A leaves the draft, caret and retained original unchanged.
 While a conversation is open the refreshes go on without the screen or input, for [desktop notifications](#desktop-notifications).
 Marks hold still: `?` needs you, in the attention colour, `●` active, `◌` queued, dim, `○` idle, `✓` finished, `×` failed, `■` stopped; moving to its group says a row changed.
@@ -2584,7 +2590,7 @@ Inspection performs no refresh or remote call; dispatch retains the authenticati
 Preference updates express Store/provider keep-or-set and model keep/set/clear intent through the locked application owner.
 Only explicit choices are saved; an absent model inherits the recommendation when a new Session is configured.
 Keep retains a pin for the unchanged provider.
-`rui defaults configure --clear-model` removes only the saved model; they are mutually exclusive with `--model`, including when flags are repeated or reversed.
+`rui defaults configure --clear-model` and `/setup --clear-model` remove only the saved model; they are mutually exclusive with `--model`, including when flags are repeated or reversed.
 Clear preserves the saved provider, even an unsupported one, unless an explicit `--provider` replaces it; it never discovers a provider or persists a recommended replacement model.
 Login fills only an unset provider, not a model pin.
 Clear must pass the same HOME, syntax, private-file and atomic-publication checks as other edits, without checking an unused Store's availability.
@@ -2607,7 +2613,7 @@ The durable decision retains that exact target for Host revalidation.
 One-shot `action inspect` JSON retains the Action ID, opaque call ID and complete arguments, escaping every non-ASCII code point so control and bidirectional characters cannot disguise the proposal on a terminal.
 Chat info changes the exposed Session settings through typed configuration; `rui session configure` retains the full shell interface and immutable Workspace check.
 Instructions require a separate one-shot `session configure --instructions -`; schema input uses a file path rather than terminal stdin.
-Chat info shows Session settings; app settings shows defaults for new Sessions. Unlisted `/requests` lists this machine’s local recovery handles; a drawn saved-key row reads its answer.
+Chat info shows Session settings; app settings shows defaults for new Sessions. `/requests` lists this machine’s local recovery handles, `/result KEY` reads an answer, and `/setup` edits only future defaults.
 Explicit operator authentication remains separate from the conversation.
 Re-entry uses Host facts, not local saved-request guesses.
 An unknown Session requires explicit configuration before entry.
@@ -2696,7 +2702,7 @@ An outcome the conversation's first read shows as the person opens the Session i
 The listing the overview opens on gives a record only to work under way or waiting, so an outcome from before Rui opened never gets one, and a Session at rest gets none until it does something; a Session a full listing no longer shows has its record cleared.
 A new title, from a Label or a first line read later, is a new version, so the record is written again with that name.
 `Attention.report` writes each record and flushes it, and only then does the overview count it as held.
-Each step rereads the preference, so an app settings Notifications edit applies at once; unreadable preferences leave the default, on.
+Each step rereads the preference, so `/setup --notifications off` applies at once; unreadable preferences leave the default, on.
 With notifications off Rui wants no record: while any record of Rui's may be on the terminal it writes one clear (`state=clear:id=rui`, which clears Rui's records and no other program's), and from the frame that carries it until one writes it whole, what the terminal holds of each record is unknown; on again, it writes every record again.
 Leaving clears Rui's records too whenever one may be on the terminal, though the spec lets `done` and `error` outlive the program: a record of a Session no Rui watches would not change again.
 
@@ -2987,7 +2993,7 @@ An open row is marked by its heading's selection background alone; the footer na
 Display eviction does not delete saved work.
 App enables mouse reporting, and wheel events scroll the visible widget.
 Every visible chooseable row or control has a click action matching its keyboard activation, including Session and Settings rows, editable status fields, command and skill choices, model controls and transcript links.
-New Session creates and opens an empty Session through captured Configure creation, without admitting a Message. Its request ledger prevents duplicate or uncertain creation; the overview task draft remains unchanged. Chat `/new` and `/clear` settle the old frontend through the normal return boundary, then enter this same creation transition. The old Session is never cleared or reconfigured. An empty chat footer derives model, effort and Folder from Current.
+New Session starts an existing task draft as Enter does; with a blank draft it selects the composer without creating a Session.
 Hover never changes keyboard selection or focus.
 Under the pointer, rows and fields take the hover background, the per-channel midpoint of the selvedge and selection colours, or a monochrome underline, while preserving their foreground; reverse stays the keyboard selection's mark.
 A row that is both selected and hovered keeps the selection look; chips and peer links underline and show the pointer shape.
@@ -3045,7 +3051,7 @@ That UI-owned repair scratch is independent of the reader’s staging file, so o
 Session-wide detach, stop, archive and original-recovery keys retain their conversation owner while the panel or a nested choice is open; navigation and editing never reach the hidden draft.
 An environment-too-large notice also has clickable `details`; that page, not info, owns the refused capture and its repair instructions.
 Scripts retain `rui session inspect` and `rui session configure` for full inspection and settings not exposed in the panel, including compaction overrides.
-`/status`, `/configure` and `/model` remain absent from conversation parsing, the slash list and completion; the overview has no slash commands at all.
+`/status` and `/configure` remain absent from conversation parsing, the slash list and completion; the overview has no slash commands at all.
 The default model is the Model field of app settings, not a second command path.
 
 Complete Action inspection is staged in an independent unlinked file before choice readiness.
@@ -3060,20 +3066,73 @@ Nothing typed while paused can authorize.
 Reading the final page requires fresh input after the completed prompt.
 A preview over 256 KiB cannot authorize an Action in this UI; exact one-shot inspection and decision commands remain available, including in the restored main-screen detach or fatal-renderer notice.
 Marked paste never grants permission.
-Typed chat info edits, clipboard reads and saved-answer reads run on the existing joined reader worker; editing continues, but sending waits for that work. Drawn actions carry their semantic inspection kind and copied payload into that worker. They do not pass through the typed slash parser.
+Typed chat info configuration and the `/setup` and `/result KEY` commands run on the reader worker once the current read finishes; editing continues, but a Message waits for the command.
+The slash commands’ unchanged CLI owners write complete stdout and stderr to the inspection scratch file.
+Output of up to two lines becomes a notice under the input without the CLI's `Rui: ` prefix, with `rui: ` diagnostics marked `!`; longer output opens as an inspection page under the `Browsing · Esc returns` heading.
+The Session screen stays in place and no command reads terminal input.
+`/discard` and `/recover KEY` answer with a notice; an unknown command shows `! Unknown command /NAME`, and a known one given an argument it does not take shows its usage, as `! Usage: /copy [code|file]`.
 
-**Slash list.** In a chat, `/` lists loaded skills plus `/reload-skills` and the no-argument navigation aliases `/new` and `/clear`, which share New Session’s empty creation owner. A leading loaded skill is Message text, preserved byte for byte; a skill row fills its name and a trailing space rather than sending it. The shared `skill_completion.Reads` merges the command table with the scope's loaded skill page, giving the command priority over a same-named skill. Inline references use the same skills owner and Host binding rule.
-The list has room for the bounded 24-skill preview plus the three listed commands. Rows sit immediately above the input; when more match than fit, the last row counts the rest. Up and Down move the highlight. Enter completes a skill or runs the highlighted command; Tab and Shift-Tab focus the footer’s model and effort buttons. Drawn-list identity fences stale clicks and keys. Esc closes suggestions or cancels a drawn command without leaving the chat.
-Submitting a command consumes its draft whether unknown, successful or failed; a hold retains it. `command_input.zig` owns this rule in the chat; the overview has no input. Unknown typed names say `! Unknown command /NAME`; malformed retained commands show their usage.
+`/new` and `/clear` are identical no-argument navigation commands: retain the old chat, retire its frontend normally, then invoke the same overview New Session transition and captured Configure creation owner. Neither creates a Message or deletes history. Both list as `start a new chat`.
+`/model` is a no-argument request for the same model choice that the footer button opens. Its semantic footer admission and choice preparation are shared; the existing tick/read boundary opens it once Current and the borrowed model source are ready. Choosing a model calls chat info’s existing typed Configure edit and re-reads Current for the footer; no model CLI path or second worker is added.
+The bounded list holds the twelve listed commands plus the loaded skill preview. A leading loaded skill is Message text; command names take precedence over same-named skills.
 
-**Command ownership.** `slash_commands.zig` has only the conversation table: loaded skills plus `/reload-skills`, `/new` and `/clear` are listed. The overview has no table, parser, command worker or held next-start overrides. Both aliases leave the old chat untouched and return through the normal retire/close boundary to the same New Session click transition and Configure creation owner. Extra arguments are misuse.
+A command list appears when you type "/", built from the same table the command parser uses. /effort and /rename submit the corresponding Session configuration edits. (Divyansh approved this on 2026-10-31, front-end plan row 6.)
 
-**Recovery.** `/discard`, `/recover KEY` and `/requests` remain unlisted. Requests has no other drawn entry point. The requests page offers the original’s `/recover KEY` row, then saved Message keys newest first with their local time. Enter or a click on a drawn saved key reads its answer through a typed saved-result input, not `/result`. No typed `/result` name remains.
+`slash_commands.zig` holds the conversation’s table of each command's name, argument shape and plain listed flag; the parser, command runner and list read it. The `/` list shows each listed chat command with its one-line description beside loaded skills. Choice and option rows remain names only.
+`/requests` and `/result KEY` are listed alongside the other chat commands. Only `/recover KEY` and `/discard` stay unlisted behind the failed-send line (Divyansh, 2026-11-13).
+`/requests` still writes its page of every recovery handle, and while that page shows over an empty draft the list's rows offer what can be done with them, each row the command line it runs, so a pick does what typing it does and no key is typed (Divyansh, 2026-11-02).
+The first row is `/recover KEY` for this conversation's own original only while a retry would go now and could only send a Message: a plain Message whose Admission is unconfirmed, nothing in flight and no Action waiting; never a decision or a Message that carries one.
+Then come each saved Message's `/result KEY`, newest saved first with its local `HH:MM` (bounded by the list’s rows less that one), the original included when it has no `/recover` row.
+A row offers only what applies to it: a saved Message's answer is the one result a page reads, and a conversation's `/recover` retries only its own unconfirmed original, so other saved requests and a rejected original, which `/discard` releases, have no row.
+Up and Down move the highlight, Enter runs the row's line and Tab puts it in the draft; Esc closes the rows until the draft changes, then leaves the page; typing gives their place to the draft's own list.
+Rows that change under an unchanged draft are a new list, which no key acts on until a frame draws it.
+Typed `/recover`, like Ctrl-R, retries nothing while an Action waits.
+The list shows while the draft is one line that starts with one `/`: while it holds no space, a row for each command the word starts; after a command's name, a row for each choice the word being typed starts.
+The choices are fixed words, never free text: `/copy`'s `code` and `file`; `/effort`'s levels, those the Session's model offers, the one in force marked `current` (none before a read names it); and for `/setup` each option, then after an option the lowercase words its shape names, so `--permission-mode` offers `bypass` and `ask`, `--compaction-trigger` offers `default`, and `--reasoning-effort` offers the model's levels and `default`; `/setup`'s saves a default for any model, so it offers every level (Divyansh, 2026-11-02: "every fixed choice").
+A quote or a backslash in the words ends the list: that text is the shell grammar's to read.
+The rows sit right above the input, in the rows a growing draft would take, under the rule, so the input never moves; at most a third of the screen, less the input's own row.
+When more match than fit, the last row says `+N more · type to narrow`, unless the list has only one row, which then shows the highlighted match.
+It goes when nothing matches.
+One row is highlighted, reversed as the Action's choice is: the first, until Up or Down moves it; any edit, a word Enter adds among them, returns it to the first, the rows follow it, and a list that narrows under it (another model, say) highlights its last row.
+Tab adds the rest of the highlighted word, and a space when another word may follow; in a draft no list is for, or over a partial character or a rejected draft, Tab does what it always did.
+A word Tab or Enter adds that the draft cannot hold is refused as a typed one is.
+Enter in a shown list takes the highlighted row: a command with nothing more to say, or a fixed value, runs the line it completes; a command that needs a word (`/effort` or `/rename`) or an option that takes a value only gets its word and the space, so the next list shows.
+So `/copy` alone, taken from the list, copies the answer, and `/copy ` then Enter copies its highlighted choice, `code` first.
+Esc or Ctrl-G, when the latest frame showed a command list, cancels the command and clears its draft; a skill or recovery list closes without consuming Message text.
+Submitting a command consumes its draft whether it is unknown, succeeds or fails; a command refused by a hold keeps its draft.
+`command_input.zig` owns that ending rule for the chat; otherwise Esc and Ctrl-G do what they always did.
+While the list shows, Up and Down move its highlight; otherwise they scroll the conversation.
+The overview has no command list or unknown-command notice: printable `/` and the following text are ignored there.
+Chat-local commands, including `/rename` and `/setup`, keep their existing parser, completion, dispatch and draft-ending behavior.
+There is no `/help` command or `?` shortcut: a question mark is ordinary chat draft text, including on an empty draft, and is ignored on the overview.
+The footer shows the keys available now; the full reference opens from **Settings › Keys**, the last row after Version, on either screen.
+Selecting Keys by Enter or click opens only key names in strong text and their short meanings, in aligned row-major pairs when they fit, or one column otherwise: no title, footer or instructions.
+One `ctrl+x` stops work; it does not require two presses.
+`keymap.list` owns the reference rows, checked against the union of both screens' keymaps so each bound key is listed or explicitly marked as an alias of one listed row, and neither rows nor aliases name unbound keys.
+`keys_panel` derives fields from those rows; `Panel.KeyList` reuses the Panel's cell clipping, without selection or an event handler.
+`AppSettings` owns whether the reference is open; Esc or Ctrl-G closes it back to Settings before any choice, Upgrade cancellation or settings-page close, never leaving a conversation through that first press.
+Conversation commands keep their existing CLI owners and scratch-file output path; no overview command worker or selected-Session command dispatch remains.
+One conversation command runs at a time; a second says `! Wait for /NAME to finish.`
+Short command output uses `slash_commands.resultNotice`; longer output stays in the conversation’s inspection page.
+After `/rename` the next listing, which shows the new label, goes at once.
+`/effort` needs a level: alone it states its usage, and the list offers the levels.
+`/effort LEVEL` submits the reasoning-effort configuration edit and `/rename NAME` submits the label edit with the rest of the line as one value, using the configuration argument decoder, so `/rename "lane four"` and `/rename lane four` both name the Session `lane four`.
+They have the same checks and the same messages, except that a line that does not parse shows the usage of the command typed.
+Once the Session accepts `/effort LEVEL`, LEVEL is also saved as the effort new Sessions start at, as `rui defaults configure --reasoning-effort` saves it.
 
-**App controls.** Chat info owns Rename, Archive, Effort, Permissions, Tools and Model; the footer owns Restore and the model/effort buttons. App settings owns defaults, Version and Keys. The Keys reference has strong key names and short meanings, aligned in pairs when wide and one column when narrow. Esc returns first to Settings. `/help` is unknown; `?` is ordinary text in a chat and ignored on the overview.
-
-**Copy last answer.** Chat info reads the newest assistant answer into the frontend’s unlinked scratch file, validating length and digest. After join, the UI streams exact Markdown through OSC 52 in bounded base64 windows between frames. At most 75,000 bytes go to the clipboard; over that, nothing is written and the notice says `Too large for the clipboard`. Before the first answer it says `No answer to copy`; a read failure says `! Copy unavailable; draft retained.` The terminal decides whether it accepts the bytes. Code-block and file-export slash-only paths are removed; transcript selection still copies a drawn range.
-
+`/copy` sends the last answer, as its Markdown, to the terminal's clipboard through OSC 52 and `/copy code` sends that answer's last complete fenced block without its final line ending, both streamed with no extra memory; `/copy file` is the fallback, and `Sent to clipboard` shows under the input until the next key (Divyansh approved this on 2026-10-31, front-end plan PR 6a).
+Each reads the newest assistant answer after the current read.
+The reader stages its exact bytes, bound to their length and digest, in the frontend's unlinked scratch file; the UI then writes `ESC ] 52 ; c ;`, the base64 of those bytes a 3 KiB window at a time, and `ESC \`, between frames, so no frame splits the sequence and neither the answer nor its base64 is ever whole in memory.
+The terminal owns the open sequence.
+A write asked for while it is open, such as enabling alternate scroll when a pumped key brings the terminal's report, waits for it to end.
+After a failure or an interruption partway, the next write, or restoration on leaving, sends CAN first, which abandons the sequence rather than setting part of it.
+At most 75,000 bytes go to the clipboard: their base64 is 100,000 bytes, the most hterm's `osc52.sh` sends.
+Over that nothing is written and the notice says `Too large for the clipboard · /copy file`.
+Rui cannot see whether the terminal took the bytes.
+`/copy file` writes the last answer as it arrives to an exclusively created mode 0600 temporary file beside `rui-ID-answer.md` in the directory Rui runs in, then renames it over that name, so an earlier file or a link there is replaced and a link's target is never followed or changed.
+If the read fails the temporary file is removed and the name keeps what it had.
+It says `Saved to ./rui-ID-answer.md`.
+Before the first answer each says `No answer to copy`; `/copy code` on an answer with no complete fenced block says `No code block`. A failed copy says `! Copy unavailable; draft retained.`, or `! This directory is not writable; draft retained.` when `/copy file` cannot write there.
 Non-TTY conversation invocation is refused; one-shot and pipe commands keep their existing contracts.
 
 Approval requires the whole choice on the input row (`› Allow once` and `Deny`, shortened to `Allow` and then `A` and `D` only when narrower than 25 and 20 columns) and its hint under it (`←→ choose · enter confirms`, shortened to `←→ · enter` when it does not fit).
@@ -3097,7 +3156,7 @@ No colour carries meaning: the glyphs do.
 Activity pages preserve both received and sent peer rows while scrolling in either direction.
 
 In a Session's feed, a press followed by a move to another cell starts a drag; the cells it crosses draw reversed, and release copies the shown text once through OSC 52 and clears the highlight; nothing persists.
-Selection resolves keyed rows and offsets: wrapped rows join, and indents, margin times and link addresses are left out; above `TerminalText.clipboard_limit` nothing is copied and the status bar says `Too large for the clipboard`, otherwise `Copied N lines`.
+Selection resolves keyed rows and offsets: wrapped rows join, and indents, margin times and link addresses are left out; above `TerminalText.clipboard_limit` nothing is copied and the status bar says `Too large for the clipboard · /copy file`, otherwise `Copied N lines`.
 A drag held at the top or bottom row moves the same Feed anchor one row through text it already holds; incoming rows do not move the selection.
 No fill is read in under a press or drag, at either loading edge; it waits for the release. Live scans continue.
 A press or drag ends without copying when the pointer leaves the feed or its content is replaced, since vxfw sends no release then.
@@ -3177,7 +3236,7 @@ A run of lines beginning with `|` is a table when its second line is a separator
 Bare local paths start at a prose-token boundary with a single `/` or `~/` and a nonempty path payload; only `~/` needs the process's explicitly borrowed, valid absolute HOME, and neither form resolves the filesystem or interprets line or column suffixes.
 Local links percent-encode the expanded path's bytes into a `file:///` URI, preserving only slashes and URI-unreserved ASCII; malformed UTF-8, controls or bidi controls leave the candidate literal.
 Bare links omit trailing sentence punctuation, including `;` and unmatched final `)`, from the clickable span without changing the visible text or internal punctuation; local filenames also keep trailing `_`, `~` and `*`.
-Other link targets (including Markdown file targets), links inside code or emphasis, Markdown link titles and complete addresses longer than 2,048 bytes after local expansion and encoding stay literal, and Copy last answer still sends the original Markdown with every address.
+Other link targets (including Markdown file targets), links inside code or emphasis, Markdown link titles and complete addresses longer than 2,048 bytes after local expansion and encoding stay literal, and `/copy` still sends the original Markdown with every address.
 The conversation view keeps each address in its text as bytes it never draws, just before the text it links, so the address moves with that text through escaping, older pages and eviction.
 Only trusted OSC 8 labels may combine an explicit foreground with underline: the viewport retains that foreground in its existing style byte and uses underline to recognize the link; uncoloured or non-underlined labels keep the dedicated link slot.
 A frame links at most 128 KiB of address bytes across its cells, because the terminal grid copies the address into every cell of a link; text past that bound, or whose address left the view, stays underlined but opens nothing.

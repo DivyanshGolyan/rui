@@ -7305,16 +7305,27 @@ const EmptySessionOwner = struct {
     }
 
     fn chooseModel(self: *EmptySessionOwner) !void {
-        try std.testing.expect(try self.rig.press("\t\r") == null);
+        try self.chooseModelFrom("\t\r");
+    }
+
+    fn chooseModelFrom(self: *EmptySessionOwner, gesture: []const u8) !void {
+        try std.testing.expect(try self.rig.press(gesture) == null);
         try std.testing.expect(self.frontend().app_info.model_choice.active);
-        try std.testing.expect(try self.rig.press("gpt-5.5\r") == null);
+        try std.testing.expect(try self.rig.press("gpt-5.5") == null);
+        const choice = &self.frontend().app_info.model_choice;
+        try std.testing.expectEqualStrings("gpt-5.5", choice.editor.buffer[0..choice.editor.length]);
+        var shown = try self.rig.shown(140, 40);
+        defer shown.deinit();
+        try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "gpt-5.5") != null);
+        try std.testing.expect(try self.rig.press("\r") == null);
         try std.testing.expect(self.frontend().info_edit != null);
+        try std.testing.expectEqualStrings("gpt-5.5", self.frontend().info_edit.?.model);
         self.frontend().poll_at = std.math.maxInt(i96);
         try self.tick();
         try self.joinRead();
+        try std.testing.expectEqualStrings("gpt-5.5", canonical(self.frontend().session).model.slice());
         try self.readCurrent();
         try std.testing.expectEqualStrings("gpt-5.5", self.frontend().line.model.slice());
-        try std.testing.expectEqualStrings("gpt-5.5", canonical(self.frontend().session).model.slice());
         try self.expectSelectedName(self.rig.overview.app_session.?.session, "New Session");
     }
 
@@ -7592,4 +7603,34 @@ test "Overview forwards captured covered pane and paste without rereading newer 
     try std.testing.expect(overview.state.creating());
     try std.testing.expectEqual(@as(usize, 1), overview.job_count);
     try std.testing.expectEqual(@as(usize, 0), Seen.now.creates);
+}
+
+test "typed model and footer picker configure the same Session owner and show Current in the footer" {
+    const Skills = struct {
+        fn read(_: client.ReadContext, _: std.mem.Allocator, _: []const u8, _: []const u8, _: []const u8) !@import("skill_suggestions.zig").Page {
+            return .{ .entries = &.{}, .total = 0 };
+        }
+    };
+    for ([_][]const u8{ "/model\r", "\t\r" }) |gesture| {
+        const fixture = try EmptySessionOwner.create();
+        defer fixture.destroy();
+        const reference = try fixture.openNew();
+        // The fixture owns canonical reads, not a real Host socket. Typing
+        // a leading slash also asks that Host for skills.
+        fixture.frontend().skill_read = Skills.read;
+        try fixture.chooseModelFrom(gesture);
+        // Acknowledge the configure result without sending a Message; the
+        // narrow footer reserves space for that retained notice until input.
+        try std.testing.expect(try fixture.rig.press("x\x7f") == null);
+        try std.testing.expectEqual(@as(usize, 1), EmptySessionOwner.configurations);
+        try std.testing.expectEqual(reference, fixture.rig.overview.app_session.?.session);
+        try std.testing.expect(fixture.frontend().submission.intent == null);
+        for ([_]u16{ 46, 140 }) |width| {
+            var shown = try fixture.rig.shown(width, 30);
+            defer shown.deinit();
+            const text = try shown.text();
+            const footer = text[std.mem.lastIndexOfScalar(u8, std.mem.trimEnd(u8, text, "\n"), '\n').? + 1 ..];
+            try std.testing.expect(std.mem.indexOf(u8, footer, "gpt-5.5") != null);
+        }
+    }
 }

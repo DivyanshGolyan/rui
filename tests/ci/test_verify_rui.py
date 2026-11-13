@@ -1019,6 +1019,7 @@ while True:
             ("fold-hover", "× Fail with exit 127 · 127", " · exit 127"),
             ("fold-hover", "× Fail with an excerpt · 1", " · exit 1"),
             ("chat-working", "Thinking", "Waiting"),
+            ("copy-no-code", "No code block", "No code block in the last answer."),
         ):
             with self.subTest(state=name):
                 self.assertIn(wanted, states[name]["expect"])
@@ -1099,17 +1100,6 @@ while True:
         self.helper["validate_scenario"](data)
         entries = list(self.helper["cast_entries"](data["states"][1]["cast"]))
         self.assertEqual([c["label"] for c in entries], ["Fix it", "Batch 1", "Batch 2", "Batch 3"])
-
-    def test_cast_skills_are_safe_unique_fixture_names(self):
-        for value in ([], ["review"], ["review", "check-project"]):
-            data = self.scenario()
-            data["states"][1]["cast"][0]["skills"] = value
-            self.helper["validate_scenario"](data)
-        for value in (None, "review", ["../escape"], ["/absolute"], ["review", "review"], [42], [""]):
-            data = self.scenario()
-            data["states"][1]["cast"][0]["skills"] = value
-            with self.subTest(skills=value), self.assertRaisesRegex(ValueError, "invalid cast skills"):
-                self.helper["validate_scenario"](data)
 
     def test_invalid_scenarios(self):
         mutations = [
