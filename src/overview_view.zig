@@ -2216,11 +2216,14 @@ fn archiveSession(state: *State, request: ArchiveRequest, effects: *Effects) Arc
     return .refused;
 }
 
-/// Whether the pinned New Session row offers the archived view: while some
-/// Session is archived, by the last listing's answer, and always within the
-/// archived view, so its way back stays drawn. The one owner of the rule.
+/// Whether the pinned New Session row offers the archived view: only where
+/// that row exists (never in a chat sidebar), while some Session is
+/// archived by the last listing's answer, and always within the archived
+/// view, so its way back stays drawn. The one owner of the rule: the keys,
+/// clicks and the draw all read it, and the draw shows the word at every
+/// width it offers it.
 pub fn offersArchived(state: *const State) bool {
-    return state.archive == .archived or state.some_archived;
+    return showsNewSession(state) and (state.archive == .archived or state.some_archived);
 }
 
 /// Enter or a click on the pinned row's Archived opens the archived view,
@@ -2944,15 +2947,20 @@ pub fn listSegments(arena: Allocator, state: *const State, item: Item, width: u1
     const spans = switch (item) {
         .new_session => new: {
             built.begin();
-            _ = try built.put(2, "+", width -| 2, .{ .colour = .ink });
-            const name_end = 3 + try built.put(3, " " ++ new_session_name, width -| 3, .{});
             // Quiet at the row's right end, as an age stands; it takes the
-            // selection's ground alone when the arrows choose it.
-            const end = width -| 1;
-            const start = end -| archived_word.len;
-            if (offersArchived(state) and start > name_end) {
+            // selection's ground alone when the arrows choose it. Whenever
+            // it is offered it is drawn, and the New Session name gives way
+            // to it, one blank column short of the word.
+            const offered = offersArchived(state);
+            const start: usize = if (offered) (width -| 1) -| archived_word.len else width;
+            const name_room: usize = if (offered) start -| 1 else width;
+            if (name_room > 2) {
+                _ = try built.put(2, "+", name_room - 2, .{ .colour = .ink });
+                if (name_room > 3) _ = try built.put(3, " " ++ new_session_name, name_room - 3, .{});
+            }
+            if (offered) {
                 const chosen = state.selected == .archived;
-                _ = try built.put(start, archived_word, archived_word.len, if (chosen)
+                _ = try built.put(start, archived_word, width -| start, if (chosen)
                     .{ .colour = .strong, .bold = true, .background = .selection }
                 else
                     .{ .colour = .quiet });
@@ -5769,10 +5777,39 @@ test "pinned row Archived: arrows, Enter, clicks and Esc over the archived fact 
             },
         }
     };
+    // With a chat open the list is a sidebar with no pinned row, so Archived
+    // is never offered, whatever the fact says: Right never reaches it, and
+    // Enter on a stale choice or a click on its word opens nothing.
+    for (std.enums.values(Start)) |start| for ([_]Input2{ .right, .enter, .click_archived }) |input| {
+        var state = try opened(&.{session("aaaaaa", .{ .finished = ago(1) }, .{ .label = "Kept", .yours = true })});
+        defer state.deinit();
+        try answerArchived(&state, 2, true);
+        try std.testing.expect(offersArchived(&state));
+        state.selected = .archived;
+        _ = try step(&state, .{ .conversation = "aaaaaa".* });
+        try std.testing.expect(!offersArchived(&state));
+        // Opening the chat moves a chosen Archived back to the pinned identity.
+        try std.testing.expect(state.selected != .archived);
+        state.selected = switch (start) {
+            .new_session => .new_session,
+            .archived => .archived,
+            .chat => .{ .session = "aaaaaa".* },
+        };
+        const effects = try step(&state, switch (input) {
+            .right => .{ .input = .{ .key = .{ .action = .open_session } } },
+            .enter => .{ .input = .{ .key = .enter } },
+            .click_archived => .{ .clicked = .{ .target = .archived } },
+            else => unreachable,
+        });
+        try std.testing.expectEqual(ArchiveFilter.active, state.archive);
+        try std.testing.expect(!hasEffect(effects, .list));
+        if (start != .archived) try std.testing.expect(state.selected != .archived);
+    };
 }
 
-test "pinned row draws Archived quietly at its right end only while offered" {
-    for ([_]bool{ false, true }) |some| for ([_]bool{ false, true }) |chosen| for ([_]u16{ 46, 140 }) |width| {
+test "pinned row draws Archived quietly at its right end, at every width, only while offered" {
+    // Below 25 columns the New Session name gives way to the word.
+    for ([_]bool{ false, true }) |some| for ([_]bool{ false, true }) |chosen| for ([_]u16{ 9, 12, 20, 24, 25, 46, 140 }) |width| {
         var state = try opened(&.{});
         defer state.deinit();
         try answerArchived(&state, 2, some);
@@ -5785,13 +5822,16 @@ test "pinned row draws Archived quietly at its right end only while offered" {
             for (row.segments, texts) |segment, *dest| dest.* = segment.text;
             break :blk texts;
         });
-        try std.testing.expect(std.mem.startsWith(u8, text, "  + New Session"));
+        if (width >= 25) try std.testing.expect(std.mem.startsWith(u8, text, "  + New Session"));
+        if (width >= 13) try std.testing.expect(std.mem.startsWith(u8, text, "  +"));
         try std.testing.expectEqual(some, std.mem.endsWith(u8, text, "Archived "));
+        // The name never runs into the word: it is drawn whole, once.
+        try std.testing.expectEqual(@as(usize, @intFromBool(some)), std.mem.count(u8, text, "Archived"));
         try std.testing.expectEqual(some, row.archived != null);
         // The arrows choose the word alone; the row itself is not selected.
         try std.testing.expectEqual(!(some and chosen), row.selected);
         if (some) {
-            try std.testing.expectEqual(@as(u16, width - 1 - 8), row.archived.?.start);
+            try std.testing.expectEqual((width -| 1) -| 8, row.archived.?.start);
             try std.testing.expectEqual(width, row.archived.?.end);
             const style = try styleOf(row.segments, "Archived");
             try std.testing.expectEqual(if (chosen) Colour.strong else Colour.quiet, style.colour);
