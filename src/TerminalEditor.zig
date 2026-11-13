@@ -179,9 +179,6 @@ pub fn selectEvent(comptime keys: anytype, event: vaxis.vxfw.Event, pasting: boo
     return switch (event) {
         .paste_start => .text,
         .paste_end => .refused,
-        // A malformed key sequence is malformed text: the composer rejects
-        // its line.
-        .invalid_key => .text,
         .key_press => |pressed| if (pasting) .text else selectKey(keys, pressed),
         else => .none,
     };
@@ -303,12 +300,6 @@ pub fn appEvent(self: *Editor, comptime keys: anytype, event: vaxis.vxfw.Event, 
             self.reject(.invalid);
             break :blk .none;
         } else self.key(pressed, pasting),
-        // A malformed key sequence rejects the line as malformed text does;
-        // the line stays shown until Enter reports and clears it.
-        .invalid_key => blk: {
-            self.reject(.invalid);
-            break :blk .none;
-        },
         else => .none,
     };
     const Outcome = keymap.Outcome(@TypeOf(keys).Action);
@@ -524,18 +515,6 @@ test "modified kitty text cannot become an ordinary permission choice" {
             try std.testing.expectEqual(KeyOutcome.submit, stream.send(&editor, "\r"));
         }
     }
-    // A malformed key fails closed even where its damaged number would name
-    // Enter or a function key: it rejects its line, which stays shown until
-    // Enter reports it, never submitted or left standing as typed.
-    for ([_][]const u8{ "\x1b[+27;1;13~", "\x1b[1:999;1P", "\x1b[+11;1~", "\x1b[114;999u", "\x1b[13;0u" }) |malformed| {
-        errdefer std.debug.print("malformed={any}\n", .{malformed});
-        var editor: Editor = .{ .buffer = &storage };
-        var stream: Typing = .{};
-        _ = stream.send(&editor, "a");
-        try std.testing.expectEqual(KeyOutcome.none, stream.send(&editor, malformed));
-        try std.testing.expectEqualStrings("a", storage[0..editor.length]);
-        try std.testing.expectEqual(KeyOutcome{ .refused = .invalid }, stream.send(&editor, "\r"));
-    }
     for ([_]u8{ 1, 2, 65, 129 }) |modifier| {
         var sequence: [32]u8 = undefined;
         const input = try std.fmt.bufPrint(&sequence, "\x1b[97;{d};97u", .{modifier});
@@ -544,6 +523,20 @@ test "modified kitty text cannot become an ordinary permission choice" {
         _ = stream.send(&editor, input);
         try std.testing.expectEqual(KeyOutcome.submit, stream.send(&editor, "\r"));
         try std.testing.expectEqualStrings("a", storage[0..editor.length]);
+    }
+}
+
+test "unknown terminal sequences add no event and do not reject typed text" {
+    var storage: [64]u8 = undefined;
+    for ([_][]const u8{ "\x1b[1114112u", "\x1b[27;2;1114112~" }) |sequence| {
+        errdefer std.debug.print("sequence={any}\n", .{sequence});
+        var editor: Editor = .{ .buffer = &storage };
+        var stream: Typing = .{};
+        _ = stream.send(&editor, "one");
+        try std.testing.expectEqual(KeyOutcome.none, stream.send(&editor, sequence));
+        try std.testing.expectEqual(@as(?keymap.Refusal, null), editor.rejected);
+        try std.testing.expectEqual(KeyOutcome.submit, stream.send(&editor, "two\r"));
+        try std.testing.expectEqualStrings("onetwo", storage[0..editor.length]);
     }
 }
 
@@ -1058,7 +1051,7 @@ test "an unbound Alt or Meta chord never inserts its bare character" {
     // Super/Meta bits. Each is dropped, keeping the draft
     // around it, rather than adding ".".
     // Enter with Alt and another modifier is still a dropped chord.
-    for ([_][]const u8{ "\x1b.", "\x1b ", "\x1bx", "\x1b[46;3u", "\x1b[46;3;46u", "\x1b[32;3u", "\x1b[46;9u", "\x1b[46;33u", "\x1b[13;4u", "\x1b[13;4;13u", "\x1b[13:13;4u", "\x1b[13;7u", "\x1b[13;9u", "\x1b[1;3A", "\x1b\x00", "\x1b\x01", "\x1b\x12", "\x1b[28;3u", "\x1b[97;7u", "\x1b[27;3;46~", "\x1b[27;3;32~", "\x1b[27;9;46~", "\x1b[27;4;13~" }) |chord| {
+    for ([_][]const u8{ "\x1b\xff", "\x1b.", "\x1b ", "\x1bx", "\x1b[46;3u", "\x1b[46;3;46u", "\x1b[32;3u", "\x1b[46;9u", "\x1b[46;33u", "\x1b[13;4u", "\x1b[13;4;13u", "\x1b[13:13;4u", "\x1b[13;7u", "\x1b[13;9u", "\x1b[1;3A", "\x1b\x00", "\x1b\x01", "\x1b\x12", "\x1b[28;3u", "\x1b[97;7u", "\x1b[27;3;46~", "\x1b[27;3;32~", "\x1b[27;9;46~", "\x1b[27;4;13~" }) |chord| {
         var editor: Editor = .{ .buffer = &storage };
         var stream: Typing = .{};
         _ = stream.send(&editor, "o");
@@ -1076,6 +1069,19 @@ test "an unbound Alt or Meta chord never inserts its bare character" {
     try std.testing.expectEqual(KeyOutcome.submit, stream.send(&editor, "\r"));
 }
 
+test "ESC before broken UTF-8 is an ordinary Alt chord and preserves following text" {
+    var storage: [64]u8 = undefined;
+    for ([_][]const u8{ "\xff", "\xc3", "\xe2\x82" }) |broken| {
+        var editor: Editor = .{ .buffer = &storage };
+        var stream: Typing = .{};
+        var bytes: [32]u8 = undefined;
+        const input = try std.fmt.bufPrint(&bytes, "one\x1b{s}two\r", .{broken});
+        try std.testing.expectEqual(KeyOutcome.submit, stream.send(&editor, input));
+        try std.testing.expectEqualStrings("onetwo", storage[0..editor.length]);
+        try std.testing.expectEqual(@as(?keymap.Refusal, null), editor.rejected);
+    }
+}
+
 test "xterm modifyOtherKeys bindings mean what the same Kitty keys mean" {
     var storage: [64]u8 = undefined;
     // Ghostty's legacy table sends Shift-Enter as CSI 27;2;13~ unasked. It
@@ -1091,19 +1097,6 @@ test "xterm modifyOtherKeys bindings mean what the same Kitty keys mean" {
         try std.testing.expectEqualStrings("one\nXtwo", storage[0..editor.length]);
         try std.testing.expect(stream.send(&editor, "\x1b[27;5;106~") != .submit);
         try std.testing.expectEqualStrings("one\nX\ntwo", storage[0..editor.length]);
-    }
-    // A malformed form is a key the user pressed whose meaning was lost. It
-    // adds no line and drops no chord, and it fails closed: it rejects its
-    // line, which Enter reports, rather than letting the text around it
-    // stand.
-    for ([_][]const u8{ "\x1b[27;2~", "\x1b[27;;13~", "\x1b[27;2;~", "\x1b[27;2;13;1~", "\x1b[27;0;13~", "\x1b[27;17;13~", "\x1b[27;2:3;13~", "\x1b[27;2;1114112~", "\x1b[27;2;55296~", "\x1b[27;+2;13~" }) |malformed| {
-        var editor: Editor = .{ .buffer = &storage };
-        var stream: Typing = .{};
-        _ = stream.send(&editor, "ok");
-        errdefer std.debug.print("malformed={any}\n", .{malformed});
-        try std.testing.expectEqual(KeyOutcome.none, stream.send(&editor, malformed));
-        try std.testing.expectEqualStrings("ok", storage[0..editor.length]);
-        try std.testing.expectEqual(KeyOutcome{ .refused = .invalid }, stream.send(&editor, "\r"));
     }
 }
 
@@ -1157,7 +1150,7 @@ test "exact UTF-8 bound and sticky rejection after backspace" {
     try std.testing.expectEqual(@as(usize, 65535), editor.length);
 }
 
-test "unknown CSI retains following text and malformed input rejects" {
+test "unknown CSI retains following text and malformed UTF-8 still rejects" {
     var storage: [80]u8 = undefined;
     var editor: Editor = .{ .buffer = &storage };
     var stream: Typing = .{};
@@ -1168,7 +1161,8 @@ test "unknown CSI retains following text and malformed input rejects" {
     // A Kitty report of a surrogate or a codepoint past Unicode is no key.
     for ([_][]const u8{ "a\x1b[55296u\r", "a\x1b[1114112u\r" }) |input| {
         editor = .{ .buffer = &storage };
-        try std.testing.expectEqual(KeyOutcome{ .refused = .invalid }, stream.send(&editor, input));
+        try std.testing.expectEqual(KeyOutcome.submit, stream.send(&editor, input));
+        try std.testing.expectEqualStrings("a", storage[0..editor.length]);
     }
     // Alt-A remains a screen action, never the permission choice "a".
     editor = .{ .buffer = &storage };

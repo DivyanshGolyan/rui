@@ -6,20 +6,10 @@ const std = @import("std");
 const protocol = @import("protocol.zig");
 const wire_request = @import("wire_request.zig");
 
-/// Presets live in their launch frame, never in the Store. The spec's JSON
-/// strings and objects are borrowed for the Host's life, not copied per slot.
-pub const Preset = struct {
-    name: []const u8,
-    spec: std.json.ObjectMap,
-};
-pub const max_presets = 64;
-pub const max_preset_name_bytes = protocol.max_preset_name_bytes;
-
-pub fn validPresetName(name: []const u8) bool {
-    if (name.len == 0 or name.len > max_preset_name_bytes) return false;
-    for (name) |byte| if (!(byte >= 'a' and byte <= 'z') and !std.ascii.isDigit(byte) and byte != '_' and byte != '-') return false;
-    return true;
-}
+pub const Preset = @import("preset_value.zig").Preset;
+pub const max_presets = @import("preset_value.zig").max_presets;
+pub const max_preset_name_bytes = @import("preset_value.zig").max_preset_name_bytes;
+pub const validPresetName = @import("preset_value.zig").validPresetName;
 
 pub const message_agent_max_text_bytes = @import("tool_record.zig").message_agent_max_text_bytes;
 pub const message_agent_description = @import("tool_record.zig").message_agent_description;

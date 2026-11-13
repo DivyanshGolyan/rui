@@ -632,7 +632,7 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
             const open: ?[]const u8 = if (self.app_session) |shown| if (shown.frontend) |frontend| frontend.titleName() else null else null;
             if (self.title.next(open, self.state.summary.counts.needs_you)) |text| try ctx.setTitle(text);
         },
-        .key_press, .paste_start, .paste_end, .invalid_key => try appKey(self, ctx, input, .{
+        .key_press, .paste_start, .paste_end => try appKey(self, ctx, input, .{
             .under = if (self.root.input.layer.settingsOpen()) .settings else .main,
             .pasted = self.root.input.pasting,
         }),
@@ -7632,5 +7632,28 @@ test "typed model and footer picker configure the same Session owner and show Cu
             const footer = text[std.mem.lastIndexOfScalar(u8, std.mem.trimEnd(u8, text, "\n"), '\n').? + 1 ..];
             try std.testing.expect(std.mem.indexOf(u8, footer, "gpt-5.5") != null);
         }
+    }
+}
+
+// Upstream #1396 drops unknown terminal sequences rather than synthesizing an
+// invalid-key event. Overview has no draft to recover: those bytes authorize
+// nothing, and the next ordinary New Session still opens the real blank chat.
+test "unknown terminal sequences leave noinput overview available to create an empty Session" {
+    for ([_][]const u8{ "\x1b[1114112u", "\x1b[27;3;1114112~" }) |sequence| {
+        const fixture = try EmptySessionOwner.create();
+        defer fixture.destroy();
+        var bytes: [64]u8 = undefined;
+        try std.testing.expect(try fixture.rig.press(try std.fmt.bufPrint(&bytes, "one{s}two", .{sequence})) == null);
+        try std.testing.expect(!fixture.rig.overview.state.creating());
+        try std.testing.expectEqual(@as(usize, 0), fixture.rig.overview.state.request_count);
+        try std.testing.expectEqual(@as(usize, 0), Seen.now.creates);
+        try std.testing.expect(fixture.rig.overview.state.notice == null);
+        const reference = try fixture.openNew();
+        try std.testing.expectEqual(@as(usize, 1), Seen.now.creates);
+        try std.testing.expectEqualStrings("", fixture.frontend().input.composition().bytes);
+        try std.testing.expect(fixture.frontend().submission.intent == null);
+        try std.testing.expect(EmptySessionOwner.canonical(&reference).first_message == null);
+        try fixture.leave();
+        try fixture.expectVisible(&.{});
     }
 }

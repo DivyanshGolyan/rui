@@ -3512,9 +3512,20 @@ test "real SQLite full during import publishes no canonical prefix" {
         configure: {
             const entry = try store_core.enter(&storage, .none);
             defer entry.release();
-            var a: store_access.Access(.write, error{SessionUpdateFailed}) = .open(&entry);
-            defer a.deinit();
-            break :configure a.end(.{}, configuration_domain.configure(&a, storage.io, storage.served, &command, null, null, null, std.heap.c_allocator, null, .{}));
+            var reply: configuration_domain.ConfigureReply = undefined;
+            var configuring: command_domain.Configure = .{ .input = .{
+                .io = storage.io,
+                .served = storage.served,
+                .tools = storage.hostTools(),
+                .command = &command,
+                .preset = null,
+                .initial_skills = null,
+                .reload_capture = null,
+                .allocator = std.heap.c_allocator,
+                .committed = null,
+                .reply = &reply,
+            } };
+            break :configure transition.run(&entry, command_domain.Configure, &configuring, .{});
         },
     );
     try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.sqliteDatabase()));
@@ -8637,6 +8648,40 @@ test "an exhausted Attempt still retains its effort refusal for the next Operati
     try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .low), settings.reasoning_effort);
 }
 
+test "schema 72 migration opens a populated wire 15 Store and preserves its rows" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var path_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "{s}/wire-15.sqlite3", .{root});
+    const previous: u32 = 71;
+    {
+        const raw = try openRaw(path);
+        defer _ = c.sqlite3_close(raw);
+        try sqlite.exec(raw, store_testing.baseline_sqlite_ddl);
+        try sqlite.exec(raw, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
+        try sqlite.exec(raw, store_testing.baseline_rows);
+        inline for (store_schema.migrations) |step| if (step.from < previous) {
+            inline for (step.sqlite) |sql| try sqlite.exec(raw, sql);
+        };
+        const meta = try sqlite.prepare(raw, "INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version','15'),('store_selector',?1),('format','71')");
+        defer _ = c.sqlite3_finalize(meta);
+        try sqlite.bindText(meta, 1, root);
+        try sqlite.expectDone(meta);
+        try sqlite.exec(raw, std.fmt.comptimePrint("PRAGMA application_id={d};PRAGMA user_version={d}", .{ store_schema.application_id, previous }));
+    }
+    for (0..2) |_| {
+        var storage: Store = undefined;
+        try storage.open(std.testing.io, path, root);
+        defer storage.close() catch unreachable;
+        try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM store_meta WHERE meta_key='wire_version' AND meta_value=?1", .{protocol.wire_version}));
+        try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM store_meta WHERE meta_key='format' AND meta_value=?1", .{std.fmt.comptimePrint("{d}", .{store_schema.schema_version})}));
+        try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref='d8mv7p'", .{}));
+        try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM pragma_foreign_key_check", .{}));
+    }
+}
+
 test "schema 71 migration opens a populated wire 14 Store and preserves its rows" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -9616,6 +9661,40 @@ test "a child's core call selected before its parent stopped runs only after the
     try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE resolution_code='cancelled'", .{}));
 }
 
+test "a child's start_agent call selected before its parent stopped is left to the stop it owes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try store_testing.canonicalCwd(std.testing.io, &workspace_buffer);
+    const parent = try configureTestSession(&storage, "start-priority-parent");
+    var create = try store_testing.completeConfiguration("start-priority-child", "", workspace, "model-a");
+    create.configuration.tools = try .of(&.{"start_agent"});
+    const child = (try storage.configure(&create, .{})).accepted.session;
+    try store_testing.sqlite_only.exec(&storage, "UPDATE session SET parent_ref=?1 WHERE session_ref=?2", .{ parent.slice(), child.slice() });
+    try submitTestMessage(&storage, &tmp, "start-priority-task", "start-priority-task", child.slice(), "start a grandchild");
+    const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    const arguments = "{\"task\":\"read\",\"attached\":true,\"spec\":{\"model\":\"model-a\",\"effort\":null,\"compactAt\":100000,\"tools\":[],\"permissionMode\":\"ask\"}}";
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const encoded = try std.json.Stringify.valueAlloc(arena.allocator(), arguments, .{});
+    const calls = [_]TestingCall{.{ .item_id = "start-priority-item", .name = "start_agent", .encoded_call_id = "start-priority-call", .decoded_call_id = "start-priority-call", .encoded_arguments = encoded[1 .. encoded.len - 1], .decoded_arguments = arguments }};
+    try settleCallsForTesting(&storage, &tmp, model, "start-priority-metadata", &calls);
+    const selected = (try storage.nextCoreWork()).?.action;
+
+    var stop = try completeSessionStop("start-priority-stop", parent.slice());
+    try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+    const core_tools = @import("../core_tools.zig");
+    const start = try arena.allocator().create(core_tools.StartAgent);
+    try std.testing.expect(try core_tools.checkStartAgent(arena.allocator(), arguments, start) == .accepted);
+    try std.testing.expectEqual(command_domain.AgentStart.stopped, try storage.startAgent(selected.binding, child.slice(), start.task, start.attached, &start.configuration, null, .{}));
+    try std.testing.expectEqual(@as(u64, 2), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM session", .{}));
+    try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE action_id=?1 AND resolution_code IS NOT NULL", .{selected.binding.action_id}));
+}
+
 test "an owed stop a client's stop already settled, or a newer one replaced, runs nothing" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -9869,6 +9948,36 @@ test "a saved tool set whose text no longer matches its digest fences the Store"
     try std.testing.expectError(error.CorruptStore, storage.readHostToolSet(std.testing.allocator));
     try std.testing.expect(storage.isFenced());
     try std.testing.expectError(error.StoreFenced, storage.readHostToolSet(std.testing.allocator));
+}
+
+test "find_tools fences a description whose bytes no longer match its digest, searched or listed" {
+    // "fetch" matches the tool's name, so only its listing reads the
+    // description; "absent" matches nothing, so the search reads it whole.
+    for ([_][]const u8{ "fetch", "absent" }) |word| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStoreToolSet(&storage, &tmp, std.testing.io, &mcp_tool_set);
+        defer storage.close() catch unreachable;
+        var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+        var command = try completeConfiguration("find-corrupt", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
+        command.configuration.tools = try .of(&.{ "fetch_page", "find_tools" });
+        command.configuration.loaded_tools = try .of(&.{"find_tools"});
+        const session = (try storage.configure(&command, .{})).accepted.session;
+        try submitTestMessage(&storage, &tmp, "find-corrupt-input", "find-corrupt-key", session.slice(), "find tools");
+        const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        const calls = [_]TestingCall{.{ .item_id = "find", .name = "find_tools", .encoded_call_id = "find", .decoded_call_id = "find", .encoded_arguments = "{\\\"words\\\":\\\"fetch\\\"}", .decoded_arguments = "{\"words\":\"fetch\"}" }};
+        try settleCallsForTesting(&storage, &tmp, model, "find-corrupt", &calls);
+        const input = (try storage.nextCoreWork()).?.action;
+        try std.testing.expect(input.tool == .find_tools);
+        try sqlite.exec(storage.sqliteDatabase(), "UPDATE content SET payload=CAST(upper(CAST(payload AS TEXT)) AS BLOB) WHERE content_id=(SELECT description_content_id FROM tool_record WHERE owner='mcp')");
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        var words: @import("../find_tools_words.zig").FindTools = .{ .count = 1 };
+        words.words[0] = word;
+        try std.testing.expectError(error.CorruptStore, storage.findTools(input.binding, arena.allocator(), &words, null, .{}));
+        try std.testing.expect(storage.isFenced());
+    }
 }
 
 test "a Session offering an MCP server's tool is listed, reported and settled" {

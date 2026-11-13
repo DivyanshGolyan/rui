@@ -1446,15 +1446,16 @@ fn ending(sink: anytype, end: Ending, colour: bool) !void {
     try sink.feed("\n");
 }
 
-fn workEnded(sink: anytype, code: []const u8, colour: bool) !void {
-    const cause = marks.cause(code);
+/// `provider` is the Session's, which picks where a quota refusal sends the person.
+fn workEnded(sink: anytype, code: []const u8, provider: ?protocol.Provider, colour: bool) !void {
+    const cause = marks.cause(code, provider);
     try ending(sink, .{ .mark = if (failure_class.of(code) == .interrupted) .stopped else .failed, .words = cause.words, .place = cause.place }, colour);
 }
 
 /// A descendant's outcome names that agent, never a saved code or report.
 fn agentEnded(sink: anytype, agent: []const u8, code: []const u8, colour: bool) !void {
     const stopped = failure_class.of(code) == .interrupted;
-    try ending(sink, .{ .mark = if (stopped) .stopped else .failed, .words = if (stopped) "stopped" else marks.cause(code).words, .agent = agent }, colour);
+    try ending(sink, .{ .mark = if (stopped) .stopped else .failed, .words = if (stopped) "stopped" else marks.cause(code, null).words, .agent = agent }, colour);
 }
 
 test "a descendant's ending names the agent without codes or advice" {
@@ -1473,7 +1474,7 @@ test "a descendant's ending names the agent without codes or advice" {
     try std.testing.expectEqualStrings("× Agent 9f8e7d · Sign-in expired\n■ Agent 9f8e7d stopped\n× Agent bad\\x1b[2J · Model reply unreadable\n", out.buffered());
 }
 
-test "an ended Turn shows one plain cause line for every failure class" {
+test "an ended Turn shows one plain cause line for every failure class, and its provider's usage place for quota" {
     const Sink = struct {
         out: *std.Io.Writer,
         pub fn feed(self: *@This(), bytes: []const u8) !void {
@@ -1481,19 +1482,25 @@ test "an ended Turn shows one plain cause line for every failure class" {
         }
     };
     const cases = .{
-        .{ "provider_policy", "× Refused by the provider" },
-        .{ "provider_quota", "× Out of quota · Settings" },
-        .{ "provider_plan", "× Model not in plan · Settings" },
-        .{ "provider_model_unavailable", "× Model not served" },
-        .{ "provider_http_401", "× Sign-in expired · Settings" },
-        .{ "provider_api_key_rejected", "× API key rejected · Settings" },
-        .{ "ResourceExceeded", "× Context full" },
-        .{ "provider_tls_verification_failed", "× Provider unreachable" },
-        .{ "retry_exhausted", "× Retries ran out" },
-        .{ "cancelled", "■ Stopped" },
-        .{ "provider_http_400", "× Provider refused the request" },
-        .{ "unknown\x1b[2J", "× Something went wrong" },
-        .{ "malformed_provider_output", "× Model reply unreadable" },
+        // The Session's provider, when known, picks only a quota refusal's place.
+        .{ "provider_policy", null, "× Refused by the provider" },
+        .{ "provider_quota", null, "× Out of quota · Settings" },
+        .{ "provider_quota", .codex, "× Out of quota · Settings" },
+        .{ "provider_quota", .openai, "× Out of quota · Settings" },
+        .{ "provider_quota", .chatgpt, "× Out of quota · Manage usage: https://chatgpt.com/settings/usage" },
+        .{ "provider_plan", null, "× Model not in plan · Settings" },
+        .{ "provider_plan", .chatgpt, "× Model not in plan · Settings" },
+        .{ "provider_model_unavailable", null, "× Model not served" },
+        .{ "provider_http_401", null, "× Sign-in expired · Settings" },
+        .{ "provider_http_401", .chatgpt, "× Sign-in expired · Settings" },
+        .{ "provider_api_key_rejected", null, "× API key rejected · Settings" },
+        .{ "ResourceExceeded", null, "× Context full" },
+        .{ "provider_tls_verification_failed", null, "× Provider unreachable" },
+        .{ "retry_exhausted", null, "× Retries ran out" },
+        .{ "cancelled", null, "■ Stopped" },
+        .{ "provider_http_400", null, "× Provider refused the request" },
+        .{ "unknown\x1b[2J", null, "× Something went wrong" },
+        .{ "malformed_provider_output", null, "× Model reply unreadable" },
     };
     var seen: std.enums.EnumSet(failure_class.Class) = .empty;
     inline for (cases) |case| {
@@ -1501,8 +1508,8 @@ test "an ended Turn shows one plain cause line for every failure class" {
         var buffer: [512]u8 = undefined;
         var out = std.Io.Writer.fixed(&buffer);
         var sink: Sink = .{ .out = &out };
-        try workEnded(&sink, case[0], false);
-        try std.testing.expectEqualStrings(case[1] ++ "\n", out.buffered());
+        try workEnded(&sink, case[0], case[1], false);
+        try std.testing.expectEqualStrings(case[2] ++ "\n", out.buffered());
     }
     try std.testing.expect(seen.eql(.full));
 }
@@ -1517,8 +1524,8 @@ test "turn and agent ending marks use their table tones" {
     var buffer: [512]u8 = undefined;
     var out = std.Io.Writer.fixed(&buffer);
     var sink: Sink = .{ .out = &out };
-    try workEnded(&sink, "malformed_provider_output", true);
-    try workEnded(&sink, "cancelled", true);
+    try workEnded(&sink, "malformed_provider_output", null, true);
+    try workEnded(&sink, "cancelled", null, true);
     try agentEnded(&sink, "9f8e7d", "malformed_provider_output", true);
     try agentEnded(&sink, "9f8e7d", "cancelled", true);
     try std.testing.expectEqualStrings("\x1b[91m×\x1b[39m Model reply unreadable\n" ++
@@ -1537,7 +1544,7 @@ test "ending tails are quiet and joined in destination then key order" {
     var buffer: [256]u8 = undefined;
     var out = std.Io.Writer.fixed(&buffer);
     var sink: Sink = .{ .out = &out };
-    try workEnded(&sink, "provider_http_401", true);
+    try workEnded(&sink, "provider_http_401", null, true);
     try std.testing.expectEqualStrings("\x1b[91m×\x1b[39m Sign-in expired\x1b[90m · Settings\x1b[39m\n", out.buffered());
     out.end = 0;
     try ending(&sink, .{ .mark = .failed, .words = "Cause", .place = "Place", .key = "Key" }, false);
@@ -1602,8 +1609,9 @@ pub fn gap(above: bool, below: bool) bool {
 /// and its neighbours: never a leading or trailing blank line between rows
 /// (see `tight`). Returns whether its output is provisional and must be
 /// replaced when the current page's queue/work facts change. Settled rows
-/// use only Store content.
-pub fn render(requests: client.Requests, store: []const u8, session: []const u8, item: protocol.ActivityItem, queued: protocol.Queued, held: bool, sink: anytype, colour: bool, home: []const u8, destination: Destination, fold: Fold) !bool {
+/// use only Store content, and `provider`, the Session's own, which never
+/// changes.
+pub fn render(requests: client.Requests, store: []const u8, session: []const u8, provider: ?protocol.Provider, item: protocol.ActivityItem, queued: protocol.Queued, held: bool, sink: anytype, colour: bool, home: []const u8, destination: Destination, fold: Fold) !bool {
     switch (item.value) {
         .admission => |value| {
             if (!showsAtAdmission(item.position, value, queued, held)) return false;
@@ -1658,7 +1666,7 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
             // The report is deliberately not read: the shared cause owns the words.
             if (!std.mem.eql(u8, ended.session.slice(), session)) {
                 try agentEnded(sink, ended.session.slice(), ended.code.slice(), colour);
-            } else try workEnded(sink, ended.code.slice(), colour);
+            } else try workEnded(sink, ended.code.slice(), provider, colour);
         },
         .stop => |stop| {
             const excluded = try excludedAtStop(requests, store, session, item, sink, colour);

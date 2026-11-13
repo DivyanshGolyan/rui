@@ -10,10 +10,14 @@
 //! id the issuer gives it, and the policy reads such a record's account from
 //! its ID token's `sub`, since these tokens carry no ChatGPT account claim. The issuer is the one Codex login uses, so its
 //! token fields and refresh rejections are read by `codex_token_wire.zig`.
+//!
+//! Also reads the plan's model list, the IDs a person signed in this way can
+//! pick, under `model_list.zig`'s bounds.
 const std = @import("std");
 const policy = @import("codex_credential_policy.zig");
 const codex = @import("codex_token_wire.zig");
 const json_scalar = @import("json_scalar.zig");
+const model_list = @import("model_list.zig");
 
 pub const Request = codex.Request;
 pub const issuer = codex.issuer;
@@ -29,7 +33,7 @@ pub const resource = "https://api.openai.com/v1";
 pub const max_code_bytes = 2048;
 pub const max_refusal_bytes = 128;
 
-const authorize_url = issuer ++ "/api/accounts/authorize";
+pub const authorize_url = issuer ++ "/api/accounts/authorize";
 const token_url = issuer ++ "/api/accounts/oauth/token";
 const revoke_url = issuer ++ "/api/accounts/oauth/revoke";
 /// Only the port of the redirect address may vary.
@@ -55,8 +59,11 @@ pub const Attempt = struct {
 
 /// Starts one attempt from `random` and returns the address the user opens,
 /// written into `buffer`. `saved` is the record of an earlier sign-in, if
-/// any: its issued client id and ID token make this a returning sign-in. On
-/// error `attempt` is zeroed.
+/// any, signed in or out: its issued client id makes this a returning
+/// sign-in, which names no agent. The address is printed for the user to
+/// open, so it never carries a token: it sends no `id_token_hint`, which the
+/// issuer takes as optional, and the user picks the account. On error
+/// `attempt` is zeroed.
 pub fn authorize(random: *const [random_bytes]u8, port: u16, host_id: []const u8, saved: ?*const policy.Record, attempt: *Attempt, buffer: []u8) ![]const u8 {
     std.debug.assert(port != 0);
     try validateHostId(host_id);
@@ -84,7 +91,6 @@ fn writeAuthorize(writer: *std.Io.Writer, attempt: *const Attempt, host_id: []co
     try writer.writeAll(authorize_url);
     if (saved) |record| {
         try param(writer, "?client_id=", record.client_id.slice());
-        try param(writer, "&id_token_hint=", record.id_token.slice());
     } else {
         try param(writer, "?client_id=", first_client_id);
         try param(writer, "&agent_name_hint=", agent_name);
@@ -172,10 +178,44 @@ pub fn parseCallback(attempt: *const Attempt, received: []const u8, destination:
     grant.code.len = (try decode(code, &grant.code.bytes, error.InvalidCallback)).len;
     if (query.client_id) |client_id| {
         grant.client_id.len = (try decode(client_id, &grant.client_id.bytes, error.InvalidCallback)).len;
+        // A returning sign-in keeps the client it named; the issuer's guide
+        // rejects an answer for another.
+        if (attempt.saved_client_id) |saved| if (!std.mem.eql(u8, saved.slice(), grant.client_id.slice()))
+            return error.ClientIdMismatch;
     } else {
         const saved = attempt.saved_client_id orelse return error.MissingClientId;
         try grant.client_id.set(saved.slice());
     }
+}
+
+/// The request target of the HTTP request a loopback listener has read so
+/// far: null until its request line is complete. Only a `GET` can be the
+/// callback; any other request is not one.
+pub fn requestTarget(received: []const u8) !?[]const u8 {
+    const end = std.mem.indexOf(u8, received, "\r\n") orelse {
+        if (received.len >= max_request_line_bytes) return error.NotCallbackAddress;
+        return null;
+    };
+    var words = std.mem.splitScalar(u8, received[0..end], ' ');
+    const method = words.next().?;
+    const target = words.next() orelse return error.NotCallbackAddress;
+    const version = words.next() orelse return error.NotCallbackAddress;
+    if (!std.mem.eql(u8, method, "GET") or words.next() != null or !std.mem.startsWith(u8, version, "HTTP/1.") or target.len == 0)
+        return error.NotCallbackAddress;
+    return target;
+}
+
+/// The most of a request the listener reads before its request line must
+/// have ended: a callback's code, state, scope and client id fit well inside.
+pub const max_request_line_bytes = 8 * 1024;
+
+/// The listener's answers to the browser, each one plain line.
+pub const page_signed_in = page("200 OK", "Signed in. You can close this tab.\n");
+pub const page_failed = page("400 Bad Request", "Sign-in did not finish. See the terminal.\n");
+pub const page_not_found = page("404 Not Found", "Not found.\n");
+
+fn page(comptime status: []const u8, comptime body: []const u8) []const u8 {
+    return std.fmt.comptimePrint("HTTP/1.1 {s}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {d}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n{s}", .{ status, body.len, body });
 }
 
 /// The callback parameters this flow reads, each borrowing the received text.
@@ -344,6 +384,19 @@ pub fn revokeRequest(current: *const policy.Record, buffer: []u8) !Request {
     return .{ .url = revoke_url, .content_type = codex.form_content, .body = writer.buffered() };
 }
 
+/// What a revocation's answer means. A 200 is success, even for a token
+/// already invalid; a server failure may be retried while the refresh token
+/// is still held; any other answer is a refusal.
+pub const Revocation = enum { revoked, retry, refused };
+
+pub fn revocation(status: u16) Revocation {
+    return switch (status) {
+        200 => .revoked,
+        429, 500...599 => .retry,
+        else => .refused,
+    };
+}
+
 fn writeRevoke(writer: *std.Io.Writer, current: *const policy.Record) !void {
     try param(writer, "token=", current.refresh_token.slice());
     try param(writer, "&token_type_hint=", "refresh_token");
@@ -373,6 +426,55 @@ pub fn validateHostId(text: []const u8) !void {
         else => if (!std.ascii.isDigit(byte) and !(byte >= 'a' and byte <= 'f')) return error.InvalidHostId,
     };
     if (uuid[14] != '4' or std.mem.indexOfScalar(u8, "89ab", uuid[19]) == null) return error.InvalidHostId;
+}
+
+/// The model IDs a plan's list (`{"models":[{"slug":...,"visibility":...},...]}`)
+/// offers for picking, in the server's order, written to `out` under
+/// `model_list`'s bounds. Only an entry whose `visibility` is `"list"` is
+/// offered; every entry names its `slug`. `scratch` holds the parse and is
+/// freed by the caller.
+pub fn parseModels(scratch: std.mem.Allocator, body: []const u8, out: *model_list.IdBuffer) !model_list.Ids {
+    // A token walk, as `model_list.parseOpenAi`'s: other members are skipped
+    // unread, so no number is ever converted.
+    var scanner: std.json.Scanner = .initCompleteInput(scratch, body);
+    var kept: model_list.Kept = .{ .out = out };
+    var models_seen = false;
+    if (try model_list.nextToken(&scanner, scratch) != .object_begin) return error.InvalidModelList;
+    while (try model_list.objectKey(&scanner, scratch)) |key| {
+        if (!std.mem.eql(u8, key, "models")) {
+            scanner.skipValue() catch return error.InvalidModelList;
+            continue;
+        }
+        models_seen = true;
+        if (try model_list.nextToken(&scanner, scratch) != .array_begin) return error.InvalidModelList;
+        while (true) {
+            switch (try model_list.nextToken(&scanner, scratch)) {
+                .array_end => break,
+                .object_begin => {},
+                else => return error.InvalidModelList,
+            }
+            var slug: ?[]const u8 = null;
+            var listed = false;
+            while (try model_list.objectKey(&scanner, scratch)) |member| {
+                const field: enum { slug, visibility } = if (std.mem.eql(u8, member, "slug")) .slug else if (std.mem.eql(u8, member, "visibility")) .visibility else {
+                    scanner.skipValue() catch return error.InvalidModelList;
+                    continue;
+                };
+                const text = switch (try model_list.nextToken(&scanner, scratch)) {
+                    .string, .allocated_string => |text| text,
+                    else => return error.InvalidModelList,
+                };
+                switch (field) {
+                    .slug => slug = text,
+                    .visibility => listed = std.mem.eql(u8, text, "list"),
+                }
+            }
+            const entry = slug orelse return error.InvalidModelList;
+            if (listed) try kept.keep(entry);
+        }
+    }
+    if (!models_seen or try model_list.nextToken(&scanner, scratch) != .end_of_document) return error.InvalidModelList;
+    return kept.ids();
 }
 
 const test_host_id = "urn:uuid:00010203-0405-4607-8809-0a0b0c0d0e0f";
@@ -455,11 +557,15 @@ test "the authorization address names the first or the saved client" {
 
     var saved: policy.Record = undefined;
     try testSavedRecord(&saved);
-    try std.testing.expectEqualStrings(
-        "https://auth.openai.com/api/accounts/authorize?client_id=" ++ test_client_id ++ "&id_token_hint=" ++ refreshed_id_token ++ tail,
-        try authorize(&testRandom(), 1455, test_host_id, &saved, &attempt, &url),
-    );
+    // A returning sign-in names its issued client, no agent and no token,
+    // whether its record is signed in or out.
+    const returning = "https://auth.openai.com/api/accounts/authorize?client_id=" ++ test_client_id ++ tail;
+    try std.testing.expectEqualStrings(returning, try authorize(&testRandom(), 1455, test_host_id, &saved, &attempt, &url));
     try std.testing.expectEqualStrings(test_client_id, attempt.saved_client_id.?.slice());
+    try std.testing.expect(std.mem.indexOf(u8, returning, "e30.") == null);
+    var signed_out = saved;
+    try policy.signOut(&signed_out);
+    try std.testing.expectEqualStrings(returning, try authorize(&testRandom(), 1455, test_host_id, &signed_out, &attempt, &url));
     // Only the port varies in the redirect address.
     try std.testing.expect(std.mem.indexOf(u8, try authorize(&testRandom(), 50001, test_host_id, null, &attempt, &url), "127.0.0.1%3A50001%2Fauth%2Fcallback&") != null);
 
@@ -495,8 +601,11 @@ test "a callback yields the code and issued client id from a listener or a paste
     try testAttempt(&saved, &returning);
     try parseCallback(&returning, "/auth/callback?code=c&state=" ++ zero_state, &callback);
     try std.testing.expectEqualStrings(test_client_id, callback.granted.client_id.slice());
-    try parseCallback(&returning, "/auth/callback?code=c&state=" ++ zero_state ++ "&client_id=oaiapp_new", &callback);
-    try std.testing.expectEqualStrings("oaiapp_new", callback.granted.client_id.slice());
+    try parseCallback(&returning, "/auth/callback?code=c&state=" ++ zero_state ++ "&client_id=" ++ test_client_id, &callback);
+    try std.testing.expectEqualStrings(test_client_id, callback.granted.client_id.slice());
+    // An answer for another client is not this sign-in's.
+    try std.testing.expectError(error.ClientIdMismatch, parseCallback(&returning, "/auth/callback?code=c&state=" ++ zero_state ++ "&client_id=oaiapp_new", &callback));
+    try std.testing.expect(std.mem.allEqual(u8, std.mem.asBytes(&callback), 0));
     // The issuer's refusal carries its code.
     try parseCallback(&attempt, "/auth/callback?error=access_denied&error_description=No+thanks&state=" ++ zero_state, &callback);
     try std.testing.expectEqualStrings("access_denied", callback.refused.slice());
@@ -737,6 +846,45 @@ test "sign-in and refresh accept a granted scope only with the plan scope" {
     }
 }
 
+test "the listener reads a GET's target once its request line ends" {
+    try std.testing.expectEqualStrings("/auth/callback?code=c", (try requestTarget("GET /auth/callback?code=c HTTP/1.1\r\nHost: 127.0.0.1\r\n")).?);
+    try std.testing.expectEqualStrings("/favicon.ico", (try requestTarget("GET /favicon.ico HTTP/1.0\r\n")).?);
+    // Not yet a whole line: wait for more.
+    for ([_][]const u8{ "", "GET /auth/callback?code=c HTTP/1.1", "GET /auth/callback?code=c HTTP/1.1\r" }) |partial|
+        try std.testing.expectEqual(@as(?[]const u8, null), try requestTarget(partial));
+    for ([_][]const u8{
+        "POST /auth/callback HTTP/1.1\r\n",
+        "GET /auth/callback\r\n",
+        "GET  HTTP/1.1\r\n",
+        "GET /a b HTTP/1.1\r\n",
+        "GET /auth/callback HTTP/2\r\n",
+        "\r\n",
+    }) |refused| try std.testing.expectError(error.NotCallbackAddress, requestTarget(refused));
+    // A request line that never ends within the bound is not a callback.
+    const endless: [max_request_line_bytes]u8 = @splat('a');
+    try std.testing.expectEqual(@as(?[]const u8, null), try requestTarget(endless[0 .. endless.len - 1]));
+    try std.testing.expectError(error.NotCallbackAddress, requestTarget(&endless));
+}
+
+test "a revocation is confirmed only by a 200, and retried only after a server failure" {
+    var status: u16 = 100;
+    while (status < 600) : (status += 1) {
+        const expected: Revocation = if (status == 200) .revoked else if (status == 429 or status >= 500) .retry else .refused;
+        try std.testing.expectEqual(expected, revocation(status));
+    }
+}
+
+test "the listener's pages are one plain line each" {
+    for ([_][]const u8{ page_signed_in, page_failed, page_not_found }) |answer| {
+        const head_end = std.mem.indexOf(u8, answer, "\r\n\r\n").? + 4;
+        const body = answer[head_end..];
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, body, "\n"));
+        try std.testing.expect(std.mem.endsWith(u8, body, "\n"));
+        var length: [32]u8 = undefined;
+        try std.testing.expect(std.mem.indexOf(u8, answer[0..head_end], try std.fmt.bufPrint(&length, "Content-Length: {d}\r\n", .{body.len})) != null);
+    }
+}
+
 test "a host id is a lowercase version 4 UUID URN" {
     var random: [16]u8 = undefined;
     for (&random, 0..) |*byte, index| byte.* = @intCast(index);
@@ -756,4 +904,64 @@ test "a host id is a lowercase version 4 UUID URN" {
         "urn:uuid:0001020g-0405-4607-8809-0a0b0c0d0e0f",
         "URN:UUID:00010203-0405-4607-8809-0a0b0c0d0e0f",
     }) |text| try std.testing.expectError(error.InvalidHostId, validateHostId(text));
+}
+
+test "a plan's model list offers listed slugs in the server's order and skips other members unread" {
+    var out: model_list.IdBuffer = undefined;
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // Shaped like the server's: nested objects and arrays, numbers and
+    // fields in any order.
+    const body =
+        \\{"models":[
+        \\{"slug":"gpt-6-sol","display_name":"Sol","visibility":"list","context_window":400000,"supported_reasoning_levels":[{"effort":"low"},{"effort":"high"}],"auto_compact_token_limit":1.5e5},
+        \\{"visibility":"hide","slug":"gpt-6-hidden"},
+        \\{"slug":"gpt-6-quiet"},
+        \\{"visibility":"list","slug":"gpt-5.5","extra":{"slug":"nested-not-kept","visibility":"list","models":[]}},
+        \\{"slug":"has space","visibility":"list"},
+        \\{"slug":"a\/b","visibility":"list"},
+        \\{"slug":"gpt-6-luna","visibility":"LIST"}
+        \\],"etag":"made-up"}
+    ;
+    try std.testing.expectEqualStrings("gpt-6-sol\ngpt-5.5\na/b\n", (try parseModels(a, body, &out)).bytes);
+    try std.testing.expectEqualStrings("", (try parseModels(a, "{\"models\":[]}", &out)).bytes);
+    for ([_][]const u8{
+        // The OpenAI API's shape is not a plan's.
+        "{\"object\":\"list\",\"data\":[{\"id\":\"gpt-6-sol\"}]}",
+        "{\"models\":[{\"slug\":7,\"visibility\":\"list\"}]}",
+        "{\"models\":[{\"slug\":null,\"visibility\":\"list\"}]}",
+        "{\"models\":[{\"slug\":\"gpt-6-sol\",\"visibility\":true}]}",
+        "{\"models\":[{\"visibility\":\"list\"}]}",
+        "{\"models\":[\"gpt-6-sol\"]}",
+        "{\"models\":{}}",
+        "{\"models\":[]} {}",
+        "{\"models\":[]}x",
+        "[]",
+        "<html>",
+        "",
+    }) |refused| try std.testing.expectError(error.InvalidModelList, parseModels(a, refused, &out));
+}
+
+test "a plan's model list past either bound is refused, not cut" {
+    var out: model_list.IdBuffer = undefined;
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var body: std.Io.Writer.Allocating = .init(arena.allocator());
+    try body.writer.writeAll("{\"models\":[");
+    for (0..model_list.max_live_models) |index| try body.writer.print("{s}{{\"slug\":\"m{d}\",\"visibility\":\"list\"}}", .{ if (index == 0) "" else ",", index });
+    // Hidden entries do not count toward the bound.
+    try body.writer.writeAll(",{\"slug\":\"hidden\",\"visibility\":\"hide\"}]}");
+    try std.testing.expectEqual(@as(usize, model_list.max_live_models), std.mem.count(u8, (try parseModels(arena.allocator(), body.written(), &out)).bytes, "\n"));
+    const one_more = try std.mem.concat(arena.allocator(), u8, &.{ body.written()[0 .. body.written().len - 2], ",{\"slug\":\"x\",\"visibility\":\"list\"}]}" });
+    try std.testing.expectError(error.ModelListTooLarge, parseModels(arena.allocator(), one_more, &out));
+
+    // Exactly the byte bound fits: 64 IDs of 256 bytes are 16 KiB.
+    body.clearRetainingCapacity();
+    try body.writer.writeAll("{\"models\":[");
+    for (0..64) |index| try body.writer.print("{s}{{\"visibility\":\"list\",\"slug\":\"{d:0>256}\"}}", .{ if (index == 0) "" else ",", index });
+    try body.writer.writeAll("]}");
+    try std.testing.expectEqual(@as(usize, 64 * 257), (try parseModels(arena.allocator(), body.written(), &out)).bytes.len);
+    const more = try std.mem.concat(arena.allocator(), u8, &.{ body.written()[0 .. body.written().len - 2], ",{\"slug\":\"x\",\"visibility\":\"list\"}]}" });
+    try std.testing.expectError(error.ModelListTooLarge, parseModels(arena.allocator(), more, &out));
 }

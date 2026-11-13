@@ -30,7 +30,6 @@ pub const Events = struct {
                 .key_release => |key| .{ .key_release = key },
                 .paste_start => .paste_start,
                 .paste_end => .paste_end,
-                .invalid_key => .invalid_key,
                 .focus_in => .focus_in,
                 .focus_out => .focus_out,
                 else => continue,

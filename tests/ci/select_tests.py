@@ -36,6 +36,7 @@ STACK_FRAMES_GATE = "tests/ci/stack_frames.json"
 # build.zig's named modules that are repository files. Every other named
 # import must be a package or generated module, or the graph refuses it.
 MODULES = {
+    "url": "src/url.zig",
     "test_poll": "src/testing/poll.zig", "h2": "src/h2/h2.zig", "tls_client": "src/tls_client/tls_client.zig", "rui_client": CALLER, "client": CALLER,
     "mysql_connection": "src/store/wire/mysql_connection.zig", "preferences": "src/preferences.zig",
     "codex_credentials": "src/codex_credentials.zig", "AnswerRenderer": "src/AnswerRenderer.zig",
@@ -91,6 +92,9 @@ FIXTURES = {
     "codex-h2-integration": ((I + "codex_h2_integration.py",), (), ("src/providers.zig", *CREDENTIALS)),
     "chatgpt-plan-integration": ((I + "chatgpt_plan_integration.py",), (),
                                  ("src/providers.zig", "src/codex_auth.zig", "src/chatgpt_plan_wire.zig", *CREDENTIALS)),
+    "chatgpt-login-integration": ((I + "chatgpt_login_integration.py",), (),
+                                  ("src/chatgpt_plan_login.zig", "src/chatgpt_plan_wire.zig", "src/codex_auth.zig",
+                                   "src/codex_credentials.zig", *CREDENTIALS)),
     "transport-h2-integration": ((I + "transport_h2_integration.py", I + "transport_h2_integration_test.py"), (),
                                  ("src/providers.zig", "src/model_adapter.zig", *MODEL)),
     "login-signal-integration": ((I + "login_signal_integration.py",), (), ()),

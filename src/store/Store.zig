@@ -259,16 +259,12 @@ pub const Store = struct {
     }
 
     fn saveModelFactsHeld(self: *Store, entries: []const model_catalog.Entry, etag: ?[]const u8) !void {
-        const entry = try enter(self, .none);
-        defer {
-            // Access has reset its statements and committed or rolled back.
-            // Keep the maintenance hint inside this serialized queue entry.
-            if (self.batch == .none) self.engine.releaseUnusedMemory(model_facts_domain.save_statements) else self.release_bulk_memory = true;
-            entry.release();
-        }
-        var access: Access(.write, error{}) = .open(&entry);
-        defer access.deinit();
-        return entry.finishTransaction(Ordinary.none, .{}, access.end(.{}, model_facts_domain.save(&access, entries, etag)));
+        // The runner has reset its statements and committed or rolled back.
+        // Keep the maintenance hint inside this serialized queue entry.
+        defer if (self.batch == .none) self.engine.releaseUnusedMemory(model_facts_domain.save_statements) else {
+            self.release_bulk_memory = true;
+        };
+        return transition.apply(self, model_facts_domain.Save, .{ .entries = entries, .etag = etag }, .{});
     }
 
     /// The selected generation for one operation. Saved entries/IDs belong to
@@ -391,11 +387,7 @@ pub const Store = struct {
     /// id, or null when none holds `offered`; below the record count, the
     /// records from `start`; at it, the set, whose id it returns.
     fn saveHostToolSetHeld(self: *Store, offered: *const tool_record.HostToolSet, digest: *const [32]u8, start: ?usize) !?u64 {
-        const entry = try enter(self, .none);
-        defer entry.release();
-        var access: Access(.write, error{}) = .open(&entry);
-        defer access.deinit();
-        return entry.finishTransaction(Ordinary.none, .{}, access.end(.{}, saveHostToolSetStep(&access, offered, digest, start)));
+        return transition.apply(self, tool_set_domain.SaveHostToolSet, .{ .offered = offered, .digest = digest, .start = start }, .{});
     }
 
     /// The Host tool set the last `saveHostToolSet` saved, read back with every
@@ -700,15 +692,21 @@ pub const Store = struct {
         committed: ?CreationCommitted,
         faults: Faults,
     ) error{OutOfMemory}!ConfigureReply {
-        const entry = enter(self, .none) catch return .infrastructure_failure;
-        defer entry.release();
-        var access: Access(.write, error{SessionUpdateFailed}) = .open(&entry);
-        defer access.deinit();
-        // Running out of memory, the caller's for a reload or the engine's,
-        // rolls the write back cleanly and is the caller's to answer.
-        var reply = entry.finishTransaction(error{OutOfMemory}, faults, access.end(faults, configuration_domain.configure(&access, self.io, self.served, command, preset, initial_skills, reload_capture, allocator, committed, faults))) catch |err| switch (err) {
+        var reply: ConfigureReply = undefined;
+        transition.apply(self, command_domain.Configure, .{
+            .io = self.io,
+            .served = self.served,
+            .tools = self.hostTools(),
+            .command = command,
+            .preset = preset,
+            .initial_skills = initial_skills,
+            .reload_capture = reload_capture,
+            .allocator = allocator,
+            .committed = committed,
+            .reply = &reply,
+        }, faults) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            else => .infrastructure_failure,
+            else => reply = .infrastructure_failure,
         };
         if (reply == .rejected)
             reply.rejected.message = configuration_domain.missingToolMessage(self.hostTools().host_tool_set, reply.rejected.code, &command.configuration.tools);
@@ -761,11 +759,20 @@ pub const Store = struct {
         captured_skill: ?*const skills_domain.MessageCapture,
         faults: Faults,
     ) MessageReply {
-        const entry = enter(self, .none) catch return .infrastructure_failure;
-        defer entry.release();
-        var access: Access(.write, error{SessionUpdateFailed}) = .open(&entry);
-        defer access.deinit();
-        var reply = entry.finishTransaction(Ordinary.none, faults, access.end(faults, command_domain.submitMessage(&access, self.io, self.served, self.selector.slice(), command, committed, initial_skills, captured_skill, faults))) catch .infrastructure_failure;
+        var reply: MessageReply = undefined;
+        transition.apply(self, command_domain.SubmitMessage, .{
+            .io = self.io,
+            .served = self.served,
+            .tools = self.hostTools(),
+            .selector = self.selector.slice(),
+            .command = command,
+            .committed = committed,
+            .initial_skills = initial_skills,
+            .captured = captured_skill,
+            .reply = &reply,
+        }, faults) catch {
+            reply = .infrastructure_failure;
+        };
         if (reply == .rejected) {
             if (command.configuration) |*configuration|
                 reply.rejected.message = configuration_domain.missingToolMessage(self.hostTools().host_tool_set, reply.rejected.code, &configuration.tools);
@@ -1283,11 +1290,7 @@ pub const Store = struct {
     }
 
     fn deliverSessionForwardHeld(self: *Store, forward_id: u64, faults: Faults) !bool {
-        const entry = try enter(self, .none);
-        defer entry.release();
-        var access: Access(.write, error{}) = .open(&entry);
-        defer access.deinit();
-        return entry.finishTransaction(Ordinary.none, faults, access.end(faults, forward_domain.deliver(&access, forward_id, faults)));
+        return transition.apply(self, forward_domain.Deliver, .{ .forward_id = forward_id }, faults);
     }
 
     /// Owed stops, ending Messages and ancestor feed hops precede calls.
@@ -1357,11 +1360,22 @@ pub const Store = struct {
     }
 
     fn startAgentHeld(self: *Store, binding: ActionAttemptBinding, caller: []const u8, task: []const u8, attached: bool, configuration: *content_custody.Configuration, committed: ?MessageCommitted, initial_skills: ?*const skills_domain.Initial, captured: ?*const skills_domain.MessageCapture, faults: Faults) !AgentStart {
-        const entry = try enter(self, .none);
-        defer entry.release();
-        var access: Access(.write, Ordinary.agent_start) = .open(&entry);
-        defer access.deinit();
-        return entry.finishTransaction(Ordinary.agent_start, faults, access.end(faults, command_domain.startAgent(&access, self.io, binding, caller, task, attached, configuration, committed, initial_skills, captured, faults)));
+        // The call's result text, which its content write reads in place.
+        var result_buffer: [tool_record.HostToolSet.max_refusal_message_bytes]u8 = undefined;
+        return transition.apply(self, command_domain.StartAgent, .{
+            .io = self.io,
+            .served = self.served,
+            .tools = self.hostTools(),
+            .binding = binding,
+            .caller = caller,
+            .task = task,
+            .attached = attached,
+            .configuration = configuration,
+            .committed = committed,
+            .initial_skills = initial_skills,
+            .captured = captured,
+            .result_buffer = &result_buffer,
+        }, faults);
     }
 
     /// Loads matching saved tools and resolves the call in one transaction.
@@ -1370,11 +1384,7 @@ pub const Store = struct {
     }
 
     fn findToolsHeld(self: *Store, binding: ActionAttemptBinding, arena: std.mem.Allocator, words: *const @import("../find_tools_words.zig").FindTools, refusal: ?[]const u8, faults: Faults) !bool {
-        const entry = try enter(self, .none);
-        defer entry.release();
-        var access: Access(.write, Ordinary.action_attempt) = .open(&entry);
-        defer access.deinit();
-        return entry.finishTransaction(Ordinary.action_attempt, faults, access.end(faults, @import("domain/find_tools.zig").run(&access, binding, arena, words, refusal, faults)));
+        return transition.apply(self, @import("domain/find_tools.zig").FindTools, .{ .binding = binding, .arena = arena, .words = words, .refusal = refusal }, faults);
     }
 
     pub fn settleSkillTool(self: *Store, binding: ActionAttemptBinding, allocator: std.mem.Allocator, captured: *const skills_domain.Capture, faults: Faults) !bool {
@@ -1382,13 +1392,7 @@ pub const Store = struct {
     }
 
     fn settleSkillToolHeld(self: *Store, binding: ActionAttemptBinding, allocator: std.mem.Allocator, captured: *const skills_domain.Capture, faults: Faults) !bool {
-        const entry = try enter(self, .none);
-        defer entry.release();
-        var access: Access(.write, Ordinary.action_attempt) = .open(&entry);
-        defer access.deinit();
-        // A reload allocates from `allocator` inside the write; running out
-        // of it rolls back cleanly and is the caller's to retry.
-        return entry.finishTransaction(Ordinary.action_attempt || error{OutOfMemory}, faults, access.end(faults, skills_domain.runTool(&access, allocator, binding, captured, faults)));
+        return transition.apply(self, skills_domain.SettleTool, .{ .binding = binding, .allocator = allocator, .captured = captured }, faults);
     }
 
     /// Fails the core tool call `binding` names with `result`, in one
@@ -1765,9 +1769,10 @@ comptime {
     // existing content identities for withdrawn names. Binding transient
     // history arguments avoids retaining a second copy of every call name.
     // Its 19032 bytes are below the previous 19240-byte resident ceiling;
-    // configuration reads reuse saved_tools for parent names and use 15032.
+    // configuration reads reuse saved_tools for parent names and use 15624,
+    // with what validation and application keep between their rounds.
     // Exact, so a change to either size is a decision.
-    if (@sizeOf(configuration_domain.ConfigurationReads) != 15032 or scratch_bytes != 19032)
+    if (@sizeOf(configuration_domain.ConfigurationReads) != 15624 or scratch_bytes != 19032)
         @compileError(std.fmt.comptimePrint("the Store's scratch is {d} bytes and the configure reads {d}; restate them here", .{ scratch_bytes, @sizeOf(configuration_domain.ConfigurationReads) }));
     if (scratch_bytes - 4888 > accepted_settlement_growth) @compileError("the settlement batch outgrew what the owner accepted");
 }
@@ -1819,7 +1824,7 @@ pub const Ordinary = struct {
     pub const action_attempt = error{StaleActionAttemptBinding};
     const action_dispatch = action_attempt || error{SupersededByControl};
     /// A creation updates no Session, but shares configure's error set.
-    const agent_start = action_attempt || error{SessionUpdateFailed};
+    pub const agent_start = action_attempt || error{SessionUpdateFailed};
 
     /// Rejects a declared ordinary name the body cannot return, so a
     /// stale or misspelled name fails to compile instead of fencing.
@@ -2170,6 +2175,21 @@ pub fn created(self: *Store, callback: Store.CreationCommitted, session: []const
     values.admitted_len += 1;
 }
 
+/// What a transition's commit tells the Host (`transition`'s
+/// `announced`): a fresh Message admission, or a native creation.
+pub const Announcement = union(enum) {
+    message: struct { callback: Store.MessageCommitted, admission: Store.MessageAdmission },
+    creation: struct { callback: Store.CreationCommitted, session: []const u8 },
+};
+
+/// `admitted` or `created`, as `announcement` names.
+pub fn announce(self: *Store, announcement: Announcement) void {
+    switch (announcement) {
+        .message => |message| admitted(self, message.callback, message.admission),
+        .creation => |creation| created(self, creation.callback, creation.session),
+    }
+}
+
 fn armRerun(context: *anyopaque, on: bool) void {
     const self: *Store = @ptrCast(@alignCast(context));
     if (self.engine == .mysql) self.engine.mysql.state.armed = on;
@@ -2290,41 +2310,6 @@ pub fn publicConversationPageForTesting(self: *Store, request: conversation_read
 /// a Store-wide order.
 pub const Identity = enum { turn_id, operation_id, action_id, content_id, created_seq, command_seq, admission_id, tool_record_id, tool_set_id, forward_id };
 
-/// What the Host hands to transactions. The next value of each `Identity`
-/// is the Store's maximum plus one, read at open and again for each column
-/// a rolled-back transaction took from. Correct because one Host owns the
-/// Store; the primary or unique key still refuses a duplicate, and a
-/// refused write fences.
-fn saveHostToolSetStep(a: anytype, offered: *const tool_record.HostToolSet, digest: *const [32]u8, start: ?usize) !?u64 {
-    const at = start orelse {
-        var set: tool_set_domain.ToolSetLookup = null;
-        tool_set_domain.lookupHostToolSet(a, digest, &set);
-        try a.run();
-        const row = set orelse {
-            try a.abandon(.{});
-            return null;
-        };
-        if (row.current) {
-            try a.abandon(.{});
-        } else {
-            tool_set_domain.pointHostToolSet(a, row.tool_set_id.get());
-            try a.commit();
-        }
-        return row.tool_set_id.get();
-    };
-    if (at < offered.records.len) {
-        var reads: tool_set_domain.RecordReads = undefined;
-        try tool_set_domain.ensureRecords(a, offered.records[at..@min(offered.records.len, at + tool_set_domain.records_per_transaction)], &reads);
-        try a.commit();
-        return null;
-    }
-    const set_id = try a.identity(.tool_set_id);
-    tool_set_domain.insertHostToolSet(a, offered, digest, set_id);
-    tool_set_domain.pointHostToolSet(a, set_id);
-    try a.commit();
-    return set_id;
-}
-
 /// A tool set `readHostToolSet` read back, in its caller's memory.
 pub const SavedHostToolSet = struct {
     records: []tool_record.Record,
@@ -2346,11 +2331,16 @@ pub const SavedHostToolSet = struct {
 
 /// The tools the Host offers and the id of their saved set, which
 /// configure resolves a Session's tool names against.
-const HostTools = struct {
+pub const HostTools = struct {
     host_tool_set: *const tool_record.HostToolSet,
     set_id: u64,
 };
 
+/// What the Host hands to transactions. The next value of each `Identity`
+/// is the Store's maximum plus one, read at open and again for each column
+/// a rolled-back transaction took from. Correct because one Host owns the
+/// Store; the primary or unique key still refuses a duplicate, and a
+/// refused write fences.
 const HostValues = struct {
     next: std.EnumArray(Identity, u64),
     /// The columns that handed out a value since `begin`.

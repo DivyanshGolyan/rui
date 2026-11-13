@@ -1151,7 +1151,7 @@ test "a Session creation that rolls back never reaches a since listing" {
                 defer a.deinit();
                 const reads = storage.configurationReads();
                 reads.* = .{ .next = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } } };
-                configuration_domain.prepareConfiguration(&a, "", &create.configuration, reads);
+                configuration_domain.prepareConfiguration(&a, storage.hostTools().host_tool_set, "", &create.configuration, reads);
                 try a.run();
                 try std.testing.expect(try configuration_domain.applyConfiguration(&a, storage.io, "", &create.configuration, null, .{}, reads) == .accepted);
                 try a.run();
@@ -12911,6 +12911,78 @@ test "core_tools start_agent spec refusals fail calls and name the refused setti
     }.run);
 }
 
+test "a start_agent call fails and starts nothing when its key is taken or its task's skill is unreadable, and a started one saves every skill its task bound" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            var opened = true;
+            defer if (opened) {
+                storage.close() catch unreachable;
+            };
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            var create = try completeConfiguration("unstarted-agent-parent", "", workspace, "model-a");
+            create.configuration.tools = try .of(&.{"start_agent"});
+            const parent = (try storage.configure(&create, .{})).accepted.session;
+            try submitTestMessage(&storage, &tmp, "unstarted-agent-message", "unstarted-agent-key", parent.slice(), "start children");
+            const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            const arguments = "{\"task\":\"read\",\"attached\":true,\"spec\":{\"model\":\"model-a\",\"effort\":null,\"compactAt\":100000,\"tools\":[],\"permissionMode\":\"ask\"}}";
+            var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer arena.deinit();
+            const encoded = try std.json.Stringify.valueAlloc(arena.allocator(), arguments, .{});
+            var calls: [3]TestingCall = undefined;
+            inline for (&calls, 0..) |*call, index| {
+                const id = std.fmt.comptimePrint("unstarted-{d}", .{index});
+                call.* = .{ .item_id = id, .name = "start_agent", .encoded_call_id = id, .decoded_call_id = id, .encoded_arguments = encoded[1 .. encoded.len - 1], .decoded_arguments = arguments };
+            }
+            try settleCallsForTesting(&storage, &tmp, model, "unstarted-agent-calls", &calls);
+            const core_tools = @import("../core_tools.zig");
+            const start = try arena.allocator().create(core_tools.StartAgent);
+            const failed_sql = "SELECT count(*) FROM action_operation a JOIN content c ON c.content_id=a.resolution_content_id WHERE a.action_id=?1 AND a.resolution_code='failed' AND c.digest=?2";
+
+            // Another command already holds the call's key.
+            const taken = (try storage.nextCoreWork()).?.action;
+            var key_buffer: [64]u8 = undefined;
+            try submitTestMessage(&storage, &tmp, "unstarted-agent-taken", try std.fmt.bufPrint(&key_buffer, "rui.core/start_agent/{d}", .{taken.binding.action_id}), parent.slice(), "taken");
+            // A fault injected before the failure's import rolls it back.
+            try std.testing.expect(try core_tools.checkStartAgent(arena.allocator(), arguments, start) == .accepted);
+            try std.testing.expectError(error.InjectedContentImportFailure, storage.startAgent(taken.binding, parent.slice(), start.task, start.attached, &start.configuration, null, .{ .content_import = true }));
+            try storage.close();
+            opened = false;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            opened = true;
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE action_id=?1 AND resolution_code IS NULL", .{taken.binding.action_id}));
+            try std.testing.expectEqual(taken.binding.action_id, (try storage.nextCoreWork()).?.action.binding.action_id);
+            try std.testing.expect(try core_tools.checkStartAgent(arena.allocator(), arguments, start) == .accepted);
+            try std.testing.expect(try storage.startAgent(taken.binding, parent.slice(), start.task, start.attached, &start.configuration, null, .{}) == .failed);
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, failed_sql, .{ taken.binding.action_id, store_testing.Blob{ .bytes = &protocol.contentDigest("Rui could not start the agent: its command key is already taken. Nothing was started.") } }));
+
+            // The task names a skill the Host could not read.
+            const unreadable = (try storage.nextCoreWork()).?.action;
+            const diagnostic = "Skill missing is not in the new Session's catalog.";
+            const captured: skills_fixture_domain.MessageCapture = .{ .failed = .{ .code = .skill_file_unavailable, .bytes = diagnostic } };
+            try std.testing.expect(try core_tools.checkStartAgent(arena.allocator(), arguments, start) == .accepted);
+            try std.testing.expect(try storage.startAgentWithInitialSkills(unreadable.binding, parent.slice(), start.task, start.attached, &start.configuration, null, null, &captured, .{}) == .failed);
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, failed_sql, .{ unreadable.binding.action_id, store_testing.Blob{ .bytes = &protocol.contentDigest(diagnostic ++ " Nothing was started.") } }));
+
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session", .{}));
+
+            // A started agent's task keeps every skill it bound, in order.
+            const bound_call = (try storage.nextCoreWork()).?.action;
+            const bound: skills_fixture_domain.MessageCapture = .{ .bound = &.{ .{ .name = "first", .bytes = "first body" }, .{ .name = "second", .bytes = "second body" } } };
+            try std.testing.expect(try core_tools.checkStartAgent(arena.allocator(), arguments, start) == .accepted);
+            try std.testing.expect(try storage.startAgentWithInitialSkills(bound_call.binding, parent.slice(), start.task, start.attached, &start.configuration, null, null, &bound, .{}) == .started);
+            const child_sql = "SELECT count(*) FROM message_skill k JOIN message_admission m ON m.admission_id=k.admission_id JOIN content c ON c.content_id=k.content_id WHERE m.session_ref<>?1 AND k.position=?2 AND k.name=?3 AND c.digest=?4";
+            try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_skill", .{}));
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, child_sql, .{ parent.slice(), @as(u64, 1), "first", store_testing.Blob{ .bytes = &protocol.contentDigest("first body") } }));
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, child_sql, .{ parent.slice(), @as(u64, 2), "second", store_testing.Blob{ .bytes = &protocol.contentDigest("second body") } }));
+        }
+    }.run);
+}
+
 test "a start_agent child works in its caller's Workspace with its provider" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
@@ -14603,6 +14675,112 @@ test "skills empty initial snapshot is valid and schema rejects mismatched catal
     }.run);
 }
 
+test "skills initial catalog equal to an earlier Session's shares its content and starts the conversation" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            var sessions: [2]protocol.Bounded(protocol.max_session_bytes) = undefined;
+            for (&sessions, [_][]const u8{ "skills-shared-first", "skills-shared-second" }) |*session, key| {
+                var create = try completeConfiguration(key, "", workspace, "model-a");
+                session.* = (try storage.configureWithInitialSkills(&create, null, &skills_fixture_initial, .{})).accepted.session;
+            }
+            const catalog_sql = "SELECT catalog_content_id FROM session_skill_catalog WHERE session_ref=?1";
+            const text_sql = "SELECT content_id FROM conversation_entry WHERE session_ref=?1 AND source_catalog_position IS NOT NULL";
+            try std.testing.expectEqual(try store_testing.queryU64(&storage, catalog_sql, .{sessions[0].slice()}), try store_testing.queryU64(&storage, catalog_sql, .{sessions[1].slice()}));
+            try std.testing.expectEqual(try store_testing.queryU64(&storage, text_sql, .{sessions[0].slice()}), try store_testing.queryU64(&storage, text_sql, .{sessions[1].slice()}));
+            for (sessions) |session| try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT entry_ordinal FROM conversation_entry WHERE session_ref=?1 AND source_catalog_position IS NOT NULL", .{session.slice()}));
+        }
+    }.run);
+}
+
+test "skills a Message's refusal diagnostic that fails to import saves nothing" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            var create = try completeConfiguration("skills-diagnostic-session", "", workspace, "model-a");
+            const session = (try storage.configure(&create, .{})).accepted.session;
+            const text = "/missing please";
+            const file = try tmp.dir.createFile(std.testing.io, "skills-diagnostic-text", .{ .read = true });
+            try file.writeStreamingAll(std.testing.io, text);
+            try file.sync(std.testing.io);
+            var message = try completeMessage("skills-diagnostic-message", session.slice(), file, text);
+            defer message.removeTemporaryContent(std.testing.io) catch unreachable;
+            const diagnostic = "Skill missing is not in this Session's saved catalog; nothing was sent.";
+            const captured: skills_fixture_domain.MessageCapture = .{ .failed = .{ .code = .skill_file_unavailable, .bytes = diagnostic } };
+            try std.testing.expect(storage.submitMessageCapturedSkills(&message, null, null, &captured, .{ .content_import = true }) == .infrastructure_failure);
+            try std.testing.expect(storage.isFenced());
+            try storage.close();
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            try std.testing.expect((try store_testing.observeCommandForTesting(&storage, "skills-diagnostic-message")).status == .absent);
+            const rejected = storage.submitMessageCapturedSkills(&message, null, null, &captured, .{});
+            try std.testing.expect(rejected == .rejected and !rejected.rejected.replayed);
+            try std.testing.expectEqual(protocol.MessageRejection.skill_file_unavailable, rejected.rejected.code);
+            try std.testing.expectEqual(@as(u64, diagnostic.len), try store_testing.queryU64(&storage, "SELECT content.byte_length FROM core_command JOIN content ON content.content_id=core_command.primary_content_id WHERE command_key=?1", .{"skills-diagnostic-message"}));
+        }
+    }.run);
+}
+
+test "skills a creating Message saves the skills its text bound with its admission" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            const settings = try completeConfiguration("skills-creating", "", workspace, "model-a");
+            var message: wire_request.MessageCommand = .{ .configuration = settings.configuration };
+            try message.key.set("skills-creating");
+            message.text = try testingBytesContent(&tmp, "skills-creating-text", "use /demo");
+            defer message.removeTemporaryContent(std.testing.io) catch unreachable;
+            const capture: skills_fixture_domain.MessageCapture = .{ .bound = &.{.{ .name = "demo", .bytes = "demo body" }} };
+            const reply = storage.submitMessageCapturedSkills(&message, null, null, &capture, .{});
+            try std.testing.expect(reply == .accepted);
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_skill k JOIN content c ON c.content_id=k.content_id WHERE k.admission_id=?1 AND k.name='demo' AND c.digest=?2", .{ reply.accepted.admission_id, store_testing.Blob{ .bytes = &protocol.contentDigest("demo body") } }));
+        }
+    }.run);
+}
+
+test "a Message's replay whose admission names other content fences the Store" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try configureTestSession(&storage, "replay-content");
+            var first = try completeMessage("replay-content-first", session.slice(), try tmp.dir.createFile(std.testing.io, "first", .{ .read = true }), "first text");
+            try first.text.file.?.writeStreamingAll(std.testing.io, "first text");
+            defer first.removeTemporaryContent(std.testing.io) catch unreachable;
+            var second = try completeMessage("replay-content-second", session.slice(), try tmp.dir.createFile(std.testing.io, "second", .{ .read = true }), "second text");
+            try second.text.file.?.writeStreamingAll(std.testing.io, "second text");
+            defer second.removeTemporaryContent(std.testing.io) catch unreachable;
+            try std.testing.expect(storage.submitMessageWithModel(&first, null, .{}) == .accepted);
+            try std.testing.expect(storage.submitMessageWithModel(&second, null, .{}) == .accepted);
+            try std.testing.expect(storage.submitMessageWithModel(&first, null, .{}).accepted.replayed);
+            const other = try store_testing.queryU64(&storage, "SELECT content_id FROM message_admission WHERE command_key=?1", .{"replay-content-second"});
+            try store_testing.exec(&storage, "UPDATE message_admission SET content_id=?2 WHERE command_key=?1", .{ "replay-content-first", other });
+            try std.testing.expect(storage.submitMessageWithModel(&first, null, .{}) == .infrastructure_failure);
+            try std.testing.expect(storage.isFenced());
+        }
+    }.run);
+}
+
 test "skills reload out of memory in configure or the skill tool rolls back without fencing" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
@@ -15008,6 +15186,63 @@ test "skills native reload validates targets after replay without changing ordin
     }.run);
 }
 
+test "a skills reload is refused when it carries settings or has no catalog, and saves a failed capture's diagnostic" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try store_testing.configureTestSession(&storage, "reload-failed-create");
+            var command: wire_request.ConfigureCommand = .{ .session = session, .reload_skills = true };
+            try command.key.set("reload-failed");
+            const diagnostic = "Rui could not reload skills: the scan failed. The previous catalog is unchanged.";
+            const failed: skills_fixture_domain.Capture = .{ .failed = .{ .code = .skills_unavailable, .bytes = diagnostic } };
+            const refused = try storage.configureWithCapturedSkills(&command, null, null, &failed, std.testing.allocator, .{});
+            try std.testing.expect(refused == .rejected and !refused.rejected.replayed);
+            try std.testing.expectEqual(protocol.ConfigurationRejection.skills_unavailable, refused.rejected.code);
+            const diagnostic_id = try store_testing.queryU64(&storage, "SELECT primary_content_id FROM core_command WHERE command_key=?1 AND accepted=0 AND code='skills_unavailable'", .{command.key.slice()});
+            var reader: ContentReader = undefined;
+            reader.open(try storage.openContent(try testingContentReference(&storage, diagnostic_id)));
+            defer reader.close();
+            var bytes: [diagnostic.len]u8 = undefined;
+            try std.testing.expectEqual(bytes.len, try reader.read(0, &bytes));
+            try std.testing.expectEqualStrings(diagnostic, &bytes);
+            // A replay answers the saved refusal, whatever the Host captures now.
+            const replay = try storage.configureWithCapturedSkills(&command, null, null, null, std.testing.allocator, .{});
+            try std.testing.expect(replay == .rejected and replay.rejected.replayed);
+            try std.testing.expectEqual(protocol.ConfigurationRejection.skills_unavailable, replay.rejected.code);
+            try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_skill_catalog", .{}));
+            // A reload changes nothing else: one that carries a setting, or
+            // requires a model, is refused before its capture is read.
+            const empty: skills_fixture_domain.Capture = .{ .reload = .{ .entries = &.{} } };
+            for (0..2) |index| {
+                var mixed: wire_request.ConfigureCommand = .{ .session = session, .reload_skills = true };
+                try mixed.key.set(if (index == 0) "reload-with-label" else "reload-requiring-model");
+                if (index == 0) {
+                    mixed.configuration.label.state = .value;
+                    try mixed.configuration.label.value.set("renamed");
+                } else mixed.require_model = true;
+                const answer = try storage.configureWithCapturedSkills(&mixed, null, null, &empty, std.testing.allocator, .{});
+                try std.testing.expect(answer == .rejected and !answer.rejected.replayed);
+                try std.testing.expectEqual(protocol.ConfigurationRejection.incomplete_initial_configuration, answer.rejected.code);
+            }
+            // Without a catalog to reload, the skills are unavailable.
+            const invocation: skills_fixture_domain.Capture = .{ .invocation = "a model tool's capture" };
+            for ([_]?*const skills_fixture_domain.Capture{ null, &invocation }, 0..) |captured, index| {
+                var uncaptured: wire_request.ConfigureCommand = .{ .session = session, .reload_skills = true };
+                try uncaptured.key.set(if (index == 0) "reload-uncaptured" else "reload-invocation");
+                const answer = try storage.configureWithCapturedSkills(&uncaptured, null, null, captured, std.testing.allocator, .{});
+                try std.testing.expect(answer == .rejected and !answer.rejected.replayed);
+                try std.testing.expectEqual(protocol.ConfigurationRejection.skills_unavailable, answer.rejected.code);
+            }
+            try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_skill_catalog", .{}));
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_revision", .{}));
+        }
+    }.run);
+}
+
 test "skills saved catalog read retains only decoded result metadata" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
@@ -15150,7 +15385,7 @@ test "inline skills configuration validation borrows one Store-owned plan throug
                     defer a.deinit();
                     const reads = storage.configurationReads();
                     reads.* = .{ .next = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } } };
-                    configuration_domain.prepareConfiguration(&a, session.slice(), &update.configuration, reads);
+                    configuration_domain.prepareConfiguration(&a, storage.hostTools().host_tool_set, session.slice(), &update.configuration, reads);
                     try a.run();
                     const checked = try configuration_domain.validateConfiguration(&a, storage.io, session.slice(), &update.configuration, null, reads);
                     try std.testing.expect(checked == .ready);
@@ -15158,7 +15393,7 @@ test "inline skills configuration validation borrows one Store-owned plan throug
                     try std.testing.expect(plan == &reads.validated);
                     const original_instructions = plan.before.?.instructions_id;
                     try std.testing.expect(plan.before.?.label == null);
-                    const applied = try configuration_domain.applyValidatedConfiguration(&a, storage.io, session.slice(), &update.configuration, null, .{}, reads, plan);
+                    const applied = try configuration_domain.applyValidatedConfiguration(&a, storage.io, session.slice(), &update.configuration, null, .{}, reads);
                     try std.testing.expect(applied == .accepted);
                     try std.testing.expect(plan == &reads.validated);
                     try std.testing.expectEqual(original_instructions, plan.before.?.instructions_id);
@@ -15978,6 +16213,104 @@ test "runner action seam covers selection admission input settlement stop and re
                     try std.testing.expectEqualStrings(expected_text, actions[0].object.get("result").?.object.get("text").?.string);
                 }
             }
+        }
+    }.run);
+}
+
+test "find_tools and the skill tool leave a call whose Session owes a stop to that stop" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var path: [protocol.max_workspace_bytes]u8 = undefined;
+            var create = try completeConfiguration("owed-calls", "", try canonicalCwd(std.testing.io, &path), "model-a");
+            create.configuration.tools = try .of(&.{ "find_tools", "skill" });
+            const session = (try storage.configure(&create, .{})).accepted.session;
+            // The Session is a child, so its parent's stop makes it owe one.
+            const root = try configureTestSession(&storage, "owed-calls-root");
+            try store_testing.exec(&storage, "UPDATE session SET parent_ref=?1 WHERE session_ref=?2", .{ root.slice(), session.slice() });
+            try submitTestMessage(&storage, &tmp, "owed-calls-input", "owed-calls-key", session.slice(), "find and invoke");
+            const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            const calls = [_]TestingCall{
+                .{ .item_id = "find", .name = "find_tools", .encoded_call_id = "find", .decoded_call_id = "find", .encoded_arguments = "{\\\"words\\\":\\\"skill\\\"}", .decoded_arguments = "{\"words\":\"skill\"}" },
+                .{ .item_id = "invoke", .name = "skill", .encoded_call_id = "invoke", .decoded_call_id = "invoke", .encoded_arguments = "{\\\"operation\\\":\\\"reload\\\"}", .decoded_arguments = "{\"operation\":\"reload\"}" },
+            };
+            try settleCallsForTesting(&storage, &tmp, model, "owed-calls", &calls);
+            const find = (try storage.nextCoreWork()).?.action;
+            try std.testing.expect(find.tool == .find_tools);
+            var skill = find.binding;
+            skill.action_id = try store_testing.queryU64(&storage, "SELECT action_id FROM action_operation WHERE parent_operation_id=?1 AND action_id<>?2", .{ find.binding.parent_operation_id, find.binding.action_id });
+            var stop = try completeSessionStop("owed-calls-root-stop", root.slice());
+            try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+            const open_sql = "SELECT count(*) FROM action_operation WHERE parent_operation_id=?1 AND resolution_code IS NULL";
+            try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, open_sql, .{model.operation_id}));
+            const revisions = try store_testing.queryU64(&storage, "SELECT count(*) FROM session_revision WHERE session_ref=?1", .{session.slice()});
+
+            var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer arena.deinit();
+            var words: @import("../find_tools_words.zig").FindTools = .{ .count = 1 };
+            words.words[0] = "skill";
+            try std.testing.expect(!try storage.findTools(find.binding, arena.allocator(), &words, null, .{}));
+            const invocation: skills_fixture_domain.Capture = .{ .invocation = "a skill's body" };
+            try std.testing.expect(!try storage.settleSkillTool(skill, arena.allocator(), &invocation, .{}));
+            // Neither call saved a command, a revision or a resolution.
+            try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, open_sql, .{model.operation_id}));
+            try std.testing.expectEqual(revisions, try store_testing.queryU64(&storage, "SELECT count(*) FROM session_revision WHERE session_ref=?1", .{session.slice()}));
+            const key = try std.fmt.allocPrint(arena.allocator(), "rui.core/find_tools/{d}", .{find.binding.action_id});
+            try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM core_command WHERE command_key=?1", .{key}));
+            try std.testing.expect(!storage.isFenced());
+        }
+    }.run);
+}
+
+test "the skill tool resolves an invocation or a failed capture with its text, and a fault saves nothing" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            var opened = true;
+            defer if (opened) storage.close() catch unreachable;
+            var path: [protocol.max_workspace_bytes]u8 = undefined;
+            var create = try completeConfiguration("skill-tool", "", try canonicalCwd(std.testing.io, &path), "model-a");
+            create.configuration.tools = try .of(&.{"skill"});
+            const session = (try storage.configure(&create, .{})).accepted.session;
+            try submitTestMessage(&storage, &tmp, "skill-tool-input", "skill-tool-key", session.slice(), "invoke");
+            const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            var calls: [2]TestingCall = undefined;
+            for (&calls, [_][]const u8{ "invoke", "fail" }) |*call, name| call.* = .{ .item_id = name, .name = "skill", .encoded_call_id = name, .decoded_call_id = name, .encoded_arguments = "{\\\"operation\\\":\\\"reload\\\"}", .decoded_arguments = "{\"operation\":\"reload\"}" };
+            try settleCallsForTesting(&storage, &tmp, model, "skill-tool-calls", &calls);
+            var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer arena.deinit();
+            const invocation: skills_fixture_domain.Capture = .{ .invocation = "the skill's own text" };
+            const failed: skills_fixture_domain.Capture = .{ .failed = .{ .code = .skill_file_unavailable, .bytes = "Rui could not read the skill's file." } };
+            const Expected = struct { captured: *const skills_fixture_domain.Capture, code: []const u8, text: []const u8 };
+            for ([_]Expected{
+                .{ .captured = &invocation, .code = "succeeded", .text = "the skill's own text" },
+                .{ .captured = &failed, .code = "failed", .text = "Rui could not read the skill's file." },
+            }) |expected| {
+                const pending = (try storage.nextCoreWork()).?.action;
+                // An injected fault rolls back the result and resolution.
+                for ([_]struct { Faults, anyerror }{
+                    .{ .{ .content_import = true }, error.InjectedContentImportFailure },
+                    .{ .{ .before_commit = true }, error.InjectedCommitFailure },
+                }) |fault| {
+                    try std.testing.expectError(fault[1], storage.settleSkillTool(pending.binding, arena.allocator(), expected.captured, fault[0]));
+                    try storage.close();
+                    opened = false;
+                    try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                    opened = true;
+                    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE action_id=?1 AND resolution_code IS NULL", .{pending.binding.action_id}));
+                }
+                try std.testing.expect(try storage.settleSkillTool(pending.binding, arena.allocator(), expected.captured, .{}));
+                const result_id = try store_testing.queryU64(&storage, "SELECT resolution_content_id FROM action_operation WHERE action_id=?1 AND resolution_code=?2", .{ pending.binding.action_id, expected.code });
+                try expectContent(&storage, try testingContentReference(&storage, result_id), expected.text);
+            }
+            try std.testing.expect(!storage.isFenced());
         }
     }.run);
 }
