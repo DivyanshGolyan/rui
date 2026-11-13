@@ -8,9 +8,11 @@ const store_core = @import("../Store.zig");
 const transition = @import("../transition.zig");
 const rsql = @import("../rsql.zig");
 const Store = store_core.Store;
+const content_domain = @import("../domain/content.zig");
 const store_testing = @import("../testing.zig");
 const configureTestSession = store_testing.configureTestSession;
 const TestingRound = shared_fixtures.TestingRound;
+const RoundMeter = shared_fixtures.RoundMeter;
 
 /// Reads a Session's head in its one round, then takes two positions and
 /// a content id, inserts that content row and dates the Session where its
@@ -132,6 +134,120 @@ test "a transition's declined guard answers declined and leaves nothing it queue
     }.run);
 }
 
+/// Queues twenty content rows, twenty statements, in one round inside its
+/// transaction, then ends done, so none of them stays.
+fn TestingPassWidth(comptime width: transition.Pass) type {
+    return struct {
+        const Self = @This();
+        pub const rounds = transition.rounds(.{ .write = .{.always} });
+        pub const round_budget = 2;
+        pub const commit: transition.Commit = .transaction;
+        pub const pass = width;
+        pub const begin: ?rounds.At = .write;
+        pub const Input = struct {};
+        pub const Result = void;
+        pub const Ordinary = error{};
+        pub const Declined = error{};
+        pub const Guards = Declined;
+        const text = "abcdefghijklmnopqrst";
+
+        input: Input,
+
+        pub fn step(_: *Self, r: *transition.Round(Self), ran: ?rounds.At) !transition.Next(Self) {
+            if (ran != null) return .{ .done = {} };
+            for (0..text.len) |index| _ = try content_domain.insertRow(r, &.ofBytes(text[index..][0..1], false));
+            return .{ .round = .write };
+        }
+
+        pub fn committed(_: *const Self) Result {}
+    };
+}
+
+test "a transition with a wide pass steps twenty statements a pass, an ordinary one twelve" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var passes: [2]u64 = undefined;
+            inline for (.{ transition.Pass.wide, transition.Pass.ordinary }, &passes) |width, *taken| {
+                const before = RoundMeter.QueryShape.snapshot(&storage);
+                try transition.apply(&storage, TestingPassWidth(width), .{}, .{});
+                taken.* = RoundMeter.QueryShape.snapshot(&storage).since(before).access_passes;
+            }
+            try std.testing.expect(!storage.isFenced());
+            // Only a batching engine sends passes, and a rerun repeats them.
+            if (case.engine != .mysql or case.rerun) return;
+            try std.testing.expectEqual([2]u64{ 1, 2 }, passes);
+        }
+    }.run);
+}
+
+/// Asks whether its transaction is open before and after its first step
+/// queues a read, then ends done. `.outside` has no `begin`, so its read
+/// runs outside the transaction; `.failed` also queues an insert of a
+/// content id the Store holds, which fails in the pass that twelve more
+/// statements force.
+fn TestingTransactionOpen(comptime path: enum { outside, inside, failed }) type {
+    return struct {
+        const Self = @This();
+        pub const rounds = transition.rounds(.{ .head = .{.always} });
+        pub const round_budget = 2;
+        pub const commit: transition.Commit = .transaction;
+        pub const begin: ?rounds.At = if (path == .outside) null else .head;
+        pub const Input = struct { session: []const u8, taken: u64 };
+        pub const Result = [3]bool;
+        pub const Ordinary = error{};
+        pub const Declined = error{};
+        pub const Guards = Declined;
+
+        input: Input,
+        loaded: TestingRound.head.Result = undefined,
+        open: [3]bool = @splat(false),
+
+        pub fn step(t: *Self, r: *transition.Round(Self), ran: ?rounds.At) !transition.Next(Self) {
+            if (ran != null) {
+                t.open[2] = r.transactionOpen();
+                return .{ .done = t.open };
+            }
+            t.open[0] = r.transactionOpen();
+            r.read(TestingRound.head, .{ .session_ref = t.input.session }, &t.loaded);
+            if (path == .failed) {
+                for (0..13) |_| r.write(TestingRound.insert_content, .{ .content_id = t.input.taken, .digest = @splat(0), .length = 0 });
+                t.open[1] = r.transactionOpen();
+                return .{ .done = t.open };
+            }
+            t.open[1] = r.transactionOpen();
+            return .{ .round = .head };
+        }
+
+        pub fn committed(t: *const Self) Result {
+            return t.open;
+        }
+    };
+}
+
+test "a step sees its transaction open once it queues from begin on, and never before begin" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try configureTestSession(&storage, "transition-open");
+            const taken = try store_testing.queryU64(&storage, "SELECT min(content_id) FROM content", .{});
+            const input: TestingTransactionOpen(.inside).Input = .{ .session = session.slice(), .taken = taken };
+            try std.testing.expectEqual([3]bool{ false, true, true }, try transition.apply(&storage, TestingTransactionOpen(.inside), input, .{}));
+            try std.testing.expectEqual([3]bool{ false, false, false }, try transition.apply(&storage, TestingTransactionOpen(.outside), input, .{}));
+            try std.testing.expectEqual([3]bool{ false, false, false }, try transition.apply(&storage, TestingTransactionOpen(.failed), input, .{}));
+            try std.testing.expect(!storage.isFenced());
+        }
+    }.run);
+}
+
 /// Counts Sessions a page of one at a time, in a `.paged` round that runs
 /// again until a page finds none.
 const TestingSessionPages = struct {
@@ -168,7 +284,8 @@ const TestingSessionPages = struct {
             t.after_len = t.after.len;
         }
         t.page_rows = 0;
-        r.readEach(after_ref, .{ .after = t.after[0..t.after_len] }, 1, t);
+        // Through `readEachFrom`, whose Args the call need not keep.
+        r.readEachFrom(after_ref, &.{ .after = t.after[0..t.after_len] }, 1, t);
         return .{ .round = if (ran == null) .first else .next };
     }
 
