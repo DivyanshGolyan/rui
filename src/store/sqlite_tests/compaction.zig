@@ -4,6 +4,7 @@ const shared_fixtures = @import("../sqlite_tests.zig");
 const tests = @import("../tests.zig");
 const std = @import("std");
 const store_core = @import("../Store.zig");
+const transition = @import("../transition.zig");
 const Store = store_core.Store;
 const historical_domain = @import("../domain/historical.zig");
 const history_floor_domain = @import("../domain/history_floor.zig");

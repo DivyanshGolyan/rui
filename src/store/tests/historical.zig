@@ -284,7 +284,7 @@ test "an admission closes the request's view it opened when its commit fails or 
         fn run(case: *store_testing.Case) !void {
             // Only a network engine's commit carries the request's reads.
             if (case.engine != .mysql or case.rerun) return;
-            const mysql_testing = @import("mysql_testing.zig");
+            const mysql_testing = @import("../mysql_testing.zig");
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
             var storage: Store = undefined;
