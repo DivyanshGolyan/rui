@@ -78,7 +78,8 @@ pub const Input = union(enum) {
     colors,
     /// Focus changes and every other event Root does not route.
     other,
-    back_to_list: bool,
+    /// Left on an empty draft asks for the list beside a wide chat.
+    back_to_list,
     session_closed,
     /// Keyboard focus returns from the list to the open chat it shows.
     focus_chat,
@@ -171,8 +172,8 @@ pub fn step(state: *State, facts: Facts, input: Input) Effects {
     // does. A page over main is left first, exactly as showing main leaves it.
     if (input == .focus_chat and state.layer == .main) return if (facts.session_open) focusChat(state) else .{};
     switch (input) {
-        .back_to_list => |draft_empty| {
-            if (!draft_empty or !facts.wide or !facts.session_open or state.layer != .main) return .{};
+        .back_to_list => {
+            if (!facts.wide or !facts.session_open or state.layer != .main) return .{};
             state.list_focused = true;
             return .{ .focus = .list, .redraw = true };
         },
@@ -499,23 +500,24 @@ test "Layer answers settings and sign-in open from the one union" {
     try std.testing.expect(over_settings.settingsOpen() and over_settings.signInOpen());
 }
 
-pub const DraftKey = enum { left, escape, other };
-pub const DraftTake = enum { edit, back };
+pub const DraftKey = enum { left, other };
+pub const DraftTake = enum { edit, list };
 
-/// Escape's existing close path also owns Left on an actually empty draft.
-/// A caret at column zero is not an empty draft.
+/// Left on an actually empty draft asks for the list; Esc is never this,
+/// and keeps its own meaning (leave). A caret at column zero is not an
+/// empty draft.
 pub fn draftKey(empty: bool, key: DraftKey) DraftTake {
-    return if (key == .escape or (empty and key == .left)) .back else .edit;
+    return if (empty and key == .left) .list else .edit;
 }
 
-test "App input draft back domain distinguishes empty text from a caret at start" {
+test "App input draft list domain distinguishes empty text from a caret at start" {
     for ([_]struct { bytes: []const u8, cursor: usize }{
         .{ .bytes = "", .cursor = 0 },
         .{ .bytes = "draft", .cursor = 5 },
         .{ .bytes = "draft", .cursor = 0 },
     }) |draft| {
-        try std.testing.expectEqual(DraftTake.back, draftKey(draft.bytes.len == 0, .escape));
-        try std.testing.expectEqual(if (draft.bytes.len == 0) DraftTake.back else .edit, draftKey(draft.bytes.len == 0, .left));
+        try std.testing.expectEqual(DraftTake.edit, draftKey(draft.bytes.len == 0, .other));
+        try std.testing.expectEqual(if (draft.bytes.len == 0) DraftTake.list else .edit, draftKey(draft.bytes.len == 0, .left));
     }
 }
 

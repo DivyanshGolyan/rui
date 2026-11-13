@@ -3121,7 +3121,7 @@
     },
     {
       "name": "left-to-list",
-      "note": "Left on an empty draft focuses the list; wide keeps feed, narrow is the existing Esc return.",
+      "note": "Left on an empty draft focuses the list beside a wide chat, keeping the feed; narrow has no list beside the chat, so Left leaves it. Esc always leaves.",
       "open": "Focus navigation audit",
       "steps": [
         {

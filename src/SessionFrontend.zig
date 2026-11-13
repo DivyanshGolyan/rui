@@ -663,7 +663,7 @@ fn chromeClick(comptime click: Click) *const fn (*anyopaque, *vxfw.EventContext)
             if (self.leaving != null) return;
             self.shown_notice.dismiss();
             switch (click) {
-                .action => |action| try self.perform(ctx, action),
+                .action => |action| try self.perform(action),
                 .status => try self.openInfo(ctx),
                 .footer => |field| try self.footerClick(ctx, field),
                 .footer_close => try self.closeStandaloneChoice(ctx),
@@ -672,7 +672,7 @@ fn chromeClick(comptime click: Click) *const fn (*anyopaque, *vxfw.EventContext)
                 },
                 .details => try self.showSubmissionFailure(),
                 .needs => if (self.heldOriginal()) |held| if (session_notice.key(held)) |key| switch (key) {
-                    .retry => try self.perform(ctx, .recover),
+                    .retry => try self.perform(.recover),
                     .discard => try self.clickCommand("/discard"),
                     .status => try self.showSubmissionFailure(),
                 },
@@ -891,7 +891,10 @@ fn appKey(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event, delivery:
             try ctx.requestFocus(self.app_input.composer.widget());
             try self.showSubmissionFailure();
         },
-        .perform => |action| try self.perform(ctx, action),
+        .perform => |action| try self.perform(action),
+        // Left on an empty draft: the list beside a wide chat takes keys and
+        // the chat stays. With no list beside it, Left leaves as Esc does.
+        .back_to_list => if (!try self.app_hooks.root.focusList(ctx)) try self.perform(.close),
         .open_choice => try self.startFooterChoice(ctx),
         .start_host => {
             const host = self.app_hooks.host.?;
@@ -906,7 +909,7 @@ fn appKey(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event, delivery:
         .consent_draft => switch (self.input.appEvent(conversation_keys, event, delivery.pasted, false)) {
             .busy => self.notice = "Not sent: this Action needs a decision",
             .editor => |outcome| switch (outcome) {
-                .action => |action| try self.perform(ctx, action),
+                .action => |action| try self.perform(action),
                 .refused => |why| if (why != .unbound) {
                     self.notice = refusedNotice(why);
                 },
@@ -925,7 +928,7 @@ fn appKey(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event, delivery:
                 .command => try self.commandLine(),
                 .busy => self.sayBusy(null, false),
                 .editor => |outcome| switch (outcome) {
-                    .action => |action| try self.perform(ctx, action),
+                    .action => |action| try self.perform(action),
                     .refused => |why| if (why != .unbound) {
                         self.notice = refusedNotice(why);
                     },
@@ -2505,7 +2508,7 @@ fn commandActive(self: *const Self) bool {
 const ConversationAction = session_keys.Action;
 const conversation_keys = session_keys.keys;
 
-fn perform(self: *Self, ctx: *vxfw.EventContext, action: ConversationAction) !void {
+fn perform(self: *Self, action: ConversationAction) !void {
     if (self.upgradeHeld() and (action == .recover or action == .expand)) {
         self.notice = session_upgrade.refusal(self.upgradePhase());
         return;
@@ -2549,7 +2552,6 @@ fn perform(self: *Self, ctx: *vxfw.EventContext, action: ConversationAction) !vo
                 const original: ?Submission.State = if (self.submission.view()) |submission| submission.state else null;
                 switch (session_notice.close(original, self.submission.published(), self.draftSafeToLeave())) {
                     .leave => {
-                        if (try self.app_hooks.root.focusList(ctx, self.input.composition().bytes.len == 0)) return;
                         self.leaving = .returned;
                         return;
                     },
@@ -9767,12 +9769,17 @@ test "App Session copy button feedback follows clipboard completion and refusal"
     try std.testing.expect(!backend.copied(backend.context));
 }
 
-test "App Session Left and Esc reuse guarded empty draft return while nonempty Left edits" {
+test "App Session Left on an empty draft alone focuses the list while Esc leaves at every width" {
+    // Esc (and its Ctrl-G alias) keeps its accepted meaning: leave, whatever
+    // the width. Only Left on an empty draft focuses a list beside the chat;
+    // with no list beside it (narrow) Left leaves as Esc does.
+    const Key = enum { left, escape, ctrl_g };
     for ([_]u16{ 46, 140 }) |width| for ([_]struct { bytes: []const u8, cursor: usize }{
         .{ .bytes = "", .cursor = 0 },
         .{ .bytes = "draft", .cursor = 5 },
         .{ .bytes = "draft", .cursor = 0 },
-    }) |draft| for ([_][]const u8{ "\x1b[D", "\x07" }) |key| {
+    }) |draft| for (std.enums.values(Key)) |key| {
+        errdefer std.debug.print("width={d} draft='{s}'@{d} key={s}\n", .{ width, draft.bytes, draft.cursor, @tagName(key) });
         const held = try HeldFrontend.create();
         defer held.destroy();
         held.size = .{ .width = width, .height = 30 };
@@ -9780,20 +9787,28 @@ test "App Session Left and Esc reuse guarded empty draft return while nonempty L
         _ = try held.draw();
         _ = held.self.input.append(draft.bytes);
         held.self.input.editors[held.self.input.active].cursor = draft.cursor;
-        try held.keys(key);
-        if (draft.bytes.len == 0) {
-            try std.testing.expectEqual(width == 140, held.root.input.list_focused and held.left == null);
-            try std.testing.expectEqual(if (width == 140) @as(?Outcome, null) else .returned, held.left);
-            if (width == 140) {
-                _ = try held.draw();
-                try std.testing.expect(!held.self.app_input.composer.caret);
-                try std.testing.expect(held.root.session != null);
-            }
+        try held.keys(switch (key) {
+            .left => "\x1b[D",
+            .escape => "\x1b",
+            .ctrl_g => "\x07",
+        });
+        const empty = draft.bytes.len == 0;
+        const to_list = key == .left and empty and width >= Root.split_at;
+        try std.testing.expectEqual(to_list, held.root.input.list_focused);
+        if (to_list) {
+            try std.testing.expectEqual(@as(?Outcome, null), held.left);
+            _ = try held.draw();
+            try std.testing.expect(!held.self.app_input.composer.caret);
+            try std.testing.expect(held.root.session != null);
+        } else if (empty) {
+            // Esc at both widths, and Left with no list beside the chat.
+            try std.testing.expectEqual(@as(?Outcome, .returned), held.left);
         } else {
-            try std.testing.expect(!held.root.input.list_focused);
+            // A nonempty Message draft: Left edits, and Esc's guarded
+            // departure keeps an unsaved draft where it is.
             try std.testing.expectEqual(@as(?Outcome, null), held.left);
             try std.testing.expectEqualStrings(draft.bytes, held.self.input.composition().bytes);
-            try std.testing.expectEqual(if (key[0] == 0x1b) draft.cursor -| 1 else draft.cursor, held.self.input.composition().cursor);
+            try std.testing.expectEqual(if (key == .left) draft.cursor -| 1 else draft.cursor, held.self.input.composition().cursor);
         }
     };
 }

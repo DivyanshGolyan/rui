@@ -7833,7 +7833,7 @@ test "App overview list activation resumes the open chat without closing its pre
         Presentation.closes = 0;
         var ctx = rig.context();
         defer ctx.cmds.deinit(std.testing.allocator);
-        try std.testing.expect(try rig.overview.root.focusList(&ctx, true));
+        try std.testing.expect(try rig.overview.root.focusList(&ctx));
         const opens = Seen.now.conversations;
         try std.testing.expect(try rig.press(key) == null);
         try std.testing.expect(!rig.overview.root.input.list_focused);

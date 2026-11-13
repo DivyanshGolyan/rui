@@ -188,10 +188,10 @@ fn apply(self: *Self, ctx: *vxfw.EventContext, effects: app_input.Effects, route
     if (effects.redraw) ctx.redraw = true;
 }
 
-/// The guarded Session close path asks the input core whether the visible
-/// sidebar can take focus without retiring the chat. Narrow retains departure.
-pub fn focusList(self: *Self, ctx: *vxfw.EventContext, draft_empty: bool) !bool {
-    const effect = app_input.step(&self.input, self.facts(null), .{ .back_to_list = draft_empty });
+/// Left on an empty chat draft asks whether a visible sidebar can take
+/// focus without retiring the chat. With none (narrow), the chat leaves.
+pub fn focusList(self: *Self, ctx: *vxfw.EventContext) !bool {
+    const effect = app_input.step(&self.input, self.facts(null), .back_to_list);
     try self.apply(ctx, effect, null);
     return effect.focus == .list;
 }
@@ -1077,7 +1077,7 @@ test "Root resumes the open chat from the list by key or click without closing i
     defer arena.deinit();
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
     for ([_]bool{ false, true }) |click| {
-        try std.testing.expect(try root.focusList(&ctx, true));
+        try std.testing.expect(try root.focusList(&ctx));
         if (click) {
             try root.widget().captureEvent(&ctx, .{ .mouse = .{ .col = 100, .row = 10, .button = .left, .type = .press, .mods = .{} } });
         } else try root.focusChat(&ctx);
@@ -1111,7 +1111,7 @@ test "App root hands list activation unchanged to its one core" {
     defer arena.deinit();
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
     for ([_]u21{ vaxis.Key.right, vaxis.Key.enter }) |key| {
-        try std.testing.expect(try root.focusList(&ctx, true));
+        try std.testing.expect(try root.focusList(&ctx));
         const target = ctx.cmds.items[ctx.cmds.items.len - 1].request_focus;
         try std.testing.expect(target.eventHandler != null);
         try std.testing.expect(target.eql(root.widget()));
@@ -1121,7 +1121,7 @@ test "App root hands list activation unchanged to its one core" {
         try std.testing.expect(!root.input.list_focused);
     }
     try std.testing.expectEqual(@as(usize, 2), selection.calls);
-    _ = try root.focusList(&ctx, true);
+    _ = try root.focusList(&ctx);
     // Only a left press transfers pane focus; hover, drag releases and
     // context clicks retain the current key owner.
     for ([_]vaxis.Mouse{
