@@ -1809,6 +1809,56 @@ test "a transition's paged round runs again for each page" {
     }.run);
 }
 
+/// Reads a Session's head and the content count in one round, which names
+/// the head's failed step apart from any other's.
+const TestingNamedRound = struct {
+    pub const rounds = transition.rounds(.{
+        .reads = .{ .always, error.TestingRead, .{.{ TestingRound.head, error.TestingHeadRead }} },
+    });
+    pub const round_budget = 1;
+    pub const commit: transition.Commit = .none;
+    pub const begin: ?rounds.At = null;
+    pub const Input = struct { session: []const u8 };
+    pub const Result = void;
+    pub const Ordinary = error{ TestingRead, TestingHeadRead };
+    const contents = rsql.Read(.{
+        .sql = "SELECT count(*) AS count FROM content",
+        .Args = struct {},
+        .Row = struct { count: u64 },
+        .cardinality = .one,
+    });
+
+    input: Input,
+    head: TestingRound.head.Result = undefined,
+    count: contents.Row = undefined,
+
+    pub fn step(t: *TestingNamedRound, r: *transition.Round(TestingNamedRound), ran: ?rounds.At) !transition.Next(TestingNamedRound) {
+        if (ran != null) return .{ .done = {} };
+        r.read(contents, .{}, &t.count);
+        r.read(TestingRound.head, .{ .session_ref = t.input.session }, &t.head);
+        return .{ .round = .reads };
+    }
+};
+
+test "a transition's round names the failed step of each statement it names, and the round's name answers for the rest" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            inline for (.{ .{ "session", error.TestingHeadRead }, .{ "content", error.TestingRead } }) |failing| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                const session = try configureTestSession(&storage, "transition-named");
+                try transition.apply(&storage, TestingNamedRound, .{ .session = session.slice() }, .{});
+                try store_testing.failReadsOf(&storage, failing[0]);
+                try std.testing.expectError(failing[1], transition.apply(&storage, TestingNamedRound, .{ .session = session.slice() }, .{}));
+                try std.testing.expect(!storage.isFenced());
+            }
+        }
+    }.run);
+}
+
 /// Reads a Session's head once outside its transaction and once inside,
 /// noting each time whether the transaction is open, then dates the
 /// Session where its revision is `revision`.
