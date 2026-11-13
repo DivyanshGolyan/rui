@@ -440,10 +440,12 @@ def resolved_sqlite_routing(root):
         value = frame_host.host_info(runtime / "rui.sock", str(launched_store))
         assert value["store"] == str(launched_store.resolve()), value
         assert "innodb_doublewrite" not in value and "kind" not in value and "engine" not in value, value
-        # SQLite must never acquire MySQL's empty-id discovery exception just
-        # because it uses a separately launched runtime directory.
+        # Read-only discovery supplies the canonical identity; a nonempty
+        # wrong identity still cannot address this Host.
+        discovered = frame_host.host_info(runtime / "rui.sock", "")
+        assert discovered["store"] == str(launched_store.resolve()), discovered
         wrong = frame_host.post(runtime / "rui.sock", "host-info",
-                                {"version": frame_host.WIRE, "kind": "host_info", "store": ""}, expected_status=409)
+                                {"version": frame_host.WIRE, "kind": "host_info", "store": str(pathlib.Path(root) / "foreign-store")}, expected_status=409)
         assert wrong["code"] == "wrong_store_identity", wrong
         host_process.close_stdin(launched)
         assert launched.wait(timeout=20) == 0, frame_host.output(launched)

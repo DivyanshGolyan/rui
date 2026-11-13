@@ -2002,12 +2002,12 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
         return error.FixtureCredentialPathRequired;
     var preparation_failure: start_report.Failure = undefined;
     host_start.fill(init, parsed, settings, &tuning.fixtures, &preparation_failure) catch |err| {
-        if (err == error.SettingsInvalid) return writeRefusal(io, &preparation_failure);
+        if (err == error.SettingsInvalid) return writeRefusal(io, &preparation_failure, caller_exit.knownError(err));
         return err;
     };
     // Keep the existing environment diagnostic before startup takes stderr.
     host_start.resolveProviders(init, settings, tuning.fixtures, &preparation_failure) catch |err| {
-        if (err == error.SettingsInvalid) return writeRefusal(io, &preparation_failure);
+        if (err == error.SettingsInvalid) return writeRefusal(io, &preparation_failure, caller_exit.knownError(err));
         return err;
     };
     const served = providers.fromSettings(settings, tuning.fixtures);
@@ -2016,7 +2016,7 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
         const text = try std.fmt.bufPrint(&refusal_buffer, "network: https_proxy/HTTPS_PROXY {s}; Rui tunnels only through an http:// proxy", .{reason});
         const failure: start_report.Failure = .init(.settings_invalid, text);
         recordExit(.environment);
-        return writeRefusal(io, &failure);
+        return writeRefusal(io, &failure, .environment);
     }
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     if (settings.store == .sqlite or parsed.get("store") != null) {
@@ -2026,25 +2026,25 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
         const selected = if (parsed.get("store")) |explicit| try selectedStore(init, explicit, &selected_buffer) else document_dir orelse try selectedStore(init, null, &selected_buffer);
         if (document_dir != null and parsed.get("store") == null) holdStore(selected);
         host_start.selectStore(init, settings, selected, parsed.get("settings") != null and parsed.get("store") == null, &preparation_failure) catch |err| {
-            if (err == error.SettingsInvalid) return writeRefusal(io, &preparation_failure);
+            if (err == error.SettingsInvalid) return writeRefusal(io, &preparation_failure, caller_exit.knownError(err));
             return storeFailure(err);
         };
     }
     const prepared = host_start.prepare(init, settings, tuning.fixtures, &preparation_failure) catch |err| {
-        if (err == error.SettingsInvalid) return writeRefusal(io, &preparation_failure);
+        if (err == error.SettingsInvalid) return writeRefusal(io, &preparation_failure, caller_exit.knownError(err));
         return err;
     };
     var failure: ?start_report.Failure = null;
-    return finishServe(io, if (settings.store == .mysql) .mysql else .sqlite, &failure, server.serve(io, std.heap.c_allocator, prepared, tuning, &failure));
+    return finishServe(io, settings.interface.lifetime.value, if (settings.store == .mysql) .mysql else .sqlite, &failure, server.serve(io, std.heap.c_allocator, prepared, tuning, &failure));
 }
 
 /// Settle the whole Host outcome before treating stdin closure as a clean end.
-fn finishServe(io: std.Io, store: start_report.Store, failure: *const ?start_report.Failure, result: anyerror!void) !void {
-    if (failure.*) |*value| return writeRefusal(io, value);
+fn finishServe(io: std.Io, lifetime: host_settings.Interface.Lifetime, store: start_report.Store, failure: *const ?start_report.Failure, result: anyerror!void) !void {
+    if (failure.*) |*value| return writeRefusal(io, value, .unclassified);
     result catch |err| {
         // Only interface.lifetime requests shutdown on stdin closure.
-        if (err == error.EffectAwareShutdown) return;
-        if (start_report.classify(store, err)) |value| return writeRefusal(io, &value);
+        if (err == error.EffectAwareShutdown and lifetime == .stdin) return;
+        if (start_report.classify(store, err)) |value| return writeRefusal(io, &value, caller_exit.knownError(err));
         return err;
     };
 }
@@ -2075,33 +2075,40 @@ test "start report CLI publishes once before settling every Host outcome" {
     const supplied_line = "{\"rui_start_error\":{\"code\":\"store_fenced\",\"message\":\"the MySQL Store lost ownership or its connection; restart the Host\"}}\n";
     const fallback_line = "{\"rui_start_error\":{\"code\":\"runtime_dir_unusable\",\"message\":\"another Host owns this runtimeDir\"}}\n";
     const mysql_line = "{\"rui_start_error\":{\"code\":\"store_locked\",\"message\":\"another Host owns this Store\"}}\n";
-    for ([_]start_report.Store{ .sqlite, .mysql }) |store| {
-        for ([_]bool{ false, true }) |supplied| {
-            for ([_]?anyerror{ null, error.EffectAwareShutdown, error.RuntimeDirectoryInUse, error.StoreLocked, error.StoreFenced, error.OutOfMemory }) |err| {
-                var failure: ?start_report.Failure = if (supplied)
-                    .init(.store_fenced, "the MySQL Store lost ownership or its connection; restart the Host")
-                else
-                    null;
-                Probe.used = 0;
-                const outcome = finishServe(io, store, &failure, if (err) |value| value else {});
-                const expected = if (supplied) supplied_line else if (err != null and err.? == error.RuntimeDirectoryInUse) fallback_line else if (store == .mysql and err != null and err.? == error.StoreLocked) mysql_line else "";
-                if (expected.len != 0) {
-                    // Every refusal is already reported, even when a fence
-                    // overrides success or an otherwise clean stdin closure.
-                    try std.testing.expectError(error.Reported, outcome);
-                } else if (err) |value| {
-                    if (value == error.EffectAwareShutdown) {
-                        try outcome;
-                    } else try std.testing.expectError(value, outcome);
-                } else try outcome;
-                try std.testing.expectEqualStrings(expected, Probe.output[0..Probe.used]);
+    const saved_exit_status = exit_status;
+    defer exit_status = saved_exit_status;
+    for ([_]host_settings.Interface.Lifetime{ .detached, .stdin }) |lifetime| {
+        for ([_]start_report.Store{ .sqlite, .mysql }) |store| {
+            for ([_]bool{ false, true }) |supplied| {
+                for ([_]?anyerror{ null, error.EffectAwareShutdown, error.RuntimeDirectoryInUse, error.StoreAlreadyOwned, error.StoreLocked, error.StoreFenced, error.OutOfMemory }) |err| {
+                    var failure: ?start_report.Failure = if (supplied)
+                        .init(.store_fenced, "the MySQL Store lost ownership or its connection; restart the Host")
+                    else
+                        null;
+                    Probe.used = 0;
+                    exit_status = .done;
+                    const outcome = finishServe(io, lifetime, store, &failure, if (err) |value| value else {});
+                    const expected = if (supplied) supplied_line else if (err != null and err.? == error.RuntimeDirectoryInUse) fallback_line else if (err != null and (err.? == error.StoreAlreadyOwned or (store == .mysql and err.? == error.StoreLocked))) mysql_line else "";
+                    if (expected.len != 0) {
+                        // Every refusal is already reported, even when a fence
+                        // overrides success or an otherwise clean stdin closure.
+                        try std.testing.expectError(error.Reported, outcome);
+                        try std.testing.expectEqual(if (!supplied and err == error.StoreAlreadyOwned) caller_exit.Status.environment else caller_exit.Status.unclassified, exit_status);
+                    } else if (err) |value| {
+                        if (value == error.EffectAwareShutdown and lifetime == .stdin) {
+                            try outcome;
+                        } else try std.testing.expectError(value, outcome);
+                    } else try outcome;
+                    try std.testing.expectEqualStrings(expected, Probe.output[0..Probe.used]);
+                }
             }
         }
     }
 }
 
 /// The CLI alone settles publication into the already-reported exit status.
-noinline fn writeRefusal(io: std.Io, failure: *const start_report.Failure) error{Reported} {
+noinline fn writeRefusal(io: std.Io, failure: *const start_report.Failure, status: caller_exit.Status) error{Reported} {
+    recordExit(status);
     host_start.report(io, failure);
     return error.Reported;
 }
