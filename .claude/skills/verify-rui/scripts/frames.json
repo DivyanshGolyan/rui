@@ -3235,6 +3235,39 @@
       ]
     },
     {
+      "name": "focus-seed-earlier",
+      "note": "Keep the two fixture completion seconds distinct so newest-first order has no random-ID tie.",
+      "sizes": [
+        "140x40"
+      ],
+      "cast": [
+        {
+          "label": "Alternate focus audit",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "messages": [
+            "Alternate focus task: Give a chat info specimen summarizing the retry deadline fix."
+          ]
+        }
+      ],
+      "open": "Alternate focus audit",
+      "steps": [
+        {
+          "wait": "The retry draft is ready."
+        },
+        {
+          "sleep": 1.2
+        }
+      ],
+      "expect": [
+        "Alternate focus task",
+        "The retry draft is ready."
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
+    },
+    {
       "name": "focus-browse-wide",
       "note": "Wide keyboard list selection settles through the existing open transition; the highlighted other chat is already in the main pane.",
       "sizes": [
@@ -3268,14 +3301,6 @@
         "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ],
       "cast": [
-        {
-          "label": "Alternate focus audit",
-          "workspace": "code/rui",
-          "mode": "bypass",
-          "messages": [
-            "Alternate focus task: Give a chat info specimen summarizing the retry deadline fix."
-          ]
-        },
         {
           "label": "Current focus audit",
           "workspace": "code/rui",
