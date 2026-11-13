@@ -667,7 +667,6 @@ def saved_settings_served(root, env):
     import model_fixture
     import ssl
     import threading
-    from host_status_fixture import socket_path
     from settings_fixture import WIRE, post
     from settings_integration import mcp_server
 
@@ -715,7 +714,7 @@ def saved_settings_served(root, env):
         save(store, "presets.review", f"@{preset_file}")
         started = run_start(store, env)
         assert started.returncode == 0, started.stderr
-        sock = socket_path(store)
+        sock = f"/tmp/rui-{os.getuid()}/{hashlib.sha256(str(store.resolve()).encode()).hexdigest()[:32]}.sock"
         create = {"version": WIRE, "kind": "configure", "store": str(store.resolve()), "key": "preset:create",
                   "session": "", "preset": "review", "configuration": {"label": None}}
         created = post(sock, "configure", create)
