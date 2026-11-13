@@ -1,9 +1,11 @@
 //! Each served provider's model list: the IDs its account can use, and
-//! whether Rui's catalog knows each one's facts. ChatGPT has no public list,
-//! so its list is the catalog's OpenAI IDs. The OpenAI API's is fetched once at Host start
-//! (`GET BASE/models`) and kept; until it arrives, or when it fails, the
-//! catalog's OpenAI IDs stand in. A model the catalog does not list runs with default
-//! limits (`product_defaults.unlisted_context_window`).
+//! whether Rui's catalog knows each one's facts. A provider whose list is
+//! live (an OpenAI key, a ChatGPT plan) has it fetched at Host start and on
+//! each model-list request (`GET BASE/models`) and kept; until it arrives,
+//! or when it fails, the catalog's OpenAI IDs stand in, as they do for a
+//! provider with no list (the ChatGPT device sign-in). A live list names
+//! IDs only: a model's facts come from the catalog, and one the catalog does
+//! not list runs with default limits (`product_defaults.unlisted_context_window`).
 const std = @import("std");
 const catalog = @import("model_catalog.zig");
 const model_capability = @import("model_capability.zig");
@@ -11,7 +13,7 @@ const provider_name = @import("provider_name.zig");
 
 /// Where a provider's list came from.
 pub const Source = enum {
-    /// Catalog OpenAI IDs: the provider has no list.
+    /// Catalog OpenAI IDs: the provider has no live list here.
     catalog,
     /// Catalog OpenAI IDs while the fetch is still in flight; ask again later.
     pending,
@@ -42,6 +44,31 @@ pub const Ids = struct {
     }
 };
 
+/// A live list's IDs as a parser keeps them, in the order it gives them:
+/// an ID Rui cannot select is skipped, and a list past either bound is
+/// refused rather than cut. Every provider's list parser keeps through this.
+pub const Kept = struct {
+    out: *IdBuffer,
+    /// Bytes written, a newline after each ID.
+    len: usize = 0,
+    count: usize = 0,
+
+    pub fn keep(self: *Kept, id: []const u8) error{ModelListTooLarge}!void {
+        if (!model_capability.validModelSyntax(id)) return;
+        // `len` counts the newlines too: one per ID kept so far.
+        if (self.count + 1 > max_live_models or self.len - self.count + id.len > max_live_id_bytes) return error.ModelListTooLarge;
+        @memcpy(self.out[self.len..][0..id.len], id);
+        self.out[self.len + id.len] = '\n';
+        self.len += id.len + 1;
+        self.count += 1;
+    }
+
+    /// Borrows `out`.
+    pub fn ids(self: *const Kept) Ids {
+        return .{ .bytes = self.out[0..self.len] };
+    }
+};
+
 /// The IDs of an OpenAI-style list (`{"data":[{"id":...},...]}`) in the
 /// provider's order, written to `out`. An ID Rui cannot select is skipped.
 /// `scratch` holds the parse and is freed by the caller.
@@ -49,8 +76,7 @@ pub fn parseOpenAi(scratch: std.mem.Allocator, body: []const u8, out: *IdBuffer)
     // A token walk, not a typed parse: other members are skipped unread,
     // so no number is ever converted.
     var scanner: std.json.Scanner = .initCompleteInput(scratch, body);
-    var len: usize = 0;
-    var count: usize = 0;
+    var kept: Kept = .{ .out = out };
     var data_seen = false;
     if (try nextToken(&scanner, scratch) != .object_begin) return error.InvalidModelList;
     while (try objectKey(&scanner, scratch)) |key| {
@@ -77,21 +103,15 @@ pub fn parseOpenAi(scratch: std.mem.Allocator, body: []const u8, out: *IdBuffer)
                     else => return error.InvalidModelList,
                 };
             }
-            const entry = id orelse return error.InvalidModelList;
-            if (!model_capability.validModelSyntax(entry)) continue;
-            count += 1;
-            // `len` counts the newlines too: one per ID kept so far.
-            if (count > max_live_models or len - (count - 1) + entry.len > max_live_id_bytes) return error.ModelListTooLarge;
-            @memcpy(out[len..][0..entry.len], entry);
-            out[len + entry.len] = '\n';
-            len += entry.len + 1;
+            try kept.keep(id orelse return error.InvalidModelList);
         }
     }
     if (!data_seen or try nextToken(&scanner, scratch) != .end_of_document) return error.InvalidModelList;
-    return .{ .bytes = out[0..len] };
+    return kept.ids();
 }
 
-fn nextToken(scanner: *std.json.Scanner, scratch: std.mem.Allocator) !std.json.Token {
+/// The next token of a list body; a malformed one is `InvalidModelList`.
+pub fn nextToken(scanner: *std.json.Scanner, scratch: std.mem.Allocator) !std.json.Token {
     return scanner.nextAlloc(scratch, .alloc_if_needed) catch |err| switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         else => error.InvalidModelList,
@@ -99,7 +119,7 @@ fn nextToken(scanner: *std.json.Scanner, scratch: std.mem.Allocator) !std.json.T
 }
 
 /// The next member's key, or null at the object's end.
-fn objectKey(scanner: *std.json.Scanner, scratch: std.mem.Allocator) !?[]const u8 {
+pub fn objectKey(scanner: *std.json.Scanner, scratch: std.mem.Allocator) !?[]const u8 {
     return switch (try nextToken(scanner, scratch)) {
         .object_end => null,
         .string, .allocated_string => |key| key,
