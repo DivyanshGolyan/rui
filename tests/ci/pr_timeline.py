@@ -28,6 +28,10 @@ Red-main minutes read main_build.py's record instead of judging runs again:
 main is red while a "Main build red" issue (the ci-red label and
 main_build.MARKER in its body) is open: from its creation, through its own
 closed and reopened events in time order, and still red now while one is open.
+Main is red while any such issue is open, so red_main returns the union of
+every issue's open spans (overlapping or touching spans merged, still-open
+spans ending at the report time); two issues open at once count each minute
+once.
 main_build.py alone decides red and green (a stale rerun of an older SHA
 changes nothing; the build job, not the whole run, is the result), and a
 closed stretch counts green even when the issue is later reopened, so this
@@ -209,8 +213,8 @@ def review_stages(outcomes, merged_at):
 def daily(rows, since, until, red):
     """UTC merge-date cohorts; absent releases are excluded from the median.
 
-    red is main's red intervals as (start, end) pairs from red_main, end None
-    while still red. A day that starts before RED_MAIN_KNOWN_FROM has no
+    red is red_main's sorted, disjoint (start, end) intervals; this only clips
+    them to each day. A day that starts before RED_MAIN_KNOWN_FROM has no
     record, so its red minutes are unknown (None), never zero.
     """
     result = []
@@ -228,8 +232,8 @@ def daily(rows, since, until, red):
             medians[f"median_{a}_to_{b}_minutes"] = round(statistics.median(values), 2) if values else None
         minutes_red = None
         if start >= known_from:
-            seconds = sum(max(0, (min(stop, instant(closed) if closed else end)
-                                  - max(start, instant(opened))).total_seconds()) for opened, closed in red)
+            seconds = sum(max(0, (min(stop, instant(closed)) - max(start, instant(opened))).total_seconds())
+                          for opened, closed in red)
             minutes_red = round(seconds / 60, 2)
         result.append({"day": day.isoformat(), "merged": len(cohort), **medians, "red_main_minutes": minutes_red})
         day += timedelta(days=1)
@@ -286,16 +290,18 @@ def containing_release(api, pr, releases):
     return None
 
 
-def red_main(api):
-    """main's red intervals as (opened, closed or None) from main_build.py's issues.
+def red_main(api, now):
+    """When main was red up to now: sorted, disjoint (start, end) UTC intervals.
 
     Each "Main build red" issue (ci-red label, main_build.MARKER in its body)
-    is open exactly while main_build.py judges main red. Its intervals come
-    from its own record: open at created_at, then each closed event ends an
-    interval and each reopened event starts one; an issue open now is red
-    until now.
+    is open exactly while main_build.py judges main red. Each issue's spans
+    come from its own record: open at created_at, then each closed event ends
+    a span and each reopened event starts one; a span still open ends at now.
+    Main is red while any of them is open, so the result is the union of all
+    issues' spans: overlapping or touching spans merge, and no minute appears
+    twice. This is the one owner of "when was main red"; readers only clip it.
     """
-    result = []
+    spans = []
     for row in pages(api, f"repos/{REPO}/issues?state=all&labels={quote(CI_RED_LABEL)}"):
         if "pull_request" in row or RED_MAIN_MARKER not in (row.get("body") or ""):
             continue
@@ -304,13 +310,21 @@ def red_main(api):
         for event in sorted((e for e in events if e["event"] in ("closed", "reopened")),
                             key=lambda e: instant(e["created_at"])):
             if event["event"] == "closed" and opened is not None:
-                result.append((opened, utc(event["created_at"])))
+                spans.append((instant(opened), instant(event["created_at"])))
                 opened = None
             elif event["event"] == "reopened" and opened is None:
                 opened = utc(event["created_at"])
         if opened is not None:
-            result.append((opened, None))
-    return sorted(result, key=lambda interval: instant(interval[0]))
+            spans.append((instant(opened), instant(now)))
+    union = []
+    for start, end in sorted(spans):
+        if end <= start:
+            continue
+        if union and start <= union[-1][1]:
+            union[-1][1] = max(union[-1][1], end)
+        else:
+            union.append([start, end])
+    return [(utc(start.isoformat()), utc(end.isoformat())) for start, end in union]
 
 
 def collect(api, since, numbers, read_activity=activities):
@@ -354,8 +368,8 @@ def main():
     since = args.since.isoformat()
     try:
         rows = collect(github, since, args.pr)
-        red = red_main(github)
         until = datetime.now(timezone.utc).isoformat()
+        red = red_main(github, until)
         report = {"since": since, "as_of": utc(until), "release_source": "releases API published_at + REST compare ancestry",
                   "red_main_source": f"open/closed {RED_MAIN_TITLE!r} issues from main_build.py, "
                                      f"recorded from {RED_MAIN_KNOWN_FROM}; earlier days are unknown",

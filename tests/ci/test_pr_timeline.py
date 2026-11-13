@@ -343,9 +343,9 @@ class TimelineTest(unittest.TestCase):
             self.issue(4, "2026-11-14T00:00:00Z", body="<!-- ci-signature: {} -->"),
             self.issue(5, "2026-11-14T00:00:00Z", body=None),
             self.issue(6, "2026-11-14T00:00:00Z", pull_request={"url": "..."})])
-        self.assertEqual(timeline.red_main(api), [
-            ("2026-11-14T02:00:00Z", "2026-11-14T03:00:00Z"), ("2026-11-14T05:00:00Z", None),
-            ("2026-11-14T23:00:00Z", "2026-11-15T01:30:00Z"), ("2026-11-15T11:00:00Z", None)])
+        # Issue 3's reopened span runs to now and covers issues 1 and 2.
+        self.assertEqual(timeline.red_main(api, "2026-11-15T12:00:00Z"), [
+            ("2026-11-14T02:00:00Z", "2026-11-14T03:00:00Z"), ("2026-11-14T05:00:00Z", "2026-11-15T12:00:00Z")])
         self.assertIn("state=all", calls[0])
         self.assertIn(f"labels={LABEL}", calls[0])
         self.assertEqual(sorted(path.split("/")[4] for path in calls[1:]), ["1", "2", "3"])
@@ -356,21 +356,52 @@ class TimelineTest(unittest.TestCase):
         api, _ = self.red_main_api([self.issue(
             1, "2026-11-14T10:00:00Z", ("reopened", "2026-11-14T15:00:00Z"),
             ("closed", "2026-11-14T15:30:00Z"), ("closed", "2026-11-14T11:00:00Z"))])
-        red = timeline.red_main(api)
+        red = timeline.red_main(api, "2026-11-14T20:00:00Z")
         self.assertEqual(red, [("2026-11-14T10:00:00Z", "2026-11-14T11:00:00Z"),
                                ("2026-11-14T15:00:00Z", "2026-11-14T15:30:00Z")])
         self.assertEqual(timeline.daily([], "2026-11-14", "2026-11-14T20:00:00Z", red)[0]["red_main_minutes"], 90)
         # Reopened and still open: red from the reopen until the report.
         api, _ = self.red_main_api([self.issue(
             1, "2026-11-14T10:00:00Z", ("closed", "2026-11-14T11:00:00Z"), ("reopened", "2026-11-14T15:00:00Z"))])
-        red = timeline.red_main(api)
-        self.assertEqual(red, [("2026-11-14T10:00:00Z", "2026-11-14T11:00:00Z"), ("2026-11-14T15:00:00Z", None)])
+        red = timeline.red_main(api, "2026-11-14T20:00:00Z")
+        self.assertEqual(red, [("2026-11-14T10:00:00Z", "2026-11-14T11:00:00Z"),
+                               ("2026-11-14T15:00:00Z", "2026-11-14T20:00:00Z")])
         self.assertEqual(timeline.daily([], "2026-11-14", "2026-11-14T20:00:00Z", red)[0]["red_main_minutes"], 360)
+
+    def test_red_main_is_the_union_of_overlapping_issues(self):
+        # B opens at 10:00; at 11:00 an older closed issue A is reopened by
+        # hand while B is still open. Main was red 10:00-12:00: 120, not 180.
+        api, _ = self.red_main_api([
+            self.issue(1, "2026-11-13T20:00:00Z", ("closed", "2026-11-13T21:00:00Z"),
+                       ("reopened", "2026-11-14T11:00:00Z")),
+            self.issue(2, "2026-11-14T10:00:00Z")])
+        red = timeline.red_main(api, "2026-11-14T12:00:00Z")
+        self.assertEqual(red, [("2026-11-13T20:00:00Z", "2026-11-13T21:00:00Z"),
+                               ("2026-11-14T10:00:00Z", "2026-11-14T12:00:00Z")])
+        self.assertEqual(timeline.daily([], "2026-11-14", "2026-11-14T12:00:00Z", red)[0]["red_main_minutes"], 120)
+        # Closed issues that overlap, one inside another: one span.
+        api, _ = self.red_main_api([
+            self.issue(1, "2026-11-14T10:00:00Z", ("closed", "2026-11-14T11:30:00Z")),
+            self.issue(2, "2026-11-14T11:00:00Z", ("closed", "2026-11-14T12:00:00Z")),
+            self.issue(3, "2026-11-14T10:30:00Z", ("closed", "2026-11-14T10:45:00Z"))])
+        red = timeline.red_main(api, "2026-11-14T20:00:00Z")
+        self.assertEqual(red, [("2026-11-14T10:00:00Z", "2026-11-14T12:00:00Z")])
+        self.assertEqual(timeline.daily([], "2026-11-14", "2026-11-14T20:00:00Z", red)[0]["red_main_minutes"], 120)
+
+    def test_red_main_merges_touching_spans_and_keeps_gaps(self):
+        api, _ = self.red_main_api([
+            self.issue(1, "2026-11-14T10:00:00Z", ("closed", "2026-11-14T11:00:00Z")),
+            self.issue(2, "2026-11-14T11:00:00Z", ("closed", "2026-11-14T12:00:00Z")),
+            self.issue(3, "2026-11-14T13:00:00Z", ("closed", "2026-11-14T14:00:00Z"))])
+        red = timeline.red_main(api, "2026-11-14T20:00:00Z")
+        self.assertEqual(red, [("2026-11-14T10:00:00Z", "2026-11-14T12:00:00Z"),
+                               ("2026-11-14T13:00:00Z", "2026-11-14T14:00:00Z")])
+        self.assertEqual(timeline.daily([], "2026-11-14", "2026-11-14T20:00:00Z", red)[0]["red_main_minutes"], 180)
 
     def test_red_main_minutes_split_midnight_clip_today_and_unknown_before_record(self):
         red = [("2026-11-12T10:00:00Z", "2026-11-14T00:30:00Z"),  # Spans the record's start.
                ("2026-11-14T23:00:00Z", "2026-11-15T01:30:00Z"),  # Closed, spans midnight.
-               ("2026-11-15T11:00:00Z", None)]                    # Still open at report time.
+               ("2026-11-15T11:00:00Z", "2026-11-15T12:00:00Z")]  # Still open at report time.
         days = timeline.daily([], "2026-11-12", "2026-11-15T12:00:00Z", red)
         self.assertEqual([day["red_main_minutes"] for day in days], [None, None, 90, 150])
         days = timeline.daily([], "2026-11-14", "2026-11-15T12:00:00Z", [])
@@ -385,9 +416,13 @@ class TimelineTest(unittest.TestCase):
                     patch("sys.argv", argv), \
                     contextlib.redirect_stdout(io.StringIO()) as output:
                 self.assertEqual(timeline.main(), 0)
-                red.assert_called_once_with(timeline.github)
+                red.assert_called_once()
+                github, now = red.call_args.args
+                self.assertIs(github, timeline.github)
                 if fmt == "json":
                     report = json.loads(output.getvalue())
+                    # Still-open spans end at the same instant the report is as of.
+                    self.assertEqual(timeline.utc(now), report["as_of"])
                     self.assertEqual(report["prs"], [row])
                     self.assertIn(timeline.RED_MAIN_KNOWN_FROM, report["red_main_source"])
                     self.assertIsNone(report["days"][0]["red_main_minutes"])
