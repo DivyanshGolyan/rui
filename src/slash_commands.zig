@@ -106,20 +106,20 @@ const ConversationName = enum {
 
 /// A conversation's commands.
 pub const conversation = Commands(ConversationName, .{
-    .archive = .{ .description = "stop active work and archive this Session" },
+    .archive = .{ .description = "archive this chat" },
     .clear = .{ .description = "start a new chat" },
-    .copy = .{ .description = "copy the last answer; code its last block, file saves it here", .argument = .{ .choice = copy_words } },
+    .copy = .{ .description = "copy the last answer", .argument = .{ .choice = copy_words } },
     .discard = .{ .listed = false },
-    .effort = .{ .description = "this Session's effort, also the default for new ones", .argument = .effort },
-    .model = .{ .description = "change this Session's model" },
+    .effort = .{ .description = "change effort", .argument = .effort },
+    .model = .{ .description = "change model" },
     .new = .{ .description = "start a new chat" },
     .recover = .{ .argument = .{ .required = "KEY" }, .listed = false },
-    .@"reload-skills" = .{ .description = "rescan skills and append catalog changes without model work" },
-    .rename = .{ .description = "name this Session", .argument = .{ .required = "NAME" } },
-    .requests = .{ .description = "recovery handles; pick one to recover it or read its answer" },
-    .result = .{ .description = "a saved answer", .argument = .{ .required = "KEY" } },
-    .setup = .{ .description = "future defaults", .argument = .{ .options = setup_options } },
-    .unarchive = .{ .description = "restore this Session without restarting work" },
+    .@"reload-skills" = .{ .description = "reload skills" },
+    .rename = .{ .description = "rename this chat", .argument = .{ .required = "NAME" } },
+    .requests = .{ .description = "recover a lost request" },
+    .result = .{ .description = "show a saved answer", .argument = .{ .required = "KEY" } },
+    .setup = .{ .description = "defaults for new chats", .argument = .{ .options = setup_options } },
+    .unarchive = .{ .description = "restore this chat" },
 });
 
 /// What a conversation says for a line that names no command: the name typed,
