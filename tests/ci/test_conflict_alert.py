@@ -111,6 +111,22 @@ class ConflictAlertTest(unittest.TestCase):
         self.assertEqual(sleeps, [])
 
 
+class PagesTest(unittest.TestCase):
+    def test_unwraps_an_envelope_key_and_stops_when_the_caller_stops(self):
+        paths = []
+
+        def api(method, path):
+            paths.append(path)
+            page = int(path.rsplit("page=", 1)[1])
+            return {"workflow_runs": [page] * (100 if page < 3 else 1)}
+
+        self.assertEqual(len(list(conflict_alert.pages(api, "runs?", "workflow_runs"))), 201)
+        self.assertEqual(paths, [f"runs?&per_page=100&page={page}" for page in (1, 2, 3)])
+        paths.clear()
+        self.assertEqual(next(conflict_alert.pages(api, "runs?", "workflow_runs")), 1)
+        self.assertEqual(len(paths), 1)
+
+
 class GitHubCommandTest(unittest.TestCase):
     def test_command_captures_output_and_propagates_failures(self):
         with patch.object(conflict_alert.subprocess, "run", return_value=
