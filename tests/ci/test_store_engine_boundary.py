@@ -36,6 +36,8 @@ ALLOWED = {
     # A test of `rui_served` against an in-memory database.
     "rsql.zig",
 }
+# The per-domain SQLite mechanism tests: any file there may name the binding.
+ALLOWED_DIRECTORIES = ("sqlite_tests/",)
 
 DOMAIN = "src/store/domain"
 DOMAIN_RULE = "src/store/domain reaches the engine or the Queue only through the transition runner"
@@ -78,7 +80,7 @@ def violations(root=ROOT):
     found = {path.relative_to(store).as_posix(): binding_sites(path.read_text()) for path in sorted(store.rglob("*.zig"))}
     messages = [f"{STORE}/{name} names the SQLite binding {count} times; run it through engine.Engine "
                 "(src/store/engine.zig) or engine/Sqlite.zig" for name, count in found.items()
-                if count and name not in ALLOWED]
+                if count and name not in ALLOWED and not name.startswith(ALLOWED_DIRECTORIES)]
     messages += [f"{STORE}/{name} no longer names the SQLite binding; remove it from ALLOWED"
                  for name in sorted(ALLOWED) if not found.get(name)]
     return messages
