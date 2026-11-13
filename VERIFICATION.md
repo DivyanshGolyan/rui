@@ -274,6 +274,7 @@ Successful gates do not capture.
 Native observation failure metadata is copied after reap and before temporary-root deletion.
 
 [Cache maintenance](.github/workflows/cache-maintenance.yml) warms production compilation after trusted main pushes that change build, dependency or maintenance inputs.
+A build partition restores its own newest snapshot, for the current dependencies first and then across a dependency repin; a partition with neither, such as one only pull requests run, starts from that baseline for the current dependencies, and no partition restores another's snapshot.
 It also compiles the build runner on six Linux slots and one Mac, so test shards on the CPU models those slots drew restore it from main.
 Cleanup keeps main's newest snapshot per platform and partition, per build-runner CPU model, of each platform's compiler and of the package set, and removes every PR cache; these are targets, not a quota.
 Warm baselines are not test acceptance.
