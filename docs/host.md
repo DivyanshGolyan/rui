@@ -134,6 +134,8 @@ Use `rui host set --store PATH SETTING @FILE` to read a JSON value from a file.
 Changes apply to the next Host; they do not reconfigure a running one.
 `rui host start` takes `--settings FILE` but not `-`, because a started Host has no stdin; pass a document on stdin with `rui host serve --settings -`.
 Bare `rui` and `rui host start` reach a Host only in `PATH`, so they refuse settings that move it elsewhere: a MySQL Store, `interface.dir`, or a `store.sqlite.dir` other than `PATH`.
+A started Host runs in `/` without stdin. Relative paths you type on the command line (`--settings FILE`, `@FILE`, and `--set` paths or `file:` sources) are taken from the directory you run the command in.
+A relative path saved in `host.json` or written inside a document has no such directory, so bare `rui` and `rui host start` refuse it, as they refuse `interface.lifetime` `stdin`; give an absolute path.
 Run such a Host with `rui host serve --store PATH`.
 
 ## Run in the foreground

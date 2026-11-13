@@ -4148,7 +4148,7 @@ A Host whose settings give `interface.lifetime` as `stdin` (the TypeScript clien
 The program that starts it writes one frame to its stdin, a 4-byte big-endian length and then UTF-8 JSON naming `v` (1), the Store directory, the OpenAI key provider `{kind: "openai_key", baseUrl, key, caFile?}`, the `runtimeDir` that holds its socket `rui.sock`, and optionally `activeCapacity`.
 The settings frame overlays defaults and saved settings; later `--set` assignments override its leaves.
 The optional `network.caFile` names a PEM file trusted exclusively for provider transport, on macOS as on Linux; omitted or null uses system trust.
-A supplied `caFile` must be a nonempty UTF-8 path without NUL bytes and shorter than the platform's path limit; a relative path is relative to the Host's working directory, and an unloadable file or failed verification never falls back to system trust.
+A supplied `caFile` must be a nonempty UTF-8 path without NUL bytes and shorter than the platform's path limit; a relative path is relative to the Host's working directory (a Host started by bare `rui`, `rui host start` or upgrade runs in `/`, so those starts take a path typed relative on their command line from the caller's directory and refuse any other relative path), and an unloadable file or failed verification never falls back to system trust.
 The optional `presets` object maps at most 64 names (1–64 bytes of `[a-z0-9_-]`) to complete agent specs, checked by the shared agent-spec parser and held only in Host memory (D22, D112).
 A `start_agent` call may name a preset and override its fields, but still refuses provider or Workspace fields, including those supplied by the preset (D221).
 The key stays in memory only, never on disk, in argv or in the environment.

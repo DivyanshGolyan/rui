@@ -646,6 +646,24 @@ def saved_settings(root, env):
     assert refused.returncode != 0 and "interface.dir: bare rui and rui host start reach only" in refused.stderr, refused
     assert "[settings_invalid]" in refused.stderr and not matching_processes(moved), refused
 
+    # A started Host runs in `/`: a path typed relative is taken from the
+    # caller's directory, and a relative path saved in host.json, which has no
+    # such directory, is refused before launch, like the stdin lifetime.
+    typed = root / "saved-typed-relative"
+    try:
+        started = run_start(typed, env, "--set", f"store.sqlite.dir={typed.name}", cwd=root)
+        assert started.returncode == 0, started.stderr
+        assert (typed / "rui.sqlite3").is_file() and not pathlib.Path("/" + typed.name).exists(), started
+    finally:
+        forced_crash_cleanup(typed)
+    for path, value, leaf in (("tools.bash.path", "relative/bash", "tools.bash.path: a Host started in / has no base"),
+                              ("interface.lifetime", "stdin", "interface.lifetime: a Host started by bare rui")):
+        unrooted = root / f"saved-unrooted-{path}"
+        assert host_command(env, "set", "--store", unrooted, path, value).returncode == 0
+        refused = run_start(unrooted, env)
+        assert refused.returncode == 2 and leaf in refused.stderr and '"settings_invalid"' in refused.stdout, refused
+        assert not matching_processes(unrooted), refused
+
     # Start failures outside the document keep the child's own report: no
     # stdout line, no settings refusal, and no Host left behind.
     proxy_dir = root / "saved-proxy"
@@ -668,7 +686,7 @@ def saved_settings(root, env):
         retired = host_command(env, "serve", "--store", root / "retired", flag, value)
         assert retired.returncode != 0 and replacement in retired.stderr, retired
     print("saved settings passed: sparse private host.json, settings/check, starter, unset, literal and unknown"
-          " refusals, ordered sources, unreachable refusal, child start failures, retired flags", flush=True)
+          " refusals, ordered sources, unreachable refusal, relative paths, child start failures, retired flags", flush=True)
 
 
 def saved_settings_served(root, env):
@@ -917,7 +935,8 @@ def main():
 
         unparsed_store = root / "unparsed-capacity"
         unparsed = run_start(unparsed_store, env, "--set", 'execution.activeCapacity=-1')
-        assert unparsed.returncode != 0 and not unparsed.stdout, unparsed
+        # Refused before any launch, it is reported as host serve reports it.
+        assert unparsed.returncode == 2 and '"code":"settings_invalid"' in unparsed.stdout, unparsed
         assert not unparsed_store.exists(), "unparsed capacity created a candidate Store"
         sized_store = root / "sized-store"
         try:
