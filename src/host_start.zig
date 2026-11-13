@@ -1145,30 +1145,52 @@ pub fn readLaunch(init: std.process.Init, request: Spawn, settings: *hs.Settings
 /// they typed it in: the --settings FILE, each @FILE, and each --set path leaf
 /// or `file:` secret source. A path read from saved host.json or from inside a
 /// document has no such base; detachedRefusal refuses it instead.
-pub fn anchorTyped(gpa: std.mem.Allocator, cwd: []const u8, request: Spawn) !Spawn {
+/// The caller's directory, looked up only when a typed value is relative: a
+/// start whose values are all absolute must not depend on it (it may have
+/// been deleted). Tests fix `path`.
+pub const Cwd = struct {
+    io: std.Io,
+    path: ?[]const u8 = null,
+    buffer: [std.Io.Dir.max_path_bytes]u8 = undefined,
+
+    fn get(self: *Cwd) ?[]const u8 {
+        if (self.path == null) self.path = self.buffer[0 .. std.Io.Dir.cwd().realPath(self.io, &self.buffer) catch return null];
+        return self.path;
+    }
+};
+
+pub fn anchorTyped(gpa: std.mem.Allocator, cwd: *Cwd, request: Spawn, failure: *start_report.Failure) !Spawn {
     var anchored = request;
     if (request.settings_file) |file| {
-        if (!std.mem.eql(u8, file, "-") and !std.fs.path.isAbsolute(file)) anchored.settings_file = try std.fs.path.join(gpa, &.{ cwd, file });
+        if (!std.mem.eql(u8, file, "-") and !std.fs.path.isAbsolute(file)) anchored.settings_file = try std.fs.path.join(gpa, &.{ try cwdBase(cwd, "settings", failure), file });
     }
     const assignments = try gpa.alloc([]const u8, request.assignments.len);
-    for (request.assignments, assignments) |assignment, *out| out.* = try anchorAssignment(gpa, cwd, assignment);
+    for (request.assignments, assignments) |assignment, *out| out.* = try anchorAssignment(gpa, cwd, assignment, failure);
     anchored.assignments = assignments;
     return anchored;
 }
 
-fn anchorAssignment(gpa: std.mem.Allocator, cwd: []const u8, assignment: []const u8) ![]const u8 {
+fn cwdBase(cwd: *Cwd, leaf: []const u8, failure: *start_report.Failure) error{SettingsInvalid}![]const u8 {
+    if (cwd.get()) |path| return path;
+    var buffer: [start_report.max_refusal_message_bytes]u8 = undefined;
+    const reason = "the current directory no longer exists, so a relative path has no base; give an absolute path";
+    failure.* = .init(.settings_invalid, std.fmt.bufPrint(&buffer, "{s}: {s}", .{ leaf, reason }) catch "settings: " ++ reason);
+    return error.SettingsInvalid;
+}
+
+fn anchorAssignment(gpa: std.mem.Allocator, cwd: *Cwd, assignment: []const u8, failure: *start_report.Failure) ![]const u8 {
     const equals = std.mem.indexOfScalar(u8, assignment, '=') orelse return assignment;
     const path = assignment[0..equals];
     const value = assignment[equals + 1 ..];
     if (std.mem.startsWith(u8, value, "@")) {
         if (value.len == 1 or std.fs.path.isAbsolute(value[1..])) return assignment;
-        return std.fmt.allocPrint(gpa, "{s}=@{s}", .{ path, try std.fs.path.join(gpa, &.{ cwd, value[1..] }) });
+        return std.fmt.allocPrint(gpa, "{s}=@{s}", .{ path, try std.fs.path.join(gpa, &.{ try cwdBase(cwd, path, failure), value[1..] }) });
     }
     for (hs.leaves) |leaf| if (matches(leaf.pattern, path)) {
         if (std.mem.eql(u8, leaf.kind, "path") and value.len != 0 and !std.fs.path.isAbsolute(value))
-            return std.fmt.allocPrint(gpa, "{s}={s}", .{ path, try std.fs.path.join(gpa, &.{ cwd, value }) });
+            return std.fmt.allocPrint(gpa, "{s}={s}", .{ path, try std.fs.path.join(gpa, &.{ try cwdBase(cwd, path, failure), value }) });
         if (leaf.secret and std.mem.startsWith(u8, value, "file:") and value.len > "file:".len and !std.fs.path.isAbsolute(value["file:".len..]))
-            return std.fmt.allocPrint(gpa, "{s}=file:{s}", .{ path, try std.fs.path.join(gpa, &.{ cwd, value["file:".len..] }) });
+            return std.fmt.allocPrint(gpa, "{s}=file:{s}", .{ path, try std.fs.path.join(gpa, &.{ try cwdBase(cwd, path, failure), value["file:".len..] }) });
         break;
     };
     return assignment;
@@ -1319,12 +1341,15 @@ pub noinline fn spawn(init: std.process.Init, typed: Spawn, ops: Ops, progress: 
     var wiping: secret_value.WipingAllocator = .{ .backing = std.heap.c_allocator };
     var anchoring: std.heap.ArenaAllocator = .init(wiping.allocator());
     defer anchoring.deinit();
-    var cwd: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const here = cwd[0 .. std.Io.Dir.cwd().realPath(io, &cwd) catch |err| return launchFailure(result, .setup, err, null)];
-    const request = anchorTyped(anchoring.allocator(), here, typed) catch |err| return launchFailure(result, .setup, err, null);
+    var cwd: Cwd = .{ .io = io };
     // Refuse before any effect: an invalid or unreachable start creates no Store.
     var reach_failure: start_report.Failure = .init(.settings_invalid, "settings: could not be read");
-    checkStart(init, request, &reach_failure) catch |err| {
+    const admitted: anyerror!Spawn = admit: {
+        const anchored = anchorTyped(anchoring.allocator(), &cwd, typed, &reach_failure) catch |err| break :admit err;
+        checkStart(init, anchored, &reach_failure) catch |err| break :admit err;
+        break :admit anchored;
+    };
+    const request = admitted catch |err| {
         var canonical: [protocol.max_store_bytes]u8 = undefined;
         launchFailure(result, .child_refused, if (err == error.SettingsInvalid) error.HostStartupFailed else err, platform.canonicalStoreDestination(io, selected, &canonical) catch null);
         result.outcome.failed.refusal = reach_failure;
@@ -1507,7 +1532,8 @@ test "Host start detached launches rebase typed paths and refuse paths with no b
         const typed = layer == .set and kind.anchored != null;
         var failure: start_report.Failure = undefined;
         // Starter door.
-        const started = try anchorTyped(a, here, request);
+        var cwd: Cwd = .{ .io = init.io, .path = here };
+        const started = try anchorTyped(a, &cwd, request, &failure);
         const start_result = checkStart(init, started, &failure);
         if (typed) {
             try start_result;
@@ -1541,11 +1567,13 @@ test "Host start detached launches rebase typed paths and refuse paths with no b
         .{ .dir = dir, .assignments = &.{"store.sqlite.dir=host-references"} },
     }) |request| {
         var failure: start_report.Failure = undefined;
-        try checkStart(init, try anchorTyped(a, here, request), &failure);
+        var cwd: Cwd = .{ .io = init.io, .path = here };
+        try checkStart(init, try anchorTyped(a, &cwd, request, &failure), &failure);
         try std.testing.expect(!try replayable(init, request));
     }
     var failure: start_report.Failure = undefined;
-    try std.testing.expectError(error.SettingsInvalid, checkStart(init, try anchorTyped(a, here, .{ .dir = dir, .settings_file = "-" }), &failure));
+    var cwd: Cwd = .{ .io = init.io, .path = here };
+    try std.testing.expectError(error.SettingsInvalid, checkStart(init, try anchorTyped(a, &cwd, .{ .dir = dir, .settings_file = "-" }, &failure), &failure));
     try std.testing.expect(std.mem.indexOf(u8, failure.message.slice(), "rui host serve --settings -") != null);
 }
 

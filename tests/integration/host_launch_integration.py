@@ -656,6 +656,22 @@ def saved_settings(root, env):
         assert (typed / "rui.sqlite3").is_file() and not pathlib.Path("/" + typed.name).exists(), started
     finally:
         forced_crash_cleanup(typed)
+    # The caller's directory is looked up only for a relative typed value: a
+    # start from a deleted directory with absolute values still starts.
+    def deleted_cwd(name):
+        gone = root / name
+        gone.mkdir()
+        return lambda: (os.chdir(gone), os.rmdir(gone))
+    orphaned = root / "saved-deleted-cwd"
+    try:
+        started = run_start(orphaned, env, "--set", "tools.bash.path=/bin/bash", preexec_fn=deleted_cwd("gone-absolute"))
+        assert started.returncode == 0, started.stderr
+    finally:
+        forced_crash_cleanup(orphaned)
+    refused = run_start(root / "saved-deleted-cwd-relative", env, "--set", "tools.bash.path=relative/bash",
+                        preexec_fn=deleted_cwd("gone-relative"))
+    assert refused.returncode == 2 and "tools.bash.path: the current directory no longer exists" in refused.stderr, refused
+    assert not (root / "saved-deleted-cwd-relative").exists(), refused
     for path, value, leaf in (("tools.bash.path", "relative/bash", "tools.bash.path: a Host started in / has no base"),
                               ("interface.lifetime", "stdin", "interface.lifetime: a Host started by bare rui")):
         unrooted = root / f"saved-unrooted-{path}"
