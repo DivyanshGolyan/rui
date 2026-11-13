@@ -2446,11 +2446,15 @@ On a terminal, bare `rui` (optionally `--store`, `--provider`, `--model`) opens 
 The overview is Rui's primary terminal surface: a client view over Session listing and host information, not a Host entity, registry or report.
 It neither creates nor resumes a Session.
 It captures canonical cwd before starting/attaching the selected Host (default Active Capacity 100), and resolves only a locally usable supported provider for Sessions it may start; an unavailable or ambiguous choice opens the app with ChatGPT and API key choices on the input row, without creating a Session.
-The same screen opens from app settings Sign-in; it drives the credential owners on a cancellable UI worker, shows a clickable device-login link or masked key entry, and keeps failures on that row.
+The same screen opens from app settings Sign-in; it drives the credential owners on a cancellable UI worker, shows a clickable sign-in link or masked key entry, and keeps failures on that row in plain words.
+Its ChatGPT choice is selected first and signs in through the browser, with a device code as the option (Divyansh chose this on 2026-11-13, "one ChatGPT sign-in, two ways to log in"): Enter reuses a usable browser sign-in, else a usable device-code sign-in, else begins the browser sign-in through the same login as `rui auth login chatgpt`.
+While it waits the row shows `Sign in at HOST`, linked to the whole address, and a masked entry for the address the browser ended on, which Enter hands to the login as the command line hands it a pasted line; a line that is not that address says so and the wait goes on.
+Tab while it waits, or after it failed with nothing saved, cancels it through the same gate as Esc and begins the device code once the cancelled attempt has settled, even when that attempt ends with a failure of its own.
+The link and the entry live in pages mapped for that attempt alone, wiped and unmapped when it settles; the browser's failure page sends the person back to Rui.
 While it is open it takes every key and click, so nothing behind it opens or navigates.
 Esc leaves it, except the first-run screen, which stays until sign-in gives a default; a screen opened from Settings always returns there.
 Its choice uses the approval row's prompt and background-only selection, including with NO_COLOR; the device row always reads `auth.openai.com/codex/device · CODE`, using the answer view's terminal hyperlink boundary.
-Either locally ready provider is selected without reinstalling its credential. Credential publication, default saving and Host activation settle once through the same owner on completion or departure, so leaving after publication cannot hide a failed default save.
+A locally ready sign-in for the chosen row is selected without reinstalling its credential. Credential publication, default saving and Host activation settle once through the same owner on completion or departure, so leaving after publication cannot hide a failed default save.
 After credential publication it saves the provider default through `saveProviderAfterLogin` and uses the existing Host start path before enabling task input.
 The shared `host_launch` result retains startup output, failure context and warnings across activation. Its reporting policy supplies terminal diagnostics after screen restoration and one plain sign-in-row line; only retryable failures offer Enter. Successful activation warnings remain a single overview notice, independently of default-save failure.
 A running Host that does not serve the chosen provider is reported, not restarted.
@@ -2581,7 +2585,7 @@ A person sees one ChatGPT sign-in with two ways to log in: `rui auth login chatg
 Three places still say "codex": the device-code page `auth.openai.com/codex/device` and ChatGPT's own "device code authorization for Codex" setting, which are OpenAI's names, and `--provider codex`, which scripts use to choose the device-code route.
 `rui defaults inspect` shows the prospective choice, each provider's local Rui-owned credential state (`local_credentials` in JSON) and separately the selected Store's actual readable Host capabilities.
 It never refreshes, contacts a provider, creates a Host/Session or imports another CLI's credentials.
-The bare-entry provider chooser can begin the device-code login or defer; explicit `rui auth login chatgpt --device-code` uses the same publication rule.
+The bare-entry provider chooser can begin the browser or device-code login or defer; explicit `rui auth login chatgpt`, with or without `--device-code`, uses the same publication rule.
 Authentication remains an explicit shell operation, separate from the conversation.
 Denial/expiry leaves preferences unchanged.
 After secure credential installation, explicit `rui auth login PROVIDER` atomically fills its own provider when no provider default exists, and replaces a saved default only when the provider table says it is the other sign-in to the same account, so a browser sign-in replaces a saved `codex` and a device-code sign-in replaces a saved `chatgpt`.

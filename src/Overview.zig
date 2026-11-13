@@ -8143,6 +8143,8 @@ test "Sign-in Esc at the choice leaves unless the first-run screen has no defaul
         }
         try std.testing.expect(overview.root.input.layer.signInOpen());
         try std.testing.expectEqual(@import("sign_in.zig").Stage.choice, page.state.stage);
+        // ChatGPT is chosen first, and begins in the browser.
+        try std.testing.expectEqual(@import("sign_in.zig").Provider.chatgpt, page.state.selected);
         const stays = from == .first_run and !default;
         // Only the first-run screen with no default holds the overview's
         // tick; under any other sign-in the overview and Session are served.

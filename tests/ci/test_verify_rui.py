@@ -647,10 +647,11 @@ while True:
     def test_first_run_states_are_isolated_and_validate_before_launch(self):
         scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
         states = {state["name"]: state for state in scenario["states"]}
-        for name in ("first-run", "first-run-codex", "first-run-key"):
+        for name in ("first-run", "first-run-browser", "first-run-codex", "first-run-key"):
             self.assertTrue(states[name]["first_run"])
             self.assertEqual(states[name]["open"], "overview")
-        self.assertEqual(states["first-run-codex"]["env"]["RUI_TEST_LOGIN"], "waiting")
+        for name in ("first-run-browser", "first-run-codex"):
+            self.assertEqual(states[name]["env"]["RUI_TEST_LOGIN"], "waiting")
         for invalid in ("yes", 1, None):
             data = self.scenario()
             data["states"][0]["first_run"] = invalid
