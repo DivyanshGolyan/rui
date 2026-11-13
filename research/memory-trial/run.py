@@ -19,7 +19,7 @@ class Endpoint(BaseHTTPRequestHandler):
 endpoint=ThreadingHTTPServer(('127.0.0.1',0),Endpoint);threading.Thread(target=endpoint.serve_forever,daemon=True).start()
 binary=str(pathlib.Path(a.binary).resolve());env=os.environ.copy()
 if a.logging:env.update(MallocStackLogging='1',MallocStackLoggingNoCompact='1')
-log=open(out/'host.stderr','w');host=subprocess.Popen([binary,'serve','--store',str(store),'--active-capacity','8','--provider-endpoint',f'http://127.0.0.1:{endpoint.server_port}/responses','--test-phase-trace','--test-sqlite-diagnostics'],stdout=subprocess.PIPE,stderr=log,text=True,env=env)
+log=open(out/'host.stderr','w');host=subprocess.Popen([binary,'host','serve','--store',str(store),'--set','execution.activeCapacity=8','--set','providers={}','--set',f'providers.codex.endpoint=http://127.0.0.1:{endpoint.server_port}/responses','--set','providers.codex.unauthenticated=true','--test-phase-trace','--test-sqlite-diagnostics'],stdout=subprocess.PIPE,stderr=log,text=True,env=env)
 manifest={'binary':binary,'sha256':hashlib.sha256(pathlib.Path(binary).read_bytes()).hexdigest(),'logging':a.logging,'instruments':a.instruments,'success':False,'capacity':8,'answer_bytes':100000,'pid':host.pid,'snapshots':[]}
 def cli(*args):return subprocess.check_output([binary,*args,'--store',str(store)],text=True,timeout=30)
 def snapshot(name):

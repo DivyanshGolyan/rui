@@ -99,7 +99,7 @@ pub const Liveness = policy.Liveness;
 
 /// What verifies an `https://` peer. Verification is never off. `.system`
 /// is Apple SecTrust on macOS, and elsewhere what `tls_client.Trust`
-/// describes; `.ca_file` is only that file (`--provider-ca-file`).
+/// describes; `.ca_file` is only that file (`network.caFile`).
 pub const Trust = tls_client.Trust;
 
 pub const Options = struct {
