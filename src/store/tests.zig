@@ -4904,6 +4904,36 @@ test "a call id repeated in a later call batch fails the settlement" {
     }.run);
 }
 
+test "a success settlement sends its rows twenty statements a pass" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            // Only a batching engine sends passes, and a rerun repeats them.
+            if (case.engine != .mysql or case.rerun) return;
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try configureTestSession(&storage, "settlement-pass-config");
+            try submitTestMessage(&storage, &tmp, "settlement-pass-input", "settlement-pass-key", session.slice(), "passes");
+            const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            const rounds = storage.testing_content_work.rounds;
+            const before = RoundMeter.QueryShape.snapshot(&storage);
+            // Sixteen messages: the facts round, then one round that writes
+            // each message's text and bag rows, their bytes, its item and its
+            // entry, resolves the Operation, closes its Turn and commits.
+            try settleMessagesForTesting(&storage, &tmp, binding, 16, false, null);
+            const shape = RoundMeter.QueryShape.snapshot(&storage).since(before);
+            try std.testing.expectEqual(@as(u16, 2), storage.testing_content_work.rounds - rounds);
+            // A settlement's queue holds twenty statements a pass, where a
+            // write's holds twelve: the passes main sent for these rows.
+            try std.testing.expectEqual(@as(u64, 7), shape.access_passes);
+            try std.testing.expectEqual(shape.expected(), shape.queries);
+            try std.testing.expect(!storage.isFenced());
+        }
+    }.run);
+}
+
 test "valid and rejected call populations grow independently" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
