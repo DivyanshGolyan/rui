@@ -580,6 +580,13 @@ def host_command(env, *arguments):
                           text=True, timeout=COMMAND_TIMEOUT)
 
 
+def host_ok(env, *arguments):
+    """A host command that must succeed; a failure shows its own report."""
+    completed = host_command(env, *arguments)
+    assert completed.returncode == 0, (arguments, completed.returncode, completed.stderr)
+    return completed
+
+
 def saved_settings(root, env):
     """DIR/host.json reaches the Host that the shared starter (bare rui and host start) launches."""
     store = root / "saved-settings"
@@ -627,7 +634,7 @@ def saved_settings(root, env):
                                 (("--settings", override, "--set", "execution.activeCapacity=6",
                                   "--set", "execution.activeCapacity=5"), 5)):
         ordered = root / f"saved-order-{capacity}"
-        assert host_command(env, "set", "--store", ordered, "execution.activeCapacity", "2").returncode == 0
+        host_ok(env, "set", "--store", ordered, "execution.activeCapacity", "2")
         try:
             started = run_start(ordered, env, *map(str, arguments))
             assert started.returncode == 0, started.stderr
@@ -639,9 +646,15 @@ def saved_settings(root, env):
 
     # Settings that move the Host out of its directory are refused before any launch.
     moved = root / "saved-moved"
-    elsewhere = root / "saved-elsewhere"
-    elsewhere.mkdir(mode=0o700)
-    assert host_command(env, "set", "--store", moved, "interface.dir", elsewhere).returncode == 0
+    # An interface directory holds the socket, so its path is bounded (94
+    # bytes); a sibling of root can exceed that under a long TMPDIR.
+    elsewhere = pathlib.Path(tempfile.mkdtemp(prefix="rui-if-", dir="/tmp")).resolve()
+    try:
+        host_ok(env, "set", "--store", moved, "interface.dir", elsewhere)
+        too_long = host_command(env, "set", "--store", moved, "interface.dir", "/" + "d" * 94)
+        assert too_long.returncode == 2 and "interface.dir" in too_long.stderr and "94" in too_long.stderr, too_long
+    finally:
+        os.rmdir(elsewhere)
     refused = run_start(moved, env)
     assert refused.returncode != 0 and "interface.dir: bare rui and rui host start reach only" in refused.stderr, refused
     assert "[settings_invalid]" in refused.stderr and not matching_processes(moved), refused
@@ -675,7 +688,7 @@ def saved_settings(root, env):
     for path, value, leaf in (("tools.bash.path", "relative/bash", "tools.bash.path: a Host started in / has no base"),
                               ("interface.lifetime", "stdin", "interface.lifetime: a Host started by bare rui")):
         unrooted = root / f"saved-unrooted-{path}"
-        assert host_command(env, "set", "--store", unrooted, path, value).returncode == 0
+        host_ok(env, "set", "--store", unrooted, path, value)
         refused = run_start(unrooted, env)
         assert refused.returncode == 2 and leaf in refused.stderr and '"settings_invalid"' in refused.stdout, refused
         assert not matching_processes(unrooted), refused
@@ -685,9 +698,9 @@ def saved_settings(root, env):
     proxy_dir = root / "saved-proxy"
     for path, value in (("providers.openai.endpoint", "http://127.0.0.1:9/responses"),
                         ("providers.openai.unauthenticated", "true")):
-        assert host_command(env, "set", "--store", proxy_dir, path, value).returncode == 0
+        host_ok(env, "set", "--store", proxy_dir, path, value)
     keyless = root / "saved-keyless"
-    assert host_command(env, "set", "--store", keyless, "providers", '{"openai":{}}').returncode == 0
+    host_ok(env, "set", "--store", keyless, "providers", '{"openai":{}}')
     for directory, changes, report in (
             (proxy_dir, {"HTTPS_PROXY": "https://proxy.example:1", "https_proxy": "https://proxy.example:1"},
              "Rui tunnels only through an http:// proxy. The Host did not start."),
@@ -742,7 +755,7 @@ def saved_settings_served(root, env):
         refused = run_start(mcp_store, token_env)
         assert refused.returncode != 0 and "[tool_name_collision]" in refused.stderr, refused
         assert "clash" in refused.stderr and "bash" in refused.stderr, refused.stderr
-        assert host_command(env, "unset", "--store", mcp_store, "tools.mcp.clash").returncode == 0
+        host_ok(env, "unset", "--store", mcp_store, "tools.mcp.clash")
         started = run_start(mcp_store, token_env)
         assert started.returncode == 0, started.stderr
     finally:
