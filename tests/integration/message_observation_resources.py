@@ -18,6 +18,7 @@ import threading
 
 import human_cli_fixture as cli
 import host_process
+from previous_release_upgrade import Dialect
 from host_process import start_ready_process, stop_process
 from proc_sample import sample
 import os_semantics
@@ -138,11 +139,10 @@ def main():
             state = pathlib.Path(temporary)
             home = state / "capture-home"
             home.mkdir()
-            host, _ = start_ready_process([baseline, "serve", "--store", state / "store",
-                "--set", 'execution.activeCapacity=1',
-                    "--set", "providers={}",
-                    "--set", "providers.codex.endpoint=" + str(f"http://127.0.0.1:{endpoint.server_port}/responses"),
-                    "--set", "providers.codex.unauthenticated=true"])
+            host, _ = start_ready_process(
+                Dialect(baseline).host_arguments(state / "store",
+                    f"http://127.0.0.1:{endpoint.server_port}/responses", retry_waits=False),
+                isolate_providers=False)
             try:
                 cli.run(home, "configure", "--store", state / "store", "--session", "resources/message",
                     "--workspace", state, "--provider", "codex", "--model", "gpt-6-sol")

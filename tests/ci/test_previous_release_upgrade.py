@@ -195,6 +195,22 @@ class RunningUpgradeTest(unittest.TestCase):
                                "--set", "providers.codex.endpoint=http://127.0.0.1/responses",
                                "--set", "providers.codex.unauthenticated=true"])
 
+    def test_resource_diagnostics_keep_the_baseline_executable_and_grammar(self):
+        for modern in (False, True):
+            dialect = upgrade.Dialect.__new__(upgrade.Dialect)
+            dialect.binary = Path("/historical/bin/rui")
+            dialect.resource_first = modern
+            dialect.host_settings = modern
+            with patch.object(upgrade.fixture, "RUI", Path("/candidate/bin/rui")):
+                args = dialect.host_arguments(Path("/store"))
+            self.assertEqual(args[:4] if not modern else args[:5],
+                             ["/historical/bin/rui", "serve", "--store", "/store"] if not modern else
+                             ["/historical/bin/rui", "host", "serve", "--store", "/store"])
+            self.assertEqual(args[-4:] if modern else args[-2:],
+                             ["--set", "execution.activeCapacity=1", "--set", "providers={}"] if modern else
+                             ["--active-capacity", "1"])
+            self.assertNotIn("--test-retry-waits-ms", args)
+
     def test_release_installer_uses_real_template_and_local_archive_only(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()

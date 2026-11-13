@@ -162,6 +162,7 @@ class Dialect:
     """One installed build's command grammar; the previous build keeps its own."""
 
     def __init__(self, binary):
+        self.binary = binary
         self.resource_first = bool(help_text(binary, "request", "inspect"))
         self.host_settings = "--set" in help_text(binary, *self.serve())
         send_help = (help_text(binary, "session", "send") if self.resource_first
@@ -175,16 +176,18 @@ class Dialect:
     def serve(self):
         return ("host", "serve") if self.resource_first else ("serve",)
 
-    def host_arguments(self, store, endpoint, *, retry_waits=True):
+    def host_arguments(self, store, endpoint=None, *, retry_waits=True):
         # Actual previous releases retain their installed grammar. Only the
         # candidate dialect uses generic settings; never teach an old binary
         # new flags or silently stop exercising the historical release.
-        settings = (["--set", "execution.activeCapacity=1", "--set", "providers={}",
-                     "--set", f"providers.codex.endpoint={endpoint}",
-                     "--set", "providers.codex.unauthenticated=true"] if self.host_settings else
-                    ["--active-capacity", "1", "--provider-endpoint", endpoint])
-        return [str(fixture.RUI), *self.serve(), "--store", str(store), *settings,
-                *(["--test-retry-waits-ms", "50,100,150"] if retry_waits else [])]
+        settings = (["--set", "execution.activeCapacity=1", "--set", "providers={}"]
+                    if self.host_settings else ["--active-capacity", "1"])
+        if endpoint is not None:
+            settings += (["--set", f"providers.codex.endpoint={endpoint}",
+                          "--set", "providers.codex.unauthenticated=true"] if self.host_settings else
+                         ["--provider-endpoint", endpoint])
+        return [str(getattr(self, "binary", fixture.RUI)), *self.serve(), "--store", str(store), *settings,
+                *(["--test-retry-waits-ms", "50,100,150"] if endpoint is not None and retry_waits else [])]
 
     def host_status(self, binary, store, timeout):
         status = subprocess.run([binary, "host", "status", "--store", store],
