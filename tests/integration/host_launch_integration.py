@@ -682,13 +682,16 @@ def saved_settings_served(root, env):
     docs, clash = mcp_server(["search"]), mcp_server(["bash"])
     mcp_store = root / "saved-mcp"
     try:
-        save(mcp_store, "tools.mcp.docs.url", f"http://127.0.0.1:{docs.server_port}/mcp")
-        save(mcp_store, "tools.mcp.clash.url", f"http://127.0.0.1:{clash.server_port}/mcp")
-        refused = run_start(mcp_store, env)
+        # A saved file holds only a secret's source; the Host reads the token.
+        token_env = {**env, "RUI_TEST_MCP_TOKEN": "t"}
+        for name, server in (("docs", docs), ("clash", clash)):
+            save(mcp_store, f"tools.mcp.{name}.url", f"http://127.0.0.1:{server.server_port}/mcp")
+            save(mcp_store, f"tools.mcp.{name}.bearerToken", "env:RUI_TEST_MCP_TOKEN")
+        refused = run_start(mcp_store, token_env)
         assert refused.returncode != 0 and "[tool_name_collision]" in refused.stderr, refused
         assert "clash" in refused.stderr and "bash" in refused.stderr, refused.stderr
         assert host_command(env, "unset", "--store", mcp_store, "tools.mcp.clash").returncode == 0
-        started = run_start(mcp_store, env)
+        started = run_start(mcp_store, token_env)
         assert started.returncode == 0, started.stderr
     finally:
         forced_crash_cleanup(mcp_store)
