@@ -1559,15 +1559,18 @@ while True:
                         run = types.SimpleNamespace(meta={"sha": "a" * 40})
                         captured = self.helper["frame_capture"](run, terminal, Path(temp), state, (width, 30), None)
                         self.assertEqual(captured["ok"], bad is None)
-                        if bad is not None:
-                            self.assertIn("background under", captured["reason"])
+                        self.assertEqual(captured["reason"],
+                                         None if bad is None else f"{marker!r} must have background=#{color}")
+                        self.assertTrue((Path(temp) / captured["files"]["txt"]).exists())
+                        # Style is a capture verdict: readiness never waits on colour.
                         observed = []
                         terminal.wait = lambda check, *_args, **_kw: observed.append(check(
                             types.SimpleNamespace(completed=frame.text, frame=frame)))
                         self.helper["frame_ready"](terminal, state)
-                        self.assertEqual(observed, [bad is None])
-                        self.assertIn("marker missing", self.helper["frame_background_failure"](
-                            {"expect_background": {"missing": "#" + color}}, frame))
+                        self.assertEqual(observed, [True])
+                        self.assertEqual(self.helper["frame_background_failure"](
+                            {"expect_background": {"missing": "#" + color}}, frame),
+                            "missing background specimen 'missing'")
 
     def test_capture_expectations_over_sizes_and_state_transitions(self):
         capture = self.helper["frame_capture"]
