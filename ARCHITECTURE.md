@@ -2486,7 +2486,7 @@ Divyansh chose marks that hold still on 2026-11-02, replacing the 2026-10-30 pul
 Enter on a row opens that Session's conversation, and so does one click on the row, under Enter's rules; a click on a folded group's `N more` opens the group at its first hidden row, as moving into it does; headings, marks, counts, memory and row words take no click (Divyansh, 2026-11-09, TUI rework plan, "Click targets on the final screens").
 One line map, `listItem` in `src/overview_view.zig`, names each list line for drawing, and `clickOf` says what a click on one names: the Session to open or the group to unfold.
 Each drawn row keeps that name, so a click means what the person saw even when the list changed since the frame, and a Session gone by then opens nothing.
-The Sessions list and a panel are two widgets in the list's place; the screen shows the one the core names (`State.listArea`), and only the Sessions hear a press.
+The Sessions list, a panel and the model picker are three widgets in the list's place; the screen shows the one the core names (`State.listArea`), and only the Sessions hear a press.
 Ctrl-X sends an ordinary `session stop` for the selected row, with the same capture and recovery as the CLI command.
 List input reaches `overview_view.step` as a semantic action, Enter or ignored input; clicks carry the Session, New Session or Settings identity drawn in the frame.
 Printable keys and bracketed paste are ignored: no editor, hidden draft, frozen-editor state, command list, skill cache or duplicate footer focus exists on the overview.
