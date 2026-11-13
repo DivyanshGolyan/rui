@@ -3644,12 +3644,25 @@ Each state carries `since`, the Host Unix second the Session entered it, read fr
 | Every unresolved Action the active Turn's Operation proposed awaits a Permission Decision | `approval` | the group's latest change, else the proposing resolution |
 | Otherwise, with an active Turn | `pending` | the group's latest change, else the Operation's resolution |
 | No active Turn, and an eligible Message is queued | `pending` | the oldest queued admission, or the latest outcome when that Message was queued before it |
+| Otherwise settled own work, with a saved attached-tree obligation | `working` | the later of the own settled state and earliest owed work |
 | No active Turn, and a stop excluded input newer than the latest Turn's input, after its outcome | `stopped`, cause `stop` | that stop |
 | The latest Turn completed | `finished` | its outcome |
 | The latest Turn was cancelled | `stopped`, cause `stop` when a stop selected it, else `interruption` | its outcome |
 | The latest Turn failed | `failed`, with its code and, for a quota code, the saved `resets_at` | its outcome |
 | No Turn | `idle` | Session creation |
 
+- **Attached tree obligations (D239):** a Session owes its parent until its active
+  Turn, eligible queued Message past its stop cutoff, unpublished forwarded rows,
+  undelivered ending Message and recursively owed descendants have transferred
+  into the parent's feed or eligible input. `src/store/domain/session_obligation.zig`
+  alone reconciles that definition before commit, propagates ancestors and records
+  their change-ring hints. The nullable `session.obligation_since` fact and its live
+  parent index serve Current, listing and Activity reads; no reader scans attached
+  Sessions or re-derives publication eligibility. Only otherwise settled own work
+  becomes `working`; Turn, Operation and Action identities remain the Session's own.
+  Standalone agents do not count. Format 72 backfills the frontier once; clearing
+  the nullable fact removes its live index entry without DELETE authority or a
+  second copy of the saved Session parent key.
 - **Latest** and **before** follow the Session's order, never the clock, which can step back.
   A tool group's changes follow its proposal, and its resolutions follow one another by acceptance position; a queued admission and an outcome compare by position.
   An `allow_once` decision and a Bash launch claim no position: a decision is ordered against a resolution by time, and `bash` dates from the earliest launch time among running Actions.

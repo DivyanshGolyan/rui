@@ -168,6 +168,12 @@ fn RoundOf(comptime R: type, comptime commit: Commit, comptime Guards: type, com
             r.get().writer.write(S, args);
         }
 
+        /// Publication settlement whose identity does not bind a Session column.
+        pub fn obligationsChanged(r: *Self, head: rsql.SessionHead) void {
+            transacts("changes obligations");
+            r.get().writer.obligationsChanged(head);
+        }
+
         /// `Access.writeCount`, as `write`.
         pub fn writeCount(r: *Self, comptime S: type, args: S.Args, rows: u64) void {
             writes("queues no write: " ++ S.sql);

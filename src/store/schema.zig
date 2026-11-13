@@ -20,7 +20,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 71;
+pub const schema_version: u32 = 72;
 
 pub const IdentityMismatch = struct {
     saved_selector: Bounded(store_path.max_bytes) = .{},
@@ -58,6 +58,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 69, .digest = 0x8db67f4a14f18a37 },
     .{ .schema_version = 70, .digest = 0xb60d036b364ad267 },
     .{ .schema_version = 71, .digest = 0xa61e85ed49f9fa8b },
+    .{ .schema_version = 72, .digest = 0xa455b6a361f2e2b9 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -657,6 +658,22 @@ pub const migrations = [_]Migration{
             "UPDATE store_meta SET meta_value='15' WHERE meta_key='wire_version' AND meta_value='14'",
         },
     },
+    // D239: the nullable fact and its live index are the durable frontier.
+    .{
+        .from = 71,
+        .sqlite = &.{
+            "ALTER TABLE session ADD COLUMN obligation_since INTEGER CHECK(obligation_since IS NULL OR obligation_since>0)",
+            "CREATE INDEX session_obligation_parent ON session(parent_ref,obligation_since,session_ref) WHERE obligation_since IS NOT NULL",
+            "CREATE INDEX session_forward_owed_message ON session_forward(target_ref,message_delivered)",
+            "WITH RECURSIVE own_owed(session_ref,since) AS (SELECT t.session_ref,m.admitted_at AS since FROM turn t JOIN message_admission m ON m.admission_id=t.first_admission_id WHERE t.outcome_code IS NULL UNION SELECT m.session_ref,m.admitted_at FROM message_admission m WHERE m.turn_id IS NULL AND m.admission_id>coalesce((SELECT admission_cutoff FROM session_stop WHERE session_ref=m.session_ref ORDER BY admission_cutoff DESC LIMIT 1),0) UNION SELECT f.target_ref,m.admitted_at FROM session_forward f LEFT JOIN action_operation a ON f.kind=1 AND a.action_id=f.source_id LEFT JOIN model_operation op ON op.operation_id=a.parent_operation_id JOIN turn t ON t.turn_id=CASE WHEN f.kind=2 THEN f.source_id ELSE op.turn_id END JOIN message_admission m ON m.admission_id=t.first_admission_id WHERE f.position IS NULL OR f.message_delivered=0),owed(session_ref,since) AS (SELECT session_ref,since FROM own_owed UNION SELECT s.parent_ref,o.since FROM owed o JOIN session s ON s.session_ref=o.session_ref WHERE s.parent_ref IS NOT NULL) UPDATE session SET obligation_since=(SELECT min(o.since) FROM owed o WHERE o.session_ref=session.session_ref)",
+        },
+        .mysql = &.{
+            "ALTER TABLE session ADD COLUMN obligation_since BIGINT CHECK(obligation_since IS NULL OR obligation_since>0) AFTER parent_ref",
+            "ALTER TABLE session ADD COLUMN session_obligation_parent_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN obligation_since IS NOT NULL THEN parent_ref END) STORED AFTER obligation_since, ADD INDEX session_obligation_parent(session_obligation_parent_lead,obligation_since,session_ref)",
+            "CREATE INDEX session_forward_owed_message ON session_forward(target_ref,message_delivered)",
+            "WITH RECURSIVE own_owed(session_ref,since) AS (SELECT t.session_ref,m.admitted_at AS since FROM turn t JOIN message_admission m ON m.admission_id=t.first_admission_id WHERE t.outcome_code IS NULL UNION SELECT m.session_ref,m.admitted_at FROM message_admission m WHERE m.turn_id IS NULL AND m.admission_id>coalesce((SELECT admission_cutoff FROM session_stop WHERE session_ref=m.session_ref ORDER BY admission_cutoff DESC LIMIT 1),0) UNION SELECT f.target_ref,m.admitted_at FROM session_forward f LEFT JOIN action_operation a ON f.kind=1 AND a.action_id=f.source_id LEFT JOIN model_operation op ON op.operation_id=a.parent_operation_id JOIN turn t ON t.turn_id=CASE WHEN f.kind=2 THEN f.source_id ELSE op.turn_id END JOIN message_admission m ON m.admission_id=t.first_admission_id WHERE f.position IS NULL OR f.message_delivered=0),owed(session_ref,since) AS (SELECT session_ref,since FROM own_owed UNION SELECT s.parent_ref,o.since FROM owed o JOIN session s ON s.session_ref=o.session_ref WHERE s.parent_ref IS NOT NULL) UPDATE session s JOIN (SELECT session_ref,min(since) AS since FROM owed GROUP BY session_ref) o ON o.session_ref=s.session_ref SET s.obligation_since=o.since",
+        },
+    },
 };
 
 comptime {
@@ -1115,6 +1132,7 @@ pub const tables = [_]Table{
             .{ .name = "workspace_key", .type = .int },
             // The Session that started this one as its attached child (D27).
             .{ .name = "parent_ref", .type = .{ .text = null }, .nullable = true },
+            .{ .name = "obligation_since", .type = .int, .nullable = true, .sqlite_added = true, .check = "obligation_since IS NULL OR obligation_since>0" },
         },
         .primary_key = &.{"session_ref"},
         .uniques = &.{&.{"created_seq"}},
@@ -1699,6 +1717,8 @@ pub const tables = [_]Table{
 };
 
 pub const indexes = [_]Index{
+    .{ .name = "session_obligation_parent", .table = "session", .columns = &.{ "parent_ref", "obligation_since", "session_ref" }, .where = "obligation_since IS NOT NULL" },
+    .{ .name = "session_forward_owed_message", .table = "session_forward", .columns = &.{ "target_ref", "message_delivered" } },
     .{ .name = "session_workspace_list", .table = "session", .columns = &.{ "workspace_digest", "created_seq" } },
     .{ .name = "message_admission_sent", .table = "message_admission", .columns = &.{ "sender_session_ref", "sender_position" }, .unique = true, .where = "sender_session_ref IS NOT NULL" },
     .{ .name = "turn_one_active_per_session", .table = "turn", .columns = &.{"session_ref"}, .unique = true, .where = "outcome_code IS NULL" },

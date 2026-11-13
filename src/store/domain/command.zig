@@ -705,6 +705,9 @@ pub const DeliverChildEnding = struct {
         switch (at) {
             .owed => {
                 const found = if (t.input.ending.owed) |*row| row else return .{ .done = false };
+                // Even a quiet ending transfers an owed Message without a
+                // Session-column write. Keep that transfer in the same owner.
+                r.obligationsChanged(found.child);
                 r.write(settle_owed_ending, .{ .turn_id = t.input.turn_id });
                 if (found.quiet) return finish(r);
                 t.outcome = try TurnOutcome.decode(found.outcome_code.slice(), if (found.outcome_content_id) |id| @intCast(id.get()) else null);
