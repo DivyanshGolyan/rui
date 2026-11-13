@@ -760,6 +760,9 @@ test "store.mysql obligation reconciliation reads stay flat in completed Turn hi
                 defer rawExec(&storage, "SET SESSION foreign_key_checks=1") catch @panic("foreign keys stayed off");
                 try rawExec(&storage, seed);
             }
+            // Reused fixture tables otherwise retain estimates from an earlier
+            // population. Compare plans against each population's actual stats.
+            try rawExec(&storage, "ANALYZE TABLE turn,message_admission,session");
             // Warm the real write owner and its commit survey before measuring;
             // the saved time is unchanged, so neither visit needs a frontier UPDATE.
             try fixtures.refreshFrontierForTesting(&storage, child.slice());
@@ -1890,7 +1893,7 @@ test "store.mysql live buffered payloads keep streamed query budgets under queue
     try openLive(&storage, &tmp);
     defer storage.close() catch unreachable;
     const chunk = schema.content_chunk_bytes;
-    const bytes = try std.testing.allocator.alloc(u8, 9 * chunk + 17);
+    const bytes = try std.testing.allocator.alloc(u8, 13 * chunk + 17);
     defer std.testing.allocator.free(bytes);
     // Reused source, never mutated until both kinds of queued borrow end.
     for ([_]usize{ 0, 1, chunk - 1, chunk, chunk + 1, 3 * chunk + 17, bytes.len }) |length| {
@@ -1918,7 +1921,7 @@ test "store.mysql live buffered payloads keep streamed query budgets under queue
             // A row write after the bytes shares the last data pass.
             access.write(live_noop, .{});
             try access.commit();
-            const queries: u64 = if (length > 8 * chunk) 3 else 2;
+            const queries: u64 = if (length > 12 * chunk) 3 else 2;
             try std.testing.expectEqual(before + queries, storage.engine.mysql.state.connection.queries);
             const chunks: u64 = @intCast((length + chunk - 1) / chunk);
             try std.testing.expectEqual(chunks, try queryU64(&storage, "SELECT count(*) FROM content_chunk WHERE content_id=?1", .{id}));

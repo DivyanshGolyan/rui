@@ -1696,8 +1696,8 @@ test "a transition's commit lands its writes, positions and identities and answe
             const rounds = storage.testing_content_work.rounds;
             const result = try transition.apply(&storage, TestingDating, .{ .session = session.slice(), .revision = 1, .finish = .commit }, .{});
             try std.testing.expectEqual(TestingDating.Result{ .committed = before.next_position }, result);
-            // Head, commit and the unchanged frontier read; rerun repeats them.
-            if (!case.rerun) try std.testing.expectEqual(rounds + 3, storage.testing_content_work.rounds);
+            // Head and commit, with frontier maintenance inline; rerun repeats them.
+            if (!case.rerun) try std.testing.expectEqual(rounds + 2, storage.testing_content_work.rounds);
             const after: TestingDatingState = try .of(&storage);
             try std.testing.expectEqual(before.next_position + 2, after.next_position);
             try std.testing.expectEqual(before.content_id, try store_testing.queryU64(&storage, "SELECT content_id FROM content WHERE byte_length=5 AND digest=?1", .{store_testing.Blob{ .bytes = &protocol.contentDigest("dated") }}));
@@ -2878,25 +2878,96 @@ test "Current, activity pages and Message progress report one work in each state
 /// Reconcile after a fixture changes immutable times or topology outside a
 /// Store entry point. Production transitions enter this owner automatically.
 pub fn refreshFrontierForTesting(storage: *Store, session: []const u8) !void {
+    return refreshFrontiersForTesting(storage, &.{session});
+}
+
+fn refreshFrontiersForTesting(storage: *Store, sessions: []const []const u8) !void {
+    std.debug.assert(sessions.len > 0 and sessions.len <= 4);
     const entry = try store_core.enter(storage, .none);
     defer entry.release();
     var a: store_access.Access(.write, error{}) = .open(&entry);
     defer a.deinit();
     return entry.finishTransaction(store_core.Ordinary.none, .{}, a.end(.{}, struct {
-        fn run(access: *store_access.Access(.write, error{}), ref: []const u8) !void {
+        fn run(access: *store_access.Access(.write, error{}), refs: []const []const u8) !void {
             const head = rsql.Read(.{
                 .sql = "SELECT session_ref,workspace_key,next_position FROM session WHERE session_ref=?1",
                 .Args = struct { session: []const u8 },
                 .Row = struct { session: rsql.SessionHead },
                 .cardinality = .optional,
             });
-            var row: head.Result = undefined;
-            access.read(head, .{ .session = ref }, &row);
+            var rows: [4]head.Result = undefined;
+            for (refs, rows[0..refs.len]) |ref, *row| access.read(head, .{ .session = ref }, row);
             try access.run();
-            access.obligationsChanged((row orelse return error.CorruptStore).session);
+            for (rows[0..refs.len]) |row| access.obligationsChanged((row orelse return error.CorruptStore).session);
             try access.commit();
         }
-    }.run(&a, session)));
+    }.run(&a, sessions)));
+}
+
+test "obligation projection recomputes a dirty forest together in either head order" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            for ([_]bool{ false, true }) |reverse| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                const root = try configureTestSession(&storage, "forest-root");
+                const left = try configureTestSession(&storage, "forest-left");
+                const right = try configureTestSession(&storage, "forest-right");
+                const separate = try configureTestSession(&storage, "forest-separate");
+                try store_testing.exec(&storage, "UPDATE session SET parent_ref=?1 WHERE session_ref IN (?2,?3)", .{ root.slice(), left.slice(), right.slice() });
+                try submitTestMessage(&storage, &tmp, "forest-left", "forest-left-task", left.slice(), "left");
+                try submitTestMessage(&storage, &tmp, "forest-right", "forest-right-task", right.slice(), "right");
+                try store_testing.exec(&storage, "UPDATE message_admission SET admitted_at=?1 WHERE session_ref=?2", .{ @as(u64, 100), left.slice() });
+                try store_testing.exec(&storage, "UPDATE message_admission SET admitted_at=?1 WHERE session_ref=?2", .{ @as(u64, 50), right.slice() });
+                try refreshFrontiersForTesting(&storage, &.{ left.slice(), right.slice() });
+                // Both dirty descendants retain older saved keys. Reusing either
+                // key while projecting their common ancestor gives the wrong min.
+                try store_testing.exec(&storage, "UPDATE message_admission SET admitted_at=?1 WHERE session_ref=?2", .{ @as(u64, 300), left.slice() });
+                try store_testing.exec(&storage, "UPDATE message_admission SET admitted_at=?1 WHERE session_ref=?2", .{ @as(u64, 200), right.slice() });
+                const before = storage.testing_content_work.rounds;
+                if (reverse) {
+                    try refreshFrontiersForTesting(&storage, &.{ separate.slice(), root.slice(), right.slice(), left.slice() });
+                } else {
+                    try refreshFrontiersForTesting(&storage, &.{ left.slice(), right.slice(), root.slice(), separate.slice() });
+                }
+                if (!case.rerun) try std.testing.expectEqual(@as(u32, 2), storage.testing_content_work.rounds - before);
+                try std.testing.expectEqual(@as(u64, 200), try store_testing.queryU64(&storage, "SELECT obligation_since FROM session WHERE session_ref=?1", .{root.slice()}));
+                try std.testing.expectEqual(@as(u64, 300), try store_testing.queryU64(&storage, "SELECT obligation_since FROM session WHERE session_ref=?1", .{left.slice()}));
+                try std.testing.expectEqual(@as(u64, 200), try store_testing.queryU64(&storage, "SELECT obligation_since FROM session WHERE session_ref=?1", .{right.slice()}));
+                try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref=?1 AND obligation_since IS NOT NULL", .{separate.slice()}));
+                try std.testing.expect(!storage.isFenced());
+            }
+        }
+    }.run);
+}
+
+test "obligation projection rejects a cyclic component even alongside a rooted component" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            for ([_]bool{ false, true }) |three_node| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                const root = try configureTestSession(&storage, "cycle-root");
+                const left = try configureTestSession(&storage, "cycle-left");
+                const right = try configureTestSession(&storage, "cycle-right");
+                const extra = try configureTestSession(&storage, "cycle-extra");
+                try store_testing.exec(&storage, "UPDATE session SET parent_ref=?1 WHERE session_ref=?2", .{ right.slice(), left.slice() });
+                try store_testing.exec(&storage, "UPDATE session SET parent_ref=?1 WHERE session_ref=?2", .{ if (three_node) extra.slice() else left.slice(), right.slice() });
+                if (three_node) try store_testing.exec(&storage, "UPDATE session SET parent_ref=?1 WHERE session_ref=?2", .{ left.slice(), extra.slice() });
+                if (refreshFrontiersForTesting(&storage, &.{ root.slice(), left.slice() })) |_| {
+                    return error.TestUnexpectedResult;
+                } else |_| {}
+                try std.testing.expect(storage.isFenced());
+                try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE obligation_since IS NOT NULL", .{}));
+            }
+        }
+    }.run);
 }
 
 test "Session work includes only attached descendants with unfinished work" {
@@ -11378,20 +11449,19 @@ const EntryPoint = enum {
 /// Each entry point's rounds (`Access.run` and `commit`, counted in
 /// `Store.testing_content_work.rounds`) on the path the round budget test
 /// drives it. Content rounds (`readRaw` windows) differ by engine, so
-/// `content_round_budgets` holds them apart. Session writes additionally read
-/// their frontier before COMMIT and write it only when its earliest time changes;
-/// parent traversal adds the same bounded read/write per visited ancestor.
-/// Otherwise settled work reads add one saved-key read, never a tree seed.
+/// `content_round_budgets` holds them apart. Frontier maintenance shares the
+/// existing write/COMMIT round, regardless of ancestry. Otherwise settled work
+/// reads add one saved-key read, never a tree seed.
 const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .commandExists = 1,
     .readSkills = 2,
-    .settleSkillTool = 4,
-    .configure = 5,
-    .submitMessageWithModel = 4,
-    .stopSession = 3,
-    .archiveSession = 3,
-    .interruptModel = 4,
-    .decidePermission = 3,
+    .settleSkillTool = 3,
+    .configure = 4,
+    .submitMessageWithModel = 2,
+    .stopSession = 2,
+    .archiveSession = 2,
+    .interruptModel = 2,
+    .decidePermission = 2,
     .observeCommand = 3,
     .commandResult = 1,
     .inspectSession = 3,
@@ -11405,41 +11475,41 @@ const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .readSessionReport = 6,
     .readSessionList = 7,
     .actionContent = 2,
-    .admitModelAttempt = 3,
-    .admitNextActionAttempt = 3,
+    .admitModelAttempt = 2,
+    .admitNextActionAttempt = 2,
     .readBashExecutionInput = 2,
-    .admitActionAttempt = 3,
+    .admitActionAttempt = 2,
     .readMcpExecutionInput = 3,
     .revokeActionSender = 2,
     .nextCoreWork = 3,
     .nextAction = 1,
-    .resolveAction = 3,
-    .deliverAgentMessage = 4,
-    .deliverChildEnding = 4,
-    .deliverSessionForward = 4,
-    .startAgent = 9,
-    .findTools = 6,
-    .stopOwedSession = 5,
-    .resolveCoreCall = 3,
+    .resolveAction = 2,
+    .deliverAgentMessage = 3,
+    .deliverChildEnding = 2,
+    .deliverSessionForward = 2,
+    .startAgent = 5,
+    .findTools = 5,
+    .stopOwedSession = 2,
+    .resolveCoreCall = 2,
     .actionSupersededByStop = 1,
     .withActionDispatchHandoff = 1,
-    .settleActionAttempt = 4,
+    .settleActionAttempt = 3,
     .recoverOneUncertainAction = 1,
     .tryAdmitNextModelRetry = 1,
     .dispatchWork = 1,
     .operationSupersededByControl = 1,
     .withDispatchHandoff = 1,
-    .claimModelAuthRefresh = 3,
-    .settleModelAttemptFailure = 4,
+    .claimModelAuthRefresh = 2,
+    .settleModelAttemptFailure = 2,
     .recoverOneExhaustedModelAttempt = 1,
-    .settleModelSuccess = 4,
+    .settleModelSuccess = 2,
     .openContentIdentity = 1,
     .readOwnedContent = 0,
     .readHistoricalSettings = 1,
     .readHistoricalEntry = 1,
     .validateHistoricalOutputsStep = 1,
     .readPrefixSeal = 1,
-    .recordPrefixSeal = 3,
+    .recordPrefixSeal = 2,
     // The entry batch's page already holds the item's parts.
     .readHistoricalParts = 0,
     .readHistoricalToolResult = 1,
@@ -14459,10 +14529,10 @@ test "model fact refresh reads existence once before batched writes" {
                 std.debug.print("model facts: {d} entries, {d} Access rounds\n", .{ count, rounds.taken() });
                 try std.testing.expectEqual(@as(u16, 2), rounds.taken());
                 if (case.engine == .mysql) {
-                    // Both reads share one pass. Access queues eight
+                    // Both reads share one pass. Access queues twelve
                     // statements per pass: the writes, source last, then
                     // COMMIT in the last pass, so no control is sent.
-                    const write_passes = (count + 2 + 7) / 8;
+                    const write_passes = (count + 2 + 11) / 12;
                     try std.testing.expectEqual(@as(u64, 1 + write_passes), shape.access_passes);
                     try std.testing.expectEqual(@as(u64, 0), shape.controls);
                     try std.testing.expectEqual(@as(u64, 1 + write_passes), shape.queries);
@@ -16497,8 +16567,8 @@ test "runner action seam covers selection admission input settlement stop and re
             };
             const host_tool_set: tool_defs.HostToolSet = .{ .records = &records, .digests = &digests };
             // The replay fixture executes every write transaction twice.
-            // Keep the exact three-round budget (including frontier) on both passes.
-            const write_rounds: u64 = if (case.rerun) 6 else 3;
+            // Frontier maintenance shares the two original rounds on both passes.
+            const write_rounds: u64 = if (case.rerun) 4 else 2;
             inline for (.{ .bash, .mcp }) |runner| {
                 for (0..4) |scenario| {
                     var tmp = std.testing.tmpDir(.{});
@@ -17317,8 +17387,8 @@ test "configure parent inherits binding without a task, uses the create round bu
             meter.stop(.configure);
             if (!case.rerun) {
                 const measured = meter.measured.get(.configure).?;
-                // Creation also reconciles the already-live parent.
-                try std.testing.expectEqual(round_budgets.get(.configure) + 1, measured.rounds);
+                // Ancestor maintenance shares creation's existing commit round.
+                try std.testing.expectEqual(round_budgets.get(.configure), measured.rounds);
                 if (case.engine == .mysql) try std.testing.expectEqual(measured.shape.expected(), measured.shape.queries);
             }
             const session = result.accepted.session;

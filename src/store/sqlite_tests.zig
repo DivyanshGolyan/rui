@@ -694,11 +694,12 @@ test "a full queue takes an engine pass and the round still counts once" {
     defer entry.release();
     var a: store_access.Access(.write, error{TestingGuard}) = .open(&entry);
     defer a.deinit();
-    // Before engine passes the ninth entry was RoundFull.
-    const digest = protocol.contentDigest("ninefold");
+    // The thirteenth entry exceeds the write queue's twelve slots.
+    const text = "abcdefghijkl";
+    const digest = protocol.contentDigest(text);
     const id = try a.identity(.content_id);
-    a.write(TestingRound.insert_content, .{ .content_id = id, .digest = digest, .length = 8 });
-    for (0..8) |index| a.writeContent(id, "ninefold"[index..][0..1]);
+    a.write(TestingRound.insert_content, .{ .content_id = id, .digest = digest, .length = text.len });
+    for (0..text.len) |index| a.writeContent(id, text[index..][0..1]);
     const before = storage.testing_content_work.rounds;
     try a.run();
     try std.testing.expectEqual(1, storage.testing_content_work.rounds - before);
@@ -706,7 +707,7 @@ test "a full queue takes an engine pass and the round still counts once" {
     try a.abandon(.{});
 }
 
-test "a settlement's queue holds sixteen statements a pass, twice a write's" {
+test "a settlement's queue holds twenty statements a pass" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
@@ -717,16 +718,16 @@ test "a settlement's queue holds sixteen statements a pass, twice a write's" {
     var a: store_access.Access(.settlement, error{TestingGuard}) = undefined;
     a.init(&entry);
     defer a.deinit();
-    // A row and fifteen chunks fill one pass; a write's queue takes two.
-    const text = "sixteen in a row";
+    // A row and nineteen chunks fill one pass; a write's queue takes two.
+    const text = "abcdefghijklmnopqrst";
     const digest = protocol.contentDigest(text);
     const id = try a.identity(.content_id);
     a.write(TestingRound.insert_content, .{ .content_id = id, .digest = digest, .length = text.len });
-    for (0..15) |index| a.writeContent(id, text[index..][0..1]);
+    for (0..19) |index| a.writeContent(id, text[index..][0..1]);
     try a.run();
     try std.testing.expectEqual(1, a.passes);
-    a.writeContent(id, text[15..]);
-    for (0..16) |_| a.writeContent(id, "");
+    a.writeContent(id, text[19..]);
+    for (0..20) |_| a.writeContent(id, "");
     try a.run();
     try std.testing.expectEqual(3, a.passes);
     try a.abandon(.{});
@@ -2633,7 +2634,7 @@ test "obligation frontier read cost is flat in finished children" {
         var statement = c.sqlite3_next_stmt(storage.sqliteDatabase(), null);
         var writer_measured = false;
         while (statement) |each| : (statement = c.sqlite3_next_stmt(storage.sqliteDatabase(), each)) {
-            if (!std.mem.startsWith(u8, std.mem.span(c.sqlite3_sql(each)), "SELECT s.session_ref,s.workspace_key,s.next_position,s.parent_ref,s.obligation_since AS saved_since,")) continue;
+            if (!std.mem.startsWith(u8, std.mem.span(c.sqlite3_sql(each)), "UPDATE session SET obligation_since=")) continue;
             try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_stmt_status(each, c.SQLITE_STMTSTATUS_RUN, 0));
             writer_cost.* = c.sqlite3_stmt_status(each, c.SQLITE_STMTSTATUS_VM_STEP, 0);
             writer_measured = true;
@@ -8562,11 +8563,11 @@ test "Attempt checks keep main cost and prefix seals include one frontier reconc
     // Main's statements and VM steps at 72db6de9 and again at 2e8e8353,
     // each on its warm second call: opening a view, recording a seal, the
     // Operation's kind, a dispatch handoff and a content lookup.
-    // The unchanged frontier adds one statement / 138 VM steps to the
-    // seal's existing five statements / 124 VM steps. Matching MySQL's
-    // functional active-Turn key costs SQLite six additional instructions;
-    // other limits stay unchanged.
-    const main_work = [_][2]i64{ .{ 2, 24 }, .{ 6, 262 }, .{ 3, 32 }, .{ 2, 24 }, .{ 1, 14 } };
+    // The set-based frontier projection and streamed hints add two statements
+    // and 797 VM steps to the seal's five statements / 124 VM steps. This
+    // bounded CPU work replaces client-side ancestor rounds; the seal keeps
+    // main's two Access rounds. Unrelated statement limits stay unchanged.
+    const main_work = [_][2]i64{ .{ 2, 24 }, .{ 7, 921 }, .{ 3, 32 }, .{ 2, 24 }, .{ 1, 14 } };
     for (0..2) |call| {
         var work: [main_work.len][2]i64 = undefined;
         _ = statementWorkSince(storage.sqliteDatabase());
@@ -8590,7 +8591,7 @@ test "Attempt checks keep main cost and prefix seals include one frontier reconc
     }
     // Rounds, where main took 2 for a view, a check or a handoff, 3 for
     // the Operation's kind, 5 for a seal and 1 for a content lookup: each
-    // Attempt check is one read; a seal reads, reconciles its frontier and commits.
+    // Attempt check is one read; a seal reads, then projects inline with COMMIT.
     const entry = try store_core.enter(&storage, .none);
     defer entry.release();
     {
@@ -8605,7 +8606,7 @@ test "Attempt checks keep main cost and prefix seals include one frontier reconc
         defer a.deinit();
         const before = storage.testing_content_work.rounds;
         try historical_domain.sealOn(&a, attempt.binding, &TestingAttempt.seal);
-        try std.testing.expectEqual(3, storage.testing_content_work.rounds - before);
+        try std.testing.expectEqual(2, storage.testing_content_work.rounds - before);
     }
     {
         var a: store_access.Access(.read, error{}) = .open(&entry);

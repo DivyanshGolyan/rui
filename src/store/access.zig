@@ -8,8 +8,8 @@
 //! engine lowers binds into its outgoing batch. A pass runs on queue or
 //! packet pressure, before rebinding an in-process statement, when an
 //! in-process sink needs its row, before position compare-and-sets, and at
-//! `run`. The queue stays bounded (eight slots, sixteen for a survey or a
-//! settlement).
+//! `run`. Queues stay bounded: eight slots normally, 24 for a survey,
+//! 12 for a write and 20 for a settlement.
 //! In-process passes cost no round trip; network passes send a batch.
 //! Until the pass that steps a read, `Found` is `.pending` and Debug/test
 //! builds poison its destination (`Access.read` says what that catches).
@@ -193,13 +193,15 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// A transaction of any number of writes.
         const transacts = mode == .write or mode == .settlement;
         /// The statements one engine pass steps at most. Accesses sit on
-        /// the deepest stack chains, so only a survey's and a settlement's
-        /// queue is wide. A survey's holds the reads a commit carries: an
+        /// the deepest stack chains. Writers reserve four more slots for the two-statement
+        /// obligation projection/hints and COMMIT, so maintenance never evicts
+        /// a full ordinary write batch. A survey holds the reads a commit carries: an
         /// admitted request's settings and first history round (12) and
         /// the dispatch survey (12).
         const max_queued = switch (mode) {
             .survey => 24,
-            .settlement => 16,
+            .settlement => 20,
+            .write => 12,
             else => 8,
         };
         const Guarded = if (max_queued > 16) u32 else u16;
@@ -237,7 +239,6 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         // transaction visits more, reconcile this bounded batch before reuse.
         obligation_heads: [if (reads_only or mode == .single) 0 else max_claims]rsql.SessionHead = undefined,
         obligation_count: u8 = 0,
-        reconciling_obligations: bool = false,
         /// The last `max_taken` content ids this Access took, the rows
         /// `contentSink` may open; 0 marks a free entry.
         taken: [if (reads_only or mode == .single) 0 else max_taken]u64 = @splat(0),
@@ -456,10 +457,9 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
             // Reserve for the whole statement before marking either Session.
             // Flushing on its second head could otherwise forget its first
             // head before this write has even entered the queue.
-            if (!reads_only and mode != .single and !a.reconciling_obligations and
+            if (!reads_only and mode != .single and
                 a.obligation_count + S.session_fields.len > a.obligation_heads.len)
             {
-                a.pass();
                 a.reconcileObligations() catch |err| {
                     a.failure = err;
                     return;
@@ -693,8 +693,6 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
             // The frontier belongs to this transaction, before any engine may
             // append COMMIT or a post-commit survey. No reader can see the gap.
             if (mode != .single and a.obligation_count != 0) {
-                a.pass();
-                if (a.failure) |err| return err;
                 try a.reconcileObligations();
             }
             const commits = a.bindCommit();
@@ -777,10 +775,8 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
             // The sole .single writer revokes an Action sender; it changes no
             // obligation input and retains its one-write/autocommit contract.
             if (reads_only or mode == .single) return;
-            if (a.reconciling_obligations) return;
             for (a.obligation_heads[0..a.obligation_count]) |known| if (std.mem.eql(u8, &known.ref, &head.ref)) return;
             if (a.obligation_count == a.obligation_heads.len) {
-                a.pass();
                 a.reconcileObligations() catch |err| {
                     a.failure = err;
                     return;
@@ -801,16 +797,18 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// The frontier owner also records ancestor invalidation. It is not a
         /// second ancestry walk after commit, and failure rolls back both facts.
         pub fn obligationTouch(a: *Self, head: rsql.SessionHead) void {
-            std.debug.assert(a.reconciling_obligations);
-            a.touch(head);
+            const touched = &a.store.touched;
+            if (touched.needsEntry(&head.ref)) touched.add(.{ .session = head.ref, .workspace = head.workspace_key.get() });
+        }
+
+        pub fn visit(a: *Self, row: anytype) bool {
+            return obligation.hint(a, row);
         }
 
         noinline fn reconcileObligations(a: *Self) Error!void {
             if (a.failure) |err| return err;
             if (a.obligation_count == 0) return;
-            a.reconciling_obligations = true;
-            defer a.reconciling_obligations = false;
-            try obligation.reconcile(a, a.obligation_heads[0..a.obligation_count]);
+            obligation.reconcile(a, a.obligation_heads[0..a.obligation_count]);
             a.obligation_count = 0;
         }
 

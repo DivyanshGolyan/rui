@@ -3667,8 +3667,9 @@ Each state carries `since`, the Host Unix second the Session entered it, read fr
   Turn, eligible queued Message past its stop cutoff, unpublished forwarded rows,
   undelivered ending Message and recursively owed descendants have transferred
   into the parent's feed or eligible input. `src/store/domain/session_obligation.zig`
-  alone reconciles that definition before commit, propagates ancestors and records
-  their change-ring hints. The nullable `session.obligation_since` fact and its live
+  alone reconciles that definition before commit in one set-based ancestor
+  projection and streams their change-ring hints in the existing write batch.
+  Maintenance adds no client-side ancestor rounds and skips unchanged values. The nullable `session.obligation_since` fact and its live
   parent index serve Current, listing and Activity reads; no reader scans attached
   Sessions or re-derives publication eligibility. Only otherwise settled own work
   becomes `working`; Turn, Operation and Action identities remain the Session's own.
