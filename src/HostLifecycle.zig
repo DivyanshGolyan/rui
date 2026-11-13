@@ -10,6 +10,7 @@ const Installation = @import("Installation.zig");
 const candidate = @import("release_candidate.zig");
 const cli_args = @import("cli_args.zig");
 const product_defaults = @import("product_defaults.zig");
+const host_start = @import("host_start.zig");
 
 pub const Stage = enum { stopping, awaiting_retirement, starting, verifying };
 pub const Progress = struct {
@@ -178,14 +179,15 @@ fn deriveLaunch(allocator: std.mem.Allocator, argv: []const []const u8) !LaunchS
     const parsed = try grammar.parseSyntax(argv[3..], scratch.allocator(), &problem);
     try parsed.validateValues(&problem);
     if (parsed.help or parsed.missing() != null or std.mem.eql(u8, parsed.get("settings") orelse "", "-")) return error.UnsupportedHostConfiguration;
-    inline for (.{ "bash-path", "provider-ca-file" }) |name| {
-        if (parsed.get(name)) |value| if (!std.fs.path.isAbsolute(value)) return error.UnsupportedHostConfiguration;
-    }
+    try host_start.validateRestartOptions(allocator, &parsed);
+    // Relaunch appends one authoritative capacity assignment. Refuse before
+    // disruption when the target parser would have no repeat slot for it.
+    if (parsed.repeat_count == parsed.repeats.len) return error.UnsupportedHostConfiguration;
     var options: std.ArrayList(LaunchOption) = .empty;
     errdefer options.deinit(allocator);
     for (grammar.options) |option| {
+        if (std.mem.eql(u8, option.hex_of orelse option.name, "store")) continue;
         if (option.hidden and parsed.hasNamed(option.name)) return error.UnsupportedHostConfiguration;
-        if (std.mem.eql(u8, option.hex_of orelse option.name, "store") or std.mem.eql(u8, option.name, "active-capacity")) continue;
         if (option.repeated) {
             for (parsed.allNamed(option.name)) |value| try options.append(allocator, .{ .name = option.name, .value = value });
         } else if (parsed.hasNamed(option.name)) {
@@ -202,7 +204,7 @@ fn supportedByHelp(specification: *const LaunchSpecification, help: []const u8) 
         const named = std.fmt.bufPrint(&needle, "[--{s}{s}", .{ option.name, if (option.value != null) " " else "]" }) catch return false;
         if (std.mem.indexOf(u8, first, named) == null) return false;
     }
-    return std.mem.indexOf(u8, first, "[--store ") != null and std.mem.indexOf(u8, first, "[--active-capacity ") != null;
+    return std.mem.indexOf(u8, first, "[--store ") != null and std.mem.indexOf(u8, first, "[--set ") != null;
 }
 
 pub fn releaseVersion(reported: []const u8) ?candidate.Version {
@@ -325,9 +327,10 @@ const PrivateLaunch = struct {
     envp: [:null]?[*:0]const u8,
 
     fn init(allocator: std.mem.Allocator, executable: []const u8, options: []const LaunchOption, store: []const u8, active_capacity: usize, environment: []const []const u8) !PrivateLaunch {
-        var capacity_buffer: [std.fmt.count("{d}", .{std.math.maxInt(usize)})]u8 = undefined;
-        const capacity = std.fmt.bufPrint(&capacity_buffer, "{d}", .{active_capacity}) catch unreachable;
-        const arguments = [_][]const u8{ executable, "host", "serve", "--store", store, "--active-capacity", capacity };
+        var capacity_buffer: [128]u8 = undefined;
+        const capacity = try host_start.capacityAssignment(active_capacity, &capacity_buffer);
+        // Replay overrides first; the observed capacity is authoritative last.
+        const arguments = [_][]const u8{ executable, "host", "serve", "--store", store, "--set", capacity };
         var argc: usize = arguments.len;
         var byte_count: usize = 0;
         for (arguments) |argument| {
@@ -502,13 +505,15 @@ test "upgrade private launch buffers wipe argv environment and sentinels on ever
         fn exercise(gpa: std.mem.Allocator, environment: []const []const u8, fail_after_construction: bool) !void {
             const endpoint = "https://example.test/v1?token=synthetic-launch-only";
             const options = [_]LaunchOption{
-                .{ .name = "provider-endpoint", .value = endpoint },
+                .{ .name = "set", .value = endpoint },
                 .{ .name = "synthetic-flag", .value = null },
                 .{ .name = "synthetic-empty", .value = "" },
             };
             var buffers = try PrivateLaunch.init(gpa, "/synthetic/bin/rui", &options, "/synthetic/private-store", 17, environment);
             defer buffers.deinit(gpa);
-            const expected = [_][]const u8{ "/synthetic/bin/rui", "host", "serve", "--provider-endpoint", endpoint, "--synthetic-flag", "--synthetic-empty", "", "--store", "/synthetic/private-store", "--active-capacity", "17" };
+            var capacity_buffer: [128]u8 = undefined;
+            const capacity = try host_start.capacityAssignment(17, &capacity_buffer);
+            const expected = [_][]const u8{ "/synthetic/bin/rui", "host", "serve", "--set", endpoint, "--synthetic-flag", "--synthetic-empty", "", "--store", "/synthetic/private-store", "--set", capacity };
             try std.testing.expectEqual(expected.len, buffers.argv.len);
             try std.testing.expectEqual(environment.len, buffers.envp.len);
             for (expected, buffers.argv) |argument, pointer| {
@@ -607,8 +612,7 @@ test "upgrade lifecycle derives launch semantics before disruption" {
     for ([_][]const []const u8{
         &.{ "rui", "session", "start" },
         &.{ "rui", "host", "serve", "--test-observation-fd", "8" },
-        &.{ "rui", "host", "serve", "--bash-path", "relative/bash" },
-        &.{ "rui", "host", "serve", "--provider-ca-file", "relative.pem", "--provider-endpoint", "https://example.test" },
+        &.{ "rui", "host", "serve", "--set", "missing-equals" },
         &.{ "rui", "host", "serve", "--unknown-new-option", "value" },
     }) |args| {
         if (deriveLaunch(allocator, args)) |*result| {
@@ -616,15 +620,32 @@ test "upgrade lifecycle derives launch semantics before disruption" {
             return error.TestUnexpectedResult;
         } else |_| {}
     }
+    var first_buffer: [128]u8 = undefined;
+    var last_buffer: [128]u8 = undefined;
+    const first = try host_start.capacityAssignment(3, &first_buffer);
+    const last = try host_start.capacityAssignment(5, &last_buffer);
     for ([_][]const u8{ "--store", "--store-hex" }, [_][]const u8{ "/some/store", "2f736f6d652f73746f7265" }) |spelling, value| {
-        var launch = try deriveLaunch(allocator, &.{ "rui", "host", "serve", spelling, value, "--active-capacity", "3", "--provider-endpoint", "--store" });
+        var launch = try deriveLaunch(allocator, &.{ "rui", "host", "serve", spelling, value, "--set", first, "--set", last });
         defer launch.deinit(allocator);
-        try std.testing.expectEqual(@as(usize, 1), launch.options.len);
-        try std.testing.expectEqualStrings("provider-endpoint", launch.options[0].name);
-        try std.testing.expectEqualStrings("--store", launch.options[0].value.?);
-        try std.testing.expect(supportedByHelp(&launch, "rui host serve [--store PATH] [--active-capacity N] [--provider-endpoint URL]\n"));
-        try std.testing.expect(!supportedByHelp(&launch, "rui host serve [--store PATH] [--active-capacity N]\n"));
+        try std.testing.expectEqual(@as(usize, 2), launch.options.len);
+        try std.testing.expectEqualStrings("set", launch.options[0].name);
+        try std.testing.expectEqualStrings(first, launch.options[0].value.?);
+        try std.testing.expectEqualStrings("set", launch.options[1].name);
+        try std.testing.expectEqualStrings(last, launch.options[1].value.?);
+        try std.testing.expect(supportedByHelp(&launch, "rui host serve [--store PATH] [--set PATH=VALUE]\n"));
+        try std.testing.expect(!supportedByHelp(&launch, "rui host serve [--store PATH]\n"));
     }
+    const repeat_limit = @as(cli_args.Parsed, undefined).repeats.len;
+    var full: [3 + 2 * repeat_limit][]const u8 = undefined;
+    @memcpy(full[0..3], &[_][]const u8{ "rui", "host", "serve" });
+    for (0..repeat_limit) |index| {
+        full[3 + 2 * index] = "--set";
+        full[4 + 2 * index] = first;
+    }
+    try std.testing.expectError(error.UnsupportedHostConfiguration, deriveLaunch(allocator, &full));
+    var almost_full = try deriveLaunch(allocator, full[0 .. full.len - 2]);
+    defer almost_full.deinit(allocator);
+    try std.testing.expectEqual(repeat_limit - 1, almost_full.options.len);
     // File-backed documents, unlike an exhausted stdin document, retain
     // the same argv replay and help-admission behavior as ordinary flags.
     for ([_][]const u8{ "/private/host.json", "relative/host.json" }) |file| {
@@ -633,8 +654,8 @@ test "upgrade lifecycle derives launch semantics before disruption" {
         try std.testing.expectEqual(@as(usize, 1), launch.options.len);
         try std.testing.expectEqualStrings("settings", launch.options[0].name);
         try std.testing.expectEqualStrings(file, launch.options[0].value.?);
-        try std.testing.expect(supportedByHelp(&launch, "rui host serve [--store PATH] [--active-capacity N] [--settings FILE|-]\n"));
-        try std.testing.expect(!supportedByHelp(&launch, "rui host serve [--store PATH] [--active-capacity N]\n"));
+        try std.testing.expect(supportedByHelp(&launch, "rui host serve [--store PATH] [--set PATH=VALUE] [--settings FILE|-]\n"));
+        try std.testing.expect(!supportedByHelp(&launch, "rui host serve [--store PATH] [--set PATH=VALUE]\n"));
     }
     try std.testing.expect(!restartableEnvironment(&.{"SSL_CERT_FILE=relative.pem"}));
     try std.testing.expect(!restartableEnvironment(&.{"SSL_CERT_DIR=/absolute:relative"}));
