@@ -18,6 +18,9 @@ pub const Semantics = struct {
     proc_memory: bool,
     full_backlog_blocks_connect: bool,
     stack_guard_bus_error: bool,
+    /// The command that opens a link in the user's browser, and whether it
+    /// works only inside a graphical session.
+    link_opener: ?struct { command: []const u8, needs_display: bool },
 };
 
 pub fn semantics(comptime os: std.Target.Os.Tag) Semantics {
@@ -33,6 +36,11 @@ pub fn semantics(comptime os: std.Target.Os.Tag) Semantics {
         .proc_memory = os == .linux,
         .full_backlog_blocks_connect = os == .linux,
         .stack_guard_bus_error = os == .macos,
+        .link_opener = switch (os) {
+            .macos => .{ .command = "open", .needs_display = false },
+            .linux => .{ .command = "xdg-open", .needs_display = true },
+            else => null,
+        },
     };
 }
 
@@ -66,6 +74,15 @@ pub const full_backlog_blocks_connect = current.full_backlog_blocks_connect;
 /// reports as a bus error; Linux delivers SIGSEGV.
 pub const stack_guard_bus_error = current.stack_guard_bus_error;
 
+/// The command that opens a link in a browser here, given the environment:
+/// macOS's `open` always has one; Linux's `xdg-open` only in a graphical
+/// session, which names `DISPLAY` or `WAYLAND_DISPLAY`.
+pub fn linkOpener(environ: *const std.process.Environ.Map) ?[]const u8 {
+    const opener = current.link_opener orelse return null;
+    if (opener.needs_display and environ.get("DISPLAY") == null and environ.get("WAYLAND_DISPLAY") == null) return null;
+    return opener.command;
+}
+
 test "Linux and Darwin semantics" {
     const linux = semantics(.linux);
     const mac = semantics(.macos);
@@ -77,6 +94,9 @@ test "Linux and Darwin semantics" {
     try std.testing.expect(linux.proc_memory and !mac.proc_memory);
     try std.testing.expect(linux.full_backlog_blocks_connect and !mac.full_backlog_blocks_connect);
     try std.testing.expect(!linux.stack_guard_bus_error and mac.stack_guard_bus_error);
+    try std.testing.expectEqualStrings("xdg-open", linux.link_opener.?.command);
+    try std.testing.expect(linux.link_opener.?.needs_display and !mac.link_opener.?.needs_display);
+    try std.testing.expectEqualStrings("open", mac.link_opener.?.command);
     const unsupported = semantics(.windows);
     try std.testing.expect(!unsupported.supported and unsupported.read_only_directory == null);
 }

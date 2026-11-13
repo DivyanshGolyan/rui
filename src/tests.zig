@@ -56,6 +56,7 @@ test {
     _ = @import("server_mcp.zig");
     _ = @import("api_key.zig");
     _ = @import("attempt.zig");
+    _ = @import("chatgpt_plan_login.zig");
     _ = @import("codex_auth.zig");
     _ = @import("codex_credentials.zig");
     _ = @import("model_adapter.zig");
