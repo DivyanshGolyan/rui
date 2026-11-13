@@ -34,16 +34,15 @@ const ExecutionPopulation = struct {
 };
 
 /// The model transport a Host runs.
-pub const Transport = enum {
+pub const Transport = union(enum) {
     none,
     /// Model requests.
     requests,
-    /// Model requests and the OpenAI key's model list.
+    /// Model requests and one provider's model list.
     requests_and_model_list,
-    /// The catalog, with or without model requests, even at zero capacity.
-    catalog,
-    /// The catalog and provider list, with or without model requests.
-    listings,
+    /// The catalog and this many providers' live model lists, with or
+    /// without model requests, even at zero capacity.
+    listings: usize,
 };
 
 pub fn calculate(
@@ -79,8 +78,7 @@ pub fn calculate(
     const model_list: usize = switch (transport) {
         .none, .requests => 0,
         .requests_and_model_list => @intFromBool(active_capacity != 0),
-        .catalog => 1,
-        .listings => 2,
+        .listings => |lists| try add(1, lists),
     };
     fixed_host = try add(fixed_host, model_list);
 
@@ -267,17 +265,20 @@ test "catalog discovery reserves its sockets beyond model capacity including zer
     for ([_]usize{ 0, 1, 100 }) |capacity| {
         for ([_]std.Target.Os.Tag{ .linux, .macos }) |os_tag| {
             const requests = try calculate(3, capacity, 10, 2, .requests, false, os_tag);
-            const catalog = try calculate(3, capacity, 10, 2, .catalog, false, os_tag);
-            const listings = try calculate(3, capacity, 10, 2, .listings, false, os_tag);
+            const catalog = try calculate(3, capacity, 10, 2, .{ .listings = 0 }, false, os_tag);
             try std.testing.expectEqual(requests.fixed_host + 1, catalog.fixed_host);
-            try std.testing.expectEqual(requests.fixed_host + 2, listings.fixed_host);
-            try std.testing.expectEqual(requests.execution, listings.execution);
+            // One more socket for each live list.
+            for ([_]usize{ 1, 2 }) |lists| {
+                const listings = try calculate(3, capacity, 10, 2, .{ .listings = lists }, false, os_tag);
+                try std.testing.expectEqual(requests.fixed_host + 1 + lists, listings.fixed_host);
+                try std.testing.expectEqual(requests.execution, listings.execution);
+            }
         }
     }
 }
 
 test "default managed Host budgets all creating-Message contents at a typical Linux limit" {
-    const requirement = try calculate(3, 100, 100, 3, .catalog, true, .linux);
+    const requirement = try calculate(3, 100, 100, 3, .{ .listings = 0 }, true, .linux);
     try std.testing.expectEqual(@as(usize, 1028), requirement.total);
     try std.testing.expectEqual(@as(usize, 99), try fitIntake(requirement.total, 1024));
 }

@@ -444,7 +444,7 @@ test "feed_reads continues a paginated provisional replay without restarting or 
 test "feed_reads ending identity includes position and ordinal" {
     const Key = struct { position: u64, ordinal: u64 = 0 };
     const E = Ending(Key);
-    const ending: E = .{ .key = .{ .position = 9, .ordinal = 2 }, .cause = @import("marks.zig").cause("provider_http_500") };
+    const ending: E = .{ .key = .{ .position = 9, .ordinal = 2 }, .cause = @import("marks.zig").cause("provider_http_500", null) };
     for ([_]u64{ 8, 9, 10 }) |position| for ([_]u64{ 1, 2, 3 }) |ordinal| {
         try std.testing.expectEqual(position == 9 and ordinal == 2, ending.matches(.{ .position = position, .ordinal = ordinal }));
     };
