@@ -458,17 +458,19 @@ def startup_limits(root, env):
     assert "back up" in failed.stderr and "[internal_unexpected]" in failed.stderr, failed.stderr
     with sqlite3.connect(database) as connection:
         assert connection.execute("PRAGMA user_version").fetchone()[0] == 21
-    for wire in (None, "future"):
+    # At the current format, a missing or other saved format is refused too.
+    for saved_format in (None, "future"):
         with sqlite3.connect(database) as connection:
             connection.execute(f"PRAGMA user_version={SCHEMA}")
-            connection.execute("DELETE FROM store_meta WHERE meta_key='wire_version'")
-            if wire is not None:
-                connection.execute("INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version',?)", (wire,))
+            connection.execute("DELETE FROM store_meta WHERE meta_key='format'")
+            if saved_format is not None:
+                connection.execute("INSERT INTO store_meta(meta_key,meta_value) VALUES('format',?)", (saved_format,))
         original = hashlib.sha256(database.read_bytes()).digest()
         before = time.monotonic()
         failed = run_start(store, env)
         assert failed.returncode == 1 and time.monotonic() - before < 5, failed
-        assert "wire metadata" in failed.stderr and f"wire {host_process.WIRE_VERSION}" in failed.stderr, failed.stderr
+        assert "format metadata" in failed.stderr and "wire metadata" not in failed.stderr, failed.stderr
+        assert f"wire {host_process.WIRE_VERSION}" in failed.stderr, failed.stderr
         assert "unsupported Store format" not in failed.stderr, failed.stderr
         assert str(store) in failed.stderr and "back up" in failed.stderr and "No migration" in failed.stderr, failed.stderr
         assert hashlib.sha256(database.read_bytes()).digest() == original
@@ -501,12 +503,12 @@ def startup_limits(root, env):
     with sqlite3.connect(database) as source, sqlite3.connect(hostile_database) as destination:
         source.backup(destination)
     hostile_database.chmod(0o600)
-    for schema, wire in ((21, "1"), (SCHEMA, None), (SCHEMA, "future")):
+    for schema, saved_format in ((21, "21"), (SCHEMA, None), (SCHEMA, "future")):
         with sqlite3.connect(hostile_database) as connection:
             connection.execute(f"PRAGMA user_version={schema}")
-            connection.execute("DELETE FROM store_meta WHERE meta_key='wire_version'")
-            if wire is not None:
-                connection.execute("INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version',?)", (wire,))
+            connection.execute("DELETE FROM store_meta WHERE meta_key='format'")
+            if saved_format is not None:
+                connection.execute("INSERT INTO store_meta(meta_key,meta_value) VALUES('format',?)", (saved_format,))
         original = hashlib.sha256(hostile_database.read_bytes()).digest()
         before = time.monotonic()
         failed = run_start(hostile, env)

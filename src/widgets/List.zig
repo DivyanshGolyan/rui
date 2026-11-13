@@ -139,7 +139,7 @@ const Lazy = struct {
         const self: *Lazy = @ptrCast(@alignCast(raw));
         try self.load(ctx.arena);
         const row = self.row.?;
-        const surface = try vxfw.Surface.init(ctx.arena, self.widget(), .{ .width = ctx.max.width.?, .height = @intCast(row.lines.len) });
+        const surface = try vxfw.Surface.init(ctx.cell_arena, self.widget(), .{ .width = ctx.max.width.?, .height = @intCast(row.lines.len) });
         @memset(surface.buffer, .{ .style = self.base_style });
         if (surface.size.width == 0) return surface;
         for (row.lines, 0..) |line, y| {
@@ -347,7 +347,7 @@ fn indicator(self: *const Self, ctx: vxfw.DrawContext, words: *const fn (u32, st
 
 const Testing = struct {
     fn context(arena: std.mem.Allocator, height: u16) vxfw.DrawContext {
-        return .{ .arena = arena, .min = .{}, .max = .{ .width = 20, .height = height }, .cell_size = .{} };
+        return .{ .arena = arena, .cell_arena = arena, .min = .{}, .max = .{ .width = 20, .height = height }, .cell_size = .{} };
     }
 
     fn below(count: u32, arena: std.mem.Allocator) std.mem.Allocator.Error!Line {
@@ -778,7 +778,7 @@ test "List every two-line scroll offset shows whole rows and accounts for every 
                 try std.testing.expect(list.shown.first <= index and index < list.shown.end);
             }
             var screen: vaxis.Screen = try .init(alloc, .{ .cols = width, .rows = height, .x_pixel = 0, .y_pixel = 0 });
-            surface.render(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = height, .screen = &screen }, list.widget());
+            try surface.render(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = height, .screen = &screen }, list.widget());
             var above: u32 = 0;
             var below: u32 = 0;
             var first_lines: u32 = 0;

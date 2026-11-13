@@ -250,7 +250,7 @@ fn mapped(err: anyerror) ?Code {
         error.HostNotServing => .host_not_serving,
         error.HostRestartFailed => .host_restart_failed,
         error.IncompatibleHost => .host_incompatible,
-        error.InvalidHostInfo, error.HostPeerIdentityUnavailable, error.HostProcessSnapshotUnavailable, error.InvalidHostProcessSnapshot => .host_identity_unconfirmed,
+        error.InvalidHostInfo, error.HostPeerNotServing, error.HostServeArgumentsUnreadable, error.HostServeStoreMissing, error.HostServeStoreRelative, error.HostSocketStoreMismatch, error.HostPeerPidMismatch, error.HostPeerIdentityUnavailable, error.HostProcessSnapshotUnavailable, error.InvalidHostProcessSnapshot => .host_identity_unconfirmed,
         error.IneligibleInstallation, error.UpgradeIneligible, error.InvalidInstallationHome => .upgrade_ineligible,
         error.InvalidReleaseVersion, error.InvalidReleaseChecksum, error.DuplicateReleaseChecksum, error.MissingReleaseChecksum, error.InvalidReleaseEndpoint, error.UnsupportedReleasePlatform => .upgrade_release_invalid,
         error.ReleaseDownloadFailed => .upgrade_download_failed,
