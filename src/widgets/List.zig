@@ -164,8 +164,8 @@ fn selection(style: vaxis.Style, selected: vaxis.Style) vaxis.Style {
 }
 
 fn hovering(style: vaxis.Style, hover: vaxis.Style) vaxis.Style {
-    var result = selection(style, hover);
-    result.ul_style = hover.ul_style;
+    var result = Hover.look(style, hover);
+    result.dim = false;
     return result;
 }
 

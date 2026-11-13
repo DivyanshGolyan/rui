@@ -3,6 +3,7 @@
 //! colour-specific label syntax.
 const std = @import("std");
 const vaxis = @import("vaxis");
+const Hover = @import("widgets/Hover.zig");
 
 /// How one label is drawn. The selection wins over the pointer.
 pub const Look = enum { plain, hovered, selected };
@@ -26,17 +27,15 @@ pub fn segments(labels: [2][]const u8, looks: [2]Look, style: vaxis.Style, hover
 }
 
 fn labelStyle(look: Look, style: vaxis.Style, hover: vaxis.Style) vaxis.Style {
-    var drawn = style;
-    switch (look) {
-        .plain => {},
-        .selected => drawn.reverse = true,
-        .hovered => {
-            drawn.bg = hover.bg;
-            drawn.reverse = hover.reverse;
-            drawn.ul_style = hover.ul_style;
+    return switch (look) {
+        .plain => style,
+        .selected => selected: {
+            var drawn = style;
+            drawn.reverse = true;
+            break :selected drawn;
         },
-    }
-    return drawn;
+        .hovered => Hover.look(style, hover),
+    };
 }
 
 test "Choice row preserves the approval labels and draws each label plain, hovered or selected" {

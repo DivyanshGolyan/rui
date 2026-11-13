@@ -141,7 +141,7 @@ fn drawHover(self: *Self, arena: std.mem.Allocator, surface: vxfw.Surface) !void
             const rect: Hover.Rect = .{ .row = @intCast(row), .col = span.start, .width = span.end - span.start };
             try targets.append(arena, rect);
             if (self.hover.contains(rect)) for (cells[span.start..span.end]) |*cell| {
-                cell.style.ul_style = .single;
+                cell.style = Hover.underlined(cell.style);
             };
         }
     };
@@ -165,11 +165,7 @@ fn drawHover(self: *Self, arena: std.mem.Allocator, surface: vxfw.Surface) !void
 }
 
 fn hovering(self: *const Self, cells: []vaxis.Cell) void {
-    for (cells) |*cell| {
-        cell.style.bg = self.hover_style.bg;
-        cell.style.reverse = self.hover_style.reverse;
-        cell.style.ul_style = self.hover_style.ul_style;
-    }
+    for (cells) |*cell| cell.style = Hover.look(cell.style, self.hover_style);
 }
 
 /// One mouse event in this widget's coordinates.

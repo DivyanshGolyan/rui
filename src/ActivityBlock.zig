@@ -14,6 +14,7 @@ const session_line = @import("session_line.zig");
 const work_line = @import("work_line.zig");
 const queued_line = @import("queued_line.zig");
 const Chip = @import("Chip.zig");
+const Hover = @import("widgets/Hover.zig");
 const Self = @This();
 
 const more_bytes = std.fmt.count("+{d} more running · info", .{std.math.maxInt(u64)});
@@ -133,8 +134,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
             const full = std.fmt.bufPrint(&self.more_label, "+{d} more running · info", .{omitted}) catch unreachable;
             self.more.label = if (vaxis.gwidth.gwidth(full, self.method) <= width - indent) full else std.fmt.bufPrint(&self.more_label, "+{d} · info", .{omitted}) catch unreachable;
             self.more.style = self.styles.quiet;
-            self.more.hover = self.styles.quiet;
-            self.more.hover.ul_style = .single;
+            self.more.hover = Hover.underlined(self.styles.quiet);
             self.more.method = self.method;
             children = try ctx.arena.alloc(vxfw.SubSurface, 1);
             children[0] = .{ .origin = .{ .row = index - skip, .col = indent }, .surface = try self.more.widget().draw(ctx.withConstraints(.{}, .{ .width = width - indent, .height = 1 })) };

@@ -1959,11 +1959,7 @@ fn drawHostNotice(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Erro
     self.app_host_hover.targets = if (self.hostNext() != null and surface.size.width > 0 and surface.size.height > 0) try ctx.arena.dupe(Hover.Rect, &.{target}) else &.{};
     if (self.app_host_hover.targets.len != 0 and self.app_host_hover.contains(target)) {
         const hover = @import("widget_style.zig").of(self.caps, .{ .background = .hover });
-        for (surface.buffer) |*cell| {
-            cell.style.bg = hover.bg;
-            cell.style.reverse = hover.reverse;
-            cell.style.ul_style = hover.ul_style;
-        }
+        for (surface.buffer) |*cell| cell.style = Hover.look(cell.style, hover);
     }
     surface.widget = hostNotice(self).?;
     return surface;

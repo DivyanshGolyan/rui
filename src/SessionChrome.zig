@@ -13,6 +13,7 @@ const AppScreen = @import("AppScreen.zig");
 const ActivityBlock = @import("ActivityBlock.zig");
 const StatusRow = @import("StatusRow.zig");
 const Chip = @import("Chip.zig");
+const Hover = @import("widgets/Hover.zig");
 const Footer = @import("widgets/Footer.zig");
 const session_line = @import("session_line.zig");
 const Self = @This();
@@ -267,8 +268,7 @@ fn choiceChip(self: *Self, action: chrome.ChoiceAction) *Chip {
 fn footerChip(chip: *Chip, style: vaxis.Style, method: vaxis.gwidth.Method, ctx: vxfw.DrawContext, col: u16, width: u16) !vxfw.SubSurface {
     chip.method = method;
     chip.style = style;
-    chip.hover = style;
-    chip.hover.ul_style = .single;
+    chip.hover = Hover.underlined(style);
     return .{ .origin = .{ .col = col, .row = 0 }, .surface = try chip.widget().draw(ctx.withConstraints(.{}, .{ .width = width, .height = 1 })) };
 }
 
