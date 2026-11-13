@@ -1154,14 +1154,6 @@ while True:
             self.assertEqual(ps(42), ("Wed Nov 11 07:56:31 2026", "tmux -S /private/socket"))
 
 
-    def test_frame_step_selection_preserves_mutations_only(self):
-        decide = self.helper["frame_step_selected"]
-        for action in ("text", "keys", "mouse", "send", "host"):
-            self.assertTrue(decide({action: "fixture"}, False), action)
-        for action in ("wait", "gone", "exited", "sleep"):
-            self.assertFalse(decide({action: "fixture"}, False), action)
-            self.assertTrue(decide({action: "fixture"}, True), action)
-
     def test_invalid_build_jobs_fails_before_build(self):
         build = self.helper["cmd_build"]
         for value in ("", "0", "-1", "1.5", "abc"):
@@ -1212,7 +1204,7 @@ while True:
             self.assertEqual(err.getvalue(), "verify-rui: this build has no screen library\n")
 
     def run_frames_scenario(self, scenario, sizes=None, capture_ok=True, only=None, failing_state=None,
-                            initial_frames=("›",)):
+                            initial_frames=("›",), real_steps=False):
         """Run the real loader/orchestrator with an inert OS and capture adapter."""
         command = self.helper["cmd_frames"]
         calls = []
@@ -1230,6 +1222,8 @@ while True:
             class Terminal:
                 def __init__(self, _run, state, size):
                     self.state = state
+                    self.status = None
+                    self.frame = types.SimpleNamespace(columns=size[0])
                     calls.append(("open", state["name"], size, state.get("theme", "night")))
 
                 def wait(self, predicate, _description, *, allow_exit=False):
@@ -1238,6 +1232,9 @@ while True:
                         if predicate(types.SimpleNamespace(completed=screen)):
                             return
                     raise AssertionError("initial readiness did not accept any committed frame")
+
+                def write(self, data):
+                    calls.append(("write", self.state["name"], data))
 
                 def resize(self, size):
                     calls.append(("resize", size))
@@ -1259,10 +1256,11 @@ while True:
                 return False
 
             replacements = {"Run": lambda _path: run, "cmd_new": lambda _args: print(root),
-                            "cmd_cleanup": lambda _args: None, "frame_wait": lambda *_args, **_kw: None,
-                            "frame_ready": lambda *_args, **_kw: None, "FrameTerminal": Terminal,
+                            "cmd_cleanup": lambda _args: None,
+                            "frame_wait": lambda _run, target, text, *a: calls.append(("wait", target.state["name"], text)),
+                            "frame_ready": lambda target, state, **kw: calls.append(("ready", state["name"])), "FrameTerminal": Terminal,
                             "load_build": lambda _sha: {"screen_library": "/test/library"},
-                            "frame_steps": steps, "frame_capture": capture}
+                            "frame_steps": self.helper["frame_steps"] if real_steps else steps, "frame_capture": capture}
             with patch.dict(command.__globals__, replacements), patch.dict(os.environ), \
                     patch("time.sleep", side_effect=AssertionError("frames must not sleep to settle")), \
                     contextlib.redirect_stdout(io.StringIO()):
@@ -1286,7 +1284,7 @@ while True:
                 calls, records = self.run_frames_scenario(scenario, initial_frames=screens)
                 self.assertEqual([call for call in calls if call[0] == "initial-frame"],
                                  [("initial-frame", screen, allow_exit) for screen in screens[:count]])
-                self.assertEqual(calls[calls.index(("steps",)) - 1],
+                self.assertEqual(calls[calls.index(("steps",)) - 2],
                                  ("initial-frame", screens[count - 1], allow_exit))
                 self.assertTrue(records[0]["ok"])
 
@@ -1316,7 +1314,7 @@ while True:
                                                          initial_frames=screens)
                 self.assertEqual([call for call in calls if call[0] == "initial-frame"],
                                  [("initial-frame", screen, False) for screen in screens[:count]])
-                self.assertEqual(calls[calls.index(("steps",)) - 1],
+                self.assertEqual(calls[calls.index(("steps",)) - 2],
                                  ("initial-frame", screens[count - 1], False))
                 self.assertTrue(records[0]["ok"])
 
@@ -1337,9 +1335,9 @@ while True:
                 self.assertEqual([c[1] for c in calls if c[0] == "capture"], expected * 2)
                 self.assertEqual([r["size"] for r in records], [self.helper["size_name"](size) for size in expected] * 2)
                 first = next(i for i, call in enumerate(calls) if call[0] == "capture")
-                self.assertEqual(calls[first - 1], ("steps",))  # No first-size resize or sleep after the wait.
+                self.assertEqual(calls[first - 1], ("ready", "default"))  # No first-size resize or sleep after the wait.
                 second = next(i for i, call in enumerate(calls) if i > first and call[0] == "capture")
-                self.assertEqual(calls[second - 1], ("resize", expected[1]))
+                self.assertEqual(calls[second - 2:second + 1], [("resize", expected[1]), ("ready", "default"), ("capture", expected[1])])
 
     def test_failed_capture_makes_the_command_fail(self):
         scenario = {"sizes": ["100x30"], "states": [{"name": "working", "open": "overview", "steps": []}]}
@@ -1347,18 +1345,17 @@ while True:
             self.run_frames_scenario(scenario, capture_ok=False)
         self.assertEqual(result.exception.code, 1)
 
-    def test_only_filters_predecessor_steps_and_skips_observation_only_terminal(self):
+    def test_only_runs_predecessor_wait_but_does_not_capture_it(self):
         scenario = {"sizes": ["100x30"], "states": [
-            {"name": "observe", "open": "overview", "steps": [{"wait": "never"}]},
-            {"name": "mutate", "open": "overview", "steps": [
-                {"wait": "never"}, {"text": "draft"}, {"gone": "never"}, {"sleep": 1}], "expect": []},
-            {"name": "chosen", "open": "overview", "steps": [{"wait": "ready"}]},
+            {"name": "earlier", "open": "overview", "steps": [
+                {"text": "archive"}, {"wait": "archived"}]},
+            {"name": "chosen", "open": "overview", "steps": []},
         ]}
-        calls, records = self.run_frames_scenario(scenario, only="chosen", initial_frames=("› ready",))
-        self.assertEqual([c[1] for c in calls if c[0] == "open"], ["mutate", "chosen"])
-        self.assertEqual([c[1:] for c in calls if c[0] == "step-values"], [
-            ("mutate", [{"text": "draft"}]), ("chosen", [{"wait": "ready"}])])
+        calls, records = self.run_frames_scenario(scenario, only="chosen", real_steps=True)
+        self.assertLess(calls.index(("write", "earlier", b"archive")), calls.index(("wait", "earlier", "archived")))
+        self.assertLess(calls.index(("wait", "earlier", "archived")), calls.index(("ready", "earlier")))
         self.assertEqual([r["name"] for r in records], ["chosen"])
+        self.assertEqual(len([c for c in calls if c[0] == "capture"]), 1)
 
     def test_only_unknown_lists_valid_states(self):
         command = self.helper["cmd_frames"]
