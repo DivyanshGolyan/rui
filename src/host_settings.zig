@@ -1194,11 +1194,9 @@ pub fn seal(settings: *const Settings, failure: *start_report.Failure) error{Set
     if (settings.store == .sqlite) {
         if (settings.store.sqlite.dir.slice().len == 0) return refuse(failure, "store.sqlite.dir", "must be anchored");
     } else if (settings.store.mysql.url.bytes.parsed == null) return refuse(failure, "store.mysql.url", "credential source has not been resolved");
-    var live: usize = 0;
     inline for (std.enums.values(provider_name.Provider)) |provider| {
         const name = @tagName(provider);
         if (@field(settings.providers.entries, name)) |*entry| {
-            if (provider.facts().model_list == .live) live += 1;
             const at = "providers." ++ name;
             const endpoint = if (entry.endpoint) |*url| url.slice() else provider.facts().endpoint;
             endpoint_value.validateEndpoint(endpoint) catch return refuse(failure, at ++ ".endpoint", "invalid provider endpoint");
@@ -1216,7 +1214,6 @@ pub fn seal(settings: *const Settings, failure: *start_report.Failure) error{Set
             }
         }
     }
-    if (live > 1) return refuse(failure, "providers", "at most one live model list may be served");
     for (settings.tools.mcp.names[0..settings.tools.mcp.len], settings.tools.mcp.slice()) |*name, *server| {
         var buffer: [start_report.max_refusal_message_bytes / 2]u8 = undefined;
         if (!secret_value.valid(server.bearer_token.value())) return refuse(failure, std.fmt.bufPrint(&buffer, "tools.mcp.{s}.bearerToken", .{name.slice()}) catch unreachable, "credential source has not been resolved");
@@ -2312,5 +2309,44 @@ test "Host settings secret file and environment sources preserve OS bytes" {
             try apply(b, gpa, out.written(), .file, checkSample, &failure);
             try expectSame(Settings, a, b);
         }
+    }
+}
+
+// Each provider can be absent, authenticated or credential-free independently.
+// Live-list capacity belongs to the Host's per-provider listing owner, not seal.
+test "Host settings proof admits the complete provider presence and credential domain" {
+    const gpa = std.testing.allocator;
+    const settings = try gpa.create(Settings);
+    defer gpa.destroy(settings);
+    const State = enum { absent, authenticated, unauthenticated };
+    const state_count = std.enums.values(State).len;
+    const combinations = std.math.pow(usize, state_count, std.enums.values(provider_name.Provider).len);
+    for (0..combinations) |combination| {
+        settings.* = .{};
+        defer settings.deinit();
+        var failure: start_report.Failure = undefined;
+        try apply(settings, gpa, "{\"providers\":{}}", .file, checkSample, &failure);
+        var choices = combination;
+        inline for (std.enums.values(provider_name.Provider)) |provider| {
+            const state: State = @fromBackingInt(@intCast(choices % 3));
+            choices /= state_count;
+            if (state != .absent) {
+                const at = "providers." ++ @tagName(provider);
+                try assign(settings, gpa, at, "{}", checkSample, &failure);
+                const entry = &@field(settings.providers.entries, @tagName(provider)).?;
+                if (state == .unauthenticated) {
+                    try assign(settings, gpa, at ++ ".unauthenticated", "true", checkSample, &failure);
+                } else switch (comptime provider.facts().credential) {
+                    .api_key => {
+                        entry.key.bytes.len = "resolved-key".len;
+                        @memcpy(entry.key.bytes.bytes[0..entry.key.bytes.len], "resolved-key");
+                        entry.key.source = .literal;
+                    },
+                    .sign_in => try assign(settings, gpa, at ++ ".credentialFile", "/tmp/" ++ @tagName(provider) ++ ".json", checkSample, &failure),
+                }
+            }
+        }
+        try anchor(settings, "/tmp/host-settings-providers");
+        _ = try seal(settings, &failure);
     }
 }
