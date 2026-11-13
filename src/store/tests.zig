@@ -4066,7 +4066,9 @@ test "the Store prepares only typed statements, its transaction control and test
 test "Store entry points queue and fence only through canonical access" {
     // Every entry point classifies its errors through `Entry`; a new path
     // cannot take a lock beside the Store's queue, read or set the fence
-    // beside it, or enter without returning through a classifier.
+    // beside it, or enter without returning through a classifier. Only the
+    // transition runner opens a writing Access: every other Store file,
+    // tests included, opens a read or survey one.
     const sources = .{
         @embedFile("Store.zig"),
         @embedFile("access.zig"),
@@ -4108,6 +4110,27 @@ test "Store entry points queue and fence only through canonical access" {
         @embedFile("queue.zig"),
         @embedFile("transition.zig"),
     };
+    // The Store's test files, which hold no entry point but may open an
+    // Access; import_architecture.py checks this list too.
+    const test_sources = .{
+        @embedFile("mysql_dialect_check.zig"),
+        @embedFile("mysql_session_tests.zig"),
+        @embedFile("mysql_testing.zig"),
+        @embedFile("sqlite_tests.zig"),
+        @embedFile("tests.zig"),
+    };
+    inline for (sources ++ test_sources) |source| {
+        // access.zig, which defines it, and transition.zig, the runner.
+        if (source.ptr == sources[1].ptr or source.ptr == sources[sources.len - 1].ptr) continue;
+        var at: usize = 0;
+        while (std.mem.indexOfPos(u8, source, at, "Access" ++ "(")) |index| : (at = index + 1) {
+            if (index > 0 and (std.ascii.isAlphanumeric(source[index - 1]) or source[index - 1] == '_')) continue;
+            const mode = source[index + "Access".len + 1 ..];
+            if (std.mem.startsWith(u8, mode, ".read,") or std.mem.startsWith(u8, mode, ".survey,")) continue;
+            std.debug.print("an Access opened outside the transition runner: {s}\n", .{source[index..][0..@min(48, source.len - index)]});
+            return error.WriterOutsideRunner;
+        }
+    }
     var locks: usize = 0;
     var fence_stores: usize = 0;
     var fence_loads: usize = 0;
