@@ -6,7 +6,7 @@
 ## Publish and merge
 
 Before publishing, run the focused checks in [Evidence](../../CODING_STANDARDS.md#evidence).
-For PR descriptions, use the `pr` skill.
+A PR description has a Summary, the Evidence it was checked with, and its Merge danger.
 The description lists every behavior change in the diff, small ones included, so the summary and the diff agree.
 PRs changing `src/` carry a [Shape section](../../CODING_STANDARDS.md#shape-before-code), and the plan job refuses them without it.
 Every PR commit states its actual test commands and results.
