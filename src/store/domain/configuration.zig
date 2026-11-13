@@ -555,8 +555,9 @@ pub const ConfigurationReads = struct {
     validated: ValidatedConfiguration = undefined,
     /// What validation, then application, keeps between its rounds
     /// (`validateStep`, `applyStep`): one storage, as validation ends
-    /// before application starts.
-    step: union { validating: Validating, applying: ApplyState } = undefined,
+    /// before application starts. Tagged, so its size is the same in every
+    /// build mode: a bare union carries a safety tag only in safe builds.
+    step: union(enum) { validating: Validating, applying: ApplyState } = undefined,
     /// What application answers.
     applied: Applied = undefined,
     /// Whether the Session exists: `.missing` for a creation, which reads none.
