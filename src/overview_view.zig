@@ -5389,8 +5389,11 @@ test "overview quiet rows cover sender work selection and the open empty chat" {
         try std.testing.expectEqual(selected, name.bold);
         try std.testing.expectEqual(if (selected) Colour.strong else Colour.normal, name.colour);
         const second = try rowSecondSegments(arena.allocator(), &state, 0, width, .{});
-        try std.testing.expectEqual(quiet, (try styleOf(second, case[2])).dim);
-        try std.testing.expectEqual(quiet, (try styleOf(second, "rui")).dim);
+        // Main's folder role is quiet, exactly like the detail and age.
+        // Quiet rows add dim without replacing that existing muted role.
+        const muted: Style = .{ .colour = .quiet, .dim = quiet };
+        try std.testing.expectEqual(muted, try styleOf(second, case[2]));
+        try std.testing.expectEqual(muted, try styleOf(second, "rui"));
         // The mark, age, folder and padding share the name/detail's value.
         for (first.segments) |segment| try std.testing.expectEqual(quiet, segment.style.dim);
         for (second) |segment| try std.testing.expectEqual(quiet, segment.style.dim);
