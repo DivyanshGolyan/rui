@@ -1043,7 +1043,7 @@ fn hostSettings(init: std.process.Init, command: cli_args.Command, parsed: *cons
     const selected = try selectedStore(init, parsed.get("store"), &selected_buffer);
     var failure: start_report.Failure = undefined;
     var output: std.Io.File.Writer = .init(.stdout(), init.io, &.{});
-    if (command == .host_settings and parsed.has("paths")) return host_start.paths(&output.interface);
+    if (command == .host_settings and parsed.has("paths")) return host_start.listPaths(&output.interface);
     if (command == .host_settings and parsed.has("check")) {
         const settings = try std.heap.c_allocator.create(host_settings.Settings);
         defer std.heap.c_allocator.destroy(settings);

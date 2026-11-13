@@ -231,7 +231,7 @@ pub fn showSaved(init: std.process.Init, dir: []const u8, out: *std.Io.Writer, f
     try out.writeByte('\n');
 }
 
-pub fn paths(out: *std.Io.Writer) !void {
+pub fn listPaths(out: *std.Io.Writer) !void {
     for (hs.leaves) |leaf| try out.print("{s}\t{s}\t{s}\t{s}\n", .{ leaf.pattern, leaf.kind, leaf.default, leaf.doc });
 }
 
@@ -855,7 +855,7 @@ test "Host start every generated leaf saves shows loads and unsets to defaults" 
     }
     var listed: std.Io.Writer.Allocating = .init(gpa);
     defer listed.deinit();
-    try paths(&listed.writer);
+    try listPaths(&listed.writer);
     for (hs.leaves) |leaf| try std.testing.expect(std.mem.indexOf(u8, listed.written(), leaf.pattern) != null);
 }
 
