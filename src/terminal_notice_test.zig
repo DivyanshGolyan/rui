@@ -102,7 +102,7 @@ const ConsentProbe = struct {
         switch (input) {
             .init => {
                 self.consent.adopt(17);
-                self.card = .{ .consent = &self.consent, .description = "Run the probe", .body = self.text.widget(), .userdata = self, .on_decision = decided };
+                self.card = .{ .consent = &self.consent, .body = self.text.widget(), .userdata = self, .on_decision = decided };
             },
             .tick => try self.card.widget().handleEvent(ctx, input),
             else => {},
