@@ -1,4 +1,5 @@
-"""Launch frame helpers shared by the SQLite and MySQL launch-frame fixtures."""
+"""Settings document helpers shared by the SQLite and MySQL fixtures."""
+import codecs
 import json
 import os_semantics
 import struct
@@ -49,13 +50,23 @@ def wait_for_host(path, store, process):
             return host_info(path, str(store))
         except (FileNotFoundError, ConnectionRefusedError):
             return None
-    host_process.wait_for(ready, "the Host in runtimeDir to answer Host info", timeout=20)
+    host_process.wait_for(ready, "the Host in interface.dir to answer Host info", timeout=20)
 
 
-def refusal(process):
+def refusal(process, forbidden=(), *, expected_exit=1):
     out, err = output(process)
-    assert process.returncode == 1, (out, err)
-    assert not err, (out, err)
-    lines = out.decode().splitlines()
-    assert len(lines) == 1, (out, err)
-    return json.loads(lines[0])["rui_start_error"]
+    assert expected_exit != 0 and process.returncode == expected_exit, (process.returncode, expected_exit, out, err)
+    assert err.strip(), (out, err)
+    assert err.endswith(b"\n") and err.count(b"\n") == 1, (out, err)
+    assert len(err.decode().splitlines()) == 1, (out, err)
+    assert out.endswith(b"\n") and out.count(b"\n") == 1, (out, err)
+    failure = json.loads(out[:-1])["rui_start_error"]
+    prefix = b"rui: the Host did not start: "
+    suffix = b" [" + failure["code"].encode() + b"]\n"
+    assert err.startswith(prefix) and err.endswith(suffix), (out, err)
+    escaped = err[len(prefix):-len(suffix)]
+    decoded, consumed = codecs.escape_decode(escaped)
+    assert consumed == len(escaped) and decoded == failure["message"].encode(), (out, err)
+    for secret in forbidden:
+        assert secret.encode() not in out + err, "a refusal exposed secret bytes"
+    return failure

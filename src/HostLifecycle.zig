@@ -9,6 +9,9 @@ const process = @import("upgrade_process.zig");
 const Installation = @import("Installation.zig");
 const candidate = @import("release_candidate.zig");
 const cli_args = @import("cli_args.zig");
+const hs = @import("host_settings.zig");
+const host_start = @import("host_start.zig");
+const start_report = @import("start_report.zig");
 const product_defaults = @import("product_defaults.zig");
 
 pub const Stage = enum { stopping, awaiting_retirement, starting, verifying };
@@ -177,7 +180,8 @@ fn deriveLaunch(allocator: std.mem.Allocator, argv: []const []const u8) !LaunchS
     var problem: cli_args.Refusal = undefined;
     const parsed = try grammar.parseSyntax(argv[3..], scratch.allocator(), &problem);
     try parsed.validateValues(&problem);
-    if (parsed.help or parsed.missing() != null or parsed.has("launch-frame")) return error.UnsupportedHostConfiguration;
+    if (parsed.help or parsed.missing() != null or std.mem.eql(u8, parsed.get("settings") orelse "", "-")) return error.UnsupportedHostConfiguration;
+    if (parsed.get("settings")) |source| if (!std.fs.path.isAbsolute(source)) return error.UnsupportedHostConfiguration;
     inline for (.{ "bash-path", "provider-ca-file" }) |name| {
         if (parsed.get(name)) |value| if (!std.fs.path.isAbsolute(value)) return error.UnsupportedHostConfiguration;
     }
@@ -193,6 +197,65 @@ fn deriveLaunch(allocator: std.mem.Allocator, argv: []const []const u8) !LaunchS
         }
     }
     return .{ .options = try options.toOwnedSlice(allocator) };
+}
+
+// host_launch starts the replacement in `/` with stdin closed. Read the
+// document through its owner before any retirement and admit only what that
+// launch reproduces: no cwd-relative path and no stdin lifetime. Do not anchor
+// here: that would disguise relative paths without preserving them. The Store
+// is exempt because replay pins the observed canonical --store.
+fn admitReplay(init: std.process.Init, launch: *const LaunchSpecification) !void {
+    for (launch.options) |option| {
+        if (!std.mem.eql(u8, option.name, "settings")) continue;
+        const source = option.value orelse return error.UnsupportedHostConfiguration;
+        if (!std.fs.path.isAbsolute(source)) return error.UnsupportedHostConfiguration;
+        const settings = try init.gpa.create(hs.Settings);
+        defer init.gpa.destroy(settings);
+        settings.* = .{};
+        defer settings.deinit();
+        var failure: start_report.Failure = undefined;
+        host_start.readDocument(init, source, settings, &failure) catch |err| {
+            if (err == error.OutOfMemory) return err;
+            return error.UnsupportedHostConfiguration;
+        };
+        if (settings.interface.lifetime.value == .stdin) return error.UnsupportedHostConfiguration;
+        inline for (@typeInfo(hs.Settings).@"struct".field_names, @typeInfo(hs.Settings).@"struct".field_types) |name, Field| {
+            if (comptime !std.mem.eql(u8, name, "store")) {
+                if (!replayPaths(Field, &@field(settings, name))) return error.UnsupportedHostConfiguration;
+            }
+        }
+    }
+}
+
+fn replayPaths(comptime T: type, value: *const T) bool {
+    if (@typeInfo(T) == .optional) {
+        return if (value.*) |*present| replayPaths(@typeInfo(T).optional.child, present) else true;
+    }
+    if (@hasDecl(T, "kind")) {
+        return switch (T.kind) {
+            .path => value.anchored or (value.slice().len == 0 and T.allow_empty) or std.fs.path.isAbsolute(value.slice()),
+            .secret => switch (value.source) {
+                .file => |*file| replayPaths(@TypeOf(file.*), file),
+                else => true,
+            },
+            .named => blk: {
+                for (value.values[0..value.len]) |*entry| if (!replayPaths(T.Child, entry)) break :blk false;
+                break :blk true;
+            },
+            .providers => replayPaths(T.Table, &value.entries),
+            else => true,
+        };
+    }
+    switch (@typeInfo(T)) {
+        .@"struct" => |info| inline for (info.field_names, info.field_types) |name, Field| {
+            if (!replayPaths(Field, &@field(value, name))) return false;
+        },
+        .@"union" => return switch (value.*) {
+            inline else => |*payload| replayPaths(@TypeOf(payload.*), payload),
+        },
+        else => @compileError("not a Host settings kind"),
+    }
+    return true;
 }
 
 fn supportedByHelp(specification: *const LaunchSpecification, help: []const u8) bool {
@@ -283,6 +346,7 @@ const PreparedActivation = struct {
     buffers: ?PrivateLaunch,
 
     fn init(process_init: std.process.Init, allocator: std.mem.Allocator, plan: *const Plan, target: []const u8, cancellation: ?*const client.Cancellation) !PreparedActivation {
+        try admitReplay(process_init, &plan.launch);
         if (plan.observed.profile.historical()) {
             const stop_help = try process.output(allocator, process_init.io, &.{ plan.snapshot.executable, "host", "pause", "--help" }, cancellation, 32768);
             defer allocator.free(stop_help);
@@ -603,8 +667,8 @@ test "relaunch activation reading requires the pinned launch for either wire" {
 
 test "upgrade lifecycle derives launch semantics before disruption" {
     const allocator = std.testing.allocator;
+    try std.testing.expectError(error.UnsupportedHostConfiguration, deriveLaunch(allocator, &.{ "rui", "host", "serve", "--settings", "-" }));
     for ([_][]const []const u8{
-        &.{ "rui", "host", "serve", "--launch-frame" },
         &.{ "rui", "session", "start" },
         &.{ "rui", "host", "serve", "--test-observation-fd", "8" },
         &.{ "rui", "host", "serve", "--bash-path", "relative/bash" },
@@ -623,6 +687,18 @@ test "upgrade lifecycle derives launch semantics before disruption" {
         try std.testing.expectEqualStrings("provider-endpoint", launch.options[0].name);
         try std.testing.expectEqualStrings("--store", launch.options[0].value.?);
         try std.testing.expect(supportedByHelp(&launch, "rui host serve [--store PATH] [--active-capacity N] [--provider-endpoint URL]\n"));
+        try std.testing.expect(!supportedByHelp(&launch, "rui host serve [--store PATH] [--active-capacity N]\n"));
+    }
+    // File-backed documents, unlike an exhausted stdin document, retain
+    // the same argv replay and help-admission behavior as ordinary flags.
+    try std.testing.expectError(error.UnsupportedHostConfiguration, deriveLaunch(allocator, &.{ "rui", "host", "serve", "--settings", "relative/host.json" }));
+    for ([_][]const u8{"/private/host.json"}) |file| {
+        var launch = try deriveLaunch(allocator, &.{ "rui", "host", "serve", "--settings", file });
+        defer launch.deinit(allocator);
+        try std.testing.expectEqual(@as(usize, 1), launch.options.len);
+        try std.testing.expectEqualStrings("settings", launch.options[0].name);
+        try std.testing.expectEqualStrings(file, launch.options[0].value.?);
+        try std.testing.expect(supportedByHelp(&launch, "rui host serve [--store PATH] [--active-capacity N] [--settings FILE|-]\n"));
         try std.testing.expect(!supportedByHelp(&launch, "rui host serve [--store PATH] [--active-capacity N]\n"));
     }
     try std.testing.expect(!restartableEnvironment(&.{"SSL_CERT_FILE=relative.pem"}));
@@ -656,5 +732,58 @@ test "upgrade lifecycle control cannot equate different wire profiles or instanc
         replacement = original;
         try replacement.facts.store.set("/fixture/other");
         try std.testing.expect(!sameHost(original, replacement));
+    }
+}
+
+test "upgrade activation refuses cwd-dependent or stdin-bound settings before any Host is touched" {
+    const gpa = std.testing.allocator;
+    var environment: std.process.Environ.Map = .init(gpa);
+    defer environment.deinit();
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const init: std.process.Init = .{ .minimal = .{ .args = .{ .vector = &.{} }, .environ = .empty }, .arena = &arena, .gpa = gpa, .io = std.testing.io, .environ_map = &environment, .preopens = .empty };
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var private = try tmp.dir.createDirPathOpen(init.io, "private", .{ .permissions = .fromMode(0o700), .open_options = .{ .iterate = true } });
+    defer private.close(init.io);
+    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const directory = root[0..try private.realPath(init.io, &root)];
+    const path = try std.fmt.allocPrint(arena.allocator(), "{s}/host.json", .{directory});
+    // No release is installed under target: an admitted plan proceeds past
+    // admission and stops only at resolving the target executable.
+    const target = try std.fmt.allocPrint(arena.allocator(), "{s}/no-release", .{directory});
+    const Case = struct { argv: []const []const u8, document: []const u8, admitted: bool };
+    for ([_]Case{
+        // A relative document path names another file once the launch is in `/`.
+        .{ .argv = &.{ "rui", "host", "serve", "--settings", "relative/host.json" }, .document = "{}", .admitted = false },
+        // An absolute document must not hide a cwd-relative trust root.
+        .{ .argv = &.{ "rui", "host", "serve", "--settings", path }, .document = "{\"network\":{\"caFile\":\"relative.pem\"}}", .admitted = false },
+        .{ .argv = &.{ "rui", "host", "serve", "--settings", path }, .document = "{\"tools\":{\"bash\":{\"path\":\"relative/bash\"}}}", .admitted = false },
+        .{ .argv = &.{ "rui", "host", "serve", "--settings", path }, .document = "{\"interface\":{\"lifetime\":\"stdin\"}}", .admitted = false },
+        // Unreadable or refused documents cannot be replayed either.
+        .{ .argv = &.{ "rui", "host", "serve", "--settings", path }, .document = "{\"unknown\":true}", .admitted = false },
+        // Fully absolute configurations replay; replay pins --store itself.
+        .{ .argv = &.{ "rui", "host", "serve", "--settings", path }, .document = "{\"network\":{\"caFile\":\"/private/ca.pem\"},\"tools\":{\"bash\":{\"path\":\"/bin/bash\"}}}", .admitted = true },
+        .{ .argv = &.{ "rui", "host", "serve", "--settings", path }, .document = "{\"store\":{\"sqlite\":{\"dir\":\"relative/store\"}}}", .admitted = true },
+        .{ .argv = &.{ "rui", "host", "serve", "--settings", path, "--provider-ca-file", "/private/ca.pem" }, .document = "{}", .admitted = true },
+    }) |case| {
+        try private.writeFile(init.io, .{ .sub_path = "host.json", .data = case.document });
+        try private.setFilePermissions(init.io, "host.json", .fromMode(0o600), .{});
+        const launch = deriveLaunch(gpa, case.argv) catch |err| {
+            // Argument admission is the first half of the same decision.
+            try std.testing.expect(!case.admitted);
+            try std.testing.expectEqual(error.UnsupportedHostConfiguration, err);
+            continue;
+        };
+        var plan: Plan = undefined;
+        plan.launch = launch;
+        defer plan.launch.deinit(gpa);
+        plan.observed.profile = .current;
+        const prepared = PreparedActivation.init(init, gpa, &plan, target, null);
+        if (prepared) |*value| {
+            var owned = value.*;
+            owned.deinit(gpa);
+            return error.TestUnexpectedResult;
+        } else |err| try std.testing.expectEqual(if (case.admitted) error.FileNotFound else error.UnsupportedHostConfiguration, err);
     }
 }

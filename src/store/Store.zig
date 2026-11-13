@@ -1116,8 +1116,8 @@ pub const Store = struct {
             self.admitModelAttempt(.tool_continuation, faults);
     }
 
-    /// Never inlined: its two Accesses and admission's rows (about 4 KiB)
-    /// stay off the frame of a caller that goes on to dispatch the Attempt.
+    /// Admission's rows over 1 KiB stay off the engine thread's stack, in
+    /// the Store's scratch (`AdmitModel.Scratch`).
     pub fn admitModelAttempt(self: *Store, admission_kind: ModelAdmissionKind, faults: Faults) !?AttemptAdmission {
         return self.admitModelAttemptInto(admission_kind, faults, null);
     }
@@ -1133,15 +1133,15 @@ pub const Store = struct {
     noinline fn admitModelAttemptHeld(self: *Store, admission_kind: ModelAdmissionKind, faults: Faults, start: ?historical_domain.Start) !?AttemptAdmission {
         const entry = try enter(self, .none);
         defer entry.release();
-        var reader: ReadAccess = .open(&entry);
-        defer reader.deinit();
+        // Only a network engine's commit carries the request's reads.
+        const starting: ?model_admission_domain.AdmitModel.Starting = if (start) |into| if (self.engine.batches()) .{ .start = into, .store = self } else null else null;
         // An admission whose purpose rests on its context's size writes as
         // an assistant response under a guard on that size, and so reads no
         // size. Only the guard's failure, rolled back, admits again as the
         // compaction it showed is due.
-        const first = admitModelAttemptOnce(&entry, &reader, admission_kind, .weighed, faults, start);
+        const first = admitModelAttemptOnce(&entry, admission_kind, .weighed, faults, starting);
         const due = if (first) |_| false else |err| err == error.CompactionDue;
-        const outcome = if (due) admitModelAttemptOnce(&entry, &reader, admission_kind, .over, faults, start) else first;
+        const outcome = if (due) admitModelAttemptOnce(&entry, admission_kind, .over, faults, starting) else first;
         return entry.finishTransaction(Ordinary.none, faults, idleUnlessAdmitted(&entry, outcome));
     }
 
@@ -1156,10 +1156,16 @@ pub const Store = struct {
     }
 
     /// Never inlined: the second admission reuses the first's frame.
-    noinline fn admitModelAttemptOnce(entry: *const Entry, reader: *ReadAccess, admission_kind: ModelAdmissionKind, pressure: model_admission_domain.Pressure, faults: Faults, start: ?historical_domain.Start) !?AttemptAdmission {
-        var writer: Access(.write, error{ SelectionChanged, ProjectionFailed, InstructionSelectionFailed, CompactionDue }) = .open(entry);
-        defer writer.deinit();
-        return writer.end(faults, model_admission_domain.admitNextModelAttempt(reader, &writer, admission_kind, pressure, faults, start));
+    noinline fn admitModelAttemptOnce(entry: *const Entry, admission_kind: ModelAdmissionKind, pressure: model_admission_domain.Pressure, faults: Faults, starting: ?model_admission_domain.AdmitModel.Starting) !?AttemptAdmission {
+        const Admit = model_admission_domain.AdmitModel;
+        var admission: Admit = .{ .input = .{
+            .kind = admission_kind,
+            .pressure = pressure,
+            .faults = faults,
+            .start = starting,
+            .scratch = entry.store.reportScratch(Admit.Scratch),
+        } };
+        return transition.run(entry, Admit, &admission, faults);
     }
 
     pub fn admitNextActionAttempt(

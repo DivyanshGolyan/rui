@@ -704,7 +704,7 @@ const insert_operation = rsql.Write(.{
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
-/// What an admission of `kind` selects: the owner `admitNextModelAttempt`
+/// What an admission of `kind` selects: the owner `AdmitModel`
 /// and the dispatch loop's work read (`dispatchWork`) queue it here.
 fn queueSelection(reader: anytype, kind: ModelAdmissionKind, found: *runnable_selection.Result) void {
     switch (kind) {
@@ -784,191 +784,328 @@ pub const CheckIdle = struct {
     }
 };
 
-/// Admits the next model Attempt of `kind`. The read Access `reader`
-/// selects, outside any transaction but inside the Store hold; with nothing
+/// Admits the next model Attempt of `kind`. Round `.select` selects,
+/// outside any transaction but inside the Store hold; with nothing
 /// selected it answers null, and its caller runs main's idle checks
-/// (`CheckIdle`). The selected Session's admission facts and
-/// recipe identities share selection's read batch, so Zig chooses coverage
-/// before the write Access opens. Only the selected recipe's uncovered
-/// bytes, where the purpose rests on them, are read inside the transaction.
-/// Then it writes the Turn, binds and projects input, inserts the Operation
-/// and commits. The Entry mutex excludes every other writer; a moved head is
-/// `SelectionChanged`.
-pub fn admitNextModelAttempt(reader: anytype, writer: anytype, kind: ModelAdmissionKind, pressure: Pressure, faults: Faults, start: ?historical_domain.Start) !?AttemptAdmission {
-    var queued: QueuedAdmission = undefined;
-    if (!try queueNextModelAttempt(reader, writer, kind, pressure, faults, &queued)) return null;
-    return commitAdmission(writer, &queued, start);
-}
-
-/// Commits the admission `writer` holds queued, starting the admitted
-/// Attempt's request in `start` where the commit's message carries reads.
-/// Never inlined: the request's reads live in this frame through the
-/// commit only, beside `queueNextModelAttempt`'s and not under it.
-noinline fn commitAdmission(writer: anytype, queued: *const QueuedAdmission, start: ?historical_domain.Start) !?AttemptAdmission {
-    const binding = queued.binding;
-    // The request's settings round reads only what this commit saves, so
-    // it follows COMMIT in the same message where that message has room.
-    var request: historical_domain.SettingsRead = undefined;
-    // Only a network engine's commit carries reads after it.
-    const opened = if (start) |into| writer.store.engine.batches() and into.open(writer.store, binding) else false;
-    if (opened) {
-        request = .init(start.?.view, start.?.settings);
-        request.readAhead(start.?, &queued.session, queued.position);
-    }
-    writer.commitFollowed(if (opened) &request else null) catch |err| {
-        if (opened) start.?.view.close();
-        return err;
-    };
-    const started = opened and start.?.view.settled != null;
-    if (opened and !started) start.?.view.close();
-    return .{ .permit = .{ .binding = binding }, .request_started = started };
-}
-
-/// What `queueNextModelAttempt` queued: the Attempt its writes admit.
-const QueuedAdmission = struct {
-    binding: AttemptBinding,
-    session: @FieldType(rsql.SessionHead, "ref"),
-    /// The Operation's admission position.
-    position: u64,
-    /// The selected model: the Operation's insert reads these bytes in
-    /// place when the commit steps it, after the facts' frame is gone.
-    model: @FieldType(SelectedRow, "model"),
-};
-
-/// Selects the next Attempt and queues its admission's writes on `writer`,
-/// which the caller commits, and says in `queued` what they admit; false
-/// when nothing is runnable. Never inlined:
-/// the facts it reads are over 1 KiB, and its frame is gone before the
-/// commit, whose message is the deepest part of the engine thread's stack.
-noinline fn queueNextModelAttempt(reader: anytype, writer: anytype, kind: ModelAdmissionKind, pressure: Pressure, faults: Faults, queued: *QueuedAdmission) !bool {
-    var found: runnable_selection.Result = undefined;
-    var facts_row: SelectedRow = undefined;
-    var facts_found: store_access.Found = undefined;
-    queueSelection(reader, kind, &found);
-    queueSelectedContext(reader, kind, &facts_row, &facts_found);
-    try store_access.runNamed(reader, .{
-        .{ selected_context, error.SessionReadFailed },
-        .{ open_turn_context, error.SessionReadFailed },
-        .{ tool_continuation_context, error.SessionReadFailed },
-    }, error.RunnableSelectionFailed);
-    // With nothing selected, its caller runs `CheckIdle`.
-    const selection = found orelse return false;
-    if (selection.cutoff.get() < selection.first_admission.get()) return error.CorruptStore;
-    const session_ref: []const u8 = &selection.session.ref;
-    const first_admission = selection.first_admission.get();
-    if (!facts_found.get()) return error.CorruptStore;
-    const facts = &facts_row;
-    queued.model = facts.model;
-    if (facts.session.next_position != selection.session.next_position) return error.SelectionChanged;
-    const policy = model_capability.compactionPolicy(facts.model.slice(), if (facts.compaction_trigger) |trigger| trigger.get() else null, facts.output_reservation);
-    var compaction: turn_policy.CompactionFacts = .{
-        .trigger = policy.compaction_trigger,
-        .context_changed = false,
-        .usage_tokens = null,
-        .uncovered_bytes = 0,
-        .output_reservation = policy.output_reservation,
-    };
-    if (facts.latest_turn != null) {
-        if (facts.latest_operation == null) return error.CorruptStore;
-        const latest_first = facts.latest_first orelse return error.CorruptStore;
-        const resolution: []const u8 = if (facts.latest_resolution) |*code| code.slice() else "";
-        compaction.previous = previousTurn(facts.latest_compaction orelse return error.CorruptStore, resolution, facts.latest_active, latest_first.get(), first_admission, output_format.OutputItemKind.compaction.replayableTo((facts.latest_model orelse return error.CorruptStore).slice(), facts.model.slice(), .selected_base));
-    }
-    // The uncovered bytes are never read here. Where only their count
-    // decides the purpose, the admission writes as an assistant response
-    // and its first write checks the count against the policy's limit
-    // (`within_pressure`); that guard's failure is `CompactionDue`, and the
-    // caller admits again knowing the count is `.over` it.
-    var purpose = turn_policy.nextPurpose(compaction);
-    var weighed: ?within_pressure.Args = null;
-    if (try takeContext(&compaction, facts, facts.model.slice(), session_ref)) |coverage| {
-        purpose = turn_policy.nextPurpose(compaction);
-        if (purpose != .compaction) if (turn_policy.compactingBytes(compaction)) |limit| switch (pressure) {
-            .over => purpose = .compaction,
-            .weighed => weighed = .{
-                .session = facts.session,
-                .covered = coverage.covered,
-                .frontier = coverage.frontier,
-                .results = coverage.results,
-                .limit = @min(limit, std.math.maxInt(i64)),
-            },
-        };
-    }
-    // A compaction after one that overflowed makes room: settlement let
-    // the Turn go on only because a deeper floor exists (D217).
-    var dropped: u64 = 0;
-    const room: ?history_floor_domain.Choice = if (compaction.previous) |previous| room: {
-        if (purpose != .compaction or previous.purpose != .compaction or !previous.context_overflow or !previous.turn_active) break :room null;
-        const latest = (facts.latest_operation orelse return error.CorruptStore).get();
-        const deeper = try history_floor_domain.deeperFloor(writer, latest) orelse return error.CorruptStore;
-        dropped = try history_floor_domain.droppedEntries(writer, latest, deeper);
-        break :room deeper.choice;
-    } else null;
-    // A compaction that makes no room keeps its base's floor (D217).
-    const floor: ?u64 = if (room) |choice| choice.floor else if (purpose == .compaction)
-        try history_floor_domain.inheritedFloor(writer, session_ref, selection.session.next_position.get(), facts.model.slice())
-    else
-        null;
-    const selected: u64 = if (purpose == .compaction) 0 else selection.selected;
-    const instructions: u64 = if (purpose == .compaction) 0 else facts.instructions;
-
-    const offer = try tool_offer.freeze(writer, facts.tool_set_id.get(), if (facts.loaded_tool_set_id) |id| id.get() else null, facts.offer_stale);
-    if (weighed) |args| writer.write(within_pressure, args);
-    const turn_id = if (selection.turn_id) |existing| existing.get() else try writer.identity(.turn_id);
-    const operation_id = try writer.identity(.operation_id);
-    const cutoff = selection.cutoff.get();
-    if (selection.turn_id == null) {
-        writer.write(insert_turn, .{ .turn_id = turn_id, .session = facts.session, .first_admission = first_admission, .cutoff = cutoff, .operation_id = operation_id });
-    } else {
-        writer.write(continue_turn, .{ .turn_id = turn_id, .cutoff = cutoff, .operation_id = operation_id, .session = facts.session });
-    }
-    const positions = try writer.positions(facts.session);
-    if (selected != 0) {
-        const inputs = selected + selection.skills;
-        writer.writeCount(bind_messages, .{ .turn_id = turn_id, .session = facts.session, .cutoff = cutoff }, selected);
-        writer.writeCount(project_messages, .{
-            .session = facts.session,
-            .turn_id = turn_id,
-            .position_base = try positions.take(inputs),
-            .first_admission = first_admission,
-        }, selected);
-        if (selection.skills != 0) writer.writeCount(project_skills, .{ .session = facts.session, .turn_id = turn_id, .first_admission = first_admission }, selection.skills);
-    }
-    if (instructions != 0) {
-        writer.writeCount(project_instructions, .{
-            .session = facts.session,
-            .turn_id = turn_id,
-            .position_base = try positions.take(instructions),
-            .revision = facts.revision.get(),
-        }, instructions);
-    }
-    const position = try positions.take(1);
-    writer.write(insert_operation, .{
-        .operation_id = operation_id,
-        .turn_id = turn_id,
-        .session = facts.session,
-        .revision = facts.revision.get(),
-        .cutoff = cutoff,
-        .position = position,
-        .compaction = purpose == .compaction,
-        .compaction_trigger = policy.compaction_trigger,
-        .output_reservation = policy.output_reservation,
-        .reasoning_effort = configuration_domain.effectiveReasoningEffort(facts),
-        .history_floor = floor,
-        .history_level = if (room) |choice| choice.level else null,
-        .history_dropped = if (room != null) dropped else null,
-        .model = queued.model.slice(),
-        .shipped_context_window = model_capability.contextWindow(@import("../../model_catalog.zig").shipped, facts.model.slice()),
-        .unlisted_context_window = @import("../../product_defaults.zig").unlisted_context_window,
-        .tool_set_id = offer,
+/// (`CheckIdle`). The selected Session's admission facts and recipe
+/// identities share selection's round, so Zig chooses coverage before the
+/// transaction opens. Inside it, only where the purpose asks: a compaction
+/// after one that overflowed walks to a deeper floor (`.floor_facts`, then
+/// `.floor_page` pages) and counts what it drops (`.dropped`); another
+/// compaction reads its base's floor (`.inherited`); a stale offer is
+/// projected, looked up and, when new, saved (`.offer_project`,
+/// `.offer_lookup`, `.offer_intern`). Then it writes the Turn, binds and
+/// projects input, inserts the Operation and commits. The Entry mutex
+/// excludes every other writer; a moved head is `SelectionChanged`.
+///
+/// Where `Input.start` is given, the admitted Attempt's request starts in
+/// it: its view opens before the commit, whose message carries the
+/// request's settings round after COMMIT (`follow`), and
+/// `request_started` says whether that round settled. When not, the view
+/// is closed and the caller opens it. Its caller gives `start` only on an
+/// engine whose commit carries reads after it.
+pub const AdmitModel = struct {
+    pub const rounds = transition.rounds(.{
+        .select = .{ .always, error.RunnableSelectionFailed, .{
+            .{ selected_context, error.SessionReadFailed },
+            .{ open_turn_context, error.SessionReadFailed },
+            .{ tool_continuation_context, error.SessionReadFailed },
+        } },
+        .floor_facts = .{ .branch, error.CorruptStore },
+        .floor_page = .{ .paged, error.CorruptStore },
+        .dropped = .{ .branch, error.CorruptStore },
+        .inherited = .{ .branch, error.CorruptStore },
+        .offer_project = .{.branch},
+        .offer_lookup = .{.branch},
+        .offer_intern = .{.branch},
     });
-    // The writes are queued, not run, as in every converted entry point.
-    if (faults.attempt_before_commit) return error.InjectedAttemptCommitFailure;
-    queued.binding = .{ .turn_id = turn_id, .operation_id = operation_id, .attempt_ordinal = 1 };
-    queued.session = facts.session.ref;
-    queued.position = position;
-    return true;
-}
+    pub const round_budget = 2;
+    pub const commit: transition.Commit = .transaction;
+    /// Today's writer first queues at the floor walk, the inherited floor
+    /// or the offer, whichever runs first, or at the commit: every round
+    /// after selection reads inside the transaction.
+    pub const begin: ?rounds.At = .floor_facts;
+    pub const Input = struct {
+        kind: ModelAdmissionKind,
+        pressure: Pressure,
+        faults: Faults,
+        start: ?Starting,
+        /// The Store's scratch, which holds what the run reads over 1 KiB.
+        scratch: *Scratch,
+    };
+    pub const Result = ?AttemptAdmission;
+    pub const Ordinary = store_core.Ordinary.none;
+    pub const Guards = error{ SelectionChanged, ProjectionFailed, InstructionSelectionFailed, CompactionDue };
+    pub const Declined = error{};
+
+    /// Where the admitted request starts, and the Store its view reads
+    /// through: the step only hands the Store to the view it opens.
+    pub const Starting = struct { start: historical_domain.Start, store: *Store };
+
+    /// What the run reads over 1 KiB, in the Store's report scratch: the
+    /// selected model the Operation's insert reads in place at the commit,
+    /// the request's settings round the commit carries, and the facts, the
+    /// floor walk, the inherited floor or the offer, one at a time.
+    pub const Scratch = struct {
+        model: @FieldType(SelectedRow, "model"),
+        request: historical_domain.SettingsRead,
+        read: union(enum) {
+            facts: SelectedRow,
+            floor: history_floor_domain.FloorSearch,
+            inherited: history_floor_domain.InheritedFloor,
+            offer: tool_offer.Freeze,
+        },
+    };
+
+    input: Input,
+    found: runnable_selection.Result = undefined,
+    facts_found: store_access.Found = undefined,
+    /// What the commit's writes take from the facts, kept once the facts
+    /// leave the scratch.
+    admitting: Admitting = undefined,
+    dropped: history_floor_domain.DroppedEntries = .{},
+    /// The room a compaction after one that overflowed makes.
+    room: ?history_floor_domain.Choice = null,
+    floor: ?u64 = null,
+    /// The tool set the Operation offers.
+    offer: u64 = 0,
+    binding: AttemptBinding = undefined,
+    /// Whether the request's view opened for the commit's reads.
+    opened: bool = false,
+
+    const Admitting = struct {
+        session: rsql.SessionHead,
+        revision: u64,
+        policy: model_capability.CompactionPolicy,
+        reasoning_effort: ?model_capability.ReasoningEffort,
+        shipped_context_window: u64,
+        instructions: u64,
+        tool_set_id: u64,
+        loaded_tool_set_id: ?u64,
+        offer_stale: bool,
+        compaction: bool,
+        weighed: ?within_pressure.Args,
+    };
+
+    pub fn step(t: *AdmitModel, r: *transition.Round(AdmitModel), ran: ?rounds.At) !transition.Next(AdmitModel) {
+        const at = ran orelse {
+            t.input.scratch.read = .{ .facts = undefined };
+            queueSelection(r, t.input.kind, &t.found);
+            queueSelectedContext(r, t.input.kind, &t.input.scratch.read.facts, &t.facts_found);
+            return .{ .round = .select };
+        };
+        switch (at) {
+            .select => return t.decide(r),
+            .floor_facts, .floor_page => {
+                const search = &t.input.scratch.read.floor;
+                if (search.next(r)) return .{ .round = .floor_page };
+                const room = search.room() orelse return error.CorruptStore;
+                t.room = room.choice;
+                t.floor = room.choice.floor;
+                t.dropped.queue(r, search.operation, room);
+                return .{ .round = .dropped };
+            },
+            .dropped => return t.freeze(r),
+            .inherited => {
+                t.floor = t.input.scratch.read.inherited.floor(t.input.scratch.model.slice());
+                return t.freeze(r);
+            },
+            .offer_project => {
+                try t.input.scratch.read.offer.intern(r);
+                return .{ .round = .offer_lookup };
+            },
+            .offer_lookup => {
+                const offer = &t.input.scratch.read.offer;
+                t.offer = try offer.set(r);
+                // A new set's rows run in a round of their own, so the
+                // member names they read in place are read before the
+                // scratch changes.
+                if (offer.interning.inserted) return .{ .round = .offer_intern };
+                return t.queueAdmission(r);
+            },
+            .offer_intern => return t.queueAdmission(r),
+        }
+    }
+
+    /// After selection's round: nothing selected ends the run; otherwise
+    /// the purpose, and the round the floor or the offer asks for next.
+    fn decide(t: *AdmitModel, r: *transition.Round(AdmitModel)) !transition.Next(AdmitModel) {
+        // With nothing selected, its caller runs `CheckIdle`.
+        const selection = &(t.found orelse return .{ .done = null });
+        if (selection.cutoff.get() < selection.first_admission.get()) return error.CorruptStore;
+        const session_ref: []const u8 = &selection.session.ref;
+        const first_admission = selection.first_admission.get();
+        if (!t.facts_found.get()) return error.CorruptStore;
+        const facts = &t.input.scratch.read.facts;
+        t.input.scratch.model = facts.model;
+        if (facts.session.next_position != selection.session.next_position) return error.SelectionChanged;
+        const policy = model_capability.compactionPolicy(facts.model.slice(), if (facts.compaction_trigger) |trigger| trigger.get() else null, facts.output_reservation);
+        var compaction: turn_policy.CompactionFacts = .{
+            .trigger = policy.compaction_trigger,
+            .context_changed = false,
+            .usage_tokens = null,
+            .uncovered_bytes = 0,
+            .output_reservation = policy.output_reservation,
+        };
+        if (facts.latest_turn != null) {
+            if (facts.latest_operation == null) return error.CorruptStore;
+            const latest_first = facts.latest_first orelse return error.CorruptStore;
+            const resolution: []const u8 = if (facts.latest_resolution) |*code| code.slice() else "";
+            compaction.previous = previousTurn(facts.latest_compaction orelse return error.CorruptStore, resolution, facts.latest_active, latest_first.get(), first_admission, output_format.OutputItemKind.compaction.replayableTo((facts.latest_model orelse return error.CorruptStore).slice(), facts.model.slice(), .selected_base));
+        }
+        // The uncovered bytes are never read here. Where only their count
+        // decides the purpose, the admission writes as an assistant response
+        // and its first write checks the count against the policy's limit
+        // (`within_pressure`); that guard's failure is `CompactionDue`, and the
+        // caller admits again knowing the count is `.over` it.
+        var purpose = turn_policy.nextPurpose(compaction);
+        var weighed: ?within_pressure.Args = null;
+        if (try takeContext(&compaction, facts, facts.model.slice(), session_ref)) |coverage| {
+            purpose = turn_policy.nextPurpose(compaction);
+            if (purpose != .compaction) if (turn_policy.compactingBytes(compaction)) |limit| switch (t.input.pressure) {
+                .over => purpose = .compaction,
+                .weighed => weighed = .{
+                    .session = facts.session,
+                    .covered = coverage.covered,
+                    .frontier = coverage.frontier,
+                    .results = coverage.results,
+                    .limit = @min(limit, std.math.maxInt(i64)),
+                },
+            };
+        }
+        // A compaction after one that overflowed makes room: settlement let
+        // the Turn go on only because a deeper floor exists (D217).
+        const deepens = if (compaction.previous) |previous|
+            purpose == .compaction and previous.purpose == .compaction and previous.context_overflow and previous.turn_active
+        else
+            false;
+        const latest: u64 = if (deepens) (facts.latest_operation orelse return error.CorruptStore).get() else 0;
+        t.admitting = .{
+            .session = facts.session,
+            .revision = facts.revision.get(),
+            .policy = policy,
+            .reasoning_effort = configuration_domain.effectiveReasoningEffort(facts),
+            .shipped_context_window = model_capability.contextWindow(@import("../../model_catalog.zig").shipped, facts.model.slice()),
+            .instructions = if (purpose == .compaction) 0 else facts.instructions,
+            .tool_set_id = facts.tool_set_id.get(),
+            .loaded_tool_set_id = if (facts.loaded_tool_set_id) |id| id.get() else null,
+            .offer_stale = facts.offer_stale,
+            .compaction = purpose == .compaction,
+            .weighed = weighed,
+        };
+        // The facts leave the scratch from here on.
+        if (deepens) {
+            t.input.scratch.read = .{ .floor = .{ .operation = latest } };
+            t.input.scratch.read.floor.start(r);
+            return .{ .round = .floor_facts };
+        }
+        // A compaction that makes no room keeps its base's floor (D217).
+        if (purpose == .compaction) {
+            t.input.scratch.read = .{ .inherited = .{} };
+            t.input.scratch.read.inherited.queue(r, session_ref, selection.session.next_position.get());
+            return .{ .round = .inherited };
+        }
+        return t.freeze(r);
+    }
+
+    /// Freezes the offer: at once where the intent is not stale, otherwise
+    /// in the rounds `tool_offer.Freeze` asks for.
+    fn freeze(t: *AdmitModel, r: *transition.Round(AdmitModel)) !transition.Next(AdmitModel) {
+        const admitting = &t.admitting;
+        if (tool_offer.Freeze.unchanged(admitting.tool_set_id, admitting.loaded_tool_set_id, admitting.offer_stale)) |offer| {
+            t.offer = offer;
+            return t.queueAdmission(r);
+        }
+        t.input.scratch.read = .{ .offer = .{} };
+        t.input.scratch.read.offer.project(r, admitting.tool_set_id, admitting.loaded_tool_set_id);
+        return .{ .round = .offer_project };
+    }
+
+    /// Queues the admission's writes, opens the request's view where the
+    /// commit carries its reads, and asks for the commit.
+    fn queueAdmission(t: *AdmitModel, r: *transition.Round(AdmitModel)) !transition.Next(AdmitModel) {
+        const selection = &t.found.?;
+        const admitting = &t.admitting;
+        const first_admission = selection.first_admission.get();
+        const selected: u64 = if (admitting.compaction) 0 else selection.selected;
+        if (admitting.weighed) |args| r.write(within_pressure, args);
+        const turn_id = if (selection.turn_id) |existing| existing.get() else try r.identity(.turn_id);
+        const operation_id = try r.identity(.operation_id);
+        const cutoff = selection.cutoff.get();
+        if (selection.turn_id == null) {
+            r.write(insert_turn, .{ .turn_id = turn_id, .session = admitting.session, .first_admission = first_admission, .cutoff = cutoff, .operation_id = operation_id });
+        } else {
+            r.write(continue_turn, .{ .turn_id = turn_id, .cutoff = cutoff, .operation_id = operation_id, .session = admitting.session });
+        }
+        const positions = try r.positions(admitting.session);
+        if (selected != 0) {
+            const inputs = selected + selection.skills;
+            r.writeCount(bind_messages, .{ .turn_id = turn_id, .session = admitting.session, .cutoff = cutoff }, selected);
+            r.writeCount(project_messages, .{
+                .session = admitting.session,
+                .turn_id = turn_id,
+                .position_base = try positions.take(inputs),
+                .first_admission = first_admission,
+            }, selected);
+            if (selection.skills != 0) r.writeCount(project_skills, .{ .session = admitting.session, .turn_id = turn_id, .first_admission = first_admission }, selection.skills);
+        }
+        if (admitting.instructions != 0) {
+            r.writeCount(project_instructions, .{
+                .session = admitting.session,
+                .turn_id = turn_id,
+                .position_base = try positions.take(admitting.instructions),
+                .revision = admitting.revision,
+            }, admitting.instructions);
+        }
+        const position = try positions.take(1);
+        r.write(insert_operation, .{
+            .operation_id = operation_id,
+            .turn_id = turn_id,
+            .session = admitting.session,
+            .revision = admitting.revision,
+            .cutoff = cutoff,
+            .position = position,
+            .compaction = admitting.compaction,
+            .compaction_trigger = admitting.policy.compaction_trigger,
+            .output_reservation = admitting.policy.output_reservation,
+            .reasoning_effort = admitting.reasoning_effort,
+            .history_floor = t.floor,
+            .history_level = if (t.room) |choice| choice.level else null,
+            .history_dropped = if (t.room != null) t.dropped.dropped() else null,
+            .model = t.input.scratch.model.slice(),
+            .shipped_context_window = admitting.shipped_context_window,
+            .unlisted_context_window = @import("../../product_defaults.zig").unlisted_context_window,
+            .tool_set_id = t.offer,
+        });
+        // The writes are queued, not run, as in every converted entry point.
+        if (t.input.faults.attempt_before_commit) return error.InjectedAttemptCommitFailure;
+        t.binding = .{ .turn_id = turn_id, .operation_id = operation_id, .attempt_ordinal = 1 };
+        // The request's settings round reads only what this commit saves,
+        // so it follows COMMIT in the same message.
+        if (t.input.start) |starting| if (starting.start.open(starting.store, t.binding)) {
+            t.opened = true;
+            const request = &t.input.scratch.request;
+            request.* = .init(starting.start.view, starting.start.settings);
+            request.readAhead(starting.start, &admitting.session.ref, position);
+        };
+        return .commit;
+    }
+
+    pub fn follow(t: *AdmitModel) ?*historical_domain.SettingsRead {
+        return if (t.opened) &t.input.scratch.request else null;
+    }
+
+    pub fn committed(t: *const AdmitModel) Result {
+        const started = t.opened and t.input.start.?.start.view.settled != null;
+        if (t.opened and !started) t.input.start.?.start.view.close();
+        return .{ .permit = .{ .binding = t.binding }, .request_started = started };
+    }
+
+    /// A commit that failed closes the view it opened.
+    pub fn failed(t: *AdmitModel) void {
+        if (t.opened) t.input.start.?.start.view.close();
+    }
+};
 
 /// Which of the dispatch loop's commit-driven scans would find work now.
 /// A hint: each admission still selects for itself, so a stale one costs

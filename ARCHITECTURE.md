@@ -1667,7 +1667,7 @@ Closed stdout cannot abort remaining restarts: outcome counts are retained and r
 `platform` alone owns per-user runtime naming and socket enumeration, without creating a runtime directory or Store.
 Socket discovery retries transient refusal for at most 200 ms inside the shared observation deadline; failed transport alone never establishes absence.
 Under the Store lease, `platform.StoreLease.listen` atomically publishes the canonical Store path beside a standard SQLite socket as `<hash>.store` (0600) before binding.
-Clean socket retirement removes its hint only after unlink succeeds; a crash leaves the hint for read-only discovery. MySQL and launch-frame sockets publish no hint.
+Clean socket retirement removes its hint only after unlink succeeds; a crash leaves the hint for read-only discovery. MySQL and settings-document sockets publish no hint.
 For an unreachable socket, `platform` validates the private same-owner regular hint, bounded canonical Store and exact socket hash, then observes that Store's lease: only a free lease proves absence, which discovery skips silently without deleting anything.
 A held or inaccessible lease, missing or untrusted hint (including older Hosts), or connected unreadable peer remains unconfirmed and counts as a failure with its socket path and recovery advice.
 The hint is only routing information, never a liveness flag, Host registry or activation authority. Startup's `platform.reclaimStaleSocket` still requires the held Store/runtime lease; discovery never reclaims sockets.
@@ -3953,17 +3953,17 @@ Reclaim only the expected stale socket after ownership.
 Unavailable/inaccessible/competing owners reject.
 Clients never auto-start or access SQLite; disconnects/timeouts do not cancel work.
 
-A MySQL Host starts only from `rui host serve --launch-frame`.
-Its stdin
-frame's `store` is `mysql://USER:PASSWORD@HOST[:PORT]/DATABASE`; TCP verifies
+A MySQL Host starts only from a settings document, `rui host serve --settings -` or `--settings FILE`.
+The
+document's `store.mysql.url` is `mysql://USER:PASSWORD@HOST[:PORT]/DATABASE`; TCP verifies
 TLS with system trust unless its sole query option is `ssl-ca=<path>`, a nonempty absolute PEM CA-bundle path (percent escapes allowed, at most `PATH_MAX - 1` decoded bytes) trusted exclusively; unknown or repeated keys, fragments, relative or empty paths, `ssl-ca` on a Unix socket and any verification-disabling option are refused (D224).
 A Unix socket is an absolute path in place of HOST,
 usually percent-encoded (`%2Fvar%2Frun%2Fmysqld.sock`).
 User, password and
 database components accept percent escapes.
-The frame requires a private
-`runtimeDir`; every launched Host binds `runtimeDir/rui.sock` (D211).
-The URL travels only in stdin, never in argv, environment, files or
+The document requires a private
+`interface.dir`; every launched Host binds `interface.dir/rui.sock` (D211).
+The URL travels as a literal only in stdin; a document file names a secret source for it (an environment variable or a private file), and it never appears in argv or
 refusal messages.
 Parsing wipes all JSON allocations, including failed
 parses; the connection handshake wipes its authentication buffer as soon as
@@ -4157,16 +4157,16 @@ Restart then uses committed uncertainty and owned-leftover cleanup; it preserves
 Remote effects and duplicate model cost remain possible.
 Orphan tools may retain each bounded unlinked stdin file until exit; replacement Hosts cannot reclaim it, and no aggregate scratch bound spans dead-Host generations.
 
-A launched Host (`rui host serve --launch-frame`) is the exception: its shutdown is bounded.
+A Host whose settings give `interface.lifetime` as `stdin` (the TypeScript client's default with `rui host serve --settings -`) is the exception: its shutdown is bounded.
 The program that starts it writes one frame to its stdin, a 4-byte big-endian length and then UTF-8 JSON naming `v` (1), the Store directory, the OpenAI key provider `{kind: "openai_key", baseUrl, key, caFile?}`, the `runtimeDir` that holds its socket `rui.sock`, and optionally `activeCapacity`.
-The frame is the sole source of a launched Host's settings; `--launch-frame` refuses separate provider settings, including `--provider-ca-file`.
+Serve flags given beside `--settings` are applied on top of the document.
 The provider's optional `caFile` names a PEM file trusted exclusively for that provider, on macOS as on Linux, with the same trust semantics as `--provider-ca-file`; omitted or null uses system trust.
 A supplied `caFile` must be a nonempty UTF-8 path without NUL bytes and shorter than the platform's path limit; a relative path is relative to the Host's working directory, and an unloadable file or failed verification never falls back to system trust.
 The optional `presets` object maps at most 64 names (1–64 bytes of `[a-z0-9_-]`) to complete agent specs, checked by the shared agent-spec parser and held only in Host memory (D22, D112).
 A `start_agent` call may name a preset and override its fields, but still refuses provider or Workspace fields, including those supplied by the preset (D221).
 The key stays in memory only, never on disk, in argv or in the environment.
-stdin then stays open and carries nothing; when it closes, the Host stops as `host-stop` does, and an alarm ends the process 10 seconds later if the drain has not finished, which is a forced termination as above.
-A refusal at open is one stdout line `{"rui_start_error":{"code","message"}}` with code `launch_frame_invalid`, `invalid_preset` or `store_locked`, then exit status 1.
+With `interface.lifetime` `stdin`, stdin then stays open and carries nothing; when it closes, the Host stops as `host-stop` does, and an alarm ends the process 10 seconds later if the drain has not finished, which is a forced termination as above.
+A refusal at open is one stdout line `{"rui_start_error":{"code","message"}}` with code `settings_invalid`, `invalid_preset` or `store_locked`, then a nonzero exit status set by the cause, 2 for `settings_invalid`.
 
 `rui host pause [--store PATH]` observes the ready Host once, then sends a bounded protected `POST /v1/control/host-stop`.
 It requires the observed `X-Rui-Host-Instance`, validated before fencing.
@@ -4297,7 +4297,7 @@ On Linux with glibc, the execution loop calls `malloc_trim(0)` once each time it
 | Model retries | Startup default 3 after initial try; 2/4/8 s backoff or later valid Retry-After, then positive jitter up to one quarter of backoff; conserved per Operation. |
 | Provider inactivity | Startup default 5 min awaiting first body and between chunks; body/heartbeats reset it, no progressing-stream total deadline. |
 | Bash | Startup default 5 min from process start, output does not reset it; per-call positive finite representable override, no policy maximum. |
-| Tool excerpt | Startup default 10,000 UTF-8 bytes of tail output across the entire Tool Result, no line quota; omission/path metadata additional. |
+| Tool excerpt | Startup default 20,000 UTF-8 bytes across the entire Bash Tool Result, no line quota; fitting Bash streams are complete, truncated streams use one half of their allowance for the head and the rest for the tail; omission/path metadata additional. |
 | Edit copy window | Reusable 16 KiB; not an expected-text/line/replacement/file limit. |
 | Diagnostics | Startup default 128 MiB, at most 16 files, each floor(cap/16), 4 KiB encoded record; exports consume scratch. [Failed-response records](#diagnostic-records-and-export) are separate: first 16 MiB per capture, 64 MiB and 256 records per Store, oldest first. |
 | Qualification acceptance targets | [Verification’s Host qualification targets](VERIFICATION.md#resources-and-accepted-host-qualification-targets) define workload-specific acceptance targets. They are not runtime admission limits or per-module quotas. |
@@ -4376,15 +4376,16 @@ Measure filesystem metadata and cleanup latency separately from logical bytes an
 #### Tool excerpts and full output
 
 Bash output has no per-call total capture cap.
-Short output is complete; larger output saves status, tail excerpt, omission notice and the path of each truncated stream, preserving combined-stream allowance and valid UTF-8 boundaries before provider JSON framing.
+Short output is complete; larger output saves status, head-and-tail excerpts, exact omitted-byte counts and the path of each truncated stream, preserving combined-stream allowance and valid UTF-8 boundaries before provider JSON framing.
 Failed full capture cannot masquerade as successful preservation.
 Full output is read through ordinary Bash permissions/timeouts/excerpts, not a new Read tool or whole-file context injection.
 FIFO or Host exit/crash may remove it; unavailability leaves saved results unchanged.
 Canonical permission, Edit intent and outcome evidence are not disposable spillover.
 
-A Bash result names only what carries information: the outcome line, any warnings, a `stdout tail:` section only when stdout is nonempty and a `stderr tail:` section only when stderr is nonempty.
-When either tail omits earlier bytes, `[earlier output omitted]` follows, then `Full stdout: PATH` or `Full stderr: PATH` for each truncated stream, or `Full output was not retained.` when retention is unavailable.
-An untruncated stream is complete in the result and names no file.
+A Bash result names only what carries information: the unchanged outcome line and warnings, a `stdout:` section only when stdout is nonempty and a `stderr:` section only when stderr is nonempty.
+A fitting stream is complete. A truncated stream shows its head, a separate `[N bytes left out]` line (the exact number of source bytes not shown, without thousands separators), then its tail. The head receives one half of that stream's existing allowance and the tail the rest, both cut on valid UTF-8 boundaries. If a newline lies within the last 256 source bytes of the head, the head ends just after the last such newline; if one lies within the first 256 source bytes of the tail and the tail does not already start a line (the source byte before it is not a newline), the tail starts just after the first such newline. A cut that already falls on a line boundary therefore stays where it is at either end. Bytes removed by either adjustment count as left out.
+After the stream sections, `Full stdout: PATH` or `Full stderr: PATH` names each truncated stream, or `Full output was not retained.` reports unavailable retention. There is no separate `[earlier output omitted]` line. An untruncated stream names no file.
+Saved results from older Hosts retain their `stdout tail:` / `stderr tail:` sections and `[earlier output omitted]` notice; readers accept both shapes without rewriting stored results.
 
 MCP answers are bounded by the existing 4 MiB per-call answer buffer.
 Their resolution keeps the first 10,000 rendered bytes, cut at a UTF-8 boundary, and the omitted-byte suffix; fitting answers keep their complete existing bytes and create no retained file.
