@@ -62,9 +62,10 @@ pub fn codex(init: std.process.Init, comptime exchange: anytype, display: anytyp
 
 /// The ChatGPT plan sign-in: a browser or pasted answer from `issuer`,
 /// installed through the same custody as a Codex login once `publish` wins
-/// the caller's cancellation gate. The host id lives beside the credential
-/// directory at HOME/.config/rui/host-id.
-pub fn chatgpt(init: std.process.Init, issuer: plan_login.Issuer, cancelled: *const fn () bool, publish: *const fn () bool) !void {
+/// the caller's cancellation gate. The caller renders each `plan_login.Shown`
+/// through `display` and supplies the pasted address through `paste`. The
+/// host id lives beside the credential directory at HOME/.config/rui/host-id.
+pub fn chatgpt(init: std.process.Init, issuer: plan_login.Issuer, display: anytype, paste: plan_login.Paste, cancelled: *const fn () bool, publish: *const fn () bool) !void {
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = try credentialPath(init, .chatgpt, &path_buffer, true);
     const home = init.environ_map.get("HOME") orelse return error.HomeRequired;
@@ -93,7 +94,7 @@ pub fn chatgpt(init: std.process.Init, issuer: plan_login.Issuer, cancelled: *co
         .issuer = issuer,
         // A test's issuer is a loopback; no browser goes there.
         .opener = if (issuer == .fixture) null else os.linkOpener(init.environ_map),
-    }, cancelled, &room.record, Publish{ .path = path, .scratch = &room.work.credentials, .gate = publish }, Publish.install);
+    }, display, paste, cancelled, &room.record, Publish{ .path = path, .scratch = &room.work.credentials, .gate = publish }, Publish.install);
 }
 
 pub fn key(init: std.process.Init, bytes: []const u8) !void {
