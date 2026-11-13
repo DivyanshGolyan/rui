@@ -4,6 +4,7 @@
 const std = @import("std");
 const model_attempt = @import("model_attempt.zig");
 const tool_proposal = @import("../../tool_proposal.zig");
+const FieldCertificate = @import("../../activity_read.zig").FieldCertificate;
 const content_string = @import("../../content_string.zig");
 const idempotency_key = @import("../../idempotency_key.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
@@ -960,7 +961,7 @@ const insert_call = rsql.Write(.{
         acceptance_position: ?u64,
         action_kind: ?u64,
         description: ?tool_record.Description,
-        field_metadata: [120]u8,
+        field_metadata: FieldCertificate.Bytes,
         session: rsql.SessionHead,
     },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
@@ -1904,11 +1905,8 @@ fn Settlement(comptime A: type) type {
             const name_content_id, const call_id_content_id, const arguments_content_id = content_ids;
             // The call's certificate: (little-endian length, SHA-256) for its
             // name, call_id and arguments, in ProposalField order.
-            var field_metadata: [120]u8 = undefined;
-            for (fields.*, 0..) |field, at| {
-                std.mem.writeInt(u64, field_metadata[at * 40 ..][0..8], field.decoded_length, .little);
-                @memcpy(field_metadata[at * 40 + 8 ..][0..32], &field.content_digest);
-            }
+            var field_metadata: FieldCertificate.Bytes = undefined;
+            for (fields.*, 0..) |field, at| FieldCertificate.write(&field_metadata, at, .{ .length = field.decoded_length, .digest = field.content_digest });
             // A Bash call keeps its valid line even when not offered; malformed
             // Bash arguments have none. MCP uses its saved line or tool name.
             const description = try callDescription(call_facts, s.io, s.output.source, record);

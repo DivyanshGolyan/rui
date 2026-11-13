@@ -2268,7 +2268,7 @@ pub const proposal_row = rsql.Read(.{
         arguments_content_id: rsql.Positive,
         consistent: bool,
         /// Three admission-certified (little-endian length, SHA-256) pairs.
-        field_metadata: [120]u8,
+        field_metadata: activity_read.FieldCertificate.Bytes,
         length0: u64,
         digest0: [32]u8,
         private0: bool,
@@ -2329,9 +2329,9 @@ fn certifiedFields(row: *const proposal_row.Row) error{CorruptStore}![3]activity
         const suffix = std.fmt.comptimePrint("{d}", .{index});
         const length: u64 = @field(row, "length" ++ suffix);
         const digest: [32]u8 = @field(row, "digest" ++ suffix);
-        const certified = row.field_metadata[index * 40 ..][0..40];
-        if (@field(row, "private" ++ suffix) or length != std.mem.readInt(u64, certified[0..8], .little) or
-            !std.mem.eql(u8, &digest, certified[8..40])) return error.CorruptStore;
+        const certified = activity_read.FieldCertificate.read(&row.field_metadata, index);
+        if (@field(row, "private" ++ suffix) or length != certified.length or
+            !std.mem.eql(u8, &digest, &certified.digest)) return error.CorruptStore;
         fields[index] = .{ .length = length, .digest = digest };
     }
     return fields;
@@ -2395,7 +2395,7 @@ pub const ToolOutcomeRow = struct {
     call_id_content_id: ?rsql.Positive,
     arguments_content_id: ?rsql.Positive,
     consistent: bool,
-    field_metadata: ?[120]u8,
+    field_metadata: ?activity_read.FieldCertificate.Bytes,
     length0: ?u64,
     digest0: ?[32]u8,
     private0: ?bool,
