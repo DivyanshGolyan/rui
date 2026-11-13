@@ -110,7 +110,6 @@ const cores = .{
     .{ "schema_json.zig", @import("schema_json.zig") },
     .{ "session_consent.zig", @import("session_consent.zig") },
     .{ "session_departure.zig", @import("session_departure.zig") },
-    .{ "session_field.zig", @import("session_field.zig") },
     .{ "session_settings.zig", @import("session_settings.zig") },
     .{ "session_id.zig", @import("session_id.zig") },
     .{ "session_keys.zig", @import("session_keys.zig") },

@@ -143,7 +143,6 @@ reading: struct {
     fills: FeedPolicy.Fills = .{},
     // An Action the reader found, adopted once input is idle.
     prepared_action: ?u64 = null,
-    prepared_summary: View.ActionSummary = .{},
     // One joined read at a time; no reuse until its live diagnostic is delivered.
     pending_diagnostic: ?struct { failure: protocol_reply.ReadFailure, phase: ReadPhase, recoverable: bool } = null,
 } = .{},
@@ -190,7 +189,6 @@ expansion: struct {
     reading: ?OpenRequest = null,
     generation: u64 = 0,
 } = .{},
-action_summary: View.ActionSummary = .{},
 // A frontend-owned change the next frame must show: input, notices, status,
 // live text or scrolling. The Screen's own changes make it stale() instead.
 dirty: bool = true,
@@ -466,7 +464,7 @@ pub fn attach(self: *Self, hooks: AppHooks, caps: overview_view.Caps) vxfw.Widge
     self.app_caps = caps;
     self.screen.setWidth(caps.width);
     self.app_preview = .{ .document = &self.screen.browsing, .colour = self.colour, .more = true, .handler = .{ .userdata = self, .on_notice = appNotice, .on_scroll = appDragScroll, .on_click = appPreviewClick } };
-    self.app_card = .{ .consent = &self.app_consent, .description = "", .body = self.app_preview.widget(), .userdata = self, .on_decision = appDecision };
+    self.app_card = .{ .consent = &self.app_consent, .body = self.app_preview.widget(), .userdata = self, .on_decision = appDecision };
     self.chrome = .init(.{ .userdata = self, .key = chromeClick(.needs), .stop = chromeClick(.{ .action = .stop }), .back = chromeClick(.{ .action = .close }), .latest = chromeClick(.{ .action = .latest }), .status_page = chromeClick(.status), .details = chromeClick(.details), .pick = chromeClick(.footer_pick), .close = chromeClick(.footer_close), .model = chromeClick(.{ .footer = .model }), .effort = chromeClick(.{ .footer = .effort }) });
     return self.widget();
 }
@@ -992,7 +990,6 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
                 const blurred = self.input.appEvent(conversation_keys, .focus_out, self.app_hooks.root.input.pasting, false);
                 if (blurred == .editor and blurred.editor == .refused) self.notice = refusedNotice(blurred.editor.refused);
                 try self.screen.showFile(self.init.io, self.files.action, .action);
-                self.action_summary = self.reading.prepared_summary;
                 self.reading.prepared_action = null;
                 self.reading.phase = .activity;
                 self.app_consent.adopt(request);
@@ -1084,7 +1081,6 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     self.app_card.style = normal;
     self.app_card.quiet = quiet;
     self.app_card.hover_style = hover;
-    self.app_card.description = self.action_summary.description.slice();
     self.app_card.method = self.app_caps.width;
     self.app_preview.style = normal;
     self.app_preview.colours = colours;
@@ -3141,9 +3137,10 @@ fn readInspection(self: *const Self) reader_policy.Inspection {
     };
 }
 
-/// What the queued row shows, if it shows (see `queued_line.unshown`): the
-/// newest waiting Message, by the line read from it, and how many wait
-/// that live output has not shown.
+/// What the queued row shows, if it shows: the newest waiting Message, by
+/// the line read from it, and how many wait. While the work holds nothing
+/// back, the oldest waiting Message is already being taken, so it is not
+/// counted.
 pub fn queuedRow(self: *const Self) ?struct { newest: u64, waiting: queued_line.Waiting } {
     const queued = self.live.queued;
     const count = queued.count - @intFromBool(queued.count != 0 and !self.live.work.state.holdsQueue());
@@ -3432,7 +3429,6 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
         }
         if (phase == .permission) {
             self.reading.prepared_action = self.job.result.action;
-            self.reading.prepared_summary = self.job.result.summary;
             if (self.reading.prepared_action == null) self.reading.phase = .activity;
         }
     }

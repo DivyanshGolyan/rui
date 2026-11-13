@@ -6,7 +6,6 @@ const operation_effort = @import("operation_effort.zig");
 const session_settings = @import("../../session_settings.zig");
 const command_reply = @import("../../command_reply.zig");
 const command_input = @import("../../command_input.zig");
-const session_field = @import("../../session_field.zig");
 const configuration_admission = @import("../../configuration_admission.zig");
 const workspace_path = @import("../../workspace_path.zig");
 const provider_route = @import("../../provider_route.zig");
@@ -165,11 +164,6 @@ pub const SessionFacts = struct {
     output_reservation: ?u64 = null,
     reasoning_effort: ?model_capability.ReasoningEffort = null,
     created_at: u64,
-};
-
-pub const RevisionContentField = enum(c_int) {
-    instructions = 0,
-    output_schema = 1,
 };
 
 pub const ConfigurationContentAction = enum(u2) {
@@ -390,7 +384,7 @@ pub const Applied = struct {
     output_schema_id: ?u64,
     instructions_updated: bool,
     /// The settings this revision changed; empty for a creation.
-    changes: std.EnumSet(session_field.SessionField) = .empty,
+    changes: std.EnumSet(session_settings.SessionField) = .empty,
 };
 
 /// The settings a revision can change, as `next` holds them before and
@@ -425,8 +419,8 @@ const Settings = struct {
     }
 
     /// Each field whose value differs, by its name in `SessionField`.
-    fn changed(before: *const Settings, after: *const CurrentConfiguration) std.EnumSet(session_field.SessionField) {
-        var fields: std.EnumSet(session_field.SessionField) = .empty;
+    fn changed(before: *const Settings, after: *const CurrentConfiguration) std.EnumSet(session_settings.SessionField) {
+        var fields: std.EnumSet(session_settings.SessionField) = .empty;
         inline for (session_settings.entries) |entry| {
             if (comptime entry.changeable) {
                 const name = comptime settingsField(entry);
@@ -439,7 +433,7 @@ const Settings = struct {
                         old.eql(next.slice()),
                     .choice, .content, .tools, .decimal_policy => old == next,
                 };
-                fields.setPresent(@field(session_field.SessionField, entry.field), !same);
+                fields.setPresent(@field(session_settings.SessionField, entry.field), !same);
             }
         }
         return fields;
@@ -1390,16 +1384,16 @@ test "Session settings changed detects each mutable value without comparing boun
     try current.label.?.set("label");
     const before = Settings.of(&current);
     inline for (.{
-        session_field.SessionField.model,
-        session_field.SessionField.instructions,
-        session_field.SessionField.tools,
-        session_field.SessionField.loaded_tools,
-        session_field.SessionField.permission_mode,
-        session_field.SessionField.output_schema,
-        session_field.SessionField.compaction_trigger,
-        session_field.SessionField.output_reservation,
-        session_field.SessionField.reasoning_effort,
-        session_field.SessionField.label,
+        session_settings.SessionField.model,
+        session_settings.SessionField.instructions,
+        session_settings.SessionField.tools,
+        session_settings.SessionField.loaded_tools,
+        session_settings.SessionField.permission_mode,
+        session_settings.SessionField.output_schema,
+        session_settings.SessionField.compaction_trigger,
+        session_settings.SessionField.output_reservation,
+        session_settings.SessionField.reasoning_effort,
+        session_settings.SessionField.label,
     }) |field| {
         var next = current;
         switch (field) {

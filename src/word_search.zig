@@ -7,8 +7,14 @@ pub fn fold(byte: u8) u8 {
     return if (byte >= 'A' and byte <= 'Z') byte + 32 else byte;
 }
 
+/// Bytes a hit's snippet holds.
+const snippet_bytes = 160;
+/// Bytes of recent input kept to cut snippets from: more than a snippet with
+/// its lookbehind and lookahead.
+const raw_bytes = 512;
+
 pub const Hit = struct {
-    snippet: Bounded(160) = .{},
+    snippet: Bounded(snippet_bytes) = .{},
     offset: usize = 0,
     length: usize = 0,
     raw_offset: usize = 0,
@@ -19,7 +25,7 @@ pub const Matcher = struct {
     query_len: usize = 0,
     carry: [256]u8 = undefined,
     carry_len: usize = 0,
-    raw: [512]u8 = undefined,
+    raw: [raw_bytes]u8 = undefined,
     total: usize = 0,
     count: usize = 0,
     hits: [3]Hit = .{ .{}, .{}, .{} },
@@ -45,7 +51,7 @@ pub const Matcher = struct {
                     const pos = self.total - self.query_len;
                     self.hits[self.count].raw_offset = pos;
                     // Long queries are matched in full but only their visible
-                    // prefix is highlighted inside the 160-byte snippet.
+                    // prefix is highlighted inside the snippet.
                     self.starts[self.count] = pos - @min(pos, if (self.query_len <= 120) @as(usize, 40) else 0);
                     self.count += 1;
                 }
@@ -53,7 +59,7 @@ pub const Matcher = struct {
                 self.carry_len -= 1;
             }
             for (0..self.count) |i| {
-                if (!self.done[i] and self.total >= self.starts[i] + 160 + lookahead) self.cut(i);
+                if (!self.done[i] and self.total >= self.starts[i] + snippet_bytes + lookahead) self.cut(i);
             }
         }
     }
@@ -72,17 +78,17 @@ pub const Matcher = struct {
     /// snippet, where a character crossing its start can begin, so only a
     /// valid character crossing either end is left out.
     fn cut(self: *Matcher, index: usize) void {
-        var bytes: [160]u8 = undefined;
+        var bytes: [snippet_bytes]u8 = undefined;
         const start = self.starts[index];
-        const end = @min(self.total, start + 160);
+        const end = @min(self.total, start + snippet_bytes);
         var shown: ?usize = null;
         var n: usize = 0;
         var p = start -| 3;
         while (p < end) {
-            const size = std.unicode.utf8ByteSequenceLength(self.raw[p % 512]) catch 1;
+            const size = std.unicode.utf8ByteSequenceLength(self.raw[p % self.raw.len]) catch 1;
             var sequence: [4]u8 = undefined;
             const seen = @min(size, self.total - p);
-            for (0..seen) |j| sequence[j] = self.raw[(p + j) % 512];
+            for (0..seen) |j| sequence[j] = self.raw[(p + j) % self.raw.len];
             const valid = seen == size and std.unicode.utf8ValidateSlice(sequence[0..size]);
             const width: usize = if (valid) size else 1;
             if (p >= start) {

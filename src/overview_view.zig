@@ -2305,7 +2305,7 @@ pub fn band(state: *const State) ?Band {
     return null;
 }
 
-pub const Rgb = [3]u8;
+pub const Rgb = theme.Rgb;
 
 /// The Khadi skins. Day is an undyed cotton ground with indigo ink; night is
 /// an indigo-dyed ground with cotton text. Both alarm in station-board

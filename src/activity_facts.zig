@@ -8,8 +8,8 @@ const change_ring = @import("change_ring.zig");
 const idempotency_key = @import("idempotency_key.zig");
 const mutation_answer = @import("mutation_answer.zig");
 const outcome_code = @import("outcome_code.zig");
-const session_field = @import("session_field.zig");
 const session_id = @import("session_id.zig");
+const session_settings = @import("session_settings.zig");
 const session_work = @import("session_work.zig");
 const tool_presentation = @import("tool_presentation.zig");
 const turn_ending = @import("turn_ending.zig");
@@ -77,7 +77,7 @@ pub const Item = struct {
     /// A setting a revision changed, or its later effort refusal. Ordinary
     /// rows share the revision's position; a refusal has its settlement
     /// position and the provider's bounded report, without a new revision.
-    pub const SessionChanged = struct { revision: u64, field: session_field.SessionField, provider_text: ?Bounded(outcome_code.max_report_bytes) = null };
+    pub const SessionChanged = struct { revision: u64, field: session_settings.SessionField, provider_text: ?Bounded(outcome_code.max_report_bytes) = null };
     /// A compaction that succeeded, at its admission: `dropped` is how many
     /// conversation entries it left out to make room, zero for none (D217).
     pub const Compacted = struct { operation: u64, dropped: u64 };
