@@ -746,7 +746,7 @@ fn appSessionLeft(raw: *anyopaque, ctx: *vxfw.EventContext, outcome: SessionFron
     const left = &self.app_session.?;
     const from = left.session;
     left.ended = outcome;
-    if (outcome == .returned) switch (left.frontend.?.back(view.canHoldSend(&self.state))) {
+    if (outcome == .returned or outcome == .new_session) switch (left.frontend.?.back(view.canHoldSend(&self.state))) {
         .ended => |ended| left.ended = ended,
         .overview => |recovery| {
             if (recovery != .none) _ = try self.event(.{ .unconfirmed = .{ .reference = left.session, .recovery = recovery } });
@@ -756,6 +756,10 @@ fn appSessionLeft(raw: *anyopaque, ctx: *vxfw.EventContext, outcome: SessionFron
             try self.root.closeSession(ctx);
             // App's last frame can still point at the old widgets. Dispose
             // only after the next frame replaces that focus/hit-test tree.
+            if (outcome == .new_session) {
+                self.follow = .{};
+                return self.appNext(ctx, try self.event(.{ .clicked = .{ .target = .new_session } }));
+            }
             return self.followNext(ctx, from);
         },
     };
@@ -1763,7 +1767,7 @@ fn leaveFinished(self: *Self, left: Left, settled: ?SessionFrontend.Departure) !
         };
         switch (end) {
             .detached, .interrupted => TerminalApp.detached(store, session, departure.action),
-            .returned => unreachable,
+            .returned, .new_session => unreachable,
         }
     };
     return outcome catch |err| {
@@ -7033,6 +7037,55 @@ test "empty creation captures fresh effort and permission at admitted Enter or c
     };
 }
 
+test "new and clear retire the old chat through the real lender and open empty Configure creations" {
+    const Files = struct {
+        var dir: std.Io.Dir = undefined;
+        var count: u8 = 0;
+        fn scratch(init: std.process.Init) !std.Io.File {
+            count += 1;
+            return dir.createFile(init.io, &.{'a' + count}, .{ .read = true });
+        }
+    };
+    for ([_][]const u8{ "/new\r", "/clear\r" }) |keys| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const home = path[0..try tmp.dir.realPath(std.testing.io, &path)];
+        Files.dir = tmp.dir;
+        Files.count = 0;
+        var ops = fake_operations;
+        ops.open = openSession;
+        var cancellation: client.Cancellation = .{};
+        const rig = try Rig.open(.{ .store = home, .workspace = "/work", .home = home, .directory = home, .provider = "codex", .model = "gpt-5.5" }, ops, &cancellation);
+        defer rig.close();
+        const overview = rig.overview;
+        overview.hooks.scratch = Files.scratch;
+        try std.testing.expect(try rig.next(.{ .open = "k7m2qx".* }) == null);
+        defer {
+            if (overview.app_session) |left| {
+                left.frontend.?.stop();
+                overview.disposeSession(left);
+                overview.app_session = null;
+            }
+            for (overview.retired.items) |retired| overview.disposeSession(retired.left);
+            overview.retired.deinit(std.testing.allocator);
+        }
+        try std.testing.expect(try rig.settle() == null);
+        const frontend = overview.app_session.?.frontend.?;
+        frontend.reading.opening = false;
+        frontend.poll_at = std.math.maxInt(i96);
+        var ctx = rig.context();
+        defer ctx.cmds.deinit(std.testing.allocator);
+        try app_events.send(&ctx, keys, overview.root.widget(), frontend.widget());
+        try std.testing.expect(!ctx.quit);
+        try std.testing.expect(try rig.settle() == null);
+        try std.testing.expectEqualStrings("n3w5es", &overview.opened);
+        try std.testing.expectEqualStrings("n3w5es", overview.app_session.?.frontend.?.session);
+        try std.testing.expectEqual(@as(usize, 1), Seen.now.creates);
+        try std.testing.expect(overview.app_session.?.frontend.?.submission.intent == null);
+    }
+}
+
 /// Real Overview/SessionFrontend owners over canonical read-boundary fixtures.
 /// Configure-empty rows remain in this backend even when the list hides them;
 /// this is not a Store integration fixture. Native CLI/PTY tests own persistence.
@@ -7271,16 +7324,27 @@ const EmptySessionOwner = struct {
     }
 
     fn chooseModel(self: *EmptySessionOwner) !void {
-        try std.testing.expect(try self.rig.press("\t\r") == null);
+        try self.chooseModelFrom("\t\r");
+    }
+
+    fn chooseModelFrom(self: *EmptySessionOwner, gesture: []const u8) !void {
+        try std.testing.expect(try self.rig.press(gesture) == null);
         try std.testing.expect(self.frontend().app_info.model_choice.active);
-        try std.testing.expect(try self.rig.press("gpt-5.5\r") == null);
+        try std.testing.expect(try self.rig.press("gpt-5.5") == null);
+        const choice = &self.frontend().app_info.model_choice;
+        try std.testing.expectEqualStrings("gpt-5.5", choice.editor.buffer[0..choice.editor.length]);
+        var shown = try self.rig.shown(140, 40);
+        defer shown.deinit();
+        try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "gpt-5.5") != null);
+        try std.testing.expect(try self.rig.press("\r") == null);
         try std.testing.expect(self.frontend().info_edit != null);
+        try std.testing.expectEqualStrings("gpt-5.5", self.frontend().info_edit.?.model);
         self.frontend().poll_at = std.math.maxInt(i96);
         try self.tick();
         try self.joinRead();
+        try std.testing.expectEqualStrings("gpt-5.5", canonical(self.frontend().session).model.slice());
         try self.readCurrent();
         try std.testing.expectEqualStrings("gpt-5.5", self.frontend().line.model.slice());
-        try std.testing.expectEqualStrings("gpt-5.5", canonical(self.frontend().session).model.slice());
         try self.expectSelectedName(self.rig.overview.app_session.?.session, "New Session");
     }
 
@@ -7558,6 +7622,36 @@ test "Overview forwards captured covered pane and paste without rereading newer 
     try std.testing.expect(overview.state.creating());
     try std.testing.expectEqual(@as(usize, 1), overview.job_count);
     try std.testing.expectEqual(@as(usize, 0), Seen.now.creates);
+}
+
+test "typed model and footer picker configure the same Session owner and show Current in the footer" {
+    const Skills = struct {
+        fn read(_: client.ReadContext, _: std.mem.Allocator, _: []const u8, _: []const u8, _: []const u8) !@import("skill_suggestions.zig").Page {
+            return .{ .entries = &.{}, .total = 0 };
+        }
+    };
+    for ([_][]const u8{ "/model\r", "\t\r" }) |gesture| {
+        const fixture = try EmptySessionOwner.create();
+        defer fixture.destroy();
+        const reference = try fixture.openNew();
+        // The fixture owns canonical reads, not a real Host socket. Typing
+        // a leading slash also asks that Host for skills.
+        fixture.frontend().skill_read = Skills.read;
+        try fixture.chooseModelFrom(gesture);
+        // Acknowledge the configure result without sending a Message; the
+        // narrow footer reserves space for that retained notice until input.
+        try std.testing.expect(try fixture.rig.press("x\x7f") == null);
+        try std.testing.expectEqual(@as(usize, 1), EmptySessionOwner.configurations);
+        try std.testing.expectEqual(reference, fixture.rig.overview.app_session.?.session);
+        try std.testing.expect(fixture.frontend().submission.intent == null);
+        for ([_]u16{ 46, 140 }) |width| {
+            var shown = try fixture.rig.shown(width, 30);
+            defer shown.deinit();
+            const text = try shown.text();
+            const footer = text[std.mem.lastIndexOfScalar(u8, std.mem.trimEnd(u8, text, "\n"), '\n').? + 1 ..];
+            try std.testing.expect(std.mem.indexOf(u8, footer, "gpt-5.5") != null);
+        }
+    }
 }
 
 // Upstream #1396 drops unknown terminal sequences rather than synthesizing an

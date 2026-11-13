@@ -3072,7 +3072,7 @@ That UI-owned repair scratch is independent of the reader’s staging file, so o
 Session-wide detach, stop, archive and original-recovery keys retain their conversation owner while the panel or a nested choice is open; navigation and editing never reach the hidden draft.
 An environment-too-large notice also has clickable `details`; that page, not info, owns the refused capture and its repair instructions.
 Scripts retain `rui session inspect` and `rui session configure` for full inspection and settings not exposed in the panel, including compaction overrides.
-`/status`, `/configure` and `/model` remain absent from conversation parsing, the slash list and completion; the overview has no slash commands at all.
+`/status` and `/configure` remain absent from conversation parsing, the slash list and completion; the overview has no slash commands at all.
 The default model is the Model field of app settings, not a second command path.
 
 Complete Action inspection is staged in an independent unlinked file before choice readiness.
@@ -3091,15 +3091,19 @@ Typed chat info configuration and the `/setup` and `/result KEY` commands run on
 The slash commands’ unchanged CLI owners write complete stdout and stderr to the inspection scratch file.
 Output of up to two lines becomes a notice under the input without the CLI's `Rui: ` prefix, with `rui: ` diagnostics marked `!`; longer output opens as an inspection page under the `Browsing · Esc returns` heading.
 The Session screen stays in place and no command reads terminal input.
-`/discard` and `/recover KEY` answer with a notice; an unknown command shows `! Unknown command /NAME`, and a known one given an argument it does not take shows its usage, as `! Usage: /copy [code|file]`.
+`/discard` and `/recover KEY` answer with a notice; a known command given an argument it does not take shows its usage, as `! Usage: /copy [code|file]`. `slash_commands.zig`'s `draftOf` alone says what a draft is, from its bytes and the complete command grammar: a command line (its first word is exactly a command's name, listed or not), one unfinished `/word` and nothing else, or a Message, which is every other draft, `/review this change` and `//literal` included. The editor's Enter, Esc and Ctrl-G, completion and the list all ask it; none keeps its own test for a leading `/`. Enter runs a command line and sends anything else through ordinary Message admission, unchanged. The Host resolves skill references against the Session's complete saved catalog; a name absent from that catalog stays literal agent text, not an unknown-command notice.
+
+`/new` and `/clear` are identical no-argument navigation commands: retain the old chat, retire its frontend normally, then invoke the same overview New Session transition and captured Configure creation owner. Neither creates a Message or deletes history. Both list as `start a new chat`.
+`/model` is a no-argument request for the same model choice that the footer button opens. Its semantic footer admission and choice preparation are shared; the existing tick/read boundary opens it once Current and the borrowed model source are ready. Choosing a model calls chat info’s existing typed Configure edit and re-reads Current for the footer; no model CLI path or second worker is added.
+The bounded list holds the twelve listed commands plus the loaded skill preview. Suggestion reads, including absent, failed and truncated previews, never decide whether a line is a Message. The Session catalog alone owns skill membership; the complete command grammar, including unlisted `/discard` and `/recover`, takes precedence over same-named leading skills. Mid-Message references remain skills. The draft's first word lists the commands and then the skills its name starts, both read from the caret's word; a later word lists skills alone, and a command line's later words list that command's own choices. `skill_completion.enter` decides what Enter or a click does with the highlighted row: a row runs only where its word ends the draft, so the line run is the line shown, and anywhere else it only fills the word in.
 
 A command list appears when you type "/", built from the same table the command parser uses. /effort and /rename submit the corresponding Session configuration edits. (Divyansh approved this on 2026-10-31, front-end plan row 6.)
 
-`slash_commands.zig` holds the conversation’s table of each command's name, argument shape and plain listed flag; the parser, command runner and list read it. The `/` list shows only names as typed, with fixed choice words in quiet colour separated by ` · `; choice and option rows are names only too.
-`/requests`, `/recover`, `/result` and `/discard` are for recovery: they work, but the list leaves them out (Divyansh, 2026-11-02).
+`slash_commands.zig` holds the conversation’s table of each command's name, argument shape and plain listed flag; the parser, command runner and list read it. The `/` list shows each listed chat command with its short plain description beside loaded skills. Palette descriptions use the same terminal-safe, grapheme-aware ellipsis fitter as overview list rows, with the current terminal capabilities. Choice and option rows remain names only.
+`/requests` and `/result KEY` are listed alongside the other chat commands. Only `/recover KEY` and `/discard` stay unlisted behind the failed-send line (Divyansh, 2026-11-13).
 `/requests` still writes its page of every recovery handle, and while that page shows over an empty draft the list's rows offer what can be done with them, each row the command line it runs, so a pick does what typing it does and no key is typed (Divyansh, 2026-11-02).
 The first row is `/recover KEY` for this conversation's own original only while a retry would go now and could only send a Message: a plain Message whose Admission is unconfirmed, nothing in flight and no Action waiting; never a decision or a Message that carries one.
-Then come each saved Message's `/result KEY`, newest saved first with its local `HH:MM` (23 of them, the list's rows less that one), the original included when it has no `/recover` row.
+Then come each saved Message's `/result KEY`, newest saved first with its local `HH:MM` (bounded by the list’s rows less that one), the original included when it has no `/recover` row.
 A row offers only what applies to it: a saved Message's answer is the one result a page reads, and a conversation's `/recover` retries only its own unconfirmed original, so other saved requests and a rejected original, which `/discard` releases, have no row.
 Up and Down move the highlight, Enter runs the row's line and Tab puts it in the draft; Esc closes the rows until the draft changes, then leaves the page; typing gives their place to the draft's own list.
 Rows that change under an unchanged draft are a new list, which no key acts on until a frame draws it.
@@ -3115,7 +3119,7 @@ Tab adds the rest of the highlighted word, and a space when another word may fol
 A word Tab or Enter adds that the draft cannot hold is refused as a typed one is.
 Enter in a shown list takes the highlighted row: a command with nothing more to say, or a fixed value, runs the line it completes; a command that needs a word (`/effort` or `/rename`) or an option that takes a value only gets its word and the space, so the next list shows.
 So `/copy` alone, taken from the list, copies the answer, and `/copy ` then Enter copies its highlighted choice, `code` first.
-Esc or Ctrl-G, when the latest frame showed a command list, cancels the command and clears its draft; a skill or recovery list closes without consuming Message text.
+Esc or Ctrl-G, when the latest frame showed a list, closes it; it also clears a draft that is a command line or one unfinished `/word`, and never one that is a Message, whichever word the caret is in.
 Submitting a command consumes its draft whether it is unknown, succeeds or fails; a command refused by a hold keeps its draft.
 `command_input.zig` owns that ending rule for the chat; otherwise Esc and Ctrl-G do what they always did.
 While the list shows, Up and Down move its highlight; otherwise they scroll the conversation.
