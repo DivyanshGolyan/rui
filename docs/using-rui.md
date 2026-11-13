@@ -210,7 +210,7 @@ An explicit `--permission-mode` on a new Session wins over the saved choice; wit
 `rui defaults inspect` reads the saved defaults without changing them.
 
 Signing in with `rui auth login PROVIDER` saves that provider as the default when none is saved.
-`rui auth login chatgpt` also replaces a saved `codex` default, since both sign in to the same ChatGPT account, and clears a model saved for Codex.
+Either ChatGPT sign-in, in the browser or with `--device-code`, also replaces a saved default of the other and keeps the model saved with it, since both sign in to the same ChatGPT account: new Sessions use the one logged in last, and Sessions already open keep theirs.
 Any other saved provider stays; the sign-in says so and names the command that changes it, such as `rui defaults configure --provider chatgpt`.
 Existing Sessions keep their provider.
 
