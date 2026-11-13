@@ -5113,7 +5113,11 @@ test "an item with more content than a batch holds saves each part's own text, a
             var item: OversizedItem = .{};
             try item.build();
             const contents = try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{});
+            const rounds = storage.testing_content_work.rounds;
             try item.settle(&storage, &tmp, binding, null);
+            // The item's lookups ride its batches' rounds, not one round
+            // per part.
+            if (!case.rerun) try std.testing.expectEqual(4, storage.testing_content_work.rounds - rounds);
             const operation = binding.operation_id;
             for (0..OversizedItem.parts) |index| {
                 var buffer: [16]u8 = undefined;
