@@ -686,7 +686,7 @@ def saved_settings_served(root, env):
     import ssl
     import threading
     from settings_fixture import WIRE, post
-    from settings_integration import mcp_server
+    from settings_fixture import mcp_server
 
     state = root / "saved-served-state"
     state.mkdir(mode=0o700)

@@ -9,9 +9,7 @@ const process = @import("upgrade_process.zig");
 const Installation = @import("Installation.zig");
 const candidate = @import("release_candidate.zig");
 const cli_args = @import("cli_args.zig");
-const hs = @import("host_settings.zig");
 const host_start = @import("host_start.zig");
-const start_report = @import("start_report.zig");
 const product_defaults = @import("product_defaults.zig");
 
 pub const Stage = enum { stopping, awaiting_retirement, starting, verifying };
@@ -201,75 +199,19 @@ fn deriveLaunch(allocator: std.mem.Allocator, argv: []const []const u8) !LaunchS
     return .{ .options = try options.toOwnedSlice(allocator) };
 }
 
-// host_launch starts the replacement in `/` with stdin closed. Read every
-// layer it applies (saved host.json, the document, each --set) through their
-// owner before any retirement, and admit only what that launch reproduces: no
-// cwd-relative path or @FILE and no stdin lifetime. Do not anchor here: that
-// would disguise relative paths without preserving them. The Store is exempt
-// because replay pins the observed canonical --store.
+// host_launch starts the replacement in `/` with stdin closed; host_start
+// decides before any retirement whether this launch reproduces there.
 fn admitReplay(init: std.process.Init, launch: *const LaunchSpecification, store: []const u8) !void {
     var assignments: std.ArrayList([]const u8) = .empty;
     defer assignments.deinit(init.gpa);
     var request: host_start.Spawn = .{ .dir = store };
     for (launch.options) |option| {
         const value = option.value orelse return error.UnsupportedHostConfiguration;
-        if (std.mem.eql(u8, option.name, "settings")) {
-            if (!std.fs.path.isAbsolute(value)) return error.UnsupportedHostConfiguration;
-            request.settings_file = value;
-        } else if (std.mem.eql(u8, option.name, "set")) {
-            const equals = std.mem.indexOfScalar(u8, value, '=') orelse return error.UnsupportedHostConfiguration;
-            const assigned = value[equals + 1 ..];
-            if (std.mem.startsWith(u8, assigned, "@") and !std.fs.path.isAbsolute(assigned[1..])) return error.UnsupportedHostConfiguration;
-            try assignments.append(init.gpa, value);
-        }
+        if (std.mem.eql(u8, option.name, "settings")) request.settings_file = value;
+        if (std.mem.eql(u8, option.name, "set")) try assignments.append(init.gpa, value);
     }
     request.assignments = assignments.items;
-    const settings = try init.gpa.create(hs.Settings);
-    defer init.gpa.destroy(settings);
-    settings.* = .{};
-    defer settings.deinit();
-    var failure: start_report.Failure = undefined;
-    host_start.readLaunch(init, request, settings, &failure) catch |err| {
-        if (err == error.OutOfMemory) return err;
-        return error.UnsupportedHostConfiguration;
-    };
-    if (settings.interface.lifetime.value == .stdin) return error.UnsupportedHostConfiguration;
-    inline for (@typeInfo(hs.Settings).@"struct".field_names, @typeInfo(hs.Settings).@"struct".field_types) |name, Field| {
-        if (comptime !std.mem.eql(u8, name, "store")) {
-            if (!replayPaths(Field, &@field(settings, name))) return error.UnsupportedHostConfiguration;
-        }
-    }
-}
-
-fn replayPaths(comptime T: type, value: *const T) bool {
-    if (@typeInfo(T) == .optional) {
-        return if (value.*) |*present| replayPaths(@typeInfo(T).optional.child, present) else true;
-    }
-    if (@hasDecl(T, "kind")) {
-        return switch (T.kind) {
-            .path => value.anchored or (value.slice().len == 0 and T.allow_empty) or std.fs.path.isAbsolute(value.slice()),
-            .secret => switch (value.source) {
-                .file => |*file| replayPaths(@TypeOf(file.*), file),
-                else => true,
-            },
-            .named => blk: {
-                for (value.values[0..value.len]) |*entry| if (!replayPaths(T.Child, entry)) break :blk false;
-                break :blk true;
-            },
-            .providers => replayPaths(T.Table, &value.entries),
-            else => true,
-        };
-    }
-    switch (@typeInfo(T)) {
-        .@"struct" => |info| inline for (info.field_names, info.field_types) |name, Field| {
-            if (!replayPaths(Field, &@field(value, name))) return false;
-        },
-        .@"union" => return switch (value.*) {
-            inline else => |*payload| replayPaths(@TypeOf(payload.*), payload),
-        },
-        else => @compileError("not a Host settings kind"),
-    }
-    return true;
+    if (!try host_start.replayable(init, request)) return error.UnsupportedHostConfiguration;
 }
 
 fn supportedByHelp(specification: *const LaunchSpecification, help: []const u8) bool {

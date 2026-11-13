@@ -1138,6 +1138,67 @@ pub fn readLaunch(init: std.process.Init, request: Spawn, settings: *hs.Settings
     }
 }
 
+/// Upgrade replay relaunches `request` in `/` with stdin closed. Read every
+/// layer it applies through readLaunch and admit only what reproduces there:
+/// no cwd-relative document, @FILE or path value, and no stdin lifetime. Do
+/// not anchor here: that would disguise relative paths without preserving
+/// them. The Store is exempt because replay pins the observed canonical Store.
+pub fn replayable(init: std.process.Init, request: Spawn) error{OutOfMemory}!bool {
+    if (request.settings_file) |file| if (!std.fs.path.isAbsolute(file)) return false;
+    for (request.assignments) |assignment| {
+        const equals = std.mem.indexOfScalar(u8, assignment, '=') orelse return false;
+        const value = assignment[equals + 1 ..];
+        if (std.mem.startsWith(u8, value, "@") and !std.fs.path.isAbsolute(value[1..])) return false;
+    }
+    const settings = try init.gpa.create(hs.Settings);
+    defer init.gpa.destroy(settings);
+    settings.* = .{};
+    defer settings.deinit();
+    var failure: start_report.Failure = undefined;
+    readLaunch(init, request, settings, &failure) catch |err| {
+        if (err == error.OutOfMemory) return error.OutOfMemory;
+        return false;
+    };
+    if (settings.interface.lifetime.value == .stdin) return false;
+    inline for (@typeInfo(hs.Settings).@"struct".field_names, @typeInfo(hs.Settings).@"struct".field_types) |name, Field| {
+        if (comptime !std.mem.eql(u8, name, "store")) {
+            if (!replayPaths(Field, &@field(settings, name))) return false;
+        }
+    }
+    return true;
+}
+
+fn replayPaths(comptime T: type, value: *const T) bool {
+    if (@typeInfo(T) == .optional) {
+        return if (value.*) |*present| replayPaths(@typeInfo(T).optional.child, present) else true;
+    }
+    if (@hasDecl(T, "kind")) {
+        return switch (T.kind) {
+            .path => value.anchored or (value.slice().len == 0 and T.allow_empty) or std.fs.path.isAbsolute(value.slice()),
+            .secret => switch (value.source) {
+                .file => |*file| replayPaths(@TypeOf(file.*), file),
+                else => true,
+            },
+            .named => blk: {
+                for (value.values[0..value.len]) |*entry| if (!replayPaths(T.Child, entry)) break :blk false;
+                break :blk true;
+            },
+            .providers => replayPaths(T.Table, &value.entries),
+            else => true,
+        };
+    }
+    switch (@typeInfo(T)) {
+        .@"struct" => |info| inline for (info.field_names, info.field_types) |name, Field| {
+            if (!replayPaths(Field, &@field(value, name))) return false;
+        },
+        .@"union" => return switch (value.*) {
+            inline else => |*payload| replayPaths(@TypeOf(payload.*), payload),
+        },
+        else => @compileError("not a Host settings kind"),
+    }
+    return true;
+}
+
 /// Read source descriptions only: no secret is resolved and no login made.
 /// A Host whose settings listen elsewhere could start but never be reached
 /// through `dir`, so the starter refuses it before launching anything.

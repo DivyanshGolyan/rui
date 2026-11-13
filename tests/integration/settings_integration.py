@@ -3,7 +3,6 @@
 refusals on stdout and stderr, and a clean exit when
 stdin closes (D5, D112, D118, D130, D136)."""
 
-import http.server
 import json
 import pathlib
 import os
@@ -13,12 +12,11 @@ import socket
 import subprocess
 import sys
 import tempfile
-import threading
 import time
 
 import host_process
 import os_semantics
-from settings_fixture import WIRE, frame, host_info, output, post, refusal, wait_for_host
+from settings_fixture import WIRE, frame, host_info, mcp_server, output, post, refusal, wait_for_host
 
 
 RUI = pathlib.Path(sys.argv[1]).resolve()
@@ -33,31 +31,6 @@ def launch(raw):
 def host_stop(path, store, instance):
     return post(path, "control/host-stop", {"version": WIRE, "kind": "host_stop", "store": store},
                 b"X-Rui-Host-Instance: " + instance.encode() + b"\r\n")
-
-
-def mcp_server(names):
-    """A loopback MCP server whose tools/list names `names`."""
-    tools = [{"name": name, "inputSchema": {"type": "object"}} for name in names]
-
-    class Handler(http.server.BaseHTTPRequestHandler):
-        protocol_version = "HTTP/1.1"
-
-        def do_POST(self):
-            self.rfile.read(int(self.headers["Content-Length"]))
-            body = json.dumps({"jsonrpc": "2.0", "id": 1, "result": {"tools": tools}}).encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.send_header("Connection", "close")
-            self.end_headers()
-            self.wfile.write(body)
-
-        def log_message(self, *args):
-            pass
-
-    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    return server
 
 
 def mcp_entry(name, server):
