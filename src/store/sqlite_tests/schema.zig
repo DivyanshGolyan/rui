@@ -84,7 +84,7 @@ test "fresh Store uses current schema and rejects the prior version" {
     try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().statFile(std.testing.io, try std.fmt.bufPrint(&wal_buffer, "{s}-wal", .{database}), .{}));
 }
 
-test "existing Store strictly validates current format and wire metadata" {
+test "existing Store strictly validates current format metadata and keeps no wire label" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
@@ -94,10 +94,13 @@ test "existing Store strictly validates current format and wire metadata" {
     var storage: Store = undefined;
     try storage.open(std.testing.io, database, root);
     try std.testing.expectEqual(@as(u64, schema_version), try store_testing.sqlite_only.queryU64(&storage, "SELECT CAST(meta_value AS INTEGER) FROM store_meta WHERE meta_key='format'", .{}));
+    // A new Store has no wire label, and it opens again without one.
+    try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM store_meta WHERE meta_key='wire_version'", .{}));
+    try storage.close();
+    try storage.open(std.testing.io, database, root);
     try storage.close();
     const Case = struct { sql: [:0]const u8, refusal: anyerror };
     const cases = [_]Case{
-        .{ .sql = "UPDATE store_meta SET meta_value='13' WHERE meta_key='wire_version'", .refusal = error.WrongStoreVersion },
         .{ .sql = std.fmt.comptimePrint("UPDATE store_meta SET meta_value='{d}' WHERE meta_key='format'", .{schema_version - 1}), .refusal = error.WrongStoreVersion },
         .{ .sql = "DELETE FROM store_meta WHERE meta_key='format'", .refusal = error.WrongStoreVersion },
     };
@@ -105,7 +108,7 @@ test "existing Store strictly validates current format and wire metadata" {
         var raw: ?*c.sqlite3 = null;
         var path_buffer: [platform.max_database_path_bytes + 1:0]u8 = undefined;
         try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_open(try std.fmt.bufPrintSentinel(&path_buffer, "{s}", .{database}, 0), &raw));
-        try sqlite.exec(raw.?, "UPDATE store_meta SET meta_value='" ++ std.fmt.comptimePrint("{d}", .{schema_version}) ++ "' WHERE meta_key='format';UPDATE store_meta SET meta_value='" ++ protocol.wire_version ++ "' WHERE meta_key='wire_version'");
+        try sqlite.exec(raw.?, "UPDATE store_meta SET meta_value='" ++ std.fmt.comptimePrint("{d}", .{schema_version}) ++ "' WHERE meta_key='format'");
         try sqlite.exec(raw.?, case.sql);
         _ = c.sqlite3_close(raw);
         const before = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, database, std.testing.allocator, .unlimited);
@@ -176,10 +179,11 @@ test "SQLite selector mismatch retains migration evidence and rolls back metadat
 }
 
 test "metadata seed preserves exact SQLite bootstrap bytes and digest" {
-    // The pre-refactor seed text: parameter slots, tuple order and random
-    // expression are format, not merely row-equivalent implementation details.
+    // The seed text: parameter slots, tuple order and random expression are
+    // format, not merely row-equivalent implementation details. Format 74
+    // dropped the wire label.
     try std.testing.expectEqualStrings(
-        "INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version',?1),('store_selector',?2),('format','" ++
+        "INSERT INTO store_meta(meta_key,meta_value) VALUES('store_selector',?1),('format','" ++
             std.fmt.comptimePrint("{d}", .{schema_version}) ++ "'),('store_id',lower(hex(randomblob(16))))",
         comptime store_schema.sqliteMetaSeedSql(),
     );

@@ -30,13 +30,6 @@ pub const Code = enum {
     all_excludes_record,
     all_excludes_key,
     model_excludes_clear_model,
-    launch_frame_excludes_store,
-    launch_frame_excludes_provider,
-    launch_frame_excludes_provider_endpoint,
-    launch_frame_excludes_provider_ca_file,
-    launch_frame_excludes_active_capacity,
-    launch_frame_excludes_codex_fixture,
-    launch_frame_excludes_openai_fixture,
     provider_excludes_endpoint,
     provider_excludes_ca_file,
     provider_excludes_codex_fixture,
@@ -173,8 +166,6 @@ pub const pending = .{
     "InsecureRecordDirectory",
     "InvalidApiKey",
     "InvalidBaseUrl",
-    "InvalidBashPath",
-    "InvalidBashTimeout",
     "InvalidCharacter",
     "InvalidHexIdentity",
     "InvalidHostStopResponse",
@@ -193,7 +184,6 @@ pub const pending = .{
     "InvalidToolName",
     "InvalidUtf8",
     "IsDir",
-    "LaunchFrameInvalid",
     "LoginInterrupted",
     "MissingArgumentValue",
     "MutationNotAccepted",
@@ -250,7 +240,7 @@ fn mapped(err: anyerror) ?Code {
         error.HostNotServing => .host_not_serving,
         error.HostRestartFailed => .host_restart_failed,
         error.IncompatibleHost => .host_incompatible,
-        error.InvalidHostInfo, error.HostPeerIdentityUnavailable, error.HostProcessSnapshotUnavailable, error.InvalidHostProcessSnapshot => .host_identity_unconfirmed,
+        error.InvalidHostInfo, error.HostPeerNotServing, error.HostServeArgumentsUnreadable, error.HostServeStoreMissing, error.HostServeStoreRelative, error.HostSocketStoreMismatch, error.HostPeerPidMismatch, error.HostPeerIdentityUnavailable, error.HostProcessSnapshotUnavailable, error.InvalidHostProcessSnapshot => .host_identity_unconfirmed,
         error.IneligibleInstallation, error.UpgradeIneligible, error.InvalidInstallationHome => .upgrade_ineligible,
         error.InvalidReleaseVersion, error.InvalidReleaseChecksum, error.DuplicateReleaseChecksum, error.MissingReleaseChecksum, error.InvalidReleaseEndpoint, error.UnsupportedReleasePlatform => .upgrade_release_invalid,
         error.ReleaseDownloadFailed => .upgrade_download_failed,
@@ -296,7 +286,9 @@ fn mapped(err: anyerror) ?Code {
         error.InteractiveTerminalRequired => .terminal_required,
         error.EmptyMessageInput => .message_empty,
         error.InvalidArguments, error.InvalidPrefix => .invocation_invalid,
-        error.InvalidInvocation => .invocation_invalid,
+        // Host startup normally consumes this with its leaf-scoped report.
+        // A CLI escape remains a caller refusal, never an internal fault.
+        error.InvalidInvocation, error.SettingsInvalid => .invocation_invalid,
         error.CallerFailure => .internal_unexpected,
         // Directory owners translate this to a contextual Store/preference
         // cause. An escape without that context retains the internal fallback.
@@ -422,7 +414,7 @@ pub fn facts(code: Code) Facts {
         .host_not_serving => .{ .act = .operate, .input = null, .accepted = .none, .says = "No Host serves this Store.", .next = "Start its Host with the command below, then retry the same saved request unchanged." },
         .host_incompatible => .{ .act = .operate, .input = null, .accepted = .none, .says = "The Host serving this Store runs a different Rui version that does not speak this rui's protocol.", .next = "Pause it with the Rui version that started it, then start it again with rui host start --store PATH." },
         .host_stopping => .{ .act = .wait, .input = null, .accepted = .none, .says = "The Host for this Store is shutting down and no longer accepts requests.", .next = "Wait for it to exit, then start it again with rui host start --store PATH and retry." },
-        .mysql_host_unavailable => .{ .act = .operate, .input = null, .accepted = .none, .says = "The launched MySQL Host for this Store is unavailable.", .next = "Check this Store's launch-frame Host and RUI_RUNTIME_DIR, then retry unchanged." },
+        .mysql_host_unavailable => .{ .act = .operate, .input = null, .accepted = .none, .says = "The launched MySQL Host for this Store is unavailable.", .next = "Check this Store's settings-based Host and RUI_RUNTIME_DIR, then retry unchanged." },
         .store_path_malformed => .{ .act = .fix, .input = .identity, .accepted = .{ .grammar = "a nonempty UTF-8 filesystem path without controls, whose canonical form is at most 492 bytes" }, .says = "The Store path is malformed.", .next = "Supply --store PATH naming a private Store directory." },
         .store_unavailable => .{ .act = .operate, .input = null, .accepted = .none, .says = "The Store directory is missing, inaccessible or not private.", .next = "Create the directory if missing, give your user access, and restrict its permissions to 0700; then retry unchanged." },
         .peer_context_invalid => .{ .act = .fix, .input = .sender_handle, .accepted = .{ .grammar = "RUI_STORE, RUI_ADDRESS (six lowercase Crockford characters) and nonempty RUI_SENDER_HANDLE together, or none" }, .says = "The inherited peer context is incomplete or malformed.", .next = "Restore all three variables from the Session Bash, or unset RUI_STORE RUI_ADDRESS RUI_SENDER_HANDLE to make an operator call." },
@@ -459,13 +451,6 @@ pub fn facts(code: Code) Facts {
         .all_excludes_record => .{ .act = .fix, .input = .identity, .accepted = .{ .grammar = "--all without --record, or --session ID with an explicit capture" }, .says = "Stopping all Sessions creates a separate capture for each Session.", .next = "Remove --record or stop a single Session." },
         .all_excludes_key => .{ .act = .fix, .input = .identity, .accepted = .{ .grammar = "--all without --key or --key-hex, or --session ID with an explicit capture" }, .says = "Stopping all Sessions creates a separate key for each Session.", .next = "Remove the explicit key or stop a single Session." },
         .model_excludes_clear_model => .{ .act = .fix, .input = .option, .accepted = .{ .grammar = "--model MODEL or --clear-model, not both" }, .says = "Setting and clearing the saved model conflict.", .next = "Keep the desired model change only." },
-        .launch_frame_excludes_store => .{ .act = .fix, .input = .option, .accepted = .{ .grammar = "--launch-frame, or --store PATH or --store-hex HEX without --launch-frame" }, .says = "The launch frame already supplies the Store.", .next = "Remove the Store flag or stop using --launch-frame." },
-        .launch_frame_excludes_provider => launchConflict("provider", "--provider"),
-        .launch_frame_excludes_provider_endpoint => launchConflict("provider endpoint", "--provider-endpoint"),
-        .launch_frame_excludes_provider_ca_file => launchConflict("provider CA file", "--provider-ca-file"),
-        .launch_frame_excludes_active_capacity => launchConflict("active capacity", "--active-capacity"),
-        .launch_frame_excludes_codex_fixture => launchConflict("Codex fixture endpoint", "--test-codex-fixture-endpoint"),
-        .launch_frame_excludes_openai_fixture => launchConflict("OpenAI fixture endpoint", "--test-openai-fixture-endpoint"),
         .provider_excludes_endpoint => endpointConflict("--provider-endpoint", "A managed provider and a development endpoint are alternative provider sources."),
         .provider_excludes_ca_file => .{ .act = .fix, .input = .option, .accepted = .{ .grammar = "--provider LABEL, or --provider-endpoint URL with --provider-ca-file PATH" }, .says = "A managed provider cannot use a development endpoint CA file.", .next = "Keep the managed provider or the development endpoint and its CA file." },
         .provider_excludes_codex_fixture => endpointConflict("--test-codex-fixture-endpoint", "A managed provider and a Codex fixture are alternative provider sources."),
@@ -536,9 +521,6 @@ pub fn facts(code: Code) Facts {
     };
 }
 
-fn launchConflict(comptime field: []const u8, comptime flag: []const u8) Facts {
-    return .{ .act = .fix, .input = .option, .accepted = .{ .grammar = "--launch-frame without " ++ flag ++ ", or " ++ flag ++ " without --launch-frame" }, .says = "A launch frame cannot be combined with a separate " ++ field ++ " option.", .next = "Remove " ++ flag ++ " or stop using --launch-frame." };
-}
 fn endpointConflict(comptime flag: []const u8, comptime says: []const u8) Facts {
     return .{ .act = .fix, .input = .option, .accepted = .{ .grammar = "--provider LABEL or " ++ flag ++ " URL, not both" }, .says = says, .next = "Keep the managed provider or the development source, not both." };
 }
@@ -840,4 +822,8 @@ test "release download failures have their own caller code" {
     try std.testing.expectEqual(Code.upgrade_download_failed, of(error.ReleaseDownloadFailed));
     try std.testing.expectEqual(Code.upgrade_preparation_failed, of(error.UpgradeChildFailed));
     try std.testing.expectEqual(Code.upgrade_release_invalid, of(error.InvalidReleaseEndpoint));
+}
+
+test "settings admission has a caller refusal fallback outside startup reporting" {
+    try std.testing.expectEqual(Code.invocation_invalid, of(error.SettingsInvalid));
 }

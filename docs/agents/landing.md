@@ -6,7 +6,7 @@
 ## Publish and merge
 
 Before publishing, run the focused checks in [Evidence](../../CODING_STANDARDS.md#evidence).
-For PR descriptions, use the `pr` skill.
+A PR description has a Summary, the Evidence it was checked with, and its Merge danger.
 The description lists every behavior change in the diff, small ones included, so the summary and the diff agree.
 PRs changing `src/` carry a [Shape section](../../CODING_STANDARDS.md#shape-before-code), and the plan job refuses them without it.
 Every PR commit states its actual test commands and results.
@@ -31,6 +31,9 @@ Pending, skipped, cancelled or earlier-head success is not green.
 A green PR squash-merges without waiting for review signoff or a promotion.
 Follow [Review](../../CODING_STANDARDS.md#review) for Codex requests and findings.
 Ship later fixes as follow-up PRs.
+
+The admin bypass in [the main ruleset](../../.github/main-ruleset.json) is a last resort, used only for changes on the critical path.
+Use it only when every red or missing check is a macOS job that GitHub never assigned a runner, every check that ran passed, and an infra-retry also failed to get a runner; state why in the merge commit or a PR comment.
 
 Merge `origin/main` into a PR only when it conflicts with `main`; [Conflict alert](../../.github/workflows/conflict-alert.yml) comments on each PR a move of `main` leaves conflicting.
 After that merge, run `python3 tests/ci/prepush.py` and wait for the new head's CI.
@@ -62,7 +65,8 @@ Arm auto-merge only on a PR whose base is `main`; on a stacked PR it would merge
 
 Diagnose failures through [rui-ci-triage](../../.claude/skills/rui-ci-triage/SKILL.md) and follow [Evidence](../../CODING_STANDARDS.md#evidence) for reruns, strict-path holds and failure retention.
 A red whose failing file or fixture is outside the PR's diff is first reproduced on `main`; when `main` itself is red, it gets one fix owner, and the PR's owner is not asked to fix it.
-The fastest fix for a red `main` is often a revert of the one merged PR that broke it, which merges on green `admission` alone.
+The fastest fix for a red `main` is often a revert of the one merged PR that broke it.
+The [main build](../../.github/workflows/main-build.yml) names the PRs merged since `main` last compiled in its `ci-red` issue, and when two of them crossed, a revert of the later one is the fast fix.
 A red counts as fixed only when a commit between the red and a later green changed its failing fixture or owner.
 For a recurring fixture-and-assertion signature on SHAs that did not touch its code, update or file one issue for that signature and own the race fix.
 Preserve the assertion's strength.
@@ -83,4 +87,4 @@ Whoever dispatches a promotion watches it to the end and reports the result unpr
 A failed step means the promotion is red even while its bisect step keeps the run in progress for up to four hours; report it then.
 A red promotion names, on each `promotion-red` issue it files, the first batch commit where each failed step of that job fails; a suite batch with several causes names only its earliest.
 Fix forward through an ordinary PR, then promote again.
-Recover an interrupted publication by rerunning that promotion's failed jobs, which reuses the same release identity.
+Recover a red Release as [Release publication](../../VERIFICATION.md#release-publication) says; a red wire recheck there follows publication, not a failed one.

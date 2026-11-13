@@ -468,3 +468,63 @@ test "MCP missing tools refuse create update creating Message and start_agent wi
         }
     }.run);
 }
+
+test "a model admission freezes an offer the Host's tool set no longer holds, and a later one reuses the set it saved" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            const records = comptime testingHostToolRecords(&.{
+                .{ .name = "read_page", .owner = .mcp, .server = "docs", .read_only = true, .description = "Read a page.", .input_schema = "{\"type\":\"object\"}" },
+                .{ .name = "write_page", .owner = .mcp, .server = "docs", .description = "Write a page.", .input_schema = "{\"type\":\"object\"}" },
+            });
+            const digests = comptime blk: {
+                @setEvalBranchQuota(1_000_000);
+                var out: [records.len][32]u8 = undefined;
+                for (&records, &out) |*record, *digest| digest.* = tool_defs.recordDigest(record);
+                break :blk out;
+            };
+            const host_tool_set: tool_defs.HostToolSet = .{ .records = &records, .digests = &digests };
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStoreWith(case, &storage, &tmp, std.testing.io, .{ .host_tool_set = &host_tool_set });
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            var configure = try completeConfiguration("stale-offer-one", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
+            configure.configuration.tools = try .of(&.{ "read_page", "write_page" });
+            const one = (try storage.configure(&configure, .{})).accepted.session;
+            try configure.key.set("stale-offer-two");
+            const two = (try storage.configure(&configure, .{})).accepted.session;
+            try submitTestMessage(&storage, &tmp, "stale-offer-input-one", "stale-offer-message-one", one.slice(), "one");
+            try submitTestMessage(&storage, &tmp, "stale-offer-input-two", "stale-offer-message-two", two.slice(), "two");
+            const offered = try store_testing.queryU64(&storage, "SELECT tool_set_id FROM session WHERE session_ref=?1", .{one.slice()});
+            // The Host withdraws one of the tools both Sessions offer.
+            const kept = comptime testingHostToolRecords(&.{
+                .{ .name = "read_page", .owner = .mcp, .server = "docs", .read_only = true, .description = "Read a page.", .input_schema = "{\"type\":\"object\"}" },
+            });
+            const kept_digests = comptime blk: {
+                @setEvalBranchQuota(1_000_000);
+                var out: [kept.len][32]u8 = undefined;
+                for (&kept, &out) |*record, *digest| digest.* = tool_defs.recordDigest(record);
+                break :blk out;
+            };
+            const withdrawn: tool_defs.HostToolSet = .{ .records = &kept, .digests = &kept_digests };
+            try storage.saveHostToolSet(&withdrawn);
+            const sets = try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_set", .{});
+
+            // The first admission projects the offer, finds no saved set
+            // and saves one without the withdrawn tool.
+            const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try std.testing.expectEqual(sets + 1, try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_set", .{}));
+            const frozen = try store_testing.queryU64(&storage, "SELECT tool_set_id FROM model_operation WHERE operation_id=?1", .{first.operation_id});
+            try std.testing.expect(frozen != offered);
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_set_member m JOIN tool_record t ON t.tool_record_id=m.tool_record_id WHERE m.tool_set_id=?1 AND t.name='read_page'", .{frozen}));
+            try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_set_member m JOIN tool_record t ON t.tool_record_id=m.tool_record_id WHERE m.tool_set_id=?1 AND t.name='write_page'", .{frozen}));
+
+            // The second finds the set the first saved.
+            const second = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try std.testing.expectEqual(sets + 1, try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_set", .{}));
+            try std.testing.expectEqual(frozen, try store_testing.queryU64(&storage, "SELECT tool_set_id FROM model_operation WHERE operation_id=?1", .{second.operation_id}));
+            try std.testing.expect(!storage.isFenced());
+        }
+    }.run);
+}

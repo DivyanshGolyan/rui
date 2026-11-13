@@ -31,7 +31,6 @@ const chatgpt_plan_login = @import("chatgpt_plan_login.zig");
 const model_adapter = @import("model_adapter.zig");
 const providers = @import("providers.zig");
 const api_key = @import("api_key.zig");
-const launch_frame = @import("launch_frame.zig");
 const host_start = @import("host_start.zig");
 const host_settings = @import("host_settings.zig");
 const start_report = @import("start_report.zig");
@@ -721,29 +720,161 @@ fn readStdin(buffer: []u8) ?usize {
     return std.posix.read(std.Io.File.stdin().handle, buffer) catch 0;
 }
 
-/// `rui auth logout chatgpt`: revoke, then remove the tokens, keeping the
-/// issued client id and the host id.
+/// `rui auth logout chatgpt`: ends both ChatGPT logins, the browser sign-in
+/// (revoked, then its tokens removed, keeping the issued client id and the
+/// host id) and the device-code one (its tokens removed), then says how each
+/// ended (Divyansh chose this on 2026-11-13).
 fn planLogout(init: std.process.Init, provider: []const u8, fixture_endpoint: ?[]const u8) !void {
     if (!std.mem.eql(u8, provider, "chatgpt")) {
         stderr.diagnostic("rui: rui auth logout signs out of chatgpt only; Rui keeps no sign-in to end for another provider.\n", .{});
         return usage();
     }
+    // A bad test issuer is a bad invocation, refused before either login
+    // is touched. A credential path Rui cannot resolve is only that
+    // login's outcome (`unlocated`); the other is still ended.
     const issuer = try planIssuer(init, fixture_endpoint);
-    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const path = try credentialPath(init, .chatgpt, &path_buffer, false);
-    const outcome = chatgpt_plan_login.logout(init.io, path, issuer) catch |err| switch (err) {
-        // No private directory: never signed in.
-        error.FileNotFound => .not_signed_in,
-        else => return err,
+    var browser_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const browser_path = provider_login.credentialPath(init, .chatgpt, &browser_buffer, false) catch null;
+    var device_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const device_path = provider_login.credentialPath(init, .codex, &device_buffer, false) catch null;
+    const receipt = logoutReceipt(chatgpt_plan_login.logout(init.io, browser_path, device_path, issuer));
+    if (receipt.done) |line| try std.Io.File.stdout().writeStreamingAll(init.io, line);
+    if (receipt.browser) |line| stderr.diagnosticBytes(line);
+    if (receipt.device_code) |line| stderr.diagnosticBytes(line);
+    if (receipt.failed()) {
+        recordExit(.unclassified);
+        return error.Reported;
+    }
+}
+
+/// What a logout says: one stdout line for what it ended, and one stderr
+/// line for each login that may remain, which also fails the command.
+const LogoutReceipt = struct {
+    done: ?[]const u8,
+    browser: ?[]const u8,
+    device_code: ?[]const u8,
+
+    fn failed(self: LogoutReceipt) bool {
+        return self.browser != null or self.device_code != null;
+    }
+};
+
+fn logoutReceipt(ended: chatgpt_plan_login.Logout) LogoutReceipt {
+    const again = "inspect it, then run rui auth logout chatgpt again.\n";
+    const removed_browser = ended.browser == .revoked or ended.browser == .unconfirmed;
+    const removed_device = ended.device_code == .removed;
+    const partial = ended.browser == .failed or ended.browser == .unlocated or ended.device_code == .failed or ended.device_code == .unlocated;
+    // An unconfirmed revocation still ended the sign-in locally: it is said
+    // on stdout, as before, and fails nothing.
+    const unconfirmed = ": Rui deleted its tokens, but ChatGPT did not confirm it ended the browser sign-in. To end it there too, disconnect Rui in ChatGPT's settings.\n";
+    const confirmed = ended.browser != .unconfirmed;
+    return .{
+        .done = if (partial)
+            if (removed_browser)
+                if (confirmed) "Rui: Signed out of ChatGPT in the browser.\n" else "Rui: Signed out of ChatGPT in the browser" ++ unconfirmed
+            else if (removed_device) "Rui: Signed out of ChatGPT with a device code.\n" else null
+        else if (!confirmed) "Rui: Signed out of ChatGPT" ++ unconfirmed else if (removed_browser or removed_device) "Rui: Signed out of ChatGPT.\n" else "Rui: Not signed in to ChatGPT; nothing changed.\n",
+        .browser = switch (ended.browser) {
+            .absent, .revoked, .unconfirmed => null,
+            .failed => "rui: still signed in to ChatGPT in the browser: Rui could not read or change its private credential; " ++ again,
+            .unlocated => unlocated("browser", .chatgpt),
+        },
+        .device_code = switch (ended.device_code) {
+            .absent, .removed => null,
+            .failed => "rui: still signed in to ChatGPT with a device code: Rui could not read or change its private credential; " ++ again,
+            .unlocated => unlocated("device-code", .codex),
+        },
     };
-    try std.Io.File.stdout().writeStreamingAll(init.io, switch (outcome) {
-        .not_signed_in => "Rui: Not signed in to ChatGPT; nothing changed.\n",
-        .revoked => "Rui: Signed out of ChatGPT.\n",
-        .unconfirmed => "Rui: Signed out of ChatGPT: Rui deleted its tokens, but ChatGPT did not confirm it ended the sign-in. To end it there too, disconnect Rui in ChatGPT's settings.\n",
-    });
-    // Logout ends the browser sign-in only; the device-code one stays.
-    const device = providerReadiness(init, .codex) catch .credential_error;
-    if (device.usable()) try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Still signed in to ChatGPT with a device code; chats that use it keep working.\n");
+}
+
+/// A login whose credential path Rui could not resolve, naming the variable
+/// that sets it.
+fn unlocated(comptime way: []const u8, comptime provider: protocol.Provider) []const u8 {
+    return "rui: could not end the ChatGPT " ++ way ++ " sign-in: Rui could not find its credential. Set " ++
+        comptime provider_login.credentialVariable(provider) ++ " to an absolute path, or leave it unset with HOME absolute, then run rui auth logout chatgpt again.\n";
+}
+
+test "logout says how it left each ChatGPT login, and fails while either may remain" {
+    const Readiness = provider_selection.Readiness;
+    // Written out by hand for every pair of local states, as `rui auth
+    // status` reads them, with the revocation confirmed, and then
+    // unconfirmed for each state that holds a browser sign-in to revoke,
+    // which still ends it locally and exits 0, as before.
+    // A readable record whose claims status rejects (`credential_error`)
+    // is signed out like any other; these rows are an unreadable one.
+    const out = "Rui: Signed out of ChatGPT.\n";
+    const nothing = "Rui: Not signed in to ChatGPT; nothing changed.\n";
+    const out_browser = "Rui: Signed out of ChatGPT in the browser.\n";
+    const out_device = "Rui: Signed out of ChatGPT with a device code.\n";
+    const unconfirmed = "Rui: Signed out of ChatGPT: Rui deleted its tokens, but ChatGPT did not confirm it ended the browser sign-in. To end it there too, disconnect Rui in ChatGPT's settings.\n";
+    const unconfirmed_browser = "Rui: Signed out of ChatGPT in the browser: Rui deleted its tokens, but ChatGPT did not confirm it ended the browser sign-in. To end it there too, disconnect Rui in ChatGPT's settings.\n";
+    const browser_stays = "rui: still signed in to ChatGPT in the browser: Rui could not read or change its private credential; inspect it, then run rui auth logout chatgpt again.\n";
+    const device_stays = "rui: still signed in to ChatGPT with a device code: Rui could not read or change its private credential; inspect it, then run rui auth logout chatgpt again.\n";
+    const browser_unfound = "rui: could not end the ChatGPT browser sign-in: Rui could not find its credential. Set RUI_CHATGPT_CREDENTIAL_FILE to an absolute path, or leave it unset with HOME absolute, then run rui auth logout chatgpt again.\n";
+    const device_unfound = "rui: could not end the ChatGPT device-code sign-in: Rui could not find its credential. Set RUI_CODEX_CREDENTIAL_FILE to an absolute path, or leave it unset with HOME absolute, then run rui auth logout chatgpt again.\n";
+    const B = chatgpt_plan_login.Browser;
+    const D = chatgpt_plan_login.DeviceCode;
+    const Row = struct { Readiness, Readiness, B, D, ?[]const u8, ?[]const u8, ?[]const u8, u8 };
+    const rows = [_]Row{
+        .{ .missing, .missing, .absent, .absent, nothing, null, null, 0 },
+        .{ .missing, .configured, .absent, .removed, out, null, null, 0 },
+        .{ .missing, .renewal_due, .absent, .removed, out, null, null, 0 },
+        .{ .missing, .refresh_required, .absent, .removed, out, null, null, 0 },
+        .{ .missing, .credential_error, .absent, .failed, null, null, device_stays, 1 },
+        .{ .configured, .missing, .revoked, .absent, out, null, null, 0 },
+        .{ .configured, .configured, .revoked, .removed, out, null, null, 0 },
+        .{ .configured, .renewal_due, .revoked, .removed, out, null, null, 0 },
+        .{ .configured, .refresh_required, .revoked, .removed, out, null, null, 0 },
+        .{ .configured, .credential_error, .revoked, .failed, out_browser, null, device_stays, 1 },
+        .{ .renewal_due, .missing, .revoked, .absent, out, null, null, 0 },
+        .{ .renewal_due, .configured, .revoked, .removed, out, null, null, 0 },
+        .{ .renewal_due, .renewal_due, .revoked, .removed, out, null, null, 0 },
+        .{ .renewal_due, .refresh_required, .revoked, .removed, out, null, null, 0 },
+        .{ .renewal_due, .credential_error, .revoked, .failed, out_browser, null, device_stays, 1 },
+        .{ .refresh_required, .missing, .revoked, .absent, out, null, null, 0 },
+        .{ .refresh_required, .configured, .revoked, .removed, out, null, null, 0 },
+        .{ .refresh_required, .renewal_due, .revoked, .removed, out, null, null, 0 },
+        .{ .refresh_required, .refresh_required, .revoked, .removed, out, null, null, 0 },
+        .{ .refresh_required, .credential_error, .revoked, .failed, out_browser, null, device_stays, 1 },
+        .{ .credential_error, .missing, .failed, .absent, null, browser_stays, null, 1 },
+        .{ .credential_error, .configured, .failed, .removed, out_device, browser_stays, null, 1 },
+        .{ .credential_error, .renewal_due, .failed, .removed, out_device, browser_stays, null, 1 },
+        .{ .credential_error, .refresh_required, .failed, .removed, out_device, browser_stays, null, 1 },
+        .{ .credential_error, .credential_error, .failed, .failed, null, browser_stays, device_stays, 1 },
+        // ChatGPT did not confirm the revocation.
+        .{ .configured, .missing, .unconfirmed, .absent, unconfirmed, null, null, 0 },
+        .{ .configured, .configured, .unconfirmed, .removed, unconfirmed, null, null, 0 },
+        .{ .configured, .renewal_due, .unconfirmed, .removed, unconfirmed, null, null, 0 },
+        .{ .configured, .refresh_required, .unconfirmed, .removed, unconfirmed, null, null, 0 },
+        .{ .configured, .credential_error, .unconfirmed, .failed, unconfirmed_browser, null, device_stays, 1 },
+        // A credential path Rui cannot resolve, beside each outcome of the
+        // other login, and both at once.
+        .{ .missing, .missing, .unlocated, .absent, null, browser_unfound, null, 1 },
+        .{ .missing, .configured, .unlocated, .removed, out_device, browser_unfound, null, 1 },
+        .{ .missing, .credential_error, .unlocated, .failed, null, browser_unfound, device_stays, 1 },
+        .{ .missing, .missing, .absent, .unlocated, null, null, device_unfound, 1 },
+        .{ .configured, .missing, .revoked, .unlocated, out_browser, null, device_unfound, 1 },
+        .{ .configured, .missing, .unconfirmed, .unlocated, unconfirmed_browser, null, device_unfound, 1 },
+        .{ .credential_error, .missing, .failed, .unlocated, null, browser_stays, device_unfound, 1 },
+        .{ .missing, .missing, .unlocated, .unlocated, null, browser_unfound, device_unfound, 1 },
+    };
+    // Every pair of states is in the table once with a confirmed revocation.
+    var seen = std.EnumArray(Readiness, std.EnumSet(Readiness)).initFill(.empty);
+    for (rows[0..25]) |row| {
+        try std.testing.expect(!seen.get(row[0]).contains(row[1]));
+        seen.getPtr(row[0]).insert(row[1]);
+    }
+    for (std.enums.values(Readiness)) |state| try std.testing.expectEqual(std.enums.values(Readiness).len, seen.get(state).count());
+    for (rows) |row| {
+        const said = logoutReceipt(.{ .browser = row[2], .device_code = row[3] });
+        const lines = [_]?[]const u8{ said.done, said.browser, said.device_code };
+        for (lines, [_]?[]const u8{ row[4], row[5], row[6] }) |actual, expected| {
+            if (expected) |line| try std.testing.expectEqualStrings(line, actual.?) else try std.testing.expectEqual(@as(?[]const u8, null), actual);
+        }
+        try std.testing.expectEqual(row[7], @as(u8, @intFromBool(said.failed())));
+        // No person reads the retired name.
+        for (lines) |text| if (text) |line| try std.testing.expect(std.mem.indexOf(u8, line, "Codex") == null);
+    }
 }
 
 /// The plan's issuer: OpenAI's, or a test's loopback fixture, which only a
@@ -2177,11 +2308,6 @@ test "the Host line names a login only for an unserved provider that has one" {
 fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     const io = init.io;
     try host_start.checkFlags(parsed);
-    const frame: ?*launch_frame.Frame = if (parsed.has("launch-frame")) try readLaunchFrame(init) else null;
-    defer if (frame) |value| {
-        value.deinit();
-        std.heap.c_allocator.destroy(value);
-    };
     // Caller-owned final storage: Prepared and the provider table borrow it
     // until all Host owners drain. Its secrets are wiped on every exit.
     const settings = try std.heap.c_allocator.create(host_settings.Settings);
@@ -2198,45 +2324,52 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     if (parsed.get("test-openai-fixture-endpoint") != null and init.environ_map.get(api_key.path_variable) == null)
         return error.FixtureCredentialPathRequired;
     var preparation_failure: start_report.Failure = undefined;
-    host_start.fill(init, parsed, frame, settings, &tuning.fixtures, &preparation_failure) catch |err| {
-        if (frame != null and err == error.InvalidBaseUrl) return writeRefusal(io, &preparation_failure);
+    host_start.fill(init, parsed, settings, &tuning.fixtures, &preparation_failure) catch |err| {
+        if (err == error.SettingsInvalid) return writeRefusal(io, &preparation_failure, caller_exit.knownError(err));
         return err;
     };
     // Keep the existing environment diagnostic before startup takes stderr.
-    try host_start.resolveProviders(init, settings, tuning.fixtures);
+    host_start.resolveProviders(init, settings, tuning.fixtures, &preparation_failure) catch |err| {
+        if (err == error.SettingsInvalid) return writeRefusal(io, &preparation_failure, caller_exit.knownError(err));
+        return err;
+    };
     const served = providers.fromSettings(settings, tuning.fixtures);
     if (try served.proxyRefusal(std.heap.c_allocator)) |reason| {
+        // The proxy is process environment, not a settings leaf, and has no
+        // StartError code: keep its stderr-only diagnostic and exit.
         stderr.diagnostic("rui: https_proxy/HTTPS_PROXY {s}; Rui tunnels only through an http:// proxy. The Host did not start.\n", .{reason});
         recordExit(.environment);
         return error.Reported;
     }
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const supplied = if (frame) |value| switch (value.store) {
-        .sqlite_dir => |*directory| directory.slice(),
-        .mysql_url => value.runtime_dir.slice(),
-    } else parsed.get("store");
-    const selected = try selectedStore(init, supplied, &selected_buffer);
-    if (settings.store == .sqlite) host_start.selectStore(init, settings, selected, frame != null, &preparation_failure) catch |err| {
-        if (err == error.LaunchFrameInvalid) return writeRefusal(io, &preparation_failure);
-        return storeFailure(err);
+    if (settings.store == .sqlite or parsed.get("store") != null) {
+        const document_dir = if (settings.store == .sqlite and !settings.store.sqlite.dir.anchored) settings.store.sqlite.dir.slice() else null;
+        // Document paths are admitted OS bytes. The text-only spelling policy
+        // belongs to legacy CLI/default selection, not the settings reader.
+        const selected = if (parsed.get("store")) |explicit| try selectedStore(init, explicit, &selected_buffer) else document_dir orelse try selectedStore(init, null, &selected_buffer);
+        if (document_dir != null and parsed.get("store") == null) holdStore(selected);
+        host_start.selectStore(init, settings, selected, parsed.get("settings") != null and parsed.get("store") == null, &preparation_failure) catch |err| {
+            if (err == error.SettingsInvalid) return writeRefusal(io, &preparation_failure, caller_exit.knownError(err));
+            return storeFailure(err);
+        };
+    }
+    const prepared = host_start.prepare(init, settings, tuning.fixtures, &preparation_failure) catch |err| {
+        if (err == error.SettingsInvalid) return writeRefusal(io, &preparation_failure, caller_exit.knownError(err));
+        return err;
     };
-    const prepared = try host_start.prepare(init, settings, tuning.fixtures, &preparation_failure);
     var failure: ?start_report.Failure = null;
-    return finishServe(io, if (frame != null) (if (settings.store == .mysql) .mysql else .sqlite) else null, &failure, server.serve(io, std.heap.c_allocator, prepared, tuning, &failure));
+    return finishServe(io, settings.interface.lifetime.value, if (settings.store == .mysql) .mysql else .sqlite, &failure, server.serve(io, std.heap.c_allocator, prepared, tuning, &failure));
 }
 
 /// Settle the whole Host outcome before treating stdin closure as a clean end.
-fn finishServe(io: std.Io, store: ?start_report.Store, failure: *const ?start_report.Failure, result: anyerror!void) !void {
-    if (store) |kind| {
-        if (failure.*) |*value| return writeRefusal(io, value);
-        result catch |err| {
-            // Without a refusal, closing a launched Host's stdin is clean.
-            if (err == error.EffectAwareShutdown) return;
-            if (start_report.classify(kind, err)) |value| return writeRefusal(io, &value);
-            return err;
-        };
-    }
-    return result;
+fn finishServe(io: std.Io, lifetime: host_settings.Interface.Lifetime, store: start_report.Store, failure: *const ?start_report.Failure, result: anyerror!void) !void {
+    if (failure.*) |*value| return writeRefusal(io, value, .unclassified);
+    result catch |err| {
+        // Only interface.lifetime requests shutdown on stdin closure.
+        if (err == error.EffectAwareShutdown and lifetime == .stdin) return;
+        if (start_report.classify(store, err)) |value| return writeRefusal(io, &value, caller_exit.knownError(err));
+        return err;
+    };
 }
 
 test "start report CLI publishes once before settling every Host outcome" {
@@ -2265,50 +2398,42 @@ test "start report CLI publishes once before settling every Host outcome" {
     const supplied_line = "{\"rui_start_error\":{\"code\":\"store_fenced\",\"message\":\"the MySQL Store lost ownership or its connection; restart the Host\"}}\n";
     const fallback_line = "{\"rui_start_error\":{\"code\":\"runtime_dir_unusable\",\"message\":\"another Host owns this runtimeDir\"}}\n";
     const mysql_line = "{\"rui_start_error\":{\"code\":\"store_locked\",\"message\":\"another Host owns this Store\"}}\n";
-    for ([_]?start_report.Store{ null, .sqlite, .mysql }) |store| {
-        for ([_]bool{ false, true }) |supplied| {
-            for ([_]?anyerror{ null, error.EffectAwareShutdown, error.RuntimeDirectoryInUse, error.StoreLocked, error.StoreFenced, error.OutOfMemory }) |err| {
-                var failure: ?start_report.Failure = if (supplied)
-                    .init(.store_fenced, "the MySQL Store lost ownership or its connection; restart the Host")
-                else
-                    null;
-                Probe.used = 0;
-                const outcome = finishServe(io, store, &failure, if (err) |value| value else {});
-                const expected = if (store == null) "" else if (supplied) supplied_line else if (err != null and err.? == error.RuntimeDirectoryInUse) fallback_line else if (store == .mysql and err != null and err.? == error.StoreLocked) mysql_line else "";
-                if (expected.len != 0) {
-                    // Every refusal is already reported, even when a fence
-                    // overrides success or an otherwise clean stdin closure.
-                    try std.testing.expectError(error.Reported, outcome);
-                } else if (err) |value| {
-                    if (store != null and value == error.EffectAwareShutdown) {
-                        try outcome;
-                    } else try std.testing.expectError(value, outcome);
-                } else try outcome;
-                try std.testing.expectEqualStrings(expected, Probe.output[0..Probe.used]);
+    const saved_exit_status = exit_status;
+    defer exit_status = saved_exit_status;
+    for ([_]host_settings.Interface.Lifetime{ .detached, .stdin }) |lifetime| {
+        for ([_]start_report.Store{ .sqlite, .mysql }) |store| {
+            for ([_]bool{ false, true }) |supplied| {
+                for ([_]?anyerror{ null, error.EffectAwareShutdown, error.RuntimeDirectoryInUse, error.StoreAlreadyOwned, error.StoreLocked, error.StoreFenced, error.OutOfMemory }) |err| {
+                    var failure: ?start_report.Failure = if (supplied)
+                        .init(.store_fenced, "the MySQL Store lost ownership or its connection; restart the Host")
+                    else
+                        null;
+                    Probe.used = 0;
+                    exit_status = .done;
+                    const outcome = finishServe(io, lifetime, store, &failure, if (err) |value| value else {});
+                    const expected = if (supplied) supplied_line else if (err != null and err.? == error.RuntimeDirectoryInUse) fallback_line else if (err != null and (err.? == error.StoreAlreadyOwned or (store == .mysql and err.? == error.StoreLocked))) mysql_line else "";
+                    if (expected.len != 0) {
+                        // Every refusal is already reported, even when a fence
+                        // overrides success or an otherwise clean stdin closure.
+                        try std.testing.expectError(error.Reported, outcome);
+                        try std.testing.expectEqual(if (!supplied and err != null and err.? == error.StoreAlreadyOwned) caller_exit.Status.environment else caller_exit.Status.unclassified, exit_status);
+                    } else if (err) |value| {
+                        if (value == error.EffectAwareShutdown and lifetime == .stdin) {
+                            try outcome;
+                        } else try std.testing.expectError(value, outcome);
+                    } else try outcome;
+                    try std.testing.expectEqualStrings(expected, Probe.output[0..Probe.used]);
+                }
             }
         }
     }
 }
 
-/// Startup-only rendering scratch does not stay in serve's resident frame.
-// The CLI owns publication and the already-reported status, through cleanup.
-noinline fn writeRefusal(io: std.Io, failure: *const start_report.Failure) error{Reported} {
-    var buffer: [start_report.max_line_bytes]u8 = undefined;
-    std.Io.File.stdout().writeStreamingAll(io, start_report.line(failure, &buffer)) catch {};
+/// The CLI alone settles publication into the already-reported exit status.
+noinline fn writeRefusal(io: std.Io, failure: *const start_report.Failure, status: caller_exit.Status) error{Reported} {
+    recordExit(status);
+    host_start.report(io, failure);
     return error.Reported;
-}
-
-/// Reads the launch frame from stdin, or reports its refusal on stdout.
-noinline fn readLaunchFrame(init: std.process.Init) !*launch_frame.Frame {
-    const frame = try std.heap.c_allocator.create(launch_frame.Frame);
-    errdefer std.heap.c_allocator.destroy(frame);
-    frame.* = .{};
-    var refusal: start_report.Failure = undefined;
-    launch_frame.read(init.io, .stdin(), std.heap.c_allocator, frame, &refusal) catch |err| {
-        if (err == error.LaunchFrameInvalid) return writeRefusal(init.io, &refusal);
-        return err;
-    };
-    return frame;
 }
 
 /// The live Session addresses its own /configure.
@@ -4946,7 +5071,7 @@ test "Host transport classification requires Store lock evidence" {
     try std.testing.expectEqualStrings("rui session inspect: The Host for this Store is shutting down and no longer accepts requests. Store: \"/private/store\". Next: Wait for it to exit, then start it again with rui host start --store PATH and retry. [host_stopping]\n", writer.buffered());
 }
 
-test "MySQL Host unavailability uses launch-frame repair without lock claims" {
+test "MySQL Host unavailability uses settings-based repair without lock claims" {
     const code = caller_error.of(error.MysqlHostUnavailable);
     try std.testing.expectEqual(caller_error.Code.mysql_host_unavailable, code);
     try std.testing.expectEqual(caller_error.Act.operate, caller_error.facts(code).act);
@@ -4954,7 +5079,7 @@ test "MySQL Host unavailability uses launch-frame repair without lock claims" {
     var bytes: [1024]u8 = undefined;
     var writer = std.Io.Writer.fixed(&bytes);
     try caller_error.writeLine(&writer, code, .{ .resource = "host", .operation = "start", .store = "0123456789abcdef0123456789abcdef", .not_sent = false });
-    try std.testing.expectEqualStrings("rui host start: The launched MySQL Host for this Store is unavailable. Store: \"0123456789abcdef0123456789abcdef\". Next: Check this Store's launch-frame Host and RUI_RUNTIME_DIR, then retry unchanged. [mysql_host_unavailable]\n", writer.buffered());
+    try std.testing.expectEqualStrings("rui host start: The launched MySQL Host for this Store is unavailable. Store: \"0123456789abcdef0123456789abcdef\". Next: Check this Store's settings-based Host and RUI_RUNTIME_DIR, then retry unchanged. [mysql_host_unavailable]\n", writer.buffered());
 }
 
 test "CLI boundary keeps Store and transport failures distinct" {

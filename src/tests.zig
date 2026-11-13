@@ -72,7 +72,7 @@ test {
     _ = @import("os/socket.zig");
     _ = @import("os/system_path.zig");
     _ = @import("execution_turn.zig");
-    _ = @import("launch_frame.zig");
+    _ = @import("preset_settings_test.zig");
     _ = @import("start_report.zig");
     _ = @import("mysql_url.zig");
     _ = @import("openapi.zig");

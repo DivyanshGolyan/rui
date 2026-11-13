@@ -1,4 +1,4 @@
-//! Start failures as owned values, independent of the launch frame and I/O.
+//! Start failures as owned values, independent of document intake and I/O.
 const std = @import("std");
 const bounded = @import("bounded.zig");
 
@@ -9,7 +9,6 @@ pub const Store = enum { sqlite, mysql };
 
 /// A refusal at open, as `RuiStartError.code` names it (D136).
 pub const StartError = enum {
-    launch_frame_invalid,
     settings_invalid,
     invalid_preset,
     store_locked,
@@ -70,7 +69,6 @@ fn mysqlRefusal(err: anyerror) ?Failure {
         error.StoreSchemaBehind => .init(.store_schema_behind, "the MySQL Store format is older than this build; apply its forward migrations"),
         error.StoreSchemaAhead => .init(.store_schema_behind, "the MySQL Store format is newer than this build; use a compatible build"),
         error.MalformedStoreFormat => .init(.store_schema_behind, "the MySQL Store format metadata is not a valid number"),
-        error.WrongStoreVersion => .init(.store_schema_behind, "the MySQL Store wire version does not match this build"),
         error.WrongStoreSchema => .init(.store_schema_behind, "the MySQL Store metadata contains an unexpected key"),
         error.StoreCatalogMismatch => .init(.store_schema_behind, "the MySQL Store catalog does not match this build"),
         error.WrongStoreIdentity => .init(.store_schema_behind, "the MySQL Store identity metadata or connection target is invalid"),
@@ -159,7 +157,6 @@ test "MySQL metadata admission failures have distinct bounded static diagnostics
         .{ error.StoreSchemaBehind, "the MySQL Store format is older than this build; apply its forward migrations" },
         .{ error.StoreSchemaAhead, "the MySQL Store format is newer than this build; use a compatible build" },
         .{ error.MalformedStoreFormat, "the MySQL Store format metadata is not a valid number" },
-        .{ error.WrongStoreVersion, "the MySQL Store wire version does not match this build" },
         .{ error.WrongStoreSchema, "the MySQL Store metadata contains an unexpected key" },
         .{ error.StoreCatalogMismatch, "the MySQL Store catalog does not match this build" },
         .{ error.WrongStoreIdentity, "the MySQL Store identity metadata or connection target is invalid" },
@@ -194,7 +191,7 @@ test "start report owns formatted bytes across source and value mutation" {
     var original: Failure = .init(.tool_name_collision, message);
     const copied = original;
     @memset(&source, 'x');
-    original = .init(.launch_frame_invalid, "changed");
+    original = .init(.settings_invalid, "changed");
     var buffer: [max_line_bytes]u8 = undefined;
     try std.testing.expectEqualStrings("{\"rui_start_error\":{\"code\":\"tool_name_collision\",\"message\":\"tool name bash is offered by Rui and by docs\"}}\n", line(&copied, &buffer));
 }
@@ -212,7 +209,7 @@ test "start report preserves JSON escaping and the maximum message" {
     for (0..max_refusal_message_bytes) |i| try std.testing.expectEqualStrings("\\u0000", rendered[prefix.len + 6 * i ..][0..6]);
 }
 
-// Independent expectations from main's launch-frame classifier at the merge.
+// Independent expectations from the original startup classifier at the merge.
 test "start report classifier preserves every refusal code and message byte" {
     const cases = .{
         .{ error.StoreAlreadyOwned, StartError.store_locked, "another Host owns this Store", false },
@@ -223,7 +220,6 @@ test "start report classifier preserves every refusal code and message byte" {
         .{ error.StoreSchemaBehind, StartError.store_schema_behind, "the MySQL Store format is older than this build; apply its forward migrations", true },
         .{ error.StoreSchemaAhead, StartError.store_schema_behind, "the MySQL Store format is newer than this build; use a compatible build", true },
         .{ error.MalformedStoreFormat, StartError.store_schema_behind, "the MySQL Store format metadata is not a valid number", true },
-        .{ error.WrongStoreVersion, StartError.store_schema_behind, "the MySQL Store wire version does not match this build", true },
         .{ error.WrongStoreSchema, StartError.store_schema_behind, "the MySQL Store metadata contains an unexpected key", true },
         .{ error.StoreCatalogMismatch, StartError.store_schema_behind, "the MySQL Store catalog does not match this build", true },
         .{ error.WrongStoreIdentity, StartError.store_schema_behind, "the MySQL Store identity metadata or connection target is invalid", true },

@@ -31,7 +31,7 @@ The required `admission` job can fail because an upstream acceptance job failed 
 Read that upstream failure rather than blaming the aggregate.
 A Promote run whose step has failed is red even while its bisect step keeps the run in progress (up to four hours); report it as red at once.
 A Promote failure bisects each failed step of the job inside that job: read every `Promotion bisect: <step>:` line and the retained replay logs before diagnosing the commit each names.
-A Release failure inside a green promotion concerns publication only; rerun that promotion's failed jobs.
+A Release failure inside a green promotion is publication or the post-publication wire recheck; [Release publication](../../../VERIFICATION.md#release-publication) says which, and what recovers each.
 
 ## 3. Decide whether the diff caused it
 
@@ -44,7 +44,9 @@ Before blaming the commit under test or calling it a stale base, look up the sig
   Suspect the diff only after these are ruled out.
 - **Broken main** when the failing file or fixture is not in the PR's diff.
   Reproduce on main HEAD before routing it to the PR's owner: `gh workflow run check.yml --ref main -f base=$(git rev-parse origin/stable)`.
-  Selection covers `base..main`, so a base at the last promoted commit selects every check the merged batch touched, the failing one included.
+  Selection covers `base..main`, so a base at the last promoted commit selects every Linux check the merged batch touched.
+  That dispatch runs no native macOS targets and no upgrade gate, so reproduce those on their own workflow at main HEAD instead: a native Mac failure with `gh workflow run qualify-macos.yml -f ref=main -f suite=native`, and an upgrade failure with `gh workflow run previous-release-upgrade.yml --ref main`.
+  A green run that skipped the failing check proves nothing about `main`.
   If main is red, find the merged pair that crossed (two PRs green alone, broken together, or a release that shipped between a wire PR's green run and its merge), name them, and route one main fix or a revert of the later PR.
 
 - **Intermittent** when the signature fails on SHAs that never touched the fixture or its owner (`git log <a>..<b> -- <paths>`), or when one SHA both passes and fails across workflows.

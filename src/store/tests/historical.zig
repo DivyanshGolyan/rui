@@ -242,6 +242,77 @@ test "a view's page holds the outputs its entries name under no floor, a deeper 
     }.run);
 }
 
+test "a compaction that makes no room is admitted with its base's floor" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try configureTestSession(&storage, "inherited-floor-config");
+            try submitTestMessage(&storage, &tmp, "inherited-floor-one", "inherited-floor-one", session.slice(), "first");
+            const overflowed = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try std.testing.expectEqual(ModelOperationKind.assistant_response, try storage.modelOperationKind(overflowed));
+            try storage.settleModelAttemptFailure(overflowed, .{ .uncorrelated = "provider_context_overflow" }, .context_overflow, .{});
+            // A base whose floor drops the first input.
+            const base = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try std.testing.expectEqual(ModelOperationKind.compaction, try storage.modelOperationKind(base));
+            try store_testing.setHistoryFloorForTesting(&storage, base.operation_id, "first", 1);
+            const floor = try store_testing.queryU64(&storage, "SELECT history_floor FROM model_operation WHERE operation_id=?1", .{base.operation_id});
+            try settleCompactionForTesting(&storage, &tmp, base, &.{.compaction});
+            const answered = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try settleItemsForTesting(&storage, &tmp, answered, &.{"{\"type\":\"message\",\"id\":\"m0\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"answer\"}]}"}, "answer");
+            // The next Turn's request overflows: the compaction after it
+            // follows a request, not a compaction that overflowed, so it
+            // walks no deeper and keeps the base's floor.
+            try submitTestMessage(&storage, &tmp, "inherited-floor-two", "inherited-floor-two", session.slice(), "second");
+            const request = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try std.testing.expectEqual(ModelOperationKind.assistant_response, try storage.modelOperationKind(request));
+            try storage.settleModelAttemptFailure(request, .{ .uncorrelated = "provider_context_overflow" }, .context_overflow, .{});
+            const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try std.testing.expectEqual(ModelOperationKind.compaction, try storage.modelOperationKind(next));
+            try std.testing.expectEqual(floor, try store_testing.queryU64(&storage, "SELECT history_floor FROM model_operation WHERE operation_id=?1", .{next.operation_id}));
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_operation WHERE operation_id=?1 AND history_level IS NULL", .{next.operation_id}));
+            try std.testing.expect(!storage.isFenced());
+        }
+    }.run);
+}
+
+test "an admission closes the request's view it opened when its commit fails or its settings do not settle" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            // Only a network engine's commit carries the request's reads.
+            if (case.engine != .mysql or case.rerun) return;
+            const mysql_testing = @import("mysql_testing.zig");
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try configureTestSession(&storage, "closed-view-config");
+            try submitTestMessage(&storage, &tmp, "closed-view-one", "closed-view-one", session.slice(), "one");
+            var view: HistoricalView = undefined;
+            var settings: HistoricalSettings = undefined;
+
+            // Every answer of the commit's message is lost, its settings
+            // round's with them: the admission stands, its request unread.
+            storage.engine.mysql.state.testing_drop = .after_commit;
+            const unread = (try storage.admitModelAttemptInto(.message, .{}, .{ .view = &view, .settings = &settings })).?;
+            try std.testing.expect(!unread.request_started);
+            try std.testing.expect(!view.isActive());
+            try settleItemsForTesting(&storage, &tmp, unread.permit.binding, &.{"{\"type\":\"message\",\"id\":\"m0\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"answer\"}]}"}, "answer");
+
+            // The server refuses the Operation the commit inserts.
+            try submitTestMessage(&storage, &tmp, "closed-view-two", "closed-view-two", session.slice(), "two");
+            try mysql_testing.rawExec(&storage, "CREATE TRIGGER refuse_operation BEFORE INSERT ON model_operation FOR EACH ROW SIGNAL SQLSTATE '45000'");
+            defer mysql_testing.rawExec(&storage, "DROP TRIGGER refuse_operation") catch @panic("cannot restore Operation inserts");
+            if (storage.admitModelAttemptInto(.message, .{}, .{ .view = &view, .settings = &settings })) |_| return error.TestUnexpectedResult else |_| {}
+            try std.testing.expect(!view.isActive());
+        }
+    }.run);
+}
+
 test "a request reads its settings in one round and its history and tools in one more" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {

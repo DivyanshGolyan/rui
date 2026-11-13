@@ -365,7 +365,7 @@ def main():
                 [RUI, "host", "serve", "--store", store, "--active-capacity", "1"],
                 capture_output=True, timeout=10,
             )
-            assert contender.returncode != 0 and b"ready store=" not in contender.stdout, contender
+            assert contender.returncode != 0 and b"ready " not in contender.stdout, contender
             assert not diagnostics.matching("cleanup_completed", action=str(action["action"]))
             gate.unlink()
             diagnostics.wait("cleanup_completed", action=str(action["action"]))

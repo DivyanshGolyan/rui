@@ -40,6 +40,7 @@ const testSettings = tests.testSettings;
 const testingSessionReport = tests.testingSessionReport;
 const testingStore = store_testing.testingSqliteStore;
 const TestingStatementFault = shared_fixtures.TestingStatementFault;
+const runsOf = shared_fixtures.runsOf;
 const statementWorkSince = shared_fixtures.statementWorkSince;
 
 test "complete historical tool-result traversal scales with groups and calls" {
@@ -715,16 +716,6 @@ test "a prefix seal on a full disk answers CanonicalStorageFull and fences" {
     try std.testing.expectError(error.CanonicalStorageFull, view.recordPrefixSeal(&TestingAttempt.seal));
     try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.sqliteDatabase()));
     try std.testing.expect(storage.isFenced());
-}
-
-/// How many times the Store has run the cached statement whose text is
-/// `sql` on this connection.
-fn runsOf(database: *c.sqlite3, sql: []const u8) i64 {
-    var statement = c.sqlite3_next_stmt(database, null);
-    while (statement) |each| : (statement = c.sqlite3_next_stmt(database, each)) {
-        if (std.mem.eql(u8, std.mem.span(c.sqlite3_sql(each)), sql)) return c.sqlite3_stmt_status(each, c.SQLITE_STMTSTATUS_RUN, 0);
-    }
-    return 0;
 }
 
 test "a prefix seal reads its Attempt inside the transaction it writes in" {

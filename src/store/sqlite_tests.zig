@@ -396,6 +396,16 @@ pub fn statementWorkSince(database: *c.sqlite3) [2]i64 {
     return work;
 }
 
+/// How many times the Store has run the cached statement whose text is
+/// `sql` on this connection.
+pub fn runsOf(database: *c.sqlite3, sql: []const u8) i64 {
+    var statement = c.sqlite3_next_stmt(database, null);
+    while (statement) |each| : (statement = c.sqlite3_next_stmt(database, each)) {
+        if (std.mem.eql(u8, std.mem.span(c.sqlite3_sql(each)), sql)) return c.sqlite3_stmt_status(each, c.SQLITE_STMTSTATUS_RUN, 0);
+    }
+    return 0;
+}
+
 pub fn openRaw(path: []const u8) !*c.sqlite3 {
     var raw: ?*c.sqlite3 = null;
     var path_buffer: [platform.max_database_path_bytes + 1:0]u8 = undefined;

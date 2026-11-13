@@ -694,6 +694,7 @@ fn appNext(self: *Self, ctx: *vxfw.EventContext, next: ?Next) !void {
             ctx.quit = true;
         },
         .open_settings => try self.root.openSettings(ctx),
+        .focus_chat => try self.root.focusChat(ctx),
 
         .open => |reference| {
             try self.root.showMain(ctx);
@@ -746,7 +747,7 @@ fn appSessionLeft(raw: *anyopaque, ctx: *vxfw.EventContext, outcome: SessionFron
     const left = &self.app_session.?;
     const from = left.session;
     left.ended = outcome;
-    if (outcome == .returned) switch (left.frontend.?.back(view.canHoldSend(&self.state))) {
+    if (outcome == .returned or outcome == .new_session) switch (left.frontend.?.back(view.canHoldSend(&self.state))) {
         .ended => |ended| left.ended = ended,
         .overview => |recovery| {
             if (recovery != .none) _ = try self.event(.{ .unconfirmed = .{ .reference = left.session, .recovery = recovery } });
@@ -756,6 +757,10 @@ fn appSessionLeft(raw: *anyopaque, ctx: *vxfw.EventContext, outcome: SessionFron
             try self.root.closeSession(ctx);
             // App's last frame can still point at the old widgets. Dispose
             // only after the next frame replaces that focus/hit-test tree.
+            if (outcome == .new_session) {
+                self.follow = .{};
+                return self.appNext(ctx, try self.event(.{ .clicked = .{ .target = .new_session } }));
+            }
             return self.followNext(ctx, from);
         },
     };
@@ -1090,11 +1095,13 @@ fn drawPart(self: *Self, ctx: vxfw.DrawContext, part: AppScreen.Overview.Part) s
     self.app_frame = frame;
     const rows = try ctx.arena.create(SessionRows);
     rows.* = .{ .state = &self.state, .width = size.width, .caps = self.caps, .frame = frame };
-    self.app_sessions.selected = if (view.selectedLine(&self.state)) |line| @intCast(line) else null;
+    self.app_sessions.selected = if (view.focusedLine(&self.state, self.root.input.list_focused or self.root.session == null)) |line| @intCast(line) else null;
+    self.app_sessions.selection_background = if (self.root.session != null and !self.root.input.list_focused) .bar else .selection;
     self.app_sessions.rows = .{ .userdata = rows, .count = @intCast(view.listLength(&self.state)), .rowFn = SessionRows.row, .countFromFn = SessionRows.count };
     self.app_sessions.aboveFn = SessionRows.above;
     self.app_sessions.belowFn = SessionRows.below;
     self.app_settings_line.selected = self.state.selected == .settings;
+    self.app_settings_line.memory = self.state.memory;
     self.app_settings_line.caps = self.caps;
     self.app_sessions.tail = .{ .widget = self.app_settings_line.widget(), .rows = view.layout(&self.state).settings.len() };
     self.app_sessions.caps = self.caps;
@@ -1281,7 +1288,7 @@ fn settingsBackend(self: *Self) AppSettings.Backend {
             return owner(raw).caps;
         }
     };
-    return .{ .context = self, .read = Callbacks.read, .save = Callbacks.save, .save_state = Callbacks.saveState, .upgrade = Callbacks.upgrade, .run = Callbacks.run, .caps = Callbacks.caps, .models = modelsSnapshot, .sign_in = Callbacks.signIn };
+    return .{ .context = self, .read = Callbacks.read, .save = Callbacks.save, .save_state = Callbacks.saveState, .upgrade = Callbacks.upgrade, .run = Callbacks.run, .caps = Callbacks.caps, .models = modelsSnapshot, .sign_in = Callbacks.signIn, .memory = memoryValue };
 }
 
 fn destroy(self: *Self) void {
@@ -1301,7 +1308,7 @@ fn destroy(self: *Self) void {
 const Ending = union(enum) { overview, conversation: Left };
 
 /// What the core asks of the loop: to leave or present a pane under Root.
-const Next = union(enum) { leave, open: view.Reference, open_settings };
+const Next = union(enum) { leave, open: view.Reference, open_settings, focus_chat };
 
 /// Steps the core with one event and queues the jobs it asks for. Presenting
 /// panes and leaving are the loop's to do.
@@ -1322,6 +1329,7 @@ fn eventResult(self: *Self, value: view.Event) !EventResult {
     var next: ?Next = null;
     for (effects.slice()) |effect| switch (effect) {
         .open_settings => next = .open_settings,
+        .focus_chat => next = .focus_chat,
         .list => |since| {
             self.traversal = .init(since);
             self.traversal_archive = self.state.listing_archive.?;
@@ -1696,11 +1704,16 @@ fn quiesceUpgrade(self: *Self) !bool {
                 .leave => return error.InteractiveInterrupted,
                 .open => |reference| self.started = reference,
                 // Only direct list input asks for settings, never a worker answer.
-                .open_settings => unreachable,
+                .open_settings, .focus_chat => unreachable,
             };
         }
     }
     return self.worker.thread == null and self.job_count == 0;
+}
+
+fn memoryValue(raw: *anyopaque) ?view.Memory {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    return self.state.memory;
 }
 
 /// One borrowed source for app settings and the open conversation's choices.
@@ -1763,7 +1776,7 @@ fn leaveFinished(self: *Self, left: Left, settled: ?SessionFrontend.Departure) !
         };
         switch (end) {
             .detached, .interrupted => TerminalApp.detached(store, session, departure.action),
-            .returned => unreachable,
+            .returned, .new_session => unreachable,
         }
     };
     return outcome catch |err| {
@@ -1974,11 +1987,11 @@ fn hostFacts(self: *Self) HostRead {
         .incompatible => .incompatible,
         .access_failure => .unreadable,
     };
-    // The same read samples the counts line's memory.
+    // The same read samples live memory.
     return .{ .observation = observation, .memory = self.liveMemory(if (observation.facts()) |host| host.started_at else null) };
 }
 
-/// The counts line's memory: this TUI, the Host that started at
+/// Live memory: this TUI, the Host that started at
 /// `host_started_at` and its tools. With no Host ready it is this TUI alone.
 /// The Host's pid is read once per Host start.
 fn liveMemory(self: *Self, host_started_at: ?u64) view.Memory {
@@ -2332,7 +2345,7 @@ const Rig = struct {
     fn click(rig: *Rig, column: u16, row: u16, width: u16, height: u16) !?Ending {
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
-        const frame = try rig.overview.root.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = height }, .cell_size = .{} });
+        const frame = try rig.overview.root.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = height }, .cell_size = .{} });
         var ctx = rig.context();
         defer ctx.cmds.deinit(std.testing.allocator);
         try app_events.mouse(&ctx, frame, .{ .col = @intCast(column), .row = @intCast(row), .button = .left, .type = .press, .mods = .{} });
@@ -2353,10 +2366,10 @@ const Rig = struct {
     fn shown(rig: *Rig, width: u16, height: u16) !Shown {
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         errdefer arena.deinit();
-        const surface = try rig.overview.root.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = height }, .cell_size = .{} });
+        const surface = try rig.overview.root.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = height }, .cell_size = .{} });
         var screen: vaxis.Screen = try .init(arena.allocator(), .{ .rows = height, .cols = width, .x_pixel = 0, .y_pixel = 0 });
         const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = height, .screen = &screen };
-        surface.render(window, rig.overview.root.session orelse rig.overview.widget());
+        try surface.render(window, rig.overview.root.session orelse rig.overview.widget());
         return .{ .arena = arena, .screen = screen };
     }
 
@@ -4922,7 +4935,7 @@ test "App overview schedules spinning rows only while Root shows the list" {
         }) |layout| {
             if (layout.open and overview.root.session == null) try overview.root.openSession(&ctx, session.widget(), null);
             if (!layout.open and overview.root.session != null) try overview.root.closeSession(&ctx);
-            _ = try overview.root.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = layout.width, .height = 24 }, .cell_size = .{} });
+            _ = try overview.root.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = layout.width, .height = 24 }, .cell_size = .{} });
             try std.testing.expectEqual(spinning, overview.listSpins());
             // Force a due animation step without waiting for the clock. A
             // hidden list cannot advance its last frame, even on later ticks.
@@ -4964,7 +4977,7 @@ test "App overview prepares full-width list rows and splits only beside a Sessio
     defer arena.deinit();
     const header = overview.app_header.widget();
     for ([_]u16{ 46, 140 }) |width| {
-        const surface = try overview.root.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 40 }, .cell_size = .{} });
+        const surface = try overview.root.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 40 }, .cell_size = .{} });
         try std.testing.expectEqual(width, overview.state.size.width);
         try std.testing.expectEqual(@as(usize, 1), Find.count(surface, header));
         try std.testing.expectEqual(@as(usize, 1), Find.count(surface, overview.widget()));
@@ -4973,7 +4986,7 @@ test "App overview prepares full-width list rows and splits only beside a Sessio
     var ctx = rig.context();
     defer ctx.cmds.deinit(std.testing.allocator);
     try overview.root.openSession(&ctx, chat.widget(), null);
-    const wide = try overview.root.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 140, .height = 40 }, .cell_size = .{} });
+    const wide = try overview.root.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 140, .height = 40 }, .cell_size = .{} });
     const panes = wide.children[0].surface.children;
     try std.testing.expectEqual(@as(u16, 40), overview.state.size.width);
     try std.testing.expectEqual(@as(u16, 40), panes[0].surface.size.width);
@@ -5013,7 +5026,7 @@ test "App overview list stays live beside a focused child and wheels stay in the
     overview.state.selected = .{ .session = "b4n8wd".* };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    const draw: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 140, .height = 4 }, .cell_size = .{} };
+    const draw: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 140, .height = 4 }, .cell_size = .{} };
     const frame = try overview.root.widget().draw(draw);
     const selected = overview.app_sessions.selected.?;
     const target = view.clickOf(&overview.state, view.listItem(&overview.state, selected).?).?;
@@ -5111,7 +5124,7 @@ test "App overview list press follows only after the open child settles and open
     overview.ops.open = Find.open;
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    const frame = try overview.root.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 140, .height = 40 }, .cell_size = .{} });
+    const frame = try overview.root.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 140, .height = 40 }, .cell_size = .{} });
     const origin = Find.origin(frame, overview.app_sessions.widget(), .{ .row = 0, .col = 0 }).?;
     var ctx = rig.context();
     defer ctx.cmds.deinit(std.testing.allocator);
@@ -5151,7 +5164,7 @@ test "App shell divider follows overview locale across layouts and screen select
             for ([_]bool{ false, true }) |open| {
                 if (open) try overview.root.openSession(&events, session.widget(), null) else try overview.root.closeSession(&events);
                 for ([_]u16{ 46, 99, 100, 140 }) |width| {
-                    const surface = try overview.root.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 24 }, .cell_size = .{} });
+                    const surface = try overview.root.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 24 }, .cell_size = .{} });
                     const layout = surface.children[0].surface;
                     if (open and width >= Root.split_at) {
                         const divider = layout.children[1].surface;
@@ -5160,7 +5173,7 @@ test "App shell divider follows overview locale across layouts and screen select
                     } else try std.testing.expect(layout.widget.eql(if (open) session.widget() else overview.widget()));
                     var screen: vaxis.Screen = try .init(arena.allocator(), .{ .cols = width, .rows = 24, .x_pixel = 0, .y_pixel = 0 });
                     const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = 24, .screen = &screen };
-                    surface.render(window, (overview.root.session orelse overview.widget()));
+                    try surface.render(window, (overview.root.session orelse overview.widget()));
                     if (!case.unicode) for (screen.buf) |cell| {
                         for (cell.char.grapheme) |byte| try std.testing.expect(byte < 0x80);
                     };
@@ -5231,7 +5244,7 @@ test "App list clicks validate present and removed targets with open and closed 
             overview.ops.open = Click.open;
             var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
             defer arena.deinit();
-            const frame = try overview.root.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 140, .height = 40 }, .cell_size = .{} });
+            const frame = try overview.root.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 140, .height = 40 }, .cell_size = .{} });
             const at = Click.origin(frame, overview.app_sessions.widget(), .{ .row = 0, .col = 0 }).?;
             const row = for (overview.app_sessions.shown_at) |span| {
                 if (span.target) |target| if (target == .open and std.mem.eql(u8, &target.open, "b4n8wd")) break span.row;
@@ -5364,7 +5377,7 @@ test "App root navigation shows and focuses the main pane before every Session s
                         defer ctx.cmds.deinit(std.testing.allocator);
                         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
                         defer arena.deinit();
-                        const draw_context: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 24 }, .cell_size = .{} };
+                        const draw_context: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 24 }, .cell_size = .{} };
                         _ = try overview.root.widget().draw(draw_context);
                         if (settings_open) {
                             try overview.root.openSettings(&ctx);
@@ -5488,7 +5501,7 @@ test "App settings Enter reaches Root at both widths with and without a retained
             defer ctx.cmds.deinit(std.testing.allocator);
             var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
             defer arena.deinit();
-            const draw_context: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 24 }, .cell_size = .{} };
+            const draw_context: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 24 }, .cell_size = .{} };
             _ = try overview.root.widget().draw(draw_context);
             // Real parser/overview handlers select the last list row;
             // do not synthesize a core click or set selected directly.
@@ -6328,7 +6341,7 @@ test "Overview mouse Host start and retry hover preserve foreground selection an
         const host_widget = hostNotice(overview).?;
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
-        const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 60, .height = 1 }, .cell_size = .{} };
+        const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 60, .height = 1 }, .cell_size = .{} };
         const plain = try host_widget.draw(draw_ctx);
         const selected = overview.state.selected;
         var events = rig.context();
@@ -6397,7 +6410,7 @@ test "Overview mouse Host line without a start or retry has no hover or click ac
         const host_widget = hostNotice(overview).?;
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
-        const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 60, .height = 1 }, .cell_size = .{} };
+        const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 60, .height = 1 }, .cell_size = .{} };
         const plain = try host_widget.draw(draw_ctx);
         var events = rig.context();
         defer events.cmds.deinit(std.testing.allocator);
@@ -6464,7 +6477,7 @@ test "App settings Sign-in Enter and click use the Overview owner and return to 
         try std.testing.expect(page.backend.?.models != null);
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
-        _ = try overview.root.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 24 }, .cell_size = .{} });
+        _ = try overview.root.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 24 }, .cell_size = .{} });
         if (busy) overview.defaults_save = .pending;
         ctx.cmds.clearRetainingCapacity();
         if (click) {
@@ -6646,7 +6659,7 @@ test "Sign-in keeps the pane through Session and Settings clicks with and withou
         const frontend = if (overview.app_session) |held| held.frontend else null;
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
-        const frame = try overview.root.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 140, .height = 40 }, .cell_size = .{} });
+        const frame = try overview.root.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 140, .height = 40 }, .cell_size = .{} });
         try std.testing.expect(overview.root.listVisible());
         const at: vxfw.RelativePoint = switch (click) {
             .session => session: {
@@ -6951,9 +6964,9 @@ test "accepted empty creation opens the returned Session with blank focused chat
         try std.testing.expect(focused.eql(frontend.app_input.composer.widget()));
         var shown = try rig.shown(width, 24);
         defer shown.deinit();
-        const frame = try overview.root.widget().draw(.{ .arena = shown.arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 24 }, .cell_size = .{} });
+        const frame = try overview.root.widget().draw(.{ .arena = shown.arena.allocator(), .cell_arena = shown.arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 24 }, .cell_size = .{} });
         const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = 24, .screen = &shown.screen };
-        frame.render(window, focused);
+        try frame.render(window, focused);
         try std.testing.expect(shown.cursor() != null);
     }
 }
@@ -6971,6 +6984,8 @@ const key_encodings = std.enums.EnumArray(keymap.Key, []const []const u8).init(.
     .alt_a = &.{ "\x1ba", "\x1b[97;3u", "\x1b[27;3;97~" },
     .up = &.{ "\x1b[A", "\x1bOA", "\x1b[1;1A" },
     .down = &.{ "\x1b[B", "\x1bOB", "\x1b[1;1B" },
+    .left = &.{ "\x1b[D", "\x1bOD", "\x1b[1;1D" },
+    .right = &.{ "\x1b[C", "\x1bOC", "\x1b[1;1C" },
     .shift_up = &.{ "\x1b[1;2A", "\x1b[1;2:1A" },
     .shift_down = &.{ "\x1b[1;2B", "\x1b[1;2:1B" },
     .page_up = &.{ "\x1b[5~", "\x1b[5;1~", "\x1b[5;2~" },
@@ -7031,6 +7046,55 @@ test "empty creation captures fresh effort and permission at admitted Enter or c
         try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, .xhigh), after.reasoning_effort);
         try std.testing.expectEqual(@as(?protocol.PermissionMode, .ask), after.permission_mode);
     };
+}
+
+test "new and clear retire the old chat through the real lender and open empty Configure creations" {
+    const Files = struct {
+        var dir: std.Io.Dir = undefined;
+        var count: u8 = 0;
+        fn scratch(init: std.process.Init) !std.Io.File {
+            count += 1;
+            return dir.createFile(init.io, &.{'a' + count}, .{ .read = true });
+        }
+    };
+    for ([_][]const u8{ "/new\r", "/clear\r" }) |keys| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const home = path[0..try tmp.dir.realPath(std.testing.io, &path)];
+        Files.dir = tmp.dir;
+        Files.count = 0;
+        var ops = fake_operations;
+        ops.open = openSession;
+        var cancellation: client.Cancellation = .{};
+        const rig = try Rig.open(.{ .store = home, .workspace = "/work", .home = home, .directory = home, .provider = "codex", .model = "gpt-5.5" }, ops, &cancellation);
+        defer rig.close();
+        const overview = rig.overview;
+        overview.hooks.scratch = Files.scratch;
+        try std.testing.expect(try rig.next(.{ .open = "k7m2qx".* }) == null);
+        defer {
+            if (overview.app_session) |left| {
+                left.frontend.?.stop();
+                overview.disposeSession(left);
+                overview.app_session = null;
+            }
+            for (overview.retired.items) |retired| overview.disposeSession(retired.left);
+            overview.retired.deinit(std.testing.allocator);
+        }
+        try std.testing.expect(try rig.settle() == null);
+        const frontend = overview.app_session.?.frontend.?;
+        frontend.reading.opening = false;
+        frontend.poll_at = std.math.maxInt(i96);
+        var ctx = rig.context();
+        defer ctx.cmds.deinit(std.testing.allocator);
+        try app_events.send(&ctx, keys, overview.root.widget(), frontend.widget());
+        try std.testing.expect(!ctx.quit);
+        try std.testing.expect(try rig.settle() == null);
+        try std.testing.expectEqualStrings("n3w5es", &overview.opened);
+        try std.testing.expectEqualStrings("n3w5es", overview.app_session.?.frontend.?.session);
+        try std.testing.expectEqual(@as(usize, 1), Seen.now.creates);
+        try std.testing.expect(overview.app_session.?.frontend.?.submission.intent == null);
+    }
 }
 
 /// Real Overview/SessionFrontend owners over canonical read-boundary fixtures.
@@ -7271,16 +7335,27 @@ const EmptySessionOwner = struct {
     }
 
     fn chooseModel(self: *EmptySessionOwner) !void {
-        try std.testing.expect(try self.rig.press("\t\r") == null);
+        try self.chooseModelFrom("\t\r");
+    }
+
+    fn chooseModelFrom(self: *EmptySessionOwner, gesture: []const u8) !void {
+        try std.testing.expect(try self.rig.press(gesture) == null);
         try std.testing.expect(self.frontend().app_info.model_choice.active);
-        try std.testing.expect(try self.rig.press("gpt-5.5\r") == null);
+        try std.testing.expect(try self.rig.press("gpt-5.5") == null);
+        const choice = &self.frontend().app_info.model_choice;
+        try std.testing.expectEqualStrings("gpt-5.5", choice.editor.buffer[0..choice.editor.length]);
+        var shown = try self.rig.shown(140, 40);
+        defer shown.deinit();
+        try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "gpt-5.5") != null);
+        try std.testing.expect(try self.rig.press("\r") == null);
         try std.testing.expect(self.frontend().info_edit != null);
+        try std.testing.expectEqualStrings("gpt-5.5", self.frontend().info_edit.?.model);
         self.frontend().poll_at = std.math.maxInt(i96);
         try self.tick();
         try self.joinRead();
+        try std.testing.expectEqualStrings("gpt-5.5", canonical(self.frontend().session).model.slice());
         try self.readCurrent();
         try std.testing.expectEqualStrings("gpt-5.5", self.frontend().line.model.slice());
-        try std.testing.expectEqualStrings("gpt-5.5", canonical(self.frontend().session).model.slice());
         try self.expectSelectedName(self.rig.overview.app_session.?.session, "New Session");
     }
 
@@ -7311,9 +7386,9 @@ const EmptySessionOwner = struct {
             defer shown.deinit();
             const columns: u16 = if (width >= Root.split_at) Root.list_width else width;
             if (width < Root.split_at) {
-                const frame = try overview.listWidget().draw(.{ .arena = shown.arena.allocator(), .min = .{}, .max = .{ .width = columns, .height = 24 }, .cell_size = .{} });
+                const frame = try overview.listWidget().draw(.{ .arena = shown.arena.allocator(), .cell_arena = shown.arena.allocator(), .min = .{}, .max = .{ .width = columns, .height = 24 }, .cell_size = .{} });
                 const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = columns, .height = 24, .screen = &shown.screen };
-                frame.render(window, overview.widget());
+                try frame.render(window, overview.widget());
             }
             var text: std.Io.Writer.Allocating = .init(shown.arena.allocator());
             for (0..24) |row| {
@@ -7560,6 +7635,36 @@ test "Overview forwards captured covered pane and paste without rereading newer 
     try std.testing.expectEqual(@as(usize, 0), Seen.now.creates);
 }
 
+test "typed model and footer picker configure the same Session owner and show Current in the footer" {
+    const Skills = struct {
+        fn read(_: client.ReadContext, _: std.mem.Allocator, _: []const u8, _: []const u8, _: []const u8) !@import("skill_suggestions.zig").Page {
+            return .{ .entries = &.{}, .total = 0 };
+        }
+    };
+    for ([_][]const u8{ "/model\r", "\t\r" }) |gesture| {
+        const fixture = try EmptySessionOwner.create();
+        defer fixture.destroy();
+        const reference = try fixture.openNew();
+        // The fixture owns canonical reads, not a real Host socket. Typing
+        // a leading slash also asks that Host for skills.
+        fixture.frontend().skill_read = Skills.read;
+        try fixture.chooseModelFrom(gesture);
+        // Acknowledge the configure result without sending a Message; the
+        // narrow footer reserves space for that retained notice until input.
+        try std.testing.expect(try fixture.rig.press("x\x7f") == null);
+        try std.testing.expectEqual(@as(usize, 1), EmptySessionOwner.configurations);
+        try std.testing.expectEqual(reference, fixture.rig.overview.app_session.?.session);
+        try std.testing.expect(fixture.frontend().submission.intent == null);
+        for ([_]u16{ 46, 140 }) |width| {
+            var shown = try fixture.rig.shown(width, 30);
+            defer shown.deinit();
+            const text = try shown.text();
+            const footer = text[std.mem.lastIndexOfScalar(u8, std.mem.trimEnd(u8, text, "\n"), '\n').? + 1 ..];
+            try std.testing.expect(std.mem.indexOf(u8, footer, "gpt-5.5") != null);
+        }
+    }
+}
+
 // Upstream #1396 drops unknown terminal sequences rather than synthesizing an
 // invalid-key event. Overview has no draft to recover: those bytes authorize
 // nothing, and the next ordinary New Session still opens the real blank chat.
@@ -7592,7 +7697,7 @@ test "App list selection consumes the core projection through arrivals covered S
                 defer shown.deinit();
                 // Root deliberately hides a narrow sidebar. Exercise its
                 // production draw owner too, without inventing its policy.
-                if (!overview.root.listVisible()) _ = try overview.listWidget().draw(.{ .arena = shown.arena.allocator(), .min = .{}, .max = .{ .width = Root.list_width, .height = 24 }, .cell_size = .{} });
+                if (!overview.root.listVisible()) _ = try overview.listWidget().draw(.{ .arena = shown.arena.allocator(), .cell_arena = shown.arena.allocator(), .min = .{}, .max = .{ .width = Root.list_width, .height = 24 }, .cell_size = .{} });
                 const expected: ?u32 = if (view.selectedLine(&overview.state)) |line| @intCast(line) else null;
                 try std.testing.expectEqual(expected, overview.app_sessions.selected);
             }
@@ -7774,4 +7879,120 @@ test "creation preference read failure is retained through repair and ordinary r
     try std.testing.expectEqual(@as(usize, 1), Seen.now.creates);
     try std.testing.expectEqualStrings("high", Seen.now.creation.reasoning_effort.?.slice());
     try std.testing.expectEqualStrings("bypass", Seen.now.creation.permission_mode.slice());
+}
+
+test "App overview paste shapes after chat close cannot create or retain an editor paste" {
+    // #1379 removed the overview composer. Test its actual list owner, not
+    // a substitute editor: both paste marks are delivered and all text is inert.
+    for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |list_focused| for ([_][]const u8{ "", "\n", "text" }) |paste| {
+        const rig = try openOverview();
+        defer rig.close();
+        var events = rig.context();
+        defer events.cmds.deinit(std.testing.allocator);
+        try rig.overview.root.closeSession(&events);
+        try std.testing.expect(rig.overview.root.input.list_focused);
+        rig.overview.root.input.list_focused = list_focused;
+        var shown = try rig.shown(width, 30);
+        defer shown.deinit();
+        const creates = Seen.now.creates;
+        const opens = Seen.now.conversations;
+        try std.testing.expect(try rig.press("\x1b[200~") == null);
+        try std.testing.expect(try rig.press(paste) == null);
+        try std.testing.expect(try rig.press("\x1b[201~") == null);
+        try std.testing.expect(!rig.overview.root.input.pasting);
+        try std.testing.expect(try rig.press("\x1b[DX") == null);
+        try std.testing.expectEqual(creates, Seen.now.creates);
+        try std.testing.expectEqual(opens, Seen.now.conversations);
+        try std.testing.expect(!rig.overview.state.creating());
+        try std.testing.expect(rig.overview.root.session == null);
+        // Ordinary explicit Enter still creates an empty chat, never sends
+        // any of the ignored paste or later typing as a first Message.
+        try std.testing.expect(try rig.press("\r") == null);
+        try std.testing.expect(try rig.settle() == null);
+        try std.testing.expectEqual(creates + 1, Seen.now.creates);
+    };
+}
+
+test "App overview list activation resumes the open chat without closing its presentation" {
+    const Presentation = struct {
+        var closes: usize = 0;
+        fn close(_: *anyopaque) void {
+            closes += 1;
+        }
+    };
+    for ([_][]const u8{ "\r", "\x1b[C" }) |key| {
+        const rig = try openListed();
+        defer rig.close();
+        const reference = shownRow(rig, 2);
+        const chat: vxfw.Text = .{ .text = "Chat" };
+        rig.overview.root.session = chat.widget();
+        // The fixture borrowed the dummy widget, not an app_session allocation.
+        defer rig.overview.root.session = null;
+        rig.overview.root.size = .{ .width = 140, .height = 40 };
+        _ = try rig.overview.event(.{ .conversation = reference });
+        // Stand in for an open Chat Info: it must survive the return.
+        rig.overview.root.main_presentation = .{ .context = rig, .close = Presentation.close };
+        Presentation.closes = 0;
+        var ctx = rig.context();
+        defer ctx.cmds.deinit(std.testing.allocator);
+        try std.testing.expect(try rig.overview.root.focusList(&ctx));
+        const opens = Seen.now.conversations;
+        try std.testing.expect(try rig.press(key) == null);
+        try std.testing.expect(!rig.overview.root.input.list_focused);
+        try std.testing.expectEqual(@as(usize, 0), Presentation.closes);
+        try std.testing.expectEqual(opens, Seen.now.conversations);
+    }
+}
+
+test "Overview Settings live memory frame uses quiet role in day and night" {
+    const rig = try openListed();
+    defer rig.close();
+    for ([_]view.Caps{ .{}, .{ .background = .{ 255, 255, 255 } } }) |caps| {
+        rig.overview.caps = caps;
+        var before = try rig.shown(80, 24);
+        defer before.deinit();
+        if (rig.overview.state.memory == null) try std.testing.expect(std.mem.indexOf(u8, try before.text(), "rui 38 MB") == null);
+        _ = try rig.overview.event(.{ .memory = .{ .rui = 38 * view.mib, .tools = 120 * view.mib } });
+        var shown = try rig.shown(80, 24);
+        defer shown.deinit();
+        const row: u16 = for (0..24) |y| {
+            if (std.mem.startsWith(u8, try shown.line(@intCast(y)), "  Settings")) break @intCast(y);
+        } else return error.TestExpectedSettingsRow;
+        const text = try shown.line(row);
+        const memory = std.mem.indexOf(u8, text, "rui 38 MB · tools 120 MB") orelse return error.TestExpectedMemory;
+        const expected = @import("widget_style.zig").of(caps, .{ .colour = .quiet });
+        for (memory..memory + "rui 38 MB".len) |column| try std.testing.expectEqual(expected, shown.screen.readCell(@intCast(column), row).?.style);
+        // The lender returns the same latest shell read, without a second cache.
+        try std.testing.expectEqual(rig.overview.state.memory, memoryValue(rig.overview));
+    }
+}
+
+test "App settings live memory follows Overview readings while chat info stays chat-only" {
+    const rig = try openListed();
+    defer rig.close();
+    const overview = rig.overview;
+    var ctx = rig.context();
+    defer ctx.cmds.deinit(std.testing.allocator);
+    try appClick(overview, &ctx, .settings);
+    try std.testing.expect(overview.root.input.layer.settingsOpen());
+    const backend = overview.root.settings_page.backend.?;
+    const read_memory = backend.memory orelse return error.TestExpectedMemoryReader;
+    try std.testing.expectEqual(@as(?view.Memory, null), read_memory(backend.context));
+    var before = try rig.shown(140, 24);
+    defer before.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, try before.text(), "Memory") == null);
+    const Case = struct { memory: view.Memory, text: []const u8 };
+    for ([_]Case{
+        .{ .memory = .{ .rui = 38 * view.mib, .tools = 120 * view.mib }, .text = "Memory          rui 38 MB · tools 120 MB" },
+        .{ .memory = .{ .rui = 1024 * view.mib, .tools = null }, .text = "Memory          rui 1.0 GB" },
+    }) |case| {
+        _ = try overview.event(.{ .memory = case.memory });
+        try std.testing.expectEqual(@as(?view.Memory, case.memory), read_memory(backend.context));
+        var shown = try rig.shown(140, 24);
+        defer shown.deinit();
+        try std.testing.expect(std.mem.indexOf(u8, try shown.text(), case.text) != null);
+    }
+    // Neither the per-Session facts nor its frontend bridge carries app memory.
+    try std.testing.expect(!@hasField(@import("chat_info.zig").Backend, "memory"));
+    try std.testing.expect(!@hasField(SessionFrontend.Lender, "memory"));
 }

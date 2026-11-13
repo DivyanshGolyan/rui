@@ -48,6 +48,7 @@ const TestingStatementFault = shared_fixtures.TestingStatementFault;
 const busyStatements = shared_fixtures.busyStatements;
 const expectModelRevisions = shared_fixtures.expectModelRevisions;
 const probeConstraint = shared_fixtures.probeConstraint;
+const runsOf = shared_fixtures.runsOf;
 
 test "complete call outcomes continue once in call order ahead of pending input" {
     var tmp = std.testing.tmpDir(.{});
@@ -986,4 +987,72 @@ test "an admission that selects nothing answers main's names for its idle checks
         try std.testing.expect(fault.failed > 0);
         try std.testing.expect(storage.isFenced());
     }
+}
+
+/// Runs `write` on the connection as the statement whose text is `sql`
+/// starts: another writer's commit, between that statement and the ones
+/// before it in its round.
+const TestingStatementInterleave = struct {
+    sql: [:0]const u8,
+    write: [:0]const u8,
+    database: *c.sqlite3,
+    ran: u64 = 0,
+
+    fn arm(self: *TestingStatementInterleave) void {
+        _ = c.sqlite3_trace_v2(self.database, c.SQLITE_TRACE_STMT, traced, self);
+    }
+
+    fn disarm(self: *const TestingStatementInterleave) void {
+        _ = c.sqlite3_trace_v2(self.database, 0, null, null);
+    }
+
+    fn traced(_: c_uint, context: ?*anyopaque, statement: ?*anyopaque, _: ?*anyopaque) callconv(.c) c_int {
+        const self: *TestingStatementInterleave = @ptrCast(@alignCast(context.?));
+        if (!std.mem.eql(u8, std.mem.span(c.sqlite3_sql(@ptrCast(statement))), self.sql)) return 0;
+        if (c.sqlite3_exec(self.database, self.write, null, null, null) == c.SQLITE_OK) self.ran += 1;
+        return 0;
+    }
+};
+
+test "a model admission whose Session moves between its selection and its facts writes nothing" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSession(&storage, "moved-head-config");
+    try submitTestMessage(&storage, &tmp, "moved-head-input", "moved-head-message", session.slice(), "work");
+    // The selection reads the Session's head; another writer moves it
+    // before the facts read it again, outside any transaction.
+    var interleave: TestingStatementInterleave = .{
+        .sql = model_admission_domain.selected_context_sql,
+        .write = "UPDATE session SET next_position=next_position+1",
+        .database = storage.sqliteDatabase(),
+    };
+    interleave.arm();
+    const admitted = storage.admitModelAttempt(.message, .{});
+    interleave.disarm();
+    try std.testing.expectEqual(@as(u64, 1), interleave.ran);
+    try std.testing.expectError(error.SelectionChanged, admitted);
+    try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM turn", .{}));
+    try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM model_operation", .{}));
+    try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE turn_id IS NOT NULL", .{}));
+}
+
+test "a model admission selects outside its transaction, and one that selects nothing opens none" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const database = storage.sqliteDatabase();
+    var begins = runsOf(database, "BEGIN IMMEDIATE");
+    try std.testing.expect(try storage.admitModelAttempt(.message, .{}) == null);
+    try std.testing.expectEqual(begins, runsOf(database, "BEGIN IMMEDIATE"));
+    const session = try configureTestSession(&storage, "outside-config");
+    try submitTestMessage(&storage, &tmp, "outside-input", "outside-message", session.slice(), "work");
+    begins = runsOf(database, "BEGIN IMMEDIATE");
+    try std.testing.expect(try storage.admitModelAttempt(.message, .{}) != null);
+    try std.testing.expectEqual(begins + 1, runsOf(database, "BEGIN IMMEDIATE"));
+    try std.testing.expect(!storage.isFenced());
 }
