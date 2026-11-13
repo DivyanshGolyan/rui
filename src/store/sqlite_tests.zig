@@ -8447,10 +8447,9 @@ test "Attempt checks, prefix seals and content lookups do no more work than main
         try std.testing.expectEqual(1, storage.testing_content_work.rounds - before);
     }
     {
-        var a: store_access.Access(.write, error{}) = .open(&entry);
-        defer a.deinit();
+        var seal: historical_domain.RecordSeal = .{ .input = .{ .binding = attempt.binding, .seal = &TestingAttempt.seal } };
         const before = storage.testing_content_work.rounds;
-        try historical_domain.sealOn(&a, attempt.binding, &TestingAttempt.seal);
+        try transition.run(&entry, historical_domain.RecordSeal, &seal, .{});
         try std.testing.expectEqual(2, storage.testing_content_work.rounds - before);
     }
     {
