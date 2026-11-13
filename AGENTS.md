@@ -59,6 +59,7 @@ This section owns only how Codex reports what it finds:
 
 ## Status updates and reports
 
+Report progress, blockers and verification results relevant to the requested task.
 Include repository-wide health only when it affects that task or the user asks for it.
 Write a final report, handoff or brief for a reader who has not seen your tool calls, the files you opened or your reasoning.
 Lead with the result and what it depends on, in full sentences and the repository's own terms; define or drop any label coined during the work.
@@ -68,5 +69,5 @@ Say of each claim whether you ran it, read it in source or inferred it ([Evidenc
 
 Standing grant: merge each small, coherent change once its PR is green, without further approval, lane completion or review signoff.
 The same grant covers promoting `main` to a release when [Promote](docs/agents/landing.md#promote) says to.
-Changes reach `main` only by merging their PR.
+Changes reach `main` only by merging their PR; the admin bypass is allowed only under the conditions in [Landing procedures](docs/agents/landing.md#publish-and-merge).
 For PR publication, stacking, renaming a shared name, the admin bypass, landing or CI-failure ownership, read [Landing procedures](docs/agents/landing.md).
