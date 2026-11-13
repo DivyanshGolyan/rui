@@ -427,7 +427,7 @@ noinline fn submitCreating(
     const reads = &creation.message;
     reads.* = .{ .digest = command.semanticDigest(), .text = content_domain.sealedIdentity(&command.text) };
     readMessage(a, selector, command, reads);
-    configuration_domain.prepareConfiguration(a, "", configuration, creation);
+    configuration_domain.prepareConfiguration(a, a.store.hostTools().host_tool_set, "", configuration, creation);
     try a.run();
     if (try replayMessage(a, command, reads)) |reply| return reply;
     const sender_valid = senderValid(command, selector, reads.sender);
@@ -441,10 +441,10 @@ noinline fn submitCreating(
         null;
     if (rejection != null) return rejectMessage(a, command, reads, command.sender != null and sender_valid, rejection.?, faults);
     const checked = try configuration_domain.validateConfiguration(a, io, "", configuration, initial_skills, creation);
-    const plan = switch (checked) {
+    switch (checked) {
         .rejected => |code| return rejectMessage(a, command, reads, command.sender != null and sender_valid, std.meta.stringToEnum(message_admission.Rejection, @tagName(code)).?, faults),
-        .ready => |value| value,
-    };
+        .ready => {},
+    }
     // Configuration's validation-only phase owns ordinary refusal precedence.
     // No configuration/content/Session writes exist when a batch refuses.
     // The Host bound the text's `/name` words to skills, or found none.
@@ -454,7 +454,7 @@ noinline fn submitCreating(
             .bound => |bound| reads.bound = bound,
         }
     }
-    switch (try configuration_domain.applyValidatedConfiguration(a, io, "", configuration, initial_skills, faults, creation, plan)) {
+    switch (try configuration_domain.applyValidatedConfiguration(a, io, "", configuration, initial_skills, faults, creation)) {
         .rejected => |code| rejection = std.meta.stringToEnum(message_admission.Rejection, @tagName(code)).?,
         .accepted => |applied| {
             content_domain.lookup(a, &reads.text);
@@ -794,7 +794,7 @@ pub fn startAgent(
     const creation = a.store.configurationReads();
     creation.* = .{ .next = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } } };
     creation.attach_parent = attached;
-    configuration_domain.prepareConfiguration(a, "", configuration, creation);
+    configuration_domain.prepareConfiguration(a, a.store.hostTools().host_tool_set, "", configuration, creation);
     try a.run();
     const found = facts orelse return error.StaleActionAttemptBinding;
     if (!std.mem.eql(u8, &found.session.ref, caller)) return error.CorruptStore;

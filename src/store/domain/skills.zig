@@ -83,37 +83,65 @@ const insert_instruction = rsql.Write(.{
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
-/// Initializes even an empty catalog. Empty initial catalogs have no instruction
-/// and consume no conversation position. Existing authored instructions stay intact.
-pub fn initialize(a: anytype, session: rsql.SessionHead, initial: ?*const Initial, faults: store_core.Faults) !void {
-    const value = initial orelse return;
-    const ready = switch (value.*) {
-        .ready => |prepared| prepared,
-        .unavailable => return error.SkillCatalogUnavailable,
-    };
-    try append(a, session, ready.encoded, ready.instruction, faults);
-}
-
 /// Appends both immutable metadata and ordinary instruction bytes in the caller's
 /// transaction. The caller settles its command/tool result in that transaction.
 pub fn append(a: anytype, session: rsql.SessionHead, encoded: []const u8, instruction: ?[]const u8, faults: store_core.Faults) !void {
-    var metadata: content.Import = .ofBytes(encoded, false);
-    var text: content.Import = .ofBytes(instruction orelse "", false);
-    var rows: content.Pair = .{ .first = null, .second = null };
-    var last: ordinal.Row = undefined;
-    content.lookupPair(a, &metadata, &text, &rows);
-    if (instruction != null) a.read(ordinal, .{ .session = &session.ref }, &last);
+    var appending: Appending = .{ .session = session, .encoded = encoded, .instruction = instruction };
+    appending.queue(a);
     try a.run();
-    content.foundPair(&rows, &metadata, &text);
-    if (faults.content_import) return error.InjectedContentImportFailure;
-    const metadata_id = try content.importBytes(a, &metadata, encoded);
-    const position = if (instruction != null) try (try a.positions(session)).take(1) else 0;
-    a.write(insert_snapshot, .{ .session = session, .position = position, .catalog_content_id = metadata_id });
-    if (instruction) |bytes| {
-        const text_id = try content.importBytes(a, &text, bytes);
-        a.write(insert_instruction, .{ .session = session, .ordinal = last.ordinal + 1, .position = position, .content_id = text_id });
-    }
+    try appending.finish(a, faults);
 }
+
+/// `append` as one round its caller runs: `queue` queues the lookup of
+/// both values' rows and, with an instruction, the Session's last entry
+/// ordinal; `finish`, after that round, queues the snapshot and the
+/// instruction. A transition keeps it in its value, so the round's rows
+/// land there and its reads bind the Session's reference in place.
+pub const Appending = struct {
+    session: rsql.SessionHead,
+    /// The caller's, which outlive the transaction.
+    encoded: []const u8,
+    instruction: ?[]const u8,
+    metadata: content.Import = undefined,
+    text: content.Import = undefined,
+    rows: content.Pair = undefined,
+    last: ordinal.Row = undefined,
+
+    /// The catalog a created Session starts with, or null when it starts
+    /// with none. Initializes even an empty catalog: an empty one has no
+    /// instruction and consumes no conversation position. Existing
+    /// authored instructions stay intact.
+    pub fn initial(session: rsql.SessionHead, captured: ?*const Initial) error{SkillCatalogUnavailable}!?Appending {
+        const value = captured orelse return null;
+        const ready = switch (value.*) {
+            .ready => |prepared| prepared,
+            .unavailable => return error.SkillCatalogUnavailable,
+        };
+        return .{ .session = session, .encoded = ready.encoded, .instruction = ready.instruction };
+    }
+
+    pub fn queue(appending: *Appending, a: anytype) void {
+        appending.metadata = .ofBytes(appending.encoded, false);
+        appending.text = .ofBytes(appending.instruction orelse "", false);
+        appending.rows = .{ .first = null, .second = null };
+        content.lookupPair(a, &appending.metadata, &appending.text, &appending.rows);
+        if (appending.instruction != null) a.read(ordinal, .{ .session = &appending.session.ref }, &appending.last);
+    }
+
+    /// After `queue`'s round.
+    pub fn finish(appending: *Appending, a: anytype, faults: store_core.Faults) !void {
+        const session = appending.session;
+        content.foundPair(&appending.rows, &appending.metadata, &appending.text);
+        if (faults.content_import) return error.InjectedContentImportFailure;
+        const metadata_id = try content.importBytes(a, &appending.metadata, appending.encoded);
+        const position = if (appending.instruction != null) try (try a.positions(session)).take(1) else 0;
+        a.write(insert_snapshot, .{ .session = session, .position = position, .catalog_content_id = metadata_id });
+        if (appending.instruction) |bytes| {
+            const text_id = try content.importBytes(a, &appending.text, bytes);
+            a.write(insert_instruction, .{ .session = session, .ordinal = appending.last.ordinal + 1, .position = position, .content_id = text_id });
+        }
+    }
+};
 
 /// A writer reads its actual current catalog, not the shell's earlier guess.
 /// Concurrent same-candidate reloads therefore append at most one delta.
@@ -178,12 +206,30 @@ pub const Failure = struct {
 /// Ordinary immutable rejected-command outcome; its typed code, not wording,
 /// controls the native caller's repair guidance and survives keyed replay.
 pub fn importFailure(a: anytype, bytes: []const u8, faults: store_core.Faults) !u64 {
-    var outcome: content.Import = .ofBytes(bytes, false);
-    content.lookup(a, &outcome);
+    var importing: ImportingFailure = .{ .bytes = bytes };
+    importing.lookup(a);
     try a.run();
-    if (faults.content_import) return error.InjectedContentImportFailure;
-    return content.importBytes(a, &outcome, bytes);
+    return importing.import(a, faults);
 }
+
+/// `importFailure` as one round its caller runs: `lookup` queues the
+/// lookup of the outcome's row, and `import`, after that round, its id.
+pub const ImportingFailure = struct {
+    /// The caller's, which outlive the transaction.
+    bytes: []const u8,
+    outcome: content.Import = undefined,
+
+    pub fn lookup(importing: *ImportingFailure, a: anytype) void {
+        importing.outcome = .ofBytes(importing.bytes, false);
+        content.lookup(a, &importing.outcome);
+    }
+
+    /// After `lookup`'s round.
+    pub fn import(importing: *ImportingFailure, a: anytype, faults: store_core.Faults) !u64 {
+        if (faults.content_import) return error.InjectedContentImportFailure;
+        return content.importBytes(a, &importing.outcome, importing.bytes);
+    }
+};
 
 /// A model skill tool call's or a catalog reload's capture.
 pub const Capture = union(enum) {
