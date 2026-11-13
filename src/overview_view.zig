@@ -2745,6 +2745,8 @@ pub fn grouped(buffer: *[32]u8, count: u64) []const u8 {
 /// Items use the same words and click meanings whether pinned or scrolled.
 pub const Item = union(enum) { new_session, gap, row: usize, empty };
 
+const new_session_name = "New Session";
+
 /// The new-conversation control belongs to the overview, never a chat sidebar.
 pub fn showsNewSession(state: *const State) bool {
     return state.conversing == null;
@@ -2762,10 +2764,22 @@ pub fn listLength(state: *const State) usize {
 
 /// Pinned controls have no scrollable list line.
 pub fn selectedLine(state: *const State) ?usize {
-    return switch (state.selected) {
-        .session => |ref| if (position(state, ref)) |at| at + firstRowLine(state) else null,
+    const ref = selectedSession(state) orelse return null;
+    return if (position(state, ref)) |at| at + firstRowLine(state) else null;
+}
+
+/// The open chat owns sidebar selection, independently of list navigation.
+/// Until its canonical listing arrives there is no projected line to select.
+fn selectedSession(state: *const State) ?Reference {
+    return state.conversing orelse switch (state.selected) {
+        .session => |ref| ref,
         .new_session, .settings => null,
     };
+}
+
+fn rowSelected(state: *const State, row: *const Row) bool {
+    const ref = selectedSession(state) orelse return false;
+    return std.mem.eql(u8, &ref, &row.reference);
 }
 
 pub fn listItem(state: *const State, line: usize) ?Item {
@@ -2800,7 +2814,7 @@ pub fn rowSegments(arena: Allocator, state: *const State, at: usize, width: u16,
     const end = width -| 1;
     const age_cells = @min(built.measure(age), end -| 3);
     const name_end = end -| age_cells -| @intFromBool(age_cells != 0);
-    const selected = if (state.conversing) |reference| std.mem.eql(u8, &reference, &row.reference) else state.selected == .session and std.mem.eql(u8, &state.selected.session, &row.reference);
+    const selected = rowSelected(state, row);
     // The archived-only list already supplies this fact; mixed lists do not.
     const archived = if (row.archive_state == .archived and state.archive != .archived)
         if (caps.unicode) " · archived" else " . archived"
@@ -2851,14 +2865,14 @@ pub const ListRow = struct { segments: []const Segment, heading: bool, selected:
 pub fn listSegments(arena: Allocator, state: *const State, item: Item, width: u16, caps: Caps, frame: u64) error{OutOfMemory}!ListRow {
     if (item == .row) {
         const row = &state.rows.items[state.order.items[item.row]];
-        return .{ .segments = try rowSegments(arena, state, item.row, width, caps, frame), .heading = false, .selected = state.selected == .session and std.mem.eql(u8, &state.selected.session, &row.reference) };
+        return .{ .segments = try rowSegments(arena, state, item.row, width, caps, frame), .heading = false, .selected = rowSelected(state, row) };
     }
     var built: Spans = .of(arena, caps, width);
     const spans = switch (item) {
         .new_session => new: {
             built.begin();
             _ = try built.put(2, "+", width -| 2, .{ .colour = .ink });
-            _ = try built.put(3, " New Session", width -| 3, .{});
+            _ = try built.put(3, " " ++ new_session_name, width -| 3, .{});
             break :new try built.finish();
         },
         .gap => &.{},
@@ -2907,9 +2921,10 @@ fn blankCells(arena: Allocator, cells: usize) error{OutOfMemory}![]const u8 {
     return bytes;
 }
 
-/// The row title: its Label, else the first line of its first Message (a
-/// greyed hint), else its reference.
+/// Empty chats use the pinned control's words; admitted conversations use
+/// their Label, first Message line, or reference in the usual precedence.
 fn title(state: *const State, row: *const Row) session_line.Name {
+    if (row.first == null) return .{ .text = new_session_name, .hint = false };
     return session_line.name(if (row.label) |*text| text.slice() else null, state.lineOf(row), &row.reference);
 }
 
@@ -4441,11 +4456,11 @@ test "overview scroll rows exclude the pinned New Session and chat omits its gap
             try std.testing.expectEqual(Item{ .row = at }, item);
             try std.testing.expectEqualStrings(&state.rows.items[index].reference, &clickOf(&state, item).?.open);
             state.selected = .{ .session = state.rows.items[index].reference };
-            try std.testing.expectEqual(@as(?usize, at + @intFromBool(!chat)), selectedLine(&state));
+            try std.testing.expectEqual(@as(?usize, if (chat) position(&state, mixed[0].reference).? else at + 1), selectedLine(&state));
         }
         try std.testing.expectEqual(null, listItem(&state, listLength(&state)));
         state.selected = .new_session;
-        try std.testing.expectEqual(null, selectedLine(&state));
+        try std.testing.expectEqual(if (chat) position(&state, mixed[0].reference) else null, selectedLine(&state));
     }
     var empty = try opened(&.{});
     defer empty.deinit();
@@ -6028,4 +6043,60 @@ test "empty Session projection counts and provider bands share visible rows" {
     try std.testing.expect(band(&state) == null);
     _ = try step(&state, .{ .conversation = null });
     try std.testing.expectEqual(Counts{ .working = 1 }, state.summary.counts);
+}
+
+test "empty chat name and selection agree across listing arrival orders and first admission" {
+    for ([_]bool{ false, true }) |listed_first| for ([_]?[]const u8{ null, "Configured name" }) |label| {
+        const empty = session("empty1", .{ .idle = ago(1) }, .{ .first = null, .label = label });
+        var state = try opened(if (listed_first) &.{empty} else &.{});
+        defer state.deinit();
+        _ = try step(&state, .{ .open = empty.reference });
+        _ = try step(&state, .{ .conversation = empty.reference });
+        if (!listed_first) {
+            // Neither opening nor a metadata-less Current fabricates a list
+            // member. In particular a provider-less failure is not a band.
+            try std.testing.expectEqual(@as(usize, 0), state.order.items.len);
+            try std.testing.expect(selectedLine(&state) == null);
+            _ = try step(&state, .{ .observed = .{ .reference = empty.reference, .read_version = testToken(2), .work = .{ .state = failedRow("empty1", 1, "provider_http_401", null).state }, .opening = false } });
+            try std.testing.expectEqual(@as(usize, 1), state.rows.items.len);
+            try std.testing.expectEqual(@as(usize, 0), state.order.items.len);
+            try std.testing.expect(band(&state) == null);
+            _ = try refresh(&state, .changed, testToken(3), &.{empty});
+        }
+        // A pre-list reconciliation or a covered Settings selection cannot
+        // choose a different sidebar row from the conversation being shown.
+        for ([_]Selection{ .new_session, .settings, .{ .session = "other1".* } }) |navigation| {
+            state.selected = navigation;
+            try std.testing.expectEqual(@as(?usize, 0), selectedLine(&state));
+            try std.testing.expectEqualStrings("New Session", title(&state, &state.rows.items[state.order.items[0]]).text);
+            for ([_]u16{ 46, 140 }) |width| {
+                var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+                defer arena.deinit();
+                const built = try listSegments(arena.allocator(), &state, .{ .row = 0 }, width, .{}, 0);
+                try std.testing.expect(built.selected);
+                var name_found = false;
+                for (built.segments) |segment| {
+                    try std.testing.expect(std.mem.indexOf(u8, segment.text, &empty.reference) == null);
+                    if (std.mem.indexOf(u8, segment.text, "New Session") != null) {
+                        name_found = true;
+                        try std.testing.expect(segment.style.bold);
+                        try std.testing.expectEqual(Colour.strong, segment.style.colour);
+                    }
+                }
+                try std.testing.expect(name_found);
+            }
+        }
+        _ = try step(&state, .{ .conversation = null });
+        try std.testing.expectEqual(@as(usize, 0), state.order.items.len);
+        try std.testing.expect(selectedLine(&state) == null);
+        // Canonical admission, not naming/configuration choices, restores the
+        // normal row title. It remains visible after leaving the chat.
+        var admitted = empty;
+        admitted.first = .{ .position = 1, .admission = 4, .sender = null };
+        _ = try refresh(&state, .changed, testToken(4), &.{admitted});
+        state.rows.items[0].line = .requested;
+        _ = try step(&state, .{ .first_line = .{ .reference = admitted.reference, .admission = 4, .line = "The first admitted task" } });
+        try std.testing.expectEqualStrings(label orelse "The first admitted task", title(&state, &state.rows.items[0]).text);
+        try std.testing.expectEqual(@as(usize, 1), state.order.items.len);
+    };
 }

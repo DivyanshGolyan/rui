@@ -2131,10 +2131,13 @@ def validate_scenario(data, sizes=None):
         require(isinstance(steps, list), f"{name}: steps must be a list")
         for step in steps:
             require(isinstance(step, dict), f"{name}: step must be an object")
-            actions = set(step) - {"timeout", "repaint"}
+            actions = set(step) - {"timeout", "repaint", "min_columns"}
             require(len(actions) == 1 and actions <= {"text", "keys", "wait", "gone", "sleep", "send", "host", "mouse", "exited"}, f"{name}: unknown or ambiguous step {step}")
             action = next(iter(actions))
             require("repaint" not in step or action == "mouse" and type(step["repaint"]) is bool, f"{name}: invalid repaint (mouse boolean only)")
+            require("min_columns" not in step or action in ("wait", "gone")
+                    and type(step["min_columns"]) is int and step["min_columns"] > 0,
+                    f"{name}: invalid min_columns (positive integer for wait/gone only)")
             value = step[action]
             require("timeout" not in step or action in ("wait", "gone", "exited") and duration(step["timeout"]), f"{name}: invalid timeout")
             if action == "mouse":
@@ -2453,6 +2456,10 @@ def frame_steps(run, terminal, steps, exiting=False):
             terminal.mouse(step["mouse"], repaint=step.get("repaint", True))
         elif "wait" in step or "gone" in step:
             action = "wait" if "wait" in step else "gone"
+            if "min_columns" in step and terminal.frame.columns < step["min_columns"]:
+                print(f"skip {action} {step[action]!r}: {terminal.frame.columns} columns < {step['min_columns']}",
+                      file=sys.stderr)
+                continue
             frame_wait(run, terminal, step[action], action == "gone", step.get("timeout", 20), exiting)
         elif "exited" in step:
             terminal.wait(lambda _c: terminal.collected, "Rui exit", step.get("timeout", 20), allow_exit=True)

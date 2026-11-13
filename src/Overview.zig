@@ -7083,6 +7083,7 @@ const EmptySessionOwner = struct {
     const references = [_]view.Reference{ "e2m4pt".*, "f3n5qw".* };
     const message = "Name the admitted empty chat";
     var rows: [references.len]protocol.SessionRow = undefined;
+    var efforts: [references.len]?model_capability.ReasoningEffort = @splat(.high);
     var count: usize = 0;
     var generation: u64 = 0;
     var configurations: usize = 0;
@@ -7099,6 +7100,7 @@ const EmptySessionOwner = struct {
         fixture.path_len = try fixture.tmp.dir.realPath(std.testing.io, &fixture.path);
         try pin(fixture.home(), "codex", "gpt-6-luna");
         count = 0;
+        efforts = @splat(.high);
         generation = 0;
         configurations = 0;
         scratch_count = 0;
@@ -7187,9 +7189,17 @@ const EmptySessionOwner = struct {
     }
 
     fn configure(_: std.process.Init, _: client.ReadContext, _: []const u8, reference: []const u8, edit: @import("chat_info.zig").Edit) !bool {
-        try std.testing.expect(edit == .model);
         const row = canonical(reference);
-        try row.model.set(edit.model);
+        switch (edit) {
+            .model => |model| try row.model.set(model),
+            .effort => |effort| for (rows[0..count], 0..) |*candidate, at| {
+                if (candidate == row) {
+                    efforts[at] = effort;
+                    break;
+                }
+            },
+            else => return error.TestUnexpectedResult,
+        }
         row.revision += 1;
         configurations += 1;
         return true;
@@ -7240,6 +7250,11 @@ const EmptySessionOwner = struct {
         try session.label.set("");
         try session.workspace.set(row.workspace.slice());
         try session.model.set(row.model.slice());
+        var effort: ?model_capability.ReasoningEffort = null;
+        for (rows[0..count], 0..) |*candidate, at| if (candidate == row) {
+            effort = efforts[at];
+        };
+        session.effort = effort;
         session.instructions = false;
         session.archive_state = row.archive_state;
         const FeedPolicy = @import("feed_reads.zig").Policy(@import("feed_window.zig").Key);
@@ -7251,7 +7266,7 @@ const EmptySessionOwner = struct {
             .result = .{
                 .status = true,
                 .work = .{ .read_version = .{ .instance = @splat(1), .generation = generation }, .work = row.work.core() },
-                .line = .{ .read = .{ .revision = row.revision, .end = row.end }, .model = row.model, .provider = .codex, .folder = row.workspace, .effort = .high },
+                .line = .{ .read = .{ .revision = row.revision, .end = row.end }, .model = row.model, .provider = .codex, .folder = row.workspace, .effort = effort },
                 .hint = .absent,
                 .cursor = .{ .position = row.end },
                 .at_start = true,
@@ -7279,11 +7294,16 @@ const EmptySessionOwner = struct {
         try std.testing.expect(try self.rig.settle() == null);
         const reference = self.rig.overview.app_session.?.session;
         try std.testing.expect(canonical(&reference).first_message == null);
+        // Neither open nor an activity observation fabricates a list row.
+        // The sidebar projection waits for canonical listing metadata.
+        try self.expectVisible(&.{});
         try self.readCurrent();
+        try self.expectVisible(&.{});
         try self.refresh();
         try std.testing.expect(self.rig.overview.root.session.?.eql(self.frontend().widget()));
         try std.testing.expectEqualStrings("", self.frontend().input.composition().bytes);
         try std.testing.expect(self.frontend().submission.intent == null);
+        try self.expectSelectedName(reference, "New Session");
         return reference;
     }
 
@@ -7298,6 +7318,55 @@ const EmptySessionOwner = struct {
         try self.readCurrent();
         try std.testing.expectEqualStrings("gpt-5.5", self.frontend().line.model.slice());
         try std.testing.expectEqualStrings("gpt-5.5", canonical(self.frontend().session).model.slice());
+        try self.expectSelectedName(self.rig.overview.app_session.?.session, "New Session");
+    }
+
+    fn chooseEffort(self: *EmptySessionOwner) !void {
+        try std.testing.expect(try self.rig.press("\t\t\r") == null);
+        try std.testing.expect(self.frontend().app_info.standaloneField() == .effort);
+        try std.testing.expect(self.frontend().app_info.panel.choice != null);
+        try std.testing.expect(try self.rig.press("\x1b[A\r") == null);
+        try std.testing.expectEqual(@import("chat_info.zig").Edit{ .effort = .medium }, self.frontend().info_edit.?);
+        self.frontend().poll_at = std.math.maxInt(i96);
+        try self.tick();
+        try self.joinRead();
+        try self.readCurrent();
+        try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, .medium), self.frontend().line.effort);
+        try self.expectSelectedName(self.rig.overview.app_session.?.session, "New Session");
+    }
+
+    /// At 140 columns inspect the composed sidebar; Root hides it at 46,
+    /// where the same production list widget is drawn independently.
+    fn expectSelectedName(self: *EmptySessionOwner, reference: view.Reference, name: []const u8) !void {
+        const overview = self.rig.overview;
+        try self.expectVisible(&.{reference});
+        try std.testing.expectEqual(reference, overview.state.conversing.?);
+        try std.testing.expectEqual(@as(?usize, 0), view.selectedLine(&overview.state));
+        try std.testing.expect(!view.showsNewSession(&overview.state));
+        for ([_]u16{ 46, 140 }) |width| {
+            var shown = try self.rig.shown(width, 24);
+            defer shown.deinit();
+            const columns: u16 = if (width >= Root.split_at) Root.list_width else width;
+            if (width < Root.split_at) {
+                const frame = try overview.listWidget().draw(.{ .arena = shown.arena.allocator(), .min = .{}, .max = .{ .width = columns, .height = 24 }, .cell_size = .{} });
+                const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = columns, .height = 24, .screen = &shown.screen };
+                frame.render(window, overview.widget());
+            }
+            var text: std.Io.Writer.Allocating = .init(shown.arena.allocator());
+            for (0..24) |row| {
+                for (0..columns) |col| try text.writer.writeAll(shown.screen.readCell(@intCast(col), @intCast(row)).?.char.grapheme);
+                try text.writer.writeByte('\n');
+            }
+            try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text.written(), name));
+            try std.testing.expect(std.mem.indexOf(u8, text.written(), &reference) == null);
+            try std.testing.expectEqual(@as(?u32, 0), overview.app_sessions.selected);
+            try std.testing.expect((try view.listSegments(shown.arena.allocator(), &overview.state, .{ .row = 0 }, columns, overview.caps, 0)).selected);
+            var bold_name = false;
+            for (try view.rowSegments(shown.arena.allocator(), &overview.state, 0, columns, overview.caps, 0)) |segment| {
+                if (std.mem.indexOf(u8, segment.text, name) != null) bold_name = segment.style.bold;
+            }
+            try std.testing.expect(bold_name);
+        }
     }
 
     fn leave(self: *EmptySessionOwner) !void {
@@ -7325,6 +7394,13 @@ test "empty New Session owner opens blank then hides on leave without deleting i
     defer fixture.destroy();
     const reference = try fixture.openNew();
     try fixture.expectVisible(&.{reference});
+    // A saved label is not an admitted Message; the open empty row keeps
+    // its product name even when canonical metadata contains another label.
+    const empty = EmptySessionOwner.canonical(&reference);
+    empty.label = .{};
+    try empty.label.?.set("Renamed but still empty");
+    try fixture.refresh();
+    try fixture.expectSelectedName(reference, "New Session");
     try fixture.leave();
     try fixture.expectVisible(&.{});
     try fixture.refresh();
@@ -7353,6 +7429,19 @@ test "empty New Session owner saves a real model choice then still hides on leav
     try std.testing.expectEqualStrings("gpt-5.5", EmptySessionOwner.canonical(&reference).model.slice());
 }
 
+test "empty New Session owner saves a real effort choice without renaming its selected sidebar entry" {
+    const fixture = try EmptySessionOwner.create();
+    defer fixture.destroy();
+    const reference = try fixture.openNew();
+    try fixture.chooseEffort();
+    try std.testing.expectEqual(@as(usize, 1), EmptySessionOwner.configurations);
+    try std.testing.expect(EmptySessionOwner.canonical(&reference).first_message == null);
+    try fixture.leave();
+    try fixture.refresh();
+    try fixture.expectVisible(&.{});
+    try std.testing.expectEqual(@as(usize, 1), EmptySessionOwner.count);
+}
+
 test "empty New Session owner promotes the same row only after a canonical first Message admission" {
     const fixture = try EmptySessionOwner.create();
     defer fixture.destroy();
@@ -7362,6 +7451,7 @@ test "empty New Session owner promotes the same row only after a canonical first
     try std.testing.expect(chat.submission.intent != null);
     try std.testing.expectEqualStrings(EmptySessionOwner.message, try chat.input.message(chat.submission.intent.?.message));
     try std.testing.expect(EmptySessionOwner.canonical(&reference).first_message == null);
+    try fixture.expectSelectedName(reference, "New Session");
     // The frontend really sealed and captured the Message. This unit fixture
     // has no Host; replace its joined transport failure with a typed admitted
     // reply, as the native request boundary does, rather than faking a send key.
@@ -7385,12 +7475,14 @@ test "empty New Session owner promotes the same row only after a canonical first
     // Acceptance alone is not the overview's listing authority.
     try fixture.refresh();
     try std.testing.expect(fixture.rig.overview.state.rows.items[0].first == null);
+    try fixture.expectSelectedName(reference, "New Session");
     const row = EmptySessionOwner.canonical(&reference);
     row.first_message = .{ .position = 2, .admission = 37, .admitted_at = test_now_s, .sender = null, .content = .{ .length = EmptySessionOwner.message.len, .digest = protocol.contentDigest(EmptySessionOwner.message) } };
     row.end = 2;
     row.revision += 1;
     row.peers.from_person_at = test_now_s;
     try fixture.refresh();
+    try fixture.expectSelectedName(reference, EmptySessionOwner.message);
     try fixture.leave();
     try fixture.expectVisible(&.{reference});
     try std.testing.expectEqual(@as(usize, 1), EmptySessionOwner.count);

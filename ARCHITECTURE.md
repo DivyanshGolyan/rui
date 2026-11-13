@@ -2508,6 +2508,8 @@ Enter on the pinned `+ New Session` row (Home then Enter), or one click on it, c
 `configure_input.ConfigureInput.completeCreation` completes the copied prospective binding with the Workspace, provider/model, saved effort and permission mode; captured Configure and `Requests.sendCaptured` use the existing request ledger.
 No Message or Turn receipt is synthesized. Only sending text from the chat admits a Message.
 The single pure list projection in `overview_view.visible` omits a listed row whose `first_message` is null, except when it names the currently open Session.
+The shared `overview_view.title` names that current empty row `New Session`, using the pinned control’s words rather than its raw reference; first Message admission restores the normal Label/first-line/reference naming precedence.
+The shared row rendering and selected-line projection derive selection from the current conversation, otherwise the overview selection; canonical list membership is still required before a row is drawn.
 Changing model or effort without admitting a Message does not make that row visible after leaving the chat.
 This is presentation only: Configure-created Sessions and their observed metadata stay stored and remain available through CLI list, inspect and resume; leaving does not delete, archive or reconfigure them.
 While that creation is pending, Enter and clicks cannot duplicate it; pending state is derived from the ledger entry.
