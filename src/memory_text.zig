@@ -8,8 +8,11 @@ const mib = 1024 * 1024;
 /// does. Null memory draws nothing before the first read. The result belongs to arena.
 pub fn fit(arena: std.mem.Allocator, memory: ?Memory, unicode: bool, columns: u16) error{OutOfMemory}![]const u8 {
     for (try choices(arena, memory, unicode)) |text| {
-        // Every character the figure uses is one column wide.
-        if (std.unicode.utf8CountCodepoints(text) catch unreachable <= columns) return text;
+        // Every character the figure uses is one column wide, so its width is
+        // its count of UTF-8 lead bytes.
+        var width: usize = 0;
+        for (text) |byte| width += @intFromBool(byte & 0xC0 != 0x80);
+        if (width <= columns) return text;
     }
     return "";
 }
