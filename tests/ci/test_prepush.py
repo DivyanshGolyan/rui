@@ -1,4 +1,5 @@
 import ast
+import contextlib
 from contextlib import redirect_stdout
 import io
 import json
@@ -14,6 +15,7 @@ from unittest.mock import patch
 
 import build_files
 import prepush
+import select_tests
 
 ROOT = prepush.ROOT
 
@@ -226,14 +228,15 @@ class PrepushTest(unittest.TestCase):
             self.assertEqual({name: full[name] for name in default}, default)
             self.assertEqual(full["unfiltered unit compile"], prepush.UNIT_COMPILE)
             self.assertEqual(full["stack frames"], ["zig", "build", "-j1", "stack-frames", "-Dcpu=baseline", "--summary", "line"])
-        self.assertEqual(with_server["live MySQL"], ["env", "RUI_TEST_REQUIRE_ENGINES=mysql", "zig", "build", "test", "--summary", "line"])
+        self.assertEqual(with_server["live MySQL"], ["env", "RUI_TEST_REQUIRE_ENGINES=mysql", "zig", "build", "test-store", "--summary", "line"])
         self.assertIsInstance(without["live MySQL"], prepush.Skipped)
         self.assertIn("RUI_TEST_MYSQL_SOCKET", without["live MySQL"].reason)
-        self.assertTrue(without["live MySQL"].reason.endswith("so CI runs test"))
+        self.assertTrue(without["live MySQL"].reason.endswith("so CI runs test-store"))
 
     def test_full_runs_only_the_server_targets_that_read_the_local_mysql(self):
         for path, live in (("src/request_encoding.zig", None), ("src/store/wire/pg.zig", None),
-                           ("src/store/wire/mysql_connection.zig", ["test"]), ("src/store/rsql.zig", ["test"]),
+                           ("src/store/wire/mysql_connection.zig", ["test-store"]), ("src/store/rsql.zig", ["test-store"]),
+                           ("src/store/mysql.zig", ["test-store"]),
                            ("tests/integration/launch_frame_integration.py", ["launch-frame-integration"])):
             with self.subTest(path=path):
                 self.file(path)
@@ -241,6 +244,25 @@ class PrepushTest(unittest.TestCase):
                 command = full.get("live MySQL")
                 self.assertEqual(command and command[4:-2], live)
                 self.assertNotIn("live MySQL", dict(prepush.checks([path], AVAILABLE, "BASE")))
+
+    def test_the_live_mysql_step_never_runs_a_whole_suite(self):
+        # Every path whose development selection names a live server target.
+        candidates = {path for patterns, *_ in select_tests.LIVE_RULES for path in patterns if "*" not in path and not path.startswith("!")}
+        candidates |= {"src/store/rsql.zig", "src/store/Store.zig", "src/store/schema.zig", "src/store.zig"}
+        for path in sorted(candidates):
+            with self.subTest(path=path):
+                self.file(path)
+                command = dict(prepush.checks([path], AVAILABLE, "BASE", "full", mysql=True)).get("live MySQL")
+                if command:
+                    self.assertFalse(set(command) & {"test", "check", "check-full"}, command)
+                    self.assertFalse(any(word.startswith("-Dtest-filter") for word in command))
+        # Whatever whole suite a selection names live, only its live owners run.
+        self.file("src/store/rsql.zig")
+        selection = {"targets": ["check", "check-full", "test", "test-store", "launch-frame-integration"], "mysql_suites": ["launch-frame-integration"],
+                     "server_targets": ["check", "check-full", "launch-frame-integration", "test", "test-store"]}
+        with patch.object(prepush, "select", return_value=selection):
+            command = dict(prepush.checks(["src/store/rsql.zig"], AVAILABLE, "BASE", "full", mysql=True))["live MySQL"]
+        self.assertEqual(command[4:-2], ["launch-frame-integration", "test-store"])
 
     def test_mysql_is_reachable_only_through_a_listening_named_socket_with_a_password(self):
         path = str(self.root / "m.sock")
@@ -290,24 +312,31 @@ class PrepushTest(unittest.TestCase):
         self.commit("a", "1\n", "root")
         return self.git("rev-parse", "HEAD^{tree}")
 
-    def run_checks(self, *commands):
+    def run_checks(self, *commands, base="BASE"):
         with redirect_stdout(io.StringIO()):
-            return prepush.run([(f"check {index}", command) for index, command in enumerate(commands)], "default")
+            return prepush.run([(f"check {index}", command) for index, command in enumerate(commands)], "default", base)
 
     def test_a_receipt_covers_only_its_clean_tree_with_every_command_passed(self):
         tree = self.receipt_repository()
         results = self.run_checks(["true"], prepush.Skipped("no server"))
         self.assertEqual(results, [{"name": "check 0", "command": ["true"], "exit": 0}, {"name": "check 1", "skipped": "no server"}])
         receipt = prepush.read_receipt()
-        self.assertEqual((receipt["tree"], receipt["mode"]), (tree, "default"))
+        self.assertEqual((receipt["tree"], receipt["base"], receipt["mode"]), (tree, "BASE", "default"))
         self.assertTrue(prepush.receipt_path().is_relative_to((self.root / ".git").resolve()), "untracked, per checkout")
-        self.assertTrue(prepush.receipt_covers(receipt, [tree, tree]), "same tree")
+        self.assertTrue(prepush.receipt_covers(receipt, [(tree, "BASE"), (tree, "BASE")]), "same tree")
+        self.assertFalse(prepush.receipt_covers(receipt, [(tree, "OTHER")]), "same tree checked against another merge base")
         changed = self.commit("a", "2\n", "change")
-        self.assertFalse(prepush.receipt_covers(receipt, [self.git("rev-parse", f"{changed}^{{tree}}")]), "changed tree")
-        self.assertFalse(prepush.receipt_covers(receipt, [tree, self.git("rev-parse", "HEAD^{tree}")]), "one of two pushed trees changed")
+        self.assertFalse(prepush.receipt_covers(receipt, [(self.git("rev-parse", f"{changed}^{{tree}}"), "BASE")]), "changed tree")
+        self.assertFalse(prepush.receipt_covers(receipt, [(tree, "BASE"), (self.git("rev-parse", "HEAD^{tree}"), "BASE")]),
+                         "one of two pushed trees changed")
+        head = (self.git("rev-parse", "HEAD^{tree}"), "BASE")
 
         self.run_checks(["true"], ["false"])
-        self.assertFalse(prepush.receipt_covers(prepush.read_receipt(), [self.git("rev-parse", "HEAD^{tree}")]), "a failed command")
+        self.assertFalse(prepush.receipt_covers(prepush.read_receipt(), [head]), "a failed command")
+        for commands in ((), (prepush.Skipped("no server"),)):
+            with self.subTest(commands=commands):
+                self.run_checks(*commands)
+                self.assertFalse(prepush.receipt_covers(prepush.read_receipt(), [head]), "a run that ran nothing passes nothing")
 
     def test_a_dirty_working_tree_never_yields_a_receipt_matching_head(self):
         tree = self.receipt_repository()
@@ -316,44 +345,47 @@ class PrepushTest(unittest.TestCase):
                 dirty()
                 self.run_checks(["true"])
                 self.assertIsNone(prepush.read_receipt()["tree"])
-                self.assertFalse(prepush.receipt_covers(prepush.read_receipt(), [tree]))
+                self.assertFalse(prepush.receipt_covers(prepush.read_receipt(), [(tree, "BASE")]))
                 self.git("checkout", "-q", "--", ".")
                 self.git("clean", "-qfd")
         self.run_checks(["sh", "-c", "echo changed > a"])
-        self.assertFalse(prepush.receipt_covers(prepush.read_receipt(), [tree]), "a check that dirtied the tree")
+        self.assertFalse(prepush.receipt_covers(prepush.read_receipt(), [(tree, "BASE")]), "a check that dirtied the tree")
         self.git("checkout", "-q", "--", ".")
         self.run_checks(["true"])
-        self.assertTrue(prepush.receipt_covers(prepush.read_receipt(), [tree]))
+        self.assertTrue(prepush.receipt_covers(prepush.read_receipt(), [(tree, "BASE")]))
 
     def test_pushing_a_tree_with_a_passing_receipt_does_not_run_the_checks_again(self):
-        tree = self.receipt_repository()
-        head = self.git("rev-parse", "HEAD")
+        self.git("init", "-q", "-b", "main")
+        self.commit("a", "1\n", "root")
+        self.git("checkout", "-qb", "feature")
+        head = self.commit("b", "1\n", "feature")
+        tree = self.git("rev-parse", "HEAD^{tree}")
+        # One probe per changed diff, as checks() plans nothing for an empty one.
+        planned = patch.object(prepush, "checks", side_effect=lambda paths, *_: iter([("probe", ["true"])] if paths else [])).start()
 
-        git = prepush.git
-        planned = patch.object(prepush, "checks", side_effect=lambda *_: iter([("probe", ["true"])])).start()
-        patch.object(prepush, "changed_paths", return_value=(["AGENTS.md"], "BASE")).start()
-        patch.object(prepush, "merged_base", return_value=False).start()
-        patch.object(prepush, "git", side_effect=lambda *a: "BASE" if a[0] == "merge-base" else git(*a)).start()
-
-        def push():
-            with patch("sys.argv", ["prepush.py", "--quick"]), patch.dict(os.environ, {"RUI_PREPUSH_PUSHED": f" {head}"}), \
+        def run(*argv, pushed=None):
+            environ = {"RUI_PREPUSH_PUSHED": f" {pushed}"} if pushed else {}
+            # select_tests.changed_paths reads the repository it runs in.
+            with patch("sys.argv", ["prepush.py", *argv]), patch.dict(os.environ, environ), contextlib.chdir(self.root), \
                     redirect_stdout(io.StringIO()) as output, self.assertRaises(SystemExit) as result:
                 prepush.main()
             return result.exception.code, output.getvalue()
 
-        code, first = push()
-        self.assertEqual((code, planned.call_count), (0, 1), "no receipt yet: the checks run")
-        self.assertIn("== probe: true", first)
-        self.assertEqual(prepush.read_receipt()["tree"], tree)
-        code, second = push()
-        self.assertEqual((code, planned.call_count), (0, 1), "the same tree again: nothing runs")
-        self.assertIn(f"run on tree {tree} passed", second)
+        def push(sha):
+            before = planned.call_count
+            code, output = run("--quick", "--base", "main", pushed=sha)
+            self.assertEqual(code, 0)
+            return planned.call_count > before, output
+
+        self.assertEqual(run("--base", "HEAD")[0], 0)
+        self.assertEqual(prepush.read_receipt()["results"], [], "the diff against HEAD is empty")
+        self.assertTrue(push(head)[0], "a receipt against another base, which ran nothing, does not cover the push")
+        ran, output = push(head)
+        self.assertFalse(ran, "the same tree and base again: nothing runs")
+        self.assertIn(f"run on tree {tree} against {self.git('merge-base', 'HEAD', 'main')} passed", output)
         self.commit("a", "2\n", "change")
-        code, _ = push()
-        self.assertEqual(planned.call_count, 1, "pushing the old commit still matches its tree")
-        head = self.git("rev-parse", "HEAD")
-        push()
-        self.assertEqual(planned.call_count, 2, "a new tree runs the checks")
+        self.assertFalse(push(head)[0], "pushing the old commit still matches its tree and base")
+        self.assertTrue(push(self.git("rev-parse", "HEAD"))[0], "a new tree runs the checks")
 
     def test_whitespace_in_committed_lines_is_fixed_in_the_working_tree_and_still_fails(self):
         self.git("init", "-q")

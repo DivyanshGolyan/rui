@@ -200,10 +200,11 @@ Before every push, including review-fix rounds and after merging main, run only 
   Deleted files still select owner checks, and mixed changes union checks without repeating them.
   Commands read working-tree contents; unstaged and untracked-only changes do not select checks.
   When history since the merge base holds a merge of `origin/main`, it also compiles the unit binaries unfiltered with CI's unit producer command, `zig build ci-build -Dci-targets=test -Dci-part=unit`, because a filtered build never analyzes a test the merge brought back.
-  Each run writes a receipt to the checkout's git directory with HEAD's tree, the mode and each command's exit code; a working tree that differs from HEAD records no tree, so its receipt matches no push.
+  Each run writes a receipt to the checkout's git directory with HEAD's tree, the merge base its diff came from, the mode and each command's exit code; a working tree that differs from HEAD records no tree, so its receipt matches no push.
   Orb setup installs it as a git pre-push hook that runs `--quick`, everything above except the Zig builds; elsewhere install it once with `python3 tests/ci/prepush.py --install-hook`.
-  The hook runs nothing when the receipt holds the pushed tree and every command in it passed, so pushing the same tree again does not repeat the checks.
+  The hook runs nothing when the receipt holds the pushed tree and its merge base with `origin/main`, and records at least one command, every one of which passed, so pushing the same tree again does not repeat the checks.
 - `python3 tests/ci/prepush.py --full`, which runs the default checks plus the unfiltered unit compile, `zig build -j1 stack-frames -Dcpu=baseline` and, when `RUI_TEST_MYSQL_SOCKET` and `RUI_TEST_MYSQL_ROOT_PASSWORD` name a reachable MySQL, the selected server targets that read it, with `RUI_TEST_REQUIRE_ENGINES=mysql`.
+  It runs `test-store` where the selection names `test`, and never `test`, `check` or `check-full`, so it is no full local suite.
   Without that server it says so, skips only that part and records the skip in the receipt.
   Postgres tests and `mysql-wire-integration`, which starts its own server in Docker, stay with CI.
 - the touched owners' focused tests (`-Dtest-filter`)
