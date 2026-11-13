@@ -722,6 +722,9 @@ pub const Preparation = struct {
         text_format,
         request_end,
         end,
+        /// The request is sealed; the Session's seal and the span's check
+        /// and memo come next.
+        sealed,
         history_store,
         complete,
     };
@@ -831,6 +834,10 @@ pub const Preparation = struct {
             // The sealed request is the source of the prefix check and the
             // memo, read once under the allowance; a failure loses only the
             // memo.
+            if (self.state.stage == .sealed) {
+                self.planSpan() catch |err| return .{ .failed = err };
+                self.state.stage = .history_store;
+            }
             if (self.state.stage == .history_store) {
                 if (self.state.prefix_check != null) {
                     if (!(self.advancePrefixCheck(&bytes_left) catch |err| return .{ .failed = err })) continue;
@@ -890,8 +897,9 @@ pub const Preparation = struct {
             // previous span that this view contains replaces encoding that
             // prefix; anything else rebuilds it from the Store.
             .history_start => {
+                const next = try self.startSpan();
                 self.state.stage = .history;
-                return self.startSpan();
+                return next;
             },
             .history => {
                 items_left.* += 1; // The semantic cursor charges discovery or parser work.
@@ -1053,7 +1061,7 @@ pub const Preparation = struct {
                 return self.loadItemHeader(.request_end, 0);
             },
             .end => return .end,
-            .history_store, .complete => unreachable,
+            .sealed, .history_store, .complete => unreachable,
         }
         return .pending;
     }
@@ -1385,7 +1393,13 @@ pub const Preparation = struct {
         self.closeEmission();
         // The writer closes before a memo file opens.
         self.writer.close();
-        self.state.stage = .history_store;
+        self.state.stage = .sealed;
+    }
+
+    /// Plans what the sealed request's span is checked against and kept
+    /// as. It changes nothing before its one Store read. Never inlined, as
+    /// `seal`.
+    noinline fn planSpan(self: *Preparation) !void {
         const span = &(self.state.span orelse return);
         // The history_memo emission drains before the history's next item,
         // so a copy has ended, matched or lost, before the request seals.
@@ -1454,11 +1468,14 @@ pub const Preparation = struct {
             bytes_left.* -= count;
         }
         if (check.record) {
+            // From a copy: finishing a hash changes it, and the seal must be
+            // the same each time this runs.
+            var hasher = check.hasher;
             const next: store.PrefixSeal = .{
                 .anchor = check.anchor,
                 .admission_position = check.admission_position,
                 .span_length = check.length,
-                .digest = check.hasher.finalResult(),
+                .digest = hasher.finalResult(),
             };
             try self.view.recordPrefixSeal(&next);
         }
