@@ -135,7 +135,7 @@ fn runAttempt(self: *Self) !Published {
     }
     // These effects have independent outcomes. Retain both even when the UI
     // leaves after publication and never consumes an activation on a tick.
-    const defaults: anyerror!void = if (preferences.saveProviderAfterLogin(init.environ_map.get("HOME") orelse "", self.state.selected, false)) |_| {} else |err| err;
+    const defaults: anyerror!void = if (preferences.saveProviderAfterLogin(init.environ_map.get("HOME") orelse "", self.state.selected)) |_| {} else |err| err;
     return .{ .defaults = defaults, .activation = self.activate.?(init, self.selectors) };
 }
 
