@@ -5,7 +5,7 @@ import { execFileSync } from "node:child_process";
 import { once } from "node:events";
 import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
-import { createSecureServer } from "node:http2";
+import { createServer as createH2Server, createSecureServer } from "node:http2";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -63,15 +63,9 @@ for (const [engine, adapter] of [["sqlite", "codex"], ["mysql", "codex"], ["mysq
 			assert.equal(path, "/v1/responses");
 			return { type: "text/event-stream", body: response(++modelCalls) };
 		}
-		// The plan fixture's existing loopback-only test transport is HTTP/1.1.
-		const provider = adapter === "chatgpt" ? createServer((request, reply) => {
-			request.resume();
-			request.on("end", () => {
-				const result = answer(request.method, request.url, request.headers.authorization);
-				reply.writeHead(200, { "content-type": result.type, "content-length": Buffer.byteLength(result.body), connection: "close" });
-				reply.end(result.body);
-			});
-		}) : createSecureServer({ key: readFileSync(key), cert: readFileSync(cert) }).on("stream", (stream, headers) => {
+		// Like TestHTTPServer in the plan suite, the loopback fixture serves h2c.
+		const provider = adapter === "chatgpt" ? createH2Server() : createSecureServer({ key: readFileSync(key), cert: readFileSync(cert) });
+		provider.on("stream", (stream, headers) => {
 			stream.resume();
 			stream.on("end", () => {
 				const result = answer(headers[":method"], headers[":path"], headers.authorization);
