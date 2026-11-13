@@ -22,6 +22,12 @@ on:
         description: Run the full suite on Linux and macOS and bisect a failing job over the batch
         required: true
         type: boolean
+      # main-build.yml after each merge: never a test, never a promotion.
+      compile_only:
+        description: Compile every gate and unit root and type-check macOS; run no tests
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -31,7 +37,7 @@ permissions:
   checks: read
 
 concurrency:
-  group: selected-${{ github.event_name }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}${{ inputs.promotion && '-promotion' || '' }}
+  group: selected-${{ github.event_name }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}${{ inputs.promotion && '-promotion' || '' }}${{ inputs.compile_only && '-compile' || '' }}
   cancel-in-progress: true
 
 jobs:
@@ -58,6 +64,7 @@ jobs:
       macos_matrix: ${{ steps.select.outputs.macos_matrix }}
       macos_split: ${{ steps.select.outputs.macos_split }}
       policy_skips: ${{ steps.select.outputs.policy_skips }}
+      compile_only: ${{ steps.select.outputs.compile_only }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -72,6 +79,7 @@ jobs:
           DRAFT: ${{ github.event.pull_request.draft || false }}
           EVENT_NAME: ${{ github.event_name }}
           PROMOTION: ${{ inputs.promotion || false }}
+          COMPILE_ONLY: ${{ inputs.compile_only || false }}
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$CANDIDATE_REF"
@@ -88,7 +96,7 @@ jobs:
           kind = classify(selection['base'], selection['head'])
           result = plan(selection, event_name=os.environ['EVENT_NAME'],
                         draft=os.environ['DRAFT'] == 'true', promotion=os.environ['PROMOTION'] == 'true',
-                        change_kind=kind)
+                        change_kind=kind, compile_only=os.environ['COMPILE_ONLY'] == 'true')
           with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
               print('candidate_ref=' + os.environ['CANDIDATE_REF'], file=f)
               for key, value in result.outputs.items():
@@ -105,7 +113,7 @@ jobs:
           python3 tests/ci/pr_shape.py "$BASE"
   policy:
     needs: plan
-    if: ${{ !github.event.repository.private && needs.plan.outputs.change_kind == 'normal' && needs.plan.outputs.draft_run == 'false' }}
+    if: ${{ !github.event.repository.private && needs.plan.outputs.change_kind == 'normal' && needs.plan.outputs.draft_run == 'false' && needs.plan.outputs.compile_only == 'false' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -359,8 +367,9 @@ jobs:
   linux_suites:
     name: linux suites (${{ matrix.name }})
     needs: [plan, linux_build, linux_build_unit]
-    # The unit producer is skipped when no selected target compiles it.
-    if: ${{ !cancelled() && needs.linux_build.result == 'success' && contains(fromJSON('["success", "skipped"]'), needs.linux_build_unit.result) }}
+    # The unit producer is skipped when no selected target compiles it. A
+    # compile-only build stops at its producers.
+    if: ${{ !cancelled() && needs.plan.outputs.compile_only == 'false' && needs.linux_build.result == 'success' && contains(fromJSON('["success", "skipped"]'), needs.linux_build_unit.result) }}
     runs-on: ubuntu-24.04
     # Ordinary shards take under ten minutes; a local rebuild after a rejected
     # handoff compiles without the producer's cache. A failed promotion shard
@@ -514,10 +523,18 @@ jobs:
           NATIVE_RESULT: ${{ needs.linux_suites.result }}
           TYPECHECK: ${{ needs.plan.outputs.typecheck_macos }}
           TYPECHECK_RESULT: ${{ needs.macos_typecheck.result }}
+          COMPILE_ONLY: ${{ needs.plan.outputs.compile_only }}
         run: |
           test "$PLAN_RESULT" = success
+          # A compile-only build runs neither policy nor suites.
+          case "$COMPILE_ONLY" in
+            true) RAN=skipped ;;
+            false) RAN=success ;;
+            *) echo 'Missing or invalid compile-only selection' >&2; exit 1 ;;
+          esac
           case "$DRAFT_RUN:${CHANGE_KIND-normal}" in
             true:normal|true:documentation|false:documentation)
+              test "$COMPILE_ONLY" = false
               test "$POLICY_RESULT" = skipped
               test "$TARGETS" = '[]'
               test "$SPLIT" = false
@@ -530,7 +547,7 @@ jobs:
             false:normal) ;;
             *) echo 'Invalid draft run or change kind' >&2; exit 1 ;;
           esac
-          test "$POLICY_RESULT" = success
+          test "$POLICY_RESULT" = "$RAN"
           if [ "$CODEGEN" = true ]; then test "$CODEGEN_RESULT" = success; else test "$CODEGEN_RESULT" = skipped; fi
           if [ "$SPLIT" = true ]; then test "$UNIT_RESULT" = success; else test "$UNIT_RESULT" = skipped; fi
           case "$TYPECHECK" in
@@ -540,7 +557,7 @@ jobs:
           esac
           if [ -n "$TARGETS" ] && [ "$TARGETS" != '[]' ]; then
             test "$BUILD_RESULT" = success
-            test "$NATIVE_RESULT" = success
+            test "$NATIVE_RESULT" = "$RAN"
           else
             test "$BUILD_RESULT" = skipped
             test "$NATIVE_RESULT" = skipped

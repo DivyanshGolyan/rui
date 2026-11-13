@@ -81,8 +81,12 @@ Correct that transition or replace the owning model, not a downstream observer.
 From the first review finding, name its class, sweep the change for siblings and correct the structure that allows the class, so one round closes it.
 When another correction touches the same lifecycle, redraw states, authorities, handoffs and release conditions.
 Prefer replacing superseded state over additional flags, retries, test hooks or timing allowances.
+A cache, memo or "already shown" check keys on every input that changes its value (revision, caret, source, the commit a run tested); a result computed from an older input is dropped, never applied over a newer one.
+Every refused or rejected state a user can reach (an editor overflow, a failed sign-in, a closed pane's focus) has a tested way out.
 
 Respect architectural transaction/effect boundaries.
+Check every precondition before the first step that cannot be undone (stopping a Host, deleting a credential, marking work pending); a check that runs after it can only report damage.
+Independent targets (two logins, several Hosts or Stores) succeed or fail independently, and each reports its own outcome.
 Give each mutable handle one owner.
 Construct callback state in final storage before registration; retain its address and custody through safe cleanup.
 Validate external syntax and consequential meaning.
@@ -161,6 +165,8 @@ Review parity and failure paths as well as the diff:
   Route each to the main path's failure boundary, or justify it beside the code.
 - **In-flight effects.** Each effect the change emits has one record from emission to a definite answer.
   On every exit (return, error, cancel), the owner reports each still-open record to the caller's failure boundary.
+- **Consumers.** When the change alters a shared value (a label, status text, column, step list, exit convention or file list), search for the old form. A test or fixture that restates it reads it from its owner instead ([Evidence](#evidence)); a consumer that cannot (a skill, helper script or document) changes in the same change.
+- **Runnable instructions.** A command in a skill, doc or script runs as written on the platforms it names: required inputs are supplied, nothing depends on one machine's paths or permissions, and a step that needs a person (such as a hardware check at the Mac) says so.
 - **Design.** Check the change against the approved design, not only the issue derived from it.
   An edit to a contract document that makes it match the change's own code is a finding, and so is a "by design" that cites text the same change added.
 
