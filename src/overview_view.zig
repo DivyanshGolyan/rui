@@ -2852,7 +2852,7 @@ pub fn focusedLine(state: *const State, list_focused: bool) ?usize {
     if (!list_focused) return selectedLine(state);
     return switch (state.selected) {
         .session => |ref| if (position(state, ref)) |at| at + firstRowLine(state) else null,
-        .new_session, .settings => null,
+        .new_session, .archived, .settings => null,
     };
 }
 
