@@ -33,6 +33,77 @@ const testingSessionList = shared_fixtures.testingSessionList;
 const testingSessionListReport = shared_fixtures.testingSessionListReport;
 const testingSessionReport = shared_fixtures.testingSessionReport;
 
+test "a full or changed listing's last page says whether any Session in scope is archived" {
+    try store_testing.forEachEngine(struct {
+        fn archivedOf(storage: *Store, tmp: *std.testing.TmpDir, request: protocol.ListSessions, used: *std.atomic.Value(u64), number: u64) !struct { archived: ?bool, since: []const u8, delta: []const u8, buffer: []u8 } {
+            const bytes = try testingSessionList(storage, tmp, request, used, number);
+            errdefer std.testing.allocator.free(bytes);
+            var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
+            defer parsed.deinit();
+            const object = parsed.value.object;
+            const archived: ?bool = if (object.get("archived")) |value| value.bool else null;
+            const since = std.mem.indexOf(u8, bytes, object.get("since").?.string).?;
+            const delta = std.mem.indexOf(u8, bytes, object.get("delta").?.string).?;
+            return .{ .archived = archived, .since = bytes[since..][0..object.get("since").?.string.len], .delta = bytes[delta..][0..object.get("delta").?.string.len], .buffer = bytes };
+        }
+
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var root: [protocol.max_store_bytes]u8 = undefined;
+            const workspace = root[0..try tmp.dir.realPath(std.testing.io, &root)];
+            var used = std.atomic.Value(u64).init(0);
+            var config = try completeConfiguration("archived-fact", "", workspace, "model");
+            const configured = try storage.configure(&config, .{});
+            const session = configured.accepted.session;
+            var other_scope: protocol.ListSessions = .{ .workspace = .{} };
+            try other_scope.workspace.?.set("/elsewhere");
+            var own_scope: protocol.ListSessions = .{ .workspace = .{} };
+            try own_scope.workspace.?.set(workspace);
+
+            const before = try archivedOf(&storage, &tmp, .{}, &used, 1);
+            defer std.testing.allocator.free(before.buffer);
+            try std.testing.expectEqual(@as(?bool, false), before.archived);
+
+            var archive: protocol.SessionArchiveCommand = .{ .archived = true };
+            try archive.key.set("archived-fact-archive");
+            try archive.session.set(session.slice());
+            try std.testing.expect(storage.archiveSession(&archive, .{}).accepted.archived);
+            // Every filter and scope that holds it says so; another scope does not.
+            for ([_]protocol.SessionArchiveFilter{ .active, .archived, .all }) |filter| {
+                for ([_]?protocol.ListSessions{ null, own_scope }) |scope| {
+                    var request: protocol.ListSessions = scope orelse .{};
+                    request.archive = filter;
+                    const full = try archivedOf(&storage, &tmp, request, &used, 2);
+                    defer std.testing.allocator.free(full.buffer);
+                    try std.testing.expectEqualStrings("full", full.delta);
+                    try std.testing.expectEqual(@as(?bool, true), full.archived);
+                }
+            }
+            const elsewhere = try archivedOf(&storage, &tmp, other_scope, &used, 3);
+            defer std.testing.allocator.free(elsewhere.buffer);
+            try std.testing.expectEqual(@as(?bool, false), elsewhere.archived);
+            // A changed listing carries the fact as it stands at its read.
+            const changed = try archivedOf(&storage, &tmp, .{ .since = try protocol.SinceToken.parse(before.since) }, &used, 4);
+            defer std.testing.allocator.free(changed.buffer);
+            try std.testing.expectEqualStrings("changed", changed.delta);
+            try std.testing.expectEqual(@as(?bool, true), changed.archived);
+
+            var restore: protocol.SessionArchiveCommand = .{ .archived = false };
+            try restore.key.set("archived-fact-restore");
+            try restore.session.set(session.slice());
+            try std.testing.expect(!storage.archiveSession(&restore, .{}).accepted.archived);
+            const restored = try archivedOf(&storage, &tmp, .{ .since = try protocol.SinceToken.parse(changed.since) }, &used, 5);
+            defer std.testing.allocator.free(restored.buffer);
+            try std.testing.expectEqualStrings("changed", restored.delta);
+            try std.testing.expectEqual(@as(?bool, false), restored.archived);
+        }
+    }.run);
+}
+
 test "Session list pages accepted creation order with exact workspace and fixed high water" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
@@ -62,7 +133,7 @@ test "Session list pages accepted creation order with exact workspace and fixed 
             var token: [protocol.SinceToken.max_bytes]u8 = undefined;
             const since = (protocol.SinceToken{ .instance = storage.instance, .generation = storage.commit_generation.load(.acquire) }).format(&token);
             var expected_empty: [256]u8 = undefined;
-            try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected_empty, "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[],\"delta\":\"full\",\"since\":\"{s}\",\"next\":null}}", .{since}), empty);
+            try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected_empty, "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[],\"delta\":\"full\",\"since\":\"{s}\",\"next\":null,\"archived\":false}}", .{since}), empty);
             try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
 
             var ids: [10]protocol.Bounded(protocol.max_session_bytes) = undefined;

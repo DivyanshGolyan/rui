@@ -54,7 +54,7 @@ pub fn Reply(comptime Capture: type) type {
             switch (values) {
                 .full => |full| try appendShape(reply.capture, shapes.full_tail, .{ session_list.ListDelta.full, full.since, full.after, full.ceiling }),
                 .changed => |changed| try appendShape(reply.capture, shapes.changed_tail, .{ session_list.ListDelta.changed, changed.since, changed.through, changed.after_reference }),
-                .last => |last| try appendShape(reply.capture, shapes.last_tail, .{ last.delta, last.since }),
+                .last => |last| try appendShape(reply.capture, shapes.last_tail, .{ last.delta, last.since, last.archived }),
             }
             std.debug.assert(reply.capture.length + reply.capture.buffered <= shapes.max_bytes);
         }

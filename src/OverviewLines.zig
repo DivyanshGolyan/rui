@@ -48,7 +48,8 @@ pub const NewSession = struct {
         const GroupedList = @import("GroupedList.zig");
         const built = try overview_view.listSegments(ctx.arena, self.state, .new_session, ctx.max.width.?, self.caps, 0);
         const rows = try ctx.arena.create([]const GroupedList.Row);
-        rows.* = try ctx.arena.dupe(GroupedList.Row, &.{.{ .segments = built.segments, .target = .new_session }});
+        const regions: []const GroupedList.Region = if (built.archived) |at| try ctx.arena.dupe(GroupedList.Region, &.{.{ .start = at.start, .end = at.end, .target = .archived }}) else &.{};
+        rows.* = try ctx.arena.dupe(GroupedList.Row, &.{.{ .segments = built.segments, .target = .new_session, .regions = regions }});
         self.row.rows = .of(rows);
         self.row.selected = if (built.selected) 0 else null;
         self.row.caps = self.caps;
@@ -141,6 +142,29 @@ pub const Settings = struct {
         return surface;
     }
 };
+
+test "pinned New Session row presses Archived at its drawn word and New Session elsewhere" {
+    var state: overview_view.State = undefined;
+    try state.init(std.testing.allocator, .{ .cwd = "/w", .home = "/h" });
+    defer state.deinit();
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    for ([_]bool{ false, true }) |archived| for ([_]u16{ 46, 140 }) |width| {
+        state.some_archived = archived;
+        var clicks: Clicks = .{};
+        var row: NewSession = .{ .state = &state, .userdata = &clicks, .on_click = Clicks.take };
+        // The core owns the words (`overview_view` tests); the draw records the press spans.
+        _ = try row.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 1 }, .cell_size = .{} });
+        var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        // The word's first and last cells, then the name and the gap between.
+        for ([_]u16{ width - 9, width - 2, 4, width - 12 }, 0..) |column, at| {
+            clicks.got = null;
+            try row.widget().handleEvent(&events, .{ .mouse = .{ .col = @intCast(column), .row = 0, .button = .left, .type = .press, .mods = .{} } });
+            const expected: overview_view.Click = if (archived and at < 2) .archived else .new_session;
+            try std.testing.expectEqual(expected, clicks.got.?);
+        }
+    };
+}
 
 test "overview Settings row is pinned selected and opens only on its second line" {
     var clicks: Clicks = .{};

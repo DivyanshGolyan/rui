@@ -668,6 +668,7 @@ fn appKey(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event, delivery:
     const semantic: view.Input = switch (selected) {
         .action => |action| .{ .action = action },
         .enter => .enter,
+        .left => .left,
         else => .ignored,
     };
     try self.appNext(ctx, try self.event(.{ .input = .{
@@ -6059,6 +6060,23 @@ test "App settings Model borrow ends on every Overview menu replacement or relea
         try std.testing.expectEqual(AppSettings.SaveState.idle, overview.defaults_save);
         try std.testing.expect(overview.root.input.layer.settingsOpen());
     }
+}
+
+test "the bare arrows move within the pinned row, in CSI and SS3 form: right as the table's open_session, left as a choice key" {
+    for ([_][]const u8{ "\x1b[C", "\x1bOC" }) |right| for ([_][]const u8{ "\x1b[D", "\x1bOD" }) |left| for ([_]bool{ false, true }) |archived| {
+        const rig = try openOverview();
+        defer rig.close();
+        rig.overview.state.some_archived = archived;
+        rig.overview.state.selected = .new_session;
+        _ = try rig.press(right);
+        try std.testing.expectEqual(@as(view.Selection, if (archived) .archived else .new_session), rig.overview.state.selected);
+        _ = try rig.press(left);
+        try std.testing.expectEqual(view.Selection.new_session, rig.overview.state.selected);
+        // Ctrl and Alt arrows are refused, not choices.
+        _ = try rig.press("\x1b[1;5C");
+        _ = try rig.press("\x1b[1;3C");
+        try std.testing.expectEqual(view.Selection.new_session, rig.overview.state.selected);
+    };
 }
 
 test "App settings Model keeps every named app binding live while filter text stays local" {
