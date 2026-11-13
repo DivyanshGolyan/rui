@@ -31,6 +31,9 @@
 //!   the same message where that message carries reads, or null
 //!   (`Access.commitFollowed`): a pointer to a value with `queue(reads)`
 //!   and `followed()`, which the value keeps until the commit ends.
+//! - optionally `failed(t)`, which lets go of what its steps took on that
+//!   only a commit hands on, such as a view its commit's reads fill, when
+//!   `run` ends with an error, before its transaction rolls back.
 //! - optionally `deinit(t)`, which frees what its steps allocated, once
 //!   `apply` ends on any path.
 //!
@@ -349,8 +352,8 @@ fn check(comptime T: type) void {
 
 /// Runs `t` under `entry`'s lock: each round its steps ask for, then its
 /// commit, answering `committed`, or `declined` when a `Declined` guard
-/// stops the commit. On `.done` or an error it abandons what it queued.
-/// `t` lives in the caller's frame: a queued statement may read its bytes
+/// stops the commit. On `.done` or an error it abandons what it queued;
+/// on an error, after `failed` when `T` declares it. `t` lives in the caller's frame: a queued statement may read its bytes
 /// in place until the pass that steps it.
 pub noinline fn run(entry: *const store_core.Entry, comptime T: type, t: *T, faults: Faults) !T.Result {
     comptime check(T);
@@ -362,7 +365,9 @@ pub noinline fn run(entry: *const store_core.Entry, comptime T: type, t: *T, fau
     };
     defer if (@FieldType(State, "reader") != void) core.reader.deinit();
     defer if (T.commit != .none) core.writer.deinit();
-    if (T.commit != .none) return core.writer.end(faults, drive(T, t, &core)) else return drive(T, t, &core);
+    const result = drive(T, t, &core);
+    if (comptime @hasDecl(T, "failed")) if (result) |_| {} else |_| T.failed(t);
+    if (T.commit != .none) return core.writer.end(faults, result) else return result;
 }
 
 fn drive(comptime T: type, t: *T, core: *CoreFor(T)) !T.Result {

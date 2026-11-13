@@ -1947,6 +1947,66 @@ test "a transition's follow reads ride its commit's message where that message c
     }.run);
 }
 
+/// Dates a Session where its revision is `revision`, or fails its step
+/// after the head's round, noting in `failed` when the runner calls its
+/// failure hook.
+const TestingFailing = struct {
+    pub const rounds = transition.rounds(.{ .head = .{ .always, error.TestingRead } });
+    pub const round_budget = 2;
+    pub const commit: transition.Commit = .transaction;
+    pub const begin: ?rounds.At = null;
+    pub const Input = struct { session: []const u8, revision: u64, fail_step: bool, failed: *bool };
+    pub const Result = void;
+    pub const Ordinary = error{ TestingGuard, TestingStep };
+    pub const Guards = error{TestingGuard};
+    pub const Declined = error{};
+
+    input: Input,
+    loaded: TestingRound.head.Result = undefined,
+
+    pub fn step(t: *TestingFailing, r: *transition.Round(TestingFailing), ran: ?rounds.At) !transition.Next(TestingFailing) {
+        if (ran == null) {
+            r.read(TestingRound.head, .{ .session_ref = t.input.session }, &t.loaded);
+            return .{ .round = .head };
+        }
+        r.write(TestingRound.date_session, .{ .session = t.loaded.head, .revision = t.input.revision });
+        if (t.input.fail_step) return error.TestingStep;
+        return .commit;
+    }
+
+    pub fn committed(_: *const TestingFailing) Result {}
+
+    pub fn failed(t: *TestingFailing) void {
+        t.input.failed.* = true;
+    }
+};
+
+test "a transition's failure hook runs when a step or its commit fails, and only then" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try configureTestSession(&storage, "transition-failing");
+            const before: TestingDatingState = try .of(&storage);
+            var failed = false;
+            // A guard the commit does not decline, then a step's error.
+            try std.testing.expectError(error.TestingGuard, transition.apply(&storage, TestingFailing, .{ .session = session.slice(), .revision = 99, .fail_step = false, .failed = &failed }, .{}));
+            try std.testing.expect(failed);
+            failed = false;
+            try std.testing.expectError(error.TestingStep, transition.apply(&storage, TestingFailing, .{ .session = session.slice(), .revision = 1, .fail_step = true, .failed = &failed }, .{}));
+            try std.testing.expect(failed);
+            try std.testing.expectEqual(before, try TestingDatingState.of(&storage));
+            failed = false;
+            try transition.apply(&storage, TestingFailing, .{ .session = session.slice(), .revision = 1, .fail_step = false, .failed = &failed }, .{});
+            try std.testing.expect(!failed);
+            try std.testing.expect(!storage.isFenced());
+        }
+    }.run);
+}
+
 /// Reads a Session's head once outside its transaction and once inside,
 /// noting each time whether the transaction is open, then dates the
 /// Session where its revision is `revision`.
