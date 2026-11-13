@@ -24,7 +24,7 @@ pub const Paths = struct {
     store: protocol.Bounded(protocol.max_store_bytes) = .{},
     database: protocol.Bounded(max_database_path_bytes) = .{},
     scratch: protocol.Bounded(max_scratch_path_bytes) = .{},
-    socket: protocol.Bounded(@max(max_socket_path_bytes, max_launch_socket_path_bytes)) = .{},
+    socket: @import("host_settings.zig").OsBytes(@max(max_socket_path_bytes, max_launch_socket_path_bytes)) = .{},
 
     /// The socket's spelling may be a short alias for a long canonical path.
     /// Only MySQL children need this non-secret client routing hint.
@@ -1224,4 +1224,19 @@ test "Host socket Store hint proves absence only with trusted mapping and free l
     try lease.retireSocket();
     try std.testing.expectError(error.FileNotFound, std.Io.Dir.openFileAbsolute(io, hint_path, .{}));
     try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().statFile(io, socket.slice(), .{ .follow_symlinks = false }));
+}
+
+
+test "runtime socket storage preserves every non-NUL OS byte" {
+    var paths: Paths = .{};
+    for (1..256) |value| {
+        const byte: [1]u8 = .{@intCast(value)};
+        try paths.socket.set(&byte);
+        try std.testing.expectEqualSlices(u8, &byte, paths.socket.slice());
+    }
+    try std.testing.expectError(error.SettingsInvalid, paths.socket.set(&.{0}));
+    try std.testing.expectEqualSlices(u8, &.{255}, paths.socket.slice());
+    const over: [@max(max_socket_path_bytes, max_launch_socket_path_bytes) + 1]u8 = @splat('x');
+    try std.testing.expectError(error.SettingsInvalid, paths.socket.set(&over));
+    try std.testing.expectEqualSlices(u8, &.{255}, paths.socket.slice());
 }

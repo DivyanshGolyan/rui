@@ -68,7 +68,7 @@ for (const [engine, adapter] of [["sqlite", "codex"], ["mysql", "codex"], ["mysq
 			request.resume();
 			request.on("end", () => {
 				const result = answer(request.method, request.url, request.headers.authorization);
-				reply.writeHead(200, { "content-type": result.type, connection: "close" });
+				reply.writeHead(200, { "content-type": result.type, "content-length": Buffer.byteLength(result.body), connection: "close" });
 				reply.end(result.body);
 			});
 		}) : createSecureServer({ key: readFileSync(key), cert: readFileSync(cert) }).on("stream", (stream, headers) => {
