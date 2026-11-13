@@ -5,6 +5,26 @@
   ],
   "states": [
     {
+      "name": "archived-row-none",
+      "note": "With nothing archived the pinned New Session row draws no Archived",
+      "open": "overview",
+      "steps": [
+        {
+          "wait": "+ New Session"
+        }
+      ],
+      "expect": [
+        "+ New Session",
+        "Settings"
+      ],
+      "absent": [
+        "Archived"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
+    },
+    {
       "name": "quiet-person",
       "note": "A real person message supplies the sender for peer-seeded quiet specimens",
       "open": "overview",
@@ -605,6 +625,157 @@
       ],
       "absent_regex": [
         "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+      ]
+    },
+    {
+      "name": "archived-row",
+      "note": "A quiet Archived at the right end of the pinned New Session row once a chat is archived",
+      "open": "overview",
+      "steps": [
+        {
+          "wait": "Archived"
+        }
+      ],
+      "expect": [
+        "+ New Session",
+        "Archived"
+      ],
+      "absent": [
+        "Archive audit",
+        "/sessions"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
+    },
+    {
+      "name": "archived-row-chosen",
+      "note": "Right on the New Session row selects Archived alone; Left goes back, Right again",
+      "open": "overview",
+      "steps": [
+        {
+          "wait": "Archived"
+        },
+        {
+          "keys": [
+            "Home",
+            "Right",
+            "Left",
+            "Right"
+          ]
+        }
+      ],
+      "expect": [
+        "+ New Session",
+        "Archived"
+      ],
+      "absent": [
+        "Archive audit"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
+    },
+    {
+      "name": "archived-view",
+      "note": "Enter on Archived opens the existing archived view: plain names, no archived marker",
+      "open": "overview",
+      "steps": [
+        {
+          "wait": "Archived"
+        },
+        {
+          "keys": [
+            "Home",
+            "Right",
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Archive audit"
+        }
+      ],
+      "expect": [
+        "+ New Session",
+        "Archived",
+        "Archive audit"
+      ],
+      "absent": [
+        "· archived",
+        "[Archived]"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
+    },
+    {
+      "name": "archived-view-click",
+      "note": "A click on Archived opens the archived view",
+      "open": "overview",
+      "steps": [
+        {
+          "wait": "Archived"
+        },
+        {
+          "mouse": {
+            "at": "Archived",
+            "do": "click"
+          }
+        },
+        {
+          "wait": "Archive audit"
+        }
+      ],
+      "expect": [
+        "+ New Session",
+        "Archived",
+        "Archive audit"
+      ],
+      "absent": [
+        "· archived"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
+    },
+    {
+      "name": "archived-view-esc",
+      "note": "Esc in the archived view returns to the usual list",
+      "open": "overview",
+      "steps": [
+        {
+          "wait": "Archived"
+        },
+        {
+          "keys": [
+            "Home",
+            "Right",
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Archive audit"
+        },
+        {
+          "keys": [
+            "Esc"
+          ]
+        },
+        {
+          "gone": "Archive audit"
+        }
+      ],
+      "expect": [
+        "+ New Session",
+        "Archived",
+        "enter open"
+      ],
+      "absent": [
+        "Archive audit",
+        "No archived Sessions"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {

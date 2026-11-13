@@ -638,9 +638,13 @@ pub const session_list_reply = struct {
     pub const full_tail = facts ++ .{ "{\"after\":\"", Hole.decimal, "\",\"ceiling\":\"", Hole.decimal, "\"}}" };
     /// Holes: delta, token, through, after reference.
     pub const changed_tail = facts ++ .{ "{\"through\":\"", Hole.decimal, "\",\"after_reference\":", Hole{ .string = session_id_bytes }, "}}" };
-    /// Holes: delta, token.
-    pub const last_tail = facts ++ .{"null}"};
-    pub const max_bytes = shapeBytes(head) + jsonListBytes(session_list_page_size, SessionRow.max_json_bytes) + maxShapeBytes(.{ full_tail, changed_tail, last_tail });
+    /// Holes: delta, token, archived. The last page of a full or changed
+    /// listing says whether any Session in its scope is archived.
+    pub const last_tail = facts ++ .{ "null,\"archived\":", Hole.boolean, "}" };
+    /// Holes: delta, token. Nothing changed since the token, the archived
+    /// fact included, so the Host answers it without the Store.
+    pub const unchanged_tail = facts ++ .{"null}"};
+    pub const max_bytes = shapeBytes(head) + jsonListBytes(session_list_page_size, SessionRow.max_json_bytes) + maxShapeBytes(.{ full_tail, changed_tail, last_tail, unchanged_tail });
 };
 
 pub const ActivityFacts = activity_facts.Page;

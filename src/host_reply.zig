@@ -260,7 +260,7 @@ pub fn renderHostPause(response: protocol.JsonOut, paused: bool) !void {
 /// Nothing changed since the token: it comes back, with no rows.
 pub fn renderSessionsNotModified(response: protocol.JsonOut, since: protocol.SinceToken) !void {
     var token: [protocol.SinceToken.max_bytes]u8 = undefined;
-    try response.appendShape(protocol.session_list_reply.head ++ protocol.session_list_reply.last_tail, .{ protocol.ListDelta.not_modified, since.format(&token) });
+    try response.appendShape(protocol.session_list_reply.head ++ protocol.session_list_reply.unchanged_tail, .{ protocol.ListDelta.not_modified, since.format(&token) });
 }
 
 pub fn renderSkillSuggestions(out: protocol.JsonOut, page: *const skill_suggestions.Page) error{BufferTooLarge}!void {

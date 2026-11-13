@@ -2380,7 +2380,7 @@ This read never starts a Host, imports local records or selects a Session for re
 
 Client interprets each list exchange as owned `SessionListReply` facts: a complete eight-row-bounded page or a validated HTTP status/type/code read failure.
 Rows retain the exact reference, Workspace, model and Label strings, named provider, closed tools, Permission Mode, times, first Message, Session work and `from_person_at`; slices borrow the fact value independently of scratch/reply-buffer reuse.
-Validation also checks that the Label is valid, that each work state carries exactly its own facts, that the first Message's sender is a canonical reference, and that `delta` and `since` are present, with no rows on `not_modified` and the request's own token echoed there.
+Validation also checks that the Label is valid, that each work state carries exactly its own facts, that the first Message's sender is a canonical reference, and that `delta` and `since` are present, with no rows on `not_modified` and the request's own token echoed there, and that `archived` stands on a full or changed listing's last page and nowhere else.
 `SessionTraversal` in `src/protocol_reply.zig` owns one traversal's cursor, ceiling and `since`.
 Validation requires the version/type, all row fields and explicit nullable `next`, rejects consumed duplicates and duplicate references/tools, checks every row against the requested Workspace, and requires a full page plus increasing canonical signed-SQLite cursor positions with the same continuation ceiling.
 Non-null `next` requires `after < ceiling`: a ninth matching row must exist beyond the eighth row's position.
@@ -2471,6 +2471,8 @@ At most one automatic start runs per overview: a failed start or a second crash 
 
 The overview refreshes about once a second with `session list` `since`, keeping its rows and replacing those reported changed.
 The overview has no slash-command parser or view command surface; the former `/sessions` archive-view commands and counts-line view-name click are removed.
+The full list's pinned `+ New Session` row draws a quiet `Archived` at its right end, at every width, while the last full or changed listing's `archived` fact says some Session is archived, and always inside the archived view; `overview_view.offersArchived` alone decides it, and the chat sidebar, which has no pinned row, never shows it (Divyansh, 2026-11-13, mock X3cnQ7RiEqcsHkxcSp9Up8).
+On that row → selects `Archived` and ← selects `New Session` again; ↑, ↓, Home and End leave the row as before. Enter on `Archived`, or a click on it, opens the existing archived view (plain names, no `· archived` marker), and from inside the archived view returns to the usual list; a click elsewhere on the row is still New Session. Esc in the archived view returns to the usual list. A click drawn before the last archived Session left opens nothing.
 Alt-A puts away the selected Session through the existing archive owner, stopping its work first when required. Shell archive/list/unarchive commands remain available, and `/archive` and `/unarchive` in an open chat retain their existing Session-local behavior.
 A row remains visible with archive progress until the server reports it archived.
 Archived rows and exact conversations show their archive state.
@@ -2948,6 +2950,8 @@ The queued strip keeps its row when space runs short and leaves in the same fram
 A stop finds excluded Messages by walking Admission-only pages backward from itself, then renders them in admission order; no previous read's queue or drawing state decides placement.
 Every page carries `queued`: the field came with wire version 3, and a frontend and Host on different wire versions refuse each other as incompatible.
 Wire version 10 makes the refused-send target required and nullable under the [public activity contract](#public-session-activity); non-null peers keep their canonical ID grammar.
+
+Wire version 17 adds `archived` to the last page of a full or changed `session list`: whether any Session in the listing's scope is archived, whatever its archive filter. A `not_modified` page carries none, since nothing changed, that fact included, and the Host still answers it without the Store.
 
 Wire version 14 requires the `chatgpt` provider key, and supports the `chatgpt_plan` route, in `host_info`'s `capabilities.providers`; ordinary clients and Hosts on different wire versions refuse each other.
 Until format 74 the Store saved its wire label, so each wire bump also appended a Store format step (format 72 moved the saved label from 15 to 16); format 74 deletes the label, and a wire bump now needs only the historical Host-info profile below.
@@ -4037,7 +4041,7 @@ A client first probes the existing `host.lock` with a nonblocking shared lock, w
 One absolute probe deadline covers connect, write, first byte, header and full body; ordinary commands retain their separate processing and transfer waits.
 The shared response parser accepts only valid bounded HTTP/1.1 headers with one decimal Content-Length, supported Content-Type and wire version; it rejects malformed field names/values, duplicates of consequential fields and unsupported transfer or content encodings rather than interpreting ambiguous framing.
 A complete compatible reply from that owner means ready and reports the canonical Store selector, wire version, actual allocated Active Capacity, slots in use, the Host's start time, whether it holds new Turns (`paused`), its Bash capability and each built-in provider's route (`unserved`, `endpoint`, `chatgpt_device`, `key_file` or `chatgpt_plan`). **Slots in use** (`custody_occupied`) counts held custody records, including detached cleanup; it is the value Current reports as `execution.custody_occupied`.
-Only the historical wire-13 Host-info profile accepts an absent `chatgpt` route as `unserved`, covering v0.69.1 alongside v0.69.2's complete provider facts. Current wire-16 facts require the provider; the wire-15 and wire-14 profiles freeze v0.71.0’s and v0.70.0’s complete provider facts; historical normalization serves upgrade/restart discovery and exact-instance activation, never ordinary status or client readiness.
+Only the historical wire-13 Host-info profile accepts an absent `chatgpt` route as `unserved`, covering v0.69.1 alongside v0.69.2's complete provider facts. Current wire-17 facts require the provider; the wire-16, wire-15 and wire-14 profiles freeze v0.73.0’s, v0.71.0’s and v0.70.0’s complete provider facts; historical normalization serves upgrade/restart discovery and exact-instance activation, never ordinary status or client readiness.
 Codex, OpenAI and the existing required identity/control fields remain required; unknown, duplicate and malformed fields still fail decoding.
 The start time (`started_at`) is the Host Unix second read once before execution starts; every reply of one Host reports the same value, and like every Host time it orders nothing across clock changes.
 Both are read from Host memory, so the reply still never touches SQLite.

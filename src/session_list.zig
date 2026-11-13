@@ -106,6 +106,7 @@ pub const Tail = union(enum) {
     full: struct { since: []const u8, after: u64, ceiling: u64 },
     /// A changed listing with more changed Sessions after `after_reference`.
     changed: struct { since: []const u8, through: u64, after_reference: *const change_ring.Id },
-    /// The last page of a full or changed listing.
-    last: struct { delta: ListDelta, since: []const u8 },
+    /// The last page of a full or changed listing, and whether any Session
+    /// in the listing's scope is archived, whatever the archive filter.
+    last: struct { delta: ListDelta, since: []const u8, archived: bool },
 };

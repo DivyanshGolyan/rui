@@ -218,6 +218,7 @@ pub const routes = [_]Route{
             protocol.session_list_reply.head ++ .{ListOf(protocol.SessionRow)} ++ protocol.session_list_reply.full_tail,
             protocol.session_list_reply.head ++ .{ListOf(protocol.SessionRow)} ++ protocol.session_list_reply.changed_tail,
             protocol.session_list_reply.head ++ .{ListOf(protocol.SessionRow)} ++ protocol.session_list_reply.last_tail,
+            protocol.session_list_reply.head ++ .{ListOf(protocol.SessionRow)} ++ protocol.session_list_reply.unchanged_tail,
         }),
     },
     .{
@@ -1463,7 +1464,10 @@ test "replies the Host renders conform to their schemas" {
     const row: protocol.SessionRow = .{ .tools = try .of(&.{"bash"}), .label = .{} };
     try protocol.writeShape(&out.writer, protocol.session_list_reply.head, .{});
     try row.writeJson(&out.writer);
-    try protocol.writeShape(&out.writer, protocol.session_list_reply.last_tail, .{ protocol.ListDelta.full, "x" });
+    try protocol.writeShape(&out.writer, protocol.session_list_reply.last_tail, .{ protocol.ListDelta.full, "x", true });
+    try Case.check(schemas, "ListSessionsReply", out.written(), a);
+    out.clearRetainingCapacity();
+    try protocol.writeShape(&out.writer, protocol.session_list_reply.head ++ protocol.session_list_reply.unchanged_tail, .{ protocol.ListDelta.not_modified, "x" });
     try Case.check(schemas, "ListSessionsReply", out.written(), a);
 
     // These are the Store's real streaming reports, not schema examples:
