@@ -210,14 +210,13 @@ test "overview Settings hover follows only its drawn row without selecting or fo
     try std.testing.expectEqual(widget_style.of(settings.caps, .{ .background = .selection }).bg, both.readCell(3, 1).style.bg);
 }
 
-test "overview Settings memory width domain preserves label and drops rui before tools" {
+test "overview Settings memory width domain preserves label and drops tools before rui" {
     var clicks: Clicks = .{};
     var settings: Settings = .{ .selected = false, .caps = .{}, .userdata = &clicks, .on_click = Clicks.take };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const version = @import("transport_options").version ++ " ";
     const full = "rui 38 MB · tools 120 MB";
-    const tools = "tools 120 MB";
     const rui = "rui 38 MB";
     for ([_]?overview_view.Memory{ null, .{ .rui = 38 * overview_view.mib, .tools = null }, .{ .rui = 38 * overview_view.mib, .tools = 120 * overview_view.mib } }) |memory| {
         settings.memory = memory;
@@ -225,8 +224,8 @@ test "overview Settings memory width domain preserves label and drops rui before
             const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = @intCast(width), .height = 2 }, .cell_size = .{} };
             const surface = try settings.widget().draw(ctx);
             const text = try cells(arena.allocator(), surface, 1);
-            const expected = if (memory) |live| (if (live.tools != null)
-                (if (width >= 14 + ctx.stringWidth(full) + version.len) full else if (width >= 14 + tools.len + version.len) tools else "")
+            const expected = if (memory) |live| (if (live.tools != null and width >= 14 + ctx.stringWidth(full) + version.len)
+                full
             else if (width >= 14 + rui.len + version.len) rui else "") else "";
             if (width >= "  Settings".len + version.len + 1) try std.testing.expect(std.mem.startsWith(u8, text, "  Settings"));
             if (width >= version.len) try std.testing.expect(std.mem.endsWith(u8, text, version));
@@ -237,7 +236,7 @@ test "overview Settings memory width domain preserves label and drops rui before
                 try std.testing.expect(std.mem.indexOf(u8, text, "rui ") == null);
                 try std.testing.expect(std.mem.indexOf(u8, text, "tools ") == null);
             }
-            if (std.mem.eql(u8, expected, tools)) try std.testing.expect(std.mem.indexOf(u8, text, "rui ") == null);
+            if (std.mem.eql(u8, expected, rui)) try std.testing.expect(std.mem.indexOf(u8, text, "tools ") == null);
             _ = arena.reset(.retain_capacity);
         }
     }
