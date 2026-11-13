@@ -162,12 +162,23 @@ fn restartableEnvironment(environment: []const []const u8) bool {
     return true;
 }
 
+fn nowNanos(io: std.Io) i96 {
+    return std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
+}
+
+/// Sleeps toward `until` on the awake clock, at most 50 ms at a time, and
+/// answers false without sleeping once `until` has passed.
+fn sleepToward(io: std.Io, until: i96) !bool {
+    const remaining = until - nowNanos(io);
+    if (remaining <= 0) return false;
+    try std.Io.sleep(io, .fromNanoseconds(@intCast(@min(remaining, 50 * std.time.ns_per_ms))), .awake);
+    return true;
+}
+
 pub fn awaitRetirement(io: std.Io, store: []const u8) !bool {
-    const until = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + product_defaults.host_shutdown_seconds * std.time.ns_per_s;
+    const until = nowNanos(io) + product_defaults.host_shutdown_seconds * std.time.ns_per_s;
     while (platform.StoreLease.observe(io, store) != .unowned) {
-        const remaining = until - std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
-        if (remaining <= 0) return false;
-        try std.Io.sleep(io, .fromNanoseconds(@intCast(@min(remaining, 50 * std.time.ns_per_ms))), .awake);
+        if (!try sleepToward(io, until)) return false;
     }
     return true;
 }
@@ -479,17 +490,17 @@ fn startPinned(init: std.process.Init, allocator: std.mem.Allocator, plan: *cons
     if (launched != 0 or launched_pid <= 0 or launched_started == 0) return .{ .failed = .starting };
     Progress.send(progress, .verifying);
     // A Host of a newer release may first back up and migrate the Store.
-    var wait = HostStartupWait.init(std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds);
+    var wait = HostStartupWait.init(nowNanos(io));
     var startup: [8192]u8 = undefined;
     var used: usize = 0;
-    while (!wait.expired(std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds)) {
+    while (!wait.expired(nowNanos(io))) {
         if (used < startup.len) {
             const n = std.c.read(startup_read, startup[used..].ptr, startup.len - used);
             if (n > 0) used += @intCast(n);
             if (n == 0 and client.hostLockState(io, store) == .free) return .{ .failed = .starting };
         }
-        wait.observe(startup[0..used], std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds);
-        const until = wait.until(std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds);
+        wait.observe(startup[0..used], nowNanos(io));
+        const until = wait.until(nowNanos(io));
         if (client.observeHostProcessForUpgrade(io, store, until)) |reading| {
             if (reading.pid() != launched_pid) return .replacement_observed;
             var snapshot = identity.snapshot(allocator, reading.pid()) catch return .{ .unconfirmed = .verifying };
@@ -503,8 +514,7 @@ fn startPinned(init: std.process.Init, allocator: std.mem.Allocator, plan: *cons
             } else return .{ .unconfirmed = .verifying };
             return activation;
         } else |_| {}
-        const remaining = until - std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
-        if (remaining > 0) try std.Io.sleep(io, .fromNanoseconds(@intCast(@min(remaining, 50 * std.time.ns_per_ms))), .awake);
+        _ = try sleepToward(io, until);
     }
     return .{ .unconfirmed = .verifying };
 }
