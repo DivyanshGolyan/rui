@@ -3512,9 +3512,20 @@ test "real SQLite full during import publishes no canonical prefix" {
         configure: {
             const entry = try store_core.enter(&storage, .none);
             defer entry.release();
-            var a: store_access.Access(.write, error{SessionUpdateFailed}) = .open(&entry);
-            defer a.deinit();
-            break :configure a.end(.{}, configuration_domain.configure(&a, storage.io, storage.served, &command, null, null, null, std.heap.c_allocator, null, .{}));
+            var reply: configuration_domain.ConfigureReply = undefined;
+            var configuring: command_domain.Configure = .{ .input = .{
+                .io = storage.io,
+                .served = storage.served,
+                .tools = storage.hostTools(),
+                .command = &command,
+                .preset = null,
+                .initial_skills = null,
+                .reload_capture = null,
+                .allocator = std.heap.c_allocator,
+                .committed = null,
+                .reply = &reply,
+            } };
+            break :configure transition.run(&entry, command_domain.Configure, &configuring, .{});
         },
     );
     try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.sqliteDatabase()));
@@ -9648,6 +9659,40 @@ test "a child's core call selected before its parent stopped runs only after the
     try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE session_ref=?1", .{parent.slice()}));
     try expectOnlyForwardsThenIdle(&storage);
     try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE resolution_code='cancelled'", .{}));
+}
+
+test "a child's start_agent call selected before its parent stopped is left to the stop it owes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try store_testing.canonicalCwd(std.testing.io, &workspace_buffer);
+    const parent = try configureTestSession(&storage, "start-priority-parent");
+    var create = try store_testing.completeConfiguration("start-priority-child", "", workspace, "model-a");
+    create.configuration.tools = try .of(&.{"start_agent"});
+    const child = (try storage.configure(&create, .{})).accepted.session;
+    try store_testing.sqlite_only.exec(&storage, "UPDATE session SET parent_ref=?1 WHERE session_ref=?2", .{ parent.slice(), child.slice() });
+    try submitTestMessage(&storage, &tmp, "start-priority-task", "start-priority-task", child.slice(), "start a grandchild");
+    const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    const arguments = "{\"task\":\"read\",\"attached\":true,\"spec\":{\"model\":\"model-a\",\"effort\":null,\"compactAt\":100000,\"tools\":[],\"permissionMode\":\"ask\"}}";
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const encoded = try std.json.Stringify.valueAlloc(arena.allocator(), arguments, .{});
+    const calls = [_]TestingCall{.{ .item_id = "start-priority-item", .name = "start_agent", .encoded_call_id = "start-priority-call", .decoded_call_id = "start-priority-call", .encoded_arguments = encoded[1 .. encoded.len - 1], .decoded_arguments = arguments }};
+    try settleCallsForTesting(&storage, &tmp, model, "start-priority-metadata", &calls);
+    const selected = (try storage.nextCoreWork()).?.action;
+
+    var stop = try completeSessionStop("start-priority-stop", parent.slice());
+    try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+    const core_tools = @import("../core_tools.zig");
+    const start = try arena.allocator().create(core_tools.StartAgent);
+    try std.testing.expect(try core_tools.checkStartAgent(arena.allocator(), arguments, start) == .accepted);
+    try std.testing.expectEqual(command_domain.AgentStart.stopped, try storage.startAgent(selected.binding, child.slice(), start.task, start.attached, &start.configuration, null, .{}));
+    try std.testing.expectEqual(@as(u64, 2), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM session", .{}));
+    try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE action_id=?1 AND resolution_code IS NOT NULL", .{selected.binding.action_id}));
 }
 
 test "an owed stop a client's stop already settled, or a newer one replaced, runs nothing" {

@@ -64,7 +64,8 @@ A running Host keeps its configured capacity through the restart.
 Installation and activation are reported separately.
 Unsupported or application-owned Hosts remain running with an explained successful skip. A failed or unconfirmed Host restart returns `host_restart_failed` (exit 6) after the installation receipt; the binary upgrade is not rolled back.
 Automatic activation supports released and source managed `host serve` launches whose public settings can be preserved and whose executable reports a verified numeric version.
-Unknown managed builds, foreign executables, application-owned `--settings`, hidden-option, and relative configuration-path launches are not paused.
+Unknown managed builds, foreign executables, application-owned `--settings -`, hidden-option, and relative Bash/CA-path launches are not paused.
+`--settings FILE` retains argv replay, including relative file names; this step does not inspect or snapshot the document.
 This does not make a selected source installation eligible for `rui upgrade`; Upgrade still requires a selected managed release.
 When that selection is released but its running Host came from a managed source build, the usual version comparison applies: a newer Host stays running without a downgrade; an equal or older Host can restart on the pinned release.
 Private launch environment is observed only in memory and wiped after the operation.
@@ -126,7 +127,8 @@ Each `--provider LABEL` serves one built-in provider at its own endpoint with it
 A Host reads the key once when it starts and refuses to start `openai` without one, so after saving a key, pause a running Host and start it again to add it.
 An auto-started Host serves `openai` whenever a key is saved.
 To use an OpenAI-compatible server that speaks the Responses API, such as Azure OpenAI or a company proxy, set `RUI_OPENAI_BASE_URL` to its `https://` base URL (for example `https://example.openai.azure.com/openai/v1`) in the environment that starts the Host; the key is then sent only to that URL's `/responses` and `/models`.
-A Host with a key reads the key's model list from `/models` once as it starts, for the model picker; if that fails, the picker shows the models Rui knows.
+A Host with a key reads the key's model list from `/models` as it starts and again each time the model picker asks; if that fails, the picker shows the models Rui knows.
+A Host serving a ChatGPT plan sign-in (`chatgpt`) reads that plan's list the same way, from `https://api.openai.com/v1/models`; without a usable sign-in it does not ask, and the picker shows the models Rui knows.
 An auto-started Host takes it from the command that starts it, and a running Host keeps the URL it started with.
 An invalid one stops `host serve --provider openai`; an auto-started Host reports it and starts serving Codex only.
 Sessions of a provider the Host does not serve wait until a Host that serves it starts.

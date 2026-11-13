@@ -1024,7 +1024,8 @@ class SelectionTest(unittest.TestCase):
         for path in ("src/codex_credential_policy.zig", "src/codex_token_wire.zig"):
             result = select([path], "review", AVAILABLE)
             # The ChatGPT plan sign-in keeps its records in the same custody.
-            native = sorted(["chatgpt-plan-integration", "codex-credential-integration", "codex-h2-integration", "codex-integration", "test-native", "test-logic"])
+            native = sorted(["chatgpt-login-integration", "chatgpt-plan-integration", "codex-credential-integration",
+                             "codex-h2-integration", "codex-integration", "test-native", "test-logic"])
             self.assertEqual(result["native_targets"], native)
             self.assertEqual(result["targets"], sorted(native + ["stack-frames"]))
 
