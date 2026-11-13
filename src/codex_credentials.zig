@@ -130,6 +130,49 @@ pub fn exchangeRefresh(path: []const u8, expected_generation: u64, scratch: *Scr
     return true;
 }
 
+/// Signs the plan record at `path` out under the exclusive lock, so no
+/// refresh rotates the tokens between their revocation and their removal:
+/// `revoke` first acts on the record as it is (it decides what to report and
+/// returns an error only to abandon the sign-out), then the record is
+/// published signed out (`policy.signOut`). Returns false, publishing
+/// nothing, when there is no sign-in to end.
+pub fn signOut(path: []const u8, scratch: *Scratch, context: anytype, revoke: anytype) !bool {
+    var owner = try Owner.open(path);
+    defer owner.close();
+    const lock = try owner.acquireLock(.exclusive);
+    defer lock.close(io);
+    const record = &scratch.current;
+    owner.readRecordInto(record, &scratch.file) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => return err,
+    };
+    defer std.crypto.secureZero(u8, std.mem.asBytes(record));
+    if (record.state == .signed_out) return false;
+    try revoke(context, record);
+    try policy.signOut(record);
+    try owner.publish(record, &scratch.file);
+    return true;
+}
+
+/// Writes the owner-only file at `path` only when there is none, under the
+/// exclusive lock; true when this call wrote it. A file that exists is never
+/// replaced.
+pub fn createPrivate(path: []const u8, bytes: []const u8, buffer: []u8) !bool {
+    var owner = try Owner.open(path);
+    defer owner.close();
+    const lock = try owner.acquireLock(.exclusive);
+    defer lock.close(io);
+    if (owner.readBytes(buffer)) |existing| {
+        std.crypto.secureZero(u8, existing);
+        return false;
+    } else |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
+    }
+    try owner.publishBytes(bytes, null);
+    return true;
+}
+
 /// The owner-only file at absolute `path`, whose parent must be a private
 /// directory, read into `buffer`; null when it does not exist. The caller
 /// wipes the returned bytes.
@@ -490,6 +533,72 @@ test "only a refresh proven not sent restores ready and permits a later exchange
     defer rotated.release();
     try std.testing.expectEqual(@as(u64, 2), rotated.record.generation);
     try std.testing.expectEqualStrings("rotated", rotated.record.refresh_token.slice());
+}
+
+test "a sign-out revokes the committed tokens under the lock, then leaves only the issued client" {
+    var scratch: Scratch = undefined;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try testPath(&tmp, "chatgpt", &path_buffer);
+    const Seen = struct {
+        refresh: [64]u8 = undefined,
+        len: usize = 0,
+        calls: usize = 0,
+        fn revoke(self: *@This(), current: *const Record) !void {
+            self.calls += 1;
+            @memcpy(self.refresh[0..current.refresh_token.len], current.refresh_token.slice());
+            self.len = current.refresh_token.len;
+        }
+        fn abandon(_: *@This(), _: *const Record) !void {
+            return error.FixtureRequiresSyntheticCredential;
+        }
+    };
+    var seen: Seen = .{};
+    // No file: nothing to end, nothing revoked or written.
+    try std.testing.expect(!try signOut(path, &scratch, &seen, Seen.revoke));
+    try std.testing.expectEqual(@as(usize, 0), seen.calls);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "private/chatgpt", .{}));
+
+    var record = try testRecord("acct", 0);
+    try record.client_id.set("oaiapp_made_up");
+    // A plan record's access token carries its expiry.
+    try record.access_token.set("e30.eyJleHAiOjQxMDI0NDQ4MDB9.c2ln");
+    record.expires_at = 4_102_444_800;
+    try install(path, &record, null, &scratch);
+
+    // A revoke that abandons the sign-out leaves the record as it was.
+    try std.testing.expectError(error.FixtureRequiresSyntheticCredential, signOut(path, &scratch, &seen, Seen.abandon));
+    try std.testing.expectEqual(State.ready, (try testLoad(path, &scratch)).state);
+
+    try std.testing.expect(try signOut(path, &scratch, &seen, Seen.revoke));
+    try std.testing.expectEqual(@as(usize, 1), seen.calls);
+    try std.testing.expectEqualStrings("private-refresh", seen.refresh[0..seen.len]);
+    const after = try testLoad(path, &scratch);
+    try std.testing.expectEqual(State.signed_out, after.state);
+    try std.testing.expectEqual(@as(u64, 2), after.generation);
+    try std.testing.expectEqualStrings("oaiapp_made_up", after.client_id.slice());
+    try std.testing.expectEqual(@as(usize, 0), after.refresh_token.len);
+    var lease: Lease = undefined;
+    try std.testing.expectError(error.SignedOut, leaseInto(path, &lease, &scratch));
+    // Signed out already: nothing more to revoke.
+    try std.testing.expect(!try signOut(path, &scratch, &seen, Seen.revoke));
+    try std.testing.expectEqual(@as(usize, 1), seen.calls);
+    // A login replaces it and advances the generation.
+    try install(path, &record, null, &scratch);
+    try std.testing.expectEqual(@as(u64, 3), (try testLoad(path, &scratch)).generation);
+}
+
+test "a private file created once is never replaced" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try testPath(&tmp, "host-id", &path_buffer);
+    var buffer: [128]u8 = undefined;
+    try std.testing.expect(try createPrivate(path, "first\n", &buffer));
+    try std.testing.expect(!try createPrivate(path, "second\n", &buffer));
+    try std.testing.expectEqualStrings("first\n", (try readPrivate(path, &buffer)).?);
+    try std.testing.expectEqual(@as(u16, 0o600), (try tmp.dir.statFile(io, "private/host-id", .{})).permissions.toMode() & 0o777);
 }
 
 test "sent or uncertain refresh failures retain pending and refuse another exchange" {

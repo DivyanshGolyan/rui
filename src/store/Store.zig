@@ -700,15 +700,21 @@ pub const Store = struct {
         committed: ?CreationCommitted,
         faults: Faults,
     ) error{OutOfMemory}!ConfigureReply {
-        const entry = enter(self, .none) catch return .infrastructure_failure;
-        defer entry.release();
-        var access: Access(.write, error{SessionUpdateFailed}) = .open(&entry);
-        defer access.deinit();
-        // Running out of memory, the caller's for a reload or the engine's,
-        // rolls the write back cleanly and is the caller's to answer.
-        var reply = entry.finishTransaction(error{OutOfMemory}, faults, access.end(faults, configuration_domain.configure(&access, self.io, self.served, command, preset, initial_skills, reload_capture, allocator, committed, faults))) catch |err| switch (err) {
+        var reply: ConfigureReply = undefined;
+        transition.apply(self, command_domain.Configure, .{
+            .io = self.io,
+            .served = self.served,
+            .tools = self.hostTools(),
+            .command = command,
+            .preset = preset,
+            .initial_skills = initial_skills,
+            .reload_capture = reload_capture,
+            .allocator = allocator,
+            .committed = committed,
+            .reply = &reply,
+        }, faults) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            else => .infrastructure_failure,
+            else => reply = .infrastructure_failure,
         };
         if (reply == .rejected)
             reply.rejected.message = configuration_domain.missingToolMessage(self.hostTools().host_tool_set, reply.rejected.code, &command.configuration.tools);
@@ -1366,11 +1372,22 @@ pub const Store = struct {
     }
 
     fn startAgentHeld(self: *Store, binding: ActionAttemptBinding, caller: []const u8, task: []const u8, attached: bool, configuration: *content_custody.Configuration, committed: ?MessageCommitted, initial_skills: ?*const skills_domain.Initial, captured: ?*const skills_domain.MessageCapture, faults: Faults) !AgentStart {
-        const entry = try enter(self, .none);
-        defer entry.release();
-        var access: Access(.write, Ordinary.agent_start) = .open(&entry);
-        defer access.deinit();
-        return entry.finishTransaction(Ordinary.agent_start, faults, access.end(faults, command_domain.startAgent(&access, self.io, binding, caller, task, attached, configuration, committed, initial_skills, captured, faults)));
+        // The call's result text, which its content write reads in place.
+        var result_buffer: [tool_record.HostToolSet.max_refusal_message_bytes]u8 = undefined;
+        return transition.apply(self, command_domain.StartAgent, .{
+            .io = self.io,
+            .served = self.served,
+            .tools = self.hostTools(),
+            .binding = binding,
+            .caller = caller,
+            .task = task,
+            .attached = attached,
+            .configuration = configuration,
+            .committed = committed,
+            .initial_skills = initial_skills,
+            .captured = captured,
+            .result_buffer = &result_buffer,
+        }, faults);
     }
 
     /// Loads matching saved tools and resolves the call in one transaction.
@@ -1829,7 +1846,7 @@ pub const Ordinary = struct {
     pub const action_attempt = error{StaleActionAttemptBinding};
     const action_dispatch = action_attempt || error{SupersededByControl};
     /// A creation updates no Session, but shares configure's error set.
-    const agent_start = action_attempt || error{SessionUpdateFailed};
+    pub const agent_start = action_attempt || error{SessionUpdateFailed};
 
     /// Rejects a declared ordinary name the body cannot return, so a
     /// stale or misspelled name fails to compile instead of fencing.

@@ -16,9 +16,11 @@ pub const read = rsql.Read(.{
     .cardinality = .each,
 });
 
+// MySQL's partial active-Turn key is functional, not session_ref itself.
+// Match its expression as well as SQLite's ordinary partial-index predicate.
 const facts = rsql.Read(.{
     .sql = "SELECT s.session_ref,s.workspace_key,s.next_position,s.parent_ref,s.obligation_since AS saved_since," ++
-        "(SELECT min(m.admitted_at) FROM turn t JOIN message_admission m ON m.admission_id=t.first_admission_id WHERE t.session_ref=?1 AND t.outcome_code IS NULL) AS active_since," ++
+        "(SELECT min(m.admitted_at) FROM turn t JOIN message_admission m ON m.admission_id=t.first_admission_id WHERE t.session_ref=?1 AND t.outcome_code IS NULL AND (CASE WHEN t.outcome_code IS NULL THEN t.session_ref END)=?1) AS active_since," ++
         "(SELECT min(m.admitted_at) FROM message_admission m @index(message_admission_session_order) WHERE m.session_ref=?1 AND m.turn_id IS NULL AND m.admission_id>coalesce((SELECT admission_cutoff FROM session_stop WHERE session_ref=?1 ORDER BY admission_cutoff DESC LIMIT 1),0)) AS queued_since," ++
         "(SELECT min(m.admitted_at) FROM session_forward f @index(session_forward_feed) " ++
         "LEFT JOIN action_operation a ON f.kind=1 AND a.action_id=f.source_id LEFT JOIN model_operation op ON op.operation_id=a.parent_operation_id " ++

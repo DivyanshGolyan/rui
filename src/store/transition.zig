@@ -24,6 +24,8 @@
 //! - `committed(t)`, the result once its commit stands.
 //! - optionally `announced(t)`, what the Host hears once its commit stands
 //!   and before the Store runs anything else (`Store.announce`).
+//! - optionally `deinit(t)`, which frees what its steps allocated, once
+//!   `apply` ends on any path.
 //!
 //! The rounds run through `Access` until its queue core moves here.
 
@@ -43,6 +45,10 @@ pub const Kind = enum {
     branch,
     /// Zero or more times, each time a page.
     paged,
+    /// Zero or more times, each time one window of a content row's bytes
+    /// that the step asked for with `Round.readRaw`, read alone: a content
+    /// round (`Access.readRaw`), never one that runs what is queued.
+    raw,
 };
 
 /// How a transition's writes reach the Store.
@@ -95,10 +101,10 @@ pub fn rounds(comptime spec: anytype) type {
         }
 
         /// Whether `next` may run after `last`: rounds run in declared
-        /// order, and only a `.paged` round runs again.
+        /// order, and only a `.paged` or `.raw` round runs again.
         pub fn follows(last: ?At, next: At) bool {
             const before = last orelse return true;
-            if (next == before) return kind(next) == .paged;
+            if (next == before) return kind(next) == .paged or kind(next) == .raw;
             return @backingInt(next) > @backingInt(before);
         }
     };
@@ -174,6 +180,16 @@ fn RoundOf(comptime R: type, comptime commit: Commit, comptime Guards: type, com
         pub fn obligationsChanged(r: *Self, head: rsql.SessionHead) void {
             transacts("changes obligations");
             r.get().writer.obligationsChanged(head);
+        }
+
+        /// `Access.readRaw`, as the `.raw` round the step asks for next:
+        /// `destination`, which must outlive that round, is defined once it
+        /// runs. Nothing else may be queued for it. Its error is the
+        /// round's, so this never fails.
+        pub fn readRaw(r: *Self, content_id: u64, offset: u64, destination: []u8) error{}!void {
+            const core = r.get();
+            if (core.raw != null) @panic("a raw round reads one window");
+            core.raw = .{ .content_id = content_id, .offset = offset, .destination = destination };
         }
 
         /// `Access.writeCount`, as `write`.
@@ -278,6 +294,8 @@ fn Core(comptime R: type, comptime commit: Commit, comptime Guards: type, compti
         faults: Faults,
         /// The round the step queues for comes after this one.
         last: ?R.At = null,
+        /// The window a `.raw` round reads (`Round.readRaw`).
+        raw: ?struct { content_id: u64, offset: u64, destination: []u8 } = null,
 
         /// Whether the step queues for a round from `begin` on. Every
         /// round before `begin` is `.always` (`check`), so the round after
@@ -348,7 +366,19 @@ fn drive(comptime T: type, t: *T, core: *CoreFor(T)) !T.Result {
             const inside = if (begin) |first| @backingInt(at) >= first else false;
             // Reads queued where the round runs them.
             std.debug.assert(inside == core.opened());
-            if (@FieldType(CoreFor(T), "reader") != void and !inside) {
+            if (T.rounds.kind(at) == .raw) {
+                const window = core.raw orelse @panic("a raw round reads the window Round.readRaw asked for");
+                core.raw = null;
+                const read = if (@FieldType(CoreFor(T), "reader") != void and !inside)
+                    core.reader.readRaw(window.content_id, window.offset, window.destination)
+                else if (T.commit != .none)
+                    core.writer.readRaw(window.content_id, window.offset, window.destination)
+                else
+                    unreachable;
+                read catch |err| return named(T, at, err);
+            } else if (core.raw != null) {
+                @panic("a window Round.readRaw asked for is read only by a .raw round");
+            } else if (@FieldType(CoreFor(T), "reader") != void and !inside) {
                 // Before `begin`, writes ride the commit round.
                 if (T.commit != .none) std.debug.assert(core.writer.queued == 0);
                 core.reader.run() catch |err| return named(T, at, err);
@@ -360,6 +390,7 @@ fn drive(comptime T: type, t: *T, core: *CoreFor(T)) !T.Result {
         .commit => if (T.commit == .none) unreachable else {
             // Reads queued outside the transaction would never run.
             if (@FieldType(CoreFor(T), "reader") != void) std.debug.assert(core.reader.queued == 0);
+            std.debug.assert(core.raw == null);
             core.writer.commit() catch |err| {
                 if (comptime @typeInfo(T.Declined).error_set.error_names.?.len != 0) if (declinedBy(T, err)) |declined| {
                     try core.writer.abandon(core.faults);
@@ -400,5 +431,6 @@ pub fn apply(self: *Store, comptime T: type, input: T.Input, faults: Faults) !T.
     const entry = try store_core.enter(self, .fromControl(faults.control_trace));
     defer entry.release();
     var t: T = .{ .input = input };
+    defer if (comptime @hasDecl(T, "deinit")) t.deinit();
     return entry.finishTransaction(T.Ordinary, faults, run(&entry, T, &t, faults));
 }

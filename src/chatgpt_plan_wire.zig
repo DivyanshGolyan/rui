@@ -29,7 +29,7 @@ pub const resource = "https://api.openai.com/v1";
 pub const max_code_bytes = 2048;
 pub const max_refusal_bytes = 128;
 
-const authorize_url = issuer ++ "/api/accounts/authorize";
+pub const authorize_url = issuer ++ "/api/accounts/authorize";
 const token_url = issuer ++ "/api/accounts/oauth/token";
 const revoke_url = issuer ++ "/api/accounts/oauth/revoke";
 /// Only the port of the redirect address may vary.
@@ -55,8 +55,11 @@ pub const Attempt = struct {
 
 /// Starts one attempt from `random` and returns the address the user opens,
 /// written into `buffer`. `saved` is the record of an earlier sign-in, if
-/// any: its issued client id and ID token make this a returning sign-in. On
-/// error `attempt` is zeroed.
+/// any, signed in or out: its issued client id makes this a returning
+/// sign-in, which names no agent. The address is printed for the user to
+/// open, so it never carries a token: it sends no `id_token_hint`, which the
+/// issuer takes as optional, and the user picks the account. On error
+/// `attempt` is zeroed.
 pub fn authorize(random: *const [random_bytes]u8, port: u16, host_id: []const u8, saved: ?*const policy.Record, attempt: *Attempt, buffer: []u8) ![]const u8 {
     std.debug.assert(port != 0);
     try validateHostId(host_id);
@@ -84,7 +87,6 @@ fn writeAuthorize(writer: *std.Io.Writer, attempt: *const Attempt, host_id: []co
     try writer.writeAll(authorize_url);
     if (saved) |record| {
         try param(writer, "?client_id=", record.client_id.slice());
-        try param(writer, "&id_token_hint=", record.id_token.slice());
     } else {
         try param(writer, "?client_id=", first_client_id);
         try param(writer, "&agent_name_hint=", agent_name);
@@ -172,10 +174,44 @@ pub fn parseCallback(attempt: *const Attempt, received: []const u8, destination:
     grant.code.len = (try decode(code, &grant.code.bytes, error.InvalidCallback)).len;
     if (query.client_id) |client_id| {
         grant.client_id.len = (try decode(client_id, &grant.client_id.bytes, error.InvalidCallback)).len;
+        // A returning sign-in keeps the client it named; the issuer's guide
+        // rejects an answer for another.
+        if (attempt.saved_client_id) |saved| if (!std.mem.eql(u8, saved.slice(), grant.client_id.slice()))
+            return error.ClientIdMismatch;
     } else {
         const saved = attempt.saved_client_id orelse return error.MissingClientId;
         try grant.client_id.set(saved.slice());
     }
+}
+
+/// The request target of the HTTP request a loopback listener has read so
+/// far: null until its request line is complete. Only a `GET` can be the
+/// callback; any other request is not one.
+pub fn requestTarget(received: []const u8) !?[]const u8 {
+    const end = std.mem.indexOf(u8, received, "\r\n") orelse {
+        if (received.len >= max_request_line_bytes) return error.NotCallbackAddress;
+        return null;
+    };
+    var words = std.mem.splitScalar(u8, received[0..end], ' ');
+    const method = words.next().?;
+    const target = words.next() orelse return error.NotCallbackAddress;
+    const version = words.next() orelse return error.NotCallbackAddress;
+    if (!std.mem.eql(u8, method, "GET") or words.next() != null or !std.mem.startsWith(u8, version, "HTTP/1.") or target.len == 0)
+        return error.NotCallbackAddress;
+    return target;
+}
+
+/// The most of a request the listener reads before its request line must
+/// have ended: a callback's code, state, scope and client id fit well inside.
+pub const max_request_line_bytes = 8 * 1024;
+
+/// The listener's answers to the browser, each one plain line.
+pub const page_signed_in = page("200 OK", "Signed in. You can close this tab.\n");
+pub const page_failed = page("400 Bad Request", "Sign-in did not finish. See the terminal.\n");
+pub const page_not_found = page("404 Not Found", "Not found.\n");
+
+fn page(comptime status: []const u8, comptime body: []const u8) []const u8 {
+    return std.fmt.comptimePrint("HTTP/1.1 {s}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {d}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n{s}", .{ status, body.len, body });
 }
 
 /// The callback parameters this flow reads, each borrowing the received text.
@@ -344,6 +380,19 @@ pub fn revokeRequest(current: *const policy.Record, buffer: []u8) !Request {
     return .{ .url = revoke_url, .content_type = codex.form_content, .body = writer.buffered() };
 }
 
+/// What a revocation's answer means. A 200 is success, even for a token
+/// already invalid; a server failure may be retried while the refresh token
+/// is still held; any other answer is a refusal.
+pub const Revocation = enum { revoked, retry, refused };
+
+pub fn revocation(status: u16) Revocation {
+    return switch (status) {
+        200 => .revoked,
+        429, 500...599 => .retry,
+        else => .refused,
+    };
+}
+
 fn writeRevoke(writer: *std.Io.Writer, current: *const policy.Record) !void {
     try param(writer, "token=", current.refresh_token.slice());
     try param(writer, "&token_type_hint=", "refresh_token");
@@ -455,11 +504,15 @@ test "the authorization address names the first or the saved client" {
 
     var saved: policy.Record = undefined;
     try testSavedRecord(&saved);
-    try std.testing.expectEqualStrings(
-        "https://auth.openai.com/api/accounts/authorize?client_id=" ++ test_client_id ++ "&id_token_hint=" ++ refreshed_id_token ++ tail,
-        try authorize(&testRandom(), 1455, test_host_id, &saved, &attempt, &url),
-    );
+    // A returning sign-in names its issued client, no agent and no token,
+    // whether its record is signed in or out.
+    const returning = "https://auth.openai.com/api/accounts/authorize?client_id=" ++ test_client_id ++ tail;
+    try std.testing.expectEqualStrings(returning, try authorize(&testRandom(), 1455, test_host_id, &saved, &attempt, &url));
     try std.testing.expectEqualStrings(test_client_id, attempt.saved_client_id.?.slice());
+    try std.testing.expect(std.mem.indexOf(u8, returning, "e30.") == null);
+    var signed_out = saved;
+    try policy.signOut(&signed_out);
+    try std.testing.expectEqualStrings(returning, try authorize(&testRandom(), 1455, test_host_id, &signed_out, &attempt, &url));
     // Only the port varies in the redirect address.
     try std.testing.expect(std.mem.indexOf(u8, try authorize(&testRandom(), 50001, test_host_id, null, &attempt, &url), "127.0.0.1%3A50001%2Fauth%2Fcallback&") != null);
 
@@ -495,8 +548,11 @@ test "a callback yields the code and issued client id from a listener or a paste
     try testAttempt(&saved, &returning);
     try parseCallback(&returning, "/auth/callback?code=c&state=" ++ zero_state, &callback);
     try std.testing.expectEqualStrings(test_client_id, callback.granted.client_id.slice());
-    try parseCallback(&returning, "/auth/callback?code=c&state=" ++ zero_state ++ "&client_id=oaiapp_new", &callback);
-    try std.testing.expectEqualStrings("oaiapp_new", callback.granted.client_id.slice());
+    try parseCallback(&returning, "/auth/callback?code=c&state=" ++ zero_state ++ "&client_id=" ++ test_client_id, &callback);
+    try std.testing.expectEqualStrings(test_client_id, callback.granted.client_id.slice());
+    // An answer for another client is not this sign-in's.
+    try std.testing.expectError(error.ClientIdMismatch, parseCallback(&returning, "/auth/callback?code=c&state=" ++ zero_state ++ "&client_id=oaiapp_new", &callback));
+    try std.testing.expect(std.mem.allEqual(u8, std.mem.asBytes(&callback), 0));
     // The issuer's refusal carries its code.
     try parseCallback(&attempt, "/auth/callback?error=access_denied&error_description=No+thanks&state=" ++ zero_state, &callback);
     try std.testing.expectEqualStrings("access_denied", callback.refused.slice());
@@ -734,6 +790,45 @@ test "sign-in and refresh accept a granted scope only with the plan scope" {
             try renewal;
             try std.testing.expectEqualStrings("rt_made_up", record.refresh_token.slice());
         }
+    }
+}
+
+test "the listener reads a GET's target once its request line ends" {
+    try std.testing.expectEqualStrings("/auth/callback?code=c", (try requestTarget("GET /auth/callback?code=c HTTP/1.1\r\nHost: 127.0.0.1\r\n")).?);
+    try std.testing.expectEqualStrings("/favicon.ico", (try requestTarget("GET /favicon.ico HTTP/1.0\r\n")).?);
+    // Not yet a whole line: wait for more.
+    for ([_][]const u8{ "", "GET /auth/callback?code=c HTTP/1.1", "GET /auth/callback?code=c HTTP/1.1\r" }) |partial|
+        try std.testing.expectEqual(@as(?[]const u8, null), try requestTarget(partial));
+    for ([_][]const u8{
+        "POST /auth/callback HTTP/1.1\r\n",
+        "GET /auth/callback\r\n",
+        "GET  HTTP/1.1\r\n",
+        "GET /a b HTTP/1.1\r\n",
+        "GET /auth/callback HTTP/2\r\n",
+        "\r\n",
+    }) |refused| try std.testing.expectError(error.NotCallbackAddress, requestTarget(refused));
+    // A request line that never ends within the bound is not a callback.
+    const endless: [max_request_line_bytes]u8 = @splat('a');
+    try std.testing.expectEqual(@as(?[]const u8, null), try requestTarget(endless[0 .. endless.len - 1]));
+    try std.testing.expectError(error.NotCallbackAddress, requestTarget(&endless));
+}
+
+test "a revocation is confirmed only by a 200, and retried only after a server failure" {
+    var status: u16 = 100;
+    while (status < 600) : (status += 1) {
+        const expected: Revocation = if (status == 200) .revoked else if (status == 429 or status >= 500) .retry else .refused;
+        try std.testing.expectEqual(expected, revocation(status));
+    }
+}
+
+test "the listener's pages are one plain line each" {
+    for ([_][]const u8{ page_signed_in, page_failed, page_not_found }) |answer| {
+        const head_end = std.mem.indexOf(u8, answer, "\r\n\r\n").? + 4;
+        const body = answer[head_end..];
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, body, "\n"));
+        try std.testing.expect(std.mem.endsWith(u8, body, "\n"));
+        var length: [32]u8 = undefined;
+        try std.testing.expect(std.mem.indexOf(u8, answer[0..head_end], try std.fmt.bufPrint(&length, "Content-Length: {d}\r\n", .{body.len})) != null);
     }
 }
 

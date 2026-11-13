@@ -3536,11 +3536,15 @@ fn providerBand(built: *Spans, trouble: Band, now_ms: u64) error{OutOfMemory}![]
     var buffer: [8]u8 = undefined;
     return bandLine(built, switch (trouble.trouble) {
         // Each names the provider of the newest failure it shows.
-        .sign_in => if (trouble.provider.?.login()) |command|
-            try std.fmt.allocPrint(built.arena, "Sign-in expired. Run {s}.", .{command})
-        else
-            // No command to name, and the list pane is narrow: the name alone.
-            try std.fmt.allocPrint(built.arena, "{s} sign-in expired.", .{trouble.provider.?.shown()}),
+        .sign_in => sign_in: {
+            if (trouble.provider.?.login()) |command| {
+                const run = try std.fmt.allocPrint(built.arena, "Sign-in expired. Run {s}.", .{command});
+                if (run.len <= built.width -| 2) break :sign_in run;
+            }
+            // No command, or the narrow list pane cannot hold it whole: the
+            // name alone, which fits.
+            break :sign_in try std.fmt.allocPrint(built.arena, "{s} sign-in expired.", .{trouble.provider.?.shown()});
+        },
         .api_key => if (trouble.provider.?.login()) |command|
             try std.fmt.allocPrint(built.arena, "{s} API key rejected. Run {s}, then rui host pause.", .{ trouble.provider.?.shown(), command })
         else
@@ -4562,7 +4566,7 @@ test "the band names the provider of the newest sign-in or key failure" {
         session("bbbbbb", .{ .failed = .{ .since = test_now_s - 30, .code = bounded(session_work.max_code_bytes, "provider_http_401"), .resets_at = null } }, .{ .provider = .chatgpt }),
     };
     for ([_]struct { []const Listed, []const u8 }{
-        .{ &rows, "ChatGPT sign-in expired." },
+        .{ &rows, "Sign-in expired. Run rui auth login chatgpt." },
         .{ rows[0..1], "Sign-in expired. Run rui auth login codex." },
         .{ &.{session("cccccc", .{ .failed = .{ .since = test_now_s - 60, .code = bounded(session_work.max_code_bytes, failure_class.api_key_rejected), .resets_at = null } }, .{ .provider = .openai })}, "OpenAI API key rejected. Run rui auth login openai, then rui host pause." },
     }) |case| {
@@ -4571,7 +4575,8 @@ test "the band names the provider of the newest sign-in or key failure" {
         const text = try segmentText(arena.allocator(), try headerSegments(arena.allocator(), &state, 200, .{}));
         try std.testing.expect(std.mem.indexOf(u8, text, case[1]) != null);
     }
-    // With no command to name, the band fits the 40-column list pane whole.
+    // Too narrow for the command, the band still fits the 40-column list
+    // pane whole.
     var state = try opened(&rows);
     defer state.deinit();
     const narrow = try segmentText(arena.allocator(), try headerSegments(arena.allocator(), &state, 40, .{}));
