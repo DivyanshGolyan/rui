@@ -273,7 +273,6 @@ fn defaultProviders(init: std.process.Init, settings: *hs.Settings, failure: *st
 }
 
 pub fn fillAt(init: std.process.Init, parsed: *const cli_args.Parsed, dir: []const u8, settings: *hs.Settings, fixtures: *providers.Fixtures, failure: *start_report.Failure) !void {
-    errdefer |e| std.debug.print("DEBUGFILL {s} {s} dir={s}\n", .{ @errorName(e), failure.message.slice(), dir });
     if (parsed.get("test-codex-fixture-endpoint") != null and init.environ_map.get("RUI_CODEX_CREDENTIAL_FILE") == null) return error.FixtureCredentialPathRequired;
     if (parsed.get("test-chatgpt-fixture-endpoint") != null and init.environ_map.get("RUI_CHATGPT_CREDENTIAL_FILE") == null) return error.FixtureCredentialPathRequired;
     if (parsed.get("test-openai-fixture-endpoint") != null and init.environ_map.get(api_key.path_variable) == null) return error.FixtureCredentialPathRequired;
@@ -674,7 +673,7 @@ test "Host start private file origin refuses literal secrets and assignments ove
     try private.writeFile(init.io, .{ .sub_path = "host.json", .data = "{\"providers\":{},\"tools\":{\"bash\":{\"timeoutMs\":17}},\"execution\":{\"activeCapacity\":3},\"interface\":{\"lifetime\":\"stdin\"}}" });
     const parsed = try parseForTest(arena.allocator(), &.{ "--settings", path, "--set", "tools.bash.timeoutMs=99", "--set", "execution.activeCapacity=4", "--set", "providers.codex={}" });
     var fixtures: providers.Fixtures = .{};
-    try fill(init, &parsed, settings, &fixtures, &failure);
+    fill(init, &parsed, settings, &fixtures, &failure) catch |e| { std.debug.print("DEBUGFILL {s} {s}\n", .{ @errorName(e), failure.message.slice() }); return e; };
     try std.testing.expectEqual(@as(u64, 99), settings.tools.bash.timeout_ms.value);
     try std.testing.expectEqual(@as(usize, 4), settings.execution.active_capacity.value);
     try std.testing.expectEqual(hs.Interface.Lifetime.stdin, settings.interface.lifetime.value);
@@ -752,11 +751,11 @@ test "Host start pipe file and assignment admissions report every code on both s
             },
             .file => {
                 const parsed = try parseForTest(arena.allocator(), &.{ "--settings", path });
-                try fill(init, &parsed, settings, &fixtures, &admission_failure);
+                fill(init, &parsed, settings, &fixtures, &admission_failure) catch |e| { std.debug.print("DEBUGFILL {s} {s}\n", .{ @errorName(e), admission_failure.message.slice() }); return e; };
             },
             .assignments => {
                 const parsed = try parseForTest(arena.allocator(), &.{ "--set", "tools.bash.timeoutMs=17" });
-                try fill(init, &parsed, settings, &fixtures, &admission_failure);
+                fill(init, &parsed, settings, &fixtures, &admission_failure) catch |e| { std.debug.print("DEBUGFILL {s} {s}\n", .{ @errorName(e), admission_failure.message.slice() }); return e; };
             },
         }
         try std.testing.expectEqual(@as(u64, 17), settings.tools.bash.timeout_ms.value);
