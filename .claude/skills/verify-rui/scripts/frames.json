@@ -528,7 +528,7 @@
     },
     {
       "name": "first-run",
-      "note": "No credentials: sign-in choice occupies the input row",
+      "note": "No credentials: sign-in choice occupies the input row, ChatGPT selected",
       "open": "overview",
       "first_run": true,
       "steps": [
@@ -546,12 +546,13 @@
         "Host stopped",
         "Type a task",
         "[ChatGPT]",
-        "[API key]"
+        "[API key]",
+        "Codex"
       ]
     },
     {
-      "name": "first-run-codex",
-      "note": "Fake device login: clickable link and code, no network",
+      "name": "first-run-browser",
+      "note": "Browser sign-in on the loopback fixture issuer: short link, masked address entry, Tab offered; no browser opens",
       "open": "overview",
       "first_run": true,
       "env": {
@@ -567,6 +568,48 @@
           ]
         },
         {
+          "wait": "Sign in at 127.0.0.1:1"
+        }
+      ],
+      "expect": [
+        "Sign in at 127.0.0.1:1",
+        "Or paste the address your browser ended on",
+        "tab device code · esc back"
+      ],
+      "absent": [
+        "Provider: [c]",
+        "[ChatGPT]",
+        "[API key]",
+        "Codex",
+        "oauth/authorize"
+      ]
+    },
+    {
+      "name": "first-run-codex",
+      "note": "Tab from the browser sign-in to the fake device login: clickable link and code, no network",
+      "open": "overview",
+      "first_run": true,
+      "env": {
+        "RUI_TEST_LOGIN": "waiting"
+      },
+      "steps": [
+        {
+          "wait": "› ChatGPT    API key"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Sign in at 127.0.0.1:1"
+        },
+        {
+          "keys": [
+            "Tab"
+          ]
+        },
+        {
           "wait": "BDL9-KI88H"
         }
       ],
@@ -578,6 +621,7 @@
         "Provider: [c]",
         "[ChatGPT]",
         "[API key]",
+        "Sign in at",
         "Open auth.openai.com",
         "and enter"
       ]
