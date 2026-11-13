@@ -293,6 +293,13 @@ test "a choice takes its arrows and Enter, the screen's keys and typing, and ref
     }
 }
 
+test "text excludes controls and format characters but keeps the joiner, and a key code past Unicode" {
+    for ([_]u21{ 0x00ad, 0x200b, 0x2060, 0xfeff, 0x0600, 0x01, 0x85 }) |point| try std.testing.expect(!textScalar(point, true));
+    for ([_]u21{ 0x200d, '\t', 'a', 0x00e9, 0x1f9d1, 0x10ffff + 2 }) |point| try std.testing.expect(textScalar(point, false));
+    try std.testing.expect(textScalar('\n', true));
+    try std.testing.expect(!textScalar('\n', false));
+}
+
 /// Every key as itself, for tests of an editor without a screen.
 pub const every: Keymap(Key) = blk: {
     var map: Keymap(Key) = .{ .meanings = .initFill(null) };

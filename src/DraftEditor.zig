@@ -821,6 +821,17 @@ test "a key no table binds neither edits nor rejects the line" {
     try std.testing.expectEqual(KeyOutcome{ .refused = .invalid }, stream.send(&editor, "\r"));
 }
 
+test "a typed or pasted format character other than the joiner rejects the line" {
+    var storage: [32]u8 = undefined;
+    for ([_][]const u8{ "ok\u{ad}", "\x1b[200~ok\u{feff}x\x1b[201~" }) |input| {
+        var editor: Editor = .init(&storage);
+        var stream: Typing = .{};
+        _ = stream.send(&editor, input);
+        try std.testing.expectEqualStrings("ok", editor.text());
+        try std.testing.expectEqual(KeyOutcome{ .refused = .invalid }, stream.send(&editor, "\r"));
+    }
+}
+
 test "flag and variation selector are each deleted as one grapheme" {
     var storage: [80]u8 = undefined;
     var editor: Editor = .init(&storage);
