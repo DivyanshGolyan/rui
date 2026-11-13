@@ -1414,7 +1414,7 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
         .conversed => |input| {
             switch (input.input) {
                 .other => state.notice = null,
-                .stop => stopKey(state, .{ .reference = input.reference, .work = input.work }, &effects),
+                .stop => try stopKey(state, .{ .reference = input.reference, .work = input.work }, &effects),
                 .archive => |archive| archiveIntent(state, .{ .ask = .{ .reference = input.reference, .work = input.work, .archive = archive } }, &effects),
                 .unarchive => archiveIntent(state, .{ .restore = input.reference }, &effects),
                 .cancel_upgrade => if (state.upgrade.takesEscape()) effects.add(.cancel_upgrade),
@@ -1459,6 +1459,8 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
                     state.say(.attention, "! {s} stop unsure; details on exit", .{&result.reference});
                 },
             }
+            // A stop the answer closes returns the row to its work's kind.
+            try arrange(state);
             state.next_list_ms = 0;
         },
         .created => |result| {
@@ -1984,8 +1986,9 @@ const StopTarget = struct { reference: Reference, work: Kind };
 
 /// Ctrl-X on either screen stops at once: null targets the selection,
 /// otherwise the exact conversation. Stopping loses nothing the Host cannot
-/// replay, so it asks nothing.
-fn stopKey(state: *State, exact: ?StopTarget, effects: *Effects) void {
+/// replay, so it asks nothing. An open stop changes the row's shown kind,
+/// so the order and counts are rebuilt.
+fn stopKey(state: *State, exact: ?StopTarget, effects: *Effects) error{OutOfMemory}!void {
     if (!admitHostRequest(state)) return;
     state.notice = null;
     const target = exact orelse selected: {
@@ -1995,7 +1998,9 @@ fn stopKey(state: *State, exact: ?StopTarget, effects: *Effects) void {
     const ref = target.reference;
     const kind = kindShown(state, ref, target.work);
     if (!rules.get(kind).stoppable) return refuseStop(state, ref, kind);
-    if (state.request(.stop, ref)) effects.add(.{ .stop = ref });
+    if (!state.request(.stop, ref)) return;
+    effects.add(.{ .stop = ref });
+    try arrange(state);
 }
 
 /// Says why `ref` takes no stop. An unconfirmed one says leaving gives the
@@ -2084,7 +2089,7 @@ fn listInput(state: *State, delivery: InputDelivery, effects: *Effects) error{Ou
         .action => |action| switch (action) {
             .exit => unreachable,
             .clear => state.notice = null,
-            .stop => stopKey(state, null, effects),
+            .stop => try stopKey(state, null, effects),
             .archive => archiveIntent(state, .selected_archive, effects),
             .select_previous => select(state, .previous),
             .select_next => select(state, .next),
@@ -5454,7 +5459,7 @@ test "overview quiet rows cover every kind, sender, selection, a pending stop an
         defer arena.deinit();
         const first = try listSegments(arena.allocator(), &state, .{ .row = 0 }, width, caps, 0);
         // The drawn mark is the counted mark.
-        try std.testing.expectEqual(markCounted(drawnMark(try segmentText(arena.allocator(), first.segments))), countedMark(state.summary.counts));
+        try std.testing.expectEqual(markCounted(try drawnMark(try segmentText(arena.allocator(), first.segments))), countedMark(state.summary.counts));
         const name = try styleOf(first.segments, "Quiet row");
         try std.testing.expectEqual(quiet, name.dim);
         try std.testing.expectEqual(selected, first.selected);
@@ -5477,11 +5482,11 @@ test "overview quiet rows cover every kind, sender, selection, a pending stop an
 }
 
 /// The mark a row's first line draws; a spinner draws the active mark.
-fn drawnMark(text: []const u8) Mark {
+fn drawnMark(text: []const u8) error{TestUnexpectedResult}!Mark {
     const glyph = text[1 .. std.mem.indexOfScalarPos(u8, text, 1, ' ') orelse text.len];
     for (spinner) |frame| if (std.mem.eql(u8, glyph, frame)) return .active;
     for (std.enums.values(Mark)) |mark| if (std.mem.eql(u8, glyph, marks.get(mark).unicode) or std.mem.eql(u8, glyph, marks.get(mark).ascii)) return mark;
-    std.debug.panic("no mark drawn in {s}", .{text});
+    return error.TestUnexpectedResult;
 }
 
 /// The mark as the counts line counts it, or null for a mark it leaves out.
