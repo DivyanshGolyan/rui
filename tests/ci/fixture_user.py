@@ -210,18 +210,19 @@ def reexec_pinned(argv):
 def trust_sources(environ):
     """The caller's trust, as each variable the run sets and the file or directory it names.
 
-    Each of network_variables.TRUST that names an existing file or directory
-    keeps it. The first CA bundle file among those and TOOL_BUNDLES is also
-    every tool's bundle. A variable naming nothing is dropped, with a notice.
+    Each variable of network_variables.TRUST and TOOL_BUNDLES that names an
+    existing file or directory keeps what it names. Each tool variable the
+    caller left unset gets the main bundle: the first file among those, the
+    owner's names first. A variable naming nothing is dropped, with a notice.
     """
     named = {name: Path(environ[name]) for name in (*network_variables.TRUST, *TOOL_BUNDLES) if environ.get(name)}
     for name, path in named.items():
         if not path.exists():
             say(f"{name} names {path}, which does not exist; the run leaves {name} unset")
-    trust = {name: path for name, path in named.items() if name in network_variables.TRUST and path.exists()}
-    bundle = next((path for path in named.values() if path.is_file()), None)
+    trust = {name: path for name, path in named.items() if path.exists()}
+    bundle = next((path for path in trust.values() if path.is_file()), None)
     if bundle is not None:
-        trust.update(dict.fromkeys(TOOL_BUNDLES, bundle))
+        trust.update({name: bundle for name in TOOL_BUNDLES if name not in named})
     if not trust:
         say("no CA bundle or certificate directory in the caller's trust variables; the run uses the system "
             "trust store")

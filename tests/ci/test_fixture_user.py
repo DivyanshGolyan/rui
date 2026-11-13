@@ -121,7 +121,7 @@ class FixtureUserTest(unittest.TestCase):
                                                   f"{closed / 'bin'}:{open_}::{open_}"),
                          f"/venv/bin:/tools/zig:{open_}")
 
-    def test_trust_keeps_each_variable_that_names_a_file_or_directory_and_gives_tools_the_bundle(self):
+    def test_trust_keeps_what_each_variable_names_and_fills_only_unset_tool_variables_with_the_bundle(self):
         bundle, other, directory = self.root / "ca.crt", self.root / "other.crt", self.root / "certs"
         bundle.write_text("certificate")
         other.write_text("other")
@@ -135,9 +135,22 @@ class FixtureUserTest(unittest.TestCase):
             "both": ({"SSL_CERT_FILE": bundle, "SSL_CERT_DIR": directory},
                      {"SSL_CERT_FILE": bundle, "SSL_CERT_DIR": directory, **dict.fromkeys(tools, bundle)}),
             "a tool's bundle": ({"CURL_CA_BUNDLE": bundle}, dict.fromkeys(tools, bundle)),
-            "the owner's bundle first": ({"PIP_CERT": other, "SSL_CERT_FILE": bundle},
-                                         {"SSL_CERT_FILE": bundle, **dict.fromkeys(tools, bundle)}),
+            "a tool's own bundle stays its own": (
+                {"SSL_CERT_FILE": bundle, "PIP_CERT": other, "NODE_EXTRA_CA_CERTS": other},
+                {"SSL_CERT_FILE": bundle, "REQUESTS_CA_BUNDLE": bundle, "CURL_CA_BUNDLE": bundle,
+                 "GIT_SSL_CAINFO": bundle, "PIP_CERT": other, "NODE_EXTRA_CA_CERTS": other}),
+            "the owner's bundle fills the rest": (
+                {"PIP_CERT": other, "SSL_CERT_FILE": bundle},
+                {"SSL_CERT_FILE": bundle, "REQUESTS_CA_BUNDLE": bundle, "CURL_CA_BUNDLE": bundle,
+                 "GIT_SSL_CAINFO": bundle, "PIP_CERT": other, "NODE_EXTRA_CA_CERTS": bundle}),
+            "a tool's bundle fills the rest": (
+                {"GIT_SSL_CAINFO": other, "SSL_CERT_DIR": directory},
+                {"SSL_CERT_DIR": directory, **dict.fromkeys(tools, other)}),
             "a missing bundle": ({"SSL_CERT_FILE": missing, "CURL_CA_BUNDLE": bundle}, dict.fromkeys(tools, bundle)),
+            "a tool set to nothing stays unset": (
+                {"SSL_CERT_FILE": bundle, "PIP_CERT": missing},
+                {"SSL_CERT_FILE": bundle, "REQUESTS_CA_BUNDLE": bundle, "CURL_CA_BUNDLE": bundle,
+                 "GIT_SSL_CAINFO": bundle, "NODE_EXTRA_CA_CERTS": bundle}),
             "a missing directory": ({"SSL_CERT_DIR": missing}, {}),
             "none": ({}, {}),
         }
@@ -268,6 +281,7 @@ class FixtureUserTest(unittest.TestCase):
         (private / "share/linked.pem").write_text("linked certificate\n")
         for parent in (public, private):
             (parent / "ca.crt").write_text(f"{parent.name} certificate\n")
+            (parent / "corp.crt").write_text(f"{parent.name} corporate certificate\n")
             # A hashed directory, as /etc/ssl/certs: mostly links into another directory.
             (parent / "certs").mkdir()
             (parent / "certs/abcd1234.0").write_text(f"{parent.name} hashed certificate\n")
@@ -276,11 +290,11 @@ class FixtureUserTest(unittest.TestCase):
                         "NODE_EXTRA_CA_CERTS"}
         cases = {
             # The checkout root reads, the directory that holds its trust and installs, and its trust variables.
-            "public checkout": (public / "checkout", public, ("SSL_CERT_FILE", "SSL_CERT_DIR")),
+            "public checkout": (public / "checkout", public, ("SSL_CERT_FILE", "SSL_CERT_DIR", "PIP_CERT")),
             "private checkout": (private / "checkout", private, ("SSL_CERT_DIR",)),
-            "linked worktree": (public / "linked", private, ("SSL_CERT_FILE",)),
+            "linked worktree": (public / "linked", private, ("SSL_CERT_FILE", "PIP_CERT")),
         }
-        trust_files = {"SSL_CERT_FILE": "ca.crt", "SSL_CERT_DIR": "certs"}
+        trust_files = {"SSL_CERT_FILE": "ca.crt", "SSL_CERT_DIR": "certs", "PIP_CERT": "corp.crt"}
         tools_dir = self.root / "placed/tools"
         gid = os.getgid()
 
@@ -305,7 +319,8 @@ class FixtureUserTest(unittest.TestCase):
                         self.assertTrue(lane_reads(item, gid), f"the lane cannot read {item}")
 
                 # Each trust variable the caller set names its copy in the lane's directory, and so does
-                # each tool's bundle name when the caller's trust has a bundle; the run sets exactly those.
+                # each tool's bundle name the caller left unset when its trust has a bundle; the run sets
+                # exactly those. PIP_CERT keeps its own corporate bundle.
                 expected = {*trust, *(bundle_names if "SSL_CERT_FILE" in trust else ())}
                 self.assertEqual(set(placed.trust), expected)
                 env = fixture_user.environment("rui-x", Path("/home/rui-x"), "/p", placed.trust, {})
@@ -320,7 +335,8 @@ class FixtureUserTest(unittest.TestCase):
                                          {"abcd1234.0": f"{inputs_at.name} hashed certificate\n",
                                           "efgh5678.0": "linked certificate\n"})
                     else:
-                        self.assertEqual(copy.read_text(), f"{inputs_at.name} certificate\n")
+                        corporate = "corporate " if variable == "PIP_CERT" else ""
+                        self.assertEqual(copy.read_text(), f"{inputs_at.name} {corporate}certificate\n", variable)
                 self.assertEqual(set(placed.binaries), set(tools[inputs_at]))
                 for tool, program in tools[inputs_at].items():
                     binary = placed.binaries[tool]
