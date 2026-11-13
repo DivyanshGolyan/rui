@@ -1290,11 +1290,7 @@ pub const Store = struct {
     }
 
     fn deliverSessionForwardHeld(self: *Store, forward_id: u64, faults: Faults) !bool {
-        const entry = try enter(self, .none);
-        defer entry.release();
-        var access: Access(.write, error{}) = .open(&entry);
-        defer access.deinit();
-        return entry.finishTransaction(Ordinary.none, faults, access.end(faults, forward_domain.deliver(&access, forward_id, faults)));
+        return transition.apply(self, forward_domain.Deliver, .{ .forward_id = forward_id }, faults);
     }
 
     /// Owed stops, ending Messages and ancestor feed hops precede calls.
@@ -1388,11 +1384,7 @@ pub const Store = struct {
     }
 
     fn findToolsHeld(self: *Store, binding: ActionAttemptBinding, arena: std.mem.Allocator, words: *const @import("../find_tools_words.zig").FindTools, refusal: ?[]const u8, faults: Faults) !bool {
-        const entry = try enter(self, .none);
-        defer entry.release();
-        var access: Access(.write, Ordinary.action_attempt) = .open(&entry);
-        defer access.deinit();
-        return entry.finishTransaction(Ordinary.action_attempt, faults, access.end(faults, @import("domain/find_tools.zig").run(&access, binding, arena, words, refusal, faults)));
+        return transition.apply(self, @import("domain/find_tools.zig").FindTools, .{ .binding = binding, .arena = arena, .words = words, .refusal = refusal }, faults);
     }
 
     pub fn settleSkillTool(self: *Store, binding: ActionAttemptBinding, allocator: std.mem.Allocator, captured: *const skills_domain.Capture, faults: Faults) !bool {
