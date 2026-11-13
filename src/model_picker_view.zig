@@ -145,12 +145,11 @@ fn typedEntry(menu: *const picker.Menu, words: []const u8, defaults: picker.Defa
 
 /// Multiword filters may narrow real rows, but only a valid model ID can
 /// become a typed row. Invalid unmatched words leave the full chat list.
-/// Every row reads the menu's query, so each offers only `Menu.offered`.
 fn matchingQuery(menu: *const picker.Menu, words: []const u8, defaults: picker.Defaults) picker.Query {
-    const query = menu.query(words, defaults);
+    const query = picker.Query.parse(words);
     if (model_catalog.validModelSyntax(words)) return query;
     for (menu.entries) |entry| if (query.row(entry, defaults) != null) return query;
-    return menu.query("", defaults);
+    return picker.Query.parse("");
 }
 
 /// Build an unbounded plan; the shell applies the actual list viewport.
@@ -162,9 +161,9 @@ pub fn rows(arena: std.mem.Allocator, menu: *const picker.Menu, words: []const u
     var selected: ?u32 = null;
     var providers: picker.Providers = .empty;
     for (menu.entries) |entry| {
-        const row = query.row(entry, defaults) orelse continue;
+        if (query.row(entry, defaults) == null) continue;
         widest = @max(widest, entry.id.len);
-        providers.setUnion(row.providers);
+        providers.setUnion(entry.providers);
         if (choice) |c| if (c.id.eql(entry.id)) {
             selected = @intCast(count);
         };
@@ -175,7 +174,7 @@ pub fn rows(arena: std.mem.Allocator, menu: *const picker.Menu, words: []const u
     if (typed_row) {
         const entry = typedEntry(menu, query.words, defaults);
         widest = @max(widest, entry.id.len);
-        providers.setUnion(query.typed(entry, defaults).providers);
+        providers.setUnion(entry.providers);
         count += 1;
         selected = 0;
     }
@@ -505,76 +504,47 @@ test "model picker view drops columns before the ID without prose rows" {
     try std.testing.expect(std.mem.indexOf(u8, all.rows[0].text, "API key") == null);
 }
 
-test "model picker view offers one ChatGPT, the saved way in, and keeps it whole in the overview's 40-column list pane" {
+test "model picker view keeps each chosen sign-in whole in the overview's list pane, with and without OpenAI" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     // The overview draws the picker in its Session list pane, 40 columns
     // wide however wide the terminal is.
     const pane = 40;
-    const Case = struct { saved: picker.Provider, hidden: picker.Provider, kept_only: []const u8, hidden_only: []const u8, wide: []const u8, after_tab: []const u8 };
     for ([_]bool{ false, true }) |with_openai| {
         const lists = [_]@import("model_list.zig").Entry{
-            .{ .provider = .codex, .list = .{ .live = .{ .bytes = "gpt-6.1-sol\ngpt-6.1-terra\ndevice-only\n" } } },
-            .{ .provider = .chatgpt, .list = .{ .live = .{ .bytes = "gpt-6.1-sol\ngpt-6.1-terra\nbrowser-only\n" } } },
+            .{ .provider = .codex, .list = .{ .live = .{ .bytes = "gpt-6.1-sol\ngpt-6.1-terra\n" } } },
+            .{ .provider = .chatgpt, .list = .{ .live = .{ .bytes = "gpt-6.1-sol\ngpt-6.1-terra\n" } } },
             .{ .provider = .openai, .list = .{ .live = .{ .bytes = "gpt-6.1-sol\ngpt-6.1-terra\n" } } },
         };
         var menu = try picker.testMenu(lists[0..if (with_openai) @as(usize, 3) else 2]);
         defer menu.deinit(std.testing.allocator);
-        for ([_]Case{
-            .{ .saved = .codex, .hidden = .chatgpt, .kept_only = "device-only", .hidden_only = "browser-only", .wide = "✓  gpt-6.1-sol  1M     ‹ high ›   [ChatGPT]  API key", .after_tab = "✓  gpt-6.1-sol  ‹ high ›   [API key]" },
-            .{ .saved = .chatgpt, .hidden = .codex, .kept_only = "browser-only", .hidden_only = "device-only", .wide = "✓  gpt-6.1-sol  1M     ‹ high ›   API key  [ChatGPT]", .after_tab = "✓  gpt-6.1-sol  ‹ high ›   [API key]" },
-        }) |case| {
-            const defaults: picker.Defaults = .{ .model = "gpt-6.1-sol", .provider = case.saved, .effort = .high };
-            // Every row, at any width, names ChatGPT at most once, and a
-            // model only the hidden way in lists has no row.
-            for ([_]usize{ pane, 120 }) |width| {
-                const all = try lines(arena.allocator(), &menu, "", defaults, open(&menu, "", defaults), width);
-                var kept_shown = false;
-                for (all.rows) |line| {
-                    try std.testing.expect(std.mem.count(u8, line.text, "ChatGPT") <= 1);
-                    try std.testing.expect(std.ascii.findIgnoreCase(line.text, "codex") == null);
-                    const id = line.model.?.id.slice();
-                    try std.testing.expect(!std.mem.eql(u8, id, case.hidden_only));
-                    kept_shown = kept_shown or std.mem.eql(u8, id, case.kept_only);
-                }
-                try std.testing.expect(kept_shown);
-            }
-            // Either ChatGPT word chooses the saved way in, and the pane
-            // keeps a 13-character ID whole beside it as well as the saved one.
-            for ([_][]const u8{ "chatgpt", "codex", "api" }) |word| {
-                if (std.mem.eql(u8, word, "api") and !with_openai) continue;
-                const chosen: picker.Provider = if (std.mem.eql(u8, word, "api")) .openai else case.saved;
-                for ([_][2][]const u8{ .{ "sol", "✓  gpt-6.1-sol  " }, .{ "terra", "   gpt-6.1-terra  " } }) |id| {
-                    var buffer: [64]u8 = undefined;
-                    const typed = try std.fmt.bufPrint(&buffer, "{s} {s}", .{ id[0], word });
-                    const choice = select(&menu, typed, defaults, null);
-                    try std.testing.expectEqual(chosen, choice.?.row.provider);
-                    const shown = try lines(arena.allocator(), &menu, typed, defaults, choice, pane);
-                    try std.testing.expectEqual(@as(usize, 1), shown.rows.len);
-                    try std.testing.expect(std.mem.startsWith(u8, shown.rows[0].text, id[1]));
-                    try std.testing.expect(std.mem.indexOf(u8, shown.rows[0].text, "…") == null);
-                    if (with_openai) try std.testing.expect(std.mem.indexOf(u8, shown.rows[0].text, if (chosen == .openai) "[API key]" else "[ChatGPT]") != null);
-                }
-            }
-            var choice = select(&menu, "sol", defaults, null);
-            if (!with_openai) {
-                // One sign-in offered: no sign-in column at all.
-                try std.testing.expectEqualStrings("✓  gpt-6.1-sol  1M     ‹ high › ", (try lines(arena.allocator(), &menu, "sol", defaults, choice, 120)).rows[0].text);
-                try std.testing.expectEqual(case.saved, choice.?.row.nextSignIn().provider);
-                continue;
-            }
-            try std.testing.expectEqualStrings("✓  gpt-6.1-sol  ‹ high ›   [ChatGPT]", (try lines(arena.allocator(), &menu, "sol", defaults, choice, pane)).rows[0].text);
-            // Wide, every sign-in the row offers shows beside the chosen one.
-            try std.testing.expectEqualStrings(case.wide, (try lines(arena.allocator(), &menu, "sol", defaults, choice, 120)).rows[0].text);
-            _ = step(&menu, "sol", defaults, &choice, .next_sign_in);
-            try std.testing.expectEqualStrings(case.after_tab, (try lines(arena.allocator(), &menu, "sol", defaults, choice, pane)).rows[0].text);
-            // Tab goes round the offered sign-ins and never lands on the
-            // hidden way in.
-            for (0..4) |_| {
-                _ = step(&menu, "sol", defaults, &choice, .next_sign_in);
-                try std.testing.expect(choice.?.row.provider != case.hidden);
+        const defaults: picker.Defaults = .{ .model = "gpt-6.1-sol", .provider = .chatgpt, .effort = .high };
+        for (std.enums.values(picker.Provider)) |provider| {
+            if (provider == .openai and !with_openai) continue;
+            // Each sign-in's own word chooses it (both ChatGPT ways read
+            // "ChatGPT", so the device code's is its route name), and the
+            // pane keeps a 13-character ID whole beside it as well as the
+            // saved one.
+            const own = if (provider == .codex) "codex" else std.mem.sliceTo(provider.signIn(), ' ');
+            for ([_][2][]const u8{ .{ "sol", "✓  gpt-6.1-sol  " }, .{ "terra", "   gpt-6.1-terra  " } }) |case| {
+                var word: [64]u8 = undefined;
+                const typed = try std.fmt.bufPrint(&word, "{s} {s}", .{ case[0], own });
+                const choice = select(&menu, typed, defaults, null);
+                try std.testing.expectEqual(provider, choice.?.row.provider);
+                const shown = try lines(arena.allocator(), &menu, typed, defaults, choice, pane);
+                var boxed: [64]u8 = undefined;
+                const label = try std.fmt.bufPrint(&boxed, "[{s}]", .{provider.signIn()});
+                try std.testing.expect(std.mem.indexOf(u8, shown.rows[0].text, label) != null);
+                try std.testing.expect(std.mem.startsWith(u8, shown.rows[0].text, case[1]));
+                try std.testing.expect(std.mem.indexOf(u8, shown.rows[0].text, "…") == null);
             }
         }
+        var choice = select(&menu, "sol", defaults, null);
+        try std.testing.expectEqualStrings("✓  gpt-6.1-sol  ‹ high ›   [ChatGPT]", (try lines(arena.allocator(), &menu, "sol", defaults, choice, pane)).rows[0].text);
+        // Wide, every sign-in the row offers shows beside the chosen one.
+        try std.testing.expectEqualStrings(if (with_openai) "✓  gpt-6.1-sol  1M     ‹ high ›   ChatGPT  API key  [ChatGPT]" else "✓  gpt-6.1-sol  1M     ‹ high ›   ChatGPT  [ChatGPT]", (try lines(arena.allocator(), &menu, "sol", defaults, choice, 120)).rows[0].text);
+        _ = step(&menu, "sol", defaults, &choice, .next_sign_in);
+        try std.testing.expectEqualStrings("✓  gpt-6.1-sol  ‹ high ›   [ChatGPT]", (try lines(arena.allocator(), &menu, "sol", defaults, choice, pane)).rows[0].text);
     }
 }
 

@@ -357,18 +357,15 @@ test "Model choice shares picker rows filters never empty and picks only its pro
     try std.testing.expect(!choice.active);
 }
 
-test "Model choice keeps a chat on its own way into ChatGPT, though the picker hides it, and either ChatGPT word finds it" {
+test "Model choice keeps a chat on its own way into ChatGPT, and either ChatGPT word finds it" {
     const entries = [_]picker.Entry{
         .{ .id = "gpt-6.1-sol", .known = true, .catalogued = true, .providers = .full },
         .{ .id = "browser-only", .known = false, .catalogued = false, .providers = .initOne(.chatgpt) },
         .{ .id = "device-only", .known = false, .catalogued = false, .providers = .initOne(.codex) },
         .{ .id = "key-only", .known = false, .catalogued = false, .providers = .initOne(.openai) },
     };
-    var menu: picker.Menu = .{ .entries = &entries };
-    menu.sources = .initFill(.live);
-    // New chats use the browser sign-in, so the picker hides the device
-    // code; a chat that signed in with it keeps its own models.
-    try std.testing.expect(!menu.offered(.{ .provider = .chatgpt }).contains(.codex));
+    // Both ways into ChatGPT list models; each chat lists its own way's.
+    const menu: picker.Menu = .{ .entries = &entries };
     const Case = struct { provider: picker.Provider, own: []const u8, found: [3]bool };
     const words = [3][]const u8{ "chatgpt", "codex", "api" };
     for ([_]Case{

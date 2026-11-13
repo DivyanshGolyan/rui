@@ -1,8 +1,7 @@
 //! The model picker's list: each model a served sign-in offers, once, with
 //! the sign-ins that offer it. The models the Host knows come first, in Rui's
 //! catalog's order, then the others by name; the picker shows the default
-//! ahead of them all. Of two sign-ins to one account it offers one
-//! (`Menu.offered`), so a person sees one ChatGPT.
+//! ahead of them all.
 const std = @import("std");
 const catalog = @import("model_catalog.zig");
 const client_defaults = @import("client_defaults.zig");
@@ -65,32 +64,6 @@ pub const Menu = struct {
     pub fn loading(self: *const Menu) bool {
         for (self.sources.values) |source| if (source == .pending) return true;
         return false;
-    }
-
-    /// The sign-ins the picker offers: every one but the hidden way into an
-    /// account the Host serves two ways into. It keeps the saved default's
-    /// way, or, when neither is the saved default, the browser's; new chats
-    /// use the way logged in last, which is the saved default (Divyansh,
-    /// 2026-11-13). A sign-in the Host does not serve hides nothing, so a
-    /// typed model on no served list keeps the current binding's.
-    pub fn offered(self: *const Menu, defaults: Defaults) Providers {
-        var result: Providers = .full;
-        for (std.enums.values(Provider)) |provider| {
-            const other = provider.sameAccount() orelse continue;
-            if (self.sources.get(provider) == null or self.sources.get(other) == null) continue;
-            const saved = defaults.provider == provider or defaults.provider == other;
-            const kept = if (saved) defaults.provider.? else if (provider.browser()) provider else other;
-            if (kept != provider) result.remove(provider);
-        }
-        return result;
-    }
-
-    /// The query of `words` as this menu's picker reads them, offering
-    /// what `offered` does.
-    pub fn query(self: *const Menu, words: []const u8, defaults: Defaults) Query {
-        var parsed = Query.parse(words);
-        parsed.offered = self.offered(defaults);
-        return parsed;
     }
 
     /// The menu as the picker shows it, with `default` first.
@@ -173,8 +146,7 @@ pub const Row = struct {
     }
 
     /// The next sign-in the row offers, round to the first; with one, the
-    /// same. A hidden way into an account is not offered, so it never
-    /// lands there.
+    /// same.
     pub fn nextSignIn(self: Row) Row {
         const order = std.enums.values(Provider);
         var at = std.mem.indexOfScalar(Provider, order, self.provider).?;
@@ -193,16 +165,12 @@ pub const Row = struct {
 /// it, or that offer an effort or sign-in its name begins with; a word that
 /// names one whole sets it on each row that offers it, the last such word
 /// winning. So `/model terra low api` leaves one row, set to save as typed.
-/// A sign-in is named by account: `chatgpt` and `codex` name whichever
-/// way into ChatGPT a row offers.
+/// Both ways into ChatGPT read "ChatGPT", so a word keeps a row that offers
+/// either: `chatgpt` and `codex` keep a ChatGPT sign-in's rows.
 pub const Query = struct {
     words: []const u8,
     effort: ?ReasoningEffort = null,
     provider: ?Provider = null,
-    /// The sign-ins rows may offer; `Menu.query` narrows it to
-    /// `Menu.offered`. A row offers the rest of its model's sign-ins, and
-    /// a model none of them offers has no row.
-    offered: Providers = .full,
 
     pub fn parse(words: []const u8) Query {
         var query: Query = .{ .words = words };
@@ -212,7 +180,9 @@ pub const Query = struct {
                 if (std.ascii.eqlIgnoreCase(@tagName(effort), word)) query.effort = effort;
             }
             for (std.enums.values(Provider)) |provider| {
-                if (namesSignIn(provider, word, .whole)) query.provider = provider;
+                for (signInWords(provider)) |name| {
+                    if (std.ascii.eqlIgnoreCase(name, word)) query.provider = provider;
+                }
             }
         }
         return query;
@@ -230,15 +200,10 @@ pub const Query = struct {
     /// An explicitly typed, unlisted choice bypasses list admission. Its ID
     /// and controls go to the provider rather than pretending it is listed.
     pub fn typed(self: Query, entry: Entry, defaults: Defaults) Row {
-        var controls = self;
-        controls.words = "";
-        return controls.match(entry, defaults).?;
+        return (Query{ .words = "", .effort = self.effort, .provider = self.provider }).match(entry, defaults).?;
     }
 
     fn match(self: Query, entry: Entry, defaults: Defaults) ?Row {
-        var providers = entry.providers;
-        providers.setIntersection(self.offered);
-        if (providers.count() == 0) return null;
         var efforts: catalog.Efforts = .empty;
         for (std.enums.values(ReasoningEffort)) |effort| {
             if (model_capability.supportsReasoningEffort(catalog.shipped, entry.id, effort)) efforts.insert(effort);
@@ -246,55 +211,49 @@ pub const Query = struct {
         var each = std.mem.tokenizeScalar(u8, self.words, ' ');
         while (each.next()) |word| {
             if (std.ascii.findIgnoreCase(entry.id, word) != null) continue;
-            if (beginsOne(word, efforts, providers)) continue;
+            if (beginsOne(word, efforts, entry.providers)) continue;
             return null;
         }
         const product_provider = comptime std.meta.stringToEnum(Provider, product_defaults.provider).?;
-        // Each wanted sign-in by account: its own way in where the row
-        // offers it, else the other way into its account.
+        // An entry's providers are never empty.
         const provider = for ([_]?Provider{ self.provider, defaults.provider, product_provider }) |wanted| {
-            const one = wanted orelse continue;
-            if (providers.contains(one)) break one;
-            if (one.sameAccount()) |other| if (providers.contains(other)) break other;
+            if (wanted) |one| if (entry.providers.contains(one)) break one;
         } else for (std.enums.values(Provider)) |one| {
-            if (providers.contains(one)) break one;
+            if (entry.providers.contains(one)) break one;
         } else unreachable;
         return .{
             .effort = model_capability.startEffort(catalog.shipped, self.effort, entry.id) orelse client_defaults.startEffort(entry.id, defaults.effort),
             .provider = provider,
             .efforts = efforts,
-            .providers = providers,
+            .providers = entry.providers,
             .current = if (defaults.model) |model| std.mem.eql(u8, model, entry.id) else false,
         };
     }
 
-    /// `word` begins the name of one of `efforts` or `providers`.
+    /// `word` begins the name of one of `efforts`, of `providers`, or of
+    /// the other way into a provider's account.
     fn beginsOne(word: []const u8, efforts: catalog.Efforts, providers: Providers) bool {
         var efforts_offered = efforts.iterator();
         while (efforts_offered.next()) |effort| if (std.ascii.startsWithIgnoreCase(@tagName(effort), word)) return true;
         var providers_offered = providers.iterator();
-        while (providers_offered.next()) |provider| if (namesSignIn(provider, word, .begun)) return true;
+        while (providers_offered.next()) |provider| {
+            for ([_]?Provider{ provider, provider.sameAccount() }) |one| {
+                const named = one orelse continue;
+                for (signInWords(named)) |name| if (std.ascii.startsWithIgnoreCase(name, word)) return true;
+            }
+        }
         return false;
     }
 };
 
-/// Whether `word` names `provider`'s sign-in, whole or begun: the first word
-/// of its label (`chatgpt`, `api`), or, for an account with two ways in,
-/// either way's route name (`chatgpt`, `codex`), so `codex` still finds a
-/// ChatGPT sign-in though its label no longer says it. `openai` stays an ID
-/// word, as live lists name models `openai/…`.
-fn namesSignIn(provider: Provider, word: []const u8, how: enum { whole, begun }) bool {
+/// The words a sign-in is typed as: its label's first (`chatgpt`, `api`),
+/// and, for a way into an account with two, its route name (`codex`,
+/// `chatgpt`), as `--provider` takes it. `openai` stays a word of model IDs,
+/// as live lists name models `openai/…`.
+fn signInWords(provider: Provider) [2][]const u8 {
     const label = provider.signIn();
-    var names: [3][]const u8 = .{ label[0 .. std.mem.indexOfScalar(u8, label, ' ') orelse label.len], "", "" };
-    if (provider.sameAccount()) |other| names[1..].* = .{ @tagName(provider), @tagName(other) };
-    for (names) |name| {
-        if (name.len == 0) continue;
-        if (switch (how) {
-            .whole => std.ascii.eqlIgnoreCase(name, word),
-            .begun => std.ascii.startsWithIgnoreCase(name, word),
-        }) return true;
-    }
-    return false;
+    const first = label[0 .. std.mem.indexOfScalar(u8, label, ' ') orelse label.len];
+    return .{ first, if (provider.sameAccount() != null) @tagName(provider) else first };
 }
 
 /// The menu of a `model_list` reply's `providers` array, owned by `gpa`. A
@@ -710,101 +669,6 @@ test "a word narrows to the rows whose ID holds it or that offer the effort or s
         chat_count += 1;
     };
     try std.testing.expectEqual(chat_count, all);
-}
-
-/// The rows `typed` leaves, as `ID:SIGN-INS`: the ID's first part, then a
-/// letter for each sign-in the row offers (c device code, o API key, g
-/// browser), capital for the one it would save.
-fn offeredRows(buffer: []u8, menu: *const Menu, typed: []const u8, defaults: Defaults) ![]const u8 {
-    var out: std.Io.Writer = .fixed(buffer);
-    const query = menu.query(typed, defaults);
-    for (menu.entries) |entry| {
-        const row = query.row(entry, defaults) orelse continue;
-        if (out.buffered().len != 0) try out.writeByte(' ');
-        const id = if (std.mem.lastIndexOfScalar(u8, entry.id, '-')) |dash| if (std.mem.endsWith(u8, entry.id, "-only")) entry.id[0..dash] else entry.id[dash + 1 ..] else entry.id;
-        try out.print("{s}:", .{id});
-        for (std.enums.values(Provider), "cog") |provider, letter| {
-            if (row.providers.contains(provider)) try out.writeByte(if (row.provider == provider) std.ascii.toUpper(letter) else letter);
-        }
-        // Tab goes round the same sign-ins and lands on no other.
-        var next = row;
-        for (0..std.enums.values(Provider).len) |_| {
-            next = next.nextSignIn();
-            try std.testing.expect(row.providers.contains(next.provider));
-        }
-    }
-    return out.buffered();
-}
-
-test "the picker offers one way into each account: the saved one, else the browser's, whatever is typed" {
-    // Each served sign-in lists gpt-6.1-sol and one model of its own:
-    // dev-only (codex), key-only (openai), web-only (chatgpt). Expected
-    // rows for "", "chatgpt", "api" and "codex", written out by hand from
-    // the owner's rule (Divyansh, 2026-11-13): of codex and chatgpt both
-    // served, offer the saved default's, else chatgpt's; a model only the
-    // other offers has no row; both ChatGPT words find the offered one.
-    const Case = struct { served: []const u8, saved: ?Provider, rows: [4][]const u8 };
-    const words = [4][]const u8{ "", "chatgpt", "api", "codex" };
-    const none = [4][]const u8{ "", "", "", "" };
-    const c = [4][]const u8{ "sol:C dev:C", "sol:C dev:C", "", "sol:C dev:C" };
-    const o = [4][]const u8{ "sol:O key:O", "", "sol:O key:O", "" };
-    const g = [4][]const u8{ "sol:G web:G", "sol:G web:G", "", "sol:G web:G" };
-    const co = [4][]const u8{ "sol:Co dev:C key:O", "sol:Co dev:C", "sol:cO key:O", "sol:Co dev:C" };
-    const co_key = [4][]const u8{ "sol:cO dev:C key:O", "sol:Co dev:C", "sol:cO key:O", "sol:Co dev:C" };
-    const og = [4][]const u8{ "sol:oG key:O web:G", "sol:oG web:G", "sol:Og key:O", "sol:oG web:G" };
-    const og_key = [4][]const u8{ "sol:Og key:O web:G", "sol:oG web:G", "sol:Og key:O", "sol:oG web:G" };
-    for ([_]Case{
-        .{ .served = "", .saved = null, .rows = none },
-        .{ .served = "", .saved = .codex, .rows = none },
-        .{ .served = "", .saved = .chatgpt, .rows = none },
-        .{ .served = "", .saved = .openai, .rows = none },
-        .{ .served = "c", .saved = null, .rows = c },
-        .{ .served = "c", .saved = .codex, .rows = c },
-        .{ .served = "c", .saved = .chatgpt, .rows = c },
-        .{ .served = "c", .saved = .openai, .rows = c },
-        .{ .served = "o", .saved = null, .rows = o },
-        .{ .served = "o", .saved = .codex, .rows = o },
-        .{ .served = "o", .saved = .chatgpt, .rows = o },
-        .{ .served = "o", .saved = .openai, .rows = o },
-        .{ .served = "g", .saved = null, .rows = g },
-        .{ .served = "g", .saved = .codex, .rows = g },
-        .{ .served = "g", .saved = .chatgpt, .rows = g },
-        .{ .served = "g", .saved = .openai, .rows = g },
-        .{ .served = "co", .saved = null, .rows = co },
-        .{ .served = "co", .saved = .codex, .rows = co },
-        .{ .served = "co", .saved = .chatgpt, .rows = co },
-        .{ .served = "co", .saved = .openai, .rows = co_key },
-        .{ .served = "cg", .saved = null, .rows = g },
-        .{ .served = "cg", .saved = .codex, .rows = c },
-        .{ .served = "cg", .saved = .chatgpt, .rows = g },
-        .{ .served = "cg", .saved = .openai, .rows = g },
-        .{ .served = "og", .saved = null, .rows = og },
-        .{ .served = "og", .saved = .codex, .rows = og },
-        .{ .served = "og", .saved = .chatgpt, .rows = og },
-        .{ .served = "og", .saved = .openai, .rows = og_key },
-        .{ .served = "cog", .saved = null, .rows = og },
-        .{ .served = "cog", .saved = .codex, .rows = co },
-        .{ .served = "cog", .saved = .chatgpt, .rows = og },
-        .{ .served = "cog", .saved = .openai, .rows = og_key },
-    }) |case| {
-        var lists: [3]model_list.Entry = undefined;
-        for (case.served, 0..) |letter, at| lists[at] = switch (letter) {
-            'c' => .{ .provider = .codex, .list = .{ .live = .{ .bytes = "gpt-6.1-sol\ndev-only\n" } } },
-            'o' => .{ .provider = .openai, .list = .{ .live = .{ .bytes = "gpt-6.1-sol\nkey-only\n" } } },
-            'g' => .{ .provider = .chatgpt, .list = .{ .live = .{ .bytes = "gpt-6.1-sol\nweb-only\n" } } },
-            else => unreachable,
-        };
-        var menu = try testMenu(lists[0..case.served.len]);
-        defer menu.deinit(std.testing.allocator);
-        for (words, case.rows) |typed, expected| {
-            var buffer: [128]u8 = undefined;
-            const got = try offeredRows(&buffer, &menu, typed, .{ .provider = case.saved });
-            std.testing.expectEqualStrings(expected, got) catch |err| {
-                std.debug.print("served {s}, saved {?t}, typed \"{s}\"\n", .{ case.served, case.saved, typed });
-                return err;
-            };
-        }
-    }
 }
 
 test "model picker domain admits chat and unknown live IDs but not catalog-proven non-chat families" {
