@@ -71,17 +71,13 @@ pub const State = struct {
                         self.stage = .saving;
                         return .existing;
                     }
-                    switch (self.selected) {
-                        .chatgpt => {
-                            self.stage = .browser_waiting;
-                            return .chatgpt;
-                        },
-                        .codex => {
-                            self.stage = .codex_waiting;
-                            return .codex;
-                        },
-                        .openai => self.stage = .key_entry,
+                    if (self.selected == .openai) {
+                        self.stage = .key_entry;
+                        return .none;
                     }
+                    const browser = self.selected == .chatgpt;
+                    self.stage = if (browser) .browser_waiting else .codex_waiting;
+                    return if (browser) .chatgpt else .codex;
                 },
                 else => {},
             },
