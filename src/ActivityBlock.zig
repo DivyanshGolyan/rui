@@ -121,9 +121,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         const look = self.style(self.live.style(call));
         const row = index - skip;
         const fitted = fitWords(words, running, width, self.method);
-        var column = Chip.print(surface, self.method, 0, row, fitted.words, look, width);
-        if (fitted.cut) column = Chip.print(surface, self.method, column, row, session_line.ellipsis, look, width);
-        _ = Chip.print(surface, self.method, column, row, fitted.clock, self.styles.quiet, width);
+        self.printFitted(surface, row, 0, fitted, look, width);
     }
     if (more) {
         defer index += 1;
@@ -155,9 +153,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
                 column = Chip.print(surface, self.method, column, row, fitted.mark, if (line.tone == .attention) self.styles.attention else self.styles.quiet, width);
                 column = Chip.print(surface, self.method, column, row, " ", self.styles.normal, width);
             }
-            column = Chip.print(surface, self.method, column, row, fitted.words, words, width);
-            if (fitted.cut) column = Chip.print(surface, self.method, column, row, session_line.ellipsis, words, width);
-            _ = Chip.print(surface, self.method, column, row, fitted.clock, self.styles.quiet, width);
+            self.printFitted(surface, row, column, fitted, words, width);
         }
     };
     if (self.queued) |waiting| {
@@ -172,6 +168,14 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
 }
 
 const Fitted = struct { words: []const u8, cut: bool, clock: []const u8 };
+
+/// Prints a fitted row from `column`: its words, the ellipsis when they were
+/// cut, then its clock in the quiet style.
+fn printFitted(self: *const Self, surface: vxfw.Surface, row: u16, column: u16, fitted: anytype, words: vaxis.Style, width: u16) void {
+    var at = Chip.print(surface, self.method, column, row, fitted.words, words, width);
+    if (fitted.cut) at = Chip.print(surface, self.method, at, row, session_line.ellipsis, words, width);
+    _ = Chip.print(surface, self.method, at, row, fitted.clock, self.styles.quiet, width);
+}
 
 /// A call row within `width`: its words cut with an ellipsis so the clock
 /// stays; a row too narrow for the clock and a few words drops the clock.
