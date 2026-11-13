@@ -22,8 +22,8 @@ in front of a ProxySQL that fronts the same server with multiplexing on
 a pooling proxy spends the round trips it spends without one, and relies
 on no session state the proxy does not carry.
 
-launch_frame_mysql_integration.py runs `run` after its own cases, with
-the same arguments, so launch-frame-integration holds the budget wherever
+settings_mysql_integration.py runs `run` after its own cases, with
+the same arguments, so settings-integration holds the budget wherever
 CI starts MySQL. Like the other live MySQL integrations, it skips when RUI_TEST_MYSQL_* is
 absent and fails when CI requires MySQL but omitted it.
 """
@@ -41,7 +41,7 @@ from urllib.parse import quote
 import h2_fixture
 import host_process
 import live_engines
-import launch_frame_fixture as frame_host
+import settings_fixture as frame_host
 import mysql_server
 
 WIRE = frame_host.WIRE
@@ -204,12 +204,13 @@ def measure(rui, admin, socket, password, label):
     runtime.mkdir(mode=0o700)
     sock = runtime / "rui.sock"
     preset = {"model": "gpt-6.1-sol", "effort": "low", "compactAt": 100000, "tools": [], "permissionMode": "ask", "label": "Rounds"}
-    value = {"v": 1, "store": f"mysql://root:{quote(password, safe='')}@{quote(str(root / 'relay.sock'), safe='')}/{database}",
-             "runtimeDir": str(runtime), "activeCapacity": 1, "presets": {"rounds": preset},
-             "provider": {"kind": "openai_key", "baseUrl": f"https://localhost:{endpoint.server_address[1]}/v1", "key": "sk-rounds",
-                          "caFile": str(root / "cert.pem")}}
+    value = {"store": {"mysql": {"url": {"value": f"mysql://root:{quote(password, safe='')}@{quote(str(root / 'relay.sock'), safe='')}/{database}"}}},
+             "interface": {"dir": str(runtime), "lifetime": "stdin"},
+             "execution": {"activeCapacity": 1}, "presets": {"rounds": preset},
+             "network": {"caFile": str(root / "cert.pem")},
+             "providers": {"openai": {"endpoint": f"https://localhost:{endpoint.server_address[1]}/v1/responses", "key": {"value": "sk-rounds"}}}}
     env = {key: os.environ[key] for key in ("PATH", "HOME", "TMPDIR") if key in os.environ}
-    host = subprocess.Popen([rui, "host", "serve", "--launch-frame"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+    host = subprocess.Popen([rui, "host", "serve", "--settings", "-"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                             stderr=open(root / "host.err", "wb"), env=env)
     host.stdin.write(frame_host.frame(value))
     host.stdin.flush()

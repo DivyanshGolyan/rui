@@ -1654,7 +1654,7 @@ Closed stdout cannot abort remaining restarts: outcome counts are retained and r
 `platform` alone owns per-user runtime naming and socket enumeration, without creating a runtime directory or Store.
 Socket discovery retries transient refusal for at most 200 ms inside the shared observation deadline; failed transport alone never establishes absence.
 Under the Store lease, `platform.StoreLease.listen` atomically publishes the canonical Store path beside a standard SQLite socket as `<hash>.store` (0600) before binding.
-Clean socket retirement removes its hint only after unlink succeeds; a crash leaves the hint for read-only discovery. MySQL and launch-frame sockets publish no hint.
+Clean socket retirement removes its hint only after unlink succeeds; a crash leaves the hint for read-only discovery. MySQL and settings-document sockets publish no hint.
 For an unreachable socket, `platform` validates the private same-owner regular hint, bounded canonical Store and exact socket hash, then observes that Store's lease: only a free lease proves absence, which discovery skips silently without deleting anything.
 A held or inaccessible lease, missing or untrusted hint (including older Hosts), or connected unreadable peer remains unconfirmed and counts as a failure with its socket path and recovery advice.
 The hint is only routing information, never a liveness flag, Host registry or activation authority. Startup's `platform.reclaimStaleSocket` still requires the held Store/runtime lease; discovery never reclaims sockets.
@@ -3884,16 +3884,16 @@ Reclaim only the expected stale socket after ownership.
 Unavailable/inaccessible/competing owners reject.
 Clients never auto-start or access SQLite; disconnects/timeouts do not cancel work.
 
-A MySQL Host starts only from `rui host serve --launch-frame`.
+A MySQL Host starts only from `rui host serve --settings -`.
 Its stdin
-frame's `store` is `mysql://USER:PASSWORD@HOST[:PORT]/DATABASE`; TCP verifies
+document's `store.mysql.url` is `mysql://USER:PASSWORD@HOST[:PORT]/DATABASE`; TCP verifies
 TLS with system trust unless its sole query option is `ssl-ca=<path>`, a nonempty absolute PEM CA-bundle path (percent escapes allowed, at most `PATH_MAX - 1` decoded bytes) trusted exclusively; unknown or repeated keys, fragments, relative or empty paths, `ssl-ca` on a Unix socket and any verification-disabling option are refused (D224).
 A Unix socket is an absolute path in place of HOST,
 usually percent-encoded (`%2Fvar%2Frun%2Fmysqld.sock`).
 User, password and
 database components accept percent escapes.
-The frame requires a private
-`runtimeDir`; every launched Host binds `runtimeDir/rui.sock` (D211).
+The document requires a private
+`interface.dir`; every launched Host binds `interface.dir/rui.sock` (D211).
 The URL travels only in stdin, never in argv, environment, files or
 refusal messages.
 Parsing wipes all JSON allocations, including failed
@@ -4088,16 +4088,16 @@ Restart then uses committed uncertainty and owned-leftover cleanup; it preserves
 Remote effects and duplicate model cost remain possible.
 Orphan tools may retain each bounded unlinked stdin file until exit; replacement Hosts cannot reclaim it, and no aggregate scratch bound spans dead-Host generations.
 
-A launched Host (`rui host serve --launch-frame`) is the exception: its shutdown is bounded.
+A launched Host (`rui host serve --settings -`) is the exception: its shutdown is bounded.
 The program that starts it writes one frame to its stdin, a 4-byte big-endian length and then UTF-8 JSON naming `v` (1), the Store directory, the OpenAI key provider `{kind: "openai_key", baseUrl, key, caFile?}`, the `runtimeDir` that holds its socket `rui.sock`, and optionally `activeCapacity`.
-The frame is the sole source of a launched Host's settings; `--launch-frame` refuses separate provider settings, including `--provider-ca-file`.
+The frame is the sole source of a launched Host's settings; `--settings -` refuses separate provider settings, including `--provider-ca-file`.
 The provider's optional `caFile` names a PEM file trusted exclusively for that provider, on macOS as on Linux, with the same trust semantics as `--provider-ca-file`; omitted or null uses system trust.
 A supplied `caFile` must be a nonempty UTF-8 path without NUL bytes and shorter than the platform's path limit; a relative path is relative to the Host's working directory, and an unloadable file or failed verification never falls back to system trust.
 The optional `presets` object maps at most 64 names (1–64 bytes of `[a-z0-9_-]`) to complete agent specs, checked by the shared agent-spec parser and held only in Host memory (D22, D112).
 A `start_agent` call may name a preset and override its fields, but still refuses provider or Workspace fields, including those supplied by the preset (D221).
 The key stays in memory only, never on disk, in argv or in the environment.
 stdin then stays open and carries nothing; when it closes, the Host stops as `host-stop` does, and an alarm ends the process 10 seconds later if the drain has not finished, which is a forced termination as above.
-A refusal at open is one stdout line `{"rui_start_error":{"code","message"}}` with code `launch_frame_invalid`, `invalid_preset` or `store_locked`, then exit status 1.
+A refusal at open is one stdout line `{"rui_start_error":{"code","message"}}` with code `settings_invalid`, `invalid_preset` or `store_locked`, then exit status 1.
 
 `rui host pause [--store PATH]` observes the ready Host once, then sends a bounded protected `POST /v1/control/host-stop`.
 It requires the observed `X-Rui-Host-Instance`, validated before fencing.

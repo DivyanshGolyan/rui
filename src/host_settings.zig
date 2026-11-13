@@ -313,9 +313,14 @@ fn textDefault(comptime capacity: usize, comptime value: []const u8) Text(capaci
 /// Structured JSON Schema facts passed to a visitor. Secret objects are a
 /// choice of exactly one source; literals are pipe-only and never written.
 pub const Schema = struct {
+    /// Strict end anchor: unlike $, this also excludes a terminal newline.
+    pub const os_bytes_pattern = "^([0-9a-f]{2})*(?![\\s\\S])";
+
     type: enum { string, integer, boolean, object, one_of },
     nullable: bool = false,
     path_accepts_empty: bool = false,
+    /// The byte bound follows the Host OS, not the portable document grammar.
+    native_path_limit: bool = false,
     /// Complete byte-string alternatives; hex is a closed {hex: string}
     /// object with an even lowercase spelling and no additional properties.
     one_of: []const enum { string, hex_object } = &.{},
@@ -323,7 +328,7 @@ pub const Schema = struct {
         property: []const u8 = "hex",
         required: bool = true,
         additional_properties: bool = false,
-        pattern: []const u8 = "^([0-9a-f]{2})*$",
+        pattern: []const u8 = os_bytes_pattern,
         max_length: usize,
     } = null,
     source_paths_are_bytes: bool = false,
@@ -338,6 +343,7 @@ pub const Schema = struct {
     literal_origin: ?Origin = null,
     source_env_max_bytes: ?usize = null,
     source_file_max_bytes: ?usize = null,
+    source_file_native_path_limit: bool = false,
     set_capacity: ?usize = null,
     name_max_bytes: ?usize = null,
 };
@@ -442,6 +448,7 @@ fn leafFor(comptime T: type, comptime value: T, comptime pattern: []const u8, co
             row.json_schema.max_bytes = T.max_bytes;
             row.json_schema.format = if (T.absolute) "absolute-path" else null;
             row.json_schema.path_accepts_empty = T.allow_empty;
+            row.json_schema.native_path_limit = T.max_bytes == max_path_bytes;
             row.json_schema.type = .one_of;
             row.json_schema.one_of = &.{ .string, .hex_object };
             row.json_schema.hex_object = .{ .max_length = 2 * T.max_bytes };
@@ -489,6 +496,7 @@ fn leafFor(comptime T: type, comptime value: T, comptime pattern: []const u8, co
             row.json_schema.source_paths_are_bytes = true;
             row.json_schema.source_env_is_bytes = true;
             row.json_schema.source_file_max_bytes = Path.max_bytes;
+            row.json_schema.source_file_native_path_limit = true;
             row.json_schema.max_bytes = if (T.default_source == .mysql) max_document_bytes else secret_value.max_key_bytes;
             row.json_schema.format = if (T.default_source == .mysql) "mysql-login-source" else "credential-source";
             row.sample_json = "{\"env\":\"HOST_SETTINGS_SAMPLE\"}";

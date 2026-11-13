@@ -8,7 +8,7 @@ do not select checks. GitHub CI owns review-phase acceptance.
 
 --quick leaves out the Zig builds and is what the git pre-push hook runs;
 --install-hook installs that hook. Whitespace errors in committed lines and
-stale generated files (openapi.json, the client's wire.ts) are fixed in the
+stale generated files (openapi.json and the client's wire.ts/settings-kinds.ts) are fixed in the
 working tree and still fail the run, so the fix is committed before the push.
 """
 import argparse
@@ -28,6 +28,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 SOURCE_POLICY = (
+    (("tests/integration/settings_fixture.py",), (("test_settings_fixture.py", "*"),)),
     (("src/*.zig", "tests/*.zig"), (("test_import_architecture.py", "*"),)),
     (("src/*.zig",), (("test_provider_locality.py", "*"), ("test_wire_version.py", "*"))),
     (("src/*.zig", "tests/*.zig", "tests/integration/*.py", "tests/ci/test_*.py", "tests/ci/*_test.py"),
@@ -72,8 +73,8 @@ def policy_tests(paths):
     return focused
 
 
-# Generated from the wire types, then from openapi.json; CI fails when either is stale.
-GENERATED = ("openapi.json", "clients/ts/src/wire.ts")
+# Generated from the wire types, then from openapi.json; CI fails when any is stale.
+GENERATED = ("openapi.json", "clients/ts/src/wire.ts", "clients/ts/src/settings-kinds.ts")
 # The two `git diff --check` problems with one fix; a patch's whitespace is its content.
 WHITESPACE_LINES = re.compile(r"^([^\s:][^:\n]*):(\d+): (trailing whitespace|new blank line at EOF)\.$", re.M)
 UNFIXABLE = ("*.patch", "*.diff")
@@ -165,7 +166,7 @@ def fix_whitespace(base):
 
 
 def regenerate():
-    """Regenerate openapi.json and wire.ts; 1 if either differs from HEAD's."""
+    """Regenerate openapi.json and TypeScript settings artifacts; 1 if any differs from HEAD's."""
     if subprocess.run(["zig", "build", "openapi", "--summary", "none"], cwd=ROOT).returncode:
         return 1
     if (ROOT / "clients/ts/node_modules").is_dir():

@@ -399,7 +399,7 @@ pub const Host = struct {
     limits: Limits = .{},
     /// What this Host serves, owned by its caller for the Host's life.
     providers: *const providers_module.Providers = &providers_module.none,
-    /// Named creation specs, borrowed from the launch frame for the Host's life.
+    /// Named creation specs, borrowed from Host settings for the Host's life.
     /// Never part of the Store or any Session after resolution (D22).
     presets: []const core_tools.Preset = &.{},
     /// The OpenAI API key's model list, refreshed by the execution owner.

@@ -700,7 +700,7 @@ const Intake = struct {
         }
     }
 
-    /// stdin carries nothing after the launch frame; its close, or any
+    /// stdin carries nothing after the settings document; its close, or any
     /// failure to read it, stops the Host. Shutdown then has 10 seconds
     /// before the alarm's default action ends the process (D118).
     fn readStdin(self: *Intake) void {
@@ -972,7 +972,7 @@ noinline fn offerMcpTools(io: std.Io, arena: std.mem.Allocator, scratch: std.mem
             return err;
         },
         error.TooManyTools => {
-            failure.* = .init(.launch_frame_invalid, "the MCP servers list more tools than a Host offers");
+            failure.* = .init(.settings_invalid, "tools.mcp: servers list more tools than a Host offers");
             return err;
         },
         else => |other| return other,
@@ -1271,7 +1271,7 @@ fn serveOpened(
         _ = host.advance(.draining);
         execution_thread.join();
     }
-    try writeReadiness(&lease.paths, active_capacity, intake_capacity, descriptor_requirement, descriptor_limit_text, retention_entries.len, served.any());
+    try writeReadiness(&lease.paths, host.instance, active_capacity, intake_capacity, descriptor_requirement, descriptor_limit_text, retention_entries.len, served.any());
     stderr.release();
     readiness_owned.* = false;
     if (diagnostic_open_error) |err|
@@ -1474,6 +1474,7 @@ noinline fn reportWrongStoreVersion(store_path: []const u8, found_schema_version
 
 noinline fn writeReadiness(
     paths: *const platform.Paths,
+    instance: protocol.InstanceId,
     active_capacity: usize,
     intake_capacity: usize,
     descriptor_requirement: usize,
@@ -1482,7 +1483,9 @@ noinline fn writeReadiness(
     provider_enabled: bool,
 ) !void {
     var ready: protocol.ResponseBuffer = .{};
-    try ready.appendFmt("ready store={s} socket={s} active_capacity={d} intake_capacity={d} descriptor_requirement={d} descriptor_limit={s} custody_record_bytes={d} execution_slot_bytes={d} model_preparation_bytes={d} scratch_limit_bytes={d} retention_entry_bytes={d} retention_capacity={d} bash_execution=enabled execution={s}", .{
+    const instance_hex = std.fmt.bytesToHex(instance, .lower);
+    try ready.appendFmt("ready instance={s} store={s} socket={s} active_capacity={d} intake_capacity={d} descriptor_requirement={d} descriptor_limit={s} custody_record_bytes={d} execution_slot_bytes={d} model_preparation_bytes={d} scratch_limit_bytes={d} retention_entry_bytes={d} retention_capacity={d} bash_execution=enabled execution={s}", .{
+        &instance_hex,
         paths.store.slice(),
         paths.socket.slice(),
         active_capacity,
@@ -1775,12 +1778,26 @@ noinline fn configureCapturedSkills(host: *Host, command: *const wire_request.Co
     return host.store.configureWithCreationCommitted(command, preset, initial_skills, if (reload_capture) |*value| value else null, host.allocator, inheritance.creationCallback(), host.hooks.storeFaults(.command));
 }
 
+fn matchesStore(kind: std.meta.Tag(wire_request.Request), supplied: []const u8, expected: []const u8) bool {
+    return (kind == .host_info and supplied.len == 0) or std.mem.eql(u8, supplied, expected);
+}
+
+test "settings readiness discovers the canonical Store only through host info" {
+    for (std.enums.values(std.meta.Tag(wire_request.Request))) |kind| {
+        for ([_][]const u8{ "/canonical/sqlite", "0123456789abcdef0123456789abcdef" }) |identity| {
+            try std.testing.expect(matchesStore(kind, identity, identity));
+            try std.testing.expect(!matchesStore(kind, "wrong-identity", identity));
+            try std.testing.expectEqual(kind == .host_info, matchesStore(kind, "", identity));
+        }
+    }
+}
+
 /// `client_environment` holds a Message's checked environment.
 fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header, request_number: u64, accepted_at_ns: u64, request: *wire_request.Request, client_environment: ?*SessionEnvironments.Offer) !void {
-    // The first MySQL readiness probe learns the opaque id over the private
-    // socket. All subsequent work must name that exact id, never the URL.
-    const discovering = request.* == .host_info and request.store().len == 0 and host.store.kind() == .mysql;
-    if (!discovering and !std.mem.eql(u8, request.store(), host.lease.paths.store.slice())) {
+    // Readiness learns the owner's canonical identity over its private socket;
+    // default SQLite selection is not duplicated in each client. Every other
+    // request, including controls, must carry that exact identity.
+    if (!matchesStore(std.meta.activeTag(request.*), request.store(), host.lease.paths.store.slice())) {
         return respondStatic(fd, 409, .invocation_error, "wrong_store_identity");
     }
     if (header.instance) |instance| {
@@ -4920,7 +4937,7 @@ test "Host startup reports MCP tool collision and excess tools as owned failures
         try std.testing.expect(failure != null);
         var buffer: [start_report.max_line_bytes]u8 = undefined;
         try std.testing.expectEqualStrings(if (too_many)
-            "{\"rui_start_error\":{\"code\":\"launch_frame_invalid\",\"message\":\"the MCP servers list more tools than a Host offers\"}}\n"
+            "{\"rui_start_error\":{\"code\":\"settings_invalid\",\"message\":\"tools.mcp: servers list more tools than a Host offers\"}}\n"
         else
             "{\"rui_start_error\":{\"code\":\"tool_name_collision\",\"message\":\"tool name bash is offered by Rui and by docs\"}}\n", start_report.line(&failure.?, &buffer));
     }

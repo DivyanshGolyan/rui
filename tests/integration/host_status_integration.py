@@ -20,7 +20,7 @@ import host_process
 from host_process import HeldReplies, HostDiagnostics, TestHTTPServer, canonical_fixture_root, dispose_all, is_peer_disconnect, start_ready_process, stop_process, wait_for
 import os_semantics
 import live_engines
-import launch_frame_fixture as frame_host
+import settings_fixture as frame_host
 from host_status_fixture import ACTOR, RUI, complete_response, socket_path, status
 
 
@@ -94,7 +94,7 @@ def prove_fragmented_request():
 def start(store, capacity, *options):
     return start_ready_process(
         [RUI, "host", "serve", "--store", store, "--active-capacity", str(capacity), *options],
-        required_fields={"active_capacity": str(capacity)},
+        required_fields={"activeCapacity": str(capacity)},
         observations="status" if "--test-phase-trace" in options else None,
     )
 
@@ -364,14 +364,16 @@ def mysql_host_info():
             ddl = subprocess.run([RUI, "store", "schema", "--engine", "mysql"], check=True, capture_output=True, text=True, timeout=20).stdout
             sql(f"USE {database};" + ddl)
             url = f"mysql://root:{quote(password, safe='')}@{quote(socket, safe='')}/{database}"
-            # Credentials travel only through the launch frame, never argv or
+            # Credentials travel only through the settings document, never argv or
             # the child's environment. The Host answers with its opaque id.
-            child = subprocess.Popen([RUI, "host", "serve", "--launch-frame"], stdin=subprocess.PIPE,
+            child = subprocess.Popen([RUI, "host", "serve", "--settings", "-"], stdin=subprocess.PIPE,
                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                      env={key: os.environ[key] for key in ("PATH", "HOME", "TMPDIR") if key in os.environ})
             child.stdin.write(frame_host.frame({
-                "v": 1, "store": url, "runtimeDir": str(runtime), "activeCapacity": 2,
-                "provider": {"kind": "openai_key", "baseUrl": "https://api.openai.com/v1", "key": "sk-host-info-test"},
+                "store": {"mysql": {"url": {"value": url}}},
+                "interface": {"dir": str(runtime), "lifetime": "stdin"},
+                "execution": {"activeCapacity": 2},
+                "providers": {"openai": {"endpoint": "https://api.openai.com/v1/responses", "key": {"value": "sk-host-info-test"}}},
             }))
             child.stdin.flush()
             sock = runtime / "rui.sock"
@@ -426,12 +428,13 @@ def resolved_sqlite_routing(root):
     runtime = pathlib.Path(root) / "sqlite-runtime"
     runtime.mkdir(mode=0o700)
     launched_store = pathlib.Path(root) / "launched-store"
-    frame = {"v": 1, "store": str(launched_store), "runtimeDir": str(runtime),
-             "provider": {"kind": "openai_key", "baseUrl": "https://api.openai.com/v1", "key": "sk-routing-test"}}
-    launched = subprocess.Popen([RUI, "host", "serve", "--launch-frame"], stdin=subprocess.PIPE,
+    document = {"store": {"sqlite": {"dir": str(launched_store)}},
+                "interface": {"dir": str(runtime), "lifetime": "stdin"},
+                "providers": {"openai": {"endpoint": "https://api.openai.com/v1/responses", "key": {"value": "sk-routing-test"}}}}
+    launched = subprocess.Popen([RUI, "host", "serve", "--settings", "-"], stdin=subprocess.PIPE,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
     try:
-        launched.stdin.write(frame_host.frame(frame))
+        launched.stdin.write(frame_host.frame(document))
         launched.stdin.flush()
         frame_host.wait_for_host(runtime / "rui.sock", launched_store, launched)
         value = frame_host.host_info(runtime / "rui.sock", str(launched_store))
@@ -548,10 +551,10 @@ def main():
                 stale.unlink()
             noncanonical = json.dumps({
                 "version": host_process.WIRE_VERSION, "type": "host_info", "store": str(store.resolve()),
-                "instance": "0" * 32, "active_capacity": "01", "started_at": "1792918800", "custody_occupied": "1",
+                "instance": "0" * 32, "activeCapacity": "01", "started_at": "1792918800", "custody_occupied": "1",
                 "paused": False, "capabilities": {"bash": True, "providers": {"codex": "unserved", "openai": "unserved", "chatgpt": "unserved"}},
             }).encode()
-            valid_body = noncanonical.replace(b'"active_capacity": "01"', b'"active_capacity": "1"')
+            valid_body = noncanonical.replace(b'"activeCapacity": "01"', b'"activeCapacity": "1"')
             ambiguous_bodies = (
                 valid_body.replace(b'"store": ', b'"store": "/wrong", "store": ', 1),
                 valid_body.replace(b'"bash": true', b'"bash": false, "bash": true'),
@@ -687,7 +690,7 @@ def main():
             selected = exchange("host_info", lambda: cli_status(home))
             assert selected == {
                 "version": host_process.WIRE_VERSION, "type": "host_status", "status": "ready", "store": str(store.resolve()),
-                "instance": match.group(1), "active_capacity": "3", "intake_capacity": "100",
+                "instance": match.group(1), "activeCapacity": "3", "intake_capacity": "100",
                 "descriptor_limit": fields["descriptor_limit"], "started_at": started_at, "custody_occupied": "0",
                 "paused": False, "capabilities": {"bash": True, "providers": {"codex": "chatgpt_device", "openai": "unserved", "chatgpt": "unserved"}},
                 "diagnostics": f"{store.resolve()}/diagnostics",
@@ -706,7 +709,7 @@ def main():
             assert "innodb_doublewrite" not in json.loads(body), body
             assert json.loads(body) == {
                 "version": host_process.WIRE_VERSION, "type": "host_info", "store": str(store.resolve()),
-                "instance": match.group(1), "active_capacity": "3",
+                "instance": match.group(1), "activeCapacity": "3",
                 "intake_capacity": "100", "descriptor_limit": fields["descriptor_limit"],
                 "started_at": started_at, "custody_occupied": "0", "paused": False,
                 "capabilities": {"bash": True, "providers": {"codex": "chatgpt_device", "openai": "unserved", "chatgpt": "unserved"}},

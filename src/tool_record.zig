@@ -255,7 +255,7 @@ pub const HostToolSet = struct {
     }
 
     /// Advisory detail about this Host, not a claim of name ownership. The
-    /// launch frame bounds this to eight server names of at most 64 bytes.
+    /// settings owner bounds this to eight server names of at most 64 bytes.
     pub fn writeMissingTool(self: *const HostToolSet, name: []const u8, out: *std.Io.Writer) !void {
         try out.print("spec.tools: {s} is not a known tool", .{name});
         var empty = self.emptyServers();

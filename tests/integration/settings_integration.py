@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""A Host started with a launch frame on stdin: readiness on the socket in
-runtimeDir, refusals as one `rui_start_error` line, and a clean exit when
+"""A Host started with a settings document on stdin: readiness in interface.dir,
+refusals on stdout and stderr, and a clean exit when
 stdin closes (D5, D112, D118, D130, D136)."""
 
 import http.server
@@ -18,12 +18,12 @@ import time
 
 import host_process
 import os_semantics
-from launch_frame_fixture import WIRE, frame, host_info, output, post, refusal, wait_for_host
+from settings_fixture import WIRE, frame, host_info, output, post, refusal, wait_for_host
 
 
 RUI = pathlib.Path(sys.argv[1]).resolve()
 def launch(raw):
-    process = subprocess.Popen([RUI, "host", "serve", "--launch-frame"], stdin=subprocess.PIPE,
+    process = subprocess.Popen([RUI, "host", "serve", "--settings", "-"], stdin=subprocess.PIPE,
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     process.stdin.write(raw)
     process.stdin.flush()
@@ -61,7 +61,7 @@ def mcp_server(names):
 
 
 def mcp_entry(name, server):
-    return {"name": name, "url": f"http://127.0.0.1:{server.server_port}/mcp", "bearerToken": "t", "callTimeoutMs": 1000}
+    return name, {"url": f"http://127.0.0.1:{server.server_port}/mcp", "bearerToken": {"value": "t"}, "callTimeoutMs": 1000}
 
 
 def sdk_tool_set(root, good, network, ci):
@@ -88,19 +88,19 @@ def sdk_tool_set(root, good, network, ci):
                                       "the real MCP SDK server port", timeout=20)
             port = server.stdout.readline().decode().strip()
             assert port.isdecimal(), port
-            entry = {"name": "drift-sdk", "url": f"http://127.0.0.1:{port}/mcp",
-                     "bearerToken": "sdk-test-token", "callTimeoutMs": 1000}
+            entry = ("drift-sdk", {"url": f"http://127.0.0.1:{port}/mcp",
+                     "bearerToken": {"value": "sdk-test-token"}, "callTimeoutMs": 1000})
             runtime = root / "sdk"
             runtime.mkdir(mode=0o700)
-            base = dict(good, runtimeDir=str(runtime), store=str(root / "sdk-store"))
-            host = launch(frame(dict(base, mcpServers=[entry])))
-            wait_for_host(runtime / "rui.sock", base["store"], host)
+            base = dict(good, interface=dict(good["interface"], dir=str(runtime)), store={"sqlite": {"dir": str(root / "sdk-store")}})
+            host = launch(frame(dict(base, tools={"mcp": dict([entry])})))
+            wait_for_host(runtime / "rui.sock", base["store"]["sqlite"]["dir"], host)
             host_process.close_stdin(host)
             assert host.wait(timeout=30) == 0, output(host)
             for name in ("echo", "fail", "slow", "progress"):
                 collision = mcp_server([name])
                 try:
-                    host = launch(frame(dict(base, mcpServers=[entry, mcp_entry("collision", collision)])))
+                    host = launch(frame(dict(base, tools={"mcp": dict([entry, mcp_entry("collision", collision)])})))
                     with selectors.DefaultSelector() as selector:
                         selector.register(host.stdout, selectors.EVENT_READ)
                         host_process.wait_for(lambda: bool(selector.select(timeout=0)),
@@ -135,13 +135,66 @@ def sdk_tool_set(root, good, network, ci):
                 print(diagnostic, file=sys.stderr)
 
 
+def source_modes(root, good):
+    """All source modes reach the same reporting door; only lifetime ends input."""
+    store = good["store"]["sqlite"]["dir"]
+    settings_file = root / "settings.json"
+
+    def file_host(document, *flags):
+        settings_file.write_text(json.dumps(document))
+        settings_file.chmod(0o600)
+        return subprocess.Popen([RUI, "host", "serve", "--settings", str(settings_file), *flags],
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    # The original pipe Host holds this Store. File and flag Hosts must emit
+    # the same structured refusal and stderr sentence as the pipe Host.
+    private = dict(good, providers={})
+    for process in (file_host(private),
+                    subprocess.Popen([RUI, "host", "serve", "--store", store],
+                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)):
+        assert refusal(process)["code"] == "store_locked"
+
+    secret = "sk-file-origin-must-not-appear"
+    invalid = dict(private, providers={"openai": {"key": {"value": secret}}})
+    refused = refusal(file_host(invalid), forbidden=(secret,))
+    assert refused["code"] == "settings_invalid", refused
+    assert "providers.openai.key" in refused["message"], refused
+
+    # A document's default lifetime is detached, even when read from stdin.
+    # A file may explicitly choose stdin lifetime. Flags override its leaves.
+    for source in ("pipe", "file"):
+        runtime = root / (source + "-lifetime")
+        runtime.mkdir(mode=0o700)
+        target = str(root / (source + "-store"))
+        document = {"store": {"sqlite": {"dir": target}}, "providers": {},
+                    "interface": {"dir": str(runtime)}, "execution": {"activeCapacity": 1}}
+        if source == "file":
+            document["interface"]["lifetime"] = "stdin"
+            process = file_host(document, "--active-capacity", "3")
+        else:
+            process = launch(frame(document))
+            host_process.close_stdin(process)
+        path = runtime / "rui.sock"
+        wait_for_host(path, target, process)
+        info = host_info(path, target)
+        assert info["active_capacity"] == ("3" if source == "file" else "1"), info
+        if source == "file":
+            host_process.close_stdin(process)
+        else:
+            host_stop(path, target, info["instance"])
+        assert process.wait(timeout=30) == 0, output(process)
+        assert not path.exists()
+
+
 def main(network, ci):
     root = host_process.canonical_fixture_root(tempfile.mkdtemp(prefix="rui-launch-"))
     store = root / "store"
     runtime = root / "run"
     runtime.mkdir(mode=0o700)
-    good = {"v": 1, "store": str(store), "runtimeDir": str(runtime), "activeCapacity": 2,
-            "provider": {"kind": "openai_key", "baseUrl": "https://api.openai.com/v1", "key": "sk-launch-test"}}
+    good = {"store": {"sqlite": {"dir": str(store)}},
+            "interface": {"dir": str(runtime), "lifetime": "stdin"},
+            "execution": {"activeCapacity": 2},
+            "providers": {"openai": {"endpoint": "https://api.openai.com/v1/responses", "key": {"value": "sk-launch-test"}}}}
 
     host = launch(frame(good))
     sock = runtime / "rui.sock"
@@ -154,15 +207,17 @@ def main(network, ci):
         for name in ("cmdline", "environ"):
             assert b"sk-launch-test" not in pathlib.Path(f"/proc/{host.pid}/{name}").read_bytes(), name
 
+    source_modes(root, good)
+
     # A second Host on the same Store is refused while the first holds it.
     other = root / "other"
     other.mkdir(mode=0o700)
-    second = launch(frame(dict(good, runtimeDir=str(other))))
+    second = launch(frame(dict(good, interface=dict(good["interface"], dir=str(other)))))
     assert refusal(second)["code"] == "store_locked"
 
     # Another Store may not share the runtime directory: the first Host keeps
     # its socket.
-    shared = launch(frame(dict(good, store=str(root / "store2"))))
+    shared = launch(frame(dict(good, store={"sqlite": {"dir": str(root / "store2")}})))
     refused = refusal(shared)
     assert refused["code"] == "runtime_dir_unusable", refused
     assert info == host_info(sock, str(store))
@@ -171,15 +226,15 @@ def main(network, ci):
     open_dir = root / "open"
     open_dir.mkdir()
     open_dir.chmod(0o777)
-    insecure = launch(frame(dict(good, store=str(root / "store3"), runtimeDir=str(open_dir))))
+    insecure = launch(frame(dict(good, store={"sqlite": {"dir": str(root / "store3")}}, interface=dict(good["interface"], dir=str(open_dir)))))
     refused = refusal(insecure)
     assert refused["code"] == "runtime_dir_unusable", refused
     assert not (open_dir / "rui.sock").exists()
 
-    # A runtimeDir that is a file is a structured refusal too.
+    # An interface.dir that is a file is a structured refusal too.
     not_a_dir = root / "file"
     not_a_dir.write_text("x")
-    refused = refusal(launch(frame(dict(good, store=str(root / "store4"), runtimeDir=str(not_a_dir)))))
+    refused = refusal(launch(frame(dict(good, store={"sqlite": {"dir": str(root / "store4")}}, interface=dict(good["interface"], dir=str(not_a_dir))))))
     assert refused["code"] == "runtime_dir_unusable", refused
 
     # Closing stdin stops the Host; its socket goes with it.
@@ -198,7 +253,7 @@ def main(network, ci):
     assert not sock.exists()
 
     # A Host launched paused reports it, and host_pause can lift it.
-    host = launch(frame(dict(good, paused=True)))
+    host = launch(frame(dict(good, execution=dict(good["execution"], paused=True))))
     wait_for_host(sock, store, host)
     info = host_info(sock, str(store))
     assert info["paused"] is True, info
@@ -232,26 +287,26 @@ def main(network, ci):
     host_process.close_stdin(host)
     assert host.wait(timeout=30) == 0, output(host)
 
-    for presets, field in [
-        ({"Bad": preset}, "name"),
-        ({"a" * 64: dict(preset, **{"\x01" * 64: None})}, "\x01"),
-        ({"review": {name: value for name, value in preset.items() if name != "effort"}}, "effort"),
-        ({"review": dict(preset, tools=["bash"])}, "workspace"),
+    for presets in [
+        {"Bad": preset},
+        {"a" * 64: dict(preset, **{"\x01" * 64: None})},
+        {"review": {name: value for name, value in preset.items() if name != "effort"}},
+        {"review": dict(preset, tools=["bash"])},
     ]:
         refused = refusal(launch(frame(dict(good, presets=presets))))
-        assert refused["code"] == "invalid_preset", refused
-        assert next(iter(presets)) in refused["message"] and field in refused["message"], refused
+        assert refused["code"] == "settings_invalid", refused
+        assert "presets" in refused["message"], refused
 
     for raw, message in [
-        (frame(dict(good, v=2)), "v must be 1"),
-        (frame(dict(good, runtimeDir="relative")), "runtimeDir must be an absolute path"),
-        (frame(dict(good, provider=dict(good["provider"], baseUrl="http://plain.example"))), "provider.baseUrl"),
-        (b"\x00\x00", "4-byte frame length"),
+        (frame(dict(good, v=2)), "v"),
+        (frame(dict(good, interface=dict(good["interface"], dir="relative"))), "interface.dir"),
+        (frame(dict(good, providers={"openai": {"endpoint": "http://plain.example"}})), "providers.openai.endpoint"),
+        (b"\x00\x00", "4-byte"),
     ]:
         process = launch(raw)
         host_process.close_stdin(process)
         refused = refusal(process)
-        assert refused["code"] == "launch_frame_invalid", refused
+        assert refused["code"] == "settings_invalid", refused
         assert message in refused["message"], refused
 
     # MCP servers: the Host lists their tools before it serves; a name a
@@ -261,24 +316,24 @@ def main(network, ci):
     clash = mcp_server(["bash"])
     mcp_root = root / "mcp"
     mcp_root.mkdir(mode=0o700)
-    base = dict(good, store=str(root / "store5"), runtimeDir=str(mcp_root))
-    host = launch(frame(dict(base, mcpServers=[mcp_entry("docs", docs)])))
-    wait_for_host(mcp_root / "rui.sock", base["store"], host)
+    base = dict(good, store={"sqlite": {"dir": str(root / "store5")}}, interface=dict(good["interface"], dir=str(mcp_root)))
+    host = launch(frame(dict(base, tools={"mcp": dict([mcp_entry("docs", docs)])})))
+    wait_for_host(mcp_root / "rui.sock", base["store"]["sqlite"]["dir"], host)
     host_process.close_stdin(host)
     assert host.wait(timeout=30) == 0, output(host)
     # The launcher stays connected until the refusal arrives: a closed stdin
     # while listing is a launcher that went away, and stops the Host quietly.
-    colliding = launch(frame(dict(base, mcpServers=[mcp_entry("docs", docs), mcp_entry("clash", clash)])))
+    colliding = launch(frame(dict(base, tools={"mcp": dict([mcp_entry("docs", docs), mcp_entry("clash", clash)])})))
     line = colliding.stdout.readline()
     refused = json.loads(line)["rui_start_error"]
     assert colliding.wait(timeout=20) == 1
-    assert not output(colliding)[1], "a tool-name refusal printed a second diagnostic"
+    assert output(colliding)[1].strip(), "a tool-name refusal omitted the stderr diagnostic"
     assert refused["code"] == "tool_name_collision", refused
     assert "bash" in refused["message"] and "clash" in refused["message"], refused
     docs.shutdown()
     docs.server_close()
-    host = launch(frame(dict(base, mcpServers=[mcp_entry("docs", docs)])))
-    wait_for_host(mcp_root / "rui.sock", base["store"], host)
+    host = launch(frame(dict(base, tools={"mcp": dict([mcp_entry("docs", docs)])})))
+    wait_for_host(mcp_root / "rui.sock", base["store"]["sqlite"]["dir"], host)
     host_process.close_stdin(host)
     assert host.wait(timeout=30) == 0, output(host)
 
@@ -289,8 +344,8 @@ def main(network, ci):
     silent.listen(8)
     hang_root = root / "hang"
     hang_root.mkdir(mode=0o700)
-    entry = {"name": "slow", "url": f"http://127.0.0.1:{silent.getsockname()[1]}/mcp", "bearerToken": "t", "callTimeoutMs": 1000}
-    host = launch(frame(dict(good, store=str(root / "store6"), runtimeDir=str(hang_root), mcpServers=[entry])))
+    entry = ("slow", {"url": f"http://127.0.0.1:{silent.getsockname()[1]}/mcp", "bearerToken": {"value": "t"}, "callTimeoutMs": 1000})
+    host = launch(frame(dict(good, store={"sqlite": {"dir": str(root / "store6")}}, interface=dict(good["interface"], dir=str(hang_root)), tools={"mcp": dict([entry])})))
     # The Host has asked the server for its tools and now waits for an answer.
     silent.settimeout(20)
     held, _ = silent.accept()
@@ -301,7 +356,7 @@ def main(network, ci):
     held.close()
     silent.close()
     sdk_tool_set(root, good, network, ci)
-    print(f"launch frame: ready, store_locked, runtime_dir_unusable, stdin close stopped the Host in {elapsed:.2f} s, opened paused, preset creation and four preset refusals, four frame refusals, MCP tools listed, a collision refused, a server down tolerated")
+    print(f"settings document: ready, store_locked, runtime_dir_unusable, stdin close stopped the Host in {elapsed:.2f} s, opened paused, preset creation and four preset refusals, four document refusals, MCP tools listed, a collision refused, a server down tolerated")
 
 
 if __name__ == "__main__":

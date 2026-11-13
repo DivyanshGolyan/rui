@@ -4276,6 +4276,797 @@
         ],
         "additionalProperties": false
       },
+      "HostSettings": {
+        "type": "object",
+        "properties": {
+          "store": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "sqlite": {
+                    "type": "object",
+                    "properties": {
+                      "dir": {
+                        "anyOf": [
+                          {
+                            "oneOf": [
+                              {
+                                "type": "string",
+                                "maxLength": 492,
+                                "x-maxBytes": 492
+                              },
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "hex": {
+                                    "type": "string",
+                                    "maxLength": 984,
+                                    "x-maxBytes": 984,
+                                    "pattern": "^([0-9a-f]{2})*$"
+                                  }
+                                },
+                                "required": [
+                                  "hex"
+                                ],
+                                "additionalProperties": false
+                              }
+                            ],
+                            "x-rui-kind": "bytes",
+                            "description": "The SQLite Store directory. Default: the Host directory."
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "x-rui-kind": "bytes"
+                      }
+                    },
+                    "additionalProperties": false,
+                    "description": "SQLite Store."
+                  }
+                },
+                "required": [
+                  "sqlite"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "mysql": {
+                    "type": "object",
+                    "properties": {
+                      "url": {
+                        "anyOf": [
+                          {
+                            "oneOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "env": {
+                                    "oneOf": [
+                                      {
+                                        "type": "string",
+                                        "maxLength": 128,
+                                        "x-maxBytes": 128
+                                      },
+                                      {
+                                        "type": "object",
+                                        "properties": {
+                                          "hex": {
+                                            "type": "string",
+                                            "maxLength": 256,
+                                            "x-maxBytes": 256,
+                                            "pattern": "^([0-9a-f]{2})*$"
+                                          }
+                                        },
+                                        "required": [
+                                          "hex"
+                                        ],
+                                        "additionalProperties": false
+                                      }
+                                    ],
+                                    "x-rui-kind": "bytes"
+                                  }
+                                },
+                                "required": [
+                                  "env"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "file": {
+                                    "oneOf": [
+                                      {
+                                        "type": "string",
+                                        "maxLength": 4095,
+                                        "x-maxBytes": 4095
+                                      },
+                                      {
+                                        "type": "object",
+                                        "properties": {
+                                          "hex": {
+                                            "type": "string",
+                                            "maxLength": 8190,
+                                            "x-maxBytes": 8190,
+                                            "pattern": "^([0-9a-f]{2})*$"
+                                          }
+                                        },
+                                        "required": [
+                                          "hex"
+                                        ],
+                                        "additionalProperties": false
+                                      }
+                                    ],
+                                    "x-rui-kind": "bytes"
+                                  }
+                                },
+                                "required": [
+                                  "file"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "value": {
+                                    "type": "string",
+                                    "maxLength": 1048576,
+                                    "x-maxBytes": 1048576
+                                  }
+                                },
+                                "required": [
+                                  "value"
+                                ],
+                                "additionalProperties": false,
+                                "description": "Literal secret; accepted only from a pipe, never from a settings file."
+                              },
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "owner": {
+                                    "const": true
+                                  }
+                                },
+                                "required": [
+                                  "owner"
+                                ],
+                                "additionalProperties": false
+                              }
+                            ],
+                            "format": "mysql-login-source",
+                            "description": "The MySQL login URL source. TCP verifies TLS; ssl-ca names an absolute PEM path."
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "x-rui-kind": "secret"
+                      }
+                    },
+                    "additionalProperties": false,
+                    "description": "MySQL Store."
+                  }
+                },
+                "required": [
+                  "mysql"
+                ],
+                "additionalProperties": false
+              }
+            ],
+            "maxProperties": 1,
+            "minProperties": 1,
+            "description": "Where the Host keeps canonical facts. One Adapter."
+          },
+          "providers": {
+            "type": "object",
+            "properties": {
+              "codex": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "endpoint": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "maxLength": 2048,
+                            "x-maxBytes": 2048,
+                            "format": "https_endpoint",
+                            "description": "Responses endpoint. Default: the provider's own."
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "credentialFile": {
+                        "anyOf": [
+                          {
+                            "oneOf": [
+                              {
+                                "type": "string",
+                                "maxLength": 4095,
+                                "x-maxBytes": 4095
+                              },
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "hex": {
+                                    "type": "string",
+                                    "maxLength": 8190,
+                                    "x-maxBytes": 8190,
+                                    "pattern": "^([0-9a-f]{2})*$"
+                                  }
+                                },
+                                "required": [
+                                  "hex"
+                                ],
+                                "additionalProperties": false
+                              }
+                            ],
+                            "x-rui-kind": "bytes",
+                            "format": "absolute-path",
+                            "description": "Sign-in file. Default: the Adapter's saved sign-in."
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "x-rui-kind": "bytes"
+                      },
+                      "unauthenticated": {
+                        "type": "boolean",
+                        "description": "Send no credential to a development endpoint."
+                      }
+                    },
+                    "additionalProperties": false,
+                    "description": "The providers served, exactly the listed set when present."
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "openai": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "endpoint": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "maxLength": 2048,
+                            "x-maxBytes": 2048,
+                            "format": "https_endpoint",
+                            "description": "Endpoint. Default: the provider's own."
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "key": {
+                        "anyOf": [
+                          {
+                            "oneOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "env": {
+                                    "oneOf": [
+                                      {
+                                        "type": "string",
+                                        "maxLength": 128,
+                                        "x-maxBytes": 128
+                                      },
+                                      {
+                                        "type": "object",
+                                        "properties": {
+                                          "hex": {
+                                            "type": "string",
+                                            "maxLength": 256,
+                                            "x-maxBytes": 256,
+                                            "pattern": "^([0-9a-f]{2})*$"
+                                          }
+                                        },
+                                        "required": [
+                                          "hex"
+                                        ],
+                                        "additionalProperties": false
+                                      }
+                                    ],
+                                    "x-rui-kind": "bytes"
+                                  }
+                                },
+                                "required": [
+                                  "env"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "file": {
+                                    "oneOf": [
+                                      {
+                                        "type": "string",
+                                        "maxLength": 4095,
+                                        "x-maxBytes": 4095
+                                      },
+                                      {
+                                        "type": "object",
+                                        "properties": {
+                                          "hex": {
+                                            "type": "string",
+                                            "maxLength": 8190,
+                                            "x-maxBytes": 8190,
+                                            "pattern": "^([0-9a-f]{2})*$"
+                                          }
+                                        },
+                                        "required": [
+                                          "hex"
+                                        ],
+                                        "additionalProperties": false
+                                      }
+                                    ],
+                                    "x-rui-kind": "bytes"
+                                  }
+                                },
+                                "required": [
+                                  "file"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "value": {
+                                    "type": "string",
+                                    "maxLength": 1024,
+                                    "x-maxBytes": 1024
+                                  }
+                                },
+                                "required": [
+                                  "value"
+                                ],
+                                "additionalProperties": false,
+                                "description": "Literal secret; accepted only from a pipe, never from a settings file."
+                              },
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "owner": {
+                                    "const": true
+                                  }
+                                },
+                                "required": [
+                                  "owner"
+                                ],
+                                "additionalProperties": false
+                              }
+                            ],
+                            "format": "credential-source",
+                            "description": "API-key source. Default: the provider's saved key."
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "x-rui-kind": "secret"
+                      },
+                      "unauthenticated": {
+                        "type": "boolean",
+                        "description": "Send no credential to a development endpoint."
+                      }
+                    },
+                    "additionalProperties": false,
+                    "description": "The providers served, exactly the listed set when present."
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "chatgpt": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "endpoint": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "maxLength": 2048,
+                            "x-maxBytes": 2048,
+                            "format": "https_endpoint",
+                            "description": "Responses endpoint. Default: the provider's own."
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "credentialFile": {
+                        "anyOf": [
+                          {
+                            "oneOf": [
+                              {
+                                "type": "string",
+                                "maxLength": 4095,
+                                "x-maxBytes": 4095
+                              },
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "hex": {
+                                    "type": "string",
+                                    "maxLength": 8190,
+                                    "x-maxBytes": 8190,
+                                    "pattern": "^([0-9a-f]{2})*$"
+                                  }
+                                },
+                                "required": [
+                                  "hex"
+                                ],
+                                "additionalProperties": false
+                              }
+                            ],
+                            "x-rui-kind": "bytes",
+                            "format": "absolute-path",
+                            "description": "Sign-in file. Default: the Adapter's saved sign-in."
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "x-rui-kind": "bytes"
+                      },
+                      "unauthenticated": {
+                        "type": "boolean",
+                        "description": "Send no credential to a development endpoint."
+                      }
+                    },
+                    "additionalProperties": false,
+                    "description": "The providers served, exactly the listed set when present."
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "additionalProperties": false,
+            "maxProperties": 3,
+            "description": "The providers served, exactly the listed set when present."
+          },
+          "network": {
+            "type": "object",
+            "properties": {
+              "caFile": {
+                "anyOf": [
+                  {
+                    "oneOf": [
+                      {
+                        "type": "string",
+                        "maxLength": 4095,
+                        "x-maxBytes": 4095
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "hex": {
+                            "type": "string",
+                            "maxLength": 8190,
+                            "x-maxBytes": 8190,
+                            "pattern": "^([0-9a-f]{2})*$"
+                          }
+                        },
+                        "required": [
+                          "hex"
+                        ],
+                        "additionalProperties": false
+                      }
+                    ],
+                    "x-rui-kind": "bytes",
+                    "description": "Trust only this PEM file; absent uses system trust. Applies to every provider."
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "x-rui-kind": "bytes"
+              }
+            },
+            "additionalProperties": false,
+            "description": "Host-wide transport trust."
+          },
+          "tools": {
+            "type": "object",
+            "properties": {
+              "bash": {
+                "type": "object",
+                "properties": {
+                  "path": {
+                    "anyOf": [
+                      {
+                        "oneOf": [
+                          {
+                            "type": "string",
+                            "maxLength": 4095,
+                            "x-maxBytes": 4095
+                          },
+                          {
+                            "type": "object",
+                            "properties": {
+                              "hex": {
+                                "type": "string",
+                                "maxLength": 8190,
+                                "x-maxBytes": 8190,
+                                "pattern": "^([0-9a-f]{2})*$"
+                              }
+                            },
+                            "required": [
+                              "hex"
+                            ],
+                            "additionalProperties": false
+                          }
+                        ],
+                        "x-rui-kind": "bytes",
+                        "description": "The Bash executable."
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "x-rui-kind": "bytes"
+                  },
+                  "timeoutMs": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 9223372036854775807,
+                    "description": "The longest one Bash call may run."
+                  }
+                },
+                "additionalProperties": false,
+                "description": "The built-in Bash tool."
+              },
+              "mcp": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "object",
+                  "properties": {
+                    "url": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "maxLength": 2048,
+                          "x-maxBytes": 2048,
+                          "format": "loopback_http",
+                          "description": "Plain HTTP to a loopback literal."
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "bearerToken": {
+                      "anyOf": [
+                        {
+                          "oneOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "env": {
+                                  "oneOf": [
+                                    {
+                                      "type": "string",
+                                      "maxLength": 128,
+                                      "x-maxBytes": 128
+                                    },
+                                    {
+                                      "type": "object",
+                                      "properties": {
+                                        "hex": {
+                                          "type": "string",
+                                          "maxLength": 256,
+                                          "x-maxBytes": 256,
+                                          "pattern": "^([0-9a-f]{2})*$"
+                                        }
+                                      },
+                                      "required": [
+                                        "hex"
+                                      ],
+                                      "additionalProperties": false
+                                    }
+                                  ],
+                                  "x-rui-kind": "bytes"
+                                }
+                              },
+                              "required": [
+                                "env"
+                              ],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "file": {
+                                  "oneOf": [
+                                    {
+                                      "type": "string",
+                                      "maxLength": 4095,
+                                      "x-maxBytes": 4095
+                                    },
+                                    {
+                                      "type": "object",
+                                      "properties": {
+                                        "hex": {
+                                          "type": "string",
+                                          "maxLength": 8190,
+                                          "x-maxBytes": 8190,
+                                          "pattern": "^([0-9a-f]{2})*$"
+                                        }
+                                      },
+                                      "required": [
+                                        "hex"
+                                      ],
+                                      "additionalProperties": false
+                                    }
+                                  ],
+                                  "x-rui-kind": "bytes"
+                                }
+                              },
+                              "required": [
+                                "file"
+                              ],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "value": {
+                                  "type": "string",
+                                  "maxLength": 1024,
+                                  "x-maxBytes": 1024
+                                }
+                              },
+                              "required": [
+                                "value"
+                              ],
+                              "additionalProperties": false,
+                              "description": "Literal secret; accepted only from a pipe, never from a settings file."
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "owner": {
+                                  "const": true
+                                }
+                              },
+                              "required": [
+                                "owner"
+                              ],
+                              "additionalProperties": false
+                            }
+                          ],
+                          "format": "credential-source",
+                          "description": "Bearer-token source."
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "x-rui-kind": "secret"
+                    },
+                    "callTimeoutMs": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 4294967295,
+                      "description": "The longest one tool call may run."
+                    }
+                  },
+                  "additionalProperties": false,
+                  "description": "Named MCP servers whose tools Sessions may use."
+                },
+                "propertyNames": {
+                  "pattern": "^[A-Za-z0-9_-]{1,64}$"
+                },
+                "maxProperties": 8,
+                "description": "Named MCP servers whose tools Sessions may use."
+              }
+            },
+            "additionalProperties": false,
+            "description": "The tool Adapters offered to Sessions."
+          },
+          "interface": {
+            "type": "object",
+            "properties": {
+              "dir": {
+                "anyOf": [
+                  {
+                    "oneOf": [
+                      {
+                        "type": "string",
+                        "maxLength": 94,
+                        "x-maxBytes": 94
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "hex": {
+                            "type": "string",
+                            "maxLength": 188,
+                            "x-maxBytes": 188,
+                            "pattern": "^([0-9a-f]{2})*$"
+                          }
+                        },
+                        "required": [
+                          "hex"
+                        ],
+                        "additionalProperties": false
+                      }
+                    ],
+                    "x-rui-kind": "bytes",
+                    "format": "absolute-path",
+                    "description": "Private interface directory. Default: the Host directory; MySQL requires an explicit directory."
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "x-rui-kind": "bytes"
+              },
+              "lifetime": {
+                "type": "string",
+                "enum": [
+                  "detached",
+                  "stdin"
+                ],
+                "description": "detached: until stopped; stdin: also stop when stdin closes."
+              }
+            },
+            "additionalProperties": false,
+            "description": "Where clients reach the Host and what ends it."
+          },
+          "execution": {
+            "type": "object",
+            "properties": {
+              "activeCapacity": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 18446744073709551615,
+                "description": "How many Turns may run at once."
+              },
+              "paused": {
+                "type": "boolean",
+                "description": "Open with Turns held, as after host_pause."
+              }
+            },
+            "additionalProperties": false,
+            "description": "How Turns run."
+          },
+          "presets": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/AgentSpec",
+              "format": "agent-spec",
+              "description": "Named creation specs held only by this Host."
+            },
+            "propertyNames": {
+              "pattern": "^[a-z0-9_-]{1,64}$"
+            },
+            "maxProperties": 64,
+            "description": "Named creation specs held only by this Host."
+          }
+        },
+        "additionalProperties": false,
+        "description": "Host settings."
+      },
       "HostStopReply": {
         "type": "object",
         "properties": {
@@ -4764,103 +5555,6 @@
         "required": [
           "position",
           "text"
-        ],
-        "additionalProperties": false
-      },
-      "LaunchFrame": {
-        "type": "object",
-        "properties": {
-          "v": {
-            "const": 1
-          },
-          "store": {
-            "type": "string"
-          },
-          "provider": {
-            "type": "object",
-            "properties": {
-              "kind": {
-                "const": "openai_key"
-              },
-              "baseUrl": {
-                "type": "string"
-              },
-              "key": {
-                "type": "string"
-              },
-              "caFile": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              }
-            },
-            "required": [
-              "kind",
-              "baseUrl",
-              "key"
-            ],
-            "additionalProperties": false
-          },
-          "runtimeDir": {
-            "type": "string"
-          },
-          "activeCapacity": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "paused": {
-            "type": "boolean"
-          },
-          "presets": {
-            "type": "object",
-            "additionalProperties": {
-              "$ref": "#/components/schemas/AgentSpec"
-            },
-            "maxProperties": 64
-          },
-          "mcpServers": {
-            "type": "array",
-            "items": {
-              "type": "object",
-              "properties": {
-                "name": {
-                  "type": "string"
-                },
-                "url": {
-                  "type": "string"
-                },
-                "bearerToken": {
-                  "type": "string"
-                },
-                "callTimeoutMs": {
-                  "type": "integer"
-                }
-              },
-              "required": [
-                "name",
-                "url",
-                "bearerToken"
-              ],
-              "additionalProperties": false
-            }
-          }
-        },
-        "required": [
-          "v",
-          "store",
-          "provider",
-          "runtimeDir"
         ],
         "additionalProperties": false
       },
@@ -11528,7 +12222,6 @@
               "code": {
                 "type": "string",
                 "enum": [
-                  "launch_frame_invalid",
                   "settings_invalid",
                   "invalid_preset",
                   "store_locked",

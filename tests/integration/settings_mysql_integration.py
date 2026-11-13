@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The launch-frame contract against CI's live MySQL Store.
+"""The settings-document contract against CI's live MySQL Store.
 
 No server is started locally. Like the Store's live tests, this skips when
 RUI_TEST_MYSQL_* is absent, and fails when CI requires MySQL but omitted it.
@@ -19,7 +19,7 @@ from urllib.parse import quote
 import host_process
 import live_engines
 import os_semantics
-import launch_frame_fixture as frame_host
+import settings_fixture as frame_host
 import store_rounds_cases
 
 
@@ -29,7 +29,7 @@ def main():
     password = os.environ.get(live_engines.MYSQL_ROOT_PASSWORD)
     if not socket or not password:
         assert "mysql" not in os.environ.get(live_engines.REQUIRE, "").split(","), "CI required MySQL but did not supply the launch fixture"
-        print("MySQL launch frame: skipped (no RUI_TEST_MYSQL_* server)")
+        print("MySQL settings document: skipped (no RUI_TEST_MYSQL_* server)")
         return
     rui, admin = map(lambda arg: str(pathlib.Path(arg).resolve()), sys.argv[1:3])
     root = host_process.canonical_fixture_root(tempfile.mkdtemp(prefix="rui-mysql-launch-"))
@@ -43,9 +43,10 @@ def main():
     # the required model, compaction trigger, tools, permission mode and effort.
     preset = {"model": "gpt-6.1-sol", "effort": "low", "compactAt": 100000,
               "tools": [], "permissionMode": "ask", "label": "Review"}
-    good = {"v": 1, "store": url, "runtimeDir": str(runtime), "activeCapacity": 2,
-            "presets": {"review": preset},
-            "provider": {"kind": "openai_key", "baseUrl": "https://api.openai.com/v1", "key": "sk-mysql-launch-test"}}
+    good = {"store": {"mysql": {"url": {"value": url}}},
+            "interface": {"dir": str(runtime), "lifetime": "stdin"},
+            "execution": {"activeCapacity": 2}, "presets": {"review": preset},
+            "providers": {"openai": {"endpoint": "https://api.openai.com/v1/responses", "key": {"value": "sk-mysql-launch-test"}}}}
     children = []
     limited_logins = [("rui_ro_" + secrets.token_hex(6), "SELECT"),
                       ("rui_no_update_" + secrets.token_hex(6), "SELECT, INSERT")]
@@ -56,7 +57,7 @@ def main():
     def launch(value):
         # The CI fixture credentials are not inherited by the Host itself.
         env = {key: os.environ[key] for key in ("PATH", "HOME", "TMPDIR") if key in os.environ}
-        child = subprocess.Popen([rui, "host", "serve", "--launch-frame"], stdin=subprocess.PIPE,
+        child = subprocess.Popen([rui, "host", "serve", "--settings", "-"], stdin=subprocess.PIPE,
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
         children.append(child)
         child.stdin.write(frame_host.frame(value))
@@ -103,12 +104,12 @@ def main():
         sql(f"CREATE DATABASE {database} CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin")
         wrong_password = secrets.token_hex(24)
         wrong_login = f"mysql://root:{wrong_password}@{quote(socket, safe='')}/{database}"
-        login_refusal = frame_host.refusal(launch(dict(good, store=wrong_login)))
+        login_refusal = frame_host.refusal(launch(dict(good, store={"mysql": {"url": {"value": wrong_login}}})))
         assert login_refusal["code"] == "mysql_login", login_refusal
         assert wrong_password not in login_refusal["message"] and password not in login_refusal["message"]
         missing_socket = str(root / "missing-mysql.sock")
         unreachable_url = f"mysql://root:{quote(password, safe='')}@{quote(missing_socket, safe='')}/{database}"
-        unreachable = frame_host.refusal(launch(dict(good, store=unreachable_url)))
+        unreachable = frame_host.refusal(launch(dict(good, store={"mysql": {"url": {"value": unreachable_url}}})))
         assert unreachable["code"] == "mysql_unreachable", unreachable
         assert missing_socket not in unreachable["message"] and password not in unreachable["message"]
         missing = launch(good)
@@ -167,7 +168,7 @@ def main():
         assert store_id == sql(f"SELECT meta_value FROM {database}.store_meta WHERE meta_key='store_id'")
         other = root / "other"
         other.mkdir(mode=0o700)
-        locked = launch(dict(good, runtimeDir=str(other)))
+        locked = launch(dict(good, interface=dict(good["interface"], dir=str(other))))
         assert frame_host.refusal(locked)["code"] == "store_locked"
         create = {"version": frame_host.WIRE, "kind": "configure", "store": store_id, "key": "mysql-launch-create",
                   "session": "", "preset": "review", "configuration": {"label": None}}
@@ -213,7 +214,7 @@ def main():
                 f"GRANT {privileges} ON {database}.* TO '{user}'@'localhost'")
             limited_url = f"mysql://{user}:{limited_password}@{quote(socket, safe='')}/{database}"
             before = admission_snapshot()
-            refused_host = launch(dict(good, store=limited_url))
+            refused_host = launch(dict(good, store={"mysql": {"url": {"value": limited_url}}}))
             denied = frame_host.refusal(refused_host)
             assert denied["code"] == "mysql_login", denied
             assert "SELECT, INSERT, UPDATE" in denied["message"], denied
@@ -268,7 +269,7 @@ def main():
         lines = out.decode().splitlines()
         assert len(lines) == 2 and lines[0].startswith("ready ") and json.loads(lines[1])["rui_start_error"]["code"] == "store_fenced", \
             f"missing named store_fenced exit: stdout={out!r} stderr={err[-4000:]!r}"
-        print("MySQL launch frame: readiness, Session round trip, stable id, selector repair and refusal, private credentials, mysql_login, mysql_unreachable, store_locked, stdin close, store_fenced")
+        print("MySQL settings document: readiness, Session round trip, stable id, selector repair and refusal, private credentials, mysql_login, mysql_unreachable, store_locked, stdin close, store_fenced")
     finally:
         primary = sys.exception()
         cleanup_errors = []

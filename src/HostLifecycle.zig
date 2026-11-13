@@ -177,7 +177,7 @@ fn deriveLaunch(allocator: std.mem.Allocator, argv: []const []const u8) !LaunchS
     var problem: cli_args.Refusal = undefined;
     const parsed = try grammar.parseSyntax(argv[3..], scratch.allocator(), &problem);
     try parsed.validateValues(&problem);
-    if (parsed.help or parsed.missing() != null or parsed.has("launch-frame")) return error.UnsupportedHostConfiguration;
+    if (parsed.help or parsed.missing() != null or std.mem.eql(u8, parsed.get("settings") orelse "", "-")) return error.UnsupportedHostConfiguration;
     inline for (.{ "bash-path", "provider-ca-file" }) |name| {
         if (parsed.get(name)) |value| if (!std.fs.path.isAbsolute(value)) return error.UnsupportedHostConfiguration;
     }
@@ -603,8 +603,8 @@ test "relaunch activation reading requires the pinned launch for either wire" {
 
 test "upgrade lifecycle derives launch semantics before disruption" {
     const allocator = std.testing.allocator;
+    try std.testing.expectError(error.UnsupportedHostConfiguration, deriveLaunch(allocator, &.{ "rui", "host", "serve", "--settings", "-" }));
     for ([_][]const []const u8{
-        &.{ "rui", "host", "serve", "--launch-frame" },
         &.{ "rui", "session", "start" },
         &.{ "rui", "host", "serve", "--test-observation-fd", "8" },
         &.{ "rui", "host", "serve", "--bash-path", "relative/bash" },
@@ -623,6 +623,17 @@ test "upgrade lifecycle derives launch semantics before disruption" {
         try std.testing.expectEqualStrings("provider-endpoint", launch.options[0].name);
         try std.testing.expectEqualStrings("--store", launch.options[0].value.?);
         try std.testing.expect(supportedByHelp(&launch, "rui host serve [--store PATH] [--active-capacity N] [--provider-endpoint URL]\n"));
+        try std.testing.expect(!supportedByHelp(&launch, "rui host serve [--store PATH] [--active-capacity N]\n"));
+    }
+    // File-backed documents, unlike an exhausted stdin document, retain
+    // the same argv replay and help-admission behavior as ordinary flags.
+    for ([_][]const u8{ "/private/host.json", "relative/host.json" }) |file| {
+        var launch = try deriveLaunch(allocator, &.{ "rui", "host", "serve", "--settings", file });
+        defer launch.deinit(allocator);
+        try std.testing.expectEqual(@as(usize, 1), launch.options.len);
+        try std.testing.expectEqualStrings("settings", launch.options[0].name);
+        try std.testing.expectEqualStrings(file, launch.options[0].value.?);
+        try std.testing.expect(supportedByHelp(&launch, "rui host serve [--store PATH] [--active-capacity N] [--settings FILE|-]\n"));
         try std.testing.expect(!supportedByHelp(&launch, "rui host serve [--store PATH] [--active-capacity N]\n"));
     }
     try std.testing.expect(!restartableEnvironment(&.{"SSL_CERT_FILE=relative.pem"}));

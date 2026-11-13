@@ -401,6 +401,20 @@ class SelectionTest(unittest.TestCase):
                 self.assertFalse(rows[0]["mysql_dialect"])
                 self.assertFalse(shards(["other-integration"], mysql_suites=graph.live_mysql)["include"][0]["live_mysql"])
 
+    def test_typescript_fixture_consumer_provisions_mysql_on_linux_only(self):
+        fixture = "clients/ts/test/settings-host.test.ts"
+        fixtures = {"ts-client": ((fixture,), (), ())}
+        files = {"src/logic_tests.zig": "const cores = .{\n};\n", "src/cli.zig": ""}
+        for source, expected in (("", False), ("const socket = process.env.RUI_TEST_MYSQL_SOCKET;", True)):
+            with self.subTest(live_case=expected), patch("select_tests.FIXTURES", fixtures):
+                files[fixture] = source
+                graph = Graph(files, files.__getitem__)
+                self.assertEqual(graph.targets(fixture), {"ts-client"})
+                for platform in ("linux", "macos"):
+                    rows = shards(["ts-client"], platform, mysql_suites=graph.live_mysql)["include"]
+                    self.assertEqual(rows[0]["live_mysql"], expected and platform == "linux")
+                    self.assertFalse(rows[0]["mysql_dialect"])
+
     def test_mysql_provisioning_owner_combinations(self):
         cases = (([], "all", False, False),
                  (["plain"], "all", False, False),
@@ -451,7 +465,7 @@ class SelectionTest(unittest.TestCase):
     def test_native_conformance_dependencies_keep_live_mysql(self):
         graph = tree_graph()
         for path in ("src/find_tools.zig", "src/find_tools_tests.zig", "src/read_transcript.zig",
-                     "src/launch_frame.zig"):
+                     "src/preset_settings_test.zig"):
             for phase in ("development", "review"):
                 with self.subTest(path=path, phase=phase):
                     result = select([path], phase, AVAILABLE, graph)
@@ -613,7 +627,7 @@ class SelectionTest(unittest.TestCase):
         self.assertEqual((alone["targets"], alone["native_targets"]), (["test-native"], ["test-native"]))
         # What it newly lists selects what reaches that file, not check.
         owned = select(["src/tests.zig", "src/mcp/Running.zig"], "review", AVAILABLE)["targets"]
-        self.assertTrue({"launch-frame-integration", "test-native"} <= set(owned))
+        self.assertTrue({"settings-integration", "test-native"} <= set(owned))
         self.assertNotIn("check", owned)
 
     def test_shared_context_text_keeps_all_request_oracle_consumers(self):
@@ -1010,7 +1024,7 @@ class SelectionTest(unittest.TestCase):
         for path in ("src/codex_credential_policy.zig", "src/codex_token_wire.zig"):
             result = select([path], "review", AVAILABLE)
             # The ChatGPT plan sign-in keeps its records in the same custody.
-            native = ["chatgpt-plan-integration", "codex-credential-integration", "codex-h2-integration", "codex-integration", "test", "test-logic"]
+            native = sorted(["chatgpt-plan-integration", "codex-credential-integration", "codex-h2-integration", "codex-integration", "test-native", "test-logic"])
             self.assertEqual(result["native_targets"], native)
             self.assertEqual(result["targets"], sorted(native + ["stack-frames"]))
 
@@ -1115,7 +1129,7 @@ class SelectionTest(unittest.TestCase):
         # A helper selects every fixture that imports it, and check once it
         # reaches every case check runs; a fixture script selects only the
         # targets that run it.
-        for path, owners in (("host_process.py", {"check", "launch-frame-integration", "ts-client"}),
+        for path, owners in (("host_process.py", {"check", "settings-integration", "ts-client"}),
                              ("control_fixture.py", {"control-integration", "dispatch-integration",
                                                      "transport-h2-integration"}),
                              ("canonical_fixture.py", {"human-cli-integration", "request-wait-integration"})):
@@ -1316,8 +1330,8 @@ class SelectionTest(unittest.TestCase):
                      "tests/integration/mcp_sdk/server.mjs",
                      "tests/integration/mcp_sdk/package-lock.json"):
             targets = set(select([path], "review", AVAILABLE)["targets"])
-            self.assertTrue(covered("launch-frame-integration", targets), (path, targets))
-        for target in ("launch-frame-integration", "check", "check-full"):
+            self.assertTrue(covered("settings-integration", targets), (path, targets))
+        for target in ("settings-integration", "check", "check-full"):
             self.assertTrue(setup_requirements([target])["node"], target)
 
     def test_setup_installs_fixture_packages_for_any_target(self):
@@ -2199,7 +2213,7 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
             "descriptor_capacity_integration.py release", "host_status_integration.py release",
             "host_launch_integration.py release", "host_stop_integration.py release",
             "admission_integration.sh debug", "host_process_test.py ",
-            "host_allocator_test.py release", "launch_frame_integration.py release",
+            "host_allocator_test.py release", "settings_integration.py release",
         }
         outputs = {}
         for part in ("all", "execution", "callers", "parallel"):

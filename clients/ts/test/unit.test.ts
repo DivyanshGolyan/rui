@@ -5,7 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { encodeFrame, launchFor, startError } from "../src/client.ts";
+import { encodeSettings, launchFor, readinessInstance, startError } from "../src/client.ts";
+import { pipeSettings, type HostSettings } from "../src/settings.ts";
 import { RuiStartError } from "../src/errors.ts";
 import { FEED_KINDS, listActivity } from "../src/feed.ts";
 import { environmentBytes, Sessions, type Link } from "../src/sessions.ts";
@@ -16,45 +17,184 @@ test("the wire version is the one openapi.json describes", () => {
 	assert.equal(WIRE_VERSION, document.info.version);
 });
 
-test("a launch frame is a big-endian length and the JSON", () => {
-	const launch = { v: 1, store: "/s", runtimeDir: "/r", provider: { kind: "openai_key", baseUrl: "https://example.com/v1", key: "test" } } satisfies import("../src/wire.ts").components["schemas"]["LaunchFrame"];
-	const frame = encodeFrame(launch);
-	const json = JSON.stringify(launch);
-	assert.equal(frame.readUInt32BE(0), json.length);
-	assert.equal(frame.subarray(4).toString("utf8"), json);
+function documentFor(settings: HostSettings) {
+	const launch = launchFor(settings, "/r");
+	try {
+		return JSON.parse(launch.document.subarray(4).toString("utf8"));
+	} finally {
+		launch.document.fill(0);
+	}
+}
+
+test("a settings document is a big-endian byte length and JSON", () => {
+	const document = { store: { sqlite: { dir: "/s/é" } } } satisfies import("../src/wire.ts").components["schemas"]["HostSettings"];
+	const bytes = encodeSettings(document);
+	try {
+		assert.equal(bytes.readUInt32BE(0), Buffer.byteLength(JSON.stringify(document)));
+		assert.deepEqual(JSON.parse(bytes.subarray(4).toString("utf8")), document);
+	} finally {
+		bytes.fill(0);
+	}
 });
 
-test("launch frame carries optional provider CA trust without leaking extra settings", () => {
-	const options = { database: "/s", provider: { baseUrl: "https://example.com", key: "key" } };
-	assert.deepEqual(launchFor(options, "/r").frame.provider, { kind: "openai_key", ...options.provider });
-	const provider = { ...options.provider, caFile: "/fixture/ca.pem", extra: true };
-	const frame = launchFor({ ...options, provider }, "/r").frame;
-	assert.deepEqual(frame.provider, { kind: "openai_key", ...options.provider, caFile: "/fixture/ca.pem" });
-	const decoded = JSON.parse(encodeFrame(frame).subarray(4).toString("utf8"));
-	assert.equal(decoded.provider.caFile, "/fixture/ca.pem");
+test("settings reach every Adapter without a provider-specific builder", () => {
+	const settings: HostSettings = {
+		store: { mysql: { url: "mysql://user:password@localhost/db" } },
+		providers: { codex: { credentialFile: "/c" }, openai: { endpoint: "https://example.com", key: "key" }, chatgpt: {} },
+		network: { caFile: "/trust" },
+		tools: { bash: { path: "/bash", timeoutMs: 42 }, mcp: { drift: { url: "http://127.0.0.1:3000/mcp", bearerToken: "secret", callTimeoutMs: 99 } } },
+		execution: { activeCapacity: 3, paused: true },
+	};
+	assert.deepEqual(documentFor(settings), {
+		...settings,
+		store: { mysql: { url: { value: "mysql://user:password@localhost/db" } } },
+		providers: { ...settings.providers, openai: { endpoint: "https://example.com", key: { value: "key" } } },
+		tools: { bash: settings.tools?.bash, mcp: { drift: { url: "http://127.0.0.1:3000/mcp", bearerToken: { value: "secret" }, callTimeoutMs: 99 } } },
+		interface: { dir: "/r", lifetime: "stdin" },
+	});
+	assert.equal(settings.providers?.openai?.key, "key", "caller settings stay unchanged");
 });
 
-test("launch frame carries the MCP servers, an empty list when none are given", () => {
-	const options = { database: "/s", provider: { baseUrl: "https://example.com", key: "key" } };
-	const tools = [
-		{ name: "drift", url: "http://127.0.0.1:3000/mcp", bearerToken: "secret", callTimeoutMs: 42 },
-		{ name: "other", url: "http://127.0.0.1:3001/mcp", bearerToken: "secret2", callTimeoutMs: 99 },
-	];
-	const frame = (extra: object) => launchFor({ ...options, ...extra }, "/r").frame as { mcpServers: unknown };
-	assert.deepEqual(frame({}).mcpServers, []);
-	assert.deepEqual(frame({ tools: [{ ...tools[0], extra: true }, tools[1]] }).mcpServers, tools);
+test("interface lifetime defaults to stdin and an explicit choice wins", () => {
+	assert.deepEqual(documentFor({}).interface, { dir: "/r", lifetime: "stdin" });
+	assert.deepEqual(documentFor({ interface: { dir: "/custom", lifetime: "detached" } }).interface, { dir: "/custom", lifetime: "detached" });
+	assert.deepEqual(documentFor({ interface: { dir: null, lifetime: "detached" } }).interface, { dir: "/r", lifetime: "detached" });
+	const launch = launchFor({ interface: { lifetime: "detached" } }, "/r");
+	assert.equal(launch.detached, true);
+	launch.document.fill(0);
 });
 
-test("launch presets preserve creation fields and encode the same plain spec", () => {
+test("schema-derived codecs cover every secret and OS-byte leaf", () => {
+	const schema = JSON.parse(readFileSync(new URL("../../../openapi.json", import.meta.url), "utf8"));
+	const leaves: { path: string[]; kind: string }[] = [];
+	// Walk the source schema independently of the generated runtime descriptor.
+	function walk(node: any, path: string[]) {
+		if (!node || typeof node !== "object") return;
+		if (node.$ref) return;
+		if (node["x-rui-kind"]) leaves.push({ path, kind: node["x-rui-kind"] });
+		for (const child of [...(node.oneOf ?? []), ...(node.anyOf ?? []), ...(node.allOf ?? [])]) walk(child, path);
+		for (const [key, child] of Object.entries(node.properties ?? {})) walk(child, [...path, key]);
+		walk(node.additionalProperties, [...path, "named-server"]);
+	}
+	walk(schema.components.schemas.HostSettings, []);
+	assert.ok(leaves.some(({ kind }) => kind === "secret"));
+	assert.ok(leaves.some(({ kind }) => kind === "bytes"));
+	for (const { path, kind } of leaves) {
+		function at(value: unknown) {
+			return path.reduceRight((field, name) => ({ [name]: field }), value);
+		}
+		const values = kind === "secret" ? ["literal-secret", { value: "literal-secret" }, { owner: true }, null] : ["/plain", Uint8Array.of(47, 255, 120), { hex: "2fff78" }];
+		for (const value of values) {
+			const input = at(value) as HostSettings;
+			const expected = kind === "secret" && typeof value === "string" ? { value }
+				: value instanceof Uint8Array ? { hex: "2fff78" } : value;
+			assert.deepEqual(pipeSettings(input), at(expected), path.join("."));
+		}
+	}
+});
+
+test("named secret codecs do not confuse map names with Object prototype properties", () => {
+	for (const name of ["constructor", "toString", "__proto__"]) {
+		const mcp = Object.fromEntries([[name, { bearerToken: "secret", url: "http://127.0.0.1:1" }]]);
+		assert.deepEqual(pipeSettings({ tools: { mcp } }), { tools: { mcp: Object.fromEntries([[name, { bearerToken: { value: "secret" }, url: "http://127.0.0.1:1" }]]) } });
+	}
+});
+
+test("only explicitly named secret environment sources join the base child environment", () => {
+	const selected = "RUI_TS_SELECTED_SECRET";
+	const unused = "RUI_TS_UNSELECTED_SECRET";
+	const oldSelected = process.env[selected];
+	const oldUnused = process.env[unused];
+	process.env[selected] = "selected-private-value";
+	process.env[unused] = "unselected-private-value";
+	try {
+		for (const name of [selected, Buffer.from(selected), { hex: Buffer.from(selected).toString("hex") }]) {
+			for (const settings of [
+				{ providers: { openai: { key: { env: name } } } },
+				{ store: { mysql: { url: { env: name } } } },
+				{ tools: { mcp: { source: { url: "http://127.0.0.1:1", bearerToken: { env: name } } } } },
+			] satisfies HostSettings[]) {
+				const launch = launchFor(settings, "/r");
+				try {
+					assert.equal(launch.env[selected], "selected-private-value");
+					assert.equal(launch.env[unused], undefined);
+					assert.ok(!launch.document.includes(Buffer.from("selected-private-value")), "environment values stay out of the document");
+					assert.deepEqual(Object.keys(launch.env).sort(), ["PATH", "HOME", "TMPDIR", selected].filter((key) => process.env[key] !== undefined).sort());
+				} finally {
+					launch.document.fill(0);
+				}
+			}
+		}
+	} finally {
+		if (oldSelected === undefined) delete process.env[selected]; else process.env[selected] = oldSelected;
+		if (oldUnused === undefined) delete process.env[unused]; else process.env[unused] = oldUnused;
+	}
+});
+
+test("environment names preserve reserved keys, Unicode and a UTF-8 BOM byte for byte", () => {
+	for (const selected of ["__proto__", "constructor", "toString", "RUI_TS_É", "\uFEFFRUI_TS_BOM"]) {
+		const old = process.env[selected];
+		process.env[selected] = "selected-private-value";
+		try {
+			for (const env of [selected, Buffer.from(selected), { hex: Buffer.from(selected).toString("hex") }]) {
+				const launch = launchFor({ providers: { openai: { key: { env } } } }, "/r");
+				try {
+					assert.equal(Object.hasOwn(launch.env, selected), true, selected);
+					assert.equal(launch.env[selected], "selected-private-value");
+					assert.ok(!Object.hasOwn(launch.env, selected.replace(/^\uFEFF/, "")) || !selected.startsWith("\uFEFF"), "BOM must not select an unreferenced key");
+				} finally {
+					launch.document.fill(0);
+				}
+			}
+		} finally {
+			if (old === undefined) delete process.env[selected]; else process.env[selected] = old;
+		}
+	}
+});
+
+test("non-UTF-8 environment names refuse without selecting a lossy replacement", () => {
+	for (const env of [Uint8Array.of(255), { hex: "ff" }]) {
+		assert.throws(() => launchFor({ providers: { openai: { key: { env } } } }, "/r"), (error: unknown) => {
+			assert.ok(error instanceof RuiStartError);
+			assert.equal(error.code, "settings_invalid");
+			assert.match(error.message, /providers\.openai\.key\.env:/);
+			assert.ok(!error.message.includes("ff"));
+			return true;
+		});
+	}
+});
+
+test("presets preserve creation fields and use the existing spec writer", () => {
 	const spec = { model: "custom", effort: null, compactAt: 1000, tools: ["bash"] as const, permissionMode: "ask" as const, provider: "openai" as const, workspace: "/w", outputSchema: { type: "object" } };
-	const options = { database: "/s", provider: { baseUrl: "https://example.com", key: "key" }, presets: { review: spec } };
-	const frame = launchFor(options, "/r").frame;
-	assert.deepEqual(frame.presets, { review: spec });
+	assert.deepEqual(documentFor({ presets: { review: spec } }).presets, { review: spec });
 	for (const text of ["[]", "false", "not JSON"]) {
 		// @ts-expect-error The runtime Host also refuses non-object schemas.
-		const invalid = launchFor({ ...options, presets: { review: { ...spec, outputSchema: text } } }, "/r").frame;
-		assert.deepEqual(JSON.parse(JSON.stringify(invalid)).presets.review.outputSchema, text);
+		const invalid = documentFor({ presets: { review: { ...spec, outputSchema: text } } });
+		assert.equal(invalid.presets.review.outputSchema, text);
 	}
+});
+
+test("child readiness accepts exactly one complete fixed leading instance receipt", () => {
+	const instance = "a0123456789bcdef".repeat(2);
+	const receipt = Buffer.from(`ready instance=${instance} `);
+	for (let split = 0; split < receipt.length; split++) {
+		assert.equal(readinessInstance(receipt.subarray(0, split)), undefined, `split ${split}`);
+		const pending = Buffer.alloc(receipt.length);
+		receipt.subarray(0, split).copy(pending);
+		receipt.subarray(split).copy(pending, split);
+		assert.equal(readinessInstance(pending), instance);
+	}
+	for (const invalid of [
+		`ready instance=${"A".repeat(32)} `,
+		`ready instance=${"a".repeat(31)} `,
+		`ready instance=${"a".repeat(33)} `,
+		`ready store=path\nready instance=${instance} `,
+		`not-ready\nready instance=${instance} `,
+		`ready instance=${instance} \n`,
+	]) assert.equal(readinessInstance(Buffer.from(invalid)), undefined);
+	const highBit = Buffer.from(receipt);
+	highBit[0] = highBit[0]! | 128;
+	assert.equal(readinessInstance(highBit), undefined, "receipt parser must not strip high bits");
 });
 
 test("the refusal line becomes a RuiStartError", () => {
@@ -167,10 +307,12 @@ test("a followed feed resumes from the end of an exhausted page", async () => {
 
 // These checks are compiled by `npm run check`, but never execute invalid input.
 function launchTypeChecks() {
-	// @ts-expect-error The Host requires every non-defaulted launch field.
-	encodeFrame({ v: 1, store: "/s" });
+	// @ts-expect-error The owner accepts only the two lifetime choices, not null.
+	launchFor({ interface: { lifetime: null } }, "/r");
+	// @ts-expect-error Store Adapters are objects, not the old URL/path field.
+	encodeSettings({ store: "/s" });
 	// @ts-expect-error Provider CA trust is a PEM filename, never a verification toggle.
-	launchFor({ database: "/s", provider: { baseUrl: "https://example.com", key: "key", caFile: false } }, "/r");
+	launchFor({ network: { caFile: false } }, "/r");
 	new RuiStartError("store_fenced", "refused");
 	new RuiStartError("mysql_version", "refused");
 	new RuiStartError("mariadb", "refused");
@@ -253,14 +395,14 @@ test("approval and ending feed entries expose the child sessionId", async () => 
 
 test("presets and configure encode one spec including loaded tools and output reservation", async () => {
 	const spec = { model: "custom", effort: null, compactAt: 1000, tools: ["web_search", "find_tools"], loadedTools: ["find_tools"], outputReservation: 42, permissionMode: "ask" as const, instructions: "rules", outputSchema: { type: "object" } };
-	const options = { database: "/s", provider: { baseUrl: "https://example.com", key: "key" }, presets: { review: spec } };
+	const options = { presets: { review: spec } };
 	let configuration: unknown;
 	const sessions = new Sessions({ async exchange(_path, build) {
 		configuration = JSON.parse(build("/s")).configuration;
 		return Buffer.from(JSON.stringify({ answer: { status: "accepted", session: "k7m2qx" } }));
 	} });
 	await sessions.create(spec, { idempotencyKey: "one-spec" });
-	const preset = JSON.parse(JSON.stringify(launchFor(options, "/r").frame)).presets.review;
+	const preset = documentFor(options).presets.review;
 	assert.deepEqual(configuration, preset);
 	assert.deepEqual(preset.loadedTools, ["find_tools"]);
 	assert.equal(preset.outputReservation, 42);
