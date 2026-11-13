@@ -179,6 +179,7 @@ class RunningUpgradeTest(unittest.TestCase):
         dialect = upgrade.Dialect.__new__(upgrade.Dialect)
         dialect.resource_first = True
         dialect.host_settings = False
+        dialect.binary = Path("/previous/bin/rui")
         with patch.object(upgrade.fixture, "RUI", Path("/previous/bin/rui")):
             args = dialect.host_arguments(Path("/store"), "http://127.0.0.1/responses", retry_waits=False)
         self.assertEqual(args, ["/previous/bin/rui", "host", "serve", "--store", "/store",
@@ -188,6 +189,7 @@ class RunningUpgradeTest(unittest.TestCase):
         dialect = upgrade.Dialect.__new__(upgrade.Dialect)
         dialect.resource_first = True
         dialect.host_settings = True
+        dialect.binary = Path("/candidate/bin/rui")
         with patch.object(upgrade.fixture, "RUI", Path("/candidate/bin/rui")):
             args = dialect.host_arguments(Path("/store"), "http://127.0.0.1/responses", retry_waits=False)
         self.assertEqual(args, ["/candidate/bin/rui", "host", "serve", "--store", "/store",
