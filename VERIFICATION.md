@@ -54,7 +54,8 @@ A capture made with no `reply` is a silent terminal, for a fixture that answers 
 The executable minimum is [select_tests.py](tests/ci/select_tests.py), using targets from [build.zig](build.zig) and its modules under `build/`.
 An edit to `build.zig`, `build.zig.zon` or a hub module (`build/product.zig`, the Rui every target builds, and `build/ci.zig`, the CI artifact handoff) selects the full build gate; an edit to another module under `build/` selects only the targets its `BUILD_MODULES` entry names, which include every target it defines.
 CI runs `python3 tests/ci/select_tests.py --base origin/main --phase review` on the pushed head.
-Run it locally only to diagnose a CI red; [Evidence](CODING_STANDARDS.md#evidence) lists the pre-push checks.
+Run it locally only to diagnose a CI red.
+[Evidence](CODING_STANDARDS.md#evidence) holds the one list of local checks: `python3 tests/ci/prepush.py` (the default) and `python3 tests/ci/prepush.py --full`, and the receipt that lets the pre-push hook skip a tree already checked.
 The selector reads the import graph of the tree it runs on: Zig `@import` and `@embedFile`, and the Python imports and `src/` reads of `tests/integration`.
 A changed file selects each unit root that compiles it and each process fixture whose scripts use it or whose driven owners (`FIXTURES`) reach it, and the Host's dispatch into them.
 A changed production `src/` file also selects fixtures whose Python or shell scripts contain a literal (including f-string constant parts) present in that file's quoted or Zig multiline string bodies at base or head, limited to at least 12 stripped characters containing a space and occurring in string bodies in fewer than three production `src/` files in the selector's working tree (counted only for prose found in changed files).

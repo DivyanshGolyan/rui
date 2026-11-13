@@ -6,10 +6,24 @@ committed diff against --base; deleted paths still select their owning checks.
 File tools and tests read the working tree; unstaged and untracked-only edits
 do not select checks. GitHub CI owns review-phase acceptance.
 
+When history since the merge base holds a merge of --base, the unit binaries
+are also compiled unfiltered, as CI's unit producer compiles them (#1415).
+--full adds that compile, stack-frames at the baseline CPU and, when
+RUI_TEST_MYSQL_* name a reachable server, each selected live need whose own
+target reads it; without one it says so and skips only that part. A live need
+with no target of its own, or whose target needs another server, is recorded
+as skipped for CI, never as passed (#1422).
+
 --quick leaves out the Zig builds and is what the git pre-push hook runs;
 --install-hook installs that hook. Whitespace errors in committed lines and
 stale generated files (openapi.json, the client's wire.ts) are fixed in the
 working tree and still fail the run, so the fix is committed before the push.
+
+Each run writes a receipt to the checkout's own git directory: HEAD's tree
+(null when the working tree differs from HEAD), the merge base its diff came
+from, the mode and each command's exit code. The hook skips its checks when
+that receipt holds the pushed tree and its merge base with --base, and ran at
+least one command, every one of which passed.
 
 Run as a script, it re-executes itself in the caller's pinned Python 3.12
 environment when .agents/setup made one (tests/ci/fixture_user.py --venv).
@@ -19,14 +33,19 @@ import json
 import os
 from pathlib import Path
 import re
+import socket
 import subprocess
 import sys
+from typing import NamedTuple
 
 import build_files
 from caller_errors import inventory_path
 import fixture_user
 from platform_boundary import SCANNED as PLATFORM_SCANNED
-from select_tests import changed_paths, matches, select
+from select_tests import LIVE_MYSQL_DIALECT_TARGETS, changed_paths, matches, select
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "integration"))
+import live_engines
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -81,17 +100,51 @@ GENERATED = ("openapi.json", "clients/ts/src/wire.ts")
 # The two `git diff --check` problems with one fix; a patch's whitespace is its content.
 WHITESPACE_LINES = re.compile(r"^([^\s:][^:\n]*):(\d+): (trailing whitespace|new blank line at EOF)\.$", re.M)
 UNFIXABLE = ("*.patch", "*.diff")
-HOOK = """#!/bin/sh
+# Every worktree of a repository shares its hook, so the pushed commits travel
+# in the environment, which a checkout's older prepush.py ignores.
+PUSHED = "RUI_PREPUSH_PUSHED"
+HOOK = f"""#!/bin/sh
+# Installed by tests/ci/prepush.py --install-hook; skip once with git push --no-verify.
+top=$(git rev-parse --show-toplevel) || exit 0
+[ -f "$top/tests/ci/prepush.py" ] || exit 0
+pushed=
+while read -r _ local_sha _ _; do
+    case $local_sha in *[!0]*) pushed="$pushed $local_sha" ;; esac
+done
+[ -n "$pushed" ] || exit 0
+{PUSHED}=$pushed
+export {PUSHED}
+exec python3 "$top/tests/ci/prepush.py" --quick
+"""
+# Earlier --install-hook texts, which --install-hook replaces as its own.
+PREVIOUS_HOOKS = ("""#!/bin/sh
 # Installed by tests/ci/prepush.py --install-hook; skip once with git push --no-verify.
 top=$(git rev-parse --show-toplevel) || exit 0
 [ -f "$top/tests/ci/prepush.py" ] || exit 0
 while read -r _ local_sha _ _; do
     case $local_sha in *[!0]*) exec python3 "$top/tests/ci/prepush.py" --quick ;; esac
 done
-"""
+""",)
+
+# CI's unit producer compile (build_artifact.py for check.yml's compiled-unit
+# part): every unit root, unfiltered, without running a test.
+UNIT_COMPILE = ["zig", "build", "ci-build", "-Dci-targets=test", "-Dci-part=unit", "--summary", "line"]
+# check.yml's linux_codegen gate, one compile at a time.
+STACK_FRAMES = ["zig", "build", "-j1", "stack-frames", "-Dcpu=baseline", "--summary", "line"]
+RECEIPT = "rui-prepush-receipt.json"
 
 
-def checks(paths, available, base, quick=False):
+class Skipped(NamedTuple):
+    """A planned check this run cannot execute, and why."""
+    reason: str
+
+
+def checks(paths, available, base, mode="default", merged_base=False, mysql=False):
+    """(name, command or Skipped) pairs for the changed paths.
+
+    `mode` is "quick", "default" or "full"; `merged_base` says history since
+    the merge base merges --base; `mysql` says RUI_TEST_MYSQL_* name a server.
+    """
     paths = sorted(set(paths))
     if not paths:
         return
@@ -128,13 +181,115 @@ def checks(paths, available, base, quick=False):
         yield "undefined Python names", [sys.executable, "-m", "ruff", "check", "--select", "F821", *python]
     if any(path == "openapi.json" or path.startswith("clients/ts/") and not path.endswith(".md") for path in paths):
         yield "TypeScript client", ["npm", "--prefix", "clients/ts", "run", "check"]
-    if quick:
+    if mode == "quick":
         return
     if targets:
         yield "development selection", ["zig", "build", *targets, "--summary", "line"]
     zig_inputs = [path for path in paths if path.endswith((".zig", ".zon"))]
     if zig_inputs and select(zig_inputs, "review", available)["targets"]:
         yield "macOS type check", ["zig", "build", "typecheck-macos", "--summary", "line"]
+    # A filtered or narrower build never analyzes tests a merge brought back (#1245).
+    if merged_base or mode == "full":
+        yield "unfiltered unit compile", UNIT_COMPILE
+    if mode != "full":
+        return
+    yield "stack frames", STACK_FRAMES
+    # A live need runs here only through the one target that runs just its tests
+    # and reads RUI_TEST_MYSQL_*. Every other need is recorded as skipped, never
+    # as passed: one with no such target (its tests sit inside a whole suite),
+    # or one whose target needs Postgres or starts its own MySQL in Docker.
+    reads_mysql = LIVE_MYSQL_DIALECT_TARGETS | set(development["mysql_suites"])
+    live = sorted({root for root, _ in development["live_needs"] if root in reads_mysql})
+    if live and mysql:
+        yield "live MySQL", ["env", f"{live_engines.REQUIRE}=mysql", "zig", "build", *live, "--summary", "line"]
+    elif live:
+        yield "live MySQL", Skipped(f"no reachable MySQL in {live_engines.MYSQL_SOCKET} and "
+                                    f"{live_engines.MYSQL_ROOT_PASSWORD}, so CI runs {' '.join(live)}")
+    left = [f"{reason} ({root or 'no target runs only these tests'})"
+            for root, reason in development["live_needs"] if root not in reads_mysql]
+    if left:
+        yield "live, CI only", Skipped("; ".join(left) + ": CI runs it")
+
+
+def mysql_reachable(environ):
+    """Whether the environment names a MySQL socket that accepts a connection."""
+    path, password = environ.get(live_engines.MYSQL_SOCKET), environ.get(live_engines.MYSQL_ROOT_PASSWORD)
+    if not path or not password:
+        return False
+    with socket.socket(socket.AF_UNIX) as client:
+        client.settimeout(2)
+        try:
+            client.connect(path)
+        except OSError:
+            return False
+    return True
+
+
+def git(*args):
+    return subprocess.check_output(["git", *args], cwd=ROOT, text=True).strip()
+
+
+def merged_base(base, ref):
+    """Whether a commit in base..HEAD merges in a commit that `ref` reaches."""
+    for line in git("rev-list", "--merges", "--parents", f"{base}..HEAD").splitlines():
+        for parent in line.split()[2:]:
+            if subprocess.run(["git", "merge-base", "--is-ancestor", parent, ref], cwd=ROOT).returncode == 0:
+                return True
+    return False
+
+
+def receipt_path():
+    return Path(git("rev-parse", "--path-format=absolute", "--git-path", RECEIPT))
+
+
+def clean_tree():
+    """HEAD's tree when the working tree matches it, untracked files included; else None."""
+    return None if git("status", "--porcelain", "--untracked-files=all") else git("rev-parse", "HEAD^{tree}")
+
+
+def read_receipt():
+    try:
+        return json.loads(receipt_path().read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def pushed_key(sha, ref):
+    """The pushed commit's (tree, merge base with `ref`), or None when the two share no history."""
+    base = subprocess.run(["git", "merge-base", sha, ref], cwd=ROOT, capture_output=True, text=True)
+    return None if base.returncode else (git("rev-parse", f"{sha}^{{tree}}"), base.stdout.strip())
+
+
+def receipt_covers(receipt, pushes):
+    """Whether the receipt records a run on every (tree, merge base) of `pushes` that ran a command and all passed.
+
+    The tree and the merge base together fix the diff a run selected its checks
+    from; a push with no merge base (None) is never covered.
+    """
+    if receipt is None or receipt.get("tree") is None or set(pushes) != {(receipt["tree"], receipt.get("base"))}:
+        return False
+    ran = [result for result in receipt["results"] if "skipped" not in result]
+    return bool(ran) and all(result.get("exit") == 0 for result in ran)
+
+
+def run(planned, mode, base):
+    """Run each planned command once, write the receipt and return its results."""
+    before = clean_tree()
+    results = []
+    for name, command in planned:
+        if isinstance(command, Skipped):
+            print(f"== {name}: skipped: {command.reason}", flush=True)
+            results.append({"name": name, "skipped": command.reason})
+            continue
+        print(f"== {name}: {' '.join(command)}", flush=True)
+        results.append({"name": name, "command": command, "exit": subprocess.run(command, cwd=ROOT).returncode})
+    # A check that changed the working tree checked what HEAD does not hold.
+    tree = before if clean_tree() == before else None
+    path = receipt_path()
+    path.write_text(json.dumps({"tree": tree, "base": base, "mode": mode, "results": results}, indent=2) + "\n")
+    if tree is None:
+        print(f"The working tree differs from HEAD, so {path} matches no push.")
+    return results
 
 
 def fix_whitespace(base):
@@ -188,7 +343,7 @@ def install_hook():
     hooks = Path(subprocess.check_output(["git", "rev-parse", "--path-format=absolute", "--git-path", "hooks"],
                                          cwd=ROOT, text=True).strip())
     hook = hooks / "pre-push"
-    if hook.exists() and hook.read_text() != HOOK:
+    if hook.exists() and hook.read_text() not in (HOOK, *PREVIOUS_HOOKS):
         raise SystemExit(f"{hook} already exists and is not Rui's; add `python3 tests/ci/prepush.py --quick` to it.")
     hooks.mkdir(parents=True, exist_ok=True)
     hook.write_text(HOOK)
@@ -213,7 +368,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base", default="origin/main")
     parser.add_argument("--plan", action="store_true", help="print selected commands without executing them")
-    parser.add_argument("--quick", action="store_true", help="leave out the Zig builds, as the pre-push hook does")
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--quick", action="store_true", help="leave out the Zig builds, as the pre-push hook does")
+    modes.add_argument("--full", action="store_true", help="also compile the unit binaries unfiltered, run stack-frames "
+                       "and, with a reachable local MySQL, the selected targets that read it")
     parser.add_argument("--install-hook", action="store_true", help="install the git pre-push hook that runs --quick")
     parser.add_argument("--fix-whitespace", metavar="BASE", help=argparse.SUPPRESS)
     parser.add_argument("--regenerate", action="store_true", help=argparse.SUPPRESS)
@@ -224,20 +382,27 @@ def main():
         raise SystemExit(fix_whitespace(args.fix_whitespace))
     if args.regenerate:
         raise SystemExit(regenerate())
+    mode = "full" if args.full else "quick" if args.quick else "default"
+    pushed = os.environ.pop(PUSHED, "").split()
+    if pushed:
+        receipt = read_receipt()
+        if receipt_covers(receipt, [pushed_key(sha, args.base) for sha in pushed]):
+            print(f"prepush: the {receipt['mode']} run on tree {receipt['tree']} against {receipt['base']} passed; "
+                  "not running it again.")
+            raise SystemExit(0)
     available = set(build_files.steps())
-    base = subprocess.check_output(["git", "merge-base", "HEAD", args.base], cwd=ROOT, text=True).strip()
+    base = git("merge-base", "HEAD", args.base)
     paths, _ = changed_paths(base, "HEAD")
-    planned = list(checks(paths, available, base, args.quick))
+    planned = list(checks(paths, available, base, mode, merged_base(base, args.base),
+                          mode == "full" and mysql_reachable(os.environ)))
     if args.plan:
-        print(json.dumps({"base": base, "paths": paths,
-                          "checks": [{"name": name, "command": command} for name, command in planned]}, indent=2))
+        print(json.dumps({"base": base, "paths": paths, "checks": [
+            {"name": name, "skipped": command.reason} if isinstance(command, Skipped) else {"name": name, "command": command}
+            for name, command in planned]}, indent=2))
         raise SystemExit(0)
-    failed = []
-    for name, command in planned:
-        print(f"== {name}: {' '.join(command)}", flush=True)
-        if subprocess.run(command, cwd=ROOT).returncode:
-            failed.append(name)
-    print(json.dumps({"failed": failed}))
+    results = run(planned, mode, base)
+    failed = [result["name"] for result in results if result.get("exit")]
+    print(json.dumps({"failed": failed, "skipped": [result["name"] for result in results if "skipped" in result]}))
     raise SystemExit(1 if failed else 0)
 
 
