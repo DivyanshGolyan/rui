@@ -24,7 +24,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const self: *const Self = @ptrCast(@alignCast(raw));
     const max = ctx.max.size();
     const size: vxfw.Size = .{ .width = max.width, .height = @min(1, max.height) };
-    const surface = try vxfw.Surface.init(ctx.arena, self.widget(), size);
+    const surface = try vxfw.Surface.init(ctx.cell_arena, self.widget(), size);
     @memset(surface.buffer, .{ .style = self.style });
     if (size.width == 0 or size.height == 0) return surface;
     const right = prefix(ctx, self.rightText(), size.width);
@@ -66,7 +66,7 @@ test "Footer aligns keys and cuts the label first in terminal cells" {
     var footer: Self = .{ .left = "abcdef", .right = "xy", .style = .{ .bold = true } };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 10, .height = 3 }, .cell_size = .{} };
+    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 10, .height = 3 }, .cell_size = .{} };
     const drawn = try footer.widget().draw(ctx);
     try std.testing.expectEqual(@as(u16, 1), drawn.size.height);
     try std.testing.expectEqualStrings("a", drawn.readCell(0, 0).char.grapheme);
@@ -99,7 +99,7 @@ test "Footer aligns keys and cuts the label first in terminal cells" {
 test "Footer notice fits right, truncates in terminal cells, and the next notice replaces it" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 32, .height = 4 }, .cell_size = .{} };
+    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 32, .height = 4 }, .cell_size = .{} };
     var footer: Self = .{ .left = "Chat", .right = "ctrl+x stop", .notice = "Copied 12 lines" };
     const fitted = try footer.widget().draw(ctx);
     try std.testing.expectEqual(@as(u16, 1), fitted.size.height);

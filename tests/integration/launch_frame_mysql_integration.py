@@ -130,7 +130,8 @@ def main():
             ("format", "0", "the MySQL Store format is older than this build; apply its forward migrations"),
             ("format", "4294967295", "the MySQL Store format is newer than this build; use a compatible build"),
             ("format", "not-a-number", "the MySQL Store format metadata is not a valid number"),
-            ("wire_version", "wrong-wire", "the MySQL Store wire version does not match this build"),
+            # Format 74 retired the Store's wire label: its row is an unknown key.
+            ("wire_version", "retired-wire", "the MySQL Store metadata contains an unexpected key"),
             ("unexpected", "unexpected-value", "the MySQL Store metadata contains an unexpected key"),
             ("store_id", "not-an-id", "the MySQL Store identity metadata or connection target is invalid"),
             (None, None, "the MySQL Store catalog does not match this build"),
