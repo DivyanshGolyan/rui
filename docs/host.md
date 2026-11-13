@@ -83,9 +83,9 @@ See [Store format and upgrades](../ARCHITECTURE.md#store-format-and-upgrades) fo
 ### Capacity and file limits
 
 A new Host can run 100 executions at once.
-`rui host start --active-capacity 8` starts a new Host with a different capacity.
+`rui host start --set execution.activeCapacity=8` starts a new Host with a different capacity.
 A running Host keeps its configured capacity through an Upgrade restart.
-If you pass a different `--active-capacity` while a Host is running, `host start` connects to that Host unchanged and says so on stderr.
+If you pass `--set execution.activeCapacity=N` while a Host is running, `host start` connects to that Host unchanged and says so on stderr.
 To change the capacity, pause the Host and start it again.
 
 `host status` reports the capacity as `active_capacity`, the slots in use as `custody_occupied` (running work and cleanup that still holds a slot), and the Unix second the Host started as `started_at`.
@@ -115,24 +115,42 @@ Cleanup can still be running.
 If the reply is lost, run the retry command that Rui printed.
 It targets the same Host, so it cannot stop a replacement.
 
+## Save Host settings
+
+```sh
+rui host set --store PATH execution.activeCapacity 8
+rui host settings --store PATH
+rui host unset --store PATH execution.activeCapacity
+rui host settings --paths
+rui host settings --store PATH --check
+```
+
+Settings are saved sparsely in `PATH/host.json`, privately and atomically.
+Bare `rui`, `rui host start` and `rui host serve` read that file.
+The order is defaults, saved settings, `--settings FILE|-`, then repeatable `--set PATH=VALUE` assignments in order.
+Use `rui host set --store PATH SETTING @FILE` to read a JSON value from a file.
+`settings` fills in defaults and shows secret sources, not secret bytes; saved literal secrets are refused.
+`unset` removes the saved assignment, restoring its default when no later source overrides it.
+Changes apply to the next Host; they do not reconfigure a running one.
+
 ## Run in the foreground
 
 ```sh
-rui host serve --store PATH --provider codex
-rui host serve --store PATH --provider codex --provider openai
-rui host serve --store PATH --active-capacity 8 --provider codex
+rui host serve --store PATH --set 'providers={"codex":{}}'
+rui host serve --store PATH --set 'providers={"codex":{},"openai":{}}'
+rui host serve --store PATH --set execution.activeCapacity=8 --set 'providers={"codex":{}}'
 ```
 
-Each `--provider LABEL` serves one built-in provider at its own endpoint with its own credential: `codex` is ChatGPT by device code (`rui auth login chatgpt --device-code`), `chatgpt` is ChatGPT in a browser (`rui auth login chatgpt`), and `openai` is an OpenAI API key (`rui auth login openai`, which reads the key from stdin).
+An explicit `providers` object lists exactly which built-in providers to serve, each at its own endpoint with its own credential: `codex` is ChatGPT by device code (`rui auth login chatgpt --device-code`), `chatgpt` is ChatGPT in a browser (`rui auth login chatgpt`), and `openai` is an OpenAI API key (`rui auth login openai`, which reads the key from stdin).
 A Host reads the key once when it starts and refuses to start `openai` without one, so after saving a key, pause a running Host and start it again to add it.
 An auto-started Host serves `openai` whenever a key is saved.
 To use an OpenAI-compatible server that speaks the Responses API, such as Azure OpenAI or a company proxy, set `RUI_OPENAI_BASE_URL` to its `https://` base URL (for example `https://example.openai.azure.com/openai/v1`) in the environment that starts the Host; the key is then sent only to that URL's `/responses` and `/models`.
 A Host with a key reads the key's model list from `/models` as it starts and again each time the model picker asks; if that fails, the picker shows the models Rui knows.
 A Host serving a ChatGPT plan sign-in (`chatgpt`) reads that plan's list the same way, from `https://api.openai.com/v1/models`; without a usable sign-in it does not ask, and the picker shows the models Rui knows.
 An auto-started Host takes it from the command that starts it, and a running Host keeps the URL it started with.
-An invalid one stops `host serve --provider openai`; an auto-started Host reports it and starts serving its ChatGPT sign-ins only.
+An invalid one stops a Host explicitly configured to serve `openai`; with automatic provider selection, the Host reports it and starts serving its ChatGPT sign-ins only.
 Sessions of a provider the Host does not serve wait until a Host that serves it starts.
-Without `--provider` or a development endpoint, `host serve` makes no model requests.
+Without a `providers` setting, every start path uses automatic provider selection: device-code sign-in is served even while signed out, browser sign-in when its credential is usable, and OpenAI when its key is usable. To serve no model providers, pass `--set 'providers={}'`.
 The [Host reference](../ARCHITECTURE.md#platforms-and-server-lifetime) states the startup and shutdown guarantees.
 
 ## Export a failed model response
