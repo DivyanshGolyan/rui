@@ -1078,12 +1078,10 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
         .band = style.of(self.app_caps, .{ .background = .bar }).bg,
         .selection = style.of(self.app_caps, .{ .background = .selection }).bg,
     };
-    const facts_style = style.of(self.app_caps, .{ .colour = .quiet, .background = .bar });
+    const facts_style = quiet;
     self.app_screen.style = normal;
     self.app_input.composer.caret = !self.app_hooks.root.input.list_focused and !self.info_open and !self.app_info.standaloneOpen() and self.footer.focus == .input;
-    self.app_input.composer.style = normal;
-    self.app_input.composer.quiet = quiet;
-    self.app_input.composer.method = self.app_caps.width;
+    self.app_input.composer.setCaps(self.app_caps);
     self.app_input.composer.placeholder = if (self.line.read != null and self.line.folder != null) "Type a task" else "";
     self.app_input.composer.editor = &self.input.editors[self.input.active];
     self.app_card.style = normal;
@@ -1246,7 +1244,7 @@ test "App Session retains the draft across a permission card arriving during pas
         try std.testing.expect(!user.style.dim);
         try std.testing.expectEqual(case.ground, rendered.readCell(79, 10).?.style.bg);
         try std.testing.expectEqual(case.ground, rendered.readCell(79, 22).?.style.bg);
-        try std.testing.expectEqual(case.band, rendered.readCell(79, 23).?.style.bg);
+        try std.testing.expectEqual(case.ground, rendered.readCell(79, 23).?.style.bg);
     }
     self.app_caps = .{ .depth = .none };
     _ = self.input.append("headTAIL");
@@ -9215,6 +9213,48 @@ test "chat info repair details never overwrite the active reader staging file" {
     const count = try self.files.inspection.readPositionalAll(std.testing.io, &bytes, 0);
     try std.testing.expectEqualStrings(Staging.bytes, bytes[0..count]);
     try std.testing.expect(self.reader.thread != null and !self.reader.completed());
+}
+
+test "chat input surface grows with draft while rules and footer stay plain in both themes" {
+    for ([_]vxfw.Size{ .{ .width = 140, .height = 40 }, .{ .width = 46, .height = 30 } }) |size| {
+        for ([_]?overview_view.Rgb{ null, .{ 255, 255, 255 } }) |background| {
+            for ([_]overview_view.Caps.Depth{ .direct, .indexed, .none }) |depth| {
+                for ([_][]const u8{ "", "first line\nsecond line\nthird line" }) |draft| {
+                    for ([_]bool{ false, true }) |list_focused| {
+                        const held = try HeldFrontend.create();
+                        defer held.destroy();
+                        held.size = .{ .width = size.width, .height = size.height };
+                        held.root.size = size;
+                        held.self.app_caps = .{ .background = background, .depth = depth };
+                        try held.keys("\x1b[200~");
+                        try held.keys(draft);
+                        try held.keys("\x1b[201~");
+                        try std.testing.expectEqualStrings(draft, held.self.input.composition().bytes);
+                        held.root.input.list_focused = list_focused;
+                        const surface = try held.draw();
+                        var rendered: vaxis.Screen = try .init(held.arena.allocator(), .{ .rows = size.height, .cols = size.width, .x_pixel = 0, .y_pixel = 0 });
+                        try surface.render(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = size.width, .height = size.height, .screen = &rendered }, held.self.app_input.composer.widget());
+                        const input_style = style.of(held.self.app_caps, .{ .background = .input_surface });
+                        const quiet_input = style.of(held.self.app_caps, .{ .colour = .quiet, .background = .input_surface });
+                        const plain = style.of(held.self.app_caps, .{ .colour = .quiet });
+                        const rows: u16 = if (draft.len == 0) 1 else 3;
+                        const first = size.height - rows - 2;
+                        for (0..size.width) |col| {
+                            for (first..first + rows) |row| {
+                                const actual = rendered.readCell(@intCast(col), @intCast(row)).?.style.bg;
+                                try std.testing.expectEqual(input_style.bg, actual);
+                            }
+                            for ([_]u16{ first - 1, size.height - 2, size.height - 1 }) |row| try std.testing.expectEqual(plain.bg, rendered.readCell(@intCast(col), @intCast(row)).?.style.bg);
+                        }
+                        const prompt = rendered.readCell(1, first).?;
+                        try std.testing.expectEqual(if (list_focused) quiet_input.fg else input_style.fg, prompt.style.fg);
+                        if (draft.len != 0) try std.testing.expectEqual(input_style.fg, rendered.readCell(3, first).?.style.fg);
+                        try std.testing.expectEqual(plain.fg, rendered.readCell(size.width - 1, size.height - 1).?.style.fg);
+                    }
+                }
+            }
+        }
+    }
 }
 
 test "chat info supplies the one bottom footer after the input and both dividers" {

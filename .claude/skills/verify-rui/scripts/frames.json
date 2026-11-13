@@ -5,6 +5,282 @@
   ],
   "states": [
     {
+      "name": "inputtint-night-empty",
+      "note": "Input surface, plain footer and ink-wash selection; colour-only changes are asserted by style-role tests",
+      "theme": "night",
+      "open": "Input tint chat",
+      "steps": [],
+      "expect": [
+        "Surface witness",
+        "alt+i info"
+      ],
+      "absent": [
+        "Browsing · Esc returns",
+        "enter retry"
+      ],
+      "cast": [
+        {
+          "label": "Input tint chat",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "messages": [
+            "Surface witness"
+          ]
+        }
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
+    },
+    {
+      "name": "inputtint-night-draft",
+      "note": "Input surface, plain footer and ink-wash selection; colour-only changes are asserted by style-role tests",
+      "theme": "night",
+      "open": "Input tint chat",
+      "steps": [
+        {
+          "text": "\u001b[200~First draft row\nSecond draft row\nThird draft row\u001b[201~"
+        },
+        {
+          "wait": "Third draft row"
+        }
+      ],
+      "expect": [
+        "Surface witness",
+        "alt+i info",
+        "First draft row",
+        "Second draft row",
+        "Third draft row"
+      ],
+      "absent": [
+        "Browsing · Esc returns",
+        "enter retry",
+        "Type a task"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
+    },
+    {
+      "name": "inputtint-night-model-focus",
+      "note": "Tab focuses the model; hold the presentation so unchanged footer text cannot capture the pre-Tab frame",
+      "theme": "night",
+      "open": "Input tint chat",
+      "steps": [
+        {
+          "keys": [
+            "Tab"
+          ]
+        },
+        {
+          "sleep": 0.35
+        }
+      ],
+      "expect": [
+        "Surface witness",
+        "alt+i info"
+      ],
+      "absent": [
+        "Browsing · Esc returns",
+        "enter retry"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
+    },
+    {
+      "name": "inputtint-night-new-selected",
+      "note": "Home then Enter opens New Session's input; its composer uses the shared input surface",
+      "theme": "night",
+      "open": "overview",
+      "steps": [
+        {
+          "wait": "Input tint chat"
+        },
+        {
+          "keys": [
+            "Home",
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Type a task"
+        }
+      ],
+      "expect": [
+        "› Type a task",
+        "alt+i info"
+      ],
+      "absent": [
+        "Browsing · Esc returns",
+        "enter retry",
+        "enter start"
+      ],
+      "expect_background": {
+        "› Type a task": "#1a2246"
+      },
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
+    },
+    {
+      "name": "inputtint-night-chat-selected",
+      "note": "Input surface, plain footer and ink-wash selection; colour-only changes are asserted by style-role tests",
+      "theme": "night",
+      "open": "Input tint chat",
+      "steps": [
+        {
+          "keys": [
+            "Esc"
+          ]
+        }
+      ],
+      "expect": [
+        "Input tint chat",
+        "Settings"
+      ],
+      "absent": [
+        "Browsing · Esc returns",
+        "enter retry"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
+    },
+    {
+      "name": "inputtint-day-empty",
+      "note": "Input surface, plain footer and ink-wash selection; colour-only changes are asserted by style-role tests",
+      "theme": "day",
+      "open": "Input tint chat",
+      "steps": [],
+      "expect": [
+        "Surface witness",
+        "alt+i info"
+      ],
+      "absent": [
+        "Browsing · Esc returns",
+        "enter retry"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
+    },
+    {
+      "name": "inputtint-day-draft",
+      "note": "Input surface, plain footer and ink-wash selection; colour-only changes are asserted by style-role tests",
+      "theme": "day",
+      "open": "Input tint chat",
+      "steps": [
+        {
+          "text": "\u001b[200~First draft row\nSecond draft row\nThird draft row\u001b[201~"
+        },
+        {
+          "wait": "Third draft row"
+        }
+      ],
+      "expect": [
+        "Surface witness",
+        "alt+i info",
+        "First draft row",
+        "Second draft row",
+        "Third draft row"
+      ],
+      "absent": [
+        "Browsing · Esc returns",
+        "enter retry",
+        "Type a task"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
+    },
+    {
+      "name": "inputtint-day-model-focus",
+      "note": "Tab focuses the model; hold the presentation so unchanged footer text cannot capture the pre-Tab frame",
+      "theme": "day",
+      "open": "Input tint chat",
+      "steps": [
+        {
+          "keys": [
+            "Tab"
+          ]
+        },
+        {
+          "sleep": 0.35
+        }
+      ],
+      "expect": [
+        "Surface witness",
+        "alt+i info"
+      ],
+      "absent": [
+        "Browsing · Esc returns",
+        "enter retry"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
+    },
+    {
+      "name": "inputtint-day-new-selected",
+      "note": "Home then Enter opens New Session's input; its composer uses the shared input surface",
+      "theme": "day",
+      "open": "overview",
+      "steps": [
+        {
+          "wait": "Input tint chat"
+        },
+        {
+          "keys": [
+            "Home",
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Type a task"
+        }
+      ],
+      "expect": [
+        "› Type a task",
+        "alt+i info"
+      ],
+      "absent": [
+        "Browsing · Esc returns",
+        "enter retry",
+        "enter start"
+      ],
+      "expect_background": {
+        "› Type a task": "#e6ddc8"
+      },
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
+    },
+    {
+      "name": "inputtint-day-chat-selected",
+      "note": "Input surface, plain footer and ink-wash selection; colour-only changes are asserted by style-role tests",
+      "theme": "day",
+      "open": "Input tint chat",
+      "steps": [
+        {
+          "keys": [
+            "Esc"
+          ]
+        }
+      ],
+      "expect": [
+        "Input tint chat",
+        "Settings"
+      ],
+      "absent": [
+        "Browsing · Esc returns",
+        "enter retry"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
+    },
+    {
       "name": "quiet-person",
       "note": "A real person message supplies the sender for peer-seeded quiet specimens",
       "open": "overview",
