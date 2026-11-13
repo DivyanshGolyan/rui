@@ -1167,7 +1167,7 @@ fn readDetached(init: std.process.Init, request: Spawn, settings: *hs.Settings, 
     inline for (@typeInfo(hs.Settings).@"struct".field_names, @typeInfo(hs.Settings).@"struct".field_types) |field, Field| {
         if (comptime !std.mem.eql(u8, field, "store")) {
             name.len = 0;
-            name.push(hs.camel(field));
+            name.push(comptime hs.camel(field));
             if (relativeLeaf(Field, &@field(settings, field), &name)) {
                 var buffer: [start_report.max_refusal_message_bytes]u8 = undefined;
                 const message = std.fmt.bufPrint(&buffer, "{s}: {s}", .{ name.slice(), relative }) catch "settings: " ++ relative;
