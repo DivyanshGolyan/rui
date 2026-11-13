@@ -39,3 +39,29 @@ The memory run was `/home/claude/.cache/verify-rui/runs/20261113T084109-62e1246-
 Main's binary SHA-256 was `d50dca9d274605cac1e017ca4f2e27ca5625414bf676320054219e6285542d10`.
 The branch binary SHA-256 was `a7ad9baebb09365bcbd919bfb566111700401d2cc9dacb4bf6d7a3f5fa2d815e`.
 This saves between-frame memory; peak frame-construction memory and CPU were not measured.
+
+## Current-main merge follow-up
+
+Main `271491cb7987ccc35bb7156c7cff240a883c9fdb` was merged, without rebasing, in branch merge commit `89451d4161f34c61e2c2bbab93172fbe50e4178f`.
+Both builds now retain #1403's uncovered-ground-strip design and #1409's covered-pane test correction.
+The comparison below supersedes the old memory table for current-main claims; the PNGs above remain explicitly historical evidence, not new post-merge captures.
+
+The quick rerun used the same ReleaseSafe Zig 0.17.1 build, 63 answered fixture turns, alternating main/branch process launches, five-second settling, `sync`, and smaps Private_Dirty.
+There were three repetitions at each size, idle only: 12 samples, zero harness errors, and matching drawn row/character counts for every corresponding pair.
+No samples were excluded, including the higher first main sample at 120×40.
+
+| Size | Current main KiB median [min, max] | Merged branch KiB median [min, max] | Saved KiB |
+| --- | --- | --- | --- |
+| 120×40 idle | 5,044 [5,040, 5,212] | 3,872 [3,872, 3,872] | 1,172 (23.2%) |
+| 250×70 idle | 10,032 [10,032, 10,036] | 5,968 [5,964, 5,972] | 4,064 (40.5%) |
+
+Current-main binary SHA-256 is `9d5a8589592213e8f8045cdebb1bc9d2d10410a194eac2eefe1a8cb065abdc47`.
+Merged-branch binary SHA-256 is `f1f62b13eb18a87bdadae84675004e8d983d6dfdb86e73d7768e00e80cbdd7c0`.
+Evidence and scripts are under `/mnt/project-files/libvaxis-memory/pin-pr/merge-followup/`.
+The owned memory run was cleaned up and its Store archived.
+
+`zig build -j1` passed.
+`zig build test -j1 -Dtest-filter=AppScreen -Dtest-filter=SessionFrontend -Dtest-filter='Stack keeps every composed cell' --summary all` passed all 184 tests.
+The new strip allocator test failed when Ground.strip was deliberately put back on the general arena; that mutation was restored.
+`python3 tests/ci/prepush.py` passed all 83 development steps (3,664 tests passed, 3 skipped) and all 55 macOS type-check steps under the isolated ordinary test account.
+Scrolled memory, fresh post-merge screenshots, peak memory, CPU, physical input, and macOS runtime behavior were not rerun in this follow-up.
