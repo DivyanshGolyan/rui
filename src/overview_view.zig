@@ -353,7 +353,7 @@ pub const StartResult = union(enum) {
 
 pub const Event = union(enum) {
     composed: Composed,
-    /// A key, paste mark or malformed key Root handed the overview. `step`
+    /// A key or paste mark Root handed the overview. `step`
     /// decides what it means and returns that in `Effects.take`.
     key: KeyInput,
     /// A footer input that is no key: the drawn choice's close action.
@@ -417,8 +417,6 @@ pub const Key = union(enum) {
     other,
     paste_start,
     paste_end,
-    /// A malformed key sequence.
-    invalid,
 };
 
 /// One input Root handed the overview, with the facts its owners hold.
@@ -1991,7 +1989,7 @@ fn footerKey(input: KeyInput) FooterInput {
         .enter => .enter,
         .named => |name| if (name == .escape or name == .ctrl_g) .escape else .other,
         .text, .host_start => .text,
-        .other, .paste_start, .paste_end, .invalid => .other,
+        .other, .paste_start, .paste_end => .other,
     };
 }
 
@@ -4577,7 +4575,7 @@ test "the band names the provider of the newest sign-in or key failure" {
     };
     for ([_]struct { []const Listed, []const u8 }{
         .{ &rows, "Sign-in expired. Run rui auth login chatgpt." },
-        .{ rows[0..1], "Sign-in expired. Run rui auth login codex." },
+        .{ rows[0..1], "Sign-in expired. Run rui auth login chatgpt --device-code." },
         .{ &.{session("cccccc", .{ .failed = .{ .since = test_now_s - 60, .code = bounded(session_work.max_code_bytes, failure_class.api_key_rejected), .resets_at = null } }, .{ .provider = .openai })}, "OpenAI API key rejected. Run rui auth login openai, then rui host pause." },
     }) |case| {
         var state = try opened(case[0]);
@@ -4591,6 +4589,14 @@ test "the band names the provider of the newest sign-in or key failure" {
     defer state.deinit();
     const narrow = try segmentText(arena.allocator(), try headerSegments(arena.allocator(), &state, 40, .{}));
     try std.testing.expectEqualStrings("ChatGPT sign-in expired.", std.mem.trim(u8, narrow, " "));
+    // A device-code chat's command fits a 60-column screen whole, and the
+    // 40-column pane falls back to its name.
+    var device = try opened(rows[0..1]);
+    defer device.deinit();
+    const sixty = try segmentText(arena.allocator(), try headerSegments(arena.allocator(), &device, 60, .{}));
+    try std.testing.expectEqualStrings("Sign-in expired. Run rui auth login chatgpt --device-code.", std.mem.trim(u8, sixty, " "));
+    const forty = try segmentText(arena.allocator(), try headerSegments(arena.allocator(), &device, 40, .{}));
+    try std.testing.expectEqualStrings("ChatGPT (device code) sign-in expired.", std.mem.trim(u8, forty, " "));
 }
 
 test "a needs-you row reads its waiting Action's command once, and again only when the Action changes" {

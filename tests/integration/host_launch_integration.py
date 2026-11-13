@@ -707,7 +707,7 @@ def main():
             forced_crash_cleanup(sized_store)
 
         # A saved OpenAI key file that holds no key is not ready: the Host
-        # starts and serves Codex instead of failing on the optional provider.
+        # starts and serves ChatGPT by device code instead of failing on the optional provider.
         key_dir = root / "openai-private"
         key_dir.mkdir(mode=0o700)
         key_file = key_dir / "openai.key"
@@ -723,7 +723,7 @@ def main():
         finally:
             forced_crash_cleanup(invalid_store)
         # A saved OpenAI key adds openai to an auto-started Host. A bad base
-        # URL is OpenAI's alone to fail: the Host starts and serves Codex.
+        # URL is OpenAI's alone to fail: the Host starts and serves ChatGPT by device code.
         key_file.write_text("sk-host-launch\n")
         for base, served, message in (("https://proxy.example/v1", "key_file", None),
                                       ("http://proxy.example/v1", "unserved", "this Host starts without OpenAI")):

@@ -135,7 +135,7 @@ fn runAttempt(self: *Self) !Published {
     }
     // These effects have independent outcomes. Retain both even when the UI
     // leaves after publication and never consumes an activation on a tick.
-    const defaults: anyerror!void = if (preferences.saveProviderAfterLogin(init.environ_map.get("HOME") orelse "", self.state.selected, false)) |_| {} else |err| err;
+    const defaults: anyerror!void = if (preferences.saveProviderAfterLogin(init.environ_map.get("HOME") orelse "", self.state.selected)) |_| {} else |err| err;
     return .{ .defaults = defaults, .activation = self.activate.?(init, self.selectors) };
 }
 
@@ -252,12 +252,6 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
             self.key.len = length;
         }
         ctx.redraw = true;
-        return;
-    }
-    if (input == .invalid_key and self.task.thread == null and (self.state.stage == .key_entry or self.state.stage == .key_invalid)) {
-        self.key_rejected = true;
-        self.state.stage = .key_invalid;
-        ctx.consumeAndRedraw();
         return;
     }
     if (input != .key_press) return;
@@ -427,12 +421,6 @@ test "Sign-in row drives keys without leaking secrets and refuses overflow" {
     try std.testing.expectEqual(@as(usize, 0), page.key.len);
     for (page.key.bytes) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
     try std.testing.expect(!page.key_rejected);
-    try page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
-    try page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = 's', .text = secret } });
-    try page.widget().handleEvent(&ctx, .invalid_key);
-    try page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
-    try std.testing.expectEqual(core.Stage.key_invalid, page.state.stage);
-    try page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.escape } });
 }
 
 test "Sign-in paste stays masked and its newline cannot submit or choose" {

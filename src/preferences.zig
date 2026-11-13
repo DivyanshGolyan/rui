@@ -158,21 +158,57 @@ test "a failed save says whether the file holds it, and why, without an error na
 /// Serializes read/modify/write for competing setup callers. A failed write or
 /// rename leaves the previous complete file; post-rename sync failure is uncertain.
 pub fn update(home: []const u8, edit: Edit, readiness: *const Readinesses) !Values {
-    return (try save(home, edit, readiness, false)).?;
+    return (try save(home, edit, readiness, null)).values;
 }
 
-/// Under the same preference lock as setup, keep an existing provider choice.
-/// Null means no change was published; credentials are owned separately.
-pub fn fillProviderAfterLogin(home: []const u8, provider: protocol.Provider) !bool {
-    return saveProviderAfterLogin(home, provider, true);
-}
+/// What `rui auth login` did to the default provider for new Sessions.
+pub const LoginDefault = enum {
+    /// None was saved; the signed-in provider is now the default.
+    filled,
+    /// The saved default was the other sign-in to the same account, and is
+    /// now this provider, keeping the model saved with it.
+    replaced,
+    /// The signed-in provider already was the default.
+    already,
+    /// Another saved choice stays, even an unsupported one.
+    kept,
+};
 
-/// Saves `provider` as the default after its sign-in: only when none is
-/// saved with `only_if_unset`, else as the person's explicit choice. True
-/// when the default is now `provider` because of this call.
-pub fn saveProviderAfterLogin(home: []const u8, provider: protocol.Provider, only_if_unset: bool) !bool {
+/// After `rui auth login`, under the same preference lock as setup: fill an
+/// unset provider default, or replace the other sign-in to the same
+/// account, and keep any other choice. Credentials are owned separately.
+pub fn fillProviderAfterLogin(home: []const u8, provider: protocol.Provider) !LoginDefault {
     const readiness: Readinesses = .initFill(.configured);
-    return (try save(home, .{ .provider = .{ .set = @tagName(provider) } }, &readiness, only_if_unset)) != null;
+    return (try save(home, .{ .provider = .{ .set = @tagName(provider) } }, &readiness, provider)).login.?;
+}
+
+/// What a sign-in to `provider` did, from the locked snapshot `before` and
+/// whether it published new values.
+fn loginOutcome(before: *const Values, published: bool, provider: protocol.Provider) LoginDefault {
+    if (!published) return if (before.provider.eql(@tagName(provider))) .already else .kept;
+    return if (before.provider.len == 0) .filled else .replaced;
+}
+
+/// Whether a sign-in to `provider` may make it the default in place of the
+/// saved provider `saved`: when none is saved, or when `saved` is the other
+/// sign-in to the same account.
+fn loginMayReplace(saved: []const u8, provider: protocol.Provider) bool {
+    return saved.len == 0 or otherWayIn(saved, provider);
+}
+
+/// Whether the saved provider `saved` is the other sign-in to `provider`'s
+/// account, as `Provider.sameAccount` says.
+fn otherWayIn(saved: []const u8, provider: protocol.Provider) bool {
+    const other = provider.sameAccount() orelse return false;
+    return std.mem.eql(u8, saved, @tagName(other));
+}
+
+/// Saves `provider` as the default after the sign-in screen signed it in:
+/// the person chose it there, so it replaces any saved provider, and like
+/// any provider change keeps the saved model only within the same account.
+pub fn saveProviderAfterLogin(home: []const u8, provider: protocol.Provider) !void {
+    const readiness: Readinesses = .initFill(.configured);
+    _ = try save(home, .{ .provider = .{ .set = @tagName(provider) } }, &readiness, null);
 }
 
 // Both preflight and locked application keep Store-selection failures
@@ -193,7 +229,11 @@ fn apply(saved: Values, edit: Edit, readiness: *const Readinesses) !Values {
         values.store.set(paths.store.slice()) catch return error.InvalidPreferenceStore;
     }
     if (edit.provider == .set) {
-        if (!saved.provider.eql(edit.provider.set)) values.model = .{};
+        // A model saved for another account's provider is dropped; within
+        // one account it carries over, as both ways in name OpenAI's model
+        // IDs. `save` admitted only a known provider name.
+        const chosen = std.meta.stringToEnum(protocol.Provider, edit.provider.set).?;
+        if (!saved.provider.eql(edit.provider.set) and !otherWayIn(saved.provider.slice(), chosen)) values.model = .{};
         values.provider.set(edit.provider.set) catch unreachable;
     }
     if (edit.notifications) |on| values.notifications = on;
@@ -223,8 +263,14 @@ fn apply(saved: Values, edit: Edit, readiness: *const Readinesses) !Values {
     return values;
 }
 
-fn save(home: []const u8, edit: Edit, readiness: *const Readinesses, only_if_unset: bool) !?Values {
-    return saveWithSync(home, edit, readiness, only_if_unset, NativeDirectorySync{});
+/// The values saved once a save returns, and for a sign-in's save, what it
+/// did to the default provider.
+const Saved = struct { values: Values, login: ?LoginDefault };
+
+/// `login` names the provider just signed in, whose edit applies only where
+/// `loginMayReplace` allows; null applies the edit as an explicit choice.
+fn save(home: []const u8, edit: Edit, readiness: *const Readinesses, login: ?protocol.Provider) !Saved {
+    return saveWithSync(home, edit, readiness, login, NativeDirectorySync{});
 }
 
 const NativeDirectorySync = struct {
@@ -233,7 +279,7 @@ const NativeDirectorySync = struct {
     }
 };
 
-fn saveWithSync(home: []const u8, edit: Edit, readiness: *const Readinesses, only_if_unset: bool, directory_sync: anytype) !?Values {
+fn saveWithSync(home: []const u8, edit: Edit, readiness: *const Readinesses, login: ?protocol.Provider, directory_sync: anytype) !Saved {
     try validateDirectoryPath(home);
     if (edit.provider == .set) {
         if (std.meta.stringToEnum(protocol.Provider, edit.provider.set) == null) return error.UnsupportedPreferenceProvider;
@@ -296,8 +342,8 @@ fn saveWithSync(home: []const u8, edit: Edit, readiness: *const Readinesses, onl
     try privateFile(lock);
     const saved = try read(dir);
     try validateSaved(&saved);
-    if (only_if_unset) {
-        if (saved.provider.len != 0) return null;
+    if (login) |provider| {
+        if (!loginMayReplace(saved.provider.slice(), provider)) return .{ .values = saved, .login = loginOutcome(&saved, false, provider) };
     }
     const values = try apply(saved, edit, readiness);
     try validate(&values);
@@ -337,7 +383,7 @@ fn saveWithSync(home: []const u8, edit: Edit, readiness: *const Readinesses, onl
         try dir.rename("preferences.tmp", dir, "preferences", io);
     }
     if (directory_sync.sync(dir.handle) != 0) return error.PreferenceDirectorySyncFailed;
-    return values;
+    return .{ .values = values, .login = if (login) |provider| loginOutcome(&saved, true, provider) else null };
 }
 
 fn openPreferenceFile(dir: std.Io.Dir, name: []const u8) !std.Io.File {
@@ -436,7 +482,7 @@ test "directory sync failures preserve complete preference publication" {
             defer dir.close(io);
             try std.testing.expectEqual(@as(c_int, 0), c.fstat(dir.handle, &fault.expected[index]));
         }
-        const result = saveWithSync(home, .{ .model = .{ .set = "new-pin" } }, &codexOnly(.missing), false, &fault);
+        const result = saveWithSync(home, .{ .model = .{ .set = "new-pin" } }, &codexOnly(.missing), null, &fault);
         if (cut == 0) {
             _ = try result;
         } else try std.testing.expectError(error.PreferenceDirectorySyncFailed, result);
@@ -459,7 +505,7 @@ test "login fills only a missing provider under the preference lock" {
     var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const len = try tmp.dir.realPath(io, &home_buffer);
     const home = home_buffer[0..len];
-    try std.testing.expect(try fillProviderAfterLogin(home, .codex));
+    try std.testing.expectEqual(LoginDefault.filled, try fillProviderAfterLogin(home, .codex));
     const first = try load(home);
     try std.testing.expectEqualStrings("codex", first.provider.slice());
     try std.testing.expectEqualStrings("", first.model.slice());
@@ -472,9 +518,127 @@ test "login fills only a missing provider under the preference lock" {
     try file.writeStreamingAll(io, "version=1\nstore=\nprovider=legacy\nmodel=legacy-model\n");
     file.close(io);
     try config.rename("preferences.tmp", config, "preferences", io);
-    try std.testing.expect(!try fillProviderAfterLogin(home, .codex));
+    try std.testing.expectEqual(LoginDefault.kept, try fillProviderAfterLogin(home, .codex));
     const saved = try load(home);
     try std.testing.expect(saved.provider.eql("legacy") and saved.model.eql("legacy-model"));
+}
+
+test "a login fills an unset default, replaces the other sign-in to its account keeping the model, and keeps every other choice" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const home = home_buffer[0..try tmp.dir.realPath(io, &home_buffer)];
+    _ = try update(home, .{}, &.initFill(.configured));
+    var config = try tmp.dir.openDir(io, ".config/rui", .{});
+    defer config.close(io);
+    const pin = "gpt-6-luna";
+    // What the file holds afterwards: the same bytes, or a published
+    // provider and model with every other choice kept.
+    const Expected = union(enum) {
+        unchanged: LoginDefault,
+        saved: struct { outcome: LoginDefault, provider: []const u8, model: []const u8 },
+        refused: anyerror,
+    };
+    // Written out by hand from the owner's decision of 2026-11-13, not
+    // derived from the code under test: the two ChatGPT sign-ins (codex by
+    // device code, chatgpt in a browser) replace each other in both
+    // directions and keep the saved model; openai and an unsupported name
+    // stay; nothing saved is filled.
+    const Case = struct { saved: []const u8, pinned: bool, login: protocol.Provider, expected: Expected };
+    const cases = [_]Case{
+        .{ .saved = "", .pinned = false, .login = .codex, .expected = .{ .saved = .{ .outcome = .filled, .provider = "codex", .model = "" } } },
+        .{ .saved = "", .pinned = false, .login = .chatgpt, .expected = .{ .saved = .{ .outcome = .filled, .provider = "chatgpt", .model = "" } } },
+        .{ .saved = "", .pinned = false, .login = .openai, .expected = .{ .saved = .{ .outcome = .filled, .provider = "openai", .model = "" } } },
+        // A pin with no provider is a broken file, left for the person.
+        .{ .saved = "", .pinned = true, .login = .codex, .expected = .{ .refused = error.SavedPreferenceProviderRequired } },
+        .{ .saved = "", .pinned = true, .login = .chatgpt, .expected = .{ .refused = error.SavedPreferenceProviderRequired } },
+        .{ .saved = "", .pinned = true, .login = .openai, .expected = .{ .refused = error.SavedPreferenceProviderRequired } },
+        .{ .saved = "codex", .pinned = false, .login = .codex, .expected = .{ .unchanged = .already } },
+        .{ .saved = "codex", .pinned = false, .login = .chatgpt, .expected = .{ .saved = .{ .outcome = .replaced, .provider = "chatgpt", .model = "" } } },
+        .{ .saved = "codex", .pinned = false, .login = .openai, .expected = .{ .unchanged = .kept } },
+        .{ .saved = "codex", .pinned = true, .login = .codex, .expected = .{ .unchanged = .already } },
+        .{ .saved = "codex", .pinned = true, .login = .chatgpt, .expected = .{ .saved = .{ .outcome = .replaced, .provider = "chatgpt", .model = pin } } },
+        .{ .saved = "codex", .pinned = true, .login = .openai, .expected = .{ .unchanged = .kept } },
+        .{ .saved = "chatgpt", .pinned = false, .login = .codex, .expected = .{ .saved = .{ .outcome = .replaced, .provider = "codex", .model = "" } } },
+        .{ .saved = "chatgpt", .pinned = false, .login = .chatgpt, .expected = .{ .unchanged = .already } },
+        .{ .saved = "chatgpt", .pinned = false, .login = .openai, .expected = .{ .unchanged = .kept } },
+        .{ .saved = "chatgpt", .pinned = true, .login = .codex, .expected = .{ .saved = .{ .outcome = .replaced, .provider = "codex", .model = pin } } },
+        .{ .saved = "chatgpt", .pinned = true, .login = .chatgpt, .expected = .{ .unchanged = .already } },
+        .{ .saved = "chatgpt", .pinned = true, .login = .openai, .expected = .{ .unchanged = .kept } },
+        .{ .saved = "openai", .pinned = false, .login = .codex, .expected = .{ .unchanged = .kept } },
+        .{ .saved = "openai", .pinned = false, .login = .chatgpt, .expected = .{ .unchanged = .kept } },
+        .{ .saved = "openai", .pinned = false, .login = .openai, .expected = .{ .unchanged = .already } },
+        .{ .saved = "openai", .pinned = true, .login = .codex, .expected = .{ .unchanged = .kept } },
+        .{ .saved = "openai", .pinned = true, .login = .chatgpt, .expected = .{ .unchanged = .kept } },
+        .{ .saved = "openai", .pinned = true, .login = .openai, .expected = .{ .unchanged = .already } },
+        .{ .saved = "retired", .pinned = false, .login = .codex, .expected = .{ .unchanged = .kept } },
+        .{ .saved = "retired", .pinned = false, .login = .chatgpt, .expected = .{ .unchanged = .kept } },
+        .{ .saved = "retired", .pinned = false, .login = .openai, .expected = .{ .unchanged = .kept } },
+        .{ .saved = "retired", .pinned = true, .login = .codex, .expected = .{ .unchanged = .kept } },
+        .{ .saved = "retired", .pinned = true, .login = .chatgpt, .expected = .{ .unchanged = .kept } },
+        .{ .saved = "retired", .pinned = true, .login = .openai, .expected = .{ .unchanged = .kept } },
+    };
+    // Every saved value, login and pin, once each.
+    try std.testing.expectEqual(5 * std.enums.values(protocol.Provider).len * 2, cases.len);
+    for (cases) |case| {
+        var text_buffer: [256]u8 = undefined;
+        const text = try std.fmt.bufPrint(&text_buffer, "version=3\nstore=\nprovider={s}\nmodel={s}\nnotifications=off\nreasoning_effort=high\n", .{ case.saved, if (case.pinned) pin else "" });
+        const file = try config.createFile(io, "preferences", .{ .permissions = .fromMode(0o600) });
+        try file.writeStreamingAll(io, text);
+        file.close(io);
+        const outcome = fillProviderAfterLogin(home, case.login);
+        var bytes: [256]u8 = undefined;
+        switch (case.expected) {
+            .refused => |err| {
+                try std.testing.expectError(err, outcome);
+                try std.testing.expectEqualStrings(text, try savedFile(config, &bytes));
+            },
+            .unchanged => |expected| {
+                try std.testing.expectEqual(expected, try outcome);
+                try std.testing.expectEqualStrings(text, try savedFile(config, &bytes));
+            },
+            .saved => |expected| {
+                try std.testing.expectEqual(expected.outcome, try outcome);
+                const saved = try load(home);
+                try std.testing.expectEqualStrings(expected.provider, saved.provider.slice());
+                try std.testing.expectEqualStrings(expected.model, saved.model.slice());
+                try std.testing.expect(!saved.notifications and saved.reasoning_effort == .high);
+            },
+        }
+    }
+    // A file this Rui cannot read is never overwritten, whoever signs in.
+    for (std.enums.values(protocol.Provider)) |login| {
+        const text = "version=9\nstore=\nprovider=codex\nmodel=\n";
+        const file = try config.createFile(io, "preferences", .{ .permissions = .fromMode(0o600) });
+        try file.writeStreamingAll(io, text);
+        file.close(io);
+        try std.testing.expectError(error.UnsupportedPreferencesVersion, fillProviderAfterLogin(home, login));
+        var bytes: [256]u8 = undefined;
+        try std.testing.expectEqualStrings(text, try savedFile(config, &bytes));
+    }
+}
+
+test "the sign-in screen's save keeps the model only within one account" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const home = home_buffer[0..try tmp.dir.realPath(io, &home_buffer)];
+    const all: Readinesses = .initFill(.configured);
+    // From, to, the model kept: written out by hand.
+    for ([_]struct { []const u8, protocol.Provider, []const u8 }{
+        .{ "codex", .chatgpt, "gpt-6-luna" },
+        .{ "chatgpt", .codex, "gpt-6-luna" },
+        .{ "codex", .codex, "gpt-6-luna" },
+        .{ "codex", .openai, "" },
+        .{ "openai", .chatgpt, "" },
+        .{ "openai", .codex, "" },
+    }) |case| {
+        _ = try update(home, .{ .provider = .{ .set = case[0] }, .model = .{ .set = "gpt-6-luna" } }, &all);
+        try saveProviderAfterLogin(home, case[1]);
+        const saved = try load(home);
+        try std.testing.expectEqualStrings(@tagName(case[1]), saved.provider.slice());
+        try std.testing.expectEqualStrings(case[2], saved.model.slice());
+    }
 }
 
 test "preference edits distinguish model keep set and clear without publishing recommendations" {
@@ -490,7 +654,7 @@ test "preference edits distinguish model keep set and clear without publishing r
     const cleared = try update(home, .{ .model = .clear }, &codexOnly(.configured));
     try std.testing.expect(cleared.provider.eql("codex") and cleared.model.len == 0);
     try std.testing.expect((try load(home)).model.len == 0);
-    try std.testing.expect(!try fillProviderAfterLogin(home, .codex));
+    try std.testing.expectEqual(LoginDefault.already, try fillProviderAfterLogin(home, .codex));
     try std.testing.expect((try load(home)).model.len == 0);
     const reset = try update(home, .{ .model = .{ .set = "gpt-6-luna" } }, &codexOnly(.refresh_required));
     try std.testing.expect(reset.model.eql("gpt-6-luna"));
@@ -675,6 +839,12 @@ test "preference edits persist explicit choices rather than recommendations" {
         .{ "legacy", "retired-model", Edit{ .provider = .{ .set = "codex" }, .model = .{ .set = "new-pin" } }, "codex", "new-pin" },
         .{ "", "", Edit{ .model = .{ .set = "gpt-6-luna" } }, "codex", "gpt-6-luna" },
         .{ "legacy", "retired-model", Edit{}, "legacy", "retired-model" },
+        // Changing how one signs in to the same account keeps the model;
+        // moving to another account drops it.
+        .{ "codex", "gpt-6-luna", Edit{ .provider = .{ .set = "chatgpt" } }, "chatgpt", "gpt-6-luna" },
+        .{ "chatgpt", "gpt-6-luna", Edit{ .provider = .{ .set = "codex" } }, "codex", "gpt-6-luna" },
+        .{ "codex", "gpt-6-luna", Edit{ .provider = .{ .set = "openai" } }, "openai", "" },
+        .{ "openai", "gpt-6-luna", Edit{ .provider = .{ .set = "chatgpt" } }, "chatgpt", "" },
     };
     inline for (cases) |case| {
         const file = try config.createFile(io, "preferences", .{ .permissions = .fromMode(0o600) });
@@ -757,7 +927,7 @@ test "preference publication is independent of an unused oversized HOME Store fa
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try std.testing.expectError(error.PreferencePathTooLong, defaultStore(home, &path_buffer));
     _ = try directoryPath(home, &path_buffer);
-    try std.testing.expect(try fillProviderAfterLogin(home, .codex));
+    try std.testing.expectEqual(LoginDefault.filled, try fillProviderAfterLogin(home, .codex));
     try std.testing.expect((try load(home)).provider.eql("codex"));
     _ = try update(home, .{ .model = .{ .set = "family=variant" } }, &codexOnly(.missing));
     try std.testing.expect((try load(home)).model.eql("family=variant"));
@@ -810,13 +980,13 @@ test "any built-in provider can be saved, and a model alone needs one ready prov
     try std.testing.expectError(error.PreferenceProviderRequired, update(home, .{ .model = .{ .set = "gpt-6-luna" } }, &both));
     const saved = try update(home, .{ .provider = .{ .set = "openai" }, .model = .{ .set = "gpt-6-luna" } }, &both);
     try std.testing.expect(saved.provider.eql("openai") and saved.model.eql("gpt-6-luna"));
-    try std.testing.expect(!try fillProviderAfterLogin(home, .codex));
+    try std.testing.expectEqual(LoginDefault.kept, try fillProviderAfterLogin(home, .codex));
     try std.testing.expect((try load(home)).provider.eql("openai"));
 }
 
 /// Legacy stdout login receipts are outside the CLI stderr migration. Derive
 /// their unchanged reason vocabulary from this owner's closed error set.
-pub fn loginDefaultFailureReason(err: @typeInfo(@typeInfo(@TypeOf(saveProviderAfterLogin)).@"fn".return_type.?).error_union.error_set) []const u8 {
+pub fn loginDefaultFailureReason(err: @typeInfo(@typeInfo(@TypeOf(fillProviderAfterLogin)).@"fn".return_type.?).error_union.error_set) []const u8 {
     switch (err) {
         error.SavedPreferenceStoreInvalid => return "InvalidPreferenceStore",
         error.SavedPreferenceProviderInvalid => return "InvalidPreferenceProvider",
@@ -853,7 +1023,7 @@ test "saved invalid preference fields are environment failures and never get ove
         file.close(io);
         try std.testing.expectError(case.err, load(home));
         try std.testing.expectError(case.err, update(home, .{ .notifications = false }, &codexOnly(.configured)));
-        const saved_failure = saveProviderAfterLogin(home, .codex, false);
+        const saved_failure = fillProviderAfterLogin(home, .codex);
         if (saved_failure) |_| return error.ExpectedRefusal else |err| {
             try std.testing.expectEqualStrings(case.legacy, loginDefaultFailureReason(err));
         }

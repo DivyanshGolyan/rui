@@ -22,7 +22,7 @@ def catalog(pending=(), mapped=("Classified",)):
 
 class CallerErrors(unittest.TestCase):
     def test_inventory_is_exactly_the_cli_owners_and_root_caller_modules(self):
-        for path in ("src/cli.zig", "src/cli_args.zig", "src/cli_grammar.zig", "src/client.zig", "src/preferences.zig",
+        for path in ("src/cli.zig", "src/cli_args.zig", "src/cli_grammar.zig", "src/client.zig", "src/preferences.zig", "src/host_start.zig",
                      "src/caller_error.zig", "src/caller_exit.zig", "src/caller_new.zig"):
             with self.subTest(path=path):
                 self.assertTrue(inventory_path(path))

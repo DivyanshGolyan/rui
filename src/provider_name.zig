@@ -36,15 +36,21 @@ pub const Provider = enum {
     /// The shell command that signs this provider in, or null while Rui
     /// has none for it; every renderer and `rui auth login` read this.
     pub fn login(self: Provider) ?[]const u8 {
-        return switch (self) {
-            inline else => |provider| if (comptime provider.facts().login) "rui auth login " ++ @tagName(provider) else null,
-        };
+        return self.facts().login;
     }
 
     /// Where a person whose plan limit stopped this provider raises it, as
     /// a line to show, or null when Rui knows no such place for it.
     pub fn usage(self: Provider) ?[]const u8 {
         return self.facts().usage;
+    }
+
+    /// The other provider that signs in to the same account another way,
+    /// or null when none does. A sign-in to either replaces the other as
+    /// the saved default for new Sessions, and keeps the model saved with
+    /// it.
+    pub fn sameAccount(self: Provider) ?Provider {
+        return self.facts().same_account;
     }
 
     /// Whether this provider runs the tool `name` itself, as it runs
@@ -57,9 +63,9 @@ pub const Provider = enum {
     /// The table: the one switch on which provider it is.
     pub fn facts(self: Provider) Facts {
         return switch (self) {
-            .codex => .{ .endpoint = managed_endpoint, .codec = .@"openai-responses/2", .shown = "ChatGPT (device code)", .sign_in = "Codex", .credential = .sign_in, .login = true, .model_list = .catalog, .usage = null, .runs_tools = &.{"web_search"} },
-            .openai => .{ .endpoint = api_endpoint, .codec = .@"openai-responses/2", .shown = "OpenAI", .sign_in = "API key", .credential = .api_key, .login = true, .model_list = .live, .usage = null, .runs_tools = &.{"web_search"} },
-            .chatgpt => .{ .endpoint = api_endpoint, .codec = .@"openai-responses/3", .shown = "ChatGPT", .sign_in = "ChatGPT", .credential = .sign_in, .login = true, .model_list = .live, .usage = "Manage usage: https://chatgpt.com/settings/usage", .runs_tools = &.{"web_search"} },
+            .codex => .{ .endpoint = managed_endpoint, .codec = .@"openai-responses/2", .shown = "ChatGPT (device code)", .sign_in = "Codex", .credential = .sign_in, .login = "rui auth login chatgpt --device-code", .model_list = .catalog, .usage = null, .runs_tools = &.{"web_search"}, .same_account = .chatgpt },
+            .openai => .{ .endpoint = api_endpoint, .codec = .@"openai-responses/2", .shown = "OpenAI", .sign_in = "API key", .credential = .api_key, .login = "rui auth login openai", .model_list = .live, .usage = null, .runs_tools = &.{"web_search"}, .same_account = null },
+            .chatgpt => .{ .endpoint = api_endpoint, .codec = .@"openai-responses/3", .shown = "ChatGPT", .sign_in = "ChatGPT", .credential = .sign_in, .login = "rui auth login chatgpt", .model_list = .live, .usage = "Manage usage: https://chatgpt.com/settings/usage", .runs_tools = &.{"web_search"}, .same_account = .codex },
         };
     }
 };
@@ -72,8 +78,9 @@ pub const Facts = struct {
     shown: []const u8,
     sign_in: []const u8,
     credential: Credential,
-    /// Whether `rui auth login` signs this provider in.
-    login: bool,
+    /// The `rui auth login` command that signs this provider in, or null
+    /// when the terminal cannot.
+    login: ?[]const u8,
     model_list: ModelList,
     /// Where a person raises the plan limit that refused a request, as the
     /// line a quota refusal shows; null sends them to Settings.
@@ -81,6 +88,9 @@ pub const Facts = struct {
     /// The tools the provider runs on its side, by the names a `tools` list
     /// gives them. A Session of another provider cannot name them.
     runs_tools: []const []const u8,
+    /// The other provider that signs in to the same account, or null.
+    /// Symmetric: each names the other.
+    same_account: ?Provider,
 
     /// What a person gives Rui to use this provider: a sign-in the Host
     /// renews, or a key that only a new key replaces.
@@ -104,22 +114,39 @@ test "every OpenAI provider runs web_search, and none runs bash" {
     }
 }
 
-test "every provider's name and sign-in read apart from the others', and only a provider with a login names one" {
+test "every provider's name and sign-in read apart from the others', and its login is a terminal command" {
     for (std.enums.values(Provider), 0..) |provider, at| {
         for (std.enums.values(Provider)[at + 1 ..]) |other| {
             try std.testing.expect(!std.mem.eql(u8, provider.signIn(), other.signIn()));
             try std.testing.expect(!std.mem.eql(u8, provider.shown(), other.shown()));
             // The typed /model word is a sign-in's first word.
             try std.testing.expect(!std.ascii.eqlIgnoreCase(firstWord(provider.signIn()), firstWord(other.signIn())));
+            if (provider.login()) |command| try std.testing.expect(!std.mem.eql(u8, command, other.login() orelse ""));
         }
-        if (provider.login()) |command| try std.testing.expect(std.mem.endsWith(u8, command, @tagName(provider)));
+        if (provider.login()) |command| try std.testing.expect(std.mem.startsWith(u8, command, "rui auth login "));
     }
     try std.testing.expectEqualStrings("Codex", Provider.codex.signIn());
     try std.testing.expectEqualStrings("ChatGPT (device code)", Provider.codex.shown());
     try std.testing.expectEqualStrings("ChatGPT", Provider.chatgpt.signIn());
     try std.testing.expectEqualStrings("API key", Provider.openai.signIn());
-    try std.testing.expectEqualStrings("rui auth login codex", Provider.codex.login().?);
+    // Both ways into ChatGPT log in through its one command; the device
+    // code is a flag on it.
+    try std.testing.expectEqualStrings("rui auth login chatgpt --device-code", Provider.codex.login().?);
     try std.testing.expectEqualStrings("rui auth login chatgpt", Provider.chatgpt.login().?);
+    try std.testing.expectEqualStrings("rui auth login openai", Provider.openai.login().?);
+}
+
+test "two providers share an account only as each other's, and only as sign-ins" {
+    for (std.enums.values(Provider)) |provider| {
+        const other = provider.sameAccount() orelse continue;
+        try std.testing.expect(other != provider);
+        try std.testing.expectEqual(@as(?Provider, provider), other.sameAccount());
+        try std.testing.expectEqual(Facts.Credential.sign_in, provider.facts().credential);
+        try std.testing.expectEqual(Facts.Credential.sign_in, other.facts().credential);
+    }
+    try std.testing.expectEqual(@as(?Provider, .chatgpt), Provider.codex.sameAccount());
+    try std.testing.expectEqual(@as(?Provider, .codex), Provider.chatgpt.sameAccount());
+    try std.testing.expectEqual(@as(?Provider, null), Provider.openai.sameAccount());
 }
 
 fn firstWord(text: []const u8) []const u8 {
