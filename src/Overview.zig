@@ -594,6 +594,24 @@ fn initScreen(self: *Self, screen: *SessionScreen) !void {
     self.screen_ready = true;
 }
 
+fn focusField(raw: *anyopaque, set: ?@import("app_input.zig").Field) @import("app_input.zig").Field {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    if (set) |field| {
+        self.state.footer.focus = field;
+        self.state.footer.pending = null;
+        self.state.notice = null;
+    }
+    return self.state.footer.focus;
+}
+
+fn focusCandidates(raw: *anyopaque, items: *[std.enums.values(@import("app_input.zig").Target).len]Root.Candidate) Root.Projection {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    items[0] = .{ .target = .input, .widget = self.app_input.composer.widget() };
+    items[1] = .{ .target = .model, .widget = self.app_model.widget() };
+    items[2] = .{ .target = .effort, .widget = self.app_effort.widget() };
+    return .{ .len = 3, .modal = self.root.settings_page.standaloneOpen() or self.state.panel != null };
+}
+
 fn widget(self: *Self) vxfw.Widget {
     return .{ .userdata = self, .eventHandler = appEvent, .drawFn = appDraw };
 }
@@ -658,6 +676,7 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
             // A subsequent event is after App has replaced both the focus
             // path and mouse hit list, including their mouse_leave callbacks.
             if (self.signInIsFirstRun()) return;
+            try self.appNext(ctx, try self.event(.{ .list_settled = .{ .wide = self.root.size.width >= Root.split_at, .focused = self.root.input.listFocused() and self.root.input.layer == .main } }));
             while (self.retired.items.len != 0 and self.retired.items[0].frame < self.root.frames) {
                 self.disposeSession(self.retired.orderedRemove(0).left);
             }
@@ -710,6 +729,7 @@ fn appKey(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event, delivery:
         .pasted = delivery.pasted,
         .under = delivery.under,
         .list_focus = delivery.list_focus,
+        .wide = delivery.wide,
         .draft = self.composerDraft(),
         .choice = if (page.standaloneField() != null) .{
             .shown = page.standaloneOpen(),
@@ -778,19 +798,21 @@ fn appNext(self: *Self, ctx: *vxfw.EventContext, next: ?Next) !void {
             try ctx.requestFocus(self.app_input.composer.widget());
             ctx.redraw = true;
         },
-        .open => |reference| {
+        .open => |opening| {
+            const reference = opening.reference;
             try self.root.showMain(ctx);
             if (self.root.session != null) {
                 try self.app_session.?.frontend.?.openPeer(ctx, &reference);
-                return;
+            } else {
+                _ = self.composer.blur();
+                self.opened = reference;
+                self.ops.open(self, ctx) catch |err| {
+                    // Departure names the Session that could not open.
+                    if (self.app_session == null) self.app_session = .{ .session = reference, .frontend = null, .files = null, .ended = err };
+                    ctx.quit = true;
+                };
             }
-            _ = self.composer.blur();
-            self.opened = reference;
-            self.ops.open(self, ctx) catch |err| {
-                // Departure names the Session that could not open.
-                if (self.app_session == null) self.app_session = .{ .session = reference, .frontend = null, .files = null, .ended = err };
-                ctx.quit = true;
-            };
+            if (opening.browse) _ = try self.root.focusList(ctx, true);
         },
     }
 }
@@ -1156,7 +1178,7 @@ fn appComposeDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Erro
 }
 
 fn selectedListLine(self: *const Self) ?u32 {
-    if (self.root.input.list_focused) return if (view.selectedLine(&self.state)) |line| @intCast(line) else null;
+    if (self.root.input.listFocused()) return if (view.selectedLine(&self.state)) |line| @intCast(line) else null;
     const open = self.state.conversing orelse return if (view.selectedLine(&self.state)) |line| @intCast(line) else null;
     var line: usize = 0;
     while (view.listItem(&self.state, line)) |item| : (line += 1) {
@@ -1197,14 +1219,14 @@ fn drawPart(self: *Self, ctx: vxfw.DrawContext, part: AppScreen.Overview.Part) s
                 const rows = try ctx.arena.create(SessionRows);
                 rows.* = .{ .state = &self.state, .width = size.width, .caps = self.caps, .frame = frame };
                 self.app_sessions.selected = self.selectedListLine();
-                self.app_sessions.selection_background = if (self.root.session != null and !self.root.input.list_focused) .bar else .selection;
+                self.app_sessions.selection_background = if (!self.root.input.listFocused()) .bar else .selection;
                 self.app_sessions.rows = .{ .userdata = rows, .count = @intCast(view.listLength(&self.state)), .rowFn = SessionRows.row, .countFromFn = SessionRows.count };
                 self.app_sessions.aboveFn = SessionRows.above;
                 self.app_sessions.belowFn = SessionRows.below;
                 break :sessions &self.app_sessions;
             },
         };
-        self.app_settings_line.selected = self.state.selected == .settings;
+        self.app_settings_line.selected = self.root.input.area == .settings_row or (self.root.input.listFocused() and self.state.selected == .settings);
         self.app_settings_line.caps = self.caps;
         prepared.tail = .{ .widget = self.app_settings_line.widget(), .rows = view.layout(&self.state).settings.len() };
         prepared.caps = self.caps;
@@ -1226,7 +1248,7 @@ fn drawPart(self: *Self, ctx: vxfw.DrawContext, part: AppScreen.Overview.Part) s
         self.app_input.composer.quiet = quiet;
         self.app_input.composer.method = self.caps.width;
         self.app_input.composer.ascii = !self.caps.unicode;
-        self.app_input.composer.caret = self.state.inputMode() != .frozen and self.state.footer.focus == .input and !self.root.settings_page.standaloneOpen();
+        self.app_input.composer.caret = self.root.input.mainFocused() and self.state.inputMode() != .frozen and self.state.footer.focus == .input and !self.root.settings_page.standaloneOpen();
         self.state.commands = view.nextCommands(&self.state, self.composerDraft());
         self.app_input.facts = .{ .userdata = self, .drawFn = appFooterDraw };
         self.app_input.status = if (try view.noticeSegments(ctx.arena, &self.state, size.width, self.caps)) |notice| try rich(ctx, self.caps, notice) else .{ .userdata = self, .drawFn = emptyStatus };
@@ -1328,8 +1350,8 @@ fn appFooterDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error
         chip.label = fact.span.text;
         chip.method = self.caps.width;
         const focused = switch (field) {
-            .model => self.state.footer.focus == .model,
-            .effort => self.state.footer.focus == .effort,
+            .model => self.root.input.mainFocused() and self.state.footer.focus == .model,
+            .effort => self.root.input.mainFocused() and self.state.footer.focus == .effort,
         };
         chip.style = @import("widget_style.zig").of(self.caps, .{ .colour = .quiet, .background = if (focused) .selection else .bar });
         chip.hover = chip.style;
@@ -1408,7 +1430,7 @@ fn create(init: std.process.Init, options: Options, hooks: Hooks, ops: Operation
         .interrupted = interrupted,
     };
     self.composer = self.emptyComposer(0);
-    self.root = .{ .main_presentation = .{ .context = self, .close = closeMainPresentation }, .overview = self.widget(), .overview_keys = .{ .context = self, .take = appKey }, .list = self.listWidget(), .compose = self.composeWidget(), .settings_page = .{ .backend = self.settingsBackend(), .version = @import("transport_options").version }, .input = .{ .layer = if (options.sign_in) .{ .sign_in = .{ .over = .main } } else .main } };
+    self.root = .{ .main_presentation = .{ .context = self, .close = closeMainPresentation }, .overview = self.widget(), .overview_keys = .{ .context = self, .take = appKey }, .overview_focus = .{ .context = self, .field = focusField, .candidates = focusCandidates }, .list = self.listWidget(), .compose = self.composeWidget(), .settings_page = .{ .backend = self.settingsBackend(), .version = @import("transport_options").version }, .input = .{ .layer = if (options.sign_in) .{ .sign_in = .{ .over = .main } } else .main } };
     self.sign_in = .{ .init = init, .selectors = options.selectors, .activate = hooks.activate, .ready = hooks.ready, .userdata = self, .on_done = signedIn, .on_close = closeSignIn, .list_visible = listVisible };
     self.root.sign_in = self.sign_in.widget();
     self.paintDivider();
@@ -1422,6 +1444,7 @@ fn create(init: std.process.Init, options: Options, hooks: Hooks, ops: Operation
     self.app_choice_pick = .{ .label = "", .userdata = self, .on_click = appChoicePick };
     self.app_choice_close = .{ .label = "", .userdata = self, .on_click = appChoiceClose };
     self.app_settings_line = .{ .selected = false, .caps = self.caps, .userdata = self, .on_click = appClick };
+    self.root.settings_control = self.app_settings_line.widget();
     self.app_sessions.on_press = .{ .userdata = self, .pressed = appClick };
     try self.state.init(init.gpa, .{ .cwd = options.workspace, .home = options.home, .login_at = options.login_at, .default = .of(options.provider, options.model) });
     errdefer self.state.deinit();
@@ -1559,7 +1582,7 @@ fn destroy(self: *Self) void {
 const Ending = union(enum) { overview, conversation: Left };
 
 /// What the core asks of the loop: to leave or present a pane under Root.
-const Next = union(enum) { leave, open: view.Reference, open_settings, focus_chat, open_choice: view.FooterField };
+const Next = union(enum) { leave, open: struct { reference: view.Reference, browse: bool = false }, open_settings, focus_chat, open_choice: view.FooterField };
 
 /// Steps the core with one event and queues the jobs it asks for. Presenting
 /// panes and leaving are the loop's to do.
@@ -1599,7 +1622,7 @@ fn eventResult(self: *Self, value: view.Event) !EventResult {
         .archive => |request| self.queue(.{ .archive = request }),
         .list_models => self.queue(.models),
         .command => |command| self.queue(.{ .command = .{ .name = command.name, .session = command.session, .line = try self.init.gpa.dupe(u8, command.text) } }),
-        .open => |reference| next = .{ .open = reference },
+        .open => |reference| next = .{ .open = .{ .reference = reference, .browse = effects.browse_open } },
         .clear_draft => self.composer = self.emptyComposer(self.composer.edits +% 1),
         // A refused addition says so as a refused key does.
         .replace => |change| switch (self.composer.replace(.{ .start = change.start, .end = change.end, .text = change.text })) {
@@ -2100,7 +2123,7 @@ fn quiesceUpgrade(self: *Self) !bool {
         if (self.worker.completed()) {
             if (try self.complete()) |next| switch (next) {
                 .leave => return error.InteractiveInterrupted,
-                .open => |reference| self.started = reference,
+                .open => |opening| self.started = opening.reference,
                 // Only direct list input asks for settings, never a worker answer.
                 .open_settings, .focus_chat, .open_choice => unreachable,
             };
@@ -3059,7 +3082,7 @@ test "returning from a Session refreshes saved effort in facts and app settings"
     const rig = try Rig.open(.{ .store = home, .workspace = "/work", .home = home, .directory = home, .provider = "codex", .model = "gpt-6-luna" }, ops, &cancellation);
     defer rig.close();
     rig.overview.hooks.scratch = Scratch.scratch;
-    try std.testing.expect(try rig.next(.{ .open = "k7m2qx".* }) == null);
+    try std.testing.expect(try rig.next(.{ .open = .{ .reference = "k7m2qx".* } }) == null);
     defer {
         for (rig.overview.retired.items) |retired| rig.overview.disposeSession(retired.left);
         rig.overview.retired.deinit(std.testing.allocator);
@@ -4088,7 +4111,7 @@ test "Host line appears once in overview and chat at wide and narrow widths, nev
             overview.disposeSession(left);
             overview.app_session = null;
         };
-        if (open) try std.testing.expect(try rig.next(.{ .open = "k7m2qx".* }) == null);
+        if (open) try std.testing.expect(try rig.next(.{ .open = .{ .reference = "k7m2qx".* } }) == null);
         // A failed listing fades the held rows but says nothing about the
         // Host. Discovery remains the shell Host line's sole observation.
         overview.ops.list = UnavailableList.read;
@@ -4191,7 +4214,7 @@ test "Host recovery keeps the open widget drafts and scroll and starts only on a
     _ = try overview.event(.{ .tick = test_now_s * 1000 });
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expect(try rig.press("list draft") == null);
-    try std.testing.expect(try rig.next(.{ .open = "k7m2qx".* }) == null);
+    try std.testing.expect(try rig.next(.{ .open = .{ .reference = "k7m2qx".* } }) == null);
     const frontend = overview.app_session.?.frontend.?;
     defer {
         frontend.stop();
@@ -4339,7 +4362,7 @@ test "Host recovery availability is independent of admission pause for the whole
         overview.hooks.scratch = HostRecovery.scratch;
         // The frontend freezes its callbacks when the Session opens.
         overview.hooks.requests = Inspection.requests;
-        try std.testing.expect(try rig.next(.{ .open = "k7m2qx".* }) == null);
+        try std.testing.expect(try rig.next(.{ .open = .{ .reference = "k7m2qx".* } }) == null);
         const frontend = overview.app_session.?.frontend.?;
         defer {
             frontend.stop();
@@ -4807,7 +4830,7 @@ test "a listing failure under a conversation ends the overview once the terminal
     try rig.answered();
     // The Session opens over the overview; the overview's next tick under
     // it collects the failure, which ends App.
-    try std.testing.expect(try rig.next(.{ .open = "k7m2qx".* }) == null);
+    try std.testing.expect(try rig.next(.{ .open = .{ .reference = "k7m2qx".* } }) == null);
     try std.testing.expect(overview.app_session.?.frontend != null);
     var ctx = rig.context();
     defer ctx.cmds.deinit(std.testing.allocator);
@@ -5860,7 +5883,7 @@ test "a conversation's Upgrade waits for the conversation's running read, though
     defer rig.close();
     const overview = rig.overview;
     overview.hooks.scratch = Scratch.scratch;
-    try std.testing.expect(try rig.next(.{ .open = "k7m2qx".* }) == null);
+    try std.testing.expect(try rig.next(.{ .open = .{ .reference = "k7m2qx".* } }) == null);
     defer {
         for (overview.retired.items) |retired| overview.disposeSession(retired.left);
         overview.retired.deinit(std.testing.allocator);
@@ -6340,7 +6363,7 @@ test "App overview list press follows only after the open child settles and open
     try std.testing.expect(try rig.settle() == null);
     overview.ops.open = openSession;
     overview.hooks.scratch = Scratch.scratch;
-    try std.testing.expect(try rig.next(.{ .open = "k7m2qx".* }) == null);
+    try std.testing.expect(try rig.next(.{ .open = .{ .reference = "k7m2qx".* } }) == null);
     defer {
         if (overview.app_session) |left| {
             if (left.frontend) |frontend| frontend.stop();
@@ -6468,7 +6491,7 @@ test "App list clicks validate present and removed targets with open and closed 
             if (open) {
                 overview.hooks.scratch = Click.scratch;
                 overview.ops.open = openSession;
-                try std.testing.expect(try rig.next(.{ .open = "k7m2qx".* }) == null);
+                try std.testing.expect(try rig.next(.{ .open = .{ .reference = "k7m2qx".* } }) == null);
                 overview.app_session.?.frontend.?.app_hooks.leave = Click.leave;
             }
             overview.ops.open = Click.open;
@@ -6583,7 +6606,7 @@ test "App root navigation shows and focuses the main pane before every Session s
                         if (retained) {
                             overview.hooks.scratch = Nav.scratch;
                             overview.ops.open = openSession;
-                            try std.testing.expect(try rig.next(.{ .open = "k7m2qx".* }) == null);
+                            try std.testing.expect(try rig.next(.{ .open = .{ .reference = "k7m2qx".* } }) == null);
                         }
                         overview.ops.open = Nav.open;
                         const original = overview.root.session;
@@ -6722,7 +6745,7 @@ test "App settings Enter reaches Root at both widths with and without a retained
             if (retained) {
                 overview.hooks.scratch = Settings.scratch;
                 overview.ops.open = openSession;
-                try std.testing.expect(try rig.next(.{ .open = "k7m2qx".* }) == null);
+                try std.testing.expect(try rig.next(.{ .open = .{ .reference = "k7m2qx".* } }) == null);
                 _ = overview.app_session.?.frontend.?.input.append("retained draft");
             }
             const previous = overview.root.session;
@@ -7040,7 +7063,7 @@ test "chat omission preserves late-listed Sessions and the physical last-row foo
     const overview = rig.overview;
     overview.hooks.scratch = Chat.scratch;
     overview.ops.open = openSession;
-    try std.testing.expect(try rig.next(.{ .open = "k7m2qx".* }) == null);
+    try std.testing.expect(try rig.next(.{ .open = .{ .reference = "k7m2qx".* } }) == null);
     defer {
         if (overview.app_session) |left| {
             if (left.frontend) |frontend| frontend.stop();
@@ -7448,7 +7471,7 @@ test "chat info Archive receives its worker answer after the ordinary ledger ent
         defer rig.close();
         const overview = rig.overview;
         overview.hooks.scratch = Archive.scratch;
-        try std.testing.expect(try rig.next(.{ .open = "k7m2qx".* }) == null);
+        try std.testing.expect(try rig.next(.{ .open = .{ .reference = "k7m2qx".* } }) == null);
         defer {
             if (overview.app_session) |left| {
                 left.frontend.?.stop();
@@ -7495,7 +7518,7 @@ test "chat info Archive backend forwards exact core ledger admission through the
         defer rig.close();
         const overview = rig.overview;
         overview.hooks.scratch = Files.scratch;
-        try std.testing.expect(try rig.next(.{ .open = "k7m2qx".* }) == null);
+        try std.testing.expect(try rig.next(.{ .open = .{ .reference = "k7m2qx".* } }) == null);
         defer {
             if (overview.app_session) |left| {
                 left.frontend.?.stop();
@@ -8005,7 +8028,7 @@ test "Sign-in keeps the pane through Session and Settings clicks with and withou
         if (retained) {
             overview.hooks.scratch = Nav.scratch;
             overview.ops.open = openSession;
-            try std.testing.expect(try rig.next(.{ .open = "k7m2qx".* }) == null);
+            try std.testing.expect(try rig.next(.{ .open = .{ .reference = "k7m2qx".* } }) == null);
             overview.app_session.?.frontend.?.reading.opening = false;
         }
         overview.ops.open = Nav.open;
@@ -8130,7 +8153,7 @@ test "Sign-in Esc at the choice leaves unless the first-run screen has no defaul
         if (retained) {
             overview.hooks.scratch = Nav.scratch;
             overview.ops.open = openSession;
-            try std.testing.expect(try rig.next(.{ .open = "k7m2qx".* }) == null);
+            try std.testing.expect(try rig.next(.{ .open = .{ .reference = "k7m2qx".* } }) == null);
             overview.app_session.?.frontend.?.reading.opening = false;
         }
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
@@ -8704,7 +8727,7 @@ test "App overview list resumes the open chat with a hidden retained draft" {
         defer ctx.cmds.deinit(std.testing.allocator);
         try std.testing.expect(try rig.overview.root.focusList(&ctx, true));
         try std.testing.expect(try rig.press(key) == null);
-        try std.testing.expect(!rig.overview.root.input.list_focused);
+        try std.testing.expect(!rig.overview.root.input.listFocused());
         try std.testing.expectEqualStrings(draft, rig.overview.composerDraft().bytes);
         try std.testing.expectEqual(@as(usize, 0), Seen.now.starts);
         // The fixture borrowed the dummy widget, not an app_session allocation.

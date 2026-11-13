@@ -11,7 +11,7 @@ pub const Method = session_line.Method;
 // --- Footer focus ----------------------------------------------------------
 
 pub const FooterField = enum { model, effort };
-pub const FooterFocus = enum { input, model, effort };
+pub const FooterFocus = @import("app_input.zig").Field;
 pub const FooterInput = union(enum) { tab: bool, enter, escape, text, click: ?FooterField, other };
 pub const FooterDecision = struct {
     focus: FooterFocus,
@@ -23,15 +23,11 @@ pub const FooterDecision = struct {
 pub fn footerInput(focus: FooterFocus, has_effort: bool, input: FooterInput) FooterDecision {
     return switch (input) {
         .click => |field| .{ .focus = .input, .open_choice = field, .forward = field == null },
-        .tab => |reverse| .{ .focus = if (reverse) switch (focus) {
-            .input => if (has_effort) .effort else .model,
-            .model => .input,
-            .effort => .model,
-        } else switch (focus) {
-            .input => .model,
-            .model => if (has_effort) .effort else .input,
-            .effort => .input,
-        } },
+        .tab => |reverse| .{ .focus = fieldOf(@import("app_input.zig").tabNext(if (has_effort) &.{ .input, .model, .effort } else &.{ .input, .model }, switch (focus) {
+            .input => .input,
+            .model => .model,
+            .effort => .effort,
+        }, reverse).?) },
         .enter => switch (focus) {
             .input => .{ .focus = .input, .forward = true },
             .model => .{ .focus = .input, .open_choice = .model },
@@ -40,6 +36,15 @@ pub fn footerInput(focus: FooterFocus, has_effort: bool, input: FooterInput) Foo
         .escape => .{ .focus = .input, .forward = focus == .input },
         .text => .{ .focus = .input, .forward = true },
         .other => .{ .focus = focus, .forward = true },
+    };
+}
+
+fn fieldOf(target: @import("app_input.zig").Target) FooterFocus {
+    return switch (target) {
+        .input => .input,
+        .model => .model,
+        .effort => .effort,
+        else => unreachable,
     };
 }
 

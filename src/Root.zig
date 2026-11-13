@@ -19,6 +19,15 @@ pub const Keys = struct {
     take: *const fn (*anyopaque, *vxfw.EventContext, vxfw.Event, app_input.Effects.Delivery) anyerror!void,
 };
 
+pub const Candidate = struct { target: app_input.Target, widget: vxfw.Widget };
+pub const Projection = struct { len: usize, modal: bool = false };
+pub const FocusOwner = struct {
+    context: *anyopaque,
+    /// Read or apply the existing footer's leaf focus. No navigation policy.
+    field: *const fn (*anyopaque, ?app_input.Field) app_input.Field,
+    candidates: *const fn (*anyopaque, *[std.enums.values(app_input.Target).len]Candidate) Projection,
+};
+
 /// The composed main screen ends its presentation when Root changes panes.
 pub const MainPresentation = struct {
     context: *anyopaque,
@@ -32,6 +41,11 @@ overview: vxfw.Widget,
 /// arrived under. A Root with no overview core (UI-only tests and native
 /// probes) hands those events to the `overview` widget instead.
 overview_keys: ?Keys = null,
+overview_focus: ?FocusOwner = null,
+session_focus: ?FocusOwner = null,
+settings_control: ?vxfw.Widget = null,
+focus_frame: app_input.Frame = .{},
+drawn_focus: [std.enums.values(app_input.Target).len]Candidate = undefined,
 list: vxfw.Widget,
 compose: vxfw.Widget,
 divider: Split.Divider = .{},
@@ -128,7 +142,8 @@ fn navigate(self: *Self, ctx: *vxfw.EventContext, request: app_input.Input) !voi
 /// the page's answers for this event, read by value.
 fn facts(self: *const Self, key: ?vaxis.Key) app_input.Facts {
     const session_open = self.session != null;
-    if (!self.input.layer.settingsOpen()) return .{ .session_open = session_open, .wide = self.size.width >= split_at };
+    const field = if (self.focusOwner()) |owner| owner.field(owner.context, null) else .input;
+    if (!self.input.layer.settingsOpen()) return .{ .session_open = session_open, .wide = self.size.width >= split_at, .frame = self.focus_frame, .field = field };
     const page = &self.settings_page;
     return .{ .session_open = session_open, .settings = .{
         .keys_open = page.keys_open,
@@ -152,8 +167,21 @@ fn apply(self: *Self, ctx: *vxfw.EventContext, effects: app_input.Effects, route
             self.settings_page.keys_open = false;
         },
     }
+    if (effects.field) |field| if (self.focusOwner()) |owner| {
+        _ = owner.field(owner.context, field);
+    };
+    if (effects.field == null and effects.focus != null and routed != null and routed.? == .key_press) if (self.focusOwner()) |owner| {
+        _ = owner.field(owner.context, owner.field(owner.context, null));
+    };
+    if (effects.activate) |target| for (self.drawn_focus[0..self.focus_frame.len]) |candidate| {
+        if (candidate.target == target) {
+            try candidate.widget.handleEvent(ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
+            break;
+        }
+    };
     if (effects.focus) |focus| try ctx.requestFocus(switch (focus) {
         .main => self.session orelse self.overview,
+        .overview => self.overview,
         // List keys are routed by Root, not by a focusable list editor.
         // Root remains drawn when a wide sidebar becomes a narrow overview.
         .list => self.widget(),
@@ -197,6 +225,7 @@ pub fn closeSession(self: *Self, ctx: *vxfw.EventContext) !void {
     self.closeMainPresentation();
     self.session = null;
     self.session_keys = null;
+    self.session_focus = null;
     if (!self.input.layer.settingsOpen()) self.settings_page.closeStandaloneChoice();
     try self.navigate(ctx, .session_closed);
     ctx.redraw = true;
@@ -206,7 +235,7 @@ pub fn closeSession(self: *Self, ctx: *vxfw.EventContext) !void {
 fn capture(raw: *anyopaque, ctx: *vxfw.EventContext, routed: vxfw.Event) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     const input: app_input.Input = switch (routed) {
-        .key_press => |key| .{ .key = .{ .named = @import("TerminalEditor.zig").named(key), .right = key.matches(vaxis.Key.right, .{}), .enter = key.matches(vaxis.Key.enter, .{}) } },
+        .key_press => |key| .{ .key = .{ .named = @import("TerminalEditor.zig").named(key), .right = key.matches(vaxis.Key.right, .{}), .enter = key.matches(vaxis.Key.enter, .{}), .tab = if (key.matches(vaxis.Key.tab, .{})) false else if (key.matches(vaxis.Key.tab, .{ .shift = true })) true else null } },
         .paste_start => .paste_start,
         .paste_end => .paste_end,
         .mouse => |mouse| .{ .mouse = switch (mouse.button) {
@@ -243,7 +272,7 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
             if (ctx.quit) return;
             if (self.session) |session| try session.handleEvent(ctx, .tick);
             if (ctx.quit) return;
-            if (self.input.layer != .main or self.input.list_focused) {
+            if (self.input.layer != .main or !self.input.mainFocused()) {
                 // Hidden screens still settle their workers and consent state,
                 // but their presentation targets aren't in this focus tree.
                 // Retain every other command; a real openSession transition
@@ -263,6 +292,39 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
         },
         else => {},
     }
+}
+
+fn focusOwner(self: *const Self) ?FocusOwner {
+    return if (self.chooseLayout().pane == .overview or self.session == null) self.overview_focus else self.session_focus;
+}
+
+fn contains(surface: vxfw.Surface, target: vxfw.Widget) bool {
+    if (surface.size.width == 0 or surface.size.height == 0) return false;
+    if (surface.widget.eql(target)) return true;
+    for (surface.children) |child| if (contains(child.surface, target)) return true;
+    return false;
+}
+
+/// One projection from the cells just drawn. Candidates supply semantic
+/// identities, never width/visibility decisions or an independent focus.
+fn projectFocus(self: *Self, surface: vxfw.Surface, layout: Layout) void {
+    self.focus_frame = .{ .overview = layout.pane == .overview };
+    if (layout.split or layout.pane == .overview) {
+        const list = if (layout.split) self.list else self.overview;
+        if (contains(surface, list)) self.appendFocus(.{ .target = .list, .widget = list });
+        if (self.settings_control) |control| if (contains(surface, control)) self.appendFocus(.{ .target = .settings_row, .widget = control });
+    }
+    if (self.focusOwner()) |owner| {
+        var candidates: [std.enums.values(app_input.Target).len]Candidate = undefined;
+        const projection = owner.candidates(owner.context, &candidates);
+        self.focus_frame.modal = projection.modal;
+        for (candidates[0..projection.len]) |candidate| if (contains(surface, candidate.widget)) self.appendFocus(candidate);
+    }
+}
+
+fn appendFocus(self: *Self, candidate: Candidate) void {
+    self.drawn_focus[self.focus_frame.len] = candidate;
+    self.focus_frame.append(candidate.target);
 }
 
 fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
@@ -292,6 +354,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         break :split try split.widget().draw(ctx);
     } else try pane.draw(ctx);
     children[0] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = child };
+    self.projectFocus(child, layout);
     self.frames += 1;
     return .{ .size = size, .widget = self.widget(), .buffer = &.{}, .children = children };
 }
@@ -1069,9 +1132,9 @@ test "App root hands list activation unchanged to its one core" {
         try std.testing.expect(target.eventHandler != null);
         try std.testing.expect(target.eql(root.widget()));
         try root.widget().captureEvent(&ctx, .{ .key_press = .{ .codepoint = key } });
-        try std.testing.expect(root.input.list_focused);
+        try std.testing.expect(root.input.listFocused());
         try root.showMain(&ctx);
-        try std.testing.expect(!root.input.list_focused);
+        try std.testing.expect(!root.input.listFocused());
     }
     try std.testing.expectEqual(@as(usize, 2), selection.calls);
     _ = try root.focusList(&ctx, true);
@@ -1083,6 +1146,6 @@ test "App root hands list activation unchanged to its one core" {
         .{ .col = 50, .row = 10, .button = .right, .type = .press, .mods = .{} },
     }) |mouse| {
         try root.widget().captureEvent(&ctx, .{ .mouse = mouse });
-        try std.testing.expect(root.input.list_focused);
+        try std.testing.expect(root.input.listFocused());
     }
 }

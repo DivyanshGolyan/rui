@@ -356,6 +356,8 @@ pub const Event = union(enum) {
     /// A key or paste mark Root handed the overview. `step`
     /// decides what it means and returns that in `Effects.take`.
     key: KeyInput,
+    /// Existing application tick/input batch ended; open only its last list selection.
+    list_settled: struct { wide: bool, focused: bool },
     /// A footer input that is no key: the drawn choice's close action.
     footer_input: FooterInput,
     /// The size of the screen the shell draws next; keys read until the
@@ -436,6 +438,7 @@ pub const KeyInput = struct {
     host_startable: bool = false,
     /// Keyboard focus is on the list; hidden composer text has no authority.
     list_focus: bool = false,
+    wide: bool = false,
 
     pub const Choice = struct {
         /// Drawn: open and not hidden while its save is pending.
@@ -826,6 +829,7 @@ pub const ArchiveAdmission = enum { admitted, refused };
 
 /// Effects are run in order; admission describes only this event's attempt.
 pub const Effects = struct {
+    browse_open: bool = false,
     archive_admission: ArchiveAdmission = .refused,
     /// What the shell does with a `key` event's input; others leave it.
     take: Take = .drop,
@@ -1087,6 +1091,8 @@ pub const State = struct {
     selected: Selection = .new_session,
     /// Focus and an admitted opening waiting for its borrowed source.
     footer: chrome.Footer = .{},
+    /// One pending selection, not a feed/reference cache. It is read from selected.
+    browse_pending: bool = false,
     /// The Session whose conversation holds the terminal, if any.
     conversing: ?Reference = null,
     /// Only a Host handshake establishes an epoch; row arrival cannot rebase it.
@@ -1714,6 +1720,11 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
     switch (event) {
         .composed => |value| try compose(state, value, &effects),
         .key => |input| effects.take = try keyInput(state, input, &effects),
+        .list_settled => |frame| {
+            const pending = state.browse_pending;
+            state.browse_pending = false;
+            if (pending and frame.wide and frame.focused) try activateList(state, .browse, &effects);
+        },
         .footer_input => |input| _ = footerInput(state, input, &effects),
         .tick => |now_ms| try tick(state, now_ms, &effects),
         .list => |reply| switch (reply) {
@@ -1964,10 +1975,17 @@ fn keyInput(state: *State, input: KeyInput, effects: *Effects) error{OutOfMemory
         }
     }
     if (input.list_focus and !input.pasted) {
+        const before = state.selected;
         switch (input.key) {
-            .enter, .right => try activateList(state, input.key == .enter, effects),
+            .enter, .right => {
+                state.browse_pending = false;
+                try activateList(state, if (input.key == .enter) .enter else .right, effects);
+            },
             .named => |name| if (keys.get(name)) |pressed| {
                 try compose(state, .{ .input = .{ .composer = .{ .action = pressed } }, .draft = .{} }, effects);
+                if (pressed == .previous or pressed == .next) {
+                    state.browse_pending = input.wide and !std.meta.eql(before, state.selected);
+                }
             },
             else => {},
         }
@@ -2587,25 +2605,27 @@ fn workLine(words: *[work_line.max_words_bytes]u8, state: *const State, row: *co
 fn clickOpen(state: *State, reference: Reference, effects: *Effects) error{OutOfMemory}!void {
     _ = position(state, reference) orelse return;
     state.selected = .{ .session = reference };
-    try activateList(state, true, effects);
+    try activateList(state, .enter, effects);
 }
 
 /// All list activation uses the selection, never the composer's retained text.
 /// Right enters only a chat; Enter also activates the Settings row.
-fn activateList(state: *State, enter_key: bool, effects: *Effects) error{OutOfMemory}!void {
+const ListIntent = enum { enter, right, browse };
+fn activateList(state: *State, intent: ListIntent, effects: *Effects) error{OutOfMemory}!void {
     if (state.inputMode() == .frozen) return;
     switch (state.selected) {
         .new_session => {},
-        .settings => if (enter_key) effects.add(.open_settings),
+        .settings => if (intent == .enter) effects.add(.open_settings),
         .session => |reference| {
             _ = state.selectedRow() orelse return;
             if (state.conversing) |open| if (std.mem.eql(u8, &reference, &open)) {
-                effects.add(.focus_chat);
+                if (intent != .browse) effects.add(.focus_chat);
                 return;
             };
             if (!admitHostRequest(state) or waitForCommand(state)) return;
             state.closePanel();
             effects.add(.{ .open = reference });
+            effects.browse_open = intent == .browse;
         },
     }
 }
@@ -2701,7 +2721,7 @@ fn enter(state: *State, text: []const u8, effects: *Effects) error{OutOfMemory}!
         // blank draft opens the selected row instead.
         .open_session => {
             if (text.len != 0) effects.add(.clear_draft);
-            try activateList(state, true, effects);
+            try activateList(state, .enter, effects);
         },
         .start => {
             if (!state.request(.start, null)) return;

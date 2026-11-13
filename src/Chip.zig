@@ -17,6 +17,8 @@ userdata: *anyopaque,
 on_click: *const fn (*anyopaque, *vxfw.EventContext) anyerror!void,
 pressed: bool = false,
 hovered: bool = false,
+/// Derived style fact from the screen focus owner, never changed by events.
+focused: bool = false,
 
 pub fn widget(self: *Self) vxfw.Widget {
     return .{ .userdata = self, .eventHandler = event, .drawFn = draw };
@@ -30,6 +32,10 @@ pub fn width(self: *const Self) u16 {
 fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     switch (input) {
+        .key_press => |key| if (key.matches(vaxis.Key.enter, .{})) {
+            ctx.consumeAndRedraw();
+            try self.on_click(self.userdata, ctx);
+        },
         .mouse => |mouse| {
             if (mouse.button == .left and mouse.type == .press) {
                 self.pressed = true;
@@ -61,7 +67,8 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const max = ctx.max.size();
     const size: vxfw.Size = .{ .width = @min(self.width(), max.width), .height = @min(1, max.height) };
     const surface = try vxfw.Surface.init(ctx.arena, self.widget(), size);
-    const style = if (self.hovered) self.hover else self.style;
+    var style = if (self.hovered) self.hover else self.style;
+    if (self.focused) style.reverse = true;
     @memset(surface.buffer, .{ .style = style });
     _ = print(surface, self.method, 0, 0, self.label, style, size.width);
     return surface;

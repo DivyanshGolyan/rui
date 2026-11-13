@@ -105,6 +105,11 @@ pub const Settings = struct {
     fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) anyerror!void {
         const self: *Settings = @ptrCast(@alignCast(raw));
         try self.hover.handleEvent(ctx, input);
+        if (input == .key_press and input.key_press.matches(vaxis.Key.enter, .{})) {
+            try self.on_click(self.userdata, ctx, .settings);
+            ctx.consumeAndRedraw();
+            return;
+        }
         if (input != .mouse) return;
         const mouse = input.mouse;
         if (mouse.button != .left or mouse.type != .press or mouse.row != 1 or self.size.height < 2 or mouse.col < 0 or mouse.col >= self.size.width) return;

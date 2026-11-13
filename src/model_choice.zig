@@ -45,6 +45,8 @@ menu: *const picker.Menu = &fallback,
 provider: picker.Provider = .codex,
 current: []const u8 = "",
 selected: ?usize = null,
+/// The filter and its result list are one nested focus owner.
+focus: enum { filter, rows } = .filter,
 scroll: usize = 0,
 query_bytes: [catalog.max_model_bytes]u8 = undefined,
 editor: Editor = .{ .buffer = &.{} },
@@ -73,6 +75,7 @@ pub fn open(self: *Self, menu: ?*const picker.Menu, provider: picker.Provider, c
     self.pasting = false;
     self.scroll = 0;
     self.selected = null;
+    self.focus = .filter;
     for (self.menu.entries, 0..) |entry, at| if (self.row(entry) != null) {
         if (self.selected == null or std.mem.eql(u8, entry.id, current)) self.selected = at;
     };
@@ -99,7 +102,7 @@ pub fn validate(self: *Self) bool {
 
 /// Named application actions remain the caller's; arrows and text filter.
 pub fn takesKey(key: vaxis.Key) bool {
-    return Editor.named(key) == null or key.matches(vaxis.Key.up, .{}) or key.matches(vaxis.Key.down, .{});
+    return Editor.named(key) == null or key.matches(vaxis.Key.up, .{}) or key.matches(vaxis.Key.down, .{}) or key.matches(vaxis.Key.tab, .{}) or key.matches(vaxis.Key.tab, .{ .shift = true });
 }
 
 pub fn cancel(self: *Self) void {
@@ -138,7 +141,7 @@ fn drawInput(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxf
     }
     paint(ctx, surface, bytes[start..], 0, 0, edit_width, self.ground);
     paint(ctx, surface, tail, 0, edit_width, size.width, self.quiet);
-    if (edit_width > 0) surface.cursor = .{ .row = 0, .col = @intCast(ctx.stringWidth(bytes[start..cursor])) };
+    if (self.focus == .filter and edit_width > 0) surface.cursor = .{ .row = 0, .col = @intCast(ctx.stringWidth(bytes[start..cursor])) };
     return surface;
 }
 
@@ -196,12 +199,26 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
     if (input == .key_press and !self.pasting) {
         const key = input.key_press;
         if (key.matches(vaxis.Key.escape, .{})) return;
+        if (key.matches(vaxis.Key.tab, .{}) or key.matches(vaxis.Key.tab, .{ .shift = true })) {
+            if (self.hits.len != 0) {
+                const at = if (self.focus == .filter) @as(usize, 0) else (std.mem.indexOfScalar(usize, self.hits, self.selected.?) orelse 0) + 1;
+                const count = self.hits.len + 1;
+                const next = (at + (if (key.mods.shift) count - 1 else @as(usize, 1))) % count;
+                self.focus = if (next == 0) .filter else .rows;
+                if (next != 0) self.selected = self.hits[next - 1];
+            }
+            ctx.consumeAndRedraw();
+            return;
+        }
+
         if (key.matches(vaxis.Key.up, .{})) {
+            self.focus = .rows;
             self.move(false);
             ctx.consumeAndRedraw();
             return;
         }
         if (key.matches(vaxis.Key.down, .{})) {
+            self.focus = .rows;
             self.move(true);
             ctx.consumeAndRedraw();
             return;
@@ -219,6 +236,7 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
     if (outcome == .submit) {
         try self.pick(ctx);
     } else if (outcome == .append or outcome == .redraw) {
+        self.focus = .filter;
         var first: ?usize = null;
         var kept = false;
         for (self.menu.entries, 0..) |entry, at| if (self.row(entry) != null) {

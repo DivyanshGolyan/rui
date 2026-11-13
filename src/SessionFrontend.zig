@@ -457,8 +457,37 @@ pub const AppHooks = struct {
     on_open: *const fn (*anyopaque, *vxfw.EventContext, *const [session_id.bytes]u8) anyerror!void,
 };
 
+fn focusField(raw: *anyopaque, set: ?@import("app_input.zig").Field) @import("app_input.zig").Field {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    if (set) |field| {
+        self.footer.focus = field;
+        self.footer.pending = null;
+        self.shown_notice.dismiss();
+        self.dirty = true;
+    }
+    return self.footer.focus;
+}
+
+fn focusCandidates(raw: *anyopaque, items: *[std.enums.values(@import("app_input.zig").Target).len]Root.Candidate) Root.Projection {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    const candidates = [_]Root.Candidate{
+        .{ .target = .input, .widget = self.app_input.composer.widget() },
+        .{ .target = .back, .widget = self.chrome.facts.back.widget() },
+        .{ .target = .model, .widget = self.chrome.facts.model.widget() },
+        .{ .target = .effort, .widget = self.chrome.facts.effort.widget() },
+        .{ .target = .info, .widget = self.chrome.info.widget() },
+        .{ .target = .latest, .widget = self.chrome.marker.widget() },
+        .{ .target = .details, .widget = self.chrome.details.widget() },
+        .{ .target = .needs, .widget = self.chrome.status.key.widget() },
+        .{ .target = .stop, .widget = self.chrome.status.stop.widget() },
+    };
+    @memcpy(items[0..candidates.len], &candidates);
+    return .{ .len = candidates.len, .modal = self.info_open or self.app_info.standaloneOpen() };
+}
+
 pub fn attach(self: *Self, hooks: AppHooks, caps: overview_view.Caps) vxfw.Widget {
     self.app_hooks = hooks;
+    hooks.root.session_focus = .{ .context = self, .field = focusField, .candidates = focusCandidates };
     self.app_info = .{ .backend = self.infoBackend(), .home = self.home };
     if (hooks.drafts) |drafts| if (drafts.take(self.init.gpa, self.session)) |draft| {
         defer draft.deinit(self.init.gpa);
@@ -1069,7 +1098,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     };
     const facts_style = style.of(self.app_caps, .{ .colour = .quiet, .background = .bar });
     self.app_screen.style = normal;
-    self.app_input.composer.caret = !self.app_hooks.root.input.list_focused and !self.info_open and !self.app_info.standaloneOpen() and self.footer.focus == .input;
+    self.app_input.composer.caret = self.app_hooks.root.input.mainFocused() and !self.info_open and !self.app_info.standaloneOpen() and self.footer.focus == .input;
     self.app_input.composer.style = normal;
     self.app_input.composer.quiet = quiet;
     self.app_input.composer.method = self.app_caps.width;
@@ -1126,7 +1155,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     chrome.facts.method = self.app_caps.width;
     chrome.facts.style = facts_style;
     chrome.facts.selected = style.of(self.app_caps, .{ .colour = .normal, .background = .selection });
-    chrome.facts.focus = self.footer.focus;
+    chrome.facts.focus = if (self.app_hooks.root.input.mainFocused()) self.footer.focus else null;
     chrome.marker.method = self.app_caps.width;
     chrome.marker.style = .{ .reverse = true };
     const held = self.heldOriginal();
@@ -1162,6 +1191,13 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     self.app_preview.size = .{};
     self.app_content.size = .{};
     self.app_screen.host = if (self.app_hooks.host) |host| host.notice(host.context) else null;
+    const focused = @import("app_input.zig").currentFocus(self.app_hooks.root.input, self.footer.focus);
+    self.chrome.facts.back.focused = focused == .back;
+    self.chrome.info.focused = focused == .info;
+    self.chrome.marker.focused = focused == .latest;
+    self.chrome.details.focused = focused == .details;
+    self.chrome.status.key.focused = focused == .needs;
+    self.chrome.status.stop.focused = focused == .stop;
     var surface = try self.app_screen.widget().draw(ctx);
     const size = if (self.app_consent.request != null) self.app_preview.size else if (screen.view == .feed) self.app_content.size else self.app_document.size;
     screen.height = size.height;
@@ -9757,7 +9793,7 @@ test "App Session Left and Esc reuse guarded empty draft return while nonempty L
         held.self.input.editors[held.self.input.active].cursor = draft.cursor;
         try held.keys(key);
         if (draft.bytes.len == 0) {
-            try std.testing.expectEqual(width == 140, held.root.input.list_focused and held.left == null);
+            try std.testing.expectEqual(width == 140, held.root.input.listFocused() and held.left == null);
             try std.testing.expectEqual(if (width == 140) @as(?Outcome, null) else .returned, held.left);
             if (width == 140) {
                 _ = try held.draw();
@@ -9765,7 +9801,7 @@ test "App Session Left and Esc reuse guarded empty draft return while nonempty L
                 try std.testing.expect(held.root.session != null);
             }
         } else {
-            try std.testing.expect(!held.root.input.list_focused);
+            try std.testing.expect(!held.root.input.listFocused());
             try std.testing.expectEqual(@as(?Outcome, null), held.left);
             try std.testing.expectEqualStrings(draft.bytes, held.self.input.composition().bytes);
             try std.testing.expectEqual(if (key[0] == 0x1b) draft.cursor -| 1 else draft.cursor, held.self.input.composition().cursor);

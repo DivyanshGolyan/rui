@@ -432,7 +432,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const footer = try ctx.arena.create(Footer);
     footer.* = .{
         .left = try Panel.displayText(ctx.arena, if (self.narrow) " ‹ Rui · settings" else " Rui · settings", self.panel.unicode),
-        .right = try Panel.displayText(ctx.arena, if (self.narrow) "esc close" else "↑↓ · enter change · esc close", self.panel.unicode),
+        .right = try Panel.displayText(ctx.arena, if (self.narrow) "esc close" else "↑↓ · tab · enter change · esc close", self.panel.unicode),
         .style = self.panel.quiet,
     };
     children[1] = .{ .origin = .{ .row = size.height - 1, .col = 0 }, .surface = try footer.widget().draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = 1 })) };

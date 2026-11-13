@@ -90,6 +90,28 @@ fn move(self: *Self, down: bool, only: ?usize) void {
     }
 }
 
+/// The same row projection used for drawing supplies Tab's wrapping order.
+fn tab(self: *Self, reverse: bool, only: ?usize) void {
+    if (self.choice) |*choice| {
+        choice.selected = (choice.selected + (if (reverse) choice.labels.len - 1 else @as(usize, 1))) % choice.labels.len;
+        return;
+    }
+    if (only) |field| {
+        self.selected = field;
+        return;
+    }
+    const count = self.fields.len + self.actions.len;
+    if (count == 0) return;
+    var at = @min(self.selected, count - 1);
+    for (0..count) |_| {
+        at = (at + (if (reverse) count - 1 else @as(usize, 1))) % count;
+        if (self.selectable(at)) {
+            self.selected = at;
+            return;
+        }
+    }
+}
+
 fn activate(self: *Self, ctx: *vxfw.EventContext, only: ?usize) !void {
     if (self.choice) |choice| {
         self.closeChoice();
@@ -102,7 +124,7 @@ fn activate(self: *Self, ctx: *vxfw.EventContext, only: ?usize) !void {
 
 /// The only keys a panel takes; every other key is its caller's.
 pub fn takesKey(key: vaxis.Key) bool {
-    return key.matches(vaxis.Key.up, .{}) or key.matches(vaxis.Key.down, .{}) or key.matches(vaxis.Key.enter, .{});
+    return key.matches(vaxis.Key.up, .{}) or key.matches(vaxis.Key.down, .{}) or key.matches(vaxis.Key.enter, .{}) or key.matches(vaxis.Key.tab, .{}) or key.matches(vaxis.Key.tab, .{ .shift = true });
 }
 
 /// The caller derives this field from its current standalone presentation.
@@ -132,7 +154,9 @@ fn eventFor(self: *Self, ctx: *vxfw.EventContext, input: vxfw.Event, only: ?usiz
     try self.hover.handleEvent(ctx, input);
     switch (input) {
         .key_press => |key| {
-            if (key.matches(vaxis.Key.up, .{})) {
+            if (key.matches(vaxis.Key.tab, .{}) or key.matches(vaxis.Key.tab, .{ .shift = true })) {
+                self.tab(key.mods.shift, only);
+            } else if (key.matches(vaxis.Key.up, .{})) {
                 self.move(false, only);
             } else if (key.matches(vaxis.Key.down, .{})) {
                 self.move(true, only);
