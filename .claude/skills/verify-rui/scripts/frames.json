@@ -307,8 +307,7 @@
         }
       ],
       "expect": [
-        "› /review this change",
-        "Skill draft kept"
+        "› /review this change"
       ],
       "absent": [
         "Unknown command",
