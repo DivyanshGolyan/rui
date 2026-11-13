@@ -219,7 +219,10 @@ def flag_start_failures(root):
         (["--test-openai-fixture-endpoint", endpoint], absent, 6, "sign_in_required", NO_KEY),
         (["--test-openai-fixture-endpoint", endpoint], {"RUI_OPENAI_KEY_FILE": str(key)}, 1, "internal_unexpected", ""),
         (["--test-openai-fixture-endpoint", endpoint], {"RUI_OPENAI_KEY_FILE": str(bad_key)}, 1, "internal_unexpected", ""),
-        (["--test-openai-fixture-endpoint", endpoint, *openai], absent, 1, "internal_unexpected", ""),
+        # main reported internal_unexpected for --provider openai here; the
+        # document spelling reaches the same missing-key refusal as the row
+        # without it.
+        (["--test-openai-fixture-endpoint", endpoint, *openai], absent, 6, "sign_in_required", NO_KEY),
         (openai, {}, 6, "sign_in_required", NO_KEY),
         (openai, {"HOME": None}, 6, "home_unavailable", ""),
         (["--set", 'providers={"codex":{}}'], {"HOME": None}, 6, "home_unavailable", ""),
@@ -249,11 +252,11 @@ def flag_start_failures(root):
     # these as internal_unexpected with exit 1 and no stdout, or, for the
     # retired flags, a flag-level choice or count refusal.
     leaf = [
-        (["--set", "providers.codex.endpoint=ftp://127.0.0.1/responses"], {}, "providers.codex.endpoint: invalid provider endpoint"),
+        (["--set", "providers.codex.endpoint=ftp://127.0.0.1/responses"], {}, "providers.codex.endpoint: must be a valid HTTPS or loopback HTTP endpoint"),
         (["--test-codex-fixture-endpoint", "ftp://x/responses"], credential, "providers.codex.endpoint: must be a valid HTTPS or loopback HTTP endpoint"),
         (["--set", "tools.bash.path="], {}, "tools.bash.path: must be an absolute path"),
-        (["--set", 'providers={"bogus":{}}'], {}, "PENDING"),
-        (["--set", "tools.bash.timeoutMs=0"], {}, "PENDING"),
+        (["--set", 'providers={"bogus":{}}'], {}, "providers.bogus: unknown provider"),
+        (["--set", "tools.bash.timeoutMs=0"], {}, "tools.bash.timeoutMs: integer is outside its bounds"),
     ]
 
     def start(index, flags, changes):
