@@ -13,8 +13,10 @@ for the PR's exact current head (SHA and head repository, so fork heads, whose
 runs GitHub lists with no pull_requests, match too), never an older completed
 run. RELEASE_PUBLISHED_AT is the release's published_at; the tag exists by
 then. A latest attempt whose policy job (or, before policy starts, the run)
-started at or after it already reads the new tag: no wait, no rerun. Otherwise
-poll an active run every 60 seconds, then rerun policy. One 90-minute budget
+started at or after it already reads the new tag: no wait, no rerun. GitHub
+reruns a run only within 30 days of its creation, so an older run's PR is
+given up at once, naming the fix (a push starts a fresh run). Otherwise poll
+an active run every 60 seconds, then rerun policy. One 90-minute budget
 covers all PRs, discovery and API calls. No completed policy job yet is a
 logged skip, not an error. One PR's failure never stops another's recheck: an
 API error stays with that PR, which is retried next poll (given up after 3
@@ -30,7 +32,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode
 
 from conflict_alert import github, pages
@@ -41,6 +43,7 @@ WIRE_PATHS = frozenset(("openapi.json", "src/wire_version.zig"))
 POLL_SECONDS = 60
 TIMEOUT_SECONDS = 90 * 60
 MAX_API_FAILURES = 3
+RERUN_WINDOW = timedelta(days=30)
 
 
 class Unrechecked(Exception):
@@ -52,6 +55,7 @@ class Selection:
     job_id: int | None
     reason: str
     waiting: bool = False
+    failed: bool = False  # nothing this script can do fixes it; the reason says what does
 
 
 def main_pr(pr):
@@ -94,9 +98,9 @@ def checked_since(run, policy):
     return timestamp(run["run_started_at"])
 
 
-def select_rerun(pr, files, runs, jobs, published):
+def select_rerun(pr, files, runs, jobs, published, now):
     """Pure decision over REST snapshots; jobs are from the run's latest
-    execution; published is the release's publication time."""
+    execution; published is the release's publication time, now the wall clock."""
     if not main_pr(pr):
         return Selection(None, "not an open, non-draft PR based on main")
     if not touches_wire(files):
@@ -111,6 +115,9 @@ def select_rerun(pr, files, runs, jobs, published):
     policy = policy[0] if policy else None
     if checked_since(run, policy) >= published:
         return Selection(None, f"run {run['id']} checks after publication; it reads the new release itself")
+    if now - timestamp(run["created_at"]) > RERUN_WINDOW:
+        return Selection(None, f"run {run['id']} is older than GitHub's 30-day rerun limit; "
+                               "push to the PR to start a fresh run", failed=True)
     if run["status"] != "completed":
         return Selection(None, f"latest run {run['id']} is {run['status']}", waiting=True)
     if policy is None or policy["status"] != "completed" or policy["conclusion"] == "skipped":
@@ -134,7 +141,7 @@ def changed_files(api, repo, number):
     return files
 
 
-def recheck_one(api, repo, pr, files, published):
+def recheck_one(api, repo, pr, files, published, now):
     number = pr["number"]
     current = api("GET", f"repos/{repo}/pulls/{number}")
     if not main_pr(current):
@@ -149,7 +156,7 @@ def recheck_one(api, repo, pr, files, published):
     # Active runs too: policy's start decides whether the run needs a wait.
     jobs = (list(pages(api, f"repos/{repo}/actions/runs/{run['id']}/jobs?filter=latest", "jobs"))
             if run is not None else [])
-    selection = select_rerun(current, files, runs, jobs, published)
+    selection = select_rerun(current, files, runs, jobs, published, now())
     if selection.job_id is None:
         return selection
     # Revalidate before POST, including an intervening head change or rerun
@@ -161,7 +168,7 @@ def recheck_one(api, repo, pr, files, published):
     fresh = latest_run(current, fresh_runs)
     if fresh is not None and (fresh["id"], fresh["run_attempt"]) != (run["id"], run["run_attempt"]):
         return Selection(None, "latest run changed while selecting", waiting=True)
-    selection = select_rerun(current, files, fresh_runs, jobs, published)
+    selection = select_rerun(current, files, fresh_runs, jobs, published, now())
     if selection.job_id is not None:
         print(f"Rerun PR #{number}: job {selection.job_id}, {selection.reason}", flush=True)
         api("POST", f"repos/{repo}/actions/jobs/{selection.job_id}/rerun")
@@ -176,8 +183,12 @@ def unrechecked(reasons):
     return ", ".join(f"#{number} ({reasons[number]})" for number in sorted(reasons)) or "unknown"
 
 
-def recheck(api, repo, published, *, clock=None, sleep=None):
-    clock, sleep = clock or time.monotonic, sleep or time.sleep
+def utc_now():
+    return datetime.now(timezone.utc)
+
+
+def recheck(api, repo, published, *, clock=None, sleep=None, now=None):
+    clock, sleep, now = clock or time.monotonic, sleep or time.sleep, now or utc_now
     deadline = clock() + TIMEOUT_SECONDS
     pending = {}   # number -> (PR snapshot, changed files or None until listed)
     reasons = {}   # number -> why it is not rechecked yet, or was given up
@@ -244,10 +255,12 @@ def recheck(api, repo, published, *, clock=None, sleep=None):
                 done(number)
         while pending:
             for number, (pr, files) in list(pending.items()):
-                ok, selection = per_pr(number, lambda: recheck_one(bounded_api, repo, pr, files, published))
+                ok, selection = per_pr(number, lambda: recheck_one(bounded_api, repo, pr, files, published, now))
                 if not ok:
                     continue
-                if selection.waiting:
+                if selection.failed:
+                    give_up(number, selection.reason)
+                elif selection.waiting:
                     print(f"Wait PR #{number}: {selection.reason}", flush=True)
                     reasons[number] = selection.reason
                 else:

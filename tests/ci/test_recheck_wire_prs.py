@@ -19,6 +19,9 @@ FORK = "contributor/repo"
 PUBLISHED_AT = "2026-11-13T12:00:00Z"
 PUBLISHED = owner.timestamp(PUBLISHED_AT)
 BEFORE, AT, AFTER = "2026-11-13T11:00:00Z", PUBLISHED_AT, "2026-11-13T12:00:01Z"
+NOW = owner.timestamp("2026-11-13T12:05:00Z")
+# GitHub's rerun limit counts from the run's creation: exactly 30 days is still rerunnable.
+WINDOW_EDGE, EXPIRED = "2026-10-14T12:05:00Z", "2026-10-14T12:04:59Z"
 
 
 def head(number=1, repo=REPO, sha=None):
@@ -33,7 +36,7 @@ def pull(number=1, **changes):
 def run(run_id=10, **changes):
     return {"id": run_id, "run_number": run_id, "run_attempt": 1, "event": "pull_request", "path": ".github/workflows/check.yml",
             "head_sha": "current-head", "head_repository": {"full_name": REPO}, "pull_requests": [{"number": 1}],
-            "status": "completed", "run_started_at": BEFORE, **changes}
+            "status": "completed", "created_at": BEFORE, "run_started_at": BEFORE, **changes}
 
 
 def job(job_id=100, **changes):
@@ -59,7 +62,7 @@ class SelectionTest(unittest.TestCase):
         return owner.select_rerun(pull() if pr is None else pr,
                                   files("openapi.json") if changed is None else changed,
                                   [run()] if runs is None else runs,
-                                  [job()] if jobs is None else jobs, PUBLISHED)
+                                  [job()] if jobs is None else jobs, PUBLISHED, NOW)
 
     def test_each_wire_owner_qualifies_in_a_mixed_file_list(self):
         for name in ("openapi.json", "src/wire_version.zig"):
@@ -151,6 +154,16 @@ class SelectionTest(unittest.TestCase):
         attempt = run(run_attempt=2, run_started_at=AFTER)
         self.assertIsNone(self.select(runs=[attempt], jobs=[job(run_attempt=2, started_at=AFTER)]).job_id)
         self.assertEqual(self.select(runs=[attempt], jobs=[job(run_attempt=2)]).job_id, 100)
+
+    def test_run_past_githubs_rerun_limit_is_given_up_naming_the_fix(self):
+        expired = self.select(runs=[run(created_at=EXPIRED)])
+        self.assertIsNone(expired.job_id)
+        self.assertTrue(expired.failed)
+        self.assertFalse(expired.waiting)
+        self.assertIn("older than GitHub's 30-day rerun limit; push to the PR to start a fresh run", expired.reason)
+        self.assertEqual(self.select(runs=[run(created_at=WINDOW_EDGE)]).job_id, 100)
+        # A run that checked after publication needs no rerun, whatever its age.
+        self.assertFalse(self.select(runs=[run(created_at=EXPIRED)], jobs=[job(started_at=AFTER)]).failed)
 
     def test_publication_time_must_be_a_zoned_github_timestamp(self):
         for value in (None, "", "null", "2026-11-13T12:00:00"):
@@ -247,11 +260,17 @@ class Clock:
 
 
 class AdapterTest(unittest.TestCase):
+    def setUp(self):
+        # main() reads the wall clock; pin it so fixture runs stay inside the rerun limit.
+        patcher = mock.patch.object(owner, "utc_now", lambda: NOW)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def recheck(self, api, clock=None):
         output = io.StringIO()
         clock = clock or Clock()
         with redirect_stdout(output):
-            owner.recheck(api, REPO, PUBLISHED, clock=clock.monotonic, sleep=clock.sleep)
+            owner.recheck(api, REPO, PUBLISHED, clock=clock.monotonic, sleep=clock.sleep, now=lambda: NOW)
         return output.getvalue()
 
     def test_reruns_policy_and_logs_pr_and_job(self):
@@ -300,7 +319,7 @@ class AdapterTest(unittest.TestCase):
         clock = Clock()
         with redirect_stdout(io.StringIO()), self.assertRaisesRegex(
                 TimeoutError, r"could not recheck PRs: #1 \(latest run 10 is in_progress\), #2 \(latest run 20 is queued\)$"):
-            owner.recheck(api, REPO, PUBLISHED, clock=clock.monotonic, sleep=clock.sleep)
+            owner.recheck(api, REPO, PUBLISHED, clock=clock.monotonic, sleep=clock.sleep, now=lambda: NOW)
         self.assertEqual(clock.now, 90 * 60)
         self.assertEqual(clock.sleeps, [60] * 90)
         self.assertEqual(api.posts, [])
@@ -552,6 +571,19 @@ class AdapterTest(unittest.TestCase):
                 self.assertIn("Retry PR #1 next poll: API error: HTTP 403: denied", output)
                 self.assertIn("Rerun PR #1: job 100", output)
                 self.assertEqual(clock.sleeps, [] if endpoint == "pulls/1/files" else [60])
+
+    def test_expired_run_is_given_up_at_once_while_others_are_rerun(self):
+        api = self.two_prs()
+        api.runs[0] = run(created_at=EXPIRED)
+        output = io.StringIO()
+        clock = Clock()
+        with redirect_stdout(output), self.assertRaisesRegex(
+                owner.Unrechecked, r"could not recheck PRs: #1 \(run 10 is older than GitHub's 30-day rerun limit; "
+                                   r"push to the PR to start a fresh run\)$"):
+            owner.recheck(api, REPO, PUBLISHED, clock=clock.monotonic, sleep=clock.sleep, now=lambda: NOW)
+        self.assertEqual(api.posts, ["actions/jobs/200/rerun"])
+        self.assertEqual(clock.sleeps, [])
+        self.assertIn("Fail PR #1:", output.getvalue())
 
     def test_one_prs_invalid_data_gives_it_up_without_stopping_others(self):
         api, clock = self.two_prs(), Clock()

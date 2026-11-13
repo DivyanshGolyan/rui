@@ -355,6 +355,10 @@ zig build -Doptimize=ReleaseSafe -j2 --summary all
 Only verified publication advances the `stable` pointer.
 To recover an interrupted publication, rerun the promotion's failed jobs: `gh run rerun <promotion run id> --failed`.
 
+After publishing, Release rechecks the [wire-version gate](tests/ci/test_wire_version.py) on open wire-changing PRs: [recheck_wire_prs.py](tests/ci/recheck_wire_prs.py) reruns `policy`, and so `admission`, on each open, non-draft PR based on main that touches `openapi.json` or `src/wire_version.zig` and whose latest check ran before publication.
+A red recheck step means the release did ship; its error names each PR it could not recheck and why.
+Do not rerun the promotion for it: push to each named PR, or rerun that PR's `policy` job; a PR whose run is past GitHub's 30-day rerun limit needs a push.
+
 [release.py](tests/ci/release.py) skips a SHA only when a verified public release already includes it, and can repair a missed pointer update without rebuilding.
 Drafts and orphan tags reserve a version for their exact SHA; recovery reuses that identity rather than skipping incomplete publication.
 A newer main SHA gets a newer version; one release covers a whole promotion batch.
