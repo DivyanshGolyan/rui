@@ -11,8 +11,6 @@ const Palette = struct {
     ground: Rgb,
     selvedge: Rgb,
     selection: Rgb,
-    /// Per-channel midpoint of selvedge and selection: a pointer's row, quieter than the keyboard's.
-    hover: Rgb,
     strong: Rgb,
     body: Rgb,
     indigo: Rgb,
@@ -25,8 +23,7 @@ const Palette = struct {
 const light: Palette = .{
     .ground = .{ 0xf3, 0xee, 0xe2 },
     .selvedge = .{ 0xe6, 0xdd, 0xc8 },
-    .selection = .{ 0xdd, 0xe0, 0xee },
-    .hover = .{ 0xe1, 0xde, 0xdb },
+    .selection = .{ 0xde, 0xda, 0xd5 },
     .strong = .{ 0x1a, 0x18, 0x14 },
     .body = .{ 0x2f, 0x2b, 0x25 },
     .indigo = .{ 0x1f, 0x2d, 0x6b },
@@ -38,8 +35,7 @@ const light: Palette = .{
 const dark: Palette = .{
     .ground = .{ 0x12, 0x19, 0x33 },
     .selvedge = .{ 0x1a, 0x22, 0x46 },
-    .selection = .{ 0x2a, 0x34, 0x67 },
-    .hover = .{ 0x22, 0x2b, 0x56 },
+    .selection = .{ 0x2b, 0x2f, 0x45 },
     .strong = .{ 0xf2, 0xec, 0xdf },
     .body = .{ 0xd4, 0xce, 0xbf },
     .indigo = .{ 0xa9, 0xb6, 0xec },
@@ -56,13 +52,20 @@ fn palette(mode: Mode) Palette {
     };
 }
 
+/// The pointer wash follows the two surfaces it sits between, never a second palette.
+fn midpoint(a: Rgb, b: Rgb) Rgb {
+    var result: Rgb = undefined;
+    for (a, b, &result) |x, y, *out| out.* = @intCast((@as(u16, x) + y) / 2);
+    return result;
+}
+
 pub fn background(mode: Mode, depth: Depth, role: Background) Color {
     const p = palette(mode);
     const rgb = switch (role) {
         .ground => p.ground,
         .selvedge => p.selvedge,
         .selection => p.selection,
-        .hover => p.hover,
+        .hover => midpoint(p.selvedge, p.selection),
         .alert => Rgb{ 0xe9, 0xb1, 0x30 },
     };
     return switch (depth) {
@@ -77,8 +80,8 @@ pub fn text(mode: Mode, depth: Depth, role: Text, on: Background) Color {
         .strong => p.strong,
         .body => p.body,
         .indigo => p.indigo,
-        // Quiet text darkens on the day selvedge and hover to keep 4.5:1.
-        .quiet => if (mode == .light and (on == .selvedge or on == .hover)) Rgb{ 0x62, 0x5a, 0x4c } else p.quiet,
+        // Quiet text darkens on the day wash surfaces to keep 4.5:1.
+        .quiet => if (mode == .light and (on == .selvedge or on == .selection or on == .hover)) Rgb{ 0x62, 0x5a, 0x4c } else p.quiet,
         .attention => p.attention,
         .failure => p.failure,
         .on_alert => Rgb{ 0x14, 0x14, 0x14 },
@@ -141,18 +144,14 @@ const Indexed = struct {
     thread: u8,
 };
 
-/// The xterm grey ramp has no step between selvedge and selection in either skin, so the
-/// nearest hover entries (237 night, 253 day) would repeat them. Night hover takes 235,
-/// between ground and selvedge, a step from both and quieter than selection on each. Day
-/// hover takes white 231, lifting a row where selection darkens it; the darker free grey
-/// 252 would fail 4.5:1 under the pinned attention 58 and stand out more than selection.
+/// Nearest distinct entries beside the existing ground and selvedge. Day selection
+/// takes 188 because its nearest, 253, is the selvedge. Hover's nearest free grey,
+/// 252, fails 4.5:1 with attention 58; 254 is the nearest remaining readable entry.
+/// Night selection and hover take 237 and 235 around selvedge 236.
 fn pinnedBackground(mode: Mode, role: Background) ?u8 {
     return switch (role) {
-        .selection => if (mode == .dark) 237 else null,
-        .hover => switch (mode) {
-            .dark => 235,
-            .light => 231,
-        },
+        .selection => if (mode == .dark) 237 else 188,
+        .hover => if (mode == .dark) 235 else 254,
         else => null,
     };
 }
@@ -213,13 +212,25 @@ test "wordmark requires a known terminal and UTF-8" {
     }
 }
 
+test "selection uses ink wash and hover derives from its neighbouring surfaces" {
+    try std.testing.expectEqual(Rgb{ 0xde, 0xda, 0xd5 }, background(.light, .direct, .selection).direct);
+    try std.testing.expectEqual(Rgb{ 0x2b, 0x2f, 0x45 }, background(.dark, .direct, .selection).direct);
+    for (std.enums.values(Mode)) |mode| {
+        const bar = background(mode, .direct, .selvedge).direct;
+        const selection = background(mode, .direct, .selection).direct;
+        const hover = background(mode, .direct, .hover).direct;
+        for (bar, selection, hover) |a, b, actual| try std.testing.expectEqual(@as(u8, @intCast((@as(u16, a) + b) / 2)), actual);
+    }
+}
+
 test "decided indexed pins" {
     try std.testing.expectEqual(@as(u8, 58), text(.light, .indexed, .attention, .ground).indexed);
     try std.testing.expectEqual(@as(u8, 58), text(.light, .indexed, .attention, .selvedge).indexed);
+    try std.testing.expectEqual(@as(u8, 188), background(.light, .indexed, .selection).indexed);
     try std.testing.expectEqual(@as(u8, 237), background(.dark, .indexed, .selection).indexed);
     try std.testing.expectEqual(@as(u8, 234), background(.dark, .indexed, .ground).indexed);
     try std.testing.expectEqual(@as(u8, 235), background(.dark, .indexed, .hover).indexed);
-    try std.testing.expectEqual(@as(u8, 231), background(.light, .indexed, .hover).indexed);
+    try std.testing.expectEqual(@as(u8, 254), background(.light, .indexed, .hover).indexed);
     try std.testing.expectEqual(Rgb{ 0x62, 0x5a, 0x4c }, text(.light, .direct, .quiet, .selvedge).direct);
     try std.testing.expectEqual(Rgb{ 0x62, 0x5a, 0x4c }, text(.light, .direct, .quiet, .hover).direct);
 }

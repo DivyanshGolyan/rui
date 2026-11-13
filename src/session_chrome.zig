@@ -112,6 +112,9 @@ pub const FooterSpans = struct {
 /// How long a notice about the person's own last action stays without a key.
 pub const notice_ms = 5_000;
 
+/// Whose outcome a notice answers.
+pub const NoticeAnswers = enum { other, panel_copy };
+
 /// The notice about the person's own last action: `Copied 12 lines`,
 /// `! Unknown command /x`. One at a time: a newer one replaces it,
 /// and the next key dismisses it before the key acts, so a key's own
@@ -124,14 +127,30 @@ pub fn Notice(comptime capacity: usize) type {
         len: usize = 0,
         /// When it was shown, on the shell's clock; null when none is held.
         shown_ms: ?u64 = null,
+        /// Whose outcome it answers: Chat info's Copy last answer reads
+        /// `Copied` only while the reply to its own copy shows.
+        answers: NoticeAnswers = .other,
 
         /// Holds `text`, shown at `now_ms`, in place of any notice. A longer
         /// text is cut on a character.
         pub fn show(self: *Self, text: []const u8, now_ms: u64) void {
+            self.answers = .other;
             const len = utf8_validation.scalarStart(text, @min(text.len, capacity));
             std.mem.copyForwards(u8, self.bytes[0..len], text[0..len]);
             self.len = len;
             self.shown_ms = now_ms;
+        }
+
+        /// Successful clipboard output, sharing the ordinary notice lifetime;
+        /// `answers` names the copy it reports.
+        pub fn showCopy(self: *Self, now_ms: u64, answers: NoticeAnswers) void {
+            self.show("Sent to clipboard", now_ms);
+            self.answers = answers;
+        }
+
+        /// Whether the reply to Chat info's own copy shows at `now_ms`.
+        pub fn showsPanelCopy(self: *const Self, now_ms: u64) bool {
+            return self.answers == .panel_copy and self.current(now_ms) != null;
         }
 
         /// The next key: the notice goes.
@@ -722,6 +741,23 @@ pub const StandaloneCases = struct {
         break :blk result;
     };
 };
+
+test "copy success shares short reply next-key replacement and expiry owner" {
+    var notice: Notice(64) = .{};
+    notice.showCopy(10, .panel_copy);
+    try std.testing.expect(notice.showsPanelCopy(10));
+    notice.dismiss();
+    try std.testing.expect(!notice.showsPanelCopy(10));
+    notice.showCopy(10, .panel_copy);
+    notice.show("failure reply", 11);
+    try std.testing.expect(!notice.showsPanelCopy(11));
+    notice.showCopy(10, .panel_copy);
+    notice.showCopy(11, .other);
+    try std.testing.expectEqualStrings("Sent to clipboard", notice.current(11).?);
+    try std.testing.expect(!notice.showsPanelCopy(11));
+    notice.showCopy(10, .panel_copy);
+    try std.testing.expect(!notice.showsPanelCopy(10 + notice_ms));
+}
 
 test "empty chat facts fit model effort and home folder with semantic fields" {
     const facts: session_line.Facts = .{ .name = "reference", .model = "gpt-6.1-sol", .effort = .low, .folder = "/home/u/code/rui", .home = "/home/u", .left = 100, .asks = true };

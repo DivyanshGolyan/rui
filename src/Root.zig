@@ -67,8 +67,9 @@ const Layout = struct {
 /// One derived pane decision drives drawing, visibility and return focus.
 fn chooseLayout(self: *const Self) Layout {
     std.debug.assert(!self.input.layer.signInOpen() or self.sign_in != null);
-    const pane = app_input.pane(self.input.layer, self.session != null);
-    return .{ .split = self.size.width >= split_at and pane != .overview, .pane = pane };
+    const wide = self.size.width >= split_at;
+    const pane = app_input.mainPane(self.input, self.session != null, wide);
+    return .{ .split = wide and pane != .overview, .pane = pane };
 }
 
 pub fn closeMainPresentation(self: *Self) void {
@@ -89,6 +90,12 @@ pub fn openSession(self: *Self, ctx: *vxfw.EventContext, session: vxfw.Widget, k
 /// here with a notice, and Esc from settings returns to it.
 pub fn showMain(self: *Self, ctx: *vxfw.EventContext) !void {
     try self.navigate(ctx, .show_main);
+}
+
+/// List activation resumes the open chat as a chat-pane click does: focus
+/// moves, and nothing the chat presents closes.
+pub fn focusChat(self: *Self, ctx: *vxfw.EventContext) !void {
+    try self.navigate(ctx, .focus_chat);
 }
 
 /// Settings takes the place of the main pane; it is no content of a feed.
@@ -125,7 +132,7 @@ fn navigate(self: *Self, ctx: *vxfw.EventContext, request: app_input.Input) !voi
 /// the page's answers for this event, read by value.
 fn facts(self: *const Self, key: ?vaxis.Key) app_input.Facts {
     const session_open = self.session != null;
-    if (!self.input.layer.settingsOpen()) return .{ .session_open = session_open };
+    if (!self.input.layer.settingsOpen()) return .{ .session_open = session_open, .wide = self.size.width >= split_at };
     const page = &self.settings_page;
     return .{ .session_open = session_open, .settings = .{
         .keys_open = page.keys_open,
@@ -151,6 +158,9 @@ fn apply(self: *Self, ctx: *vxfw.EventContext, effects: app_input.Effects, route
     }
     if (effects.focus) |focus| try ctx.requestFocus(switch (focus) {
         .main => self.session orelse self.overview,
+        // List keys are routed by Root, not by a focusable list editor.
+        // Root remains drawn when a wide sidebar becomes a narrow overview.
+        .list => self.widget(),
         .settings => self.settings_page.widget(),
         .sign_in => self.sign_in.?,
     });
@@ -177,6 +187,14 @@ fn apply(self: *Self, ctx: *vxfw.EventContext, effects: app_input.Effects, route
     if (effects.redraw) ctx.redraw = true;
 }
 
+/// Left on an empty chat draft asks whether a visible sidebar can take
+/// focus without retiring the chat. With none (narrow), the chat leaves.
+pub fn focusList(self: *Self, ctx: *vxfw.EventContext) !bool {
+    const effect = app_input.step(&self.input, self.facts(null), .back_to_list);
+    try self.apply(ctx, effect, null);
+    return effect.focus == .list;
+}
+
 /// The Session has settled its borrowers before calling this. No terminal
 /// leaves raw mode and no input stream is transferred between screens.
 pub fn closeSession(self: *Self, ctx: *vxfw.EventContext) !void {
@@ -184,7 +202,7 @@ pub fn closeSession(self: *Self, ctx: *vxfw.EventContext) !void {
     self.session = null;
     self.session_keys = null;
     if (!self.input.layer.settingsOpen()) self.settings_page.cancelChoice();
-    if (self.input.layer == .main) try ctx.requestFocus(self.overview);
+    try self.navigate(ctx, .session_closed);
     ctx.redraw = true;
 }
 
@@ -197,7 +215,7 @@ fn capture(raw: *anyopaque, ctx: *vxfw.EventContext, routed: vxfw.Event) !void {
         .paste_end => .paste_end,
         .mouse => |mouse| .{ .mouse = switch (mouse.button) {
             .wheel_up, .wheel_down, .wheel_left, .wheel_right => .wheel,
-            else => if (mouse.type == .motion) .motion else .click,
+            else => if (mouse.type == .motion) .motion else if (mouse.type != .press or mouse.button != .left or self.size.width < split_at) .click else if (mouse.col < list_width) .list_click else .chat_click,
         } },
         .key_release => .key_release,
         .color_report, .color_scheme => .colors,
@@ -229,7 +247,7 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
             if (ctx.quit) return;
             if (self.session) |session| try session.handleEvent(ctx, .tick);
             if (ctx.quit) return;
-            if (self.input.layer != .main) {
+            if (self.input.layer != .main or self.input.list_focused) {
                 // Hidden screens still settle their workers and consent state,
                 // but their presentation targets aren't in this focus tree.
                 // Retain every other command; a real openSession transition
@@ -1042,4 +1060,76 @@ test "Root navigation closes the composed main presentation before focusing anot
     try std.testing.expect(root.input.layer.settingsOpen());
     try std.testing.expect(root.settings_page.panel.choice != null);
     try std.testing.expectEqual(@as(usize, 7), owner.closes);
+}
+
+test "Root resumes the open chat from the list by key or click without closing its presentation" {
+    const Owner = struct {
+        closes: usize = 0,
+        fn close(raw: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.closes += 1;
+        }
+    };
+    const pane: vxfw.Text = .{ .text = "" };
+    var owner: Owner = .{};
+    var root: Self = .{ .overview = pane.widget(), .list = pane.widget(), .session = pane.widget(), .size = .{ .width = 140, .height = 40 }, .main_presentation = .{ .context = &owner, .close = Owner.close } };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    for ([_]bool{ false, true }) |click| {
+        try std.testing.expect(try root.focusList(&ctx));
+        if (click) {
+            try root.widget().captureEvent(&ctx, .{ .mouse = .{ .col = 100, .row = 10, .button = .left, .type = .press, .mods = .{} } });
+        } else try root.focusChat(&ctx);
+        try std.testing.expect(!root.input.list_focused);
+        try std.testing.expect(ctx.cmds.items[ctx.cmds.items.len - 1].request_focus.eql(root.session.?));
+    }
+    try std.testing.expectEqual(@as(usize, 0), owner.closes);
+}
+
+test "App root hands list activation unchanged to its one core" {
+    const Selection = struct {
+        calls: usize = 0,
+        fn take(raw: *anyopaque, _: *vxfw.EventContext, input: vxfw.Event, delivery: app_input.Effects.Delivery) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            try std.testing.expect(input.key_press.matches(vaxis.Key.enter, .{}) or input.key_press.matches(vaxis.Key.right, .{}));
+            try std.testing.expect(delivery.under == .main and !delivery.pasted);
+            self.calls += 1;
+        }
+    };
+    const overview: vxfw.Text = .{ .text = "List" };
+    const session: vxfw.Text = .{ .text = "Chat" };
+    var selection: Selection = .{};
+    var root: Self = .{
+        .overview = overview.widget(),
+        .list = overview.widget(),
+        .session = session.widget(),
+        .size = .{ .width = 140, .height = 40 },
+        .overview_keys = .{ .context = &selection, .take = Selection.take },
+    };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    for ([_]u21{ vaxis.Key.right, vaxis.Key.enter }) |key| {
+        try std.testing.expect(try root.focusList(&ctx));
+        const target = ctx.cmds.items[ctx.cmds.items.len - 1].request_focus;
+        try std.testing.expect(target.eventHandler != null);
+        try std.testing.expect(target.eql(root.widget()));
+        try root.widget().captureEvent(&ctx, .{ .key_press = .{ .codepoint = key } });
+        try std.testing.expect(root.input.list_focused);
+        try root.showMain(&ctx);
+        try std.testing.expect(!root.input.list_focused);
+    }
+    try std.testing.expectEqual(@as(usize, 2), selection.calls);
+    _ = try root.focusList(&ctx);
+    // Only a left press transfers pane focus; hover, drag releases and
+    // context clicks retain the current key owner.
+    for ([_]vaxis.Mouse{
+        .{ .col = 50, .row = 10, .button = .left, .type = .motion, .mods = .{} },
+        .{ .col = 50, .row = 10, .button = .left, .type = .release, .mods = .{} },
+        .{ .col = 50, .row = 10, .button = .right, .type = .press, .mods = .{} },
+    }) |mouse| {
+        try root.widget().captureEvent(&ctx, .{ .mouse = mouse });
+        try std.testing.expect(root.input.list_focused);
+    }
 }

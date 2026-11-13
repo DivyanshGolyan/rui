@@ -1,9 +1,10 @@
 from pathlib import Path
+import tempfile
 import unittest
 
 import re
 
-from store_conformance import ROOT, SQLITE_TESTS, TESTS, check, fixture_verdict, main, not_portable, rewrite, table
+from store_conformance import ROOT, SQLITE_TESTS, TESTS, check, conformance_sources, fixture_verdict, main, not_portable, rewrite, table
 
 PRE_SPLIT = '''//! The Store's tests.
 
@@ -82,25 +83,60 @@ class StoreConformanceTest(unittest.TestCase):
                                     'test "no Store" {\n    try std.testing.expect(storage.testing_content_work.read.load(.monotonic) == 0);')
         self.assertEqual(table(counted)[2], ("no Store", "sqlite_tests.zig", "a SQLite mechanism"))
 
-    def test_repository_tests_zig_names_no_sqlite_mechanism(self):
-        self.assertIsNone(check((ROOT / TESTS).read_text()))
+    def test_repository_conformance_files_name_no_sqlite_mechanism(self):
+        sources = conformance_sources()
+        names = [name for name, _ in sources]
+        self.assertEqual(names[0], TESTS)
+        self.assertTrue(all(name.startswith("src/store/tests/") for name in names[1:]))
+        self.assertGreater(len(names), 1)
+        self.assertIsNone(check(sources))
+
+    def test_conformance_sources_read_tests_zig_and_every_domain_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in (TESTS, "src/store/tests/b.zig", "src/store/tests/nested/a.zig",
+                         "src/store/sqlite_tests.zig", "src/store/sqlite_tests/c.zig", "src/store/testing.zig"):
+                (root / name).parent.mkdir(parents=True, exist_ok=True)
+                (root / name).write_text(name)
+            self.assertEqual(conformance_sources(root), [
+                (TESTS, TESTS), ("src/store/tests/b.zig", "src/store/tests/b.zig"),
+                ("src/store/tests/nested/a.zig", "src/store/tests/nested/a.zig")])
+
+    def test_check_reports_a_violation_in_a_domain_file(self):
+        clean = 'const store_testing = @import("../testing.zig");\ntest "t" {\n    try std.testing.expect(true);\n}\n'
+        self.assertIsNone(check([(TESTS, ""), ("src/store/tests/a.zig", clean)]))
+        problem = check([(TESTS, ""), ("src/store/tests/a.zig", clean),
+                         ("src/store/tests/b.zig", 'test "t" {\n    try sqlite.exec(db, s);\n}\n')])
+        self.assertEqual(problem, "src/store/tests/b.zig:2 names 'sqlite.', a SQLite mechanism; "
+                                  "move the test to the SQLite test files under src/store/sqlite_tests/")
+
+    def test_check_refuses_sqlite_imports_from_a_domain_file(self):
+        for module in ("../sqlite.zig", "../sqlite_tests.zig", "../sqlite_tests/x.zig", "sqlite.zig",
+                       "sqlite_tests.zig", "sqlite_tests/x.zig"):
+            with self.subTest(module=module):
+                self.assertEqual(check([("src/store/tests/a.zig", f'const s = @import("{module}");\n')]),
+                                 "src/store/tests/a.zig imports a SQLite module; SQLite-only tests belong in "
+                                 "the SQLite test files under src/store/sqlite_tests/")
+        for module in ("../testing.zig", "../tests.zig", "../sqlite_shim/x.zig"):
+            with self.subTest(module=module):
+                self.assertIsNone(check([("src/store/tests/a.zig", f'const s = @import("{module}");\n')]))
 
     def test_check_refuses_each_sqlite_name_in_code(self):
         for line in ("x(storage.database);", "try sqlite.exec(db, s);", "_ = c.sqlite3_step(s);",
                      "if (r == c.SQLITE_ROW) {}", "try expect(2, a.passes);", "storage.statements.count();",
                      "try storage.open(std.testing.io, database, root);", "storage.openWithOptions(io, d, r, .{});"):
             with self.subTest(line=line):
-                self.assertIsNotNone(check(f"test \"t\" {{\n    {line}\n}}\n"))
-        self.assertIsNotNone(check('const sqlite = @import("sqlite.zig");\n'))
+                self.assertIsNotNone(check([(TESTS, f"test \"t\" {{\n    {line}\n}}\n")]))
+        self.assertIsNotNone(check([(TESTS, 'const sqlite = @import("sqlite.zig");\n')]))
 
     def test_check_ignores_strings_and_comments(self):
-        self.assertIsNone(check('// sqlite.exec(storage.database)\nconst s = @embedFile("sqlite.zig");\n'
-                                'const t = "c.sqlite3_step";\n'))
+        self.assertIsNone(check([(TESTS, '// sqlite.exec(storage.database)\nconst s = @embedFile("sqlite.zig");\n'
+                                         'const t = "c.sqlite3_step";\n')]))
 
     def test_rewrite_moves_sqlite_tests_and_wraps_the_rest(self):
         tests, moved, stats = rewrite(PRE_SPLIT)
         self.assertEqual(stats, {"kept_tests": 2, "conformance": 1, "moved_tests": 1})
-        self.assertIsNone(check(tests))
+        self.assertIsNone(check([(TESTS, tests)]))
         self.assertIn('''test "a portable test" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {

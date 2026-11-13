@@ -11,6 +11,7 @@ const cores = .{
     .{ "activity_facts.zig", @import("activity_facts.zig") },
     .{ "activity_read.zig", @import("activity_read.zig") },
     .{ "activity_reply.zig", @import("activity_reply.zig") },
+    .{ "chat_info_focus.zig", @import("chat_info_focus.zig") },
     .{ "app_input.zig", @import("app_input.zig") },
     .{ "attempt.zig", @import("attempt.zig") },
     .{ "attention.zig", @import("attention.zig") },

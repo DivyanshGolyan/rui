@@ -30,7 +30,6 @@ const session_upgrade = @import("session_upgrade.zig");
 const upgrade_status = @import("upgrade_status.zig");
 const submission = @import("submission_state.zig");
 const TerminalText = @import("TerminalText.zig");
-const theme = @import("theme.zig");
 const work_line = @import("work_line.zig");
 const utf8_validation = @import("utf8_validation.zig");
 const unicode = @import("terminal_unicode");
@@ -124,7 +123,20 @@ pub const marks = state_marks.marks;
 /// Your own Session's active mark turns through the shared frames.
 pub const spinner = state_marks.spinner;
 
-pub const Action = enum { previous, next, select_previous, select_next, first, last, clear, exit, stop, archive };
+pub const Action = enum {
+    previous,
+    next,
+    select_previous,
+    select_next,
+    first,
+    last,
+    clear,
+    exit,
+    stop,
+    archive,
+    /// Right: a Session row opens as Enter opens it; other rows do nothing.
+    open_session,
+};
 
 /// The one key table.
 pub const keys: keymap.Keymap(Action) = .init(.{
@@ -140,6 +152,8 @@ pub const keys: keymap.Keymap(Action) = .init(.{
     .alt_a = .archive,
     .up = .previous,
     .down = .next,
+    .left = null,
+    .right = .open_session,
     .shift_up = .select_previous,
     .shift_down = .select_next,
     .page_up = null,
@@ -598,6 +612,7 @@ pub const Effect = union(enum) {
     /// Copied prospective configuration; the model bytes do not borrow state.
     create: ?Default,
     open: Reference,
+    focus_chat,
     open_settings,
 
     stop: Reference,
@@ -2077,6 +2092,7 @@ fn listInput(state: *State, delivery: InputDelivery, effects: *Effects) error{Ou
         .enter => try enter(state, effects),
         .action => |action| switch (action) {
             .exit => unreachable,
+            .open_session => if (state.selected == .session) try enter(state, effects),
             .clear => state.notice = null,
             .stop => stopKey(state, null, effects),
             .archive => archiveIntent(state, .selected_archive, effects),
@@ -2096,6 +2112,11 @@ fn enter(state: *State, effects: *Effects) error{OutOfMemory}!void {
         effects.add(.open_settings);
         return;
     }
+    // Resuming the drawn open chat is navigation, not a new Host intent.
+    if (state.selected == .session) if (state.conversing) |open| if (std.mem.eql(u8, &state.selected.session, &open)) {
+        effects.add(.focus_chat);
+        return;
+    };
     if (!admitHostRequest(state)) return;
     switch (state.selected) {
         .settings => unreachable,
@@ -2303,52 +2324,12 @@ pub fn band(state: *const State) ?Band {
     return null;
 }
 
-pub const Rgb = theme.Rgb;
+pub const Rgb = @import("theme.zig").Rgb;
 
 /// The Khadi skins. Day is an undyed cotton ground with indigo ink; night is
 /// an indigo-dyed ground with cotton text. Both alarm in station-board
 /// yellow with black and fail in madder.
 pub const Skin = enum { day, night };
-
-pub const Palette = struct {
-    colours: std.enums.EnumArray(Colour, Rgb),
-    backgrounds: std.enums.EnumArray(Background, Rgb),
-};
-
-fn hex(comptime text: *const [7]u8) Rgb {
-    @setEvalBranchQuota(10_000);
-    return .{
-        std.fmt.parseInt(u8, text[1..3], 16) catch unreachable,
-        std.fmt.parseInt(u8, text[3..5], 16) catch unreachable,
-        std.fmt.parseInt(u8, text[5..7], 16) catch unreachable,
-    };
-}
-
-/// One table per skin, from the Rui Khadi mock's `SKINS`. `render` reads
-/// roles only; the frame looks each up here.
-pub const palettes = std.enums.EnumArray(Skin, Palette).init(.{
-    .day = .{
-        .colours = .init(.{ .strong = hex("#121a44"), .ink = hex("#1d2a63"), .normal = hex("#3a4677"), .quiet = hex("#535c86"), .mark = hex("#7d84a6"), .rule = hex("#d8cfbb"), .attention = hex("#7a5200"), .failure = hex("#9e2328"), .on_band = hex("#141414") }),
-        .backgrounds = .init(.{ .ground = hex("#f3eee2"), .bar = hex("#e7dfcc"), .selection = hex("#dcdcec"), .hover = hex("#e1dddc"), .band = hex("#f2c200") }),
-    },
-    .night = .{
-        .colours = .init(.{ .strong = hex("#f6f1e4"), .ink = hex("#e2dccb"), .normal = hex("#bdb8a9"), .quiet = hex("#9d9bb0"), .mark = hex("#6e7396"), .rule = hex("#2a3157"), .attention = hex("#f2c200"), .failure = hex("#ff8f7d"), .on_band = hex("#141414") }),
-        .backgrounds = .init(.{ .ground = hex("#121833"), .bar = hex("#1a2142"), .selection = hex("#2b3568"), .hover = hex("#222b55"), .band = hex("#f2c200") }),
-    },
-});
-
-/// The same tables as 256-colour entries.
-pub const indexed = blk: {
-    @setEvalBranchQuota(400_000);
-    var tables = std.enums.EnumArray(Skin, struct { colours: std.enums.EnumArray(Colour, u8), backgrounds: std.enums.EnumArray(Background, u8) }).initUndefined();
-    for (std.enums.values(Skin)) |skin| {
-        const palette = palettes.get(skin);
-        var table = tables.getPtr(skin);
-        for (std.enums.values(Colour)) |role| table.colours.set(role, theme.nearestIndex(palette.colours.get(role)));
-        for (std.enums.values(Background)) |role| table.backgrounds.set(role, theme.nearestIndex(palette.backgrounds.get(role)));
-    }
-    break :blk tables;
-};
 
 pub const Caps = struct {
     /// Unicode marks and text; false draws ASCII only, a cell a character.
@@ -2775,6 +2756,16 @@ pub fn selectedLine(state: *const State) ?usize {
     return if (position(state, ref)) |at| at + firstRowLine(state) else null;
 }
 
+/// Keyboard list focus projects its selected row; otherwise the open chat
+/// supplies the inactive highlight. The shell reads no parallel predicates.
+pub fn focusedLine(state: *const State, list_focused: bool) ?usize {
+    if (!list_focused) return selectedLine(state);
+    return switch (state.selected) {
+        .session => |ref| if (position(state, ref)) |at| at + firstRowLine(state) else null,
+        .new_session, .settings => null,
+    };
+}
+
 /// The open chat owns sidebar selection, independently of list navigation.
 /// Until its canonical listing arrives there is no projected line to select.
 fn selectedSession(state: *const State) ?Reference {
@@ -3159,7 +3150,7 @@ fn expectEffects(expected: []const Effect, actual: Effects) !void {
                     try std.testing.expectEqual(x.action, y.action);
                 }
             },
-            .list_models, .cancel_upgrade, .open_settings, .exit => {},
+            .list_models, .cancel_upgrade, .open_settings, .focus_chat, .exit => {},
             .create => |binding| {
                 try std.testing.expectEqual(binding == null, got.create == null);
                 if (binding) |expected_binding| try std.testing.expect(expected_binding.eql(&got.create.?));
@@ -4889,17 +4880,6 @@ test "overview idle rows never fold" {
     try std.testing.expect(std.mem.indexOf(u8, text, " more") == null);
 }
 
-test "the overview indexed palettes retain every colour" {
-    const expected = [_]struct { skin: Skin, colours: [9]u8, backgrounds: [5]u8 }{
-        .{ .skin = .day, .colours = .{ 235, 17, 239, 60, 103, 187, 94, 124, 233 }, .backgrounds = .{ 255, 253, 254, 253, 214 } },
-        .{ .skin = .night, .colours = .{ 255, 188, 249, 247, 60, 237, 214, 210, 233 }, .backgrounds = .{ 234, 235, 238, 237, 214 } },
-    };
-    for (expected) |case| {
-        for (std.enums.values(Colour), case.colours) |role, value| try std.testing.expectEqual(value, indexed.get(case.skin).colours.get(role));
-        for (std.enums.values(Background), case.backgrounds) |role, value| try std.testing.expectEqual(value, indexed.get(case.skin).backgrounds.get(role));
-    }
-}
-
 test "numbers group the Indian way" {
     for ([_]struct { u64, []const u8 }{
         .{ 0, "0" },
@@ -6284,6 +6264,8 @@ test "semantic list admission owns covered Settings paste creation and Upgrade p
                 try std.testing.expectEqual(before_requests, state.request_count);
                 switch (action) {
                     .exit => unreachable,
+                    // New Session is selected: Right neither creates nor clears.
+                    .open_session => try std.testing.expect(std.meta.eql(before_notice, state.notice)),
                     .clear => try expectNotice(&state, null),
                     .stop, .archive => try expectNotice(&state, if (phase.held) upgrade_recovery else no_selection),
                     .previous, .next, .first, .last, .select_previous, .select_next => {
@@ -6297,6 +6279,48 @@ test "semantic list admission owns covered Settings paste creation and Upgrade p
             },
         }
     };
+}
+
+test "Overview list activation resumes same or opens other chat at wide and narrow widths" {
+    for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |same| for ([_]Input{ .enter, .{ .action = .open_session } }) |key| {
+        var state = try opened(&mixed);
+        defer state.deinit();
+        _ = try step(&state, .{ .resized = .{ .width = width, .height = 30 } });
+        _ = try step(&state, .{ .conversation = "b2c3d4".* });
+        state.selected = .{ .session = if (same) "b2c3d4".* else "g7h8j9".* };
+        const effects = try step(&state, .{ .input = .{ .key = key } });
+        var opens: usize = 0;
+        var resumes: usize = 0;
+        for (effects.slice()) |effect| switch (effect) {
+            .open => |reference| {
+                opens += 1;
+                try std.testing.expectEqualStrings("g7h8j9", &reference);
+            },
+            .focus_chat => resumes += 1,
+            .create => return error.UnexpectedCreate,
+            else => {},
+        };
+        try std.testing.expectEqual(@as(usize, @intFromBool(!same)), opens);
+        try std.testing.expectEqual(@as(usize, @intFromBool(same)), resumes);
+    };
+}
+
+test "Overview list Right does not create or open Settings and clicks share resume owner" {
+    var state = try opened(&mixed);
+    defer state.deinit();
+    for ([_]Selection{ .new_session, .settings }) |selection| {
+        state.selected = selection;
+        const effects = try step(&state, .{ .input = .{ .key = .{ .action = .open_session } } });
+        for (effects.slice()) |effect| try std.testing.expect(effect != .create and effect != .open_settings);
+    }
+    _ = try step(&state, .{ .conversation = "b2c3d4".* });
+    const effects = try step(&state, .{ .clicked = .{ .target = .{ .open = "b2c3d4".* } } });
+    var resumes: usize = 0;
+    for (effects.slice()) |effect| {
+        if (effect == .focus_chat) resumes += 1;
+        try std.testing.expect(effect != .open);
+    }
+    try std.testing.expectEqual(@as(usize, 1), resumes);
 }
 
 test "the shared row fitter handles no description cells without allocating or underflowing" {

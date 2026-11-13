@@ -7,7 +7,7 @@
 //! the Operation's admission position, and a floor drops every unit that
 //! begins at or below it (`historical.HistoricalView.Floor`). A floor once
 //! reached stays: every later compaction keeps its base's floor or goes
-//! deeper (`inheritedFloor`). Each level
+//! deeper (`InheritedFloor`). Each level
 //! aims at a quarter of the room the level before it did: level 1 at the
 //! context window less the output reservation, at four bytes per token as
 //! `turn_policy.comparedPressure` counts, so a catalog window larger than
@@ -23,7 +23,6 @@ const output_item = @import("../../output_item.zig");
 const model_capability = @import("../../model_capability.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
 const rsql = @import("../rsql.zig");
-const store_access = @import("../access.zig");
 const store_schema = @import("../schema.zig");
 
 pub const levels = 3;
@@ -39,7 +38,7 @@ pub fn target(window: u64, reservation: u64, level: u8) u64 {
 /// The deeper floor a compaction goes to next, and its level.
 pub const Choice = struct { floor: u64, level: u8 };
 
-/// A deeper floor, with what `droppedEntries` counts from.
+/// A deeper floor, with what `DroppedEntries` counts from.
 pub const Room = struct { choice: Choice, previous: u64, first_message: u64 };
 
 /// The units walked newest first, and the floor each level reaches: just
@@ -184,36 +183,38 @@ const base_floor_read = rsql.Read(.{
 });
 
 /// The floor a compaction that makes no room keeps: its base's, so a
-/// later base drops what the one it replaces dropped. A failed step is
-/// `CorruptStore`.
-pub fn inheritedFloor(a: anytype, session: []const u8, boundary: u64, model: []const u8) !?u64 {
-    var found: base_floor_read.Result = undefined;
-    a.read(base_floor_read, .{ .session = session, .boundary = boundary }, &found);
-    try store_access.runAs(a, error.CorruptStore);
-    const row = found orelse return null;
-    if (!output_item.Kind.compaction.replayableTo(row.model.slice(), model, .selected_base)) return null;
-    return if (row.history_floor) |floor| floor.get() else null;
-}
+/// later base drops what the one it replaces dropped, read in one round
+/// its caller runs: `queue` queues it, and `floor`, after that round,
+/// answers. Its caller names the round's failed step `CorruptStore`. A
+/// transition keeps it, as the round's destination, in storage that
+/// outlives the round, as it does the `session` it reads by.
+pub const InheritedFloor = struct {
+    found: base_floor_read.Result = undefined,
+
+    pub fn queue(read: *InheritedFloor, a: anytype, session: []const u8, boundary: u64) void {
+        a.read(base_floor_read, .{ .session = session, .boundary = boundary }, &read.found);
+    }
+
+    /// After `queue`'s round: the base's floor where a request for `model`
+    /// replays the base, or null.
+    pub fn floor(read: *const InheritedFloor, model: []const u8) ?u64 {
+        const row = read.found orelse return null;
+        if (!output_item.Kind.compaction.replayableTo(row.model.slice(), model, .selected_base)) return null;
+        return if (row.history_floor) |found| found.get() else null;
+    }
+};
 
 /// The floor and level the compaction after compaction Operation
-/// `operation` overflowed goes to, or null when no level drops more: only
-/// kept items remain, or level `levels` overflowed. Settlement asks it to
-/// decide whether the Turn goes on, and admission again for the floor it
-/// writes; nothing they read changes in between, so both get one answer.
-/// Each page is a round; the walk stops at level 1's floor, so it reads
-/// about as many units as fit that target, however long the history.
-/// A failed step is `CorruptStore`.
-pub fn deeperFloor(a: anytype, operation: u64) !?Room {
-    var search: FloorSearch = .{ .operation = operation };
-    search.start(a);
-    try store_access.runAs(a, error.CorruptStore);
-    while (search.next(a)) try store_access.runAs(a, error.CorruptStore);
-    return search.room();
-}
-
-/// `deeperFloor` as rounds its caller runs: `start` queues the facts read
-/// for the first; after each round, `next` queues a page and answers true,
-/// or answers false once the walk is over, when `room` is the answer.
+/// `operation` overflowed goes to, as rounds its caller runs: `start`
+/// queues the facts read for the first; after each round, `next` queues a
+/// page and answers true, or answers false once the walk is over, when
+/// `room` is the answer, null when no level drops more: only kept items
+/// remain, or level `levels` overflowed. Settlement walks it to decide
+/// whether the Turn goes on, and admission again for the floor it writes;
+/// nothing they read changes in between, so both get one answer. Each
+/// page is a round; the walk stops at level 1's floor, so it reads about
+/// as many units as fit that target, however long the history. Its
+/// callers name a failed step `CorruptStore`.
 pub const FloorSearch = struct {
     operation: u64,
     /// The facts round's row, then the walk `next` starts from it: the
@@ -286,14 +287,21 @@ const dropped_entries = rsql.Read(.{
 
 /// How many conversation entries `room`'s floor drops beyond the one
 /// before it (D217's `dropped`): a range of the entry index as long as
-/// what it drops, read once per compaction that makes room. A failed
-/// step is `CorruptStore`.
-pub fn droppedEntries(a: anytype, operation: u64, room: Room) !u64 {
-    var row: dropped_entries.Row = undefined;
-    a.read(dropped_entries, .{ .operation = operation, .above = room.previous, .floor = room.choice.floor, .first_message = room.first_message }, &row);
-    try store_access.runAs(a, error.CorruptStore);
-    return row.dropped;
-}
+/// what it drops, read once per compaction that makes room, in one round
+/// its caller runs: `queue` queues it, and `dropped`, after that round,
+/// answers. Its caller names the round's failed step `CorruptStore`.
+pub const DroppedEntries = struct {
+    row: dropped_entries.Row = undefined,
+
+    pub fn queue(read: *DroppedEntries, a: anytype, operation: u64, room: Room) void {
+        a.read(dropped_entries, .{ .operation = operation, .above = room.previous, .floor = room.choice.floor, .first_message = room.first_message }, &read.row);
+    }
+
+    /// After `queue`'s round.
+    pub fn dropped(read: *const DroppedEntries) u64 {
+        return read.row.dropped;
+    }
+};
 
 test "each level aims at a quarter of the room the one before it did" {
     try std.testing.expectEqual(@as(u64, (128000 - 8000) * 4), target(128000, 8000, 1));
