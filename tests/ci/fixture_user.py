@@ -88,8 +88,9 @@ PASSED = (*network_variables.PROXY, "TERM", "LANG", "LC_ALL", "LC_CTYPE")
 # Each toolchain's install root, as directories above its binary.
 TOOLS = {"zig": 1, "go": 2}
 BASE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-# The prefixes BASE_PATH's directories belong to; their installs serve every user already.
-SYSTEM_PREFIXES = frozenset(Path(entry).parent for entry in BASE_PATH.split(os.pathsep))
+# The system's own places: an install whose binary resolves under one of them serves every user already.
+# /usr holds /usr/local; BASE_PATH adds /bin and /sbin, never all of /.
+SYSTEM_PLACES = (Path("/usr"), *(Path(entry) for entry in BASE_PATH.split(os.pathsep)))
 # What the export holds, in the order root fetches it: REF (named in `export`), then these.
 EXPORTED = ("+refs/remotes/origin/main:refs/remotes/origin/main", "+refs/tags/v*:refs/tags/v*")
 
@@ -354,12 +355,14 @@ def place_trust(trust, trust_dir, gid):
 def place_install(install, tools_dir):
     """The binary the lane runs for `install`.
 
-    An install from the system's own prefixes is used in place, as every user
-    uses it (the system Python's root is all of /usr). Any other is copied
-    into `tools_dir` once per binary identity, and the copy is made readable
-    by every user whatever modes the source has.
+    An install whose binary resolves under one of SYSTEM_PLACES is used in
+    place, as every user uses it, whatever its computed root: the system
+    Python's root is all of /usr, and /usr/local/bin/zig keeps its lib in
+    /usr/local/lib/zig, outside its root. Any other is copied into `tools_dir`
+    once per binary identity, and the copy is made readable by every user
+    whatever modes the source has.
     """
-    if install.root in SYSTEM_PREFIXES:
+    if any(install.binary.is_relative_to(place) for place in SYSTEM_PLACES):
         return install.binary
     identity = os.stat(install.binary)
     key = hashlib.sha256(f"{install.root}\0{identity.st_dev}:{identity.st_ino}:{identity.st_size}:"

@@ -400,14 +400,28 @@ class FixtureUserTest(unittest.TestCase):
                 self.assertEqual(sorted(tools_dir.iterdir()), copies)
                 self.assertEqual(self.git("--git-dir", str(placed.source), "rev-parse", "refs/heads/fixture"), later)
 
-    def test_an_install_in_the_systems_own_prefix_is_used_in_place(self):
-        """The system Python's install root is all of /usr: every user already runs it, and root never copies it."""
+    def test_an_install_whose_binary_is_in_the_systems_own_places_is_used_in_place(self):
+        """Every user already runs these, and root never copies them, whatever root find_tool computes.
+
+        The system Python's root is all of /usr; a packaged Zig in /usr/local/bin keeps its lib in
+        /usr/local/lib/zig, outside the directory find_tool takes as its root.
+        """
         tools_dir = self.root / "tools"
         tools_dir.mkdir()
-        for root in ("/usr", "/usr/local", "/"):
-            with self.subTest(root=root):
-                binary = Path(root) / "bin/python3.12"
-                self.assertEqual(fixture_user.place_install(Install(binary, Path(root)), tools_dir), binary)
+        cases = {
+            # The resolved binary and the install root computed for it.
+            "system Python": ("/usr/bin/python3.12", "/usr"),
+            "Python in /usr/local": ("/usr/local/bin/python3.12", "/usr/local"),
+            "Python in /bin": ("/bin/python3.12", "/"),
+            "Zig in /usr/local/bin, lib in /usr/local/lib/zig": ("/usr/local/bin/zig", "/usr/local/bin"),
+            "Zig in /usr/bin": ("/usr/bin/zig", "/usr/bin"),
+            "Go in /usr/bin": ("/usr/bin/go", "/usr"),
+            "Go in /usr/local/go": ("/usr/local/go/bin/go", "/usr/local/go"),
+            "Go in /usr/lib/go": ("/usr/lib/go-1.27/bin/go", "/usr/lib/go-1.27"),
+        }
+        for name, (binary, root) in cases.items():
+            with self.subTest(name):
+                self.assertEqual(fixture_user.place_install(Install(Path(binary), Path(root)), tools_dir), Path(binary))
         self.assertEqual(list(tools_dir.iterdir()), [])
 
     def git(self, *args):
