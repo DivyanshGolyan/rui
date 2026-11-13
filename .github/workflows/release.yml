@@ -281,7 +281,13 @@ jobs:
       - name: Recheck wire-changing PRs against the published release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python3 -B tests/ci/recheck_wire_prs.py
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+          # The tag exists from publication: a policy check started since then reads it.
+          RELEASE_PUBLISHED_AT=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/v$VERSION" --jq .published_at)
+          export RELEASE_PUBLISHED_AT
+          python3 -B tests/ci/recheck_wire_prs.py
   npm_publish:
     # Publishes the npm tarballs after the GitHub release; scripts/publish.mjs reads their manifests
     # and orders dependencies first. npm trusted publishing (OIDC) authenticates it: each package

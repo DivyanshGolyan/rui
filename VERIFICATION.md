@@ -272,6 +272,7 @@ Successful gates do not capture.
 Native observation failure metadata is copied after reap and before temporary-root deletion.
 
 [Cache maintenance](.github/workflows/cache-maintenance.yml) warms production compilation after trusted main pushes that change build, dependency or maintenance inputs.
+A build partition restores its own newest snapshot, for the current dependencies first and then across a dependency repin; a partition with neither, such as one only pull requests run, starts from that baseline for the current dependencies, and no partition restores another's snapshot.
 It also compiles the build runner on six Linux slots and one Mac, so test shards on the CPU models those slots drew restore it from main.
 Cleanup keeps main's newest snapshot per platform and partition, per build-runner CPU model, of each platform's compiler and of the package set, and removes every PR cache; these are targets, not a quota.
 Warm baselines are not test acceptance.
@@ -354,6 +355,10 @@ zig build -Doptimize=ReleaseSafe -j2 --summary all
 [Release](.github/workflows/release.yml) runs only inside a green [promotion](#landing-cadence) and publishes the immutable main SHA that promotion qualified.
 Only verified publication advances the `stable` pointer.
 To recover an interrupted publication, rerun the promotion's failed jobs: `gh run rerun <promotion run id> --failed`.
+
+After publishing, Release rechecks the [wire-version gate](tests/ci/test_wire_version.py) on open wire-changing PRs: [recheck_wire_prs.py](tests/ci/recheck_wire_prs.py) reruns `policy`, and so `admission`, on each open, non-draft PR based on main that touches `openapi.json` or `src/wire_version.zig` and whose latest check ran before publication.
+A red recheck step means the release did ship; its error names each PR it could not recheck and why.
+Do not rerun the promotion for it: push to each named PR, or rerun that PR's `policy` job; a PR whose run is past GitHub's 30-day rerun limit needs a push.
 
 [release.py](tests/ci/release.py) skips a SHA only when a verified public release already includes it, and can repair a missed pointer update without rebuilding.
 Drafts and orphan tags reserve a version for their exact SHA; recovery reuses that identity rather than skipping incomplete publication.

@@ -1,5 +1,8 @@
 const assert = require('node:assert/strict');
-const {readFileSync, readdirSync} = require('node:fs');
+const {execFileSync} = require('node:child_process');
+const {mkdtempSync, readFileSync, readdirSync, rmSync} = require('node:fs');
+const {tmpdir} = require('node:os');
+const {join} = require('node:path');
 const {test} = require('node:test');
 const prune = require('../../.github/scripts/prune-caches.cjs');
 
@@ -69,7 +72,7 @@ test('build layouts share partition groups across repins without crossing parts'
   const main = 'refs/heads/main';
   const reordered = (id, part, platform = 'Linux-X64') => ({
     ...cache(id, main, platform, part),
-    key: `rui-build-v2-${platform}-0.17.1-${'a'.repeat(64)}-${part}-${id.toString(16).padStart(64, '0')}-${'c'.repeat(64)}`,
+    key: `rui-build-v2-${platform}-0.17.1-${'a'.repeat(64)}-${part}.${id.toString(16).padStart(64, '0')}-${'c'.repeat(64)}`,
   });
   const entries = [
     cache(1, main, 'Linux-X64', 'compiled'),
@@ -77,10 +80,84 @@ test('build layouts share partition groups across repins without crossing parts'
     reordered(4, 'baseline'), cache(5, main, 'Linux-X64', 'baseline'),
     reordered(6, 'compiled', 'macOS-ARM64'),
     {...reordered(7, 'compiled'), key: reordered(7, 'compiled').key + '-extra'},
+    // A part whose name starts with another part's name is its own group.
+    cache(8, main, 'Linux-X64', 'compiled-unit'), reordered(9, 'compiled-unit'),
   ];
   const result = await run(entries);
   assert.ifError(result.error);
-  assert.deepEqual(result.ids, [3, 5, 6, 7]);
+  assert.deepEqual(result.ids, [3, 5, 6, 7, 9]);
+});
+
+test('build restores keep each part apart and seed parts without snapshots from baseline', () => {
+  const root = `${__dirname}/../..`;
+  const action = readFileSync(`${root}/.github/actions/setup/caches/action.yml`, 'utf8');
+  const step = action.match(/- name: Name the build cache keys\n[\s\S]*?\n    - /)[0];
+  const script = step.match(/^      run: \|\n((?: {8}.*\n)+)/m)[1].replace(/^ {8}/gm, '');
+  const restore = [...action.matchAll(/restore-keys: \|\n((?: {10}.*\n)+)/g)].map(match => match[1]);
+  assert.equal(restore.length, 2);
+  const order = [...restore[0].matchAll(/build-keys\.outputs\.([a-z-]+)/g)].map(m => m[1]);
+  assert.deepEqual(order, ['prefix-deps', 'prefix-part', 'prefix-seed']);
+  assert.equal(restore[1], restore[0]);
+  // Every part the workflows name, plus setup's default.
+  const workflows = `${root}/.github/workflows`;
+  const parts = new Set(['all']);
+  for (const file of readdirSync(workflows).filter(file => file.endsWith('.yml'))) {
+    for (const [, part] of readFileSync(`${workflows}/${file}`, 'utf8').matchAll(/^\s+check-part: (.*?)\s*$/gm)) {
+      // The key's '.' terminator is unambiguous only while no part can contain it.
+      assert.match(part, /^[a-z][a-z0-9-]*$/, `${file} names check part ${part}`);
+      parts.add(part);
+    }
+  }
+  for (const part of ['compiled', 'compiled-unit', 'codegen', 'baseline']) assert.ok(parts.has(part), part);
+  const prefix = `rui-build-v2-Linux-X64-0.17.1-${'a'.repeat(64)}-`;
+  const [d1, d2, s1, s2] = ['d', 'e', 'b', 'c'].map(c => c.repeat(64));
+  // Run the step's own script, as the runner does.
+  const keys = (part, deps, sources = s2) => {
+    const dir = mkdtempSync(join(tmpdir(), 'rui-keys-'));
+    try {
+      const output = join(dir, 'output');
+      execFileSync('bash', ['-ec', script], {
+        env: {PATH: process.env.PATH, PREFIX: prefix, DEPS: deps, SOURCES: sources, CHECK_PART: part, GITHUB_OUTPUT: output},
+      });
+      return Object.fromEntries(readFileSync(output, 'utf8').trimEnd().split('\n').map(line => line.split(/=(.*)/s).slice(0, 2)));
+    } finally { rmSync(dir, {recursive: true, force: true}); }
+  };
+  // actions/cache: an exact key, else the newest key matching the first restore
+  // prefix that matches anything; empty restore keys are dropped.
+  const restored = (part, deps, existing) => {
+    const named = keys(part, deps);
+    const prefixes = order.map(output => named[output]).filter(key => key !== '');
+    assert.equal(new Set(prefixes).size, prefixes.length, `${part} repeats a restore key`);
+    if (existing.includes(named.key)) return named.key;
+    for (const restorePrefix of prefixes) {
+      const match = existing.filter(key => key.startsWith(restorePrefix));
+      if (match.length) return match[match.length - 1];
+    }
+    return null;
+  };
+  const key = (part, deps, sources = s1) => keys(part, deps, sources).key;
+  // Existing snapshots, oldest first.
+  const existing = [key('compiled', d1), key('codegen', d1), key('baseline', d1), key('baseline', d2), key('compiled-unit', d2), key('all', d2)];
+  // A part main never saves starts from baseline at the current dependencies.
+  assert.equal(restored('codegen', d2, existing.filter(k => !k.includes('codegen.'))), key('baseline', d2));
+  // After a repin a part prefers its own older snapshot to the newer baseline,
+  // and never another part whose name it starts (compiled-unit).
+  assert.equal(restored('compiled', d2, existing), key('compiled', d1));
+  assert.equal(restored('compiled-unit', d1, existing), key('compiled-unit', d2));
+  assert.equal(restored('baseline', d2, existing), key('baseline', d2));
+  assert.equal(restored('cache-execution', d1, existing), key('baseline', d1));
+  for (const own of parts) {
+    const named = keys(own, d1);
+    for (const other of parts) {
+      for (const deps of [d1, d2]) {
+        const snapshot = key(other, deps);
+        const reached = order.filter(output => named[output] !== '' && snapshot.startsWith(named[output]));
+        if (own === other) assert.deepEqual(reached, deps === d1 ? ['prefix-deps', 'prefix-part'] : ['prefix-part']);
+        else if (other === 'baseline' && deps === d1) assert.deepEqual(reached, ['prefix-seed'], `${own} seeds from baseline`);
+        else assert.deepEqual(reached, [], `${own} restores ${other}: ${snapshot}`);
+      }
+    }
+  }
 });
 
 test('main keeps the newest build runner per CPU model and the newest package set', async () => {

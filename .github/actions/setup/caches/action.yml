@@ -59,11 +59,20 @@ runs:
         DEPS: ${{ hashFiles('build.zig.zon', 'screen-emulator/build.zig.zon', 'src/build_*') }}
         SOURCES: ${{ hashFiles('build.zig', 'build/**', 'src/**', 'tests/integration/**') }}
         CHECK_PART: ${{ inputs.check-part }}
+      # The '.' ends the part: part names use [a-z0-9-], so one part's prefix
+      # (compiled.) never starts another part's key (compiled-unit.).
+      # Restore order: this part at these dependencies, this part across a
+      # repin, then cache maintenance's baseline at these dependencies, which
+      # seeds parts main never saves (codegen). Baseline's seed is its own
+      # first prefix, so it is left empty, and actions/cache drops empty keys.
       run: |
+        seed="${PREFIX}baseline.$DEPS-"
+        if [ "$CHECK_PART" = baseline ]; then seed=; fi
         {
-          echo "key=$PREFIX$CHECK_PART-$DEPS-$SOURCES"
-          echo "prefix-deps=$PREFIX$CHECK_PART-$DEPS-"
-          echo "prefix-part=$PREFIX$CHECK_PART-"
+          echo "key=$PREFIX$CHECK_PART.$DEPS-$SOURCES"
+          echo "prefix-deps=$PREFIX$CHECK_PART.$DEPS-"
+          echo "prefix-part=$PREFIX$CHECK_PART."
+          echo "prefix-seed=$seed"
         } >> "$GITHUB_OUTPUT"
     - name: Name the build runner cache keys
       id: runner-keys
@@ -104,6 +113,7 @@ runs:
         restore-keys: |
           ${{ steps.build-keys.outputs.prefix-deps }}
           ${{ steps.build-keys.outputs.prefix-part }}
+          ${{ steps.build-keys.outputs.prefix-seed }}
     - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       id: build-cache-restore
       if: ${{ inputs.publish-caches != 'true' && inputs.cold != 'true' && inputs.compiled != 'true' }}
@@ -117,6 +127,7 @@ runs:
         restore-keys: |
           ${{ steps.build-keys.outputs.prefix-deps }}
           ${{ steps.build-keys.outputs.prefix-part }}
+          ${{ steps.build-keys.outputs.prefix-seed }}
     # Package pair: pinned package sources depend only on build.zig.zon, so a
     # tool, image or build-input change that misses every build snapshot reads
     # them here instead of from codeberg.org and GitHub, whose 504s and stalls
