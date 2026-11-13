@@ -1107,7 +1107,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     var palette: ?vxfw.Widget = null;
     if (self.app_consent.request == null) if (screen.commands) |*shown| {
         self.app_palette.shown = shown;
-        self.app_palette.method = self.app_caps.width;
+        self.app_palette.caps = self.app_caps;
         self.app_palette.style = normal;
         self.app_palette.quiet = quiet;
         self.app_palette.hover_style = hover;

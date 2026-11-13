@@ -348,6 +348,7 @@ test "skills do not replace a command argument or invent an argument list" {
 test "chat table lists all commands with descriptions plus every loaded skill" {
     try std.testing.expect(!@hasDecl(slash_commands, "overview"));
     const names = [_][]const u8{ "archive", "clear", "copy", "effort", "model", "new", "reload-skills", "rename", "requests", "result", "setup", "unarchive" };
+    const descriptions = [_][]const u8{ "archive this chat", "start a new chat", "copy the last answer", "change effort", "change model", "start a new chat", "reload skills", "rename this chat", "recover a lost request", "show a saved answer", "defaults for new chats", "restore this chat" };
     var skill_names: [skill_suggestions.capacity][16]u8 = undefined;
     var entries: [skill_suggestions.capacity]skill_suggestions.Entry = undefined;
     for (&entries, &skill_names, 0..) |*entry, *name, index| entry.* = .{
@@ -361,14 +362,9 @@ test "chat table lists all commands with descriptions plus every loaded skill" {
         _ = reads.answer(1, testPage(entries[0..count]), "");
         const listed = reads.shown(&rows, "/", 1, 1, slash_commands.conversation.suggest("/", .{}), null).?.list;
         try std.testing.expectEqual(names.len + count, listed.count);
-        for (names, listed.shown()[0..names.len]) |name, entry| {
+        for (names, descriptions, listed.shown()[0..names.len]) |name, description, entry| {
             try std.testing.expectEqualStrings(name, entry.shown[1..]);
-            try std.testing.expect(entry.description.len != 0);
-            if (std.mem.eql(u8, name, "new") or std.mem.eql(u8, name, "clear")) {
-                try std.testing.expectEqualStrings("start a new chat", entry.description);
-            } else if (std.mem.eql(u8, name, "model")) {
-                try std.testing.expectEqualStrings("change this Session's model", entry.description);
-            }
+            try std.testing.expectEqualStrings(description, entry.description);
         }
         for (entries[0..count], listed.shown()[names.len..]) |skill, entry| {
             try std.testing.expectEqualStrings(skill.name, std.mem.trimEnd(u8, entry.word, " "));

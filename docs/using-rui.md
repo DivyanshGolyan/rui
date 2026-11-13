@@ -18,10 +18,10 @@ Enter these at the chat’s `›` prompt. The overview has no input or slash com
 | Command | What it does |
 | --- | --- |
 | `/archive` | Stops active work and archives this Session, confirming when required. |
-| `/unarchive` | Restores this Session without restarting work. |
+| `/unarchive` | Restores this chat without restarting work. |
 | `/rename NAME` | Names this Session. |
-| `/copy [code\|file]` | Copies the last answer; `code` copies its last code block; `file` saves it here. |
-| `/effort LEVEL` | Changes this Session’s effort and the default for new Sessions. |
+| `/copy [code\|file]` | Copies the last answer; `code` copies its last code block; `file` saves the answer here. |
+| `/effort LEVEL` | Changes this chat’s effort and also sets the default for new chats. |
 | `/model` | Opens this Session’s model picker, the same one as the footer model button and chat info. Choose a model to save it. |
 | `/setup` | Shows or changes defaults for future Sessions, not the current one. |
 | `/requests` | Lists saved requests for recovery. |

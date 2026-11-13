@@ -27,23 +27,30 @@
         }
       ],
       "expect": [
-        "/archive",
-        "/clear",
-        "/copy",
-        "/effort",
-        "/model",
-        "/new",
+        "/archive        archive this chat",
         "/clear          start a new chat",
+        "/copy           copy the last answer",
+        "/effort         change effort",
+        "/model          change model",
         "/new            start a new chat",
-        "/model          change this Session's model"
+        "/reload-skills  reload skills",
+        "/rename         rename this chat",
+        "/requests       recover a lost request",
+        "/result         show a saved answer",
+        "/setup          defaults for new chats",
+        "/unarchive      restore this chat"
       ],
       "absent": [
         "/configure",
         "/status",
         "/discard",
         "/recover",
-        "Start a new chat",
-        "Change this Session's model"
+        "archive this Session",
+        "change this Session",
+        "future defaults",
+        "stop active work",
+        "code its",
+        "append catal"
       ],
       "absent_regex": [
         "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
@@ -51,7 +58,7 @@
     },
     {
       "name": "appcmds-conversation-end",
-      "note": "The existing slash viewport scrolls to the remaining chat commands",
+      "note": "The end selection keeps every short chat command phrase visible",
       "open": "App command replacements",
       "steps": [
         {
@@ -80,18 +87,30 @@
         }
       ],
       "expect": [
-        "/reload-skills",
-        "/rename",
-        "/requests",
-        "/result",
-        "/setup",
-        "/unarchive"
+        "/archive        archive this chat",
+        "/clear          start a new chat",
+        "/copy           copy the last answer",
+        "/effort         change effort",
+        "/model          change model",
+        "/new            start a new chat",
+        "/reload-skills  reload skills",
+        "/rename         rename this chat",
+        "/requests       recover a lost request",
+        "/result         show a saved answer",
+        "/setup          defaults for new chats",
+        "/unarchive      restore this chat"
       ],
       "absent": [
         "/configure",
         "/status",
         "/discard",
-        "/recover"
+        "/recover",
+        "archive this Session",
+        "change this Session",
+        "future defaults",
+        "stop active work",
+        "code its",
+        "append catal"
       ],
       "absent_regex": [
         "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
@@ -99,7 +118,7 @@
     },
     {
       "name": "appcmds-agent-commands",
-      "note": "The slash list includes loaded skills after the chat commands",
+      "note": "Short chat phrases plus a long loaded-skill description, ellipsized at narrow width",
       "open": "New chat navigation",
       "cast": [
         {
@@ -144,23 +163,36 @@
         }
       ],
       "expect": [
-        "/requests",
-        "/result",
-        "/setup",
-        "/unarchive",
-        "/review",
+        "/archive        archive this chat",
         "/clear          start a new chat",
+        "/copy           copy the last answer",
+        "/effort         change effort",
+        "/model          change model",
         "/new            start a new chat",
-        "/model          change this Session's model"
+        "/reload-skills  reload skills",
+        "/rename         rename this chat",
+        "/requests       recover a lost request",
+        "/result         show a saved answer",
+        "/setup          defaults for new chats",
+        "/unarchive      restore this chat",
+        "/review",
+        "Verify the project and review"
       ],
       "absent": [
         "/configure",
         "/status",
-        "Start a new chat",
-        "Change this Session's model"
+        "/discard",
+        "/recover",
+        "archive this Session",
+        "change this Session",
+        "future defaults",
+        "stop active work",
+        "code its",
+        "append catal"
       ],
       "absent_regex": [
-        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+        "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$",
+        "/review +Verify the project and review\\s*$"
       ]
     },
     {
