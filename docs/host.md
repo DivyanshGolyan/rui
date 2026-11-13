@@ -123,14 +123,14 @@ rui host serve --store PATH --provider codex --provider openai
 rui host serve --store PATH --active-capacity 8 --provider codex
 ```
 
-Each `--provider LABEL` serves one built-in provider at its own endpoint with its own credential: `codex` is ChatGPT sign-in (`rui auth login codex`), and `openai` is an OpenAI API key (`rui auth login openai`, which reads the key from stdin).
+Each `--provider LABEL` serves one built-in provider at its own endpoint with its own credential: `codex` is ChatGPT by device code (`rui auth login chatgpt --device-code`), `chatgpt` is ChatGPT in a browser (`rui auth login chatgpt`), and `openai` is an OpenAI API key (`rui auth login openai`, which reads the key from stdin).
 A Host reads the key once when it starts and refuses to start `openai` without one, so after saving a key, pause a running Host and start it again to add it.
 An auto-started Host serves `openai` whenever a key is saved.
 To use an OpenAI-compatible server that speaks the Responses API, such as Azure OpenAI or a company proxy, set `RUI_OPENAI_BASE_URL` to its `https://` base URL (for example `https://example.openai.azure.com/openai/v1`) in the environment that starts the Host; the key is then sent only to that URL's `/responses` and `/models`.
 A Host with a key reads the key's model list from `/models` as it starts and again each time the model picker asks; if that fails, the picker shows the models Rui knows.
 A Host serving a ChatGPT plan sign-in (`chatgpt`) reads that plan's list the same way, from `https://api.openai.com/v1/models`; without a usable sign-in it does not ask, and the picker shows the models Rui knows.
 An auto-started Host takes it from the command that starts it, and a running Host keeps the URL it started with.
-An invalid one stops `host serve --provider openai`; an auto-started Host reports it and starts serving Codex only.
+An invalid one stops `host serve --provider openai`; an auto-started Host reports it and starts serving its ChatGPT sign-ins only.
 Sessions of a provider the Host does not serve wait until a Host that serves it starts.
 Without `--provider` or a development endpoint, `host serve` makes no model requests.
 The [Host reference](../ARCHITECTURE.md#platforms-and-server-lifetime) states the startup and shutdown guarantees.

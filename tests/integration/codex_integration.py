@@ -676,7 +676,7 @@ def forced_refresh_journey():
 
 
 def openai_journey():
-    """One Host serves Codex and an OpenAI API key side by side. The key goes
+    """One Host serves ChatGPT by device code and an OpenAI API key side by side. The key goes
     out as a bearer with no ChatGPT account, the body matches a Codex
     Session's, a 401 is final, and a Host never starts openai without a key."""
     state = pathlib.Path(tempfile.mkdtemp(prefix="rui-openai.")).resolve()

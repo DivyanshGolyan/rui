@@ -30,7 +30,7 @@ DEVICE_ANSWER = b"\x1b[?62;22c"
 
 class TerminalProcessTest(unittest.TestCase):
     def test_composer_oracles_follow_the_caret_pane(self):
-        from human_cli_fixture import composer_empty, composer_ready, overview_composer
+        from human_cli_fixture import composer_empty, composer_ready
 
         for prefix in (" ", "list text│ ", "中       │ "):
             for text, caret in (("café", 6), ("x │ y", 7)):
@@ -45,7 +45,6 @@ class TerminalProcessTest(unittest.TestCase):
                     self.assertFalse(capture.draft(text, caret - 1))
                     self.assertFalse(capture.draft("wrong", caret))
                     self.assertTrue(composer_ready(capture.completed, cursor.x, cursor.y))
-                    self.assertTrue(overview_composer(capture.completed, cursor.x, cursor.y))
                     self.assertFalse(composer_empty(capture.completed, cursor.y))
                     capture.feed(("\x1b[?2026h\r\x1b[2K" + prefix + "› \x1b[?2026l").encode())
                     self.assertTrue(capture.draft("", 2))
@@ -56,6 +55,123 @@ class TerminalProcessTest(unittest.TestCase):
         from human_cli_fixture import conversation_text
         self.assertEqual(conversation_text("list│ › line1    01:23\nlist│   line2\n    │ edited 2"),
                          "› line1    01:23\n  line2\nedited 2")
+
+    def test_draft_oracle_matches_empty_placeholder_without_losing_text_or_caret(self):
+        from types import SimpleNamespace
+        import unicodedata
+        from terminal_screen import Cell
+
+        def capture(prefix, text, caret, *, quiet=False, colour=8, faint=False):
+            # Mock committed cells only: this owner test never loads a terminal.
+            current = ScreenCapture.__new__(ScreenCapture)
+            current.synchronized, current.generation = False, 1
+            current.completed = " › earlier message\n" + "".join(prefix) + text
+            cells = [Cell(value, 7, False) for value in [*prefix, *text]]
+            if quiet:
+                for index in range(len(prefix) + 2, len(cells)):
+                    cells[index] = cells[index]._replace(fg=colour, faint=faint)
+            current.completed_cells = [[], cells]
+            current.view = SimpleNamespace(cursor=SimpleNamespace(x=len(prefix) + caret, y=1))
+            return current
+
+        for prefix in ([" "], ["l", "│", " "], ["中", "", "│", " "]):
+            for prompt in ("› ", "> "):
+                for text in ("", "kept", "café", "é", "Type a task"):
+                    normalized = unicodedata.normalize("NFC", text)
+                    caret = 2 + len(normalized)
+                    for drawn in ((prompt.rstrip(), prompt + "Type a task") if not text else (prompt + normalized,)):
+                        with self.subTest(prefix=prefix, prompt=prompt, text=text, drawn=drawn):
+                            current = capture(prefix, drawn, caret, quiet=not text and drawn.endswith("Type a task"))
+                            self.assertTrue(current.draft(text, caret, prompt=prompt))
+                            self.assertFalse(current.draft(text, caret - 1, prompt=prompt))
+                            self.assertFalse(current.draft("wrong", caret, prompt=prompt))
+                            if text:
+                                self.assertFalse(current.draft("", 2, prompt=prompt))
+        literal = capture([" "], "› Type a task", 2)
+        self.assertTrue(literal.draft("Type a task", 2))
+        self.assertFalse(literal.draft("", 2), "literal text at Home is not an empty editor")
+        self.assertFalse(capture([" "], "› Type a task", 2, quiet=True, colour=7).draft("", 2))
+        self.assertTrue(capture([" "], "› Type a task", 2, quiet=True, colour=7, faint=True).draft("", 2))
+        self.assertFalse(capture([" "], "› Type a task", 3, quiet=True).draft("", 3))
+        current = capture([" "], "› Type a task", 2, quiet=True)
+        current.synchronized = True
+        self.assertFalse(current.draft("", 2))
+        current.synchronized, current.generation = False, 0
+        self.assertFalse(current.draft("", 2))
+        current.generation, current.completed = 1, current.completed + "\nOpening…"
+        self.assertFalse(current.draft("", 2))
+        self.assertFalse(capture([" "], "Password: Type a task", 10).draft("", 10, prompt="Password: "))
+
+    def test_empty_composer_accepts_placeholder_in_the_focused_pane(self):
+        from human_cli_fixture import composer_empty
+
+        for prefix in (" ", "list text│ ", "中       │ "):
+            for mark in ("›", ">"):
+                for text in ("", " Type a task", " /copy", " draft", " Type a task extra", " x │ y"):
+                    with self.subTest(prefix=prefix, mark=mark, text=text):
+                        screen = " › earlier message\n" + prefix + mark + text
+                        self.assertEqual(composer_empty(screen, 1), text in ("", " Type a task"))
+        self.assertFalse(composer_empty("  + New Session\n  Settings", 0))
+
+    def test_command_frame_waits_past_placeholder_for_typed_command_and_reply(self):
+        from human_cli_fixture import command_frame
+        from types import SimpleNamespace
+
+        initial = " › Type a task\n ‹ gpt-6-sol · low"
+        typed = " › /copy\n ‹ gpt-6-sol · low"
+        reply = " › Type a task\n ‹ gpt-6-sol · low    No answer to copy"
+        frames = iter((initial, typed, reply))
+        events = []
+        capture = SimpleNamespace(completed=initial, listener=None)
+
+        def feed(_chunk):
+            capture.completed = next(frames)
+            events.append(capture.completed)
+            capture.listener(capture.completed, 3, 0)
+
+        capture.feed = feed
+        with patch("human_cli_fixture.terminal_capture", return_value=capture), \
+                patch("human_cli_fixture.os.write", side_effect=lambda fd, data: events.append(data)), \
+                patch("human_cli_fixture.os.read", return_value=b"committed frame"), \
+                patch("human_cli_fixture.select.select", return_value=([17], [], [])):
+            self.assertEqual(command_frame(17, "/copy", lambda screen: "No answer to copy" in screen), reply)
+        self.assertEqual(events, [b"/copy", initial, typed, b"\r", reply])
+        self.assertIsNone(capture.listener)
+
+    def test_overview_oracle_requires_list_footer_without_editor(self):
+        from human_cli_fixture import overview_frame
+
+        with patch("human_cli_fixture.keyed_frame") as keyed:
+            overview_frame(17, lambda screen: "Settings" in screen)
+        predicate = keyed.call_args.args[2]
+        listed = "  + New Session\n  Settings\nenter open"
+        # A list accepts keys with no editor cursor, including a cursor
+        # position that could not be an input row.
+        self.assertTrue(predicate(listed, 0, 0))
+        self.assertFalse(predicate(listed.replace("enter open", ""), 0, 0))
+        self.assertFalse(predicate(listed + "\n › Type a task", 3, 3))
+        self.assertFalse(predicate(" › Type a task\ngpt-6-luna", 3, 0))
+
+    def test_overview_retained_notice_requires_explicit_relaxation_and_complete_list(self):
+        from human_cli_fixture import overview_frame
+
+        for notice in ("Sign-in saved; couldn't save default", "Not created: NotDir"):
+            with self.subTest(notice=notice):
+                accept = lambda screen: notice in screen
+                with patch("human_cli_fixture.keyed_frame") as keyed:
+                    overview_frame(17, accept)
+                strict = keyed.call_args.args[2]
+                with patch("human_cli_fixture.keyed_frame") as keyed:
+                    overview_frame(17, accept, ready=False)
+                relaxed = keyed.call_args.args[2]
+                frame = "  + New Session\n  Settings\n" + notice
+                self.assertFalse(strict(frame, 0, 0))
+                self.assertTrue(relaxed(frame, 0, 0))
+                self.assertTrue(strict(frame + "\nenter open", 0, 0))
+                for marker in ("+ New Session", "Settings", notice):
+                    self.assertFalse(relaxed(frame.replace(marker, "missing"), 0, 0))
+                for editor in ("Type a task", " › draft", " > draft", "sidebar │ › draft"):
+                    self.assertFalse(relaxed(frame + "\n" + editor, 3, 3))
 
     def test_screen_theme_queries_keep_defaults_and_report_light_terminal(self):
         replies = []
