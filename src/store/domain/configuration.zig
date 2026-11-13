@@ -23,7 +23,6 @@ const model_capability = @import("../../model_capability.zig");
 const product_defaults = @import("../../product_defaults.zig");
 const tool_defs = @import("../../tool_record.zig");
 const store_core = @import("../Store.zig");
-const Store = store_core.Store;
 const command_domain = @import("command.zig");
 const content_domain = @import("content.zig");
 const model_settlement_domain = @import("model_settlement.zig");
@@ -359,7 +358,7 @@ pub fn planConfigurationUpdate(
 
 // A saved preset refusal keeps its original request identity, even when
 // this Host can now resolve it. All other answers bind the resolved spec.
-// noinline: preset resolution and hashing finish before applyConfiguration,
+// noinline: preset resolution and hashing finish before validation,
 // keeping their scratch off the engine thread's deepest chain.
 pub noinline fn configureDigest(
     command: *const content_custody.ConfigureCommand,
@@ -380,7 +379,7 @@ pub noinline fn configureDigest(
     digest.* = command.semanticDigest();
 }
 
-/// Settings `applyConfiguration` wrote to a Session, whose revision row
+/// Settings `applyStep` wrote to a Session, whose revision row
 /// `queueConfiguredCommand` records with the command.
 pub const Applied = struct {
     session: Bounded(session_id.max_reference_bytes),
@@ -453,11 +452,6 @@ fn settingsField(comptime entry: session_settings.Entry) []const u8 {
         else => entry.column,
     };
 }
-
-pub const Application = union(enum) {
-    accepted: Applied,
-    rejected: configuration_admission.Rejection,
-};
 
 /// Skills discovery already asks whether this key exists. Fold its inherited
 /// Workspace into that same read, rather than adding a parent preflight round.
@@ -878,7 +872,7 @@ fn readCreation(a: anytype, reads: *ConfigurationReads) void {
 /// D133: only a spec with Bash needs a directory, and the parser and
 /// configurationBeforeWorkspace refused one without it. The Workspace column
 /// stays nonempty, so a spec without one saves the root. noinline: the
-/// digest's hash state stays off applyConfiguration's frame, which sits on
+/// digest's hash state stays off `validateStep`'s frame, which sits on
 /// the engine thread's deepest chain.
 noinline fn saveUnusedWorkspace(configuration: *const content_custody.Configuration, next: *CurrentConfiguration, reads: *ConfigurationReads) void {
     std.debug.assert(!requestsBash(configuration));
@@ -888,7 +882,7 @@ noinline fn saveUnusedWorkspace(configuration: *const content_custody.Configurat
 
 // Both mutation branches validate after keyed replay and Configure's existing
 // preset/capability precedence. Empty targets retain creation semantics;
-// creating Messages share this check through applyConfiguration.
+// creating Messages share this check through `validateStep`.
 pub fn targetRejection(session: []const u8) ?configuration_admission.Rejection {
     return if (session.len != 0 and !session_id.valid(session)) .invalid_session_reference else null;
 }
@@ -902,7 +896,6 @@ pub const ValidatedConfiguration = struct {
     content_actions: @FieldType(ConfigurationUpdatePlan, "update"),
     before: ?Settings,
 };
-pub const ConfigurationValidation = union(enum) { ready: *const ValidatedConfiguration, rejected: configuration_admission.Rejection };
 
 /// What applying a configuration reads besides the Store's rows: the
 /// request, and the Host values its shell passes in. Each is the caller's,
@@ -919,11 +912,6 @@ pub const Request = struct {
     /// outlives the round: its hash state is aligned beyond the Store's
     /// scratch, so `ConfigurationReads` cannot hold it.
     saved: *tool_set.SavedSelection,
-
-    /// A request with `store`'s Host values, for a caller that holds it.
-    pub fn of(store: *Store, io: std.Io, session: []const u8, configuration: *const content_custody.Configuration, initial_skills: ?*const skills_domain.Initial, saved: *tool_set.SavedSelection) Request {
-        return .{ .io = io, .tools = store.hostTools(), .served = store.served, .session = session, .configuration = configuration, .initial_skills = initial_skills, .saved = saved };
-    }
 };
 
 /// The rounds validating a configuration may ask for after
@@ -978,29 +966,6 @@ pub fn validateStep(a: anytype, request: *const Request, reads: *ConfigurationRe
         },
         .loaded => return finishValidation(request, reads),
     }
-}
-
-/// `validateStep` in rounds its caller runs. noinline: its request and
-/// visitor stay off its caller's frame.
-pub noinline fn validateConfiguration(
-    a: anytype,
-    io: std.Io,
-    session: []const u8,
-    configuration: *const content_custody.Configuration,
-    initial_skills: ?*const skills_domain.Initial,
-    reads: *ConfigurationReads,
-) !ConfigurationValidation {
-    var saved: tool_set.SavedSelection = undefined;
-    const request: Request = .of(a.store, io, session, configuration, initial_skills, &saved);
-    var ran: ?ValidationRound = null;
-    while (true) switch (try validateStep(a, &request, reads, ran)) {
-        .round => |at| {
-            try a.run();
-            ran = at;
-        },
-        .rejected => |code| return .{ .rejected = code },
-        .ready => |plan| return .{ .ready = plan },
-    };
 }
 
 /// What the request and round 1 decide, then the model's facts read.
@@ -1106,13 +1071,6 @@ fn finishValidation(request: *const Request, reads: *ConfigurationReads) Validat
     return .{ .ready = &reads.validated };
 }
 
-pub fn applyConfiguration(a: anytype, io: std.Io, session: []const u8, configuration: *const content_custody.Configuration, initial_skills: ?*const skills_domain.Initial, faults: Faults, reads: *ConfigurationReads) !Application {
-    return switch (try validateConfiguration(a, io, session, configuration, initial_skills, reads)) {
-        .rejected => |code| .{ .rejected = code },
-        .ready => try applyValidatedConfiguration(a, io, session, configuration, initial_skills, faults, reads),
-    };
-}
-
 /// The rounds applying a validated configuration may ask for, in order:
 /// whether a created Session's drawn reference is free, once for each
 /// draw, then the lookups its first skill catalog needs.
@@ -1148,21 +1106,6 @@ pub fn applyStep(a: anytype, request: *const Request, faults: Faults, reads: *Co
             return .{ .accepted = &reads.applied };
         },
     }
-}
-
-/// `applyStep` in rounds its caller runs, after `validateConfiguration`
-/// readied `reads.validated`. noinline, as `validateConfiguration`.
-pub noinline fn applyValidatedConfiguration(a: anytype, io: std.Io, session: []const u8, configuration: *const content_custody.Configuration, initial_skills: ?*const skills_domain.Initial, faults: Faults, reads: *ConfigurationReads) !Application {
-    // Application reads no saved set.
-    const request: Request = .of(a.store, io, session, configuration, initial_skills, undefined);
-    var ran: ?ApplyRound = null;
-    while (true) switch (try applyStep(a, &request, faults, reads, ran)) {
-        .round => |at| {
-            try a.run();
-            ran = at;
-        },
-        .accepted => |applied| return .{ .accepted = applied.* },
-    };
 }
 
 /// The content, the tool sets and an existing Session's update; a

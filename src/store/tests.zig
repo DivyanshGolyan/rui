@@ -413,16 +413,23 @@ pub fn touchForTesting(storage: *Store, session: []const u8) !void {
 /// Runs the production INSERT of a created Session under `ref`, then rolls
 /// it back, so a test sees what the schema accepts without keeping it.
 fn insertSessionForTesting(storage: *Store, current: *const configuration_domain.CurrentConfiguration, ref: *const [protocol.session_id_bytes]u8) !void {
+    const Insert = struct {
+        pub const Guards = error{};
+        current: *const configuration_domain.CurrentConfiguration,
+        ref: *const [protocol.session_id_bytes]u8,
+
+        pub fn step(b: *@This(), r: anytype, ran: u32) !TestingAsk {
+            if (ran != 0) return .done;
+            const head: rsql.SessionHead = .{ .ref = b.ref.*, .workspace_key = .of(b.current.workspace_key), .next_position = .of(1) };
+            const digest = store_core.workspaceDigest(b.current.workspace.slice());
+            configuration_domain.insertSession(r, head, b.current, &digest, 1_000_000, null);
+            return .round;
+        }
+    };
     const entry = try store_core.enter(storage, .none);
     defer entry.release();
-    var a: store_access.Access(.write, error{}) = .open(&entry);
-    defer a.deinit();
-    const head: rsql.SessionHead = .{ .ref = ref.*, .workspace_key = .of(current.workspace_key), .next_position = .of(1) };
-    const digest = store_core.workspaceDigest(current.workspace.slice());
-    configuration_domain.insertSession(&a, head, current, &digest, 1_000_000, null);
-    const ran = a.run();
-    try a.abandon(.{});
-    return ran;
+    var insert: Insert = .{ .current = current, .ref = ref };
+    return TestingScript(Insert).run(&entry, &insert);
 }
 
 pub fn admitRetryForTesting(storage: *Store) !?AttemptAdmission {
@@ -1147,15 +1154,8 @@ test "a Session creation that rolls back never reaches a since listing" {
                 const create = try completeConfiguration("rollback-create", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
                 const entry = try store_core.enter(&storage, .none);
                 defer entry.release();
-                var a: store_access.Access(.write, error{SessionUpdateFailed}) = .open(&entry);
-                defer a.deinit();
-                const reads = storage.configurationReads();
-                reads.* = .{ .next = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } } };
-                configuration_domain.prepareConfiguration(&a, storage.hostTools().host_tool_set, "", &create.configuration, reads);
-                try a.run();
-                try std.testing.expect(try configuration_domain.applyConfiguration(&a, storage.io, "", &create.configuration, null, .{}, reads) == .accepted);
-                try a.run();
-                try a.abandon(.{});
+                var creating: TestingConfiguring(struct {}) = .{ .storage = &storage, .session = "", .configuration = &create.configuration };
+                try TestingScript(@TypeOf(creating)).run(&entry, &creating);
             }
             // The rolled-back insert still moved the commit counter. The hint
             // forgot instead of naming a Session that does not exist.
@@ -1166,6 +1166,132 @@ test "a Session creation that rolls back never reaches a since listing" {
             try std.testing.expect(!storage.isFenced());
         }
     }.run);
+}
+
+/// What a `TestingScript` body asks for after a step.
+pub const TestingAsk = enum { round, commit, done };
+
+/// A test's own steps on the runner's writer, inside one transaction:
+/// `Body.step(body, r, ran)` queues on `r`, the step's `transition.Round`,
+/// and asks for another round, the commit, or the end, which rolls back;
+/// `ran` counts the rounds run before it. A test that holds what the writer
+/// does within and between rounds reaches it as a production step does: it
+/// never opens a writer itself, and only the runner runs or commits.
+/// `Body` declares `Guards`, and optionally `pass` and `failed(body)`,
+/// which the runner calls on an error before its transaction rolls back.
+pub fn TestingScript(comptime Body: type) type {
+    return struct {
+        const Self = @This();
+        /// One round, which runs as often as the body asks.
+        pub const rounds = transition.rounds(.{ .round = .{.paged} });
+        pub const round_budget = 1;
+        pub const commit: transition.Commit = .transaction;
+        pub const pass: transition.Pass = if (@hasDecl(Body, "pass")) Body.pass else .ordinary;
+        pub const begin: ?rounds.At = .round;
+        pub const Input = *Body;
+        pub const Result = void;
+        pub const Ordinary = error{};
+        pub const Guards = Body.Guards;
+        pub const Declined = error{};
+
+        input: Input,
+        ran: u32 = 0,
+
+        pub fn step(t: *Self, r: *transition.Round(Self), ran: ?rounds.At) !transition.Next(Self) {
+            if (ran != null) t.ran += 1;
+            return switch (try t.input.step(r, t.ran)) {
+                .round => .{ .round = .round },
+                .commit => .commit,
+                .done => .{ .done = {} },
+            };
+        }
+
+        pub fn committed(_: *const Self) Result {}
+
+        pub fn failed(t: *Self) void {
+            if (comptime @hasDecl(Body, "failed")) t.input.failed();
+        }
+
+        /// Runs `body`'s steps under `entry`'s lock.
+        pub fn run(entry: *const store_core.Entry, body: *Body) !void {
+            var t: Self = .{ .input = body };
+            return transition.run(entry, Self, &t, .{});
+        }
+    };
+}
+
+/// A `TestingScript` body that prepares, validates and applies
+/// `configuration` as Configure's steps do, one round at a time, then runs
+/// the round its writes queued and ends, rolling them back. `Check`, held
+/// as `check`, may declare `ready(check, plan, reads)`, called once
+/// validation readied `plan`, and `applied(check, plan, reads, applied)`,
+/// called once application accepted it, both in the transaction.
+fn TestingConfiguring(comptime Check: type) type {
+    return struct {
+        const Self = @This();
+        pub const Guards = error{SessionUpdateFailed};
+
+        storage: *Store,
+        /// Empty for a creation.
+        session: []const u8,
+        configuration: *const @FieldType(wire_request.ConfigureCommand, "configuration"),
+        check: Check = .{},
+        reads: *configuration_domain.ConfigurationReads = undefined,
+        saved: tool_set_domain.SavedSelection = undefined,
+        /// What validation readied.
+        plan: *const configuration_domain.ValidatedConfiguration = undefined,
+        at: union(enum) {
+            prepare,
+            validate: ?configuration_domain.ValidationRound,
+            apply: ?configuration_domain.ApplyRound,
+            written,
+        } = .prepare,
+
+        pub fn step(b: *Self, r: anytype, _: u32) !TestingAsk {
+            const request: configuration_domain.Request = .{
+                .io = b.storage.io,
+                .tools = b.storage.hostTools(),
+                .served = b.storage.served,
+                .session = b.session,
+                .configuration = b.configuration,
+                .initial_skills = null,
+                .saved = &b.saved,
+            };
+            while (true) switch (b.at) {
+                .prepare => {
+                    b.reads = r.configurationReads();
+                    b.reads.* = .{ .next = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } } };
+                    configuration_domain.prepareConfiguration(r, b.storage.hostTools().host_tool_set, b.session, b.configuration, b.reads);
+                    b.at = .{ .validate = null };
+                    return .round;
+                },
+                .validate => |ran| switch (try configuration_domain.validateStep(r, &request, b.reads, ran)) {
+                    .round => |next| {
+                        b.at = .{ .validate = next };
+                        return .round;
+                    },
+                    .rejected => return error.TestUnexpectedResult,
+                    .ready => |plan| {
+                        b.plan = plan;
+                        if (comptime @hasDecl(Check, "ready")) try b.check.ready(plan, b.reads);
+                        b.at = .{ .apply = null };
+                    },
+                },
+                .apply => |ran| switch (try configuration_domain.applyStep(r, &request, r.faults(), b.reads, ran)) {
+                    .round => |next| {
+                        b.at = .{ .apply = next };
+                        return .round;
+                    },
+                    .accepted => |applied| {
+                        if (comptime @hasDecl(Check, "applied")) try b.check.applied(b.plan, b.reads, applied);
+                        b.at = .written;
+                        return .round;
+                    },
+                },
+                .written => return .done,
+            };
+        }
+    };
 }
 
 pub const TestingRound = struct {
@@ -1185,31 +1311,6 @@ pub const TestingRound = struct {
         .Args = struct { session: rsql.SessionHead, revision: u64 },
         .expect = .{ .exact = .{ .rows = 1, .otherwise = error.TestingGuard } },
     });
-
-    /// Reads `session`'s head, imports `text` and claims two positions,
-    /// then dates the Session where its revision is `revision`.
-    pub fn change(storage: *Store, session: []const u8, text: []const u8, revision: u64) !u64 {
-        const entry = try store_core.enter(storage, .none);
-        defer entry.release();
-        var a: store_access.Access(.write, error{TestingGuard}) = .open(&entry);
-        defer a.deinit();
-        return entry.finishTransaction(error{TestingGuard}, .{}, a.end(.{}, body(&a, session, text, revision)));
-    }
-
-    pub fn body(a: anytype, session: []const u8, text: []const u8, revision: u64) !u64 {
-        var loaded: head.Result = undefined;
-        a.read(head, .{ .session_ref = session }, &loaded);
-        try a.run();
-        const positions = try a.positions(loaded.head);
-        const first = try positions.take(2);
-        const content_id = try a.identity(.content_id);
-        const digest = protocol.contentDigest(text);
-        a.write(insert_content, .{ .content_id = content_id, .digest = digest, .length = text.len });
-        a.writeContent(content_id, text);
-        a.write(date_session, .{ .session = loaded.head, .revision = revision });
-        try a.commit();
-        return first;
-    }
 };
 
 test "buffered payload boundaries and streamed payloads preserve the same bytes under queue pressure" {
@@ -1230,37 +1331,48 @@ test "buffered payload boundaries and streamed payloads preserve the same bytes 
             defer std.testing.allocator.free(source);
             // Nonuniform bytes expose chunk-index and boundary mistakes.
             for (source, 0..) |*byte, i| byte.* = @truncate(i *% 31 + i / chunk);
-            var window: [4093]u8 = undefined;
+            const window_bytes = 4093;
+            var window: [window_bytes]u8 = undefined;
+            const Import = struct {
+                pub const Guards = error{};
+                bytes: []const u8,
+                ids: [2]u64 = undefined,
+
+                pub fn step(b: *@This(), r: anytype, _: u32) !TestingAsk {
+                    const length = b.bytes.len;
+                    for (&b.ids, 0..) |*id, method| {
+                        id.* = try r.identity(.content_id);
+                        // A fixture key distinct from built-in empty content;
+                        // this test exercises raw bytes, not content admission.
+                        r.write(insert, .{ .id = id.*, .digest = protocol.contentDigest("adapter parity fixture"), .length = length, .private = method == 1 });
+                        if (method == 0) {
+                            // Existing writeContent callers need not record a
+                            // row or open the public sink to lower their bytes.
+                            r.writeContent(id.*, b.bytes);
+                        } else {
+                            r.recordContentRow(id.*);
+                            const sink = try r.contentSink(id.*, length);
+                            defer sink.close();
+                            var at: usize = 0;
+                            while (at < length) {
+                                const n = @min(window_bytes, length - at);
+                                try sink.write(b.bytes[at..][0..n], at);
+                                at += n;
+                            }
+                        }
+                    }
+                    return .commit;
+                }
+            };
             for ([_]usize{ 0, 1, chunk - 1, chunk, chunk + 1, 3 * chunk + 17, source.len }) |length| {
                 const bytes = source[0..length];
                 const entry = try store_core.enter(&storage, .none);
                 defer entry.release();
-                var a: store_access.Access(.write, error{}) = .open(&entry);
+                var import: Import = .{ .bytes = bytes };
+                try TestingScript(Import).run(&entry, &import);
+                const ids = import.ids;
+                var a: reads_domain.ReadAccess = .open(&entry);
                 defer a.deinit();
-                errdefer a.abandon(.{}) catch {};
-                var ids: [2]u64 = undefined;
-                for (&ids, 0..) |*id, method| {
-                    id.* = try a.identity(.content_id);
-                    // A fixture key distinct from built-in empty content;
-                    // this test exercises raw bytes, not content admission.
-                    a.write(insert, .{ .id = id.*, .digest = protocol.contentDigest("adapter parity fixture"), .length = length, .private = method == 1 });
-                    if (method == 0) {
-                        // Existing writeContent callers need not record a
-                        // row or open the public sink to lower their bytes.
-                        a.writeContent(id.*, bytes);
-                    } else {
-                        a.recordContentRow(id.*);
-                        const sink = try a.contentSink(id.*, length);
-                        defer sink.close();
-                        var at: usize = 0;
-                        while (at < length) {
-                            const n = @min(window.len, length - at);
-                            try sink.write(bytes[at..][0..n], at);
-                            at += n;
-                        }
-                    }
-                }
-                try a.commit();
                 // Read bounded windows through the adapter, across every
                 // boundary, rather than trusting row counts or digests.
                 for (ids) |id| {
@@ -1292,50 +1404,61 @@ test "a content sink opens only on a content row its Access itself queued, in th
             // A row a committed configure inserted, not this Access.
             const existing: u64 = @intCast((try store_core.readSessionForTesting(&storage, session.slice())).?.instructions_id.?);
 
+            const Sinks = struct {
+                pub const Guards = error{};
+                storage: *Store,
+                existing: u64,
+                last: u64 = 0,
+                never: u64 = 0,
+
+                pub fn step(b: *@This(), r: anytype, ran: u32) !TestingAsk {
+                    if (ran != 0) {
+                        const again = try r.contentSink(b.last, 4);
+                        again.close();
+                        // Taken but never inserted: there is no row to open.
+                        try std.testing.expectError(error.ContentWriteFailed, r.contentSink(b.never, 4));
+                        return .done;
+                    }
+                    // Opens the transaction, so the next id is taken in it, before this
+                    // writer takes any.
+                    _ = try r.identity(.turn_id);
+                    const before = try store_core.takeIdentity(b.storage, .content_id);
+                    // Distinct identities, since content is unique by identity.
+                    const digests = [3][32]u8{ protocol.contentDigest("sink0"), protocol.contentDigest("sink1"), protocol.contentDigest("sink2") };
+                    r.write(TestingRound.insert_content, .{ .content_id = before, .digest = digests[0], .length = 4 });
+                    const first = try r.identity(.content_id);
+                    r.write(TestingRound.insert_content, .{ .content_id = first, .digest = digests[1], .length = 4 });
+                    r.recordContentRow(first);
+                    // Taken outside this writer between its own ids: inside the range of
+                    // the ids it took, but not its own.
+                    const between = try store_core.takeIdentity(b.storage, .content_id);
+                    b.never = try r.identity(.content_id);
+                    b.last = try r.identity(.content_id);
+                    r.write(TestingRound.insert_content, .{ .content_id = b.last, .digest = digests[2], .length = 4 });
+                    r.recordContentRow(b.last);
+                    try std.testing.expectEqual(first + 3, b.last);
+                    // Refused: 0, a committed row, one taken in this transaction before
+                    // this writer's first, one other code took between its own, and one
+                    // past its last. A check of the range from its first id to its last
+                    // accepted `between`.
+                    try std.testing.expectError(error.ContentNotInserted, r.contentSink(0, 4));
+                    try std.testing.expectError(error.ContentNotInserted, r.contentSink(b.existing, 4));
+                    try std.testing.expectError(error.ContentNotInserted, r.contentSink(before, 4));
+                    try std.testing.expectError(error.ContentNotInserted, r.contentSink(between, 4));
+                    try std.testing.expectError(error.ContentNotInserted, r.contentSink(b.last + 1, 4));
+                    // The first id opens while its insert is still queued: SQLite
+                    // steps it for the blob handle, while MySQL queues the chunk
+                    // behind it, so one round runs both.
+                    const sink = try r.contentSink(first, 4);
+                    try sink.write("sink", 0);
+                    sink.close();
+                    return .round;
+                }
+            };
             const entry = try store_core.enter(&storage, .none);
             defer entry.release();
-            var a: store_access.Access(.write, error{}) = .open(&entry);
-            defer a.deinit();
-            // Opens the transaction, so the next id is taken in it, before this
-            // Access takes any.
-            _ = try a.identity(.turn_id);
-            const before = try store_core.takeIdentity(&storage, .content_id);
-            // Distinct identities, since content is unique by identity.
-            const digests = [3][32]u8{ protocol.contentDigest("sink0"), protocol.contentDigest("sink1"), protocol.contentDigest("sink2") };
-            a.write(TestingRound.insert_content, .{ .content_id = before, .digest = digests[0], .length = 4 });
-            const first = try a.identity(.content_id);
-            a.write(TestingRound.insert_content, .{ .content_id = first, .digest = digests[1], .length = 4 });
-            a.recordContentRow(first);
-            // Taken outside this Access between its own ids: inside the range of
-            // the ids it took, but not its own.
-            const between = try store_core.takeIdentity(&storage, .content_id);
-            const never = try a.identity(.content_id);
-            const last = try a.identity(.content_id);
-            a.write(TestingRound.insert_content, .{ .content_id = last, .digest = digests[2], .length = 4 });
-            a.recordContentRow(last);
-            try std.testing.expectEqual(first + 3, last);
-            // Refused: 0, a committed row, one taken in this transaction before
-            // this Access's first, one other code took between its own, and one
-            // past its last. A check of the range from its first id to its last
-            // accepted `between`.
-            try std.testing.expectError(error.ContentNotInserted, a.contentSink(0, 4));
-            try std.testing.expectError(error.ContentNotInserted, a.contentSink(existing, 4));
-            try std.testing.expectError(error.ContentNotInserted, a.contentSink(before, 4));
-            try std.testing.expectError(error.ContentNotInserted, a.contentSink(between, 4));
-            try std.testing.expectError(error.ContentNotInserted, a.contentSink(last + 1, 4));
-            // The first id opens while its insert is still queued: SQLite
-            // steps it for the blob handle, while MySQL queues the chunk
-            // behind it, so one round runs both.
-            const sink = try a.contentSink(first, 4);
-            try sink.write("sink", 0);
-            sink.close();
-            try a.run();
-            try std.testing.expectEqual(0, a.queued);
-            const again = try a.contentSink(last, 4);
-            again.close();
-            // Taken but never inserted: there is no row to open.
-            try std.testing.expectError(error.ContentWriteFailed, a.contentSink(never, 4));
-            try a.abandon(.{});
+            var sinks: Sinks = .{ .storage = &storage, .existing = existing };
+            try TestingScript(Sinks).run(&entry, &sinks);
         }
     }.run);
 }
@@ -1464,24 +1587,28 @@ test "an Access that touches a fifth Session records everything and still commit
             var sessions: [5]protocol.Bounded(protocol.max_session_bytes) = undefined;
             inline for (&sessions, .{ "five-a", "five-b", "five-c", "five-d", "five-e" }) |*session, key| session.* = try configureTestSession(&storage, key);
 
+            // Each Session's head in a round, then its dating in the next.
             const Five = struct {
-                fn body(a: anytype, all: []const protocol.Bounded(protocol.max_session_bytes)) !void {
-                    for (all) |session| {
-                        var loaded: TestingRound.head.Result = undefined;
-                        a.read(TestingRound.head, .{ .session_ref = session.slice() }, &loaded);
-                        try a.run();
-                        a.write(TestingRound.date_session, .{ .session = loaded.head, .revision = 1 });
-                        try a.run();
+                pub const Guards = error{TestingGuard};
+                all: []const protocol.Bounded(protocol.max_session_bytes),
+                loaded: TestingRound.head.Result = undefined,
+
+                pub fn step(b: *@This(), r: anytype, ran: u32) !TestingAsk {
+                    const index = ran / 2;
+                    if (ran % 2 == 1) {
+                        r.write(TestingRound.date_session, .{ .session = b.loaded.head, .revision = 1 });
+                        return .round;
                     }
-                    try a.commit();
+                    if (index == b.all.len) return .commit;
+                    r.read(TestingRound.head, .{ .session_ref = b.all[index].slice() }, &b.loaded);
+                    return .round;
                 }
             };
             {
                 const entry = try store_core.enter(&storage, .none);
                 defer entry.release();
-                var a: store_access.Access(.write, error{TestingGuard}) = .open(&entry);
-                defer a.deinit();
-                try entry.finishTransaction(error{TestingGuard}, .{}, a.end(.{}, Five.body(&a, &sessions)));
+                var five: Five = .{ .all = &sessions };
+                try entry.finishTransaction(error{TestingGuard}, .{}, TestingScript(Five).run(&entry, &five));
             }
             try std.testing.expect(storage.touched.everything);
             try std.testing.expect(!storage.isFenced());
@@ -1514,60 +1641,46 @@ test "every round of a write Access dates its rows with the transaction's second
             defer storage.close() catch unreachable;
             const first = try configureTestSession(&storage, "second-first");
             const second = try configureTestSession(&storage, "second-second");
+            const Dating = struct {
+                pub const Guards = error{TestingGuard};
+                storage: *Store,
+                io: std.Io,
+                sessions: [2][]const u8,
+                heads: [2]TestingRound.head.Result = undefined,
+                dated: i64 = 0,
+
+                pub fn step(b: *@This(), r: anytype, ran: u32) !TestingAsk {
+                    switch (ran) {
+                        0 => {
+                            for (b.sessions, &b.heads) |session, *head| r.read(TestingRound.head, .{ .session_ref = session }, head);
+                            return .round;
+                        },
+                        1 => {
+                            r.write(TestingRound.date_session, .{ .session = b.heads[0].head, .revision = 1 });
+                            return .round;
+                        },
+                        else => {
+                            b.dated = try store_core.transactionSecond(b.storage);
+                            // The clock moves on to a later second before the next round dates.
+                            Clock.ahead = .fromSeconds(1);
+                            try std.testing.expect(@divFloor(try store_core.readUnixMilliseconds(b.io), 1000) > b.dated);
+                            r.write(TestingRound.date_session, .{ .session = b.heads[1].head, .revision = 1 });
+                            return .commit;
+                        },
+                    }
+                }
+            };
             const entry = try store_core.enter(&storage, .none);
             defer entry.release();
-            var a: store_access.Access(.write, error{TestingGuard}) = .open(&entry);
-            defer a.deinit();
-            var heads: [2]TestingRound.head.Result = undefined;
-            a.read(TestingRound.head, .{ .session_ref = first.slice() }, &heads[0]);
-            a.read(TestingRound.head, .{ .session_ref = second.slice() }, &heads[1]);
-            try a.run();
-            a.write(TestingRound.date_session, .{ .session = heads[0].head, .revision = 1 });
-            try a.run();
-            const dated = try store_core.transactionSecond(&storage);
-            // The clock moves on to a later second before the next round dates.
-            Clock.ahead = .fromSeconds(1);
-            try std.testing.expect(@divFloor(try store_core.readUnixMilliseconds(io), 1000) > dated);
-            a.write(TestingRound.date_session, .{ .session = heads[1].head, .revision = 1 });
-            try a.commit();
+            var dating: Dating = .{ .storage = &storage, .io = io, .sessions = .{ first.slice(), second.slice() } };
+            try TestingScript(Dating).run(&entry, &dating);
+            const dated = dating.dated;
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(DISTINCT created_at) FROM session", .{}));
             try std.testing.expectEqual(@as(u64, @intCast(dated)), try store_testing.queryU64(&storage, "SELECT max(created_at) FROM session", .{}));
             // Commit cleared it: the next transaction reads the clock again.
             try store_core.begin(&storage);
             try std.testing.expect(try store_core.transactionSecond(&storage) > dated);
             try store_core.rollbackAfterError(&storage, .{});
-        }
-    }.run);
-}
-
-test "an Access commits its writes, positions and identities together, or none of them" {
-    try store_testing.forEachEngine(struct {
-        fn run(case: *store_testing.Case) !void {
-            var tmp = std.testing.tmpDir(.{});
-            defer tmp.cleanup();
-            var storage: Store = undefined;
-            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
-            defer storage.close() catch unreachable;
-            const session = try configureTestSession(&storage, "round-config");
-            const next_sql = "SELECT next_position FROM session";
-            const position = try store_testing.queryU64(&storage, next_sql, .{});
-            const contents = try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{});
-            const content_id = storage.identities().next.get(.content_id);
-
-            // A failed guard stops the round before COMMIT: no row, position or id stays.
-            try std.testing.expectError(error.TestingGuard, TestingRound.change(&storage, session.slice(), "round rolled back", 99));
-            try std.testing.expect(!storage.isFenced());
-            try std.testing.expectEqual(position, try store_testing.queryU64(&storage, next_sql, .{}));
-            try std.testing.expectEqual(contents, try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
-            try std.testing.expectEqual(content_id, storage.identities().next.get(.content_id));
-
-            const before = @divFloor(try store_core.readUnixMilliseconds(std.testing.io), 1000);
-            try std.testing.expectEqual(position, try TestingRound.change(&storage, session.slice(), "round committed", 1));
-            const after = @divFloor(try store_core.readUnixMilliseconds(std.testing.io), 1000);
-            try std.testing.expectEqual(position + 2, try store_testing.queryU64(&storage, next_sql, .{}));
-            try std.testing.expectEqual(content_id, try store_testing.queryU64(&storage, "SELECT content_id FROM content WHERE byte_length=15 AND private=0 AND digest=?1", .{store_testing.Blob{ .bytes = &protocol.contentDigest("round committed") }}));
-            const dated: i64 = @intCast(try store_testing.queryU64(&storage, "SELECT created_at FROM session", .{}));
-            try std.testing.expect(before <= dated and dated <= after);
         }
     }.run);
 }
@@ -1581,19 +1694,27 @@ const counted_dating = rsql.Write(.{
 /// Dates `session` at `at` where its revision is `revision`, stating
 /// `rows` as the rows that write changes.
 fn countedDatingForTesting(storage: *Store, session: []const u8, at: u64, revision: u64, rows: u64) !void {
+    const Counted = struct {
+        pub const Guards = error{TestingGuard};
+        session: []const u8,
+        at: u64,
+        revision: u64,
+        rows: u64,
+        loaded: TestingRound.head.Result = undefined,
+
+        pub fn step(b: *@This(), r: anytype, ran: u32) !TestingAsk {
+            if (ran == 0) {
+                r.read(TestingRound.head, .{ .session_ref = b.session }, &b.loaded);
+                return .round;
+            }
+            r.writeCount(counted_dating, .{ .session = b.loaded.head, .at = b.at, .revision = b.revision }, b.rows);
+            return .commit;
+        }
+    };
     const entry = try store_core.enter(storage, .none);
     defer entry.release();
-    var a: store_access.Access(.write, error{TestingGuard}) = .open(&entry);
-    defer a.deinit();
-    return entry.finishTransaction(error{TestingGuard}, .{}, a.end(.{}, struct {
-        fn body(access: anytype, ref: []const u8, value: u64, current: u64, count: u64) !void {
-            var loaded: TestingRound.head.Result = undefined;
-            access.read(TestingRound.head, .{ .session_ref = ref }, &loaded);
-            try access.run();
-            access.writeCount(counted_dating, .{ .session = loaded.head, .at = value, .revision = current }, count);
-            try access.commit();
-        }
-    }.body(&a, session, at, revision, rows)));
+    var counted: Counted = .{ .session = session, .at = at, .revision = revision, .rows = rows };
+    return entry.finishTransaction(error{TestingGuard}, .{}, TestingScript(Counted).run(&entry, &counted));
 }
 
 test "a counted write commits only when it changes the rows its caller states" {
@@ -1783,8 +1904,11 @@ test "a transition with a wide pass steps twenty statements a pass, an ordinary 
             var passes: [2]u64 = undefined;
             inline for (.{ transition.Pass.wide, transition.Pass.ordinary }, &passes) |width, *taken| {
                 const before = RoundMeter.QueryShape.snapshot(&storage);
+                const rounds = storage.testing_content_work.rounds;
                 try transition.apply(&storage, TestingPassWidth(width), .{}, .{});
                 taken.* = RoundMeter.QueryShape.snapshot(&storage).since(before).access_passes;
+                // However many passes a full queue takes, the round counts once.
+                if (!case.rerun) try std.testing.expectEqual(rounds + 1, storage.testing_content_work.rounds);
             }
             try std.testing.expect(!storage.isFenced());
             // Only a batching engine sends passes, and a rerun repeats them.
@@ -3196,25 +3320,30 @@ pub fn refreshFrontierForTesting(storage: *Store, session: []const u8) !void {
 
 fn refreshFrontiersForTesting(storage: *Store, sessions: []const []const u8) !void {
     std.debug.assert(sessions.len > 0 and sessions.len <= 4);
+    const Refresh = struct {
+        pub const Guards = error{};
+        const head = rsql.Read(.{
+            .sql = "SELECT session_ref,workspace_key,next_position FROM session WHERE session_ref=?1",
+            .Args = struct { session: []const u8 },
+            .Row = struct { session: rsql.SessionHead },
+            .cardinality = .optional,
+        });
+        refs: []const []const u8,
+        rows: [4]head.Result = undefined,
+
+        pub fn step(b: *@This(), r: anytype, ran: u32) !TestingAsk {
+            if (ran == 0) {
+                for (b.refs, b.rows[0..b.refs.len]) |ref, *row| r.read(head, .{ .session = ref }, row);
+                return .round;
+            }
+            for (b.rows[0..b.refs.len]) |row| r.obligationsChanged((row orelse return error.CorruptStore).session);
+            return .commit;
+        }
+    };
     const entry = try store_core.enter(storage, .none);
     defer entry.release();
-    var a: store_access.Access(.write, error{}) = .open(&entry);
-    defer a.deinit();
-    return entry.finishTransaction(store_core.Ordinary.none, .{}, a.end(.{}, struct {
-        fn run(access: *store_access.Access(.write, error{}), refs: []const []const u8) !void {
-            const head = rsql.Read(.{
-                .sql = "SELECT session_ref,workspace_key,next_position FROM session WHERE session_ref=?1",
-                .Args = struct { session: []const u8 },
-                .Row = struct { session: rsql.SessionHead },
-                .cardinality = .optional,
-            });
-            var rows: [4]head.Result = undefined;
-            for (refs, rows[0..refs.len]) |ref, *row| access.read(head, .{ .session = ref }, row);
-            try access.run();
-            for (rows[0..refs.len]) |row| access.obligationsChanged((row orelse return error.CorruptStore).session);
-            try access.commit();
-        }
-    }.run(&a, sessions)));
+    var refresh: Refresh = .{ .refs = sessions };
+    return entry.finishTransaction(store_core.Ordinary.none, .{}, TestingScript(Refresh).run(&entry, &refresh));
 }
 
 test "obligation projection recomputes a dirty forest together in either head order" {
@@ -3937,7 +4066,9 @@ test "the Store prepares only typed statements, its transaction control and test
 test "Store entry points queue and fence only through canonical access" {
     // Every entry point classifies its errors through `Entry`; a new path
     // cannot take a lock beside the Store's queue, read or set the fence
-    // beside it, or enter without returning through a classifier.
+    // beside it, or enter without returning through a classifier. Only the
+    // transition runner opens a writing Access: every other Store file,
+    // tests included, opens a read or survey one.
     const sources = .{
         @embedFile("Store.zig"),
         @embedFile("access.zig"),
@@ -3979,6 +4110,27 @@ test "Store entry points queue and fence only through canonical access" {
         @embedFile("queue.zig"),
         @embedFile("transition.zig"),
     };
+    // The Store's test files, which hold no entry point but may open an
+    // Access; import_architecture.py checks this list too.
+    const test_sources = .{
+        @embedFile("mysql_dialect_check.zig"),
+        @embedFile("mysql_session_tests.zig"),
+        @embedFile("mysql_testing.zig"),
+        @embedFile("sqlite_tests.zig"),
+        @embedFile("tests.zig"),
+    };
+    inline for (sources ++ test_sources) |source| {
+        // access.zig, which defines it, and transition.zig, the runner.
+        if (source.ptr == sources[1].ptr or source.ptr == sources[sources.len - 1].ptr) continue;
+        var at: usize = 0;
+        while (std.mem.indexOfPos(u8, source, at, "Access" ++ "(")) |index| : (at = index + 1) {
+            if (index > 0 and (std.ascii.isAlphanumeric(source[index - 1]) or source[index - 1] == '_')) continue;
+            const mode = source[index + "Access".len + 1 ..];
+            if (std.mem.startsWith(u8, mode, ".read,") or std.mem.startsWith(u8, mode, ".survey,")) continue;
+            std.debug.print("an Access opened outside the transition runner: {s}\n", .{source[index..][0..@min(48, source.len - index)]});
+            return error.WriterOutsideRunner;
+        }
+    }
     var locks: usize = 0;
     var fence_stores: usize = 0;
     var fence_loads: usize = 0;
@@ -16737,7 +16889,7 @@ test "inline skills initial failure preserves all ordinary configuration refusal
 }
 
 test "inline skills configuration validation borrows one Store-owned plan through content imports" {
-    const Ready = @FieldType(configuration_domain.ConfigurationValidation, "ready");
+    const Ready = @FieldType(configuration_domain.Validation, "ready");
     // The validation-only phase must not return another Settings value onto
     // the Host's creation/import chain. This is an ownership API contract.
     try std.testing.expect(Ready == *const configuration_domain.ValidatedConfiguration);
@@ -16759,31 +16911,33 @@ test "inline skills configuration validation borrows one Store-owned plan throug
                 update.configuration.permission_mode.state = .value;
                 try update.configuration.permission_mode.value.set("ask");
                 {
+                    const Check = struct {
+                        original_instructions: ?@FieldType(configuration_domain.CurrentConfiguration, "instructions_id") = null,
+                        checked: u8 = 0,
+
+                        pub fn ready(check: *@This(), plan: *const configuration_domain.ValidatedConfiguration, reads: *configuration_domain.ConfigurationReads) !void {
+                            try std.testing.expect(plan == &reads.validated);
+                            check.original_instructions = plan.before.?.instructions_id;
+                            try std.testing.expect(plan.before.?.label == null);
+                            check.checked += 1;
+                        }
+
+                        pub fn applied(check: *@This(), plan: *const configuration_domain.ValidatedConfiguration, reads: *configuration_domain.ConfigurationReads, answer: *const configuration_domain.Applied) !void {
+                            try std.testing.expect(plan == &reads.validated);
+                            try std.testing.expectEqual(check.original_instructions.?, plan.before.?.instructions_id);
+                            try std.testing.expect(reads.next.instructions_id != check.original_instructions.?);
+                            try std.testing.expect(plan.before.?.label == null);
+                            try std.testing.expectEqualStrings("retained", reads.next.label.?.slice());
+                            const expected: std.EnumSet(protocol.SessionField) = .initMany(&.{ .instructions, .permission_mode, .label });
+                            try std.testing.expectEqual(expected, answer.changes);
+                            check.checked += 1;
+                        }
+                    };
                     const entry = try store_core.enter(&storage, .none);
                     defer entry.release();
-                    var a: store_access.Access(.write, error{SessionUpdateFailed}) = .open(&entry);
-                    defer a.deinit();
-                    const reads = storage.configurationReads();
-                    reads.* = .{ .next = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } } };
-                    configuration_domain.prepareConfiguration(&a, storage.hostTools().host_tool_set, session.slice(), &update.configuration, reads);
-                    try a.run();
-                    const checked = try configuration_domain.validateConfiguration(&a, storage.io, session.slice(), &update.configuration, null, reads);
-                    try std.testing.expect(checked == .ready);
-                    const plan = checked.ready;
-                    try std.testing.expect(plan == &reads.validated);
-                    const original_instructions = plan.before.?.instructions_id;
-                    try std.testing.expect(plan.before.?.label == null);
-                    const applied = try configuration_domain.applyValidatedConfiguration(&a, storage.io, session.slice(), &update.configuration, null, .{}, reads);
-                    try std.testing.expect(applied == .accepted);
-                    try std.testing.expect(plan == &reads.validated);
-                    try std.testing.expectEqual(original_instructions, plan.before.?.instructions_id);
-                    try std.testing.expect(reads.next.instructions_id != original_instructions);
-                    try std.testing.expect(plan.before.?.label == null);
-                    try std.testing.expectEqualStrings("retained", reads.next.label.?.slice());
-                    const expected: std.EnumSet(protocol.SessionField) = .initMany(&.{ .instructions, .permission_mode, .label });
-                    try std.testing.expectEqual(expected, applied.accepted.changes);
-                    try a.run();
-                    try a.abandon(.{});
+                    var updating: TestingConfiguring(Check) = .{ .storage = &storage, .session = session.slice(), .configuration = &update.configuration };
+                    try TestingScript(@TypeOf(updating)).run(&entry, &updating);
+                    try std.testing.expectEqual(@as(u8, 2), updating.check.checked);
                 }
                 const saved = (try store_core.readSessionForTesting(&storage, session.slice())).?;
                 try std.testing.expectEqual(@as(u64, 1), saved.revision);

@@ -34,12 +34,15 @@ STORE_FACADE = "src/store.zig"
 # and they import nothing else of the Store.
 STORE_WIRE = "src/store/wire/"
 STORE_TESTS = "src/store/tests.zig"
-# Test files hold no entry point, so the lock-and-fence test does not read them.
+# Test files hold no entry point, so the round-budget test does not read them.
 STORE_TEST_FILES = (STORE_TESTS, "src/store/sqlite_tests.zig", "src/store/mysql_dialect_check.zig",
                     "src/store/mysql_session_tests.zig", "src/store/mysql_testing.zig")
 # The tests that scan every Store file's source, each by its own embed list.
 SOURCE_SCAN_TESTS = ("Store entry points queue and fence only through canonical access",
                      "every function that enters the Store has a round budget")
+# The source-scan test that also reads the test files, where only the
+# transition runner may open a writing Access.
+WRITER_SCAN_TEST = SOURCE_SCAN_TESTS[0]
 BOOTSTRAP_BASE = "cdad5aaf4dc43cbb7864f0fa0a4a08bf4f25a8ff"
 # Preserve strings as tokens so braces/import spellings inside them are inert.
 TOKEN = re.compile(r'//[^\n]*|\\\\[^\n]*|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|@[A-Za-z_][A-Za-z_0-9]*|[A-Za-z_][A-Za-z_0-9]*|[^\s]')
@@ -195,7 +198,7 @@ def store_boundary(root):
 def store_access_sources(root):
     """Each source-scan test (`SOURCE_SCAN_TESTS`) reads every Store file
     but its test files (`STORE_TEST_FILES`) and the wire clients, which
-    hold no Store state.
+    hold no Store state. `WRITER_SCAN_TEST` reads the test files as well.
 
     The facade holds only re-exports, so it has no entry point to check; a
     function there must join the tests' sources.
@@ -204,14 +207,16 @@ def store_access_sources(root):
     expected = sorted(path.relative_to(directory).as_posix() for path in directory.rglob("*.zig")
                       if path.relative_to(root).as_posix() not in STORE_TEST_FILES
                       and not path.is_relative_to(root / STORE_WIRE))
+    tests = sorted(Path(path).relative_to(STORE_DIRECTORY).as_posix() for path in STORE_TEST_FILES if (root / path).exists())
     text = (root / STORE_TESTS).read_text()
     for name in SOURCE_SCAN_TESTS:
         test = re.search(rf'^test "{re.escape(name)}" \{{\n(.*?)^\}}$', text, re.M | re.S)
         if not test:
             raise ValueError(f'{STORE_TESTS} has no test "{name}"')
         listed = sorted(re.findall(r'@embedFile\("([^"]+)"\)', test[1]))
-        if listed != expected:
-            raise ValueError(f'"{name}" reads {listed}; the Store\'s files are {expected}')
+        files = sorted(expected + tests) if name == WRITER_SCAN_TEST else expected
+        if listed != files:
+            raise ValueError(f'"{name}" reads {listed}; the Store\'s files are {files}')
     if "fn" in TOKEN.findall((root / STORE_FACADE).read_text()):
         raise ValueError(f"{STORE_FACADE} declares a function; add it to the source-scan tests' sources")
 

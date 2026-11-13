@@ -111,6 +111,8 @@ const TestingRejectedCall = tests.TestingRejectedCall;
 const TestingReportAction = tests.TestingReportAction;
 const TestingResolvedAction = tests.TestingResolvedAction;
 const TestingRound = tests.TestingRound;
+const TestingAsk = tests.TestingAsk;
+const TestingScript = tests.TestingScript;
 const TestingSessionReport = tests.TestingSessionReport;
 const TestingWorkShape = tests.TestingWorkShape;
 const admitRetryForTesting = tests.admitRetryForTesting;
@@ -253,15 +255,24 @@ fn busyStatements(database: *c.sqlite3) usize {
 /// Imports `bytes` as public content in a transaction of its own, as
 /// identities are taken only inside one.
 fn importCommittedForTesting(storage: *Store, bytes: []const u8) !void {
+    const Import = struct {
+        pub const Guards = error{};
+        bytes: []const u8,
+        value: content_domain.Import,
+
+        pub fn step(b: *@This(), r: anytype, ran: u32) !TestingAsk {
+            if (ran == 0) {
+                content_domain.lookup(r, &b.value);
+                return .round;
+            }
+            _ = try content_domain.importBytes(r, &b.value, b.bytes);
+            return .commit;
+        }
+    };
     const entry = try store_core.enter(storage, .none);
     defer entry.release();
-    var a: store_access.Access(.write, error{}) = .open(&entry);
-    defer a.deinit();
-    var value: content_domain.Import = .ofBytes(bytes, false);
-    content_domain.lookup(&a, &value);
-    try a.run();
-    _ = try content_domain.importBytes(&a, &value, bytes);
-    try a.commit();
+    var import: Import = .{ .bytes = bytes, .value = .ofBytes(bytes, false) };
+    return TestingScript(Import).run(&entry, &import);
 }
 
 /// Counts SQLite VM steps from `begin` to `end`. Preparing a statement also
@@ -659,78 +670,36 @@ test "a round queues one statement any number of times, an engine pass before ea
     var storage: Store = undefined;
     try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
-    const entry = try store_core.enter(&storage, .none);
-    defer entry.release();
-    var a: store_access.Access(.write, error{TestingGuard}) = .open(&entry);
-    defer a.deinit();
-    // Before engine passes the second queuing was StatementQueuedTwice.
-    var digests: [9][32]u8 = undefined;
-    var ids: [9]u64 = undefined;
-    for (&digests, &ids, 0..) |*digest, *id, index| {
-        digest.* = protocol.contentDigest(&.{@intCast(index)});
-        id.* = try a.identity(.content_id);
-        a.write(TestingRound.insert_content, .{ .content_id = id.*, .digest = digest.*, .length = index + 1 });
-    }
-    const before = storage.testing_content_work.rounds;
-    try a.run();
-    try std.testing.expectEqual(1, storage.testing_content_work.rounds - before);
-    try std.testing.expectEqual(9, a.passes);
-    // Each binding stepped before the next replaced it: nine rows, in order.
-    for (ids, 0..) |id, index| {
-        var lengths: [64]u8 = undefined;
-        const sql = try std.fmt.bufPrintSentinel(&lengths, "SELECT byte_length FROM content WHERE content_id={d}", .{id}, 0);
-        try std.testing.expectEqual(index + 1, try store_testing.sqliteQueryU64(storage.sqliteDatabase(), sql, .{}));
-    }
-    try a.abandon(.{});
-}
+    const Rebinding = struct {
+        pub const Guards = error{TestingGuard};
+        storage: *Store,
+        ids: [9]u64 = undefined,
+        rounds: u64 = 0,
 
-test "a full queue takes an engine pass and the round still counts once" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var storage: Store = undefined;
-    try testingStore(&storage, &tmp, std.testing.io);
-    defer storage.close() catch unreachable;
+        pub fn step(b: *@This(), r: anytype, ran: u32) !TestingAsk {
+            if (ran == 0) {
+                // Before engine passes the second queuing was StatementQueuedTwice.
+                for (&b.ids, 0..) |*id, index| {
+                    id.* = try r.identity(.content_id);
+                    r.write(TestingRound.insert_content, .{ .content_id = id.*, .digest = protocol.contentDigest(&.{@intCast(index)}), .length = index + 1 });
+                }
+                b.rounds = b.storage.testing_content_work.rounds;
+                return .round;
+            }
+            try std.testing.expectEqual(1, b.storage.testing_content_work.rounds - b.rounds);
+            // Each binding stepped before the next replaced it: nine rows, in order.
+            for (b.ids, 0..) |id, index| {
+                var lengths: [64]u8 = undefined;
+                const sql = try std.fmt.bufPrintSentinel(&lengths, "SELECT byte_length FROM content WHERE content_id={d}", .{id}, 0);
+                try std.testing.expectEqual(index + 1, try store_testing.sqliteQueryU64(b.storage.sqliteDatabase(), sql, .{}));
+            }
+            return .done;
+        }
+    };
     const entry = try store_core.enter(&storage, .none);
     defer entry.release();
-    var a: store_access.Access(.write, error{TestingGuard}) = .open(&entry);
-    defer a.deinit();
-    // The thirteenth entry exceeds the write queue's twelve slots.
-    const text = "abcdefghijkl";
-    const digest = protocol.contentDigest(text);
-    const id = try a.identity(.content_id);
-    a.write(TestingRound.insert_content, .{ .content_id = id, .digest = digest, .length = text.len });
-    for (0..text.len) |index| a.writeContent(id, text[index..][0..1]);
-    const before = storage.testing_content_work.rounds;
-    try a.run();
-    try std.testing.expectEqual(1, storage.testing_content_work.rounds - before);
-    try std.testing.expectEqual(2, a.passes);
-    try a.abandon(.{});
-}
-
-test "a settlement's queue holds twenty statements a pass" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var storage: Store = undefined;
-    try testingStore(&storage, &tmp, std.testing.io);
-    defer storage.close() catch unreachable;
-    const entry = try store_core.enter(&storage, .none);
-    defer entry.release();
-    var a: store_access.Access(.settlement, error{TestingGuard}) = undefined;
-    a.init(&entry);
-    defer a.deinit();
-    // A row and nineteen chunks fill one pass; a write's queue takes two.
-    const text = "abcdefghijklmnopqrst";
-    const digest = protocol.contentDigest(text);
-    const id = try a.identity(.content_id);
-    a.write(TestingRound.insert_content, .{ .content_id = id, .digest = digest, .length = text.len });
-    for (0..19) |index| a.writeContent(id, text[index..][0..1]);
-    try a.run();
-    try std.testing.expectEqual(1, a.passes);
-    a.writeContent(id, text[19..]);
-    for (0..20) |_| a.writeContent(id, "");
-    try a.run();
-    try std.testing.expectEqual(3, a.passes);
-    try a.abandon(.{});
+    var rebinding: Rebinding = .{ .storage = &storage };
+    try TestingScript(Rebinding).run(&entry, &rebinding);
 }
 
 test "a guard that fails in an engine pass fails the next run, and nothing after it steps" {
@@ -740,48 +709,43 @@ test "a guard that fails in an engine pass fails the next run, and nothing after
     try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const session = try configureTestSession(&storage, "pass-guard");
+    const Dating = struct {
+        pub const Guards = error{TestingGuard};
+        storage: *Store,
+        session: []const u8,
+        loaded: TestingRound.head.Result = undefined,
+        before: u64 = 0,
+        unchanged: ?bool = null,
+
+        pub fn step(b: *@This(), r: anytype, ran: u32) !TestingAsk {
+            if (ran == 0) {
+                r.read(TestingRound.head, .{ .session_ref = b.session }, &b.loaded);
+                return .round;
+            }
+            b.before = try b.dated();
+            // Revision 99 matches no row, so the guard fails when the pass
+            // that rebinding the statement takes steps it, before any run.
+            r.write(TestingRound.date_session, .{ .session = b.loaded.head, .revision = 99 });
+            try std.testing.expect(r.transactionOpen());
+            r.write(TestingRound.date_session, .{ .session = b.loaded.head, .revision = 1 });
+            try std.testing.expect(!r.transactionOpen());
+            return .round;
+        }
+
+        /// Before the rollback: the second write never stepped.
+        pub fn failed(b: *@This()) void {
+            b.unchanged = if (b.dated()) |now| now == b.before else |_| false;
+        }
+
+        fn dated(b: *const @This()) !u64 {
+            return store_testing.sqlite_only.queryU64(b.storage, "SELECT created_at FROM session WHERE session_ref=?1", .{b.session});
+        }
+    };
     const entry = try store_core.enter(&storage, .none);
     defer entry.release();
-    var a: store_access.Access(.write, error{TestingGuard}) = .open(&entry);
-    defer a.deinit();
-    var loaded: TestingRound.head.Result = undefined;
-    a.read(TestingRound.head, .{ .session_ref = session.slice() }, &loaded);
-    try a.run();
-    const before = try store_testing.sqlite_only.queryU64(&storage, "SELECT created_at FROM session WHERE session_ref=?1", .{session.slice()});
-    // Revision 99 matches no row, so the guard fails when the pass steps it.
-    a.write(TestingRound.date_session, .{ .session = loaded.head, .revision = 99 });
-    a.write(TestingRound.date_session, .{ .session = loaded.head, .revision = 1 });
-    try std.testing.expectEqual(2, a.passes);
-    try std.testing.expectError(error.TestingGuard, a.run());
-    try std.testing.expectEqual(before, try store_testing.sqlite_only.queryU64(&storage, "SELECT created_at FROM session WHERE session_ref=?1", .{session.slice()}));
-    try a.abandon(.{});
-}
-
-test "abandoning an Access that has ended runs nothing" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var storage: Store = undefined;
-    try testingStore(&storage, &tmp, std.testing.io);
-    defer storage.close() catch unreachable;
-    for ([_]bool{ false, true }) |committed| {
-        const entry = try store_core.enter(&storage, .none);
-        defer entry.release();
-        var a: store_access.Access(.write, error{}) = .open(&entry);
-        defer a.deinit();
-        const id = try a.identity(.content_id);
-        const digest = protocol.contentDigest("ended");
-        a.write(TestingRound.insert_content, .{ .content_id = id, .digest = digest, .length = 5 });
-        if (committed) try a.commit() else {
-            try a.run();
-            try a.abandon(.{});
-        }
-        var statements: TestingStatements = .{};
-        statements.begin(storage.sqliteDatabase());
-        try a.abandon(.{});
-        statements.end(storage.sqliteDatabase());
-        try std.testing.expectEqual(@as(u64, 0), statements.count);
-    }
-    try std.testing.expect(!storage.isFenced());
+    var dating: Dating = .{ .storage = &storage, .session = session.slice() };
+    try std.testing.expectError(error.TestingGuard, TestingScript(Dating).run(&entry, &dating));
+    try std.testing.expectEqual(@as(?bool, true), dating.unchanged);
 }
 
 test "the tables that carry Sessions are exactly the ones the touch oracle watches" {
@@ -1628,21 +1592,36 @@ test "claiming Session positions stops at the largest position, and fails when i
 
     const session = try configureTestSessionAsk(&storage, "claim-config");
     const last: u64 = std.math.maxInt(i64);
+    const Claim = struct {
+        pub const Guards = error{};
+        session: []const u8,
+        /// Claims up to the largest position, or one position.
+        to_last: bool,
+        loaded: TestingRound.head.Result = undefined,
+
+        pub fn step(b: *@This(), r: anytype, ran: u32) !TestingAsk {
+            if (ran == 0) {
+                r.read(TestingRound.head, .{ .session_ref = b.session }, &b.loaded);
+                return .round;
+            }
+            const positions = try r.positions(b.loaded.head);
+            if (!b.to_last) {
+                _ = try positions.take(1);
+                return .commit;
+            }
+            try std.testing.expectEqual(last - 2, try positions.take(2));
+            try std.testing.expectError(error.SessionPositionExhausted, positions.take(1));
+            try std.testing.expectEqual(last, try positions.take(0));
+            try std.testing.expectError(error.SessionPositionExhausted, positions.take(last + 1));
+            return .commit;
+        }
+    };
     try store_testing.sqlite_only.exec(&storage, "UPDATE session SET next_position=9223372036854775805 WHERE session_ref=?1", .{session.slice()});
     {
         const entry = try store_core.enter(&storage, .none);
         defer entry.release();
-        var a: store_access.Access(.write, error{}) = .open(&entry);
-        defer a.deinit();
-        var loaded: TestingRound.head.Result = undefined;
-        a.read(TestingRound.head, .{ .session_ref = session.slice() }, &loaded);
-        try a.run();
-        const positions = try a.positions(loaded.head);
-        try std.testing.expectEqual(last - 2, try positions.take(2));
-        try std.testing.expectError(error.SessionPositionExhausted, positions.take(1));
-        try std.testing.expectEqual(last, try positions.take(0));
-        try std.testing.expectError(error.SessionPositionExhausted, positions.take(last + 1));
-        try a.commit();
+        var claim: Claim = .{ .session = session.slice(), .to_last = true };
+        try TestingScript(Claim).run(&entry, &claim);
     }
     try std.testing.expectEqual(last, try store_testing.sqlite_only.queryU64(&storage, "SELECT next_position FROM session", .{}));
 
@@ -1651,14 +1630,8 @@ test "claiming Session positions stops at the largest position, and fails when i
     {
         const entry = try store_core.enter(&storage, .none);
         defer entry.release();
-        var a: store_access.Access(.write, error{}) = .open(&entry);
-        defer a.deinit();
-        var loaded: TestingRound.head.Result = undefined;
-        a.read(TestingRound.head, .{ .session_ref = session.slice() }, &loaded);
-        try a.run();
-        _ = try (try a.positions(loaded.head)).take(1);
-        try std.testing.expectError(error.CorruptStore, a.commit());
-        try a.abandon(.{});
+        var claim: Claim = .{ .session = session.slice(), .to_last = false };
+        try std.testing.expectError(error.CorruptStore, TestingScript(Claim).run(&entry, &claim));
     }
 }
 
