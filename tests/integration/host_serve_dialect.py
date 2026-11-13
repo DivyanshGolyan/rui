@@ -1,4 +1,5 @@
 """Installed Host grammar shared by historical-release process diagnostics."""
+import re
 import subprocess
 
 
@@ -10,12 +11,11 @@ def help_text(binary, *command):
     return result.stdout if result.returncode == 0 else ""
 
 
-
 class HostServeDialect:
     def __init__(self, binary):
         self.binary = binary
         self.resource_first = bool(help_text(binary, "request", "inspect"))
-        self.host_settings = "--set" in help_text(binary, *self.serve())
+        self.host_settings = bool(re.search(r"--set(?:\s|=|\])", help_text(binary, *self.serve())))
 
     def serve(self):
         return ("host", "serve") if self.resource_first else ("serve",)

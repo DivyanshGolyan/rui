@@ -27,6 +27,8 @@ class DialectTest(unittest.TestCase):
              False, False, (True, True, False, False)),
             ("short IDs before pause", "rui session send [--to ID]\n",
              True, False, (True, False, True, True)),
+            ("settings document only", "rui session send [--to ID]\n",
+             True, True, (True, False, True, True)),
             ("candidate", "rui session send [--to ID]\n",
              True, True, (True, False, True, True)),
         ):
@@ -37,6 +39,8 @@ class DialectTest(unittest.TestCase):
                     if send is not None:
                         replies.update({("request", "inspect"): "rui request inspect [HANDLE]\n",
                                         ("session", "send"): send})
+                    if name == "settings document only":
+                        replies[("host", "serve")] = "rui host serve [--settings FILE|-]\n"
                     if name == "candidate":
                         replies[("host", "serve")] = "rui host serve [--set PATH=VALUE]\n"
                     if start:
