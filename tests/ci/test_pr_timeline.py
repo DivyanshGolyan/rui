@@ -7,7 +7,9 @@ import unittest
 from unittest.mock import patch
 
 import conflict_alert
+from main_build import MARKER
 import pr_timeline as timeline
+from report_issue import LABEL
 
 
 FIXTURES = json.loads(Path(__file__).with_name("pr_timeline_fixtures.json").read_text())
@@ -296,125 +298,76 @@ class TimelineTest(unittest.TestCase):
     def test_daily_medians_exclude_unreleased_and_unknown_is_not_zero(self):
         rows = [timeline.stages(**self.snapshot()), timeline.stages(**self.snapshot(1418))]
         rows[0]["stages"]["released"] = "2026-11-13T11:00:00Z"
-        days = timeline.daily(rows, "2026-11-12", "2026-11-13T12:00:00Z")
+        days = timeline.daily(rows, "2026-11-12", "2026-11-13T12:00:00Z", [])
         self.assertEqual(days[0]["merged"], 0)
         self.assertEqual(days[1]["merged"], 2)
         self.assertEqual(days[1]["median_opened_to_merged_minutes"], 28.62)
         self.assertEqual(days[1]["median_merged_to_released_minutes"], 41.27)
+        # Both days start before main_build.py's record: unknown, not zero.
         self.assertTrue(all(day["red_main_minutes"] is None for day in days))
 
-    def test_red_main_carries_state_splits_midnight_and_clips_today(self):
-        runs = [{"completed_at": when, "conclusion": conclusion} for when, conclusion in (
-            ("2026-11-11T23:00:00Z", "success"), ("2026-11-12T23:50:00Z", "failure"),
-            ("2026-11-13T00:05:00Z", "cancelled"), ("2026-11-13T00:10:00Z", "success"),
-            ("2026-11-13T11:50:00Z", "failure"), ("2026-11-13T13:00:00Z", "success"))]
-        days = timeline.daily([], "2026-11-12", "2026-11-13T12:00:00Z", list(reversed(runs)))
-        self.assertEqual([day["red_main_minutes"] for day in days], [10, 20])
-        days = timeline.daily([], "2026-11-12", "2026-11-13T12:00:00Z", runs[1:])
-        self.assertEqual([day["red_main_minutes"] for day in days], [None, 20])
+    def issue(self, number, created, closed=None, state=None, body=MARKER, **extra):
+        return {"number": number, "created_at": created, "closed_at": closed,
+                "state": state or ("closed" if closed else "open"), "body": body, **extra}
 
-    def test_main_source_is_named_push_workflow_and_job_completion(self):
+    def test_red_main_is_main_build_issues_only(self):
+        rows = [self.issue(1, "2026-11-14T23:00:00Z", "2026-11-15T01:30:00Z"),
+                self.issue(2, "2026-11-15T11:00:00Z"),
+                # Reopened by hand: open again, so red until now.
+                self.issue(3, "2026-11-14T02:00:00Z", "2026-11-14T03:00:00Z", state="open"),
+                # report_issue's per-signature ci-red issue: not main's state.
+                self.issue(4, "2026-11-14T00:00:00Z", body="<!-- ci-signature: {} -->"),
+                self.issue(5, "2026-11-14T00:00:00Z", body=None),
+                self.issue(6, "2026-11-14T00:00:00Z", pull_request={"url": "..."})]
         calls = []
         def api(method, path):
-            calls.append(path)
-            if "/workflows?" in path:
-                return {"workflows": [{"id": 42, "name": "Main build"}]}
-            if "/runs?" in path:
-                self.assertIn("branch=main&event=push", path)
-                return {"workflow_runs": [{"id": 7, "status": "completed", "conclusion": "failure"},
-                                          {"id": 8, "status": "in_progress"}]}
-            return {"jobs": [{"completed_at": "2026-11-12T23:00:00Z"}, {"completed_at": "2026-11-12T23:10:00Z"}]}
-        self.assertEqual(timeline.main_builds(api, "Main build", "2026-11-12"),
-                         [{"completed_at": "2026-11-12T23:10:00Z", "conclusion": "failure"}])
-        self.assertIsNone(timeline.main_builds(api, "not a workflow", "2026-11-12"))
-
-    def test_missing_main_workflow_is_unknown_without_error(self):
-        calls = []
-        def api(method, path):
-            calls.append(path)
+            # Runs and jobs are never read: a stale rerun of an older SHA or a
+            # failed report job cannot move red; only main_build.py's issue can.
             self.assertEqual(method, "GET")
-            self.assertIn("/workflows?", path)
-            return {"workflows": [{"id": 1, "name": "Selected checks"}]}
-        runs = timeline.main_builds(api, "Main build", "2026-11-12")
-        self.assertIsNone(runs)
-        self.assertEqual(len(calls), 1)
-        days = timeline.daily([], "2026-11-12", "2026-11-13T12:00:00Z", runs)
-        self.assertEqual([day["red_main_minutes"] for day in days], [None, None])
+            self.assertTrue(path.startswith(f"repos/{timeline.REPO}/issues?"), path)
+            calls.append(path)
+            return rows
+        self.assertEqual(timeline.red_main(api), [
+            ("2026-11-14T02:00:00Z", None), ("2026-11-14T23:00:00Z", "2026-11-15T01:30:00Z"),
+            ("2026-11-15T11:00:00Z", None)])
+        self.assertIn("state=all", calls[0])
+        self.assertIn(f"labels={LABEL}", calls[0])
 
-    def test_cancelled_main_run_between_failure_and_success_is_no_signal(self):
-        # Run creation and commit times precede completion: neither starts red.
-        completions = {1: "2026-11-11T23:00:00Z", 2: "2026-11-12T11:00:00Z",
-                       4: "2026-11-12T11:05:00Z", 5: "2026-11-12T11:20:00Z"}
-        jobs_read = []
-        def api(method, path):
-            self.assertEqual(method, "GET")
-            if "/workflows?" in path:
-                return {"workflows": [{"id": 42, "name": "Main build"}]}
-            if "/runs?" in path:
-                return {"workflow_runs": [
-                    {"id": n, "status": "completed", "conclusion": conclusion,
-                     "created_at": "2026-11-11T22:00:00Z",
-                     "head_commit": {"timestamp": "2026-11-11T21:00:00Z"}}
-                    for n, conclusion in ((6, "cancelled"), (5, "success"), (4, "failure"),
-                                          (3, "cancelled"), (2, "failure"), (1, "success"))]}
-            n = int(path.split("/runs/")[1].split("/")[0])
-            self.assertNotIn(n, (3, 6), "Cancelled runs must not even require job timestamps")
-            jobs_read.append(n)
-            return {"jobs": [{"completed_at": completions[n]}]}
-        runs = timeline.main_builds(api, "Main build", "2026-11-12")
-        self.assertEqual(jobs_read, [5, 4, 2, 1])
-        days = timeline.daily([], "2026-11-12", "2026-11-13T12:00:00Z", runs)
-        self.assertEqual([day["red_main_minutes"] for day in days], [20, 0])
-
-    def test_main_runs_stop_at_incoming_health_before_since(self):
-        # Newest first: one kept run after since, cancelled noise, then the
-        # incoming health. Neither the older run's jobs nor page 2 is needed.
-        completions = {10: "2026-11-12T03:00:00Z", 9: "2026-11-11T20:00:00Z", 8: "2026-11-11T10:00:00Z"}
-        runs = ([{"id": 10, "status": "completed", "conclusion": "success"}]
-                + [{"id": 100 + n, "status": "completed", "conclusion": "cancelled"} for n in range(97)]
-                + [{"id": 9, "status": "completed", "conclusion": "failure"},
-                   {"id": 8, "status": "completed", "conclusion": "success"}])
-        jobs_read = []
-
-        def api(method, path):
-            if "/workflows?" in path:
-                return {"workflows": [{"id": 42, "name": "Main build"}]}
-            if "/runs?" in path:
-                self.assertTrue(path.endswith("page=1"), f"paged past the cutoff: {path}")
-                return {"workflow_runs": runs}
-            n = int(path.split("/runs/")[1].split("/")[0])
-            jobs_read.append(n)
-            return {"jobs": [{"completed_at": completions[n]}]}
-
-        result = timeline.main_builds(api, "Main build", "2026-11-12")
-        self.assertEqual(result, [{"completed_at": completions[10], "conclusion": "success"},
-                                  {"completed_at": completions[9], "conclusion": "failure"}])
-        self.assertEqual(jobs_read, [10, 9])
-        days = timeline.daily([], "2026-11-12", "2026-11-12T12:00:00Z", result)
-        self.assertEqual([day["red_main_minutes"] for day in days], [180])
+    def test_red_main_minutes_split_midnight_clip_today_and_unknown_before_record(self):
+        red = [("2026-11-12T10:00:00Z", "2026-11-14T00:30:00Z"),  # Spans the record's start.
+               ("2026-11-14T23:00:00Z", "2026-11-15T01:30:00Z"),  # Closed, spans midnight.
+               ("2026-11-15T11:00:00Z", None)]                    # Still open at report time.
+        days = timeline.daily([], "2026-11-12", "2026-11-15T12:00:00Z", red)
+        self.assertEqual([day["red_main_minutes"] for day in days], [None, None, 90, 150])
+        days = timeline.daily([], "2026-11-14", "2026-11-15T12:00:00Z", [])
+        self.assertEqual([day["red_main_minutes"] for day in days], [0, 0])
 
     def test_cli_json_and_table_render_absent_stages(self):
         row = timeline.stages(**self.snapshot(1418))
-        for fmt, name in ((fmt, name) for fmt in ("table", "json") for name in ("Main build", "Custom main")):
+        for fmt in ("table", "json"):
             argv = ["pr_timeline.py", "--since", "2026-11-12", "--pr", "1418", "--format", fmt]
-            if name != "Main build":
-                argv += ["--main-workflow", name]
-            with self.subTest(fmt=fmt, name=name), patch.object(timeline, "collect", return_value=[row]), \
-                    patch.object(timeline, "main_builds", return_value=None) as builds, \
+            with self.subTest(fmt=fmt), patch.object(timeline, "collect", return_value=[row]), \
+                    patch.object(timeline, "red_main", return_value=[]) as red, \
                     patch("sys.argv", argv), \
                     contextlib.redirect_stdout(io.StringIO()) as output:
                 self.assertEqual(timeline.main(), 0)
-                builds.assert_called_once_with(timeline.github, name, "2026-11-12")
+                red.assert_called_once_with(timeline.github)
                 if fmt == "json":
                     report = json.loads(output.getvalue())
                     self.assertEqual(report["prs"], [row])
-                    self.assertEqual(report["main_workflow"], name)
-                    self.assertFalse(report["main_workflow_available"])
+                    self.assertIn(timeline.RED_MAIN_KNOWN_FROM, report["red_main_source"])
                     self.assertIsNone(report["days"][0]["red_main_minutes"])
                 else:
                     self.assertIn("unknown", output.getvalue())
-                    self.assertIn(name, output.getvalue())
-                    self.assertIn("not found", output.getvalue())
+                    self.assertIn("Main build red", output.getvalue())
+
+    def test_help_names_the_red_main_record(self):
+        with patch("sys.argv", ["pr_timeline.py", "--help"]), contextlib.redirect_stdout(io.StringIO()) as output, \
+                self.assertRaises(SystemExit):
+            timeline.main()
+        self.assertIn("Main build red", output.getvalue())
+        self.assertIn("unknown", output.getvalue())
+        self.assertNotIn("--main-workflow", output.getvalue())
 
 
 if __name__ == "__main__":
