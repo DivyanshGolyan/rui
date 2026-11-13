@@ -730,7 +730,7 @@ fn openSession(self: *Self, ctx: *vxfw.EventContext) !void {
     }
     const files: SessionFrontend.Files = .{ .scratch = opened[0], .action = opened[1], .inspection = opened[2], .details = opened[3], .actions = opened[4..6].* };
     const frontend = try self.init.gpa.create(SessionFrontend);
-    const lender: SessionFrontend.Lender = .{ .context = self, .step = conversed, .service = service, .line = conversationLine, .observed = observed, .upgrade = upgradeValue, .archive_state = archiveState, .models = modelsSnapshot, .memory = memoryValue };
+    const lender: SessionFrontend.Lender = .{ .context = self, .step = conversed, .service = service, .line = conversationLine, .observed = observed, .upgrade = upgradeValue, .archive_state = archiveState, .models = modelsSnapshot };
     frontend.begin(self.init, self.options.store, &self.opened, self.options.directory, files, self.hooks.command, self.hooks.requests, self.hooks.status, screen, self.interrupted, lender);
     const child = frontend.attach(.{ .configure = self.hooks.configure, .drafts = &self.session_drafts, .root = &self.root, .context = self, .leave = appSessionLeft, .copy = appCopy, .on_open = appSessionFollow, .host = .{ .context = self, .held = hostHeld, .lost = hostLost, .startable = hostStartable, .start = requestHostStart, .notice = hostNotice } }, self.caps);
     // Custody transfers before focus delivery: on failure the exit
@@ -1282,7 +1282,7 @@ fn settingsBackend(self: *Self) AppSettings.Backend {
             return owner(raw).caps;
         }
     };
-    return .{ .context = self, .read = Callbacks.read, .save = Callbacks.save, .save_state = Callbacks.saveState, .upgrade = Callbacks.upgrade, .run = Callbacks.run, .caps = Callbacks.caps, .models = modelsSnapshot, .sign_in = Callbacks.signIn };
+    return .{ .context = self, .read = Callbacks.read, .save = Callbacks.save, .save_state = Callbacks.saveState, .upgrade = Callbacks.upgrade, .run = Callbacks.run, .caps = Callbacks.caps, .models = modelsSnapshot, .sign_in = Callbacks.signIn, .memory = memoryValue };
 }
 
 fn destroy(self: *Self) void {
@@ -7803,42 +7803,32 @@ test "Overview Settings live memory frame uses quiet role in day and night" {
     }
 }
 
-test "chat info live memory backend borrows the latest Overview read through the real lender" {
-    const Files = struct {
-        var dir: std.Io.Dir = undefined;
-        var count: u8 = 0;
-        fn scratch(init: std.process.Init) !std.Io.File {
-            count += 1;
-            return dir.createFile(init.io, &.{'a' + count}, .{ .read = true });
-        }
-    };
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const home = path[0..try tmp.dir.realPath(std.testing.io, &path)];
-    Files.dir = tmp.dir;
-    Files.count = 0;
-    var ops = fake_operations;
-    ops.open = openSession;
-    var cancellation: client.Cancellation = .{};
-    const rig = try Rig.open(.{ .store = home, .workspace = "/work", .home = home, .directory = home, .provider = "codex", .model = "gpt-5.5" }, ops, &cancellation);
+test "App settings live memory follows Overview readings while chat info stays chat-only" {
+    const rig = try openListed();
     defer rig.close();
     const overview = rig.overview;
-    overview.hooks.scratch = Files.scratch;
-    try std.testing.expect(try rig.next(.{ .open = "k7m2qx".* }) == null);
-    defer {
-        if (overview.app_session) |left| {
-            left.frontend.?.stop();
-            overview.disposeSession(left);
-            overview.app_session = null;
-        }
-    }
-    try std.testing.expect(try rig.settle() == null);
-    const backend = overview.app_session.?.frontend.?.app_info.backend;
+    var ctx = rig.context();
+    defer ctx.cmds.deinit(std.testing.allocator);
+    try appClick(overview, &ctx, .settings);
+    try std.testing.expect(overview.root.input.layer.settingsOpen());
+    const backend = overview.root.settings_page.backend.?;
     const read_memory = backend.memory orelse return error.TestExpectedMemoryReader;
     try std.testing.expectEqual(@as(?view.Memory, null), read_memory(backend.context));
-    for ([_]view.Memory{ .{ .rui = 38 * view.mib, .tools = 120 * view.mib }, .{ .rui = 1024 * view.mib, .tools = null } }) |memory| {
-        _ = try overview.event(.{ .memory = memory });
-        try std.testing.expectEqual(@as(?view.Memory, memory), read_memory(backend.context));
+    var before = try rig.shown(140, 24);
+    defer before.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, try before.text(), "Memory") == null);
+    const Case = struct { memory: view.Memory, text: []const u8 };
+    for ([_]Case{
+        .{ .memory = .{ .rui = 38 * view.mib, .tools = 120 * view.mib }, .text = "Memory          rui 38 MB · tools 120 MB" },
+        .{ .memory = .{ .rui = 1024 * view.mib, .tools = null }, .text = "Memory          rui 1.0 GB" },
+    }) |case| {
+        _ = try overview.event(.{ .memory = case.memory });
+        try std.testing.expectEqual(@as(?view.Memory, case.memory), read_memory(backend.context));
+        var shown = try rig.shown(140, 24);
+        defer shown.deinit();
+        try std.testing.expect(std.mem.indexOf(u8, try shown.text(), case.text) != null);
     }
+    // Neither the per-Session facts nor its frontend bridge carries app memory.
+    try std.testing.expect(!@hasField(@import("chat_info.zig").Backend, "memory"));
+    try std.testing.expect(!@hasField(SessionFrontend.Lender, "memory"));
 }
