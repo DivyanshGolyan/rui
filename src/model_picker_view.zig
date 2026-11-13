@@ -490,14 +490,14 @@ test "model picker view drops columns before the ID without prose rows" {
     const defaults: picker.Defaults = .{ .model = "gpt-6.1-sol", .provider = .codex, .effort = .high };
     const selected = select(&menu, "terra", defaults, null).?;
     const wide = try lines(arena.allocator(), &menu, "terra", defaults, selected, 100);
-    try std.testing.expectEqualStrings("   gpt-6.1-terra  1M     ‹ high ›   [Codex]  API key", wide.rows[0].text);
+    try std.testing.expectEqualStrings("   gpt-6.1-terra  1M     ‹ high ›   [ChatGPT]  API key", wide.rows[0].text);
     try std.testing.expectEqual(@as(?u32, 0), wide.selected);
-    const no_context = try lines(arena.allocator(), &menu, "terra", defaults, selected, 45);
-    try std.testing.expectEqualStrings("   gpt-6.1-terra  ‹ high ›   [Codex]  API key", no_context.rows[0].text);
-    const one_sign_in = try lines(arena.allocator(), &menu, "terra", defaults, selected, 36);
-    try std.testing.expectEqualStrings("   gpt-6.1-terra  ‹ high ›   [Codex]", one_sign_in.rows[0].text);
-    const truncated = try lines(arena.allocator(), &menu, "terra", defaults, selected, 29);
-    try std.testing.expectEqualStrings("   gpt-6…  ‹ high ›   [Codex]", truncated.rows[0].text);
+    const no_context = try lines(arena.allocator(), &menu, "terra", defaults, selected, 47);
+    try std.testing.expectEqualStrings("   gpt-6.1-terra  ‹ high ›   [ChatGPT]  API key", no_context.rows[0].text);
+    const one_sign_in = try lines(arena.allocator(), &menu, "terra", defaults, selected, 38);
+    try std.testing.expectEqualStrings("   gpt-6.1-terra  ‹ high ›   [ChatGPT]", one_sign_in.rows[0].text);
+    const truncated = try lines(arena.allocator(), &menu, "terra", defaults, selected, 31);
+    try std.testing.expectEqualStrings("   gpt-6…  ‹ high ›   [ChatGPT]", truncated.rows[0].text);
     const all = try lines(arena.allocator(), &menu, "custom", defaults, select(&menu, "custom", defaults, null), 100);
     try std.testing.expectEqual(@as(usize, 1), all.rows.len);
     try std.testing.expect(!all.rows[0].heading);
@@ -521,11 +521,14 @@ test "model picker view keeps each chosen sign-in whole in the overview's list p
         const defaults: picker.Defaults = .{ .model = "gpt-6.1-sol", .provider = .chatgpt, .effort = .high };
         for (std.enums.values(picker.Provider)) |provider| {
             if (provider == .openai and !with_openai) continue;
-            // Each sign-in's own word chooses it, and the pane keeps a
-            // 13-character ID whole beside it as well as the saved one.
+            // Each sign-in's own word chooses it (both ChatGPT ways read
+            // "ChatGPT", so the device code's is its route name), and the
+            // pane keeps a 13-character ID whole beside it as well as the
+            // saved one.
+            const own = if (provider == .codex) "codex" else std.mem.sliceTo(provider.signIn(), ' ');
             for ([_][2][]const u8{ .{ "sol", "✓  gpt-6.1-sol  " }, .{ "terra", "   gpt-6.1-terra  " } }) |case| {
                 var word: [64]u8 = undefined;
-                const typed = try std.fmt.bufPrint(&word, "{s} {s}", .{ case[0], std.mem.sliceTo(provider.signIn(), ' ') });
+                const typed = try std.fmt.bufPrint(&word, "{s} {s}", .{ case[0], own });
                 const choice = select(&menu, typed, defaults, null);
                 try std.testing.expectEqual(provider, choice.?.row.provider);
                 const shown = try lines(arena.allocator(), &menu, typed, defaults, choice, pane);
@@ -539,9 +542,9 @@ test "model picker view keeps each chosen sign-in whole in the overview's list p
         var choice = select(&menu, "sol", defaults, null);
         try std.testing.expectEqualStrings("✓  gpt-6.1-sol  ‹ high ›   [ChatGPT]", (try lines(arena.allocator(), &menu, "sol", defaults, choice, pane)).rows[0].text);
         // Wide, every sign-in the row offers shows beside the chosen one.
-        try std.testing.expectEqualStrings(if (with_openai) "✓  gpt-6.1-sol  1M     ‹ high ›   Codex  API key  [ChatGPT]" else "✓  gpt-6.1-sol  1M     ‹ high ›   Codex  [ChatGPT]", (try lines(arena.allocator(), &menu, "sol", defaults, choice, 120)).rows[0].text);
+        try std.testing.expectEqualStrings(if (with_openai) "✓  gpt-6.1-sol  1M     ‹ high ›   ChatGPT  API key  [ChatGPT]" else "✓  gpt-6.1-sol  1M     ‹ high ›   ChatGPT  [ChatGPT]", (try lines(arena.allocator(), &menu, "sol", defaults, choice, 120)).rows[0].text);
         _ = step(&menu, "sol", defaults, &choice, .next_sign_in);
-        try std.testing.expectEqualStrings("✓  gpt-6.1-sol  ‹ high ›   [Codex]", (try lines(arena.allocator(), &menu, "sol", defaults, choice, pane)).rows[0].text);
+        try std.testing.expectEqualStrings("✓  gpt-6.1-sol  ‹ high ›   [ChatGPT]", (try lines(arena.allocator(), &menu, "sol", defaults, choice, pane)).rows[0].text);
     }
 }
 
@@ -561,7 +564,7 @@ test "model picker view separates the saved mark and highlighted controls" {
     for (shown.rows[0].segments) |segment| {
         if (std.mem.eql(u8, segment.text, "✓")) mark = segment.style.colour == .mark;
         if (std.mem.eql(u8, segment.text, "‹ high ›")) effort = segment.style.bold;
-        if (std.mem.eql(u8, segment.text, "[Codex]")) sign_in = segment.style.bold;
+        if (std.mem.eql(u8, segment.text, "[ChatGPT]")) sign_in = segment.style.bold;
     }
     try std.testing.expect(mark and effort and sign_in);
 }
@@ -820,7 +823,7 @@ test "model picker domain shows provider columns only across sign-ins and short 
         for (0..plan.count) |at| {
             const row = try plan.row(arena.allocator(), at);
             const id = row.model.?.id.slice();
-            const provider_shown = std.mem.indexOf(u8, row.text, "API key") != null or std.mem.indexOf(u8, row.text, "Codex") != null;
+            const provider_shown = std.mem.indexOf(u8, row.text, "API key") != null or std.mem.indexOf(u8, row.text, "ChatGPT") != null;
             try std.testing.expectEqual(both, provider_shown);
             const limit: ?[]const u8 = if (std.mem.eql(u8, id, "gpt-6.1-sol")) "1M" else if (std.mem.eql(u8, id, "gpt-5.3-codex")) "400K" else null;
             if (limit) |text| {
@@ -870,9 +873,9 @@ test "model picker controls use printed cell columns for effort and every offere
         const higher_byte = std.mem.indexOf(u8, line.text, if (unicode) "›" else ">").?;
         try std.testing.expectEqual(Control{ .start = @intCast(cells(line.text[0..lower_byte])), .end = @intCast(cells(line.text[0..lower_byte]) + 1), .target = .lower_effort }, line.controls[0]);
         try std.testing.expectEqual(Control{ .start = @intCast(cells(line.text[0..higher_byte])), .end = @intCast(cells(line.text[0..higher_byte]) + 1), .target = .higher_effort }, line.controls[1]);
-        const chat = std.mem.indexOf(u8, line.text, "[Codex]").?;
+        const chat = std.mem.indexOf(u8, line.text, "[ChatGPT]").?;
         const api = std.mem.indexOf(u8, line.text, "API key").?;
-        try std.testing.expectEqual(Control{ .start = @intCast(cells(line.text[0..chat])), .end = @intCast(cells(line.text[0..chat]) + 7), .target = .{ .sign_in = .codex } }, line.controls[2]);
+        try std.testing.expectEqual(Control{ .start = @intCast(cells(line.text[0..chat])), .end = @intCast(cells(line.text[0..chat]) + 9), .target = .{ .sign_in = .codex } }, line.controls[2]);
         try std.testing.expectEqual(Control{ .start = @intCast(cells(line.text[0..api])), .end = @intCast(cells(line.text[0..api]) + 7), .target = .{ .sign_in = .openai } }, line.controls[3]);
     }
 }
@@ -895,7 +898,7 @@ test "model picker dropped columns keep remaining control hits on their printed 
                 .model => return error.TestUnexpectedResult,
                 .lower_effort => "‹",
                 .higher_effort => "›",
-                .sign_in => |provider| if (provider == .codex) "[Codex]" else "API key",
+                .sign_in => |provider| if (provider == .codex) "[ChatGPT]" else "API key",
             };
             const byte = std.mem.indexOf(u8, line.text, label).?;
             const column = cells(line.text[0..byte]);
