@@ -723,11 +723,6 @@ test "hanging indentation survives split windows and trusted styles" {
     }
 }
 
-/// What the Action's `?` row says, for keeping it beside the choice.
-pub const ActionSummary = struct {
-    description: protocol.Bounded(protocol.max_tool_description_bytes) = .{},
-};
-
 /// A time limit as exactly as the model set it, in its largest whole unit.
 fn writeTimeLimit(out: anytype, milliseconds: u64) !void {
     if (milliseconds != 0 and milliseconds % 60_000 == 0) return print(out, "{d} min", .{milliseconds / 60_000});
@@ -817,15 +812,17 @@ pub fn actionTool(requests: client.Requests, store: []const u8, session: []const
     return actionToolFromCapture(&observed, requests.io, scratch, action);
 }
 
-/// Null means the selected approval target resolved since the activity scan.
-pub fn permission(requests: client.Requests, store: []const u8, session: []const u8, action: u64, scratch: std.Io.File, sink: anytype, colour: bool) !?ActionSummary {
-    const tool = try actionTool(requests, store, session, action, scratch) orelse return null;
-    return try permissionForTool(requests, store, session, action, scratch, sink, colour, &tool);
+/// False means the selected approval target resolved since the activity scan,
+/// so no request was shown.
+pub fn permission(requests: client.Requests, store: []const u8, session: []const u8, action: u64, scratch: std.Io.File, sink: anytype, colour: bool) !bool {
+    const tool = try actionTool(requests, store, session, action, scratch) orelse return false;
+    try permissionForTool(requests, store, session, action, scratch, sink, colour, &tool);
+    return true;
 }
 
 /// The CLI's inspection and the conversation approval share the same MCP
 /// presentation; neither guesses a runner from the arguments' shape.
-pub fn permissionForTool(requests: client.Requests, store: []const u8, session: []const u8, action: u64, scratch: std.Io.File, sink: anytype, colour: bool, tool: *const ActionTool) !ActionSummary {
+pub fn permissionForTool(requests: client.Requests, store: []const u8, session: []const u8, action: u64, scratch: std.Io.File, sink: anytype, colour: bool, tool: *const ActionTool) !void {
     // Action reads write at the descriptor's streaming offset, not positionally.
     try requests.io.vtable.fileSeekTo(requests.io.userdata, scratch, 0);
     try scratch.setLength(requests.io, 0);
@@ -857,7 +854,7 @@ const ArgumentSource = struct {
 
 /// Renders a complete captured argument file; the consent owner applies the
 /// same viewport bound to either runner before offering a decision.
-pub fn renderPermissionArguments(io: std.Io, scratch: std.Io.File, sink: anytype, colour: bool, tool: *const ActionTool) !ActionSummary {
+pub fn renderPermissionArguments(io: std.Io, scratch: std.Io.File, sink: anytype, colour: bool, tool: *const ActionTool) !void {
     return switch (try tool.runner()) {
         .bash => request(io, scratch, sink, colour),
         .mcp => mcpRequest(io, scratch, sink, colour, tool),
@@ -893,19 +890,18 @@ pub fn bashCommand(io: std.Io, scratch: std.Io.File, tool: *const ActionTool, bu
 /// Arguments remain exact JSON, not a Bash command or a schema interpretation.
 /// Like Bash, render to the Action file in full: SessionScreen applies its
 /// viewport bound and refuses consent when that file is only a preview.
-fn mcpRequest(io: std.Io, scratch: std.Io.File, sink: anytype, colour: bool, tool: *const ActionTool) !ActionSummary {
+fn mcpRequest(io: std.Io, scratch: std.Io.File, sink: anytype, colour: bool, tool: *const ActionTool) !void {
     var buffer: [4096]u8 = undefined;
     var reader = scratch.reader(io, &buffer);
-    const summary: ActionSummary = .{ .description = tool.description };
     try sink.feed("\n");
     try sink.feed(Style.attention.code(colour));
     try sink.feed("?");
     try sink.feed(Style.normal.code(colour));
     var indented: Indented(@TypeOf(sink)) = .{ .sink = sink };
-    if (summary.description.len != 0) {
+    if (tool.description.len != 0) {
         try indented.feed(" ");
         var label: Escaped(@TypeOf(&indented)) = .{ .sink = &indented, .text = .{ .mode = .label } };
-        try label.feed(summary.description.slice());
+        try label.feed(tool.description.slice());
         try label.finish();
     }
     try indented.feed("\nTool: ");
@@ -927,11 +923,10 @@ fn mcpRequest(io: std.Io, scratch: std.Io.File, sink: anytype, colour: bool, too
     try lines.finish();
     try indented.feed("\n");
     try indented.finish();
-    return summary;
 }
 
 /// The request block from an Action's arguments JSON in `scratch`.
-fn request(io: std.Io, scratch: std.Io.File, sink: anytype, colour: bool) !ActionSummary {
+fn request(io: std.Io, scratch: std.Io.File, sink: anytype, colour: bool) !void {
     var buffer: [4096]u8 = undefined;
     var reader = scratch.reader(io, &buffer);
     var source: ArgumentSource = .{ .reader = &reader.interface };
@@ -974,9 +969,6 @@ fn request(io: std.Io, scratch: std.Io.File, sink: anytype, colour: bool) !Actio
     }
     try indented.feed("\n");
     try indented.finish();
-    var summary: ActionSummary = .{};
-    try summary.description.set(arguments.description.slice());
-    return summary;
 }
 
 test "an Action's command and stdin lines carry the content mark, so neither can pass for a field" {
@@ -1808,8 +1800,7 @@ test "MCP approval uses the saved description and renders exact arguments with A
         try scratch.writePositionalAll(std.testing.io, case.arguments, 0);
         try action.setLength(std.testing.io, 0);
         var sink: Sink = .{ .file = action };
-        const summary = try renderPermissionArguments(std.testing.io, scratch, &sink, false, &tool);
-        try std.testing.expectEqualStrings(case.description, summary.description.slice());
+        try renderPermissionArguments(std.testing.io, scratch, &sink, false, &tool);
         var rendered: [2048]u8 = undefined;
         const count = try action.readPositionalAll(std.testing.io, &rendered, 0);
         var heading: [256]u8 = undefined;
@@ -1896,7 +1887,7 @@ test "MCP approval marks argument lines escapes controls and refuses a viewport 
     while (at < Viewport.capacity + 4096) : (at += fill.len) try scratch.writePositionalAll(std.testing.io, &fill, at);
     try scratch.writePositionalAll(std.testing.io, "\"\n}", at);
     var sink: Sink = .{ .file = action };
-    _ = try renderPermissionArguments(std.testing.io, scratch, &sink, false, &tool);
+    try renderPermissionArguments(std.testing.io, scratch, &sink, false, &tool);
     var beginning: [512]u8 = undefined;
     const count = try action.readPositionalAll(std.testing.io, &beginning, 0);
     const shown = beginning[0..count];
