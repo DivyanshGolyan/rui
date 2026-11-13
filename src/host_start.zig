@@ -1218,11 +1218,17 @@ const LeafName = struct {
 
 /// True when a path below `value` is relative; `name` then holds its leaf.
 fn relativeLeaf(comptime T: type, value: *const T, name: *LeafName) bool {
+    const at = name.len;
+    if (relativeBelow(T, value, name)) return true;
+    name.len = at;
+    return false;
+}
+
+fn relativeBelow(comptime T: type, value: *const T, name: *LeafName) bool {
     if (@typeInfo(T) == .optional) {
         return if (value.*) |*present| relativeLeaf(@typeInfo(T).optional.child, present, name) else false;
     }
     const at = name.len;
-    defer name.len = at;
     if (@hasDecl(T, "kind")) {
         return switch (T.kind) {
             .path => !(value.anchored or (value.slice().len == 0 and T.allow_empty) or std.fs.path.isAbsolute(value.slice())),
@@ -1511,6 +1517,9 @@ test "Host start detached launches rebase typed paths and refuse paths with no b
         } else {
             try std.testing.expectError(error.SettingsInvalid, start_result);
             try std.testing.expectEqual(start_report.StartError.settings_invalid, failure.code);
+            // The refusal names the leaf, then why.
+            try std.testing.expect(std.mem.startsWith(u8, failure.message.slice(), kind.leaf));
+            try std.testing.expectEqual(@as(u8, ':'), failure.message.slice()[kind.leaf.len]);
             try std.testing.expect(std.mem.indexOf(u8, failure.message.slice(), if (kind.anchored == null) "no stdin" else "absolute path") != null);
         }
         // Replay door: the same argv as typed, never rebased.
