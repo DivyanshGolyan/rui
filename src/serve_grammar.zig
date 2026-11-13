@@ -31,13 +31,16 @@ pub const retired_options = &[_]grammar.RetiredOption{
 pub fn currentArguments(arena: std.mem.Allocator, args: []const []const u8) error{ OutOfMemory, InvalidArguments }![]const []const u8 {
     var flagged = false;
     var settings = false;
+    var count = args.len;
     var index: usize = 0;
     while (index < args.len) : (index += 1) {
         const arg = args[index];
         if (std.mem.eql(u8, arg, "--")) break;
         if (!std.mem.startsWith(u8, arg, "--")) continue;
-        if (retiredNamed(arg[2..]) != null) {
+        if (retiredNamed(arg[2..])) |old| {
+            if (index + 1 == args.len) return error.InvalidArguments;
             flagged = true;
+            count = count - 2 + 2 * old.assignments.len;
             index += 1;
         } else if (definition.optionNamed(arg[2..])) |option| {
             if (std.mem.eql(u8, option.name, "settings")) settings = true;
@@ -45,32 +48,39 @@ pub fn currentArguments(arena: std.mem.Allocator, args: []const []const u8) erro
         }
     }
     if (!flagged) return args;
-    var out: std.ArrayList([]const u8) = .empty;
-    if (!settings) try out.appendSlice(arena, &.{ "--set", "providers={}" });
+    const out = try arena.alloc([]const u8, count + @as(usize, if (settings) 0 else 2));
+    var at: usize = 0;
+    if (!settings) {
+        out[0..2].* = .{ "--set", "providers={}" };
+        at = 2;
+    }
     index = 0;
     while (index < args.len) : (index += 1) {
         const arg = args[index];
         if (std.mem.eql(u8, arg, "--")) {
-            try out.appendSlice(arena, args[index..]);
+            @memcpy(out[at..][0 .. args.len - index], args[index..]);
+            at += args.len - index;
             break;
         }
         const old = if (std.mem.startsWith(u8, arg, "--")) retiredNamed(arg[2..]) else null;
         if (old) |found| {
             index += 1;
-            if (index == args.len) return error.InvalidArguments;
             for (found.assignments) |assignment| {
-                const assigned = try std.mem.replaceOwned(u8, arena, assignment, "VALUE", args[index]);
-                try out.appendSlice(arena, &.{ "--set", assigned });
+                out[at..][0..2].* = .{ "--set", try std.mem.replaceOwned(u8, arena, assignment, "VALUE", args[index]) };
+                at += 2;
             }
             continue;
         }
-        try out.append(arena, arg);
+        out[at] = arg;
+        at += 1;
         if (std.mem.startsWith(u8, arg, "--")) if (definition.optionNamed(arg[2..])) |option| if (option.argument != null and index + 1 < args.len) {
             index += 1;
-            try out.append(arena, args[index]);
+            out[at] = args[index];
+            at += 1;
         };
     }
-    return out.items;
+    std.debug.assert(at == out.len);
+    return out;
 }
 
 fn retiredNamed(name: []const u8) ?grammar.RetiredOption {
