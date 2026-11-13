@@ -5,7 +5,7 @@ import { once } from "node:events";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import { test } from "node:test";
 
 import { Rui, RuiStartError, RuiUnavailableError, type HostSettings, type ClientOptions, type ExitEvent } from "../src/index.ts";
@@ -69,6 +69,40 @@ test("connect starts a ready Host and close stops it", { skip }, async () => {
 	assert.deepEqual(exits, [{ code: 0, signal: null, restarting: false }]);
 	assert.ok(!existsSync(join(tmpdir(), created[0]!)), "runtimeDir left behind");
 	await assert.rejects(hostInfo(rui), RuiUnavailableError);
+});
+
+test("omitting the SQLite Store discovers its canonical identity beneath an isolated HOME", { skip }, async () => {
+	const home = realpathSync(mkdtempSync(join(tmpdir(), "rui-ts-default-home-")));
+	const oldHome = process.env.HOME;
+	const oldStore = process.env.RUI_STORE;
+	const unselected = join(home, "unselected-store");
+	process.env.HOME = home;
+	process.env.RUI_STORE = unselected;
+	let rui: Rui | undefined;
+	try {
+		rui = await Rui.connect({ providers: {} }, { binary: binary ?? "rui" });
+		const discovered = rui.hostInfo?.store;
+		assert.ok(discovered, "readiness must discover a nonempty Store identity");
+		assert.equal(discovered, realpathSync(discovered));
+		assert.ok(discovered.startsWith(home + sep), "the Host must choose its Store beneath the isolated HOME");
+		assert.notEqual(discovered, unselected, "an unreferenced RUI_STORE must not reach the child");
+		assert.ok(!existsSync(unselected));
+		const exact = await hostInfo(rui);
+		assert.equal(exact.store, discovered, "subsequent requests must name the discovered exact Store");
+		assert.equal(exact.instance, rui.hostInfo?.instance);
+		if (process.platform === "linux") {
+			const environment = readFileSync(`/proc/${rui.pid}/environ`, "utf8").split("\0");
+			assert.ok(!environment.some((entry) => entry.startsWith("RUI_STORE=")));
+		}
+	} finally {
+		try {
+			await rui?.close();
+		} finally {
+			if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome;
+			if (oldStore === undefined) delete process.env.RUI_STORE; else process.env.RUI_STORE = oldStore;
+			rmSync(home, { recursive: true, force: true });
+		}
+	}
 });
 
 test("an explicit interface never adopts a competing Host for either Store", { skip, timeout: 15_000 }, async () => {
