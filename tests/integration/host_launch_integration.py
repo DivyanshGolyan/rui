@@ -646,13 +646,29 @@ def saved_settings(root, env):
     assert refused.returncode != 0 and "interface.dir: bare rui and rui host start reach only" in refused.stderr, refused
     assert "[settings_invalid]" in refused.stderr and not matching_processes(moved), refused
 
+    # Start failures outside the document keep the child's own report: no
+    # stdout line, no settings refusal, and no Host left behind.
+    proxy_dir = root / "saved-proxy"
+    for path, value in (("providers.openai.endpoint", "http://127.0.0.1:9/responses"),
+                        ("providers.openai.unauthenticated", "true")):
+        assert host_command(env, "set", "--store", proxy_dir, path, value).returncode == 0
+    keyless = root / "saved-keyless"
+    assert host_command(env, "set", "--store", keyless, "providers", '{"openai":{}}').returncode == 0
+    for directory, changes, report in (
+            (proxy_dir, {"HTTPS_PROXY": "https://proxy.example:1", "https_proxy": "https://proxy.example:1"},
+             "Rui tunnels only through an http:// proxy. The Host did not start."),
+            (keyless, {"RUI_OPENAI_KEY_FILE": str(root / "saved-absent-key")}, "[sign_in_required]")):
+        failed = run_start(directory, dict(env, **changes))
+        assert failed.returncode != 0 and not failed.stdout and report in failed.stderr, failed
+        assert "settings_invalid" not in failed.stderr and not matching_processes(directory), failed
+
     # A deleted serve flag names its replacement path.
     for flag, value, replacement in (("--bash-timeout-ms", "1000", "--set tools.bash.timeoutMs=1000"),
                                      ("--active-capacity", "4", "--set execution.activeCapacity=4")):
         retired = host_command(env, "serve", "--store", root / "retired", flag, value)
         assert retired.returncode != 0 and replacement in retired.stderr, retired
     print("saved settings passed: sparse private host.json, settings/check, starter, unset, literal and unknown"
-          " refusals, ordered sources, unreachable refusal, retired flags", flush=True)
+          " refusals, ordered sources, unreachable refusal, child start failures, retired flags", flush=True)
 
 
 def saved_settings_served(root, env):
