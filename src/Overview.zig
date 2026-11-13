@@ -1224,6 +1224,7 @@ fn drawPart(self: *Self, ctx: vxfw.DrawContext, part: AppScreen.Overview.Part) s
     if (part != .list) {
         self.app_input.composer.style = normal;
         self.app_input.composer.quiet = quiet;
+        self.app_input.composer.rule_style = quiet;
         self.app_input.composer.method = self.caps.width;
         self.app_input.composer.ascii = !self.caps.unicode;
         self.app_input.composer.caret = self.state.inputMode() != .frozen and self.state.footer.focus == .input and !self.root.settings_page.standaloneOpen();
@@ -1303,9 +1304,9 @@ fn appFooterDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error
         .left = "",
         .right = keys,
         .notice = if (view.footerNotice(&self.state)) |notice| try @import("session_chrome.zig").noticeLine(ctx.arena, notice) else null,
-        .style = @import("widget_style.zig").of(self.caps, .{ .colour = .quiet, .background = .bar }),
+        .style = @import("widget_style.zig").of(self.caps, .{ .colour = .quiet }),
     };
-    if (self.state.notice) |notice| footer.right_style = @import("widget_style.zig").of(self.caps, .{ .colour = notice.colour, .background = .bar });
+    if (self.state.notice) |notice| footer.right_style = @import("widget_style.zig").of(self.caps, .{ .colour = notice.colour });
     const width = size.width -| @as(u16, @intCast(@min(ctx.stringWidth(footer.rightText()), size.width)));
     const spans = try view.footerSpans(ctx.arena, &self.state, width, self.caps);
     var text: std.ArrayList(u8) = .empty;
@@ -1331,7 +1332,7 @@ fn appFooterDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error
             .model => self.state.footer.focus == .model,
             .effort => self.state.footer.focus == .effort,
         };
-        chip.style = @import("widget_style.zig").of(self.caps, .{ .colour = .quiet, .background = if (focused) .selection else .bar });
+        chip.style = @import("widget_style.zig").of(self.caps, .{ .colour = .quiet, .background = if (focused) .selection else .ground });
         chip.hover = chip.style;
         chip.hover.ul_style = .single;
         children[count] = .{ .origin = .{ .row = 0, .col = fact.span.column }, .surface = try chip.widget().draw(ctx.withConstraints(.{}, .{ .width = fact.span.cells, .height = 1 })) };
@@ -5319,7 +5320,7 @@ test "Footer notice domain uses production clipping sanitization and colour" {
         try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, try shown.text(), visible));
         try std.testing.expectEqual(@as(usize, 0), (try statusRowsShown(&shown, 24)).len);
         try std.testing.expect(std.mem.indexOf(u8, footer, "enter start") == null);
-        const style = @import("widget_style.zig").of(rig.overview.caps, .{ .colour = colour, .background = .bar });
+        const style = @import("widget_style.zig").of(rig.overview.caps, .{ .colour = colour });
         // Compare actual cells: Footer keeps a prefix, not an ellipsis, and
         // notice colour survives sanitizing, clipping and terminal mapping.
         for (visible, width - visible.len..width) |byte, col| {
@@ -8291,12 +8292,16 @@ test "Overview footer text table covers default explicit effort ask bypass and b
         var cancellation: client.Cancellation = .{};
         const rig = try Rig.open(.{ .store = home, .workspace = "/code/a-very-long-project-name", .home = home, .directory = home, .provider = "codex", .model = "gpt-6.1-sol" }, fake_operations, &cancellation);
         defer rig.close();
-        for ([_]u16{ 140, 46 }) |width| {
+        for ([_]?view.Rgb{ null, .{ 255, 255, 255 } }) |background| for ([_]u16{ 140, 46 }) |width| {
+            rig.overview.caps.background = background;
             var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
             defer arena.deinit();
             const footer = try appFooterDraw(rig.overview, .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 1 }, .cell_size = .{} });
             var text: std.Io.Writer.Allocating = .init(arena.allocator());
-            for (footer.buffer) |cell| try text.writer.writeAll(cell.char.grapheme);
+            for (footer.buffer) |cell| {
+                try text.writer.writeAll(cell.char.grapheme);
+                try std.testing.expectEqual(@import("widget_style.zig").of(rig.overview.caps, .{ .colour = .quiet }), cell.style);
+            }
             const right_at = std.mem.indexOf(u8, text.written(), "enter start").?;
             const left = std.mem.trimEnd(u8, text.written()[0..right_at], " ");
             const expected = try std.fmt.allocPrint(arena.allocator(), " gpt-6.1-sol · {s}{s}", .{ if (effort) |value| @tagName(value) else product_defaults.reasoning_effort, if (width == 140) " · /code/a-very-long-project-name" else "" });
@@ -8304,7 +8309,7 @@ test "Overview footer text table covers default explicit effort ask bypass and b
             // Permissions are chat facts, never new-chat/defaults facts.
             try std.testing.expect(std.mem.indexOf(u8, text.written(), " · ask") == null);
             try std.testing.expect(std.mem.endsWith(u8, text.written(), "enter start"));
-        }
+        };
     };
 }
 

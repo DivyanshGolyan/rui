@@ -572,7 +572,7 @@ fn drawFooterContents(raw: *anyopaque, ctx: vxfw.DrawContext) !vxfw.Surface {
     const footer: Footer = .{
         .left = try Panel.displayText(ctx.arena, try std.fmt.allocPrint(ctx.arena, "{s}{s} · info", .{ if (self.narrow) " ‹ " else " ", name }), caps.unicode),
         .right = try Panel.displayText(ctx.arena, if (self.narrow) "esc close" else if (self.tool_draft != null) "↑↓ · space toggle · enter save · esc close" else "↑↓ rows · ←→ actions · tab · enter · esc close", caps.unicode),
-        .style = widget_style.of(caps, .{ .background = .bar, .colour = .quiet }),
+        .style = widget_style.of(caps, .{ .colour = .quiet }),
     };
     var surface = try footer.widget().draw(ctx);
     // Footer is a stack-local rendering value; expose only the persistent owner.
@@ -612,6 +612,7 @@ fn drawTitle(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxf
 
 const Fixture = struct {
     unicode: bool = true,
+    background: ?view.Rgb = null,
     read_calls: usize = 0,
     save_calls: usize = 0,
     session: status.Session = undefined,
@@ -682,7 +683,7 @@ const Fixture = struct {
     }
     fn caps(raw: *anyopaque) view.Caps {
         const self: *Fixture = @ptrCast(@alignCast(raw));
-        return .{ .unicode = self.unicode };
+        return .{ .unicode = self.unicode, .background = self.background };
     }
 };
 
@@ -1177,6 +1178,21 @@ test "Chat info shared ASCII capability reaches tools model rename failures and 
             }
         }
     }
+}
+
+test "Chat info footer stays plain in both themes and widths" {
+    var fixture: Fixture = .{};
+    fixture.init();
+    var page: Self = .{ .backend = fixture.backend() };
+    page.refresh();
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    for ([_]?view.Rgb{ null, .{ 255, 255, 255 } }) |background| for ([_]u16{ 140, 46 }) |width| {
+        fixture.background = background;
+        const surface = try page.footerWidget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 1 }, .cell_size = .{} });
+        const plain = widget_style.of(fixture.backend().caps(&fixture), .{ .colour = .quiet });
+        for (surface.buffer) |cell| try std.testing.expectEqual(plain, cell.style);
+    };
 }
 
 test "Chat info hosted body excludes its independent single-row footer" {

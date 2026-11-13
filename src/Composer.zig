@@ -12,6 +12,7 @@ editor: *const Editor,
 method: vaxis.gwidth.Method = .unicode,
 style: vaxis.Style = .{},
 quiet: vaxis.Style = .{ .dim = true },
+rule_style: vaxis.Style = .{},
 placeholder: []const u8 = "",
 anchor: usize = 0,
 /// Draw rules, marks and the prompt in ASCII, for a terminal without
@@ -61,14 +62,14 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         .screen = &screen,
     };
     if (rule != 0) for (0..width) |column| {
-        const cell: vaxis.Cell = .{ .char = .{ .grapheme = if (self.ascii) "-" else "─", .width = 1 }, .style = self.quiet };
+        const cell: vaxis.Cell = .{ .char = .{ .grapheme = if (self.ascii) "-" else "─", .width = 1 }, .style = self.rule_style };
         surface.writeCell(@intCast(column), 0, cell);
         surface.writeCell(@intCast(column), surface.size.height - 1, cell);
     };
     const label_storage = try ctx.arena.create([64]u8);
     const label = layout.label(label_storage, shown, if (self.ascii) .{ .up = "^", .down = "v", .dot = "-" } else .{ .up = "↑", .down = "↓", .dot = "·" });
     if (rule != 0) if (layout.labelColumn(vaxis.gwidth.gwidth(label, self.method), width)) |column| {
-        _ = window.child(.{ .x_off = @intCast(column), .height = 1 }).printSegment(.{ .text = label, .style = self.quiet }, .{ .wrap = .none });
+        _ = window.child(.{ .x_off = @intCast(column), .height = 1 }).printSegment(.{ .text = label, .style = self.rule_style }, .{ .wrap = .none });
     };
     for (lines[0..shown.rows], 0..) |line, index| {
         const row: u16 = @intCast(index + rule);
@@ -149,7 +150,7 @@ test "Composer empty draft shows the screen's placeholder and an input cursor" {
     try std.testing.expect(surface.readCell(3, 1).style.dim);
     try std.testing.expectEqual(@as(u16, 3), surface.cursor.?.col);
     try std.testing.expectEqual(@as(usize, 0), editor.length);
-    for (surface.buffer) |cell| try std.testing.expectEqual(vaxis.Color{ .index = 19 }, cell.style.bg);
+    for (0..surface.size.width) |col| try std.testing.expectEqual(vaxis.Color{ .index = 19 }, surface.readCell(col, 1).style.bg);
 }
 
 test "Composer clips wide text at every small size without moving its logical caret" {
