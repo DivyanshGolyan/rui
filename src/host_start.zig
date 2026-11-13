@@ -1180,10 +1180,10 @@ pub noinline fn spawn(init: std.process.Init, request: Spawn, ops: Ops, progress
     argv[1] = "host";
     argv[2] = "serve";
     argv[3] = "--store";
-    const directory = gpa.dupeZ(u8, paths.store.slice()) catch |err| return launchFailure(result, .setup, err, paths.store.slice());
+    const directory = gpa.dupeSentinel(u8, paths.store.slice(), 0) catch |err| return launchFailure(result, .setup, err, paths.store.slice());
     defer gpa.free(directory);
     argv[4] = directory.ptr;
-    const settings_file = if (request.settings_file) |file| gpa.dupeZ(u8, file) catch |err| return launchFailure(result, .setup, err, paths.store.slice()) else null;
+    const settings_file = if (request.settings_file) |file| gpa.dupeSentinel(u8, file, 0) catch |err| return launchFailure(result, .setup, err, paths.store.slice()) else null;
     defer if (settings_file) |file| gpa.free(file);
     if (settings_file) |file| {
         argv[5] = "--settings";
@@ -1197,7 +1197,7 @@ pub noinline fn spawn(init: std.process.Init, request: Spawn, ops: Ops, progress
     };
     for (request.assignments, 0..) |assignment, index| {
         argv[first + index * 2] = "--set";
-        const value = gpa.dupeZ(u8, assignment) catch |err| return launchFailure(result, .setup, err, paths.store.slice());
+        const value = gpa.dupeSentinel(u8, assignment, 0) catch |err| return launchFailure(result, .setup, err, paths.store.slice());
         argv[first + 1 + index * 2] = value.ptr;
         owned += 1;
     }
