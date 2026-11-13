@@ -761,11 +761,20 @@ pub const Store = struct {
         captured_skill: ?*const skills_domain.MessageCapture,
         faults: Faults,
     ) MessageReply {
-        const entry = enter(self, .none) catch return .infrastructure_failure;
-        defer entry.release();
-        var access: Access(.write, error{SessionUpdateFailed}) = .open(&entry);
-        defer access.deinit();
-        var reply = entry.finishTransaction(Ordinary.none, faults, access.end(faults, command_domain.submitMessage(&access, self.io, self.served, self.selector.slice(), command, committed, initial_skills, captured_skill, faults))) catch .infrastructure_failure;
+        var reply: MessageReply = undefined;
+        transition.apply(self, command_domain.SubmitMessage, .{
+            .io = self.io,
+            .served = self.served,
+            .tools = self.hostTools(),
+            .selector = self.selector.slice(),
+            .command = command,
+            .committed = committed,
+            .initial_skills = initial_skills,
+            .captured = captured_skill,
+            .reply = &reply,
+        }, faults) catch {
+            reply = .infrastructure_failure;
+        };
         if (reply == .rejected) {
             if (command.configuration) |*configuration|
                 reply.rejected.message = configuration_domain.missingToolMessage(self.hostTools().host_tool_set, reply.rejected.code, &configuration.tools);
@@ -2169,6 +2178,21 @@ pub fn created(self: *Store, callback: Store.CreationCommitted, session: []const
         .from_peer = false,
     };
     values.admitted_len += 1;
+}
+
+/// What a transition's commit tells the Host (`transition`'s
+/// `announced`): a fresh Message admission, or a native creation.
+pub const Announcement = union(enum) {
+    message: struct { callback: Store.MessageCommitted, admission: Store.MessageAdmission },
+    creation: struct { callback: Store.CreationCommitted, session: []const u8 },
+};
+
+/// `admitted` or `created`, as `announcement` names.
+pub fn announce(self: *Store, announcement: Announcement) void {
+    switch (announcement) {
+        .message => |message| admitted(self, message.callback, message.admission),
+        .creation => |creation| created(self, creation.callback, creation.session),
+    }
 }
 
 fn armRerun(context: *anyopaque, on: bool) void {
