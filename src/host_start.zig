@@ -1162,16 +1162,18 @@ pub noinline fn spawn(init: std.process.Init, request: Spawn, ops: Ops, progress
     }
     // Opaque MySQL selections can only attach; they carry no launch login.
     if (selection == .mysql) return launchFailure(result, .mysql_unavailable, error.MysqlHostUnavailable, null);
-    var dir = std.Io.Dir.cwd().createDirPathOpen(io, selected, .{ .permissions = .fromMode(0o700) }) catch |err| return launchFailure(result, .setup, err, null);
-    dir.close(io);
-    const paths = resolved orelse (selection.paths(io) catch |err| return launchFailure(result, .store_access, err, null));
+    // Refuse before any effect: an invalid or unreachable start creates no Store.
     var reach_failure: start_report.Failure = .init(.settings_invalid, "settings: could not be read");
-    checkReachable(init, paths.store.slice(), request, &reach_failure) catch |err| {
-        launchFailure(result, .child_refused, if (err == error.SettingsInvalid) error.HostStartupFailed else err, paths.store.slice());
+    checkReachable(init, selected, request, &reach_failure) catch |err| {
+        var canonical: [protocol.max_store_bytes]u8 = undefined;
+        launchFailure(result, .child_refused, if (err == error.SettingsInvalid) error.HostStartupFailed else err, platform.canonicalStoreDestination(io, selected, &canonical) catch null);
         result.outcome.failed.refusal = reach_failure;
         result.outcome.failed.cause.refusal_code = reach_failure.code;
         return;
     };
+    var dir = std.Io.Dir.cwd().createDirPathOpen(io, selected, .{ .permissions = .fromMode(0o700) }) catch |err| return launchFailure(result, .setup, err, null);
+    dir.close(io);
+    const paths = resolved orelse (selection.paths(io) catch |err| return launchFailure(result, .store_access, err, null));
     var executable_buffer: [std.Io.Dir.max_path_bytes + 1]u8 = undefined;
     const length = std.process.executablePath(io, &executable_buffer) catch |err| return launchFailure(result, .setup, err, paths.store.slice());
     if (length == executable_buffer.len) return launchFailure(result, .setup, error.ExecutablePathTooLong, paths.store.slice());

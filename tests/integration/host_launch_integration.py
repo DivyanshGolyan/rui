@@ -573,6 +573,86 @@ def moved_store_identity(root, env, *, terminal=False):
     print(f"moved Store identity passed: {surface}, old-path symlink, unchanged identity, restored readiness", flush=True)
 
 
+def host_command(env, *arguments):
+    return subprocess.run([RUI, "host", *map(str, arguments)], env=env, capture_output=True,
+                          text=True, timeout=COMMAND_TIMEOUT)
+
+
+def saved_settings(root, env):
+    """DIR/host.json reaches the Host that the shared starter (bare rui and host start) launches."""
+    store = root / "saved-settings"
+    for path, value in (("execution.activeCapacity", "3"), ("execution.paused", "true"),
+                        ("tools.bash.timeoutMs", "1234")):
+        saved = host_command(env, "set", "--store", store, path, value)
+        assert saved.returncode == 0 and not saved.stdout, saved
+    document = store / "host.json"
+    assert document.stat().st_mode & 0o777 == 0o600, oct(document.stat().st_mode)
+    # Sparse: only what was set, never a defaults snapshot.
+    assert json.loads(document.read_text()) == {
+        "execution": {"activeCapacity": 3, "paused": True}, "tools": {"bash": {"timeoutMs": 1234}}}, document.read_text()
+    shown = host_command(env, "settings", "--store", store)
+    assert shown.returncode == 0, shown
+    effective = json.loads(shown.stdout)
+    assert effective["tools"]["bash"]["timeoutMs"] == 1234 and effective["execution"]["paused"] is True, effective
+    assert "codex" in effective["providers"], effective  # Derived defaults are shown when none are saved.
+    check = host_command(env, "settings", "--store", store, "--check")
+    assert check.returncode == 0 and not check.stdout, check
+    try:
+        started = run_start(store, env)
+        assert started.returncode == 0, started.stderr
+        observed = status(store, env)
+        assert instance(observed, 3) and observed["paused"] is True, observed
+    finally:
+        forced_crash_cleanup(store)
+    unset = host_command(env, "unset", "--store", store, "execution.paused")
+    assert unset.returncode == 0, unset
+    assert "paused" not in json.loads(document.read_text())["execution"], document.read_text()
+
+    # Literal secrets are refused from the saved file, and never echoed.
+    literal = host_command(env, "set", "--store", store, "providers.openai.key", '{"value":"never-print-this"}')
+    assert literal.returncode != 0 and "never-print-this" not in literal.stdout + literal.stderr, literal
+    assert '"code":"settings_invalid"' in literal.stdout and "providers.openai.key" in literal.stdout, literal
+    unknown = host_command(env, "set", "--store", store, "tools.bash.timeoutMS", "5")
+    assert unknown.returncode != 0 and "nearest leaf: tools.bash.timeoutMs" in unknown.stdout, unknown
+
+    # Order of application: defaults, saved, --settings FILE, then --set in order.
+    private = root / "saved-settings-files"
+    private.mkdir(mode=0o700)
+    override = private / "settings.json"
+    override.write_text('{"execution":{"activeCapacity":4}}')
+    override.chmod(0o600)
+    for arguments, capacity in ((("--settings", override), 4),
+                                (("--settings", override, "--set", "execution.activeCapacity=6",
+                                  "--set", "execution.activeCapacity=5"), 5)):
+        ordered = root / f"saved-order-{capacity}"
+        assert host_command(env, "set", "--store", ordered, "execution.activeCapacity", "2").returncode == 0
+        try:
+            started = run_start(ordered, env, *map(str, arguments))
+            assert started.returncode == 0, started.stderr
+            assert instance(status(ordered, env), capacity)
+        finally:
+            forced_crash_cleanup(ordered)
+    piped = run_start(root / "saved-pipe", env, "--settings", "-")
+    assert piped.returncode != 0 and "rui host serve --settings -" in piped.stderr, piped
+
+    # Settings that move the Host out of its directory are refused before any launch.
+    moved = root / "saved-moved"
+    elsewhere = root / "saved-elsewhere"
+    elsewhere.mkdir(mode=0o700)
+    assert host_command(env, "set", "--store", moved, "interface.dir", elsewhere).returncode == 0
+    refused = run_start(moved, env)
+    assert refused.returncode != 0 and "interface.dir: bare rui and rui host start reach only" in refused.stderr, refused
+    assert "[settings_invalid]" in refused.stderr and not matching_processes(moved), refused
+
+    # A deleted serve flag names its replacement path.
+    for flag, value, replacement in (("--bash-timeout-ms", "1000", "--set tools.bash.timeoutMs=1000"),
+                                     ("--active-capacity", "4", "--set execution.activeCapacity=4")):
+        retired = host_command(env, "serve", "--store", root / "retired", flag, value)
+        assert retired.returncode != 0 and replacement in retired.stderr, retired
+    print("saved settings passed: sparse private host.json, settings/check, starter, unset, literal and unknown"
+          " refusals, ordered sources, unreachable refusal, retired flags", flush=True)
+
+
 def wait_for_terminal_exit(caller, master, output, deadline):
     """Drain output through reap, including a retained slave without EOF."""
     while True:
@@ -692,6 +772,8 @@ def main():
             assert wait_for_processes(held_store, 1) == [held.pid]
         finally:
             stop_process(held)
+
+        saved_settings(root, env)
 
         unparsed_store = root / "unparsed-capacity"
         unparsed = run_start(unparsed_store, env, "--set", 'execution.activeCapacity=-1')
