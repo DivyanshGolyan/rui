@@ -44,7 +44,9 @@ Before blaming the commit under test or calling it a stale base, look up the sig
   Suspect the diff only after these are ruled out.
 - **Broken main** when the failing file or fixture is not in the PR's diff.
   Reproduce on main HEAD before routing it to the PR's owner: `gh workflow run check.yml --ref main -f base=$(git rev-parse origin/stable)`.
-  Selection covers `base..main`, so a base at the last promoted commit selects every check the merged batch touched, the failing one included.
+  Selection covers `base..main`, so a base at the last promoted commit selects every Linux check the merged batch touched.
+  That dispatch runs no native macOS targets and no upgrade gate, so reproduce those on their own workflow at main HEAD instead: a native Mac failure with `gh workflow run qualify-macos.yml -f ref=main -f suite=native`, and an upgrade failure with `gh workflow run previous-release-upgrade.yml --ref main`.
+  A green run that skipped the failing check proves nothing about `main`.
   If main is red, find the merged pair that crossed (two PRs green alone, broken together, or a release that shipped between a wire PR's green run and its merge), name them, and route one main fix or a revert of the later PR.
 
 - **Intermittent** when the signature fails on SHAs that never touched the fixture or its owner (`git log <a>..<b> -- <paths>`), or when one SHA both passes and fails across workflows.
