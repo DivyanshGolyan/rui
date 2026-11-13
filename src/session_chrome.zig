@@ -123,14 +123,26 @@ pub fn Notice(comptime capacity: usize) type {
         len: usize = 0,
         /// When it was shown, on the shell's clock; null when none is held.
         shown_ms: ?u64 = null,
+        kind: enum { reply, copy } = .reply,
 
         /// Holds `text`, shown at `now_ms`, in place of any notice. A longer
         /// text is cut on a character.
         pub fn show(self: *Self, text: []const u8, now_ms: u64) void {
+            self.kind = .reply;
             const len = cutUtf8(text, capacity);
             std.mem.copyForwards(u8, self.bytes[0..len], text[0..len]);
             self.len = len;
             self.shown_ms = now_ms;
+        }
+
+        /// Successful clipboard output, sharing the ordinary notice lifetime.
+        pub fn showCopy(self: *Self, now_ms: u64) void {
+            self.show("Sent to clipboard", now_ms);
+            self.kind = .copy;
+        }
+
+        pub fn isCopy(self: *const Self, now_ms: u64) bool {
+            return self.kind == .copy and self.current(now_ms) != null;
         }
 
         /// The next key: the notice goes.
@@ -724,3 +736,16 @@ pub const StandaloneCases = struct {
         break :blk result;
     };
 };
+
+test "copy success shares short reply next-key replacement and expiry owner" {
+    var notice: Notice(64) = .{};
+    notice.showCopy(10);
+    try std.testing.expect(notice.isCopy(10));
+    notice.dismiss();
+    try std.testing.expect(!notice.isCopy(10));
+    notice.showCopy(10);
+    notice.show("failure reply", 11);
+    try std.testing.expect(!notice.isCopy(11));
+    notice.showCopy(10);
+    try std.testing.expect(!notice.isCopy(10 + notice_ms));
+}

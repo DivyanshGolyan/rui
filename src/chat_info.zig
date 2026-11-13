@@ -18,6 +18,7 @@ const shortPath = @import("home_path.zig").shortPath;
 const view = @import("overview_view.zig");
 const widget_style = @import("widget_style.zig");
 const Self = @This();
+const focus = @import("chat_info_focus.zig");
 
 pub const SaveState = enum { idle, pending, saved, failed };
 /// Configure's semantic values, not command-line fragments. String payloads
@@ -46,6 +47,8 @@ pub const Backend = struct {
     state: *const fn (*anyopaque) SaveState,
     models: *const fn (*anyopaque) ModelChoice.Snapshot,
     caps: *const fn (*anyopaque) view.Caps,
+    /// The existing short-reply owner decides replacement, dismissal and expiry.
+    copied: *const fn (*anyopaque) bool,
 };
 
 pub const Row = enum { model, effort };
@@ -64,6 +67,7 @@ ready: bool = false,
 read_failed: bool = false,
 panel: Panel = .{ .title = "Chat", .action_gap = 1, .natural_height = true },
 fields: [6]Panel.Field = undefined,
+actions: [3][]const u8 = undefined,
 failures: [9]?[]const u8 = @splat(null),
 pending: ?usize = null,
 effort_labels: [std.enums.values(catalog.ReasoningEffort).len + 1][]const u8 = undefined,
@@ -206,7 +210,8 @@ fn bind(self: *Self) void {
         self.fields[row].tail = " · saving";
     };
     self.panel.fields = &self.fields;
-    self.panel.actions = &.{ "Rename", "Archive", "Copy last answer" };
+    self.actions = .{ "Rename", "Archive", if (self.backend.copied(self.backend.context)) "Copied          " else "Copy last answer" };
+    self.panel.actions = &self.actions;
     const caps = self.backend.caps(self.backend.context);
     self.panel.unicode = caps.unicode;
     self.model_choice.unicode = caps.unicode;
@@ -423,8 +428,25 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
         if (shown.phase == .pending) return;
         try self.panel.choiceEvent(ctx, input, if (shown.row == .model) 4 else 0);
     } else {
+        if (!self.hasChoice() and input == .key_press) {
+            if (focusMove(input.key_press)) |move| {
+                self.panel.selected = @backingInt(focus.step(@fromBackingInt(@intCast(self.panel.selected)), move));
+                ctx.consumeAndRedraw();
+                return;
+            }
+        }
         try self.panel.widget().handleEvent(ctx, input);
     }
+}
+
+fn focusMove(key: vaxis.Key) ?focus.Move {
+    if (key.matches(vaxis.Key.up, .{})) return .up;
+    if (key.matches(vaxis.Key.down, .{})) return .down;
+    if (key.matches(vaxis.Key.left, .{})) return .left;
+    if (key.matches(vaxis.Key.right, .{})) return .right;
+    if (key.matches(vaxis.Key.tab, .{})) return .next;
+    if (key.matches(vaxis.Key.tab, .{ .shift = true })) return .previous;
+    return null;
 }
 
 fn standaloneEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
@@ -549,7 +571,7 @@ fn drawFooterContents(raw: *anyopaque, ctx: vxfw.DrawContext) !vxfw.Surface {
     const name = try safe(ctx.arena, self.title());
     const footer: Footer = .{
         .left = try Panel.displayText(ctx.arena, try std.fmt.allocPrint(ctx.arena, "{s}{s} · info", .{ if (self.narrow) " ‹ " else " ", name }), caps.unicode),
-        .right = try Panel.displayText(ctx.arena, if (self.narrow) "esc close" else if (self.tool_draft != null) "↑↓ · space toggle · enter save · esc close" else "↑↓ · enter change · esc close", caps.unicode),
+        .right = try Panel.displayText(ctx.arena, if (self.narrow) "esc close" else if (self.tool_draft != null) "↑↓ · space toggle · enter save · esc close" else "↑↓ rows · ←→ actions · tab · enter · esc close", caps.unicode),
         .style = widget_style.of(caps, .{ .background = .bar, .colour = .quiet }),
     };
     var surface = try footer.widget().draw(ctx);
@@ -600,6 +622,7 @@ const Fixture = struct {
     text: [status.max_model_bytes]u8 = undefined,
     archives: usize = 0,
     copies: usize = 0,
+    copy_notice: @import("session_chrome.zig").Notice(64) = .{},
 
     fn init(self: *Fixture) void {
         status.sample(&self.session);
@@ -612,7 +635,7 @@ const Fixture = struct {
         self.session.context_estimate = 18;
     }
     fn backend(self: *Fixture) Backend {
-        return .{ .context = self, .read = read, .configure = configure, .archive = archive, .copy_last_answer = copy, .state = state, .models = models, .caps = caps };
+        return .{ .context = self, .read = read, .configure = configure, .archive = archive, .copy_last_answer = copy, .state = state, .models = models, .caps = caps, .copied = copied };
     }
     fn read(raw: *anyopaque, out: *status.Session) !void {
         const self: *Fixture = @ptrCast(@alignCast(raw));
@@ -652,6 +675,10 @@ const Fixture = struct {
     }
     fn models(_: *anyopaque) ModelChoice.Snapshot {
         return .{};
+    }
+    fn copied(raw: *anyopaque) bool {
+        const self: *Fixture = @ptrCast(@alignCast(raw));
+        return self.copy_notice.isCopy(0);
     }
     fn caps(raw: *anyopaque) view.Caps {
         const self: *Fixture = @ptrCast(@alignCast(raw));
@@ -788,12 +815,12 @@ test "Chat info read-only rows are skipped by arrows and never activated" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
-    const forward = [_]usize{ 1, 2, 4, 6, 7, 8, 8 };
+    const forward = [_]usize{ 1, 2, 4, 6, 6 };
     for (forward) |wanted| {
         try press(&page, &ctx, vaxis.Key.down);
         try std.testing.expectEqual(wanted, page.panel.selected);
     }
-    const backward = [_]usize{ 7, 6, 4, 2, 1, 0, 0 };
+    const backward = [_]usize{ 4, 2, 1, 0, 0 };
     for (backward) |wanted| {
         try press(&page, &ctx, vaxis.Key.up);
         try std.testing.expectEqual(wanted, page.panel.selected);
@@ -1223,11 +1250,11 @@ test "Chat info hidden Context preserves action IDs failures and the blank actio
         page.refresh();
         page.panel.selected = 4;
         for ([_]usize{ 6, 7, 8 }) |selected| {
-            try press(&page, &ctx, vaxis.Key.down);
+            try press(&page, &ctx, if (selected == 6) vaxis.Key.down else vaxis.Key.right);
             try std.testing.expectEqual(selected, page.panel.selected);
         }
         for ([_]usize{ 7, 6, 4 }) |selected| {
-            try press(&page, &ctx, vaxis.Key.up);
+            try press(&page, &ctx, if (selected == 4) vaxis.Key.up else vaxis.Key.left);
             try std.testing.expectEqual(selected, page.panel.selected);
         }
         page.failures[7] = " · couldn't archive";
@@ -1785,4 +1812,65 @@ test "Chat info standalone lifetime domain closes every phase without cancelling
             try std.testing.expect(page.model_choice.show_more);
         }
     }
+}
+
+test "Chat info copy label follows successful short reply dismissal replacement and failure" {
+    var fixture: Fixture = .{};
+    fixture.init();
+    var page: Self = .{ .backend = fixture.backend() };
+    page.refresh();
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    for ([_]u16{ 140, 46 }) |width| {
+        page.panel.selected = 8;
+        try press(&page, &ctx, vaxis.Key.enter);
+        try std.testing.expectEqual(@as(?usize, 8), page.pending);
+        try std.testing.expect(std.mem.indexOf(u8, try dump(&page, arena.allocator(), width, 15), "Copied") == null);
+        fixture.copy_notice.showCopy(0);
+        fixture.state_value = .saved;
+        try page.widget().handleEvent(&ctx, .tick);
+        const copied = try dump(&page, arena.allocator(), width, 15);
+        try std.testing.expect(std.mem.indexOf(u8, copied, "Rename     Archive     Copied") != null);
+        try std.testing.expect(std.mem.indexOf(u8, copied, "Copy last answer") == null);
+        try std.testing.expect(!page.panel.stacked_actions);
+        try std.testing.expectEqual(@as(usize, "Copy last answer".len), page.panel.actions[2].len);
+        // The shell dismisses the existing notice before delivering the next key.
+        fixture.copy_notice.dismiss();
+        try press(&page, &ctx, vaxis.Key.left);
+        try std.testing.expect(std.mem.indexOf(u8, try dump(&page, arena.allocator(), width, 15), "Copy last answer") != null);
+        fixture.copy_notice.showCopy(0);
+        fixture.copy_notice.show("another reply", 0);
+        try std.testing.expect(std.mem.indexOf(u8, try dump(&page, arena.allocator(), width, 15), "Copied") == null);
+        page.panel.selected = 8;
+        try press(&page, &ctx, vaxis.Key.enter);
+        fixture.state_value = .failed;
+        try page.widget().handleEvent(&ctx, .tick);
+        const failed = try dump(&page, arena.allocator(), width, 15);
+        try std.testing.expect(std.mem.indexOf(u8, failed, "Copy: couldn't copy") != null);
+        try std.testing.expect(std.mem.indexOf(u8, failed, "Copied") == null);
+        fixture.fail_submit = true;
+        try press(&page, &ctx, vaxis.Key.enter);
+        try std.testing.expect(std.mem.indexOf(u8, try dump(&page, arena.allocator(), width, 15), "Copied") == null);
+        fixture.fail_submit = false;
+    }
+}
+
+test "Chat info routes horizontal and forward reverse Tab without opening choices" {
+    var fixture: Fixture = .{};
+    fixture.init();
+    var page: Self = .{ .backend = fixture.backend() };
+    page.refresh();
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    page.panel.selected = 4;
+    try press(&page, &ctx, vaxis.Key.down);
+    try press(&page, &ctx, vaxis.Key.right);
+    try std.testing.expectEqual(@as(usize, 7), page.panel.selected);
+    try press(&page, &ctx, vaxis.Key.tab);
+    try std.testing.expectEqual(@as(usize, 8), page.panel.selected);
+    try page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.tab, .mods = .{ .shift = true } } });
+    try std.testing.expectEqual(@as(usize, 7), page.panel.selected);
+    try std.testing.expect(!page.hasChoice());
 }

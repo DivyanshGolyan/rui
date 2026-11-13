@@ -2504,6 +2504,99 @@
         "140x40"
       ],
       "expect": "Detached. Host work continues."
+    },
+    {
+      "name": "chat-info-archive",
+      "note": "Arrow focus on the horizontal action row; copied feedback uses the existing notice lifetime.",
+      "open": "Action focus audit",
+      "steps": [
+        {
+          "wait": "The retry draft is ready."
+        },
+        {
+          "keys": [
+            "M-i"
+          ]
+        },
+        {
+          "wait": "Copy last answer"
+        },
+        {
+          "keys": [
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Right"
+          ]
+        }
+      ],
+      "expect": [
+        "Rename",
+        "Archive",
+        "Copy last answer"
+      ],
+      "absent": [
+        "Copied"
+      ],
+      "cast": [
+        {
+          "label": "Action focus audit",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "effort": "high",
+          "messages": [
+            "Give a chat info specimen summarizing the retry deadline fix."
+          ]
+        }
+      ]
+    },
+    {
+      "name": "chat-info-copied",
+      "note": "Arrow focus on the horizontal action row; copied feedback uses the existing notice lifetime.",
+      "open": "Copy feedback audit",
+      "steps": [
+        {
+          "wait": "The retry draft is ready."
+        },
+        {
+          "keys": [
+            "M-i"
+          ]
+        },
+        {
+          "wait": "Copy last answer"
+        },
+        {
+          "mouse": {
+            "at": "Copy last answer",
+            "do": "click"
+          }
+        },
+        {
+          "wait": "Copied"
+        }
+      ],
+      "expect": [
+        "Rename",
+        "Archive",
+        "Copied"
+      ],
+      "absent": [
+        "Copy last answer",
+        "couldn't copy"
+      ],
+      "cast": [
+        {
+          "label": "Copy feedback audit",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "effort": "high",
+          "messages": [
+            "Give a chat info specimen summarizing the retry deadline fix."
+          ]
+        }
+      ]
     }
   ]
 }

@@ -124,10 +124,11 @@ pub const list = [_]Reference{
     .{ .key = "enter", .meaning = "send" },
     .{ .key = "esc", .meaning = "back", .keys = &.{.escape}, .aliases = &.{.ctrl_g} },
     .{ .key = "⇧enter", .meaning = "new line" },
-    .{ .key = "tab", .meaning = "next footer field" },
-    .{ .key = "⇧tab", .meaning = "previous footer field" },
+    .{ .key = "tab", .meaning = "next panel/footer field" },
+    .{ .key = "⇧tab", .meaning = "previous panel/footer field" },
     .{ .key = "ctrl+x", .meaning = "stop", .keys = &.{.ctrl_x} },
     .{ .key = "↑↓", .meaning = "scroll", .keys = &.{ .up, .down }, .aliases = &.{ .shift_up, .shift_down, .page_up, .page_down, .home, .end, .ctrl_end } },
+    .{ .key = "←→", .meaning = "info actions" },
     .{ .key = "ctrl+o", .meaning = "tool output", .keys = &.{.ctrl_o} },
     .{ .key = "ctrl+p", .meaning = "earlier message", .keys = &.{.ctrl_p}, .aliases = &.{.ctrl_n} },
     .{ .key = "ctrl+r", .meaning = "retry", .keys = &.{.ctrl_r} },
@@ -173,7 +174,7 @@ test "keys reference rejects unbound rows and covers every screen key" {
 }
 
 test "keys reference aliases are explicit under their listed rows" {
-    try std.testing.expectEqual(@as(usize, 13), list.len);
+    try std.testing.expectEqual(@as(usize, 14), list.len);
     for ([_]struct { key: Key, row: []const u8 }{
         .{ .key = .ctrl_g, .row = "esc" },
         .{ .key = .ctrl_d, .row = "ctrl+c" },

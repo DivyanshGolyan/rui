@@ -596,11 +596,15 @@ fn infoBackend(self: *Self) ChatInfo.Backend {
             const frontend = owner(raw);
             return if (frontend.lender.models) |read_models| read_models(frontend.lender.context) else .{};
         }
+        fn copied(raw: *anyopaque) bool {
+            const frontend = owner(raw);
+            return frontend.shown_notice.isCopy(frontend.nowMs());
+        }
         fn caps(raw: *anyopaque) overview_view.Caps {
             return owner(raw).app_caps;
         }
     };
-    return .{ .context = self, .read = Backend.read, .configure = Backend.configure, .archive = Backend.archive, .copy_last_answer = Backend.copy, .state = Backend.state, .models = Backend.models, .caps = Backend.caps };
+    return .{ .context = self, .read = Backend.read, .configure = Backend.configure, .archive = Backend.archive, .copy_last_answer = Backend.copy, .state = Backend.state, .models = Backend.models, .caps = Backend.caps, .copied = Backend.copied };
 }
 
 /// The archive owner delivers its answer to the panel's one outstanding effect.
@@ -3388,9 +3392,11 @@ fn showCopy(self: *Self) !void {
         .no_code => "No code block",
         .too_large => TerminalText.clipboard_too_large,
         // Rui cannot see whether the clipboard took it.
-        .clipboard => |range| sent: {
+        .clipboard => |range| {
             try self.app_hooks.copy(self.app_hooks.context, self.files.scratch, range.start, range.length);
-            break :sent "Sent to clipboard";
+            self.notice = null;
+            self.shown_notice.showCopy(self.nowMs());
+            return;
         },
         .saved => saved: {
             var name: [reads.copy_name_bytes]u8 = undefined;
@@ -6334,7 +6340,7 @@ test "App Session copy notices are compact state phrases" {
         self.dirty = false;
         self.job.result.copied = case.result;
         try self.showCopy();
-        try std.testing.expectEqualStrings(case.words, self.notice.?);
+        try std.testing.expectEqualStrings(case.words, self.notice orelse self.shown_notice.current(self.nowMs()).?);
         try std.testing.expect(self.dirty);
     }
 }
@@ -9711,4 +9717,31 @@ test "chat standalone accepted departure ends presentation before handing back a
         defer saved.deinit(std.testing.allocator);
         try std.testing.expectEqualStrings("kept draft", saved.snapshot.bytes);
     };
+}
+
+test "App Session copy button feedback follows clipboard completion and refusal" {
+    var fixture: ChromeFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const self = fixture.self;
+    const backend = self.infoBackend();
+    self.job.result.copied = .{ .clipboard = .{ .start = 0, .length = 0 } };
+    try self.showCopy();
+    try std.testing.expect(backend.copied(backend.context));
+    self.shown_notice.dismiss();
+    try std.testing.expect(!backend.copied(backend.context));
+    self.job.result.copied = .no_answer;
+    try self.showCopy();
+    try self.afterInput(&fixture.ctx);
+    try std.testing.expect(!backend.copied(backend.context));
+    self.app_hooks.copy = struct {
+        fn refuse(_: *anyopaque, _: std.Io.File, _: u64, _: u64) !void {
+            return error.AccessDenied;
+        }
+    }.refuse;
+    self.info_effect = .saved;
+    self.job.result.copied = .{ .clipboard = .{ .start = 0, .length = 0 } };
+    try std.testing.expectError(error.AccessDenied, self.showCopy());
+    try std.testing.expectEqual(.failed, self.info_effect);
+    try std.testing.expect(!backend.copied(backend.context));
 }
