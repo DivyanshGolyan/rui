@@ -175,6 +175,23 @@ install_go() (
     printf 'Go %s installed; extraction/install took %ss.\n' "$go_version" "$((SECONDS - started))"
 )
 
+install_python312() {
+    if python3.12 -c 'import ensurepip, venv' >/dev/null 2>&1; then
+        printf 'Python 3.12 already installed: %s\n' "$(command -v python3.12)"
+        return
+    fi
+    command -v uv >/dev/null || python3 -m pip install --user --quiet --disable-pip-version-check uv
+    local destination=$local_opt/python link=$local_bin/python3.12
+    if ((EUID == 0)); then
+        # .agents/as-fixture-user's users run it too, and root's home is closed to them.
+        destination=/usr/local/lib/rui-python
+        link=/usr/local/bin/python3.12
+    fi
+    UV_PYTHON_INSTALL_DIR=$destination uv python install --no-bin 3.12
+    ln -sfn "$(UV_PYTHON_INSTALL_DIR=$destination uv python find --managed-python 3.12)" "$link"
+    printf 'Python 3.12 installed: %s\n' "$link"
+}
+
 persist_path() {
     local marker='# Rui orb toolchain'
     local profile="$HOME/.bash_profile"
@@ -229,12 +246,17 @@ started=$SECONDS
 GOTOOLCHAIN=local go -C "$repo_root/tests/qualification" mod download
 printf 'Go measurement dependencies ready in %ss.\n' "$((SECONDS - started))"
 
+step 'Installing Python 3.12'
+install_python312
+
 step 'Installing the pre-push checks'
 started=$SECONDS
-# The policy tests' packages and ruff, the client's generator, then the hook
-# that runs `prepush.py --quick` before each push.
+# The policy tests' packages and ruff for python3, the same pins in the Python 3.12
+# environment that prepush.py re-executes itself in, the client's generator, then
+# the hook that runs `prepush.py --quick` before each push.
 python3 -m pip install --user --quiet --disable-pip-version-check \
     -r "$repo_root/tests/integration/requirements.txt" -r "$repo_root/tests/ci/requirements.txt"
+python3 "$repo_root/tests/ci/fixture_user.py" --venv
 npm --prefix "$repo_root/clients/ts" ci --ignore-scripts --no-audit --no-fund --silent
 python3 "$repo_root/tests/ci/prepush.py" --install-hook
 printf 'Pre-push checks ready in %ss.\n' "$((SECONDS - started))"

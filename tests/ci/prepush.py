@@ -10,6 +10,9 @@ do not select checks. GitHub CI owns review-phase acceptance.
 --install-hook installs that hook. Whitespace errors in committed lines and
 stale generated files (openapi.json, the client's wire.ts) are fixed in the
 working tree and still fail the run, so the fix is committed before the push.
+
+Run as a script, it re-executes itself in the caller's pinned Python 3.12
+environment when .agents/setup made one (tests/ci/fixture_user.py --venv).
 """
 import argparse
 import json
@@ -21,6 +24,7 @@ import sys
 
 import build_files
 from caller_errors import inventory_path
+import fixture_user
 from platform_boundary import SCANNED as PLATFORM_SCANNED
 from select_tests import changed_paths, matches, select
 
@@ -238,4 +242,6 @@ def main():
 
 
 if __name__ == "__main__":
+    # The pinned Python 3.12 environment that .agents/setup makes, when it exists (#1420).
+    fixture_user.reexec_pinned(sys.argv)
     main()

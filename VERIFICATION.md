@@ -28,7 +28,10 @@ A fixture sets its own variables after entering, and its children inherit only t
 Importing host_process changes nothing, so tests/ci and fixture libraries can use it freely.
 `FixtureEntryTest` in [test_harness_contracts.py](tests/ci/test_harness_contracts.py) finds every fixture entry (each shell script, and each Python module with a main block), runs it with root simulated and requires that refusal.
 It also requires that every `measure-*` step goes through the exec entry.
-Where the shell is root, as in many containers, use an ordinary account that owns its checkout, Zig caches and Python environment.
+Where the shell is root, as in many containers, run the command through `.agents/as-fixture-user LANE [--ref REF] -- COMMAND...`, for example `.agents/as-fixture-user pr4 -- python3 tests/integration/host_process_test.py`.
+On first use it creates the ordinary account `rui-LANE`, which owns its home, its checkout of the committed REF (HEAD by default), its Zig cache and its Python 3.12 environment from the pinned requirements; later runs reuse them, and `.agents/as-fixture-user --remove LANE` deletes them.
+Each lane has its own account, so concurrent lanes never share a checkout, a Host or a Store.
+COMMAND starts under `env -i` with the caller's proxy and a readable copy of its CA bundle, which `host_process.py` still withholds from fixtures; [fixture_user.py](tests/ci/fixture_user.py) names everything else the run keeps.
 
 A fixture starts every process on a PTY through `spawn` in [terminal_process.py](tests/integration/terminal_process.py), never `subprocess.Popen`.
 `spawn` runs the process as the foreground job of a session leader that owns the PTY ([terminal_leader.py](tests/integration/terminal_leader.py)), as a terminal's shell runs a program: `/dev/tty` is that PTY, and the PTY keeps the job's termios after it exits.
