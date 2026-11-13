@@ -1,17 +1,19 @@
-// Rui.connect starts the Host as a child of this process, hands it the launch
-// frame on stdin and waits until it answers host-info on the socket in its
-// private runtimeDir (D107, D112, D130, D131). The child lives as long as its
-// stdin stays open (D5, D118). A child that exits on its own is restarted with
+// Rui.connect starts the Host as a child of this process, hands it the settings
+// document on stdin and waits until it answers host-info on the socket in its
+// private interface (D107, D112, D130, D131). By default the child lives as
+// long as stdin stays open (D5, D118); settings may select detached lifetime.
+// A child that exits on its own is restarted with
 // capped backoff, and calls in flight are retried once the new Host is ready;
 // every write carries a request key, so a retry is safe (D118, D129).
 import { spawn, type ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { mkdtemp, realpath, rm, stat } from "node:fs/promises";
+import { mkdtemp, rm, stat, symlink } from "node:fs/promises";
 import type { Socket } from "node:net";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 
+import { pipeSettings, type HostSettings } from "./settings.ts";
 import { SessionNotifications } from "./notifications.ts";
 import { resolveBinary } from "./binary.ts";
 import { RuiStartError, RuiUnavailableError } from "./errors.ts";
@@ -21,35 +23,13 @@ import type { components } from "./wire.ts";
 
 type Schemas = components["schemas"];
 
-export interface McpServer {
-	name: string;
-	url: string;
-	bearerToken: string;
-	callTimeoutMs: number;
-}
+export type { HostSettings } from "./settings.ts";
 
-export interface ConnectOptions {
-	/** The MCP servers whose tools Sessions may name. */
-	tools?: McpServer[];
-	/** The Store: a SQLite directory or a mysql:// URL, sent only in the stdin launch frame.
-	 * MySQL TCP accepts only ssl-ca=<absolute PEM path> (percent encoding allowed) for exclusive CA trust; sockets refuse it and verification cannot be disabled. */
-	database: string;
-	/** The OpenAI-compatible provider. Only the key Adapter is offered to a launched Host (D149). */
-	provider: {
-		baseUrl: string;
-		key: string;
-		/** Trust only this PEM file for this provider, instead of system CAs. Sent in the launch frame. */
-		caFile?: string;
-	};
-	/** How many Turns may run at once. Left out, the Host picks its default. */
-	activeCapacity?: number;
-	/** Named creation specs, held only by this Host. No default preset is selected. */
-	presets?: Record<string, AgentSpec>;
-	/** How long connect keeps retrying while another Host holds the Store (D183, D198). Default 120 000. */
+/** Options belonging to the client, not the Host settings document. */
+export interface ClientOptions {
+	/** How long connect retries another Host's Store lock. Default 120 000 ms. */
 	lockWaitMs?: number;
-	/** Opens the Host with Turns held, as if `rui.pause()` had just run (D196); `rui.resume()` lifts it. A restarted Host opens paused again. */
-	paused?: boolean;
-	/** The `rui` executable. Default: the one from the installed platform package, else `rui` on PATH. */
+	/** Default: the installed platform package's executable, else rui on PATH. */
 	binary?: string;
 }
 
@@ -62,7 +42,6 @@ export interface ExitEvent {
 
 type HostInfo = components["schemas"]["HostInfoReply"];
 
-const FRAME_VERSION = 1;
 const SOCKET_NAME = "rui.sock";
 const DEFAULT_LOCK_WAIT_MS = 120_000;
 const LOCK_RETRY_MS = 500;
@@ -71,6 +50,7 @@ const MAX_RESTART_MS = 30_000;
 /** The Host bounds its own shutdown at 10 s (D118); this leaves room for the exit to arrive. */
 const CLOSE_GRACE_MS = 15_000;
 const READY_POLL_MS = 25;
+const READINESS_RECEIPT_BYTES = Buffer.byteLength("ready instance=") + 32 + 1;
 /** How long a refused connection waits for the child's exit before it counts as unanswered. */
 const EXIT_NOTICE_MS = 2_000;
 /** Transient refusals during automatic restart, not initial connect. */
@@ -96,9 +76,11 @@ interface Waiter {
 
 interface Launch {
 	binary: string;
-	frame: Schemas["LaunchFrame"];
+	document: Buffer;
+	interfaceDir: NonNullable<NonNullable<Schemas["HostSettings"]["interface"]>["dir"]>;
+	aliasReady?: Promise<void>;
+	detached: boolean;
 	socketPath: string;
-	store: string;
 	env: NodeJS.ProcessEnv;
 }
 
@@ -138,10 +120,11 @@ export class Rui extends EventEmitter<{ exit: [ExitEvent] }> {
 	}
 
 	/** Starts Rui as a child of this process and resolves once it is ready. */
-	static async connect(options: ConnectOptions): Promise<Rui> {
+	static async connect(settings: HostSettings, options: ClientOptions = {}): Promise<Rui> {
 		const runtimeDir = await mkdtemp(join(tmpdir(), "rui-"));
+		let launch: Launch | undefined;
 		try {
-			const launch = launchFor(options, runtimeDir);
+			launch = launchFor(settings, runtimeDir, options);
 			const deadline = Date.now() + (options.lockWaitMs ?? DEFAULT_LOCK_WAIT_MS);
 			for (;;) {
 				try {
@@ -154,6 +137,7 @@ export class Rui extends EventEmitter<{ exit: [ExitEvent] }> {
 				}
 			}
 		} catch (error) {
+			if (launch) disposeLaunch(launch);
 			await rm(runtimeDir, { recursive: true, force: true });
 			throw error;
 		}
@@ -192,15 +176,20 @@ export class Rui extends EventEmitter<{ exit: [ExitEvent] }> {
 		this.#fail(new RuiUnavailableError("the Rui client is closed"));
 		const child = this.#child;
 		this.#host = undefined;
-		if (child && child.exitCode === null && child.signalCode === null) {
-			const exited = exitOf(child);
-			child.stdin?.end();
-			const timer = setTimeout(() => child.kill("SIGKILL"), CLOSE_GRACE_MS);
-			const exit = await exited;
-			clearTimeout(timer);
-			this.emit("exit", { ...exit, restarting: false });
+		try {
+			if (child && child.exitCode === null && child.signalCode === null) {
+				const exited = exitOf(child);
+				child.stdin?.end();
+				if (this.#launch.detached) child.kill("SIGTERM");
+				const timer = setTimeout(() => child.kill("SIGKILL"), CLOSE_GRACE_MS);
+				const exit = await exited;
+				clearTimeout(timer);
+				this.emit("exit", { ...exit, restarting: false });
+			}
+		} finally {
+			disposeLaunch(this.#launch);
+			await rm(this.#runtimeDir, { recursive: true, force: true });
 		}
-		await rm(this.#runtimeDir, { recursive: true, force: true });
 	}
 
 	/**
@@ -306,36 +295,77 @@ export class Rui extends EventEmitter<{ exit: [ExitEvent] }> {
 			this.#fail(new RuiUnavailableError(`the Rui Host could not restart: ${error.message}`, { cause: error }));
 			if (retryable) return this.#scheduleRestart();
 			this.#dead = new RuiUnavailableError(`the Rui Host cannot restart: ${error.message}`, { cause: error });
+			disposeLaunch(this.#launch);
 		}
 	}
 }
 
-export function launchFor(options: ConnectOptions, runtimeDir: string): Launch {
-	// A URL is passed through; anything else is a SQLite Store directory.
-	const store = /^[a-z][a-z0-9+.-]*:\/\//i.test(options.database) ? options.database : resolve(options.database);
-	const frame = {
-		v: FRAME_VERSION,
-		store,
-		runtimeDir,
-		...(options.activeCapacity === undefined ? {} : { activeCapacity: options.activeCapacity }),
-		...(options.paused ? { paused: true } : {}),
-		...(options.presets === undefined ? {} : {
-			presets: Object.fromEntries(Object.entries(options.presets).map(([name, spec]) => [name, presetFor(spec)])),
-		}),
-		provider: {
-			kind: "openai_key", baseUrl: options.provider.baseUrl, key: options.provider.key,
-			...(options.provider.caFile === undefined ? {} : { caFile: options.provider.caFile }),
-		},
-		// Only the Host's fields are copied: it refuses unknown ones.
-		mcpServers: (options.tools ?? []).map(({ name, url, bearerToken, callTimeoutMs }) => ({ name, url, bearerToken, callTimeoutMs })),
-	} satisfies Schemas["LaunchFrame"];
-	// The child gets only what it needs to find programs and its home (D185).
-	const env: NodeJS.ProcessEnv = {};
+export function launchFor(settings: HostSettings, runtimeDir: string, options: ClientOptions = {}): Launch {
+	// Inherit program/home lookup plus only the secret sources this document names.
+	const env: NodeJS.ProcessEnv = Object.create(null);
 	for (const name of ["PATH", "HOME", "TMPDIR"]) {
 		const value = process.env[name];
 		if (value !== undefined) env[name] = value;
 	}
-	return { binary: resolveBinary(options.binary), frame, socketPath: join(runtimeDir, SOCKET_NAME), store, env };
+	let document = pipeSettings(settings, (source, path) => {
+		const name = environmentName(source, path);
+		if (name === undefined) return;
+		const value = process.env[name];
+		if (value !== undefined) env[name] = value;
+	});
+	let interfaceDir: Launch["interfaceDir"] = runtimeDir;
+	let detached = false;
+	if (document !== null && typeof document === "object" && !Array.isArray(document)) {
+		if (Object.hasOwn(document, "presets") && document.presets !== undefined) {
+			// Presets retain their existing friendly spec writer after settings normalization.
+			const presets = document.presets as HostSettings["presets"];
+			document = { ...document, presets: Object.fromEntries(Object.entries(presets!).map(([name, spec]) => [name, presetFor(spec)])) };
+		}
+		const supplied = Object.hasOwn(document, "interface") && document.interface !== undefined ? document.interface : {};
+		if (supplied !== null && typeof supplied === "object" && !Array.isArray(supplied)) {
+			// Choose client defaults once, from canonical own data; invalid groups reach the Host unchanged.
+			const selected = {
+				...supplied,
+				...(!Object.hasOwn(supplied, "dir") || supplied.dir == null ? { dir: runtimeDir } : {}),
+				...(!Object.hasOwn(supplied, "lifetime") || supplied.lifetime === undefined ? { lifetime: "stdin" as const } : {}),
+			};
+			document = { ...document, interface: selected };
+			interfaceDir = selected.dir!; // The single default choice above supplies every omitted/null directory.
+			detached = selected.lifetime !== "stdin";
+		}
+	}
+	return {
+		binary: resolveBinary(options.binary), document: encodeSettings(document), interfaceDir,
+		socketPath: join(runtimeDir, "interface", SOCKET_NAME), env, detached,
+	};
+}
+
+/** Release all restart-owned secret bytes/references on every terminal transition. */
+function disposeLaunch(launch: Launch): void {
+	launch.document.fill(0);
+	for (const name of Object.keys(launch.env)) delete launch.env[name];
+}
+
+/** Consume the byte codec's canonical JSON value before allowing any Node environment lookup.
+ * Malformed values stay in the document for Host refusal; Host bounds remain its own. */
+function environmentName(source: unknown, path: string): string | undefined {
+	let name: string;
+	if (typeof source === "string") name = source;
+	else {
+		if (source === null || typeof source !== "object") return undefined;
+		const fields = Object.keys(source);
+		if (fields.length !== 1 || fields[0] !== "hex") return undefined;
+		const hex = (source as { hex?: unknown }).hex;
+		if (typeof hex !== "string") return undefined;
+		if (hex.length % 2 !== 0 || /[^0-9a-f]/.test(hex)) return undefined;
+		try {
+			name = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(Buffer.from(hex, "hex"));
+		} catch {
+			throw new RuiStartError("settings_invalid", `${path}: Node requires UTF-8 environment names; use a file source for OS-byte names`);
+		}
+	}
+	// Node truncates NUL and replaces lone UTF-16 surrogates; neither may choose another key.
+	return name.length !== 0 && !/[\0=\uD800-\uDFFF]/u.test(name) ? name : undefined;
 }
 
 /** Presets and Session mutation requests use the same wire writer. */
@@ -347,7 +377,7 @@ function presetFor(spec: AgentSpec): Schemas["AgentSpec"] {
 async function start(launch: Launch, spawned: (child: ChildProcess) => void): Promise<Host> {
 	let child: ChildProcess;
 	try {
-		child = spawn(launch.binary, ["host", "serve", "--launch-frame"], {
+		child = spawn(launch.binary, ["host", "serve", "--settings", "-"], {
 			env: launch.env,
 			stdio: ["pipe", "pipe", "inherit"],
 		});
@@ -356,7 +386,22 @@ async function start(launch: Launch, spawned: (child: ChildProcess) => void): Pr
 	}
 	spawned(child);
 	const stdout: Buffer[] = [];
-	child.stdout?.on("data", (chunk: Buffer) => stdout.push(chunk));
+	// This fixed prefix precedes every caller-controlled path in the child's record.
+	const receipt = Buffer.alloc(READINESS_RECEIPT_BYTES);
+	let receiptBytes = 0;
+	let readyInstance: string | undefined;
+	let outputBytes = 0;
+	const capture = (chunk: Buffer) => {
+		if (receiptBytes < receipt.length) {
+			receiptBytes += chunk.copy(receipt, receiptBytes, 0, receipt.length - receiptBytes);
+			if (receiptBytes === receipt.length) readyInstance = readinessInstance(receipt);
+		}
+		if (outputBytes + chunk.length <= 64 * 1024) {
+			stdout.push(chunk);
+			outputBytes += chunk.length;
+		} else chunk.fill(0);
+	};
+	child.stdout?.on("data", capture);
 	const outputEnded = new Promise<void>((done) => child.stdout?.once("close", done));
 	const launchError = new Promise<Error>((done) => child.once("error", done));
 	const exited = exitOf(child);
@@ -365,64 +410,96 @@ async function start(launch: Launch, spawned: (child: ChildProcess) => void): Pr
 	(child.stdout as Socket | null)?.unref();
 	(child.stdin as unknown as Socket | null)?.unref();
 	child.stdin?.on("error", () => {});
-	child.stdin?.write(encodeFrame(launch.frame));
+	// write owns this copy until its callback; retain the restart document separately.
+	const bytes = Buffer.from(launch.document);
+	const wipeWrite = () => bytes.fill(0);
+	child.stdin?.once("close", wipeWrite);
+	child.stdin?.write(bytes, () => {
+		bytes.fill(0);
+		child.stdin?.off("close", wipeWrite);
+	});
 
-	let ended: Exit | Error | undefined;
-	void exited.then((exit) => (ended ??= exit));
-	void launchError.then((error) => (ended ??= error));
-	while (ended === undefined) {
-		const info = await probe(launch).catch((error: unknown) => {
-			if (error instanceof ConnectionError) return undefined;
-			child.kill("SIGKILL");
-			throw new AttemptFailed(error as Error, undefined);
-		});
-		if (info) return { child, instance: info.instance, info, exited };
-		await sleep(READY_POLL_MS);
+	try {
+		let ended: Exit | Error | undefined;
+		void exited.then((exit) => (ended ??= exit));
+		void launchError.then((error) => (ended ??= error));
+		while (ended === undefined) {
+			const info = readyInstance === undefined ? undefined : await probe(launch, readyInstance).catch(async (error: unknown) => {
+				if (error instanceof ConnectionError) return undefined;
+				child.kill("SIGKILL");
+				throw new AttemptFailed(error as Error, await exited);
+			});
+			if (info) return { child, instance: info.instance, info, exited };
+			await sleep(READY_POLL_MS);
+		}
+		if (ended instanceof Error) {
+			throw new AttemptFailed(new RuiUnavailableError(`could not start ${launch.binary}: ${ended.message}`, { cause: ended }), undefined);
+		}
+		// The refusal line is written before the exit; give the pipe a moment to deliver it.
+		await Promise.race([outputEnded, sleep(1_000)]);
+		const output = Buffer.concat(stdout);
+		let refusal: RuiStartError | undefined;
+		try {
+			refusal = startError(output.toString("utf8"));
+		} finally {
+			output.fill(0);
+		}
+		throw new AttemptFailed(
+			refusal ?? new RuiUnavailableError(`rui exited before it was ready (code ${ended.code}, signal ${ended.signal})`),
+			ended,
+		);
+	} finally {
+		child.stdout?.off("data", capture);
+		child.stdout?.on("data", (chunk: Buffer) => chunk.fill(0));
+		receipt.fill(0);
+		for (const chunk of stdout) chunk.fill(0);
+		stdout.length = 0;
 	}
-	if (ended instanceof Error) {
-		throw new AttemptFailed(new RuiUnavailableError(`could not start ${launch.binary}: ${ended.message}`, { cause: ended }), undefined);
-	}
-	// The refusal line is written before the exit; give the pipe a moment to deliver it.
-	await Promise.race([outputEnded, sleep(1_000)]);
-	const refusal = startError(Buffer.concat(stdout).toString("utf8"));
-	throw new AttemptFailed(
-		refusal ?? new RuiUnavailableError(`rui exited before it was ready (code ${ended.code}, signal ${ended.signal})`),
-		ended,
-	);
 }
 
-async function probe(launch: Launch): Promise<HostInfo | undefined> {
+/** Readiness proves the Host admitted the path; decoding and alias effects belong after it. */
+async function createInterfaceAlias(launch: Launch): Promise<void> {
+	const dir = launch.interfaceDir;
+	const target = typeof dir === "string" ? dir : Buffer.from(dir.hex, "hex");
+	// An ASCII alias lets Node's string-only socket API reach OS-byte directories.
+	await symlink(target, dirname(launch.socketPath));
+}
+
+async function probe(launch: Launch, instance: string): Promise<HostInfo | undefined> {
+	await (launch.aliasReady ??= createInterfaceAlias(launch));
 	try {
 		await stat(launch.socketPath);
 	} catch {
 		return undefined;
 	}
-	// The Host names a SQLite Store by its canonical path, which exists once the socket does.
-	let store = launch.store.startsWith("mysql://") ? "" : launch.store;
-	if (store !== "" && !store.includes("://")) {
-		try {
-			store = await realpath(store);
-		} catch {
-			return undefined;
-		}
-	}
 	const body = JSON.stringify({
 		version: WIRE_VERSION,
 		kind: "host_info",
-		store,
+		store: "",
 	} satisfies Schemas["HostInfoRequest"]);
-	const reply = await post({ socketPath: launch.socketPath, path: "/v1/host-info", body });
-	return JSON.parse(reply.toString("utf8")) as HostInfo;
+	const reply = await post({ socketPath: launch.socketPath, path: "/v1/host-info", body, instance });
+	const info = JSON.parse(reply.toString("utf8")) as HostInfo;
+	if (info.instance !== instance) throw new RuiUnavailableError("the Host socket did not match the started child's readiness instance");
+	return info;
 }
 
 /** One length-prefixed JSON frame: a 4-byte big-endian length, then UTF-8 JSON (D130). */
-export function encodeFrame(frame: Schemas["LaunchFrame"]): Buffer {
-	const json = Buffer.from(JSON.stringify(frame));
-	const out = Buffer.alloc(4 + json.length);
-	out.writeUInt32BE(json.length, 0);
-	json.copy(out, 4);
-	json.fill(0);
-	return out;
+export function encodeSettings(document: Schemas["HostSettings"]): Buffer {
+	const json = Buffer.from(JSON.stringify(document));
+	try {
+		const out = Buffer.alloc(4 + json.length);
+		out.writeUInt32BE(json.length, 0);
+		json.copy(out, 4);
+		return out;
+	} finally {
+		json.fill(0);
+	}
+}
+
+/** Only the fixed leading child receipt is authoritative; later path bytes are not records. */
+export function readinessInstance(prefix: Buffer): string | undefined {
+	if (prefix.length !== READINESS_RECEIPT_BYTES) return undefined;
+	return /^ready instance=([0-9a-f]{32}) $/.exec(prefix.toString("latin1"))?.[1];
 }
 
 /** The refusal a child wrote as its one stdout line, `{"rui_start_error":{code,message}}` (D211). */

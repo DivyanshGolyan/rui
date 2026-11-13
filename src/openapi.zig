@@ -20,7 +20,7 @@ const model_list = @import("model_list.zig");
 const store = @import("store.zig");
 const session_report_reply = @import("session_report_reply.zig");
 const activity_reply = @import("activity_reply.zig");
-const launch_frame = @import("launch_frame.zig");
+const host_settings = @import("host_settings.zig");
 const start_report = @import("start_report.zig");
 const core_tools = @import("core_tools.zig");
 const Hole = protocol.Hole;
@@ -500,6 +500,74 @@ fn observationSchema(d: *Document) anyerror!Value {
     return d.anyOf(&kinds);
 }
 
+/// Consumes the settings owner's grammar, not its storage representation.
+/// Groups arrive parent-first; assembling them in reverse attaches complete
+/// children without retaining pointers into growable JSON object maps.
+const SettingsSchema = struct {
+    document: *Document,
+    groups: std.ArrayList(host_settings.Group) = .empty,
+    values: ObjectMap = .empty,
+
+    pub fn group(self: *SettingsSchema, fact: host_settings.Group) !void {
+        try self.groups.append(self.document.arena, fact);
+    }
+
+    pub fn leaf(self: *SettingsSchema, fact: host_settings.Leaf) !void {
+        try self.values.put(self.document.arena, fact.pattern, try self.document.settingsLeaf(fact));
+    }
+
+    fn child(self: *SettingsSchema, parent: []const u8, name: []const u8) !Value {
+        const at = try std.fmt.allocPrint(self.document.arena, "{s}{s}{s}", .{ parent, if (parent.len == 0) "" else ".", name });
+        return self.values.get(at) orelse error.MissingSettingsSchema;
+    }
+
+    fn finish(self: *SettingsSchema) !Value {
+        const d = self.document;
+        var index = self.groups.items.len;
+        while (index > 0) {
+            index -= 1;
+            const fact = self.groups.items[index];
+            var value: Value = undefined;
+            switch (fact.kind) {
+                .named => {
+                    value = try d.object(.{
+                        .type = Value{ .string = "object" },
+                        .additionalProperties = try self.child(fact.pattern, "*"),
+                        .propertyNames = try d.object(.{
+                            .pattern = Value{ .string = try std.fmt.allocPrint(d.arena, "^[{s}]{{1,{d}}}(?![\\s\\S])", .{
+                                if (fact.name_format.? == .mcp) "A-Za-z0-9_-" else "a-z0-9_-", fact.name_max_bytes.?,
+                            }) },
+                        }),
+                    });
+                },
+                .object, .providers, .one_adapter => {
+                    var properties: ObjectMap = .empty;
+                    var alternatives: std.json.Array = .init(d.arena);
+                    for (fact.keys) |key| {
+                        const item = try self.child(fact.pattern, key);
+                        try properties.put(d.arena, key, item);
+                        if (fact.kind == .one_adapter) try alternatives.append(try d.singleProperty(key, item));
+                    }
+                    value = if (fact.kind == .one_adapter)
+                        try d.object(.{ .oneOf = Value{ .array = alternatives } })
+                    else
+                        try d.object(.{
+                            .type = Value{ .string = "object" },
+                            .properties = Value{ .object = properties },
+                            .additionalProperties = Value{ .bool = false },
+                        });
+                },
+            }
+            if (fact.max_entries) |maximum| try value.object.put(d.arena, "maxProperties", try d.unsigned(maximum));
+            if (fact.min_entries != 0) try value.object.put(d.arena, "minProperties", try d.unsigned(fact.min_entries));
+            try value.object.put(d.arena, "description", .{ .string = fact.doc });
+            if (fact.nullable) value = try d.nullable(value);
+            try self.values.put(d.arena, fact.pattern, value);
+        }
+        return self.values.get("").?;
+    }
+};
+
 /// The document under construction, with its arena and named schemas.
 pub const Document = struct {
     arena: std.mem.Allocator,
@@ -637,6 +705,88 @@ pub const Document = struct {
         @compileError("no wire schema for " ++ @typeName(T));
     }
 
+    fn unsigned(d: *Document, number: u64) !Value {
+        return .{ .number_string = try std.fmt.allocPrint(d.arena, "{d}", .{number}) };
+    }
+
+    /// A closed exactly-one source or Adapter alternative.
+    fn singleProperty(d: *Document, name: []const u8, schema: Value) !Value {
+        var properties: ObjectMap = .empty;
+        try properties.put(d.arena, name, schema);
+        return d.object(.{
+            .type = Value{ .string = "object" },
+            .properties = Value{ .object = properties },
+            .required = try d.array(&.{.{ .string = name }}),
+            .additionalProperties = Value{ .bool = false },
+        });
+    }
+
+    fn boundedString(d: *Document, maximum: usize) !Value {
+        return d.object(.{
+            .type = Value{ .string = "string" },
+            .maxLength = try d.unsigned(maximum),
+            // JSON Schema lengths count Unicode scalars; the owner bounds bytes.
+            .@"x-maxBytes" = try d.unsigned(maximum),
+        });
+    }
+
+    fn osBytes(d: *Document, maximum: ?usize, pattern: []const u8, hex_maximum: ?usize) !Value {
+        const text = if (maximum) |bound| try d.boundedString(bound) else try d.object(.{ .type = Value{ .string = "string" } });
+        var hex = if (hex_maximum) |bound| try d.boundedString(bound) else try d.object(.{ .type = Value{ .string = "string" } });
+        try hex.object.put(d.arena, "pattern", .{ .string = pattern });
+        var value = try d.object(.{
+            .oneOf = try d.array(&.{ text, try d.singleProperty("hex", hex) }),
+            .@"x-rui-kind" = Value{ .string = "bytes" },
+        });
+        if (maximum == null) try value.object.put(d.arena, "x-rui-native-path-limit", .{ .bool = true });
+        return value;
+    }
+
+    fn settingsLeaf(d: *Document, leaf: host_settings.Leaf) !Value {
+        const fact = leaf.json_schema;
+        var value: Value = undefined;
+        if (fact.secret_sources.len != 0) {
+            var alternatives: std.json.Array = .init(d.arena);
+            for (fact.secret_sources) |source| {
+                const schema = if (std.mem.eql(u8, source, "env"))
+                    try d.osBytes(fact.source_env_max_bytes.?, host_settings.Schema.os_bytes_pattern, 2 * fact.source_env_max_bytes.?)
+                else if (std.mem.eql(u8, source, "file"))
+                    try d.osBytes(if (fact.source_file_native_path_limit) null else fact.source_file_max_bytes.?, host_settings.Schema.os_bytes_pattern, if (fact.source_file_native_path_limit) null else 2 * fact.source_file_max_bytes.?)
+                else if (std.mem.eql(u8, source, "value"))
+                    try d.boundedString(fact.max_bytes.?)
+                else if (std.mem.eql(u8, source, "owner"))
+                    try d.object(.{ .@"const" = Value{ .bool = true } })
+                else
+                    return error.UnknownSecretSource;
+                var alternative = try d.singleProperty(source, schema);
+                if (std.mem.eql(u8, source, "value")) try alternative.object.put(d.arena, "description", .{ .string = "Literal secret; accepted only from a pipe, never from a settings file." });
+                try alternatives.append(alternative);
+            }
+            value = try d.object(.{ .oneOf = Value{ .array = alternatives } });
+        } else if (fact.hex_object) |hex| {
+            value = try d.osBytes(if (fact.native_path_limit) null else fact.max_bytes.?, hex.pattern, if (fact.native_path_limit) null else hex.max_length);
+        } else if (fact.format != null and std.mem.eql(u8, fact.format.?, "agent-spec")) {
+            value = try d.ref("AgentSpec");
+        } else {
+            value = try d.object(.{ .type = Value{ .string = @tagName(fact.type) } });
+            if (fact.max_bytes) |maximum| value = try d.boundedString(maximum);
+            if (fact.min) |minimum| try value.object.put(d.arena, "minimum", try d.unsigned(minimum));
+            if (fact.max) |maximum| try value.object.put(d.arena, "maximum", try d.unsigned(maximum));
+            if (fact.choices.len != 0) {
+                var names: std.json.Array = .init(d.arena);
+                for (fact.choices) |name| try names.append(.{ .string = name });
+                try value.object.put(d.arena, "enum", .{ .array = names });
+            }
+        }
+        if (fact.format) |format| try value.object.put(d.arena, "format", .{ .string = format });
+        try value.object.put(d.arena, "description", .{ .string = leaf.doc });
+        if (fact.nullable) value = try d.nullable(value);
+        if (fact.secret_sources.len != 0) try value.object.put(d.arena, "x-rui-kind", .{ .string = "secret" });
+        if (fact.hex_object != null) try value.object.put(d.arena, "x-rui-kind", .{ .string = "bytes" });
+        if (fact.native_path_limit) try value.object.put(d.arena, "x-rui-native-path-limit", .{ .bool = true });
+        return value;
+    }
+
     /// JSON decoded directly into a Zig wire type. Defaults permit omission,
     /// whereas optional types permit null; these are independent on the wire.
     fn wireSchema(d: *Document, comptime T: type) anyerror!Value {
@@ -655,14 +805,7 @@ pub const Document = struct {
                 var properties: ObjectMap = .empty;
                 var required: std.json.Array = .init(d.arena);
                 inline for (fields.field_names, fields.field_types, fields.field_attrs) |name, Field, attrs| {
-                    const schema = if (comptime T == launch_frame.Wire and std.mem.eql(u8, name, "presets"))
-                        try d.object(.{
-                            .type = Value{ .string = "object" },
-                            .additionalProperties = try d.ref("AgentSpec"),
-                            .maxProperties = Value{ .integer = core_tools.max_presets },
-                        })
-                    else
-                        try d.wireSchema(Field);
+                    const schema = try d.wireSchema(Field);
                     try properties.put(d.arena, name, schema);
                     if (attrs.default_value_ptr == null) try required.append(.{ .string = name });
                 }
@@ -677,7 +820,7 @@ pub const Document = struct {
         };
     }
 
-    fn launchSchemas(d: *Document) !void {
+    fn settingsSchemas(d: *Document) !void {
         // Reuse start_agent's field vocabulary. Presets are complete specs,
         // not partial overrides, and parseAgentSpec also permits creation's
         // provider and workspace fields (start_agent inherits them instead).
@@ -690,12 +833,9 @@ pub const Document = struct {
         try spec_properties.object.put(d.arena, "provider", try d.enumeration(protocol.Provider, false));
         try spec_properties.object.put(d.arena, "workspace", try d.wireSchema([]const u8));
         try d.schemas.put(d.arena, "AgentSpec", spec);
-        var frame = try d.wireSchema(launch_frame.Wire);
-        const properties = frame.object.getPtr("properties").?;
-        try properties.object.put(d.arena, "v", try d.object(.{ .@"const" = Value{ .integer = launch_frame.version } }));
-        const provider = properties.object.getPtr("provider").?.object.getPtr("properties").?;
-        try provider.object.put(d.arena, "kind", try d.object(.{ .@"const" = Value{ .string = "openai_key" } }));
-        try d.schemas.put(d.arena, "LaunchFrame", frame);
+        var visitor: SettingsSchema = .{ .document = d };
+        try host_settings.schema(&visitor);
+        try d.schemas.put(d.arena, "HostSettings", try visitor.finish());
         try d.schemas.put(d.arena, "StartError", try d.wireSchema(struct {
             rui_start_error: struct { code: start_report.StartError, message: []const u8 },
         }));
@@ -917,7 +1057,7 @@ pub const Document = struct {
             try paths.put(d.arena, route.path, try d.object(.{ .post = operation }));
         }
         try d.schemas.put(d.arena, "ErrorReply", try d.shapeSchema(protocol.error_reply));
-        try d.launchSchemas();
+        try d.settingsSchemas();
         d.schemas.sort(SortKeys{ .keys = d.schemas.keys() });
         return d.object(.{
             .openapi = Value{ .string = "3.1.0" },
@@ -1243,67 +1383,164 @@ fn parseRequestExample(route: *const Route, index: usize, bytes: []const u8, scr
     try request.removeTemporaryContent(io);
 }
 
-test "every launch Wire field parses and conforms to its component schema" {
+/// Materializes a derived path (named entries use a valid representative) so
+/// the full document, not just a disconnected leaf schema, reaches both doors.
+fn settingsSample(d: *Document, pattern: []const u8, value: Value) !Value {
+    const dot = std.mem.indexOfScalar(u8, pattern, '.');
+    const key = pattern[0 .. dot orelse pattern.len];
+    var fields: ObjectMap = .empty;
+    try fields.put(d.arena, if (std.mem.eql(u8, key, "*")) "sample" else key, if (dot) |at| try settingsSample(d, pattern[at + 1 ..], value) else value);
+    return .{ .object = fields };
+}
+
+fn checkSettingsPreset(gpa: std.mem.Allocator, spec: ObjectMap) error{OutOfMemory}!?[]const u8 {
+    const configuration = try gpa.create(wire_request.Configuration);
+    defer gpa.destroy(configuration);
+    configuration.* = .{};
+    return switch (try core_tools.parseAgentSpec(gpa, spec, configuration)) {
+        .accepted => null,
+        .rejected => |reason| reason,
+    };
+}
+
+fn applySettingsSample(d: *Document, pattern: []const u8, value: Value, accepted: bool) !void {
+    const sample = if (pattern.len == 0) value else try settingsSample(d, pattern, value);
+    const schema = d.schemas.get("HostSettings").?;
+    const text = try std.json.Stringify.valueAlloc(d.arena, sample, .{});
+    errdefer std.debug.print("settings schema witness {s}: {s}\n", .{ pattern, text });
+    try std.testing.expectEqual(accepted, conforms(d.schemas, schema, sample));
+    const settings = try std.testing.allocator.create(host_settings.Settings);
+    defer std.testing.allocator.destroy(settings);
+    settings.* = .{};
+    defer settings.deinit();
+    var failure: start_report.Failure = undefined;
+    if (accepted) {
+        try host_settings.apply(settings, d.arena, text, .pipe, checkSettingsPreset, &failure);
+        var output: std.Io.Writer.Allocating = .init(d.arena);
+        try host_settings.write(settings, &output.writer);
+        const written = try std.json.parseFromSliceLeaky(Value, d.arena, output.written(), .{ .parse_numbers = false });
+        try std.testing.expect(conforms(d.schemas, schema, written));
+    } else {
+        try std.testing.expectError(error.SettingsInvalid, host_settings.apply(settings, d.arena, text, .pipe, checkSettingsPreset, &failure));
+    }
+}
+
+test "HostSettings schema derives every leaf and closed container from settings" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    const allocator = arena.allocator();
-    var document: Document = .init(allocator);
+    var document: Document = .init(arena.allocator());
     _ = try document.build();
-    const preset = try std.json.parseFromSliceLeaky(Value, allocator,
-        \\{"review":{"model":"custom","effort":"low","compactAt":1000,"tools":[],"permissionMode":"ask","provider":"openai","workspace":"/tmp","instructions":"Review","outputSchema":{"type":"object"},"label":null}}
-    , .{});
-    const wire: launch_frame.Wire = .{
-        .v = launch_frame.version,
-        .store = "/tmp/store",
-        .provider = .{ .kind = "openai_key", .baseUrl = "https://api.openai.com/v1", .key = "test-key", .caFile = "/tmp/ca.pem" },
-        .runtimeDir = "/tmp/rui",
-        .activeCapacity = 2,
-        .paused = true,
-        .presets = preset,
-        .mcpServers = &.{.{ .name = "tools", .url = "http://127.0.0.1:1234/mcp", .bearerToken = "test-token", .callTimeoutMs = 1000 }},
-    };
-    const bytes = try std.json.Stringify.valueAlloc(allocator, wire, .{});
-    var frame: launch_frame.Frame = .{};
-    defer frame.deinit();
-    var refusal: start_report.Failure = undefined;
-    try launch_frame.parse(std.testing.allocator, bytes, &frame, &refusal);
-    const json = try std.json.parseFromSliceLeaky(Value, allocator, bytes, .{});
-    try std.testing.expectEqual(@typeInfo(launch_frame.Wire).@"struct".field_names.len, json.object.count());
-    const schema = document.schemas.get("LaunchFrame").?;
-    try std.testing.expect(conforms(document.schemas, schema, json));
-    try std.testing.expectEqualStrings("/tmp/ca.pem", frame.ca_file.slice());
-    try std.testing.expectEqual(@as(usize, 1), frame.presets.len);
-    try std.testing.expectEqual(@as(usize, 1), frame.mcp_server_count);
-    // Defaults are omittable; nullable capacity is distinct from omission.
-    const minimal = try std.json.parseFromSliceLeaky(Value, allocator,
-        \\{"v":1,"store":"/tmp/store","provider":{"kind":"openai_key","baseUrl":"https://api.openai.com/v1","key":"test-key"},"runtimeDir":"/tmp/rui","activeCapacity":null}
-    , .{});
-    try std.testing.expect(conforms(document.schemas, schema, minimal));
-    const minimal_bytes = try std.json.Stringify.valueAlloc(allocator, minimal, .{});
-    var minimal_frame: launch_frame.Frame = .{};
-    defer minimal_frame.deinit();
-    try launch_frame.parse(std.testing.allocator, minimal_bytes, &minimal_frame, &refusal);
-    // Closed wire objects must reject renamed or missing fields, including
-    // fields inside MCP entries and the reused agent-spec schema.
-    const invalid = [_][]const u8{
-        \\{"v":1,"store":"/tmp/store","provider":{"kind":"openai_key","baseUrl":"https://api.openai.com/v1","key":"test-key","caFile":false},"runtimeDir":"/tmp/rui"}
-        ,
-        \\{"v":1,"store":"/tmp/store","provider":{"kind":"openai_key","baseUrl":"https://api.openai.com/v1","key":"test-key"},"runtimeDirectory":"/tmp/rui"}
-        ,
-        \\{"v":1,"store":"/tmp/store","provider":{"kind":"openai_key","baseUrl":"https://api.openai.com/v1","key":"test-key"},"runtimeDir":"/tmp/rui","mcpServers":[{"name":"tools","url":"http://127.0.0.1:1234/mcp","bearerToken":"test-token","timeoutMs":1000}]}
-        ,
-        \\{"v":1,"store":"/tmp/store","provider":{"kind":"openai_key","baseUrl":"https://api.openai.com/v1","key":"test-key"},"runtimeDir":"/tmp/rui","presets":{"review":{"model":"custom","tools":[],"effort":"low","permissionMode":"ask"}}}
-        ,
-    };
-    for (invalid) |text| {
-        const invalid_json = try std.json.parseFromSliceLeaky(Value, allocator, text, .{});
-        try std.testing.expect(!conforms(document.schemas, schema, invalid_json));
-        try std.testing.expectError(error.LaunchFrameInvalid, launch_frame.parse(std.testing.allocator, text, &minimal_frame, &refusal));
+    var visitor: SettingsSchema = .{ .document = &document };
+    try host_settings.schema(&visitor);
+    _ = try visitor.finish();
+    try std.testing.expectEqual(host_settings.groups.len, visitor.groups.items.len);
+    for (host_settings.leaves) |leaf| {
+        const sample = try std.json.parseFromSliceLeaky(Value, document.arena, leaf.sample_json, .{});
+        try applySettingsSample(&document, leaf.pattern, sample, true);
+        try std.testing.expect(visitor.values.contains(leaf.pattern));
+        if (leaf.json_schema.min) |minimum| {
+            try applySettingsSample(&document, leaf.pattern, try document.unsigned(minimum), true);
+            if (minimum > 0) try applySettingsSample(&document, leaf.pattern, try document.unsigned(minimum - 1), false);
+        }
+        if (leaf.json_schema.max) |maximum| {
+            try applySettingsSample(&document, leaf.pattern, try document.unsigned(maximum), true);
+            const over = Value{ .number_string = try std.fmt.allocPrint(document.arena, "{d}", .{@as(u128, maximum) + 1}) };
+            try applySettingsSample(&document, leaf.pattern, over, false);
+        }
+    }
+    for (host_settings.groups) |group| {
+        if (group.kind == .named) {
+            const child = if (group.name_format.? == .preset) sample: {
+                const pattern = try std.fmt.allocPrint(document.arena, "{s}.*", .{group.pattern});
+                for (host_settings.leaves) |leaf| if (std.mem.eql(u8, leaf.pattern, pattern))
+                    break :sample try std.json.parseFromSliceLeaky(Value, document.arena, leaf.sample_json, .{});
+                return error.MissingSettingsSample;
+            } else try document.object(.{});
+            for ([_][]const u8{ "", "bad.name", "sample\n" }) |name| {
+                var entries: ObjectMap = .empty;
+                try entries.put(document.arena, name, child);
+                try applySettingsSample(&document, group.pattern, .{ .object = entries }, false);
+            }
+            var entries: ObjectMap = .empty;
+            for (0..group.max_entries.? + 1) |index| try entries.put(document.arena, try std.fmt.allocPrint(document.arena, "entry{d}", .{index}), child);
+            try applySettingsSample(&document, group.pattern, .{ .object = entries }, false);
+        } else {
+            var unknown: ObjectMap = .empty;
+            try unknown.put(document.arena, "unknown", .{ .bool = true });
+            try applySettingsSample(&document, group.pattern, .{ .object = unknown }, false);
+            if (group.kind == .one_adapter) {
+                try applySettingsSample(&document, group.pattern, try document.object(.{}), false);
+                var adapters: ObjectMap = .empty;
+                for (group.keys) |name| try adapters.put(document.arena, name, try document.object(.{}));
+                if (group.keys.len > 1) try applySettingsSample(&document, group.pattern, .{ .object = adapters }, false);
+            }
+        }
+    }
+}
+
+test "HostSettings schema preserves OS bytes and exactly one secret source" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var document: Document = .init(arena.allocator());
+    _ = try document.build();
+    for (host_settings.leaves) |leaf| {
+        if (leaf.json_schema.hex_object != null) {
+            const schema = try document.settingsLeaf(leaf);
+            try std.testing.expectEqualStrings("bytes", schema.object.get("x-rui-kind").?.string);
+            const bytes_schema = schema.object.get("anyOf").?.array.items[0];
+            const text_schema = bytes_schema.object.get("oneOf").?.array.items[0];
+            const hex_schema = bytes_schema.object.get("oneOf").?.array.items[1].object.get("properties").?.object.get("hex").?;
+            if (leaf.json_schema.native_path_limit) {
+                try std.testing.expect(schema.object.get("x-rui-native-path-limit").?.bool);
+                try std.testing.expect(!text_schema.object.contains("maxLength"));
+                try std.testing.expect(!hex_schema.object.contains("maxLength"));
+            } else {
+                try std.testing.expect(!schema.object.contains("x-rui-native-path-limit"));
+                try std.testing.expectEqual(@as(f128, @floatFromInt(leaf.json_schema.max_bytes.?)), numeric(text_schema.object.get("maxLength").?));
+                try std.testing.expectEqual(@as(f128, @floatFromInt(leaf.json_schema.hex_object.?.max_length)), numeric(hex_schema.object.get("maxLength").?));
+            }
+            for ([_][]const u8{ "\"/tmp/example\"", "{\"hex\":\"2f746d702fff\"}" }) |text| {
+                const value = try std.json.parseFromSliceLeaky(Value, document.arena, text, .{});
+                try applySettingsSample(&document, leaf.pattern, value, true);
+            }
+            for ([_][]const u8{ "{\"hex\":\"f\"}", "{\"hex\":\"FF\"}", "{\"hex\":\"ff\\n\"}", "{\"hex\":\"2f\",\"extra\":true}", "{}" }) |text| {
+                const value = try std.json.parseFromSliceLeaky(Value, document.arena, text, .{});
+                try applySettingsSample(&document, leaf.pattern, value, false);
+            }
+        }
+        if (!leaf.secret) continue;
+        const secret_schema = try document.settingsLeaf(leaf);
+        try std.testing.expectEqualStrings("secret", secret_schema.object.get("x-rui-kind").?.string);
+        const sources = secret_schema.object.get("anyOf").?.array.items[0].object.get("oneOf").?.array.items;
+        for (sources) |source| {
+            const properties = source.object.get("properties").?.object;
+            if (properties.get("file")) |file| try std.testing.expect(file.object.get("x-rui-native-path-limit").?.bool);
+            if (properties.get("env")) |env| {
+                const text = env.object.get("oneOf").?.array.items[0];
+                try std.testing.expectEqual(@as(f128, @floatFromInt(leaf.json_schema.source_env_max_bytes.?)), numeric(text.object.get("maxLength").?));
+            }
+        }
+        for ([_][]const u8{
+            "{\"env\":\"TOKEN\"}",                   "{\"env\":{\"hex\":\"544fff\"}}", "{\"file\":\"/tmp/key\"}",
+            "{\"file\":{\"hex\":\"2f746d702fff\"}}", "{\"owner\":true}",               "null",
+        }) |text| {
+            const value = try std.json.parseFromSliceLeaky(Value, document.arena, text, .{});
+            try applySettingsSample(&document, leaf.pattern, value, true);
+        }
+        const literal = if (std.mem.eql(u8, leaf.json_schema.format.?, "mysql-login-source"))
+            "{\"value\":\"mysql://user:password@localhost/database\"}"
+        else
+            "{\"value\":\"secret-example\"}";
+        try applySettingsSample(&document, leaf.pattern, try std.json.parseFromSliceLeaky(Value, document.arena, literal, .{}), true);
+        for ([_][]const u8{ "{}", "{\"owner\":false}", "{\"value\":\"key\",\"env\":\"TOKEN\"}", "{\"env\":{\"hex\":\"ff\",\"extra\":true}}" }) |text| {
+            const value = try std.json.parseFromSliceLeaky(Value, document.arena, text, .{});
+            try applySettingsSample(&document, leaf.pattern, value, false);
+        }
     }
     inline for (std.meta.tags(start_report.StartError)) |code| {
-        const line = try std.json.Stringify.valueAlloc(allocator, .{ .rui_start_error = .{ .code = code, .message = "refused" } }, .{});
-        const error_json = try std.json.parseFromSliceLeaky(Value, allocator, line, .{});
-        try std.testing.expect(conforms(document.schemas, document.schemas.get("StartError").?, error_json));
+        const line = try std.json.Stringify.valueAlloc(document.arena, .{ .rui_start_error = .{ .code = code, .message = "refused" } }, .{});
+        const value = try std.json.parseFromSliceLeaky(Value, document.arena, line, .{});
+        try std.testing.expect(conforms(document.schemas, document.schemas.get("StartError").?, value));
     }
 }
 
@@ -1321,6 +1558,13 @@ fn conforms(schemas: ObjectMap, schema: Value, json: Value) bool {
         const name = target.string["#/components/schemas/".len..];
         return conforms(schemas, schemas.get(name).?, json);
     }
+    if (rules.get("oneOf")) |alternatives| {
+        var count: usize = 0;
+        for (alternatives.array.items) |alternative| if (conforms(schemas, alternative, json)) {
+            count += 1;
+        };
+        if (count != 1) return false;
+    }
     if (rules.get("anyOf")) |alternatives| {
         for (alternatives.array.items) |alternative| if (conforms(schemas, alternative, json)) return true;
         return false;
@@ -1330,6 +1574,9 @@ fn conforms(schemas: ObjectMap, schema: Value, json: Value) bool {
         for (names.array.items) |name| if (equal(name, json)) return true;
         return false;
     }
+    // JSON Schema patterns constrain strings even when no explicit type is present
+    // (for example propertyNames, whose instance is always a string).
+    if (json == .string) if (rules.get("pattern")) |pattern| if (!matches(pattern.string, json.string)) return false;
     const type_rule = rules.get("type") orelse return true;
     if (type_rule == .array) {
         for (type_rule.array.items) |kind| if (conformsKind(schemas, rules, kind.string, json)) return true;
@@ -1339,18 +1586,23 @@ fn conforms(schemas: ObjectMap, schema: Value, json: Value) bool {
 }
 
 fn conformsKind(schemas: ObjectMap, rules: ObjectMap, kind: []const u8, json: Value) bool {
-    if (std.mem.eql(u8, kind, "integer")) return json == .integer;
+    if (std.mem.eql(u8, kind, "integer")) {
+        if (json != .integer and json != .number_string) return false;
+        const number = numeric(json);
+        if (rules.get("minimum")) |minimum| if (number < numeric(minimum)) return false;
+        if (rules.get("maximum")) |maximum| if (number > numeric(maximum)) return false;
+        return true;
+    }
     if (std.mem.eql(u8, kind, "null")) return json == .null;
     if (std.mem.eql(u8, kind, "boolean")) return json == .bool;
     if (std.mem.eql(u8, kind, "string")) {
         if (json != .string) return false;
-        if (rules.get("maxLength")) |limit| if (json.string.len > limit.integer) return false;
-        if (rules.get("pattern")) |pattern| return matches(pattern.string, json.string);
+        if (rules.get("maxLength")) |limit| if (@as(f128, @floatFromInt(std.unicode.utf8CountCodepoints(json.string) catch return false)) > numeric(limit)) return false;
         return true;
     }
     if (std.mem.eql(u8, kind, "array")) {
         if (json != .array) return false;
-        if (rules.get("maxItems")) |limit| if (json.array.items.len > limit.integer) return false;
+        if (rules.get("maxItems")) |limit| if (@as(f128, @floatFromInt(json.array.items.len)) > numeric(limit)) return false;
         if (rules.get("prefixItems")) |prefix| {
             if (json.array.items.len != prefix.array.items.len) return false;
             for (prefix.array.items, json.array.items) |item_schema, item| if (!conforms(schemas, item_schema, item)) return false;
@@ -1361,7 +1613,9 @@ fn conformsKind(schemas: ObjectMap, rules: ObjectMap, kind: []const u8, json: Va
     }
     if (std.mem.eql(u8, kind, "object")) {
         if (json != .object) return false;
-        if (rules.get("maxProperties")) |limit| if (json.object.count() > limit.integer) return false;
+        if (rules.get("maxProperties")) |limit| if (@as(f128, @floatFromInt(json.object.count())) > numeric(limit)) return false;
+        if (rules.get("minProperties")) |limit| if (@as(f128, @floatFromInt(json.object.count())) < numeric(limit)) return false;
+        if (rules.get("propertyNames")) |name_schema| for (json.object.keys()) |name| if (!conforms(schemas, name_schema, .{ .string = name })) return false;
         const properties = if (rules.get("properties")) |props| props.object else ObjectMap.empty;
         for (json.object.keys(), json.object.values()) |name, value| {
             const property = properties.get(name) orelse rules.get("additionalProperties") orelse continue;
@@ -1371,6 +1625,15 @@ fn conformsKind(schemas: ObjectMap, rules: ObjectMap, kind: []const u8, json: Va
         return true;
     }
     return false;
+}
+
+fn numeric(value: Value) f128 {
+    return switch (value) {
+        .integer => |number| @floatFromInt(number),
+        .float => |number| @floatCast(number),
+        .number_string => |text| std.fmt.parseFloat(f128, text) catch unreachable,
+        else => unreachable,
+    };
 }
 
 fn equal(a: Value, b: Value) bool {
@@ -1390,10 +1653,21 @@ fn matches(pattern: []const u8, text: []const u8) bool {
         for (text) |byte| if (!std.ascii.isDigit(byte)) return false;
         return true;
     }
-    if (std.mem.startsWith(u8, pattern, "^[A-Za-z0-9_-]{1,")) {
-        const maximum = std.fmt.parseInt(usize, pattern["^[A-Za-z0-9_-]{1,".len .. pattern.len - "}$".len], 10) catch unreachable;
+    if (std.mem.eql(u8, pattern, host_settings.Schema.os_bytes_pattern)) {
+        if (text.len % 2 != 0) return false;
+        for (text) |byte| if (!std.ascii.isDigit(byte) and (byte < 'a' or byte > 'f')) return false;
+        return true;
+    }
+    const lower_name = std.mem.startsWith(u8, pattern, "^[a-z0-9_-]{1,");
+    if (lower_name or std.mem.startsWith(u8, pattern, "^[A-Za-z0-9_-]{1,")) {
+        const begin = std.mem.indexOfScalar(u8, pattern, ',').? + 1;
+        const end = std.mem.indexOfScalarPos(u8, pattern, begin, '}').?;
+        const maximum = std.fmt.parseInt(usize, pattern[begin..end], 10) catch unreachable;
         if (text.len == 0 or text.len > maximum) return false;
-        for (text) |byte| if (!std.ascii.isAlphanumeric(byte) and byte != '_' and byte != '-') return false;
+        for (text) |byte| {
+            if (!std.ascii.isAlphanumeric(byte) and byte != '_' and byte != '-') return false;
+            if (lower_name and std.ascii.isUpper(byte)) return false;
+        }
         return true;
     }
     const length = std.fmt.parseInt(usize, pattern["^[0-9a-f]{".len .. pattern.len - "}$".len], 10) catch unreachable;

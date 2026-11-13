@@ -1,5 +1,5 @@
 //! The MCP connection values consumed by the Host's discovery/runtime owners.
-//! The retiring launch parser aliases this value; the Host projects Settings.
+//! The Host projects Settings into this shared discovery/runtime value.
 const std = @import("std");
 const hs = @import("host_settings.zig");
 const protocol = @import("protocol.zig");

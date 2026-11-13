@@ -105,7 +105,7 @@ class ChildInputTest(unittest.TestCase):
     """Fixtures end a child's input only through host_process.close_stdin."""
 
     def test_communicate_after_closing_stdin_by_hand_fails_where_python_flushes_it_and_close_stdin_does_not(self):
-        # The launch-frame fixture's failure in five PRs before #898.
+        # The settings-document fixture's failure in five PRs before #898.
         child = subprocess.Popen(["cat"], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
         child.stdin.write(b"by hand")
         child.stdin.close()

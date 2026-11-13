@@ -50,6 +50,22 @@ class PrepushTest(unittest.TestCase):
                 self.file(path)
         return dict(prepush.checks(paths, AVAILABLE, "BASE"))
 
+    def test_generated_settings_metadata_is_checked_against_head(self):
+        (self.root / "clients/ts/node_modules").mkdir(parents=True)
+        artifact = "clients/ts/src/settings-kinds.ts"
+        results = [subprocess.CompletedProcess([], 0), subprocess.CompletedProcess([], 0),
+                   subprocess.CompletedProcess([], 0, stdout=artifact + "\n")]
+        with patch.object(prepush.subprocess, "run", side_effect=results) as run, redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(1, prepush.regenerate())
+        diff = run.call_args_list[-1].args[0]
+        self.assertEqual(["git", "diff", "--name-only", "HEAD", "--", *prepush.GENERATED], diff)
+        self.assertIn(artifact, diff)
+        self.assertIn(artifact, out.getvalue())
+
+    def test_settings_fixture_selects_its_refusal_contract(self):
+        commands = self.commands(["tests/integration/settings_fixture.py"])
+        self.assertIn("tests/ci: test_settings_fixture.py", commands)
+
     def test_docs_only_select_whitespace_regardless_of_sentence_layout(self):
         for path in ("README.md", "AGENTS.md", "docs/agents/landing.md", "research/results.md",
                      "THIRD_PARTY_NOTICES.md", ".github/notes.md", ".claude/skills/rui-ci-triage/SKILL.md"):

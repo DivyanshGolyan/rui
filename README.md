@@ -21,16 +21,18 @@ The client launches a child Host:
 ```ts
 import { Rui } from "ruicode";
 const rui = await Rui.connect({
-	database: "./app-rui-store",
-	provider: {
-		baseUrl: "https://api.openai.com/v1",
-		key: process.env.OPENAI_API_KEY!,
+	store: { sqlite: { dir: "./app-rui-store" } },
+	providers: {
+		openai: {
+			endpoint: "https://api.openai.com/v1/responses",
+			key: { value: process.env.OPENAI_API_KEY! },
+		},
 	},
 });
 ```
 
 Install with `npm install ruicode` on Node.js 22.6+; the package brings the matching `rui` executable for your platform.
-A TypeScript Host uses an OpenAI-compatible Responses API key, not the terminal's ChatGPT sign-in.
+This example uses an OpenAI-compatible Responses API key; Host settings can also select the Codex or ChatGPT sign-in providers.
 Provider usage may incur charges.
 
 ## How it works
