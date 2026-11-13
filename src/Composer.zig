@@ -23,7 +23,7 @@ ascii: bool = false,
 /// Show the terminal's cursor at the caret; false while keys cannot edit.
 caret: bool = true,
 
-/// Both New Session and chat use the same draft surface, independent of focus.
+/// The chat composer, which also draws New Session, keeps one draft surface independent of focus.
 pub fn setCaps(self: *Self, caps: view.Caps) void {
     self.style = widget_style.of(caps, .{ .background = .input_surface });
     self.quiet = widget_style.of(caps, .{ .colour = .quiet, .background = .input_surface });
