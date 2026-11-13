@@ -59,11 +59,13 @@ runs:
         DEPS: ${{ hashFiles('build.zig.zon', 'screen-emulator/build.zig.zon', 'src/build_*') }}
         SOURCES: ${{ hashFiles('build.zig', 'build/**', 'src/**', 'tests/integration/**') }}
         CHECK_PART: ${{ inputs.check-part }}
+      # The '.' ends the part: part names use [a-z0-9-], so one part's prefix
+      # (compiled.) never starts another part's key (compiled-unit.).
       run: |
         {
-          echo "key=$PREFIX$CHECK_PART-$DEPS-$SOURCES"
-          echo "prefix-deps=$PREFIX$CHECK_PART-$DEPS-"
-          echo "prefix-part=$PREFIX$CHECK_PART-"
+          echo "key=$PREFIX$CHECK_PART.$DEPS-$SOURCES"
+          echo "prefix-deps=$PREFIX$CHECK_PART.$DEPS-"
+          echo "prefix-part=$PREFIX$CHECK_PART."
         } >> "$GITHUB_OUTPUT"
     - name: Name the build runner cache keys
       id: runner-keys

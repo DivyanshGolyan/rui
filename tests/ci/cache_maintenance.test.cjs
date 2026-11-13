@@ -69,7 +69,7 @@ test('build layouts share partition groups across repins without crossing parts'
   const main = 'refs/heads/main';
   const reordered = (id, part, platform = 'Linux-X64') => ({
     ...cache(id, main, platform, part),
-    key: `rui-build-v2-${platform}-0.17.1-${'a'.repeat(64)}-${part}-${id.toString(16).padStart(64, '0')}-${'c'.repeat(64)}`,
+    key: `rui-build-v2-${platform}-0.17.1-${'a'.repeat(64)}-${part}.${id.toString(16).padStart(64, '0')}-${'c'.repeat(64)}`,
   });
   const entries = [
     cache(1, main, 'Linux-X64', 'compiled'),
@@ -77,10 +77,54 @@ test('build layouts share partition groups across repins without crossing parts'
     reordered(4, 'baseline'), cache(5, main, 'Linux-X64', 'baseline'),
     reordered(6, 'compiled', 'macOS-ARM64'),
     {...reordered(7, 'compiled'), key: reordered(7, 'compiled').key + '-extra'},
+    // A part whose name starts with another part's name is its own group.
+    cache(8, main, 'Linux-X64', 'compiled-unit'), reordered(9, 'compiled-unit'),
   ];
   const result = await run(entries);
   assert.ifError(result.error);
-  assert.deepEqual(result.ids, [3, 5, 6, 7]);
+  assert.deepEqual(result.ids, [3, 5, 6, 7, 9]);
+});
+
+test('no part restore key reaches another part, including compiled and compiled-unit', () => {
+  const root = `${__dirname}/../..`;
+  const action = readFileSync(`${root}/.github/actions/setup/caches/action.yml`, 'utf8');
+  const step = action.match(/- name: Name the build cache keys\n[\s\S]*?\n    - /)[0];
+  const outputs = Object.fromEntries([...step.matchAll(/^\s+echo "([a-z-]+)=([^"]*)"$/gm)].map(([, name, value]) => [name, value]));
+  assert.deepEqual(Object.keys(outputs).sort(), ['key', 'prefix-deps', 'prefix-part']);
+  const restore = [...action.matchAll(/restore-keys: \|\n((?: {10}.*\n)+)/g)].map(match => match[1]);
+  assert.equal(restore.length, 2);
+  for (const keys of restore) {
+    assert.deepEqual([...keys.matchAll(/build-keys\.outputs\.([a-z-]+)/g)].map(m => m[1]), ['prefix-deps', 'prefix-part']);
+  }
+  // Every part the workflows name, plus setup's default.
+  const workflows = `${root}/.github/workflows`;
+  const parts = new Set(['all']);
+  for (const file of readdirSync(workflows).filter(file => file.endsWith('.yml'))) {
+    for (const [, part] of readFileSync(`${workflows}/${file}`, 'utf8').matchAll(/^\s+check-part: (.*?)\s*$/gm)) {
+      // The key's '.' terminator is unambiguous only while no part can contain it.
+      assert.match(part, /^[a-z][a-z0-9-]*$/, `${file} names check part ${part}`);
+      parts.add(part);
+    }
+  }
+  assert.ok(parts.has('compiled') && parts.has('compiled-unit'));
+  const prefix = `rui-build-v2-Linux-X64-0.17.1-${'a'.repeat(64)}-`;
+  const name = (template, part, deps) => template.replace('$PREFIX', prefix).replace('$CHECK_PART', part)
+    .replace('$DEPS', deps).replace('$SOURCES', 'c'.repeat(64));
+  for (const own of parts) {
+    for (const other of parts) {
+      if (own === other) continue;
+      // The other part's newest snapshot, under the same or another dependency hash.
+      for (const deps of ['d'.repeat(64), 'e'.repeat(64)]) {
+        const key = name(outputs.key, other, deps);
+        for (const output of ['prefix-deps', 'prefix-part']) {
+          assert.ok(!key.startsWith(name(outputs[output], own, 'd'.repeat(64))), `${own} ${output} restores ${other}: ${key}`);
+        }
+      }
+    }
+    // The same part's snapshot after a repin is still reachable, and prunes in its own group.
+    const repinned = name(outputs.key, own, 'e'.repeat(64));
+    assert.ok(repinned.startsWith(name(outputs['prefix-part'], own, 'd'.repeat(64))));
+  }
 });
 
 test('main keeps the newest build runner per CPU model and the newest package set', async () => {

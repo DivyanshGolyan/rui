@@ -46,7 +46,7 @@ module.exports = async function pruneCaches({github, context, core}) {
 
 function mainGroup(key) {
   // Both layouts share a group so the newest snapshot wins during migration.
-  const reordered = /^rui-build-v2-(Linux-X64|macOS-ARM64)-0\.17\.[0-9]+-[a-f0-9]{64}-([a-z][a-z0-9-]*)-[a-f0-9]{64}-[a-f0-9]{64}$/.exec(key);
+  const reordered = /^rui-build-v2-(Linux-X64|macOS-ARM64)-0\.17\.[0-9]+-[a-f0-9]{64}-([a-z][a-z0-9-]*)\.[a-f0-9]{64}-[a-f0-9]{64}$/.exec(key);
   if (reordered) return `build/${reordered[1]}/${reordered[2]}`;
   const build = /^rui-build-v2-(Linux-X64|macOS-ARM64)-0\.17\.[0-9]+-[a-f0-9]{64}-[a-f0-9]{64}-[a-f0-9]{64}-([a-z][a-z0-9-]*)$/.exec(key);
   if (build) return `build/${build[1]}/${build[2]}`;
