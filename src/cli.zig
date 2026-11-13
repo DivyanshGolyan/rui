@@ -2015,7 +2015,6 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
         var refusal_buffer: [start_report.max_refusal_message_bytes]u8 = undefined;
         const text = try std.fmt.bufPrint(&refusal_buffer, "network: https_proxy/HTTPS_PROXY {s}; Rui tunnels only through an http:// proxy", .{reason});
         const failure: start_report.Failure = .init(.settings_invalid, text);
-        recordExit(.environment);
         return writeRefusal(io, &failure, .environment);
     }
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -2093,7 +2092,7 @@ test "start report CLI publishes once before settling every Host outcome" {
                         // Every refusal is already reported, even when a fence
                         // overrides success or an otherwise clean stdin closure.
                         try std.testing.expectError(error.Reported, outcome);
-                        try std.testing.expectEqual(if (!supplied and err == error.StoreAlreadyOwned) caller_exit.Status.environment else caller_exit.Status.unclassified, exit_status);
+                        try std.testing.expectEqual(if (!supplied and err != null and err.? == error.StoreAlreadyOwned) caller_exit.Status.environment else caller_exit.Status.unclassified, exit_status);
                     } else if (err) |value| {
                         if (value == error.EffectAwareShutdown and lifetime == .stdin) {
                             try outcome;
