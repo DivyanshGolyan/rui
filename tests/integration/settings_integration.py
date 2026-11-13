@@ -189,6 +189,78 @@ def source_modes(root, good):
         assert not path.exists()
 
 
+INTERNAL = ("rui host serve: Rui could not complete this operation because of an internal fault.{store} "
+            "Next: Keep the saved request, if any, and report this code with the command to the Rui maintainer. [internal_unexpected]\n")
+NO_KEY = ("\nrui: no OpenAI API key; save one with `rui auth login openai`, then start the Host again.\n"
+          "rui host serve: Provider sign-in is required. Next: Run rui auth login for the selected provider, then retry unchanged. [sign_in_required]\n")
+NO_HOME = ("rui host serve: HOME is missing or is not an absolute directory. Next: Set HOME to your absolute home directory, "
+           "or supply --store PATH when only a Store is needed. [home_unavailable]\n")
+
+
+def flag_start_failures(root):
+    """Start failures that flags and the environment reach without a document
+    keep main's exit, stderr and empty stdout; settings_invalid is only for a
+    leaf refusal, the change pr4 lists. Expectations were recorded from the
+    merge-base build, not derived from this one."""
+    home = root / "flag-home"
+    home.mkdir(mode=0o700)
+    key = root / "flag-key"
+    key.write_text("sk-flag-start\n")
+    key.chmod(0o644)
+    bad_key = root / "flag-bad-key"
+    bad_key.write_text("not a key \x01\n")
+    bad_key.chmod(0o600)
+    endpoint = "http://127.0.0.1:9/responses"
+    credential = {"RUI_CODEX_CREDENTIAL_FILE": str(root / "c.json"), "RUI_CHATGPT_CREDENTIAL_FILE": str(root / "c.json")}
+    leaf = "rui: the Host did not start: {0} [settings_invalid]\n"
+    # (flags, environment changes, exit, stderr, stdout start_error or None)
+    cases = [
+        (["--test-openai-fixture-endpoint", endpoint], {}, 1, INTERNAL.format(store=""), None),
+        (["--test-openai-fixture-endpoint", endpoint], {"RUI_OPENAI_KEY_FILE": str(root / "absent")}, 6, NO_KEY, None),
+        (["--test-openai-fixture-endpoint", endpoint], {"RUI_OPENAI_KEY_FILE": str(key)}, 1, INTERNAL.format(store=""), None),
+        (["--test-openai-fixture-endpoint", endpoint], {"RUI_OPENAI_KEY_FILE": str(bad_key)}, 1, INTERNAL.format(store=""), None),
+        (["--test-openai-fixture-endpoint", endpoint, "--provider", "openai"], {"RUI_OPENAI_KEY_FILE": str(root / "absent")}, 1, INTERNAL.format(store=""), None),
+        (["--provider", "openai"], {}, 6, NO_KEY, None),
+        (["--provider", "openai"], {"HOME": None}, 6, NO_HOME, None),
+        (["--provider", "codex"], {"HOME": None}, 6, NO_HOME, None),
+        (["--provider", "chatgpt"], {"HOME": None}, 6, NO_HOME, None),
+        (["--provider", "bogus"], {}, 2, "rui host serve: --provider bogus: That value is not supported. Accepted: codex, openai, chatgpt. "
+         "Next: Use one of the accepted values. Nothing was captured or sent. [choice_unsupported]\n", None),
+        (["--provider", "codex", "--provider", "codex"], {}, 1, INTERNAL.format(store=""), None),
+        (["--test-codex-fixture-endpoint", endpoint], {}, 1, INTERNAL.format(store=""), None),
+        (["--test-chatgpt-fixture-endpoint", endpoint], {}, 1, INTERNAL.format(store=""), None),
+        (["--test-chatgpt-fixture-endpoint", "http://127.0.0.1:9/other"], credential, 2,
+         "rui host serve: The command arguments are invalid. Accepted: options and values listed by rui host serve --help. "
+         "Next: Correct the invocation using this command's help. [invocation_invalid]\n", None),
+        (["--provider-endpoint", endpoint], {"HTTPS_PROXY": "https://proxy.example:1"}, 6,
+         "\nrui: https_proxy/HTTPS_PROXY names a scheme other than http://; Rui tunnels only through an http:// proxy. The Host did not start.\n", None),
+        (["--bash-timeout-ms", "0"], {}, 2, "rui host serve: --bash-timeout-ms 0: That is not a count in the accepted range. "
+         "Accepted: a decimal from 1 to 9223372036854775807. Next: Supply a decimal within the stated range, without signs or separators. "
+         "Nothing was captured or sent. [count_malformed]\n", None),
+        # Listed change: a flag value refused as its settings leaf. main
+        # reported these as internal_unexpected with exit 1 and no stdout.
+        (["--provider-endpoint", "ftp://127.0.0.1/responses"], {}, 2, leaf.format("providers.codex.endpoint: invalid provider endpoint"), "settings_invalid"),
+        (["--test-codex-fixture-endpoint", "ftp://x/responses"], credential, 2,
+         leaf.format("providers.codex.endpoint: must be a valid HTTPS or loopback HTTP endpoint"), "settings_invalid"),
+        (["--bash-path", ""], {}, 2, leaf.format("tools.bash.path: must be an absolute path"), "settings_invalid"),
+    ]
+    for index, (flags, changes, status, stderr, code) in enumerate(cases):
+        environment = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(home), "TMPDIR": os.environ.get("TMPDIR", "/tmp")}
+        for name, value in changes.items():
+            if value is None:
+                environment.pop(name, None)
+            else:
+                environment[name] = value
+        done = subprocess.run([RUI, "host", "serve", "--store", str(root / f"flag-store-{index}"), *flags], env=environment,
+                              stdin=subprocess.DEVNULL, capture_output=True, timeout=30)
+        observed = (done.returncode, done.stderr.decode(errors="replace"))
+        assert observed == (status, stderr), (flags, changes, observed)
+        if code is None:
+            assert done.stdout == b"", (flags, done.stdout)
+        else:
+            assert json.loads(done.stdout)["rui_start_error"]["code"] == code, (flags, done.stdout)
+
+
 def main(network, ci):
     root = host_process.canonical_fixture_root(tempfile.mkdtemp(prefix="rui-launch-"))
     store = root / "store"
@@ -211,6 +283,7 @@ def main(network, ci):
             assert b"sk-launch-test" not in pathlib.Path(f"/proc/{host.pid}/{name}").read_bytes(), name
 
     source_modes(root, good)
+    flag_start_failures(root)
 
     # A second Host on the same Store is refused while the first holds it.
     other = root / "other"
