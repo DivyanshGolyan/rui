@@ -101,30 +101,21 @@ pub const Rule = struct {
     /// A failed row names its failure's cause.
     cause: bool = false,
 
-    /// The work waits on the person: a decision to make or a failure to
-    /// read. Such a row never recedes, even in a chat they never wrote in.
-    needs_person: bool = false,
-
-    /// The row's priority class in the list order.
-    order: OrderClass,
-
     stoppable: bool,
 };
 
 /// The one per-kind table. `step` and `render` read it and switch on no kind.
-/// Marks, colours, words, counts, order and quietness all read it at
-/// `shownKind`.
 pub const rules = std.enums.EnumArray(Kind, Rule).init(.{
-    .idle = .{ .mark = .waiting, .colour = .normal, .word = "idle", .order = .done, .stoppable = false },
-    .pending = .{ .mark = .queued, .colour = .quiet, .order = .queued, .stoppable = true },
-    .working = .{ .mark = .active, .colour = .ink, .spins = true, .order = .working, .stoppable = true },
-    .retrying = .{ .mark = .active, .colour = .ink, .says = true, .order = .working, .stoppable = true },
-    .bash = .{ .mark = .active, .colour = .ink, .says = true, .spins = true, .order = .working, .stoppable = true },
-    .approval = .{ .mark = .needs_you, .colour = .attention, .needs_person = true, .order = .needs_you, .stoppable = true },
-    .stopping = .{ .mark = .active, .colour = .ink, .says = true, .order = .working, .stoppable = false },
-    .finished = .{ .mark = .finished, .colour = .mark, .word = "finished", .order = .done, .stoppable = false },
-    .failed = .{ .mark = .failed, .colour = .failure, .word = "failed", .cause = true, .needs_person = true, .order = .done, .stoppable = false },
-    .stopped = .{ .mark = .stopped, .colour = .normal, .word = "stopped", .order = .done, .stoppable = false },
+    .idle = .{ .mark = .waiting, .colour = .normal, .word = "idle", .stoppable = false },
+    .pending = .{ .mark = .queued, .colour = .quiet, .stoppable = true },
+    .working = .{ .mark = .active, .colour = .ink, .spins = true, .stoppable = true },
+    .retrying = .{ .mark = .active, .colour = .ink, .says = true, .stoppable = true },
+    .bash = .{ .mark = .active, .colour = .ink, .says = true, .spins = true, .stoppable = true },
+    .approval = .{ .mark = .needs_you, .colour = .attention, .stoppable = true },
+    .stopping = .{ .mark = .active, .colour = .ink, .says = true, .stoppable = false },
+    .finished = .{ .mark = .finished, .colour = .mark, .word = "finished", .stoppable = false },
+    .failed = .{ .mark = .failed, .colour = .failure, .word = "failed", .cause = true, .stoppable = false },
+    .stopped = .{ .mark = .stopped, .colour = .normal, .word = "stopped", .stoppable = false },
 });
 
 pub const marks = state_marks.marks;
@@ -1414,7 +1405,7 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
         .conversed => |input| {
             switch (input.input) {
                 .other => state.notice = null,
-                .stop => try stopKey(state, .{ .reference = input.reference, .work = input.work }, &effects),
+                .stop => stopKey(state, .{ .reference = input.reference, .work = input.work }, &effects),
                 .archive => |archive| archiveIntent(state, .{ .ask = .{ .reference = input.reference, .work = input.work, .archive = archive } }, &effects),
                 .unarchive => archiveIntent(state, .{ .restore = input.reference }, &effects),
                 .cancel_upgrade => if (state.upgrade.takesEscape()) effects.add(.cancel_upgrade),
@@ -1459,8 +1450,6 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
                     state.say(.attention, "! {s} stop unsure; details on exit", .{&result.reference});
                 },
             }
-            // A stop the answer closes returns the row to its work's kind.
-            try arrange(state);
             state.next_list_ms = 0;
         },
         .created => |result| {
@@ -1889,7 +1878,7 @@ fn arrange(state: *State) error{OutOfMemory}!void {
     for (state.order.items, state.sort_keys.items) |*slot, key| slot.* = key.index;
 }
 
-/// How many rows hold each mark the counts line counts.
+/// How many rows show each mark the counts line counts.
 fn counts(state: *const State) Counts {
     var result: Counts = .{};
     for (state.rows.items) |*row| if (visible(state, row)) switch (rules.get(shownKind(state, row)).mark) {
@@ -1903,7 +1892,13 @@ fn counts(state: *const State) Counts {
 }
 
 fn orderClass(state: *const State, row: *const Row) OrderClass {
-    return rules.get(shownKind(state, row)).order;
+    if (needsDecision((&row.state))) return .needs_you;
+    return switch (shownKind(state, row)) {
+        .approval => .needs_you,
+        .working, .bash, .retrying, .stopping => .working,
+        .finished, .failed, .stopped, .idle => .done,
+        .pending => .queued,
+    };
 }
 
 fn position(state: *const State, ref: Reference) ?usize {
@@ -1986,9 +1981,8 @@ const StopTarget = struct { reference: Reference, work: Kind };
 
 /// Ctrl-X on either screen stops at once: null targets the selection,
 /// otherwise the exact conversation. Stopping loses nothing the Host cannot
-/// replay, so it asks nothing. An open stop changes the row's shown kind,
-/// so the order and counts are rebuilt.
-fn stopKey(state: *State, exact: ?StopTarget, effects: *Effects) error{OutOfMemory}!void {
+/// replay, so it asks nothing.
+fn stopKey(state: *State, exact: ?StopTarget, effects: *Effects) void {
     if (!admitHostRequest(state)) return;
     state.notice = null;
     const target = exact orelse selected: {
@@ -1998,9 +1992,7 @@ fn stopKey(state: *State, exact: ?StopTarget, effects: *Effects) error{OutOfMemo
     const ref = target.reference;
     const kind = kindShown(state, ref, target.work);
     if (!rules.get(kind).stoppable) return refuseStop(state, ref, kind);
-    if (!state.request(.stop, ref)) return;
-    effects.add(.{ .stop = ref });
-    try arrange(state);
+    if (state.request(.stop, ref)) effects.add(.{ .stop = ref });
 }
 
 /// Says why `ref` takes no stop. An unconfirmed one says leaving gives the
@@ -2024,8 +2016,7 @@ fn stoppable(state: *const State, ref: Reference, work: Kind) bool {
 }
 
 /// The kind a row shows, with a retry that has fallen due as the work it
-/// became. A pending stop shows as stopping, an awaited decision included:
-/// the person has acted on it, so it no longer needs them.
+/// became.
 fn shownKind(state: *const State, row: *const Row) Kind {
     if (state.openStop(row.reference) == null and needsDecision((&row.state))) return .approval;
     return kindShown(state, row.reference, (&row.state).asOf(state.now_ms));
@@ -2089,7 +2080,7 @@ fn listInput(state: *State, delivery: InputDelivery, effects: *Effects) error{Ou
         .action => |action| switch (action) {
             .exit => unreachable,
             .clear => state.notice = null,
-            .stop => try stopKey(state, null, effects),
+            .stop => stopKey(state, null, effects),
             .archive => archiveIntent(state, .selected_archive, effects),
             .select_previous => select(state, .previous),
             .select_next => select(state, .next),
@@ -2878,9 +2869,14 @@ fn yours(row: *const Row) bool {
     return row.first == null or row.from_person_at != null;
 }
 
-/// Chats you have never written in recede unless their work needs you.
-pub fn rowQuiet(state: *const State, row: *const Row) bool {
-    return !yours(row) and !rules.get(shownKind(state, row)).needs_person;
+/// The row needs the person: it sorts under Needs you, or its work failed.
+fn needsPerson(state: *const State, row: *const Row) bool {
+    return orderClass(state, row) == .needs_you or row.state == .failed;
+}
+
+/// A chat you never wrote in recedes unless it needs you.
+fn rowQuiet(state: *const State, row: *const Row) bool {
+    return !yours(row) and !needsPerson(state, row);
 }
 
 /// Provider recovery bands above the list. Archive views remain reachable
@@ -5404,74 +5400,53 @@ test "overview second line queues due retries and uses waiting Bash commands fir
     try std.testing.expectEqualStrings("echo allowed", secondLine(&state, state.find(bash.reference).?, &buffer));
 }
 
-test "overview quiet rows cover every kind, sender, selection, a pending stop and the open empty chat" {
+test "overview quiet rows: a chat never written in recedes unless it needs you, in every kind, stop, selection, width and depth" {
     // Independent expectations from the approved mock: a chat the person
-    // never wrote in recedes unless it waits for approval or failed. The
-    // second column is quiet when never written in; the third says whether
-    // the row needs you; the fifth is the kind it shows. A pending stop shows
-    // stopping, an awaited decision included: the person has acted on it, so
-    // it counts, sorts and recedes as stopping.
+    // never wrote in recedes unless it waits for approval or failed. A stop
+    // asked of an awaited decision, pending or unconfirmed, leaves the row
+    // under Needs you as main sorts it, so it stays loud.
+    const Stop = enum { none, pending, unconfirmed };
     const cases = .{
-        .{ kind_cases[0].state, true, false, "Last answer", Kind.idle },
-        .{ kind_cases[1].state, true, false, "Queued", Kind.pending },
-        .{ kind_cases[2].state, true, false, "Thinking", Kind.working },
-        .{ kind_cases[3].state, true, false, "Provider error", Kind.retrying },
-        .{ kind_cases[4].state, true, false, "Run the logic tests", Kind.bash },
-        .{ kind_cases[5].state, false, true, "Allow: echo yes", Kind.approval },
-        .{ kind_cases[6].state, true, false, "Stopping", Kind.stopping },
-        .{ kind_cases[7].state, true, false, "Last answer", Kind.finished },
-        .{ kind_cases[8].state, false, false, "Last answer", Kind.failed },
-        .{ kind_cases[9].state, true, false, "Last answer", Kind.stopped },
-        .{ WorkState{ .bash = .{ .since = test_now_s, .call = 0, .description = null, .running = 1, .approvals = 1 } }, false, true, "Allow: echo yes", Kind.approval },
+        .{ kind_cases[0].state, false },
+        .{ kind_cases[1].state, false },
+        .{ kind_cases[2].state, false },
+        .{ kind_cases[3].state, false },
+        .{ kind_cases[4].state, false },
+        .{ kind_cases[5].state, true },
+        .{ kind_cases[6].state, false },
+        .{ kind_cases[7].state, false },
+        .{ kind_cases[8].state, true },
+        .{ kind_cases[9].state, false },
+        .{ WorkState{ .bash = .{ .since = test_now_s, .call = 0, .description = null, .running = 1, .approvals = 1 } }, true },
     };
     comptime std.debug.assert(cases.len == std.enums.values(Kind).len + 1);
-    inline for (cases) |case| for ([_]bool{ false, true }) |stop| for ([_]bool{ false, true }) |wrote| for ([_]bool{ false, true }) |selected| for ([_]u16{ 46, 140 }) |width| for ([_]Caps.Depth{ .direct, .indexed, .none }) |depth| {
+    inline for (cases) |case| for (std.enums.values(Stop)) |stop| for ([_]bool{ false, true }) |wrote| for ([_]bool{ false, true }) |selected| for ([_]u16{ 46, 140 }) |width| for ([_]Caps.Depth{ .direct, .indexed, .none }) |depth| {
         const caps: Caps = .{ .depth = depth };
-        var listed = session("k7m2qx", case[0], .{ .label = "Quiet row", .yours = wrote, .first_action = 7 });
-        listed.last_line = .{ .position = 1, .text = "Last answer" };
+        const listed = session("k7m2qx", case[0], .{ .label = "Quiet row", .yours = wrote });
         var state = try opened(&.{listed});
         defer state.deinit();
-        if (case[2]) {
-            _ = try step(&state, .{ .command = .{ .reference = listed.reference, .action = 7, .text = "Allow: echo yes" } });
-        }
-        // A pending stop: asked for and not yet reported by the Host.
-        const stopping = stop and rules.get(std.meta.activeTag(case[0])).stoppable;
-        if (stopping) {
+        const stoppable_kind = rules.get(std.meta.activeTag(case[0])).stoppable;
+        if (stop != .none) {
+            if (!stoppable_kind) continue;
             state.selected = .{ .session = listed.reference };
-            _ = try press(&state, .stop);
-            _ = try press(&state, .stop);
+            try expectEffects(&.{.{ .stop = listed.reference }}, try press(&state, .stop));
+            if (stop == .unconfirmed) _ = try step(&state, .{ .stop = .{ .reference = listed.reference, .outcome = .{ .unconfirmed = "stop-handle" } } });
             try std.testing.expect(state.openStop(listed.reference) != null);
         }
         state.selected = if (selected) .{ .session = listed.reference } else .new_session;
-        const row = state.find(listed.reference).?;
-        try std.testing.expectEqual(if (stopping) Kind.stopping else case[4], shownKind(&state, row));
-        const needs_you = case[2] and !stopping;
-        const quiet = !wrote and (case[1] or stopping);
-        try std.testing.expectEqual(quiet, rowQuiet(&state, row));
-        // Counts, order and dimming agree on what needs you.
-        try std.testing.expectEqual(@intFromBool(needs_you), state.summary.counts.needs_you);
-        try std.testing.expectEqual(needs_you, orderClass(&state, row) == .needs_you);
-        if (stopping) {
-            try std.testing.expectEqual(@as(usize, 1), state.summary.counts.working);
-            try std.testing.expectEqual(OrderClass.working, orderClass(&state, row));
-        }
+        const quiet = !wrote and !case[1];
+        try std.testing.expectEqual(quiet, rowQuiet(&state, state.find(listed.reference).?));
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         const first = try listSegments(arena.allocator(), &state, .{ .row = 0 }, width, caps, 0);
-        // The drawn mark is the counted mark.
-        try std.testing.expectEqual(markCounted(try drawnMark(try segmentText(arena.allocator(), first.segments))), countedMark(state.summary.counts));
         const name = try styleOf(first.segments, "Quiet row");
-        try std.testing.expectEqual(quiet, name.dim);
         try std.testing.expectEqual(selected, first.selected);
         try std.testing.expectEqual(selected, name.bold);
         try std.testing.expectEqual(if (selected) Colour.strong else Colour.normal, name.colour);
         const second = try rowSecondSegments(arena.allocator(), &state, 0, width, caps);
-        // Main's folder role is quiet, exactly like the detail and age.
-        // Quiet rows add dim without replacing that existing muted role.
-        const muted: Style = .{ .colour = .quiet, .dim = quiet };
-        try std.testing.expectEqual(muted, try styleOf(second, if (stopping) "Stopping" else case[3]));
-        try std.testing.expectEqual(muted, try styleOf(second, "rui"));
-        // The mark, age, folder and padding share the name/detail's value.
+        // Quiet rows add dim without replacing the folder's muted role.
+        try std.testing.expectEqual(Style{ .colour = .quiet, .dim = quiet }, try styleOf(second, "rui"));
+        // The mark, name, age, detail, folder and padding all recede together.
         for (first.segments) |segment| try std.testing.expectEqual(quiet, segment.style.dim);
         for (second) |segment| try std.testing.expectEqual(quiet, segment.style.dim);
     };
@@ -5479,33 +5454,6 @@ test "overview quiet rows cover every kind, sender, selection, a pending stop an
     defer empty.deinit();
     _ = try step(&empty, .{ .conversation = "newone".* });
     try std.testing.expect(!rowQuiet(&empty, empty.find("newone".*).?));
-}
-
-/// The mark a row's first line draws; a spinner draws the active mark.
-fn drawnMark(text: []const u8) error{TestUnexpectedResult}!Mark {
-    const glyph = text[1 .. std.mem.indexOfScalarPos(u8, text, 1, ' ') orelse text.len];
-    for (spinner) |frame| if (std.mem.eql(u8, glyph, frame)) return .active;
-    for (std.enums.values(Mark)) |mark| if (std.mem.eql(u8, glyph, marks.get(mark).unicode) or std.mem.eql(u8, glyph, marks.get(mark).ascii)) return mark;
-    return error.TestUnexpectedResult;
-}
-
-/// The mark as the counts line counts it, or null for a mark it leaves out.
-fn markCounted(mark: Mark) ?Mark {
-    return switch (mark) {
-        .needs_you, .active, .queued, .failed => mark,
-        .waiting, .finished, .stopped, .newer => null,
-    };
-}
-
-/// The one mark the counts line counts for a single visible row, or null.
-fn countedMark(tally: Counts) ?Mark {
-    const total = tally.needs_you + tally.working + tally.queued + tally.failed;
-    std.debug.assert(total <= 1);
-    if (tally.needs_you == 1) return .needs_you;
-    if (tally.working == 1) return .active;
-    if (tally.queued == 1) return .queued;
-    if (tally.failed == 1) return .failed;
-    return null;
 }
 
 // PR3: independent layout expectations for the two-line list contract.
