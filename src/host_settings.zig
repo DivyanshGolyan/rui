@@ -369,7 +369,7 @@ pub fn path(comptime pattern: []const u8) []const u8 {
     if (!found) @compileError("not a Host settings leaf: " ++ pattern);
     return pattern;
 }
-fn camel(comptime name: []const u8) []const u8 {
+pub fn camel(comptime name: []const u8) []const u8 {
     var result: []const u8 = "";
     var upper = false;
     for (name) |byte| {

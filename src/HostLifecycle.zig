@@ -178,10 +178,8 @@ fn deriveLaunch(allocator: std.mem.Allocator, argv: []const []const u8) !LaunchS
     var problem: cli_args.Refusal = undefined;
     const parsed = try grammar.parseSyntax(argv[3..], scratch.allocator(), &problem);
     try parsed.validateValues(&problem);
-    if (parsed.help or parsed.missing() != null or std.mem.eql(u8, parsed.get("settings") orelse "", "-")) return error.UnsupportedHostConfiguration;
-    // Replay runs with another cwd, so a relative document would name another file.
-    if (parsed.get("settings")) |source| if (!std.fs.path.isAbsolute(source)) return error.UnsupportedHostConfiguration;
-    try host_start.validateRestartOptions(allocator, &parsed);
+    // Whether the settings reproduce in `/` is host_start.replayable's, at activation.
+    if (parsed.help or parsed.missing() != null) return error.UnsupportedHostConfiguration;
     // Relaunch appends one authoritative capacity assignment. Refuse before
     // disruption when the target parser would have no repeat slot for it.
     if (parsed.repeat_count == parsed.repeats.len) return error.UnsupportedHostConfiguration;
@@ -626,11 +624,9 @@ test "relaunch activation reading requires the pinned launch for either wire" {
 
 test "upgrade lifecycle derives launch semantics before disruption" {
     const allocator = std.testing.allocator;
-    try std.testing.expectError(error.UnsupportedHostConfiguration, deriveLaunch(allocator, &.{ "rui", "host", "serve", "--settings", "-" }));
     for ([_][]const []const u8{
         &.{ "rui", "session", "start" },
         &.{ "rui", "host", "serve", "--test-observation-fd", "8" },
-        &.{ "rui", "host", "serve", "--set", "missing-equals" },
         &.{ "rui", "host", "serve", "--unknown-new-option", "value" },
     }) |args| {
         if (deriveLaunch(allocator, args)) |*result| {
@@ -664,9 +660,8 @@ test "upgrade lifecycle derives launch semantics before disruption" {
     var almost_full = try deriveLaunch(allocator, full[0 .. full.len - 2]);
     defer almost_full.deinit(allocator);
     try std.testing.expectEqual(repeat_limit - 1, almost_full.options.len);
-    // File-backed documents, unlike an exhausted stdin document, retain
-    // the same argv replay and help-admission behavior as ordinary flags.
-    try std.testing.expectError(error.UnsupportedHostConfiguration, deriveLaunch(allocator, &.{ "rui", "host", "serve", "--settings", "relative/host.json" }));
+    // File-backed documents retain the same argv replay and help-admission
+    // behavior as ordinary flags; host_start.replayable decides the rest.
     for ([_][]const u8{"/private/host.json"}) |file| {
         var launch = try deriveLaunch(allocator, &.{ "rui", "host", "serve", "--settings", file });
         defer launch.deinit(allocator);
@@ -733,8 +728,11 @@ test "upgrade activation refuses cwd-dependent or stdin-bound settings before an
     const host_dir = host_root[0..try host.realPath(init.io, &host_root)];
     const Case = struct { argv: []const []const u8, document: []const u8, admitted: bool, saved: []const u8 = "{}" };
     for ([_]Case{
-        // A relative document path names another file once the launch is in `/`.
+        // A relative document path names another file once the launch is in `/`,
+        // and the replacement has no stdin to read a document from.
         .{ .argv = &.{ "rui", "host", "serve", "--settings", "relative/host.json" }, .document = "{}", .admitted = false },
+        .{ .argv = &.{ "rui", "host", "serve", "--settings", "-" }, .document = "{}", .admitted = false },
+        .{ .argv = &.{ "rui", "host", "serve", "--set", "missing-equals" }, .document = "{}", .admitted = false },
         // An absolute document must not hide a cwd-relative trust root.
         .{ .argv = &.{ "rui", "host", "serve", "--settings", path }, .document = "{\"network\":{\"caFile\":\"relative.pem\"}}", .admitted = false },
         .{ .argv = &.{ "rui", "host", "serve", "--settings", path }, .document = "{\"tools\":{\"bash\":{\"path\":\"relative/bash\"}}}", .admitted = false },

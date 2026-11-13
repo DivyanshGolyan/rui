@@ -1013,24 +1013,6 @@ pub fn capacityAssignment(value: usize, buffer: []u8) ![]const u8 {
     return std.fmt.bufPrint(buffer, hs.path("execution.activeCapacity") ++ "={d}", .{value});
 }
 
-/// Like the former argv checks, this is a pure replay check, not intake of
-/// referenced documents. Document and @FILE sources remain the child's input.
-pub fn validateRestartOptions(gpa: std.mem.Allocator, parsed: *const cli_args.Parsed) !void {
-    const settings = try gpa.create(hs.Settings);
-    defer gpa.destroy(settings);
-    settings.* = .{};
-    defer settings.deinit();
-    var failure: start_report.Failure = undefined;
-    for (parsed.all("set")) |assignment| {
-        const equals = std.mem.indexOfScalar(u8, assignment, '=') orelse return error.UnsupportedHostConfiguration;
-        const value = assignment[equals + 1 ..];
-        if (std.mem.startsWith(u8, value, "@")) continue;
-        assign(settings, gpa, assignment[0..equals], value, &failure) catch return error.UnsupportedHostConfiguration;
-    }
-    if (!std.fs.path.isAbsolute(settings.tools.bash.path.slice())) return error.UnsupportedHostConfiguration;
-    if (settings.network.ca_file) |*ca| if (!std.fs.path.isAbsolute(ca.slice())) return error.UnsupportedHostConfiguration;
-}
-
 test "Host start unset retains exact provider sets and selected Store arms" {
     const gpa = std.testing.allocator;
     var environment: std.process.Environ.Map = .init(gpa);
@@ -1066,24 +1048,6 @@ test "Host start unset retains exact provider sets and selected Store arms" {
     json = try parse(arena.allocator(), shown.written(), &failure);
     try std.testing.expect(lookup(json, "store.mysql") != null);
     try std.testing.expect(lookup(json, "store.sqlite") == null);
-}
-
-test "Host start restart projections preserve path refusals and ordered generic overrides" {
-    const gpa = std.testing.allocator;
-    var arena: std.heap.ArenaAllocator = .init(gpa);
-    defer arena.deinit();
-    for ([_][]const u8{ "tools.bash.path", "network.caFile" }) |path| {
-        const relative = try std.fmt.allocPrint(arena.allocator(), "{s}=relative/path", .{path});
-        const absolute = try std.fmt.allocPrint(arena.allocator(), "{s}=/absolute/path", .{path});
-        const refused = try parseForTest(arena.allocator(), &.{ "--set", relative });
-        try std.testing.expectError(error.UnsupportedHostConfiguration, validateRestartOptions(gpa, &refused));
-        const accepted = try parseForTest(arena.allocator(), &.{ "--set", relative, "--set", absolute });
-        try validateRestartOptions(gpa, &accepted);
-    }
-    var buffer: [128]u8 = undefined;
-    const assignment = try capacityAssignment(3, &buffer);
-    const parsed = try parseForTest(arena.allocator(), &.{ "--set", assignment });
-    try validateRestartOptions(gpa, &parsed);
 }
 
 // ---- One detached starter ----------------------------------------------------
@@ -1145,79 +1109,161 @@ pub fn readLaunch(init: std.process.Init, request: Spawn, settings: *hs.Settings
     }
 }
 
-/// Upgrade replay relaunches `request` in `/` with stdin closed. Read every
-/// layer it applies through readLaunch and admit only what reproduces there:
-/// no cwd-relative document, @FILE or path value, and no stdin lifetime. Do
-/// not anchor here: that would disguise relative paths without preserving
-/// them. The Store is exempt because replay pins the observed canonical Store.
-pub fn replayable(init: std.process.Init, request: Spawn) error{OutOfMemory}!bool {
-    if (request.settings_file) |file| if (!std.fs.path.isAbsolute(file)) return false;
-    for (request.assignments) |assignment| {
-        const equals = std.mem.indexOfScalar(u8, assignment, '=') orelse return false;
-        const value = assignment[equals + 1 ..];
-        if (std.mem.startsWith(u8, value, "@") and !std.fs.path.isAbsolute(value[1..])) return false;
+// ---- A Host started in `/` ---------------------------------------------------
+// host_launch starts every detached Host (bare rui, rui host start, the TUI
+// supervisor and upgrade replay) in `/` with stdin on /dev/null. This section
+// is the one rule for what such a launch can run.
+
+/// Rebase what a person typed on this command line onto `cwd`, the directory
+/// they typed it in: the --settings FILE, each @FILE, and each --set path leaf
+/// or `file:` secret source. A path read from saved host.json or from inside a
+/// document has no such base; detachedRefusal refuses it instead.
+pub fn anchorTyped(gpa: std.mem.Allocator, cwd: []const u8, request: Spawn) !Spawn {
+    var anchored = request;
+    if (request.settings_file) |file| {
+        if (!std.mem.eql(u8, file, "-") and !std.fs.path.isAbsolute(file)) anchored.settings_file = try std.fs.path.join(gpa, &.{ cwd, file });
     }
+    const assignments = try gpa.alloc([]const u8, request.assignments.len);
+    for (request.assignments, assignments) |assignment, *out| out.* = try anchorAssignment(gpa, cwd, assignment);
+    anchored.assignments = assignments;
+    return anchored;
+}
+
+fn anchorAssignment(gpa: std.mem.Allocator, cwd: []const u8, assignment: []const u8) ![]const u8 {
+    const equals = std.mem.indexOfScalar(u8, assignment, '=') orelse return assignment;
+    const path = assignment[0..equals];
+    const value = assignment[equals + 1 ..];
+    if (std.mem.startsWith(u8, value, "@")) {
+        if (value.len == 1 or std.fs.path.isAbsolute(value[1..])) return assignment;
+        return std.fmt.allocPrint(gpa, "{s}=@{s}", .{ path, try std.fs.path.join(gpa, &.{ cwd, value[1..] }) });
+    }
+    for (hs.leaves) |leaf| if (matches(leaf.pattern, path)) {
+        if (std.mem.eql(u8, leaf.kind, "path") and value.len != 0 and !std.fs.path.isAbsolute(value))
+            return std.fmt.allocPrint(gpa, "{s}={s}", .{ path, try std.fs.path.join(gpa, &.{ cwd, value }) });
+        if (leaf.secret and std.mem.startsWith(u8, value, "file:") and value.len > "file:".len and !std.fs.path.isAbsolute(value["file:".len..]))
+            return std.fmt.allocPrint(gpa, "{s}=file:{s}", .{ path, try std.fs.path.join(gpa, &.{ cwd, value["file:".len..] }) });
+        break;
+    };
+    return assignment;
+}
+
+/// Read every layer a detached launch applies and refuse what cannot run in
+/// `/` without stdin: a stdin or relative --settings, a relative @FILE, any
+/// relative path or `file:` source in any layer, and the stdin lifetime. The
+/// Store is exempt: the starter checks it against DIR and replay pins it.
+fn readDetached(init: std.process.Init, request: Spawn, settings: *hs.Settings, failure: *start_report.Failure) !void {
+    if (request.settings_file) |file| {
+        if (std.mem.eql(u8, file, "-")) return invalid(failure, "settings", "a Host started by bare rui or rui host start has no stdin; pass a document on stdin with rui host serve --settings -");
+        if (!std.fs.path.isAbsolute(file)) return invalid(failure, "settings", relative);
+    }
+    for (request.assignments) |assignment| {
+        const equals = std.mem.indexOfScalar(u8, assignment, '=') orelse return invalid(failure, "settings", "--set requires PATH=VALUE");
+        const value = assignment[equals + 1 ..];
+        if (std.mem.startsWith(u8, value, "@") and !std.fs.path.isAbsolute(value[1..])) return invalid(failure, "settings", "@FILE " ++ relative);
+    }
+    try readLaunch(init, request, settings, failure);
+    if (settings.interface.lifetime.value == .stdin) return invalid(failure, "interface.lifetime", "a Host started by bare rui or rui host start has no stdin; use detached, or run rui host serve");
+    var name: LeafName = .{};
+    inline for (@typeInfo(hs.Settings).@"struct".field_names, @typeInfo(hs.Settings).@"struct".field_types) |field, Field| {
+        if (comptime !std.mem.eql(u8, field, "store")) {
+            name.len = 0;
+            name.push(hs.camel(field));
+            if (relativeLeaf(Field, &@field(settings, field), &name)) {
+                var buffer: [start_report.max_refusal_message_bytes]u8 = undefined;
+                const message = std.fmt.bufPrint(&buffer, "{s}: {s}", .{ name.slice(), relative }) catch "settings: " ++ relative;
+                failure.* = .init(.settings_invalid, message);
+                return error.SettingsInvalid;
+            }
+        }
+    }
+}
+
+const relative = "a Host started in / has no base for a relative path; give an absolute path";
+
+const LeafName = struct {
+    bytes: [256]u8 = undefined,
+    len: usize = 0,
+    fn push(self: *LeafName, part: []const u8) void {
+        const dot: usize = if (self.len == 0) 0 else 1;
+        if (self.len + dot + part.len > self.bytes.len) return;
+        if (dot == 1) self.bytes[self.len] = '.';
+        @memcpy(self.bytes[self.len + dot ..][0..part.len], part);
+        self.len += dot + part.len;
+    }
+    fn slice(self: *const LeafName) []const u8 {
+        return self.bytes[0..self.len];
+    }
+};
+
+/// True when a path below `value` is relative; `name` then holds its leaf.
+fn relativeLeaf(comptime T: type, value: *const T, name: *LeafName) bool {
+    if (@typeInfo(T) == .optional) {
+        return if (value.*) |*present| relativeLeaf(@typeInfo(T).optional.child, present, name) else false;
+    }
+    const at = name.len;
+    defer name.len = at;
+    if (@hasDecl(T, "kind")) {
+        return switch (T.kind) {
+            .path => !(value.anchored or (value.slice().len == 0 and T.allow_empty) or std.fs.path.isAbsolute(value.slice())),
+            .secret => switch (value.source) {
+                .file => |*file| relativeLeaf(@TypeOf(file.*), file, name),
+                else => false,
+            },
+            .named => for (value.names[0..value.len], value.values[0..value.len]) |*entry_name, *entry| {
+                name.len = at;
+                name.push(entry_name.slice());
+                if (relativeLeaf(T.Child, entry, name)) break true;
+            } else false,
+            .providers => relativeLeaf(T.Table, &value.entries, name),
+            else => false,
+        };
+    }
+    switch (@typeInfo(T)) {
+        .@"struct" => |info| inline for (info.field_names, info.field_types) |field, Field| {
+            name.len = at;
+            name.push(comptime hs.camel(field));
+            if (relativeLeaf(Field, &@field(value, field), name)) return true;
+        },
+        .@"union" => switch (value.*) {
+            inline else => |*payload, tag| {
+                name.push(comptime hs.camel(@tagName(tag)));
+                return relativeLeaf(@TypeOf(payload.*), payload, name);
+            },
+        },
+        else => @compileError("not a Host settings kind"),
+    }
+    return false;
+}
+
+/// Upgrade replay relaunches an observed `host serve` argv as typed, in `/`,
+/// from another directory: nothing can be rebased, so it admits only what
+/// readDetached admits.
+pub fn replayable(init: std.process.Init, request: Spawn) error{OutOfMemory}!bool {
     const settings = try init.gpa.create(hs.Settings);
     defer init.gpa.destroy(settings);
     settings.* = .{};
     defer settings.deinit();
     var failure: start_report.Failure = undefined;
-    readLaunch(init, request, settings, &failure) catch |err| {
+    readDetached(init, request, settings, &failure) catch |err| {
         if (err == error.OutOfMemory) return error.OutOfMemory;
         return false;
     };
-    if (settings.interface.lifetime.value == .stdin) return false;
-    inline for (@typeInfo(hs.Settings).@"struct".field_names, @typeInfo(hs.Settings).@"struct".field_types) |name, Field| {
-        if (comptime !std.mem.eql(u8, name, "store")) {
-            if (!replayPaths(Field, &@field(settings, name))) return false;
-        }
-    }
     return true;
 }
 
-fn replayPaths(comptime T: type, value: *const T) bool {
-    if (@typeInfo(T) == .optional) {
-        return if (value.*) |*present| replayPaths(@typeInfo(T).optional.child, present) else true;
-    }
-    if (@hasDecl(T, "kind")) {
-        return switch (T.kind) {
-            .path => value.anchored or (value.slice().len == 0 and T.allow_empty) or std.fs.path.isAbsolute(value.slice()),
-            .secret => switch (value.source) {
-                .file => |*file| replayPaths(@TypeOf(file.*), file),
-                else => true,
-            },
-            .named => blk: {
-                for (value.values[0..value.len]) |*entry| if (!replayPaths(T.Child, entry)) break :blk false;
-                break :blk true;
-            },
-            .providers => replayPaths(T.Table, &value.entries),
-            else => true,
-        };
-    }
-    switch (@typeInfo(T)) {
-        .@"struct" => |info| inline for (info.field_names, info.field_types) |name, Field| {
-            if (!replayPaths(Field, &@field(value, name))) return false;
-        },
-        .@"union" => return switch (value.*) {
-            inline else => |*payload| replayPaths(@TypeOf(payload.*), payload),
-        },
-        else => @compileError("not a Host settings kind"),
-    }
-    return true;
-}
-
-/// Read source descriptions only: no secret is resolved and no login made.
-/// A Host whose settings listen elsewhere could start but never be reached
-/// through `dir`, so the starter refuses it before launching anything.
-pub fn checkReachable(init: std.process.Init, request: Spawn, failure: *start_report.Failure) !void {
+/// The starter's admission before any effect: readDetached, then refuse a
+/// Host whose settings would listen away from `request.dir`, which bare rui
+/// and rui host start could never reach.
+pub fn checkStart(init: std.process.Init, request: Spawn, failure: *start_report.Failure) !void {
     const settings = try init.gpa.create(hs.Settings);
     defer init.gpa.destroy(settings);
     settings.* = .{};
     defer settings.deinit();
-    try readLaunch(init, request, settings, failure);
+    try readDetached(init, request, settings, failure);
     if (settings.store == .mysql) return invalid(failure, "store.mysql", moved);
     if (!settings.interface.dir.anchored) return invalid(failure, "interface.dir", moved);
     if (!settings.store.sqlite.dir.anchored) {
+        if (!std.fs.path.isAbsolute(settings.store.sqlite.dir.slice())) return invalid(failure, "store.sqlite.dir", relative);
         var host: [protocol.max_store_bytes]u8 = undefined;
         var chosen: [protocol.max_store_bytes]u8 = undefined;
         const a = try platform.canonicalStoreDestination(init.io, request.dir, &host);
@@ -1226,8 +1272,8 @@ pub fn checkReachable(init: std.process.Init, request: Spawn, failure: *start_re
     }
 }
 
-pub noinline fn spawn(init: std.process.Init, request: Spawn, ops: Ops, progress: ?Progress, result: *HostLaunchResult) void {
-    const selected = request.dir;
+pub noinline fn spawn(init: std.process.Init, typed: Spawn, ops: Ops, progress: ?Progress, result: *HostLaunchResult) void {
+    const selected = typed.dir;
     const io = init.io;
     const selection = platform.resolveClientSelection(selected);
     const resolved: ?platform.Paths = selection.paths(io) catch |err| switch (err) {
@@ -1242,9 +1288,17 @@ pub noinline fn spawn(init: std.process.Init, request: Spawn, ops: Ops, progress
     }
     // Opaque MySQL selections can only attach; they carry no launch login.
     if (selection == .mysql) return launchFailure(result, .mysql_unavailable, error.MysqlHostUnavailable, null);
+    // Typed relative values mean where the person stands, not `/`.
+    // Anchored copies of typed values may name secret sources; wipe them.
+    var wiping: secret_value.WipingAllocator = .{ .backing = std.heap.c_allocator };
+    var anchoring: std.heap.ArenaAllocator = .init(wiping.allocator());
+    defer anchoring.deinit();
+    var cwd: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const here = cwd[0 .. std.Io.Dir.cwd().realPath(io, &cwd) catch |err| return launchFailure(result, .setup, err, null)];
+    const request = anchorTyped(anchoring.allocator(), here, typed) catch |err| return launchFailure(result, .setup, err, null);
     // Refuse before any effect: an invalid or unreachable start creates no Store.
     var reach_failure: start_report.Failure = .init(.settings_invalid, "settings: could not be read");
-    checkReachable(init, request, &reach_failure) catch |err| {
+    checkStart(init, request, &reach_failure) catch |err| {
         var canonical: [protocol.max_store_bytes]u8 = undefined;
         launchFailure(result, .child_refused, if (err == error.SettingsInvalid) error.HostStartupFailed else err, platform.canonicalStoreDestination(io, selected, &canonical) catch null);
         result.outcome.failed.refusal = reach_failure;
@@ -1368,6 +1422,104 @@ pub noinline fn spawn(init: std.process.Init, request: Spawn, ops: Ops, progress
     return launchFailure(result, .readiness_timeout, error.HostReadinessUnconfirmed, paths.store.slice());
 }
 
+test "Host start detached launches rebase typed paths and refuse paths with no base over every layer and door" {
+    // Domain: layer (saved host.json, --settings document, --set, @FILE) x
+    // leaf kind (path leaf, file: credential source, lifetime) x door (the
+    // starter that bare rui, rui host start and the TUI share through spawn,
+    // and upgrade replay). A value typed relative on this command line is
+    // rebased for the starter; nothing is rebased for replay; a relative
+    // value inside saved host.json, a document or @FILE content, and the
+    // stdin lifetime, are refused by both.
+    const gpa = std.testing.allocator;
+    var environment: std.process.Environ.Map = .init(gpa);
+    defer environment.deinit();
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const init = initForTest(&arena, &environment);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var here_dir = try tmp.dir.createDirPathOpen(init.io, "here", .{ .permissions = .fromMode(0o700) });
+    defer here_dir.close(init.io);
+    var here_root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const here = here_root[0..try here_dir.realPath(init.io, &here_root)];
+    const Layer = enum { saved, document, set, file };
+    const Kind = struct { leaf: []const u8, relative: []const u8, json: []const u8, text: []const u8, anchored: ?[]const u8 };
+    const kinds = [_]Kind{
+        .{ .leaf = "tools.bash.path", .relative = "bin/bash", .json = "{\"tools\":{\"bash\":{\"path\":\"bin/bash\"}}}", .text = "bin/bash", .anchored = "bin/bash" },
+        .{ .leaf = "providers.openai.key", .relative = "key.txt", .json = "{\"providers\":{\"openai\":{\"key\":{\"file\":\"key.txt\"}}}}", .text = "file:key.txt", .anchored = "key.txt" },
+        .{ .leaf = "interface.lifetime", .relative = "", .json = "{\"interface\":{\"lifetime\":\"stdin\"}}", .text = "stdin", .anchored = null },
+    };
+    for (kinds, 0..) |kind, kind_index| for (std.enums.values(Layer)) |layer| {
+        var name: [32]u8 = undefined;
+        var host = try tmp.dir.createDirPathOpen(init.io, try std.fmt.bufPrint(&name, "host-{d}-{s}", .{ kind_index, @tagName(layer) }), .{ .permissions = .fromMode(0o700) });
+        defer host.close(init.io);
+        var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const dir = root[0..try host.realPath(init.io, &root)];
+        var request: Spawn = .{ .dir = dir };
+        const content_name = try std.fmt.bufPrint(&name, "content-{d}.json", .{kind_index});
+        switch (layer) {
+            .saved => {
+                try host.writeFile(init.io, .{ .sub_path = "host.json", .data = kind.json });
+                try host.setFilePermissions(init.io, "host.json", .fromMode(0o600), .{});
+            },
+            .document => {
+                try here_dir.writeFile(init.io, .{ .sub_path = "document.json", .data = kind.json });
+                try here_dir.setFilePermissions(init.io, "document.json", .fromMode(0o600), .{});
+                request.settings_file = try std.fs.path.join(a, &.{ here, "document.json" });
+            },
+            .set => request.assignments = try a.dupe([]const u8, &.{try std.fmt.allocPrint(a, "{s}={s}", .{ kind.leaf, kind.text })}),
+            .file => {
+                // @FILE content is JSON with no base of its own.
+                const parent = kind.leaf[0..std.mem.lastIndexOfScalar(u8, kind.leaf, '.').?];
+                const member = kind.leaf[parent.len + 1 ..];
+                const json = if (std.mem.eql(u8, member, "key")) "{\"key\":{\"file\":\"key.txt\"}}" else if (std.mem.eql(u8, member, "path")) "{\"path\":\"bin/bash\"}" else "{\"lifetime\":\"stdin\"}";
+                try here_dir.writeFile(init.io, .{ .sub_path = content_name, .data = json });
+                request.assignments = try a.dupe([]const u8, &.{try std.fmt.allocPrint(a, "{s}=@{s}", .{ parent, try std.fs.path.join(a, &.{ here, content_name }) })});
+            },
+        }
+        const typed = layer == .set and kind.anchored != null;
+        var failure: start_report.Failure = undefined;
+        // Starter door.
+        const started = try anchorTyped(a, here, request);
+        const start_result = checkStart(init, started, &failure);
+        if (typed) {
+            try start_result;
+            const value = started.assignments[0][std.mem.indexOfScalar(u8, started.assignments[0], '=').? + 1 ..];
+            const expected = try std.fs.path.join(a, &.{ here, kind.anchored.? });
+            try std.testing.expect(std.mem.endsWith(u8, value, expected));
+        } else {
+            try std.testing.expectError(error.SettingsInvalid, start_result);
+            try std.testing.expectEqual(start_report.StartError.settings_invalid, failure.code);
+            try std.testing.expect(std.mem.indexOf(u8, failure.message.slice(), if (kind.anchored == null) "no stdin" else "absolute path") != null);
+        }
+        // Replay door: the same argv as typed, never rebased.
+        try std.testing.expect(!try replayable(init, request));
+    };
+    // Typed references themselves: a relative --settings and @FILE are
+    // rebased for the starter and refused for replay.
+    var host = try here_dir.createDirPathOpen(init.io, "host-references", .{ .permissions = .fromMode(0o700) });
+    defer host.close(init.io);
+    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const dir = root[0..try host.realPath(init.io, &root)];
+    try here_dir.writeFile(init.io, .{ .sub_path = "plain.json", .data = "{\"execution\":{\"activeCapacity\":3}}" });
+    try here_dir.setFilePermissions(init.io, "plain.json", .fromMode(0o600), .{});
+    try here_dir.writeFile(init.io, .{ .sub_path = "bash.json", .data = "{\"path\":\"/bin/bash\"}" });
+    for ([_]Spawn{
+        .{ .dir = dir, .settings_file = "plain.json" },
+        .{ .dir = dir, .assignments = &.{"tools.bash=@bash.json"} },
+        // The reviewer's witness: a relative Store directory typed beside --store.
+        .{ .dir = dir, .assignments = &.{"store.sqlite.dir=host-references"} },
+    }) |request| {
+        var failure: start_report.Failure = undefined;
+        try checkStart(init, try anchorTyped(a, here, request), &failure);
+        try std.testing.expect(!try replayable(init, request));
+    }
+    var failure: start_report.Failure = undefined;
+    try std.testing.expectError(error.SettingsInvalid, checkStart(init, try anchorTyped(a, here, .{ .dir = dir, .settings_file = "-" }), &failure));
+    try std.testing.expect(std.mem.indexOf(u8, failure.message.slice(), "rui host serve --settings -") != null);
+}
+
 test "Host start starter refuses settings that move the Host away from its directory without resolving secrets" {
     const gpa = std.testing.allocator;
     var environment: std.process.Environ.Map = .init(gpa);
@@ -1396,13 +1548,13 @@ test "Host start starter refuses settings that move the Host away from its direc
         var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const dir = root[0..try host.realPath(init.io, &root)];
         var failure: start_report.Failure = undefined;
-        try checkReachable(init, .{ .dir = dir }, &failure);
+        try checkStart(init, .{ .dir = dir }, &failure);
         const value = if (std.mem.eql(u8, case.value, "SELF")) dir else case.value;
         // Saved and one-off assignments reach the same verdict.
         const assignment = try std.fmt.allocPrint(arena.allocator(), "{s}={s}", .{ case.path, value });
-        const once = checkReachable(init, .{ .dir = dir, .assignments = &.{assignment} }, &failure);
+        const once = checkStart(init, .{ .dir = dir, .assignments = &.{assignment} }, &failure);
         try savedEdit(init, dir, case.path, value, &failure);
-        const saved_result = checkReachable(init, .{ .dir = dir }, &failure);
+        const saved_result = checkStart(init, .{ .dir = dir }, &failure);
         if (case.refused) |prefix| {
             try std.testing.expectError(error.SettingsInvalid, once);
             try std.testing.expectError(error.SettingsInvalid, saved_result);

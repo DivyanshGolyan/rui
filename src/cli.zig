@@ -1199,9 +1199,7 @@ fn host(init: std.process.Init, command: cli_args.Command, parsed: *const cli_ar
     var fallback: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const selected = try selectedStore(init, parsed.get("store"), &fallback);
     if (command == .host_start) {
-        var file_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const settings_file = if (parsed.get("settings")) |source| try hostSettingsFile(init, source, &file_buffer) else null;
-        return startHostForTerminal(init, selected, false, settings_file, parsed.all("set"), null);
+        return startHostForTerminal(init, selected, false, parsed.get("settings"), parsed.all("set"), null);
     }
     if (command == .host_pause) return pauseHost(init.io, selected, if (parsed.get("instance")) |instance| try protocol.parseInstanceId(instance) else null);
     const paths: ?platform.Paths = platform.resolveClientPaths(init.io, selected) catch |err| switch (err) {
@@ -1220,18 +1218,6 @@ fn host(init: std.process.Init, command: cli_args.Command, parsed: *const cli_ar
         .access_failure => return error.StoreAccessFailed,
         else => {},
     }
-}
-
-/// A detached Host has no stdin, so host start takes its document from a FILE.
-fn hostSettingsFile(init: std.process.Init, source: []const u8, buffer: *[std.Io.Dir.max_path_bytes]u8) ![]const u8 {
-    if (std.mem.eql(u8, source, "-")) {
-        const failure: start_report.Failure = .init(.settings_invalid, "settings: rui host start reads --settings from a FILE; pass a document on stdin with rui host serve --settings -");
-        return writeRefusal(init.io, &failure, .invalid);
-    }
-    if (std.fs.path.isAbsolute(source)) return source;
-    var cwd: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const base = cwd[0..try std.Io.Dir.cwd().realPath(init.io, &cwd)];
-    return std.fmt.bufPrint(buffer, "{s}/{s}", .{ base, source }) catch error.NameTooLong;
 }
 
 fn writeHostStatus(io: std.Io, status: protocol_reply.HostStatus, diagnostics_directory: ?[]const u8) !void {
@@ -1368,6 +1354,9 @@ fn startHost(init: std.process.Init, selected: []const u8, assignments: []const 
 /// migration announcement its progress hook already showed. Screen callers
 /// receive the same value without installing an output hook.
 fn reportHostLaunch(io: std.Io, result: *const HostLaunchResult, quiet: bool, overrides: bool, shown: usize) !void {
+    // The starter refused the settings before launching anything (wait is
+    // set only by a launch): report it as host serve reports a refusal.
+    if (result.outcome == .failed and result.wait == null) if (result.outcome.failed.refusal) |*refusal| return writeRefusal(io, refusal, .invalid);
     var bytes: [host_launch.max_report_bytes]u8 = undefined;
     var writer = std.Io.Writer.fixed(&bytes);
     try host_launch.writeDiagnostics(result, &writer, shown);
