@@ -195,6 +195,8 @@ If the provider does not know the ID, the Session's first request fails and says
 Without `--model`, a new Session uses your saved default.
 With no saved default, it uses `gpt-6.1-sol`.
 To pick the default from a list, open **Settings** in the overview and press Enter on **Model**.
+The list shows the models of the sign-in new Sessions use, and **Sign-in** reads **ChatGPT** whether you signed in in the browser or with a device code.
+Typing `chatgpt` or `codex` keeps a ChatGPT sign-in's models; `api` keeps an API key's.
 
 To switch an existing Session within its provider, select **Model** in chat info, or run `rui session configure --session SESSION --model ID`.
 The next model request replays visible conversation without the old model’s private reasoning or compacted state.

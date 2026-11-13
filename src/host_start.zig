@@ -422,7 +422,8 @@ test "Host start resolves environment private file and saved credential sources"
     var private = try tmp.dir.createDirPathOpen(std.testing.io, "private", .{ .permissions = .fromMode(0o700) });
     defer private.close(std.testing.io);
     var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const path = try std.fmt.allocPrint(arena.allocator(), "{s}/private/key-\xff", .{root[0..try tmp.dir.realPath(std.testing.io, &root)]});
+    // APFS rejects malformed UTF-8 filenames, so the created file uses valid UTF-8.
+    const path = try std.fmt.allocPrint(arena.allocator(), "{s}/private/openai.key", .{root[0..try tmp.dir.realPath(std.testing.io, &root)]});
     try api_key.install(path, "file-key");
     try assign(settings, arena.allocator(), "providers.openai.key", "null", &failure);
     try environment.put(api_key.path_variable, path);
@@ -435,7 +436,7 @@ test "Host start resolves environment private file and saved credential sources"
     try std.testing.expectEqualStrings(path, settings.providers.entries.openai.?.key.source.file.slice());
     try std.testing.expectEqualStrings("/tmp/./codex-\xff.json", settings.providers.entries.codex.?.credential_file.?.slice());
     try std.testing.expectEqualStrings("/tmp/./chatgpt-\xff.json", settings.providers.entries.chatgpt.?.credential_file.?.slice());
-    try private.setFilePermissions(std.testing.io, "key-\xff", .fromMode(0o644), .{});
+    try private.setFilePermissions(std.testing.io, "openai.key", .fromMode(0o644), .{});
     try assign(settings, arena.allocator(), "providers.openai.key", "null", &failure);
     try std.testing.expectError(error.SettingsInvalid, prepare(init, settings, .{}, &failure));
     try std.testing.expect(std.mem.startsWith(u8, failure.message.slice(), "providers.openai.key:"));

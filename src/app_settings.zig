@@ -593,7 +593,10 @@ test "App settings page text and ground at 99x20 and 46x20" {
         try std.testing.expect(std.mem.indexOf(u8, text, "   Effort          low") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, "   Permissions     run without asking") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, "   Notifications   on") != null);
-        try std.testing.expect(std.mem.indexOf(u8, text, "   Sign-in         Codex") != null);
+        // The product default signs in with a device code, and reads as
+        // the one ChatGPT sign-in.
+        try std.testing.expect(std.mem.indexOf(u8, text, "   Sign-in         ChatGPT") != null);
+        try std.testing.expect(std.ascii.findIgnoreCase(text, "codex") == null);
         try std.testing.expect(std.mem.indexOf(u8, text, "   Version         0.60.0 · up to date") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, if (page.narrow) " ‹ Rui · settings" else " Rui · settings") != null);
         const ground = widget_style.of(.{}, .{ .background = .bar });
@@ -604,6 +607,15 @@ test "App settings page text and ground at 99x20 and 46x20" {
 
 test "App settings sign-in and effort choices reflect saved values without assuming a provider" {
     var fixture: Fixture = .{};
+    // Either way into ChatGPT reads "ChatGPT"; the device code is how,
+    // not what, a person signed in with.
+    for ([_][2][]const u8{ .{ "codex", "ChatGPT" }, .{ "chatgpt", "ChatGPT" }, .{ "openai", "API key" } }) |case| {
+        try fixture.values.provider.set(case[0]);
+        var shown: Self = .{ .backend = fixture.backend() };
+        try shown.refresh();
+        shown.bind();
+        try std.testing.expectEqualStrings(case[1], shown.fields[@backingInt(Row.sign_in)].value);
+    }
     try fixture.values.provider.set("openai");
     var page: Self = .{ .backend = fixture.backend() };
     try page.refresh();
