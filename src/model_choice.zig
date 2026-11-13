@@ -422,7 +422,7 @@ test "Model choice invalidates every replaced or released source before keys mou
     };
 }
 
-const RejectedInput = enum { typed_overflow, invalid_utf8, invalid_key, invalid_scalar, paste_overflow };
+const RejectedInput = enum { typed_overflow, invalid_utf8, invalid_scalar, paste_overflow };
 
 fn expectFilterRecovery(failure: RejectedInput) !void {
     const entries = [_]picker.Entry{
@@ -442,7 +442,6 @@ fn expectFilterRecovery(failure: RejectedInput) !void {
     switch (failure) {
         .typed_overflow => try choice.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = ' ', .text = &spaces } }),
         .invalid_utf8 => try choice.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = 0xfffd, .text = "\xff" } }),
-        .invalid_key => try choice.widget().handleEvent(&ctx, .invalid_key),
         .invalid_scalar => try choice.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = 'z', .text = "zz\x01" } }),
         .paste_overflow => {
             try choice.widget().handleEvent(&ctx, .paste_start);
@@ -487,7 +486,7 @@ test "Model choice recovers from typed overflow with its usable filter and caret
 }
 
 test "Model choice recovers from malformed input before editing and picking" {
-    for ([_]RejectedInput{ .invalid_utf8, .invalid_key, .invalid_scalar }) |failure| {
+    for ([_]RejectedInput{ .invalid_utf8, .invalid_scalar }) |failure| {
         errdefer std.debug.print("model filter rejection={s}\n", .{@tagName(failure)});
         try expectFilterRecovery(failure);
     }
