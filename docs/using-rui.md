@@ -13,12 +13,24 @@ There is no `/help` command.
 
 ## Commands
 
-Enter these at the chat’s `›` prompt. The overview has no input or slash commands. Typing `/` lists names only; fixed choices appear quietly beside the name, separated by ` · `. Choice and option rows also show names only.
+Enter these at the chat’s `›` prompt. The overview has no input or slash commands. Typing `/` lists chat commands with their descriptions beside loaded skills. Choice and option rows show their admitted names. `/discard` and `/recover KEY` stay unlisted behind the failed-send line.
 
 | Command | What it does |
 | --- | --- |
+| `/archive` | Stops active work and archives this Session, confirming when required. |
+| `/unarchive` | Restores this chat without restarting work. |
+| `/rename NAME` | Names this Session. |
+| `/copy [code\|file]` | Copies the last answer; `code` copies its last code block; `file` saves the answer here. |
+| `/effort LEVEL` | Changes this chat’s effort and also sets the default for new chats. |
+| `/model` | Opens this Session’s model picker, the same one as the footer model button and chat info. Choose a model to save it. |
+| `/setup` | Shows or changes defaults for future Sessions, not the current one. |
 | `/requests` | Lists saved requests for recovery. |
-| `/setup` | Changes defaults for future Sessions, not the current one. |
+| `/result KEY` | Reads a saved answer. |
+| `/reload-skills` | Rescans skills and appends catalog changes without model work. |
+| `/new` | Starts a new empty chat; keeps the old chat unchanged. |
+| `/clear` | Same as `/new`: starts a new empty chat, not deletion of history. |
+
+Both `/new` and `/clear` use **+ New Session**’s creation owner. They send no Message until you type and send one in the new chat. Extra text, such as `/new foo`, is misuse. Loaded skill rows insert their names into the Message; they do not run an app command. A draft whose first word is not exactly a chat command is a Message: Enter sends it unchanged, even before suggestions arrive, and Esc closes the list without deleting it. Esc on a list clears only a command line or a single unfinished `/word`. The Host looks up skills in this Session's complete saved catalog; an unknown name stays literal text for the agent.
 
 While the model works on a reply, the work line says `Thinking` with elapsed time.
 Rate-limited retries keep their countdown, and running tools show their descriptions.

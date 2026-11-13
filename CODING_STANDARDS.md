@@ -7,7 +7,7 @@ These standards own engineering methods, not runtime behavior or qualification r
 
 Each requirement has one home: [Architecture](ARCHITECTURE.md) owns accepted behavior, terminology, decisions and rationale; [Verification](VERIFICATION.md) owns required evidence and gates; GitHub issues hold unresolved decisions and research.
 Implementation slices link accepted contracts and define proof.
-A Store format change appends one version, bootstrap digest row and forward step for each dialect; main's existing rows and steps remain immutable, and `python3 tests/ci/schema_number.py --check` confirms the number against current main. A wire-label move is a Store format change, owned by that migration step rather than a new finalization special case.
+A Store format change appends one version, bootstrap digest row and forward step for each dialect; main's existing rows and steps remain immutable, and `python3 tests/ci/schema_number.py --check` confirms the number against current main. The Store keeps no wire label (format 74), so a wire bump is no Store format change.
 The [wire-version gate](tests/ci/test_wire_version.py) requires a version greater than the newest release's when generated `openapi.json` changes beyond `info.version` and documentation-only annotations, under the [wire contract rule](ARCHITECTURE.md#staged-persistent-input).
 
 Edit [Architecture](ARCHITECTURE.md) or [Verification](VERIFICATION.md) only when a change alters user-visible behavior, the Store format or a gate.
@@ -81,8 +81,12 @@ Correct that transition or replace the owning model, not a downstream observer.
 From the first review finding, name its class, sweep the change for siblings and correct the structure that allows the class, so one round closes it.
 When another correction touches the same lifecycle, redraw states, authorities, handoffs and release conditions.
 Prefer replacing superseded state over additional flags, retries, test hooks or timing allowances.
+A cache, memo or "already shown" check keys on every input that changes its value (revision, caret, source, the commit a run tested); a result computed from an older input is dropped, never applied over a newer one.
+Every refused or rejected state a user can reach (an editor overflow, a failed sign-in, a closed pane's focus) has a tested way out.
 
 Respect architectural transaction/effect boundaries.
+Check every precondition before the first step that cannot be undone (stopping a Host, deleting a credential, marking work pending); a check that runs after it can only report damage.
+Independent targets (two logins, several Hosts or Stores) succeed or fail independently, and each reports its own outcome.
 Give each mutable handle one owner.
 Construct callback state in final storage before registration; retain its address and custody through safe cleanup.
 Validate external syntax and consequential meaning.
@@ -161,6 +165,8 @@ Review parity and failure paths as well as the diff:
   Route each to the main path's failure boundary, or justify it beside the code.
 - **In-flight effects.** Each effect the change emits has one record from emission to a definite answer.
   On every exit (return, error, cancel), the owner reports each still-open record to the caller's failure boundary.
+- **Consumers.** When the change alters a shared value (a label, status text, column, step list, exit convention or file list), search for the old form. A test or fixture that restates it reads it from its owner instead ([Evidence](#evidence)); a consumer that cannot (a skill, helper script or document) changes in the same change.
+- **Runnable instructions.** A command in a skill, doc or script runs as written on the platforms it names: required inputs are supplied, nothing depends on one machine's paths or permissions, and a step that needs a person (such as a hardware check at the Mac) says so.
 - **Design.** Check the change against the approved design, not only the issue derived from it.
   An edit to a contract document that makes it match the change's own code is a finding, and so is a "by design" that cites text the same change added.
 
@@ -178,9 +184,10 @@ Keep unrelated cleanup separate; exclude personal style, speculative extensibili
 ## Evidence
 
 Use [canonical gates](VERIFICATION.md#canonical-gates) for required commands, focused checks, cache conditions and assembled-versus-independently-merged cadence; confirm commands in `build.zig`.
+This is the one list of local checks.
 Before every push, including review-fix rounds and after merging main, run only these checks:
 
-- `python3 tests/ci/prepush.py`, which selects local feedback from the committed diff against the merge base.
+- `python3 tests/ci/prepush.py` (the default), which selects local feedback from the committed diff against the merge base.
   Use `--plan` to inspect its commands without executing them.
   It checks whitespace, formatting for changed Zig files, undefined names in changed Python files, and caller-error coverage for changed CLI owners.
   Whitespace errors in committed lines, a stale `openapi.json` and a stale `clients/ts/src/wire.ts` are fixed in the working tree and still fail the run until the fix is committed.
@@ -192,7 +199,14 @@ Before every push, including review-fix rounds and after merging main, run only 
   Zig and manifest changes select the macOS type check only when those inputs have build targets of their own.
   Deleted files still select owner checks, and mixed changes union checks without repeating them.
   Commands read working-tree contents; unstaged and untracked-only changes do not select checks.
+  When history since the merge base holds a merge of `origin/main`, it also compiles the unit binaries unfiltered with CI's unit producer command, `zig build ci-build -Dci-targets=test -Dci-part=unit`, because a filtered build never analyzes a test the merge brought back.
+  Each run writes a receipt to the checkout's git directory with HEAD's tree, the merge base its diff came from, the mode and each command's exit code; a working tree that differs from HEAD records no tree, so its receipt matches no push.
   Orb setup installs it as a git pre-push hook that runs `--quick`, everything above except the Zig builds; elsewhere install it once with `python3 tests/ci/prepush.py --install-hook`.
+  The hook runs nothing when the receipt holds the pushed tree and its merge base with `origin/main`, and records at least one command, every one of which passed, so pushing the same tree again does not repeat the checks.
+- `python3 tests/ci/prepush.py --full`, which runs the default checks plus the unfiltered unit compile, `zig build -j1 stack-frames -Dcpu=baseline` and, when `RUI_TEST_MYSQL_SOCKET` and `RUI_TEST_MYSQL_ROOT_PASSWORD` name a reachable MySQL, each selected live need whose own target reads it, with `RUI_TEST_REQUIRE_ENGINES=mysql`.
+  `select_tests.py` reports each live need with the one target that runs only its tests (`live_needs`), such as `test-store` for the Store's dialect check; a need with no such target, such as native `forEachEngine` tests inside the whole native root, never runs here.
+  Without that server it says so, skips only that part and records the skip in the receipt.
+  Every other live need, one with no such target or one needing Postgres or `mysql-wire-integration`'s own Docker server, is recorded as skipped for CI, never as passed.
 - the touched owners' focused tests (`-Dtest-filter`)
 - a mutation that reverts each fix and shows its new test fails
 

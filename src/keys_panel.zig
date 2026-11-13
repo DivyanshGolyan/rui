@@ -24,7 +24,7 @@ pub fn panel(caps: view.Caps) Panel.KeyList {
 
 fn text(allocator: std.mem.Allocator, width: u16) ![]const u8 {
     var reference = panel(.{});
-    const surface = try reference.widget().draw(.{ .arena = allocator, .min = .{}, .max = .{ .width = width, .height = keymap.list.len }, .cell_size = .{} });
+    const surface = try reference.widget().draw(.{ .arena = allocator, .cell_arena = allocator, .min = .{}, .max = .{ .width = width, .height = keymap.list.len }, .cell_size = .{} });
     var output: std.Io.Writer.Allocating = .init(allocator);
     for (0..surface.size.height) |row| {
         var line: std.Io.Writer.Allocating = .init(allocator);
@@ -89,7 +89,7 @@ test "Keys panel aligns strong keys and plain meanings over every width through 
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         var reference = panel(.{});
-        const surface = try reference.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = @intCast(width), .height = height }, .cell_size = .{} });
+        const surface = try reference.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = @intCast(width), .height = height }, .cell_size = .{} });
         const columns: usize = if (width >= left_width + 2 + right_width) 2 else 1;
         const occupied = try arena.allocator().alloc(bool, width * height);
         @memset(occupied, false);

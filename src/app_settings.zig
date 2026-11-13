@@ -1,4 +1,4 @@
-//! App defaults presented as fields behind a borrowed, typed backend.
+//! App defaults and live app facts behind a borrowed, typed backend.
 //! No preference writer or Upgrade worker lives here.
 const std = @import("std");
 const vaxis = @import("vaxis");
@@ -30,13 +30,15 @@ pub const Backend = struct {
     upgrade: *const fn (*anyopaque) anyerror!void,
     run: *const fn (*anyopaque) ?upgrade_status.Run,
     caps: *const fn (*anyopaque) view.Caps,
+    /// Latest app-owned physical memory reading; null before the first read.
+    memory: ?*const fn (*anyopaque) ?view.Memory = null,
     /// Live lists change revision on every replacement or release.
     models: ?*const fn (*anyopaque) ModelChoice.Snapshot = null,
     sign_in: ?*const fn (*anyopaque, *vxfw.EventContext) anyerror!void = null,
 };
 
 /// The page's rows, in drawn order: the Panel's field index of each.
-pub const Row = enum { model, effort, permissions, notifications, sign_in, version, keys };
+pub const Row = enum { model, effort, permissions, notifications, sign_in, version, memory, keys };
 const row_count = std.enums.values(Row).len;
 
 backend: ?Backend = null,
@@ -147,7 +149,7 @@ fn permissionText(mode: protocol.PermissionMode) []const u8 {
 }
 
 fn value(self: *const Self, row: Row) []const u8 {
-    if (row == .keys) return "";
+    if (row == .keys or row == .memory) return "";
     if (row == .version) return self.version;
     if (self.read_failed) return "unavailable";
     return switch (row) {
@@ -156,7 +158,7 @@ fn value(self: *const Self, row: Row) []const u8 {
         .permissions => permissionText(self.permissionMode()),
         .notifications => if (self.values.notifications) "on" else "off",
         .sign_in => if (self.provider()) |saved| saved.signIn() else "unavailable",
-        .version, .keys => unreachable,
+        .version, .memory, .keys => unreachable,
     };
 }
 
@@ -185,10 +187,13 @@ fn bind(self: *Self) void {
             .notifications => "Notifications",
             .sign_in => "Sign-in",
             .version => "Version",
+            .memory => "Memory",
             .keys => "Keys",
         },
         .value = self.value(row),
         .tail = self.tail(row),
+        .selectable = row != .memory,
+        .visible = row != .memory,
     };
     self.panel.fields = &self.fields;
     const caps = if (self.backend) |b| b.caps(b.context) else view.Caps{};
@@ -210,6 +215,7 @@ fn bind(self: *Self) void {
 fn activate(raw: *anyopaque, ctx: *vxfw.EventContext, index: usize) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     const row: Row = @fromBackingInt(@intCast(index));
+    if (row == .memory) return;
     if (row == .keys) {
         self.keys_open = true;
         ctx.consumeAndRedraw();
@@ -232,7 +238,7 @@ fn activate(raw: *anyopaque, ctx: *vxfw.EventContext, index: usize) !void {
             };
             return;
         },
-        .keys => unreachable,
+        .memory, .keys => unreachable,
         .model, .effort, .permissions, .notifications => {
             try self.readValues();
             if (self.read_failed) {
@@ -268,7 +274,7 @@ fn activate(raw: *anyopaque, ctx: *vxfw.EventContext, index: usize) !void {
         },
         .permissions => self.panel.openChoice(&.{ "run without asking", "ask first" }, if (self.permissionMode() == .bypass) 0 else 1),
         .notifications => try self.save(ctx, row, .{ .notifications = !self.values.notifications }),
-        .sign_in, .version, .keys => {},
+        .sign_in, .version, .memory, .keys => {},
     }
     ctx.redraw = true;
 }
@@ -284,7 +290,7 @@ fn pick(raw: *anyopaque, ctx: *vxfw.EventContext, field: usize, choice: usize) !
         },
         .permissions => .{ .permission_mode = .{ .set = if (choice == 0) .bypass else .ask } },
         // Model uses the shared full-width choice.
-        .model, .notifications, .sign_in, .version, .keys => unreachable,
+        .model, .notifications, .sign_in, .version, .memory, .keys => unreachable,
     });
 }
 
@@ -352,6 +358,11 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     self.bind();
     const size = ctx.max.size();
     if (size.width == 0 or size.height == 0) return .empty(self.widget());
+    const memory = if (self.backend) |backend| (if (backend.memory) |read| read(backend.context) else null) else null;
+    // Memory is the row's whole value, from the aligned value column to the edge.
+    const text = try @import("memory_text.zig").fit(ctx.arena, memory, self.panel.unicode, size.width -| Panel.value_column);
+    self.fields[@backingInt(Row.memory)].value = text;
+    self.fields[@backingInt(Row.memory)].visible = text.len != 0;
     const children = try ctx.arena.alloc(vxfw.SubSurface, 2);
     children[0] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = try self.panel.widget().draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = size.height - 1 })) };
     const footer = try ctx.arena.create(Footer);
@@ -366,6 +377,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
 
 const Fixture = struct {
     unicode: bool = true,
+    memory_value: ?view.Memory = null,
     read_calls: usize = 0,
     save_calls: usize = 0,
     values: preferences.Values = .{},
@@ -378,7 +390,7 @@ const Fixture = struct {
     status: ?upgrade_status.Run = .{ .ended = .{ .how = .{ .up_to_date = .{ .schema = 60, .patch = 0 } }, .outcome = .unchanged } },
 
     fn backend(self: *Fixture) Backend {
-        return .{ .context = self, .read = read, .save = saveEdit, .save_state = saveState, .upgrade = upgrade, .run = run, .caps = caps };
+        return .{ .context = self, .read = read, .save = saveEdit, .save_state = saveState, .upgrade = upgrade, .run = run, .caps = caps, .memory = memory };
     }
     fn read(raw: *anyopaque) !preferences.Values {
         const self: *Fixture = @ptrCast(@alignCast(raw));
@@ -408,6 +420,10 @@ const Fixture = struct {
     fn run(raw: *anyopaque) ?upgrade_status.Run {
         const self: *Fixture = @ptrCast(@alignCast(raw));
         return self.status;
+    }
+    fn memory(raw: *anyopaque) ?view.Memory {
+        const self: *Fixture = @ptrCast(@alignCast(raw));
+        return self.memory_value;
     }
     fn caps(raw: *anyopaque) view.Caps {
         const self: *Fixture = @ptrCast(@alignCast(raw));
@@ -577,9 +593,9 @@ test "App settings page text and ground at 99x20 and 46x20" {
     defer arena.deinit();
     for ([_]u16{ 99, 46 }) |width| {
         page.narrow = width == 46;
-        const surface = try page.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
+        const surface = try page.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
         var screen = try vaxis.Screen.init(arena.allocator(), .{ .cols = width, .rows = 20, .x_pixel = 0, .y_pixel = 0 });
-        surface.render(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = 20, .screen = &screen }, page.widget());
+        try surface.render(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = 20, .screen = &screen }, page.widget());
         var dump: std.Io.Writer.Allocating = .init(arena.allocator());
         for (0..20) |row| {
             var line: std.Io.Writer.Allocating = .init(arena.allocator());
@@ -732,7 +748,7 @@ test "App settings Model shares the provider list at full width and preserves ma
     try press(&page, &ctx, vaxis.Key.enter);
     try std.testing.expect(page.hasChoice());
     for ([_]u16{ 99, 46 }) |width| {
-        const drawn = try page.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
+        const drawn = try page.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
         const parts = drawn.children[0].surface.children;
         const choice = parts[parts.len - 1];
         try std.testing.expectEqual(@as(i17, 0), choice.origin.col);
@@ -750,9 +766,9 @@ test "App settings Model shares the provider list at full width and preserves ma
     try std.testing.expect(page.model_choice.no_match);
     try std.testing.expectEqualStrings("future", page.model_choice.editor.buffer[0..page.model_choice.editor.length]);
     for ([_]u16{ 99, 46 }) |width| {
-        const drawn = try page.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
+        const drawn = try page.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
         var screen = try vaxis.Screen.init(arena.allocator(), .{ .cols = width, .rows = 20, .x_pixel = 0, .y_pixel = 0 });
-        drawn.render(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = 20, .screen = &screen }, page.widget());
+        try drawn.render(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = 20, .screen = &screen }, page.widget());
         try std.testing.expect(screen.cursor_vis);
         try std.testing.expectEqual(@as(u16, 25), screen.cursor.col);
         try std.testing.expectEqual(@as(u16, 2), screen.cursor.row);
@@ -792,7 +808,7 @@ test "App settings shared ASCII capability reaches the panel model choice tails 
             }
             fixture.status = .checking;
             page.failures.set(.notifications, " · couldn't save");
-            const surface = try page.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
+            const surface = try page.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
             try Check.ascii(surface);
             try std.testing.expect(!page.panel.unicode and !page.model_choice.unicode);
             try std.testing.expectEqualStrings("-", surface.children[0].surface.readCell(0, 0).char.grapheme);
@@ -839,7 +855,7 @@ test "App settings mouse hover and click use the same field choices as Enter" {
         var page: Self = .{ .backend = fixture.backend() };
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
-        const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 60, .height = 12 }, .cell_size = .{} };
+        const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 60, .height = 12 }, .cell_size = .{} };
         var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
         try page.refresh();
         _ = try page.widget().draw(draw_ctx);
@@ -893,20 +909,98 @@ test "App settings Keys is last and opens by Enter or click without a backend" {
         try std.testing.expectEqualStrings("", page.fields[@backingInt(Row.keys)].value);
         var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
         if (click) {
-            _ = try page.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
-            try page.widget().handleEvent(&ctx, .{ .mouse = .{ .button = .left, .type = .press, .row = 2 + @as(u16, @backingInt(Row.keys)), .col = 4, .mods = .{} } });
+            _ = try page.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
+            // With no backend, Memory is absent and Keys follows Version.
+            try page.widget().handleEvent(&ctx, .{ .mouse = .{ .button = .left, .type = .press, .row = 2 + @as(u16, @backingInt(Row.version)) + 1, .col = 4, .mods = .{} } });
         } else {
             page.select(.keys);
             try press(&page, &ctx, vaxis.Key.enter);
         }
         try std.testing.expect(page.keys_open);
         try std.testing.expect(ctx.consume_event);
-        const drawn = try page.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
+        const drawn = try page.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
         try std.testing.expectEqualStrings("e", drawn.readCell(1, 0).char.grapheme);
         try std.testing.expect(drawn.widget.eql(page.widget()));
         // Enter on a reference is inert, not a hidden settings edit.
         try press(&page, &ctx, vaxis.Key.enter);
         try std.testing.expect(page.keys_open);
         try std.testing.expect(page.saving_row == null);
+    };
+}
+
+test "App settings Memory gets the columns from the value column to the edge" {
+    var fixture: Fixture = .{ .memory_value = .{ .rui = 38 * view.mib, .tools = 120 * view.mib } };
+    var page: Self = .{ .backend = fixture.backend(), .version = "unreleased" };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    try page.refresh();
+    // memory_text owns which form fits; this page owns only the columns it gives memory.
+    for ([_]struct { width: u16, expected: ?[]const u8 }{
+        .{ .width = Panel.value_column + 24, .expected = "Memory          rui 38 MB · tools 120 MB" },
+        .{ .width = Panel.value_column + 23, .expected = "Memory          rui 38 MB" },
+        .{ .width = 40, .expected = "Memory          rui 38 MB" },
+        .{ .width = Panel.value_column + 9, .expected = "Memory          rui 38 MB" },
+        .{ .width = Panel.value_column + 8, .expected = null },
+    }) |case| {
+        const surface = try page.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = case.width, .height = 20 }, .cell_size = .{} });
+        const body = surface.children[0].surface;
+        var text: std.Io.Writer.Allocating = .init(arena.allocator());
+        for (0..body.size.height) |y| {
+            for (0..body.size.width) |x| try text.writer.writeAll(body.readCell(@intCast(x), @intCast(y)).char.grapheme);
+            try text.writer.writeByte('\n');
+        }
+        var line: ?[]const u8 = null;
+        var lines = std.mem.splitScalar(u8, text.written(), '\n');
+        while (lines.next()) |each| if (std.mem.indexOf(u8, each, "Memory") != null) {
+            line = std.mem.trim(u8, each, " ");
+        };
+        if (case.expected) |expected| try std.testing.expectEqualStrings(expected, line.?) else try std.testing.expectEqual(null, line);
+        try std.testing.expectEqual(case.expected != null, page.fields[@backingInt(Row.memory)].visible);
+        _ = arena.reset(.retain_capacity);
+    }
+}
+
+test "App settings live Memory is optional read-only and independent of saved preferences" {
+    const Case = struct { memory: ?view.Memory, expected: ?[]const u8 };
+    var fixture: Fixture = .{};
+    var page: Self = .{ .backend = fixture.backend(), .version = "unreleased" };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    for ([_]bool{ false, true }) |unicode| for ([_]bool{ false, true }) |fail_read| for ([_]u16{ 46, 99 }) |width| {
+        fixture.unicode = unicode;
+        fixture.fail_read = fail_read;
+        try page.refresh();
+        const reads = fixture.read_calls;
+        for ([_]Case{
+            .{ .memory = null, .expected = null },
+            .{ .memory = .{ .rui = 38 * view.mib, .tools = null }, .expected = "Memory          rui 38 MB" },
+            .{ .memory = .{ .rui = 38 * view.mib, .tools = 120 * view.mib }, .expected = if (unicode) "Memory          rui 38 MB · tools 120 MB" else "Memory          rui 38 MB . tools 120 MB" },
+            .{ .memory = .{ .rui = 1024 * view.mib, .tools = null }, .expected = "Memory          rui 1.0 GB" },
+            .{ .memory = null, .expected = null },
+        }) |case| {
+            fixture.memory_value = case.memory;
+            const surface = try page.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
+            const body = surface.children[0].surface;
+            var text: std.Io.Writer.Allocating = .init(arena.allocator());
+            for (0..body.size.height) |y| {
+                for (0..body.size.width) |x| try text.writer.writeAll(body.readCell(@intCast(x), @intCast(y)).char.grapheme);
+                try text.writer.writeByte('\n');
+            }
+            if (case.expected) |expected| {
+                try std.testing.expect(std.mem.indexOf(u8, text.written(), expected) != null);
+            } else try std.testing.expect(std.mem.indexOf(u8, text.written(), "Memory") == null);
+            try std.testing.expectEqual(case.memory != null, page.fields[@backingInt(Row.memory)].visible);
+            try std.testing.expect(!page.fields[@backingInt(Row.memory)].selectable);
+            try std.testing.expect(std.mem.indexOf(u8, text.written(), "Version         unreleased") != null);
+            var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+            page.select(.version);
+            try press(&page, &ctx, vaxis.Key.down);
+            try std.testing.expectEqual(@as(usize, @backingInt(Row.keys)), page.panel.selected);
+            try press(&page, &ctx, vaxis.Key.up);
+            try std.testing.expectEqual(@as(usize, @backingInt(Row.version)), page.panel.selected);
+            try std.testing.expectEqual(reads, fixture.read_calls);
+            try std.testing.expectEqual(@as(usize, 0), fixture.save_calls);
+            _ = arena.reset(.retain_capacity);
+        }
     };
 }

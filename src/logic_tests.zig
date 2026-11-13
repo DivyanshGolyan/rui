@@ -75,6 +75,7 @@ const cores = .{
     .{ "message_admission.zig", @import("message_admission.zig") },
     .{ "message_agent_arguments.zig", @import("message_agent_arguments.zig") },
     .{ "message_observation.zig", @import("message_observation.zig") },
+    .{ "memory_text.zig", @import("memory_text.zig") },
     .{ "model_capability.zig", @import("model_capability.zig") },
     .{ "model_catalog.zig", @import("model_catalog.zig") },
     .{ "model_catalog_snapshot.zig", @import("model_catalog_snapshot.zig") },
@@ -441,9 +442,9 @@ test "overview benchmark: batched initial and refreshed listings at 1,000 and 10
             };
             list.rows = .{ .userdata = &state, .count = @intCast(overview_view.listLength(&state)), .rowFn = Source.row };
             list.selected = if (overview_view.selectedLine(&state)) |at| @intCast(at) else null;
-            _ = try list.widget().draw(.{ .arena = frame.allocator(), .min = .{}, .max = .{ .width = 200, .height = 53 }, .cell_size = .{} });
+            _ = try list.widget().draw(.{ .arena = frame.allocator(), .cell_arena = frame.allocator(), .min = .{}, .max = .{ .width = 200, .height = 53 }, .cell_size = .{} });
             const footer: @import("widgets/Footer.zig") = .{ .left = "", .right = overview_view.footerRight(&state), .notice = overview_view.footerNotice(&state) };
-            _ = try footer.widget().draw(.{ .arena = frame.allocator(), .min = .{}, .max = .{ .width = 200, .height = 1 }, .cell_size = .{} });
+            _ = try footer.widget().draw(.{ .arena = frame.allocator(), .cell_arena = frame.allocator(), .min = .{}, .max = .{ .width = 200, .height = 1 }, .cell_size = .{} });
             render_ns[run] = nanosecondsNow() - render_start;
             render_allocations = @max(render_allocations, counting.count);
             frame.deinit();
