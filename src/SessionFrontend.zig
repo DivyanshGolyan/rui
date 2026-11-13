@@ -4956,8 +4956,8 @@ test "app settings starts the overview's run and keeps the original submission; 
     const held = try HeldFrontend.create();
     defer held.destroy();
     var overview: ArchiveOverview = .{ .state = undefined };
-    try overview.state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
-    defer overview.state.deinit();
+    try overview.init();
+    defer overview.deinit();
     held.self.lender = overview.lender();
     const self = &held.self;
     const original = self.input.submitText("original indeterminate model input");
@@ -5072,8 +5072,8 @@ test "an Upgrade hold refuses commands without losing their drafts" {
         const held = try HeldFrontend.create();
         defer held.destroy();
         var overview: ArchiveOverview = .{ .state = undefined };
-        try overview.state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
-        defer overview.state.deinit();
+        try overview.init();
+        defer overview.deinit();
         held.self.lender = overview.lender();
         const self = &held.self;
         _ = try overview_view.step(&overview.state, .start_upgrade);
@@ -5138,6 +5138,15 @@ const ArchiveOverview = struct {
     archived: ?overview_view.Reference = null,
     requested: bool = true,
 
+    /// Starts the Overview in place: its lender points into `self`.
+    fn init(self: *ArchiveOverview) !void {
+        try self.state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
+    }
+
+    fn deinit(self: *ArchiveOverview) void {
+        self.state.deinit();
+    }
+
     fn step(raw: *anyopaque, work: protocol.session_work.Kind, input: overview_view.ConversationInput) !overview_view.ArchiveAdmission {
         const self: *ArchiveOverview = @ptrCast(@alignCast(raw));
         switch (input) {
@@ -5186,8 +5195,8 @@ test "one settled stop read updates the chat and its list row without a listing"
     const held = fixture.held;
     const self = &held.self;
     var overview: ArchiveOverview = .{ .state = undefined };
-    try overview.state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
-    defer overview.state.deinit();
+    try overview.init();
+    defer overview.deinit();
     _ = try overview_view.step(&overview.state, .{ .host = .{ .instance = @splat(0xab), .started_at = 1, .slots = 2, .slots_in_use = 0 } });
     const ref = "k7m2qx".*;
     const stopping: protocol.WorkState = .{ .stopping = .{ .since = 1 } };
@@ -5238,8 +5247,8 @@ test "Alt-A archives the open conversation at once without submitting or changin
         const held = try HeldFrontend.create();
         defer held.destroy();
         var overview: ArchiveOverview = .{ .state = undefined };
-        try overview.state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
-        defer overview.state.deinit();
+        try overview.init();
+        defer overview.deinit();
         held.self.lender = overview.lender();
         held.self.live.work.state = .{ .working = .{ .since = 1 } };
         const ticket: ?Input.Ticket = if (original) held.self.input.submitText("retained original") else null;
@@ -5265,8 +5274,8 @@ test "Alt-A and Ctrl-X during opening forward no intent and keep the draft" {
         const held = try HeldFrontend.create();
         defer held.destroy();
         var overview: ArchiveOverview = .{ .state = undefined };
-        try overview.state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
-        defer overview.state.deinit();
+        try overview.init();
+        defer overview.deinit();
         held.self.lender = overview.lender();
         try sendKeys(&held.self, "keep draft\x1b[D");
         const revision = held.self.input.revision;
@@ -5296,8 +5305,8 @@ test "conversation slash archive archives a busy Session at once and consumes on
         const held = try HeldFrontend.create();
         defer held.destroy();
         var overview: ArchiveOverview = .{ .state = undefined };
-        try overview.state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
-        defer overview.state.deinit();
+        try overview.init();
+        defer overview.deinit();
         held.self.lender = overview.lender();
         held.self.command = UnusedArchiveCommand.command;
         UnusedArchiveCommand.calls = 0;
@@ -5327,8 +5336,8 @@ test "conversation slash and shortcut archive restore share one pending or unkno
         const held = try HeldFrontend.create();
         defer held.destroy();
         var overview: ArchiveOverview = .{ .state = undefined };
-        try overview.state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
-        defer overview.state.deinit();
+        try overview.init();
+        defer overview.deinit();
         held.self.lender = overview.lender();
         held.self.command = UnusedArchiveCommand.command;
         UnusedArchiveCommand.calls = 0;
@@ -5360,8 +5369,8 @@ test "Ctrl-X stops at once beside a typed slash archive, and Enter then archives
         const held = try HeldFrontend.create();
         defer held.destroy();
         var overview: ArchiveOverview = .{ .state = undefined };
-        try overview.state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
-        defer overview.state.deinit();
+        try overview.init();
+        defer overview.deinit();
         held.self.lender = overview.lender();
         held.self.live.work.state = .{ .working = .{ .since = 1 } };
         try sendKeys(&held.self, "/archive\x18");
@@ -5399,8 +5408,8 @@ test "upgrade holds classify every lender intent before forwarding and allow loc
         const held = try HeldFrontend.create();
         defer held.destroy();
         var overview: ArchiveOverview = .{ .state = undefined };
-        try overview.state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
-        defer overview.state.deinit();
+        try overview.init();
+        defer overview.deinit();
         held.self.lender = overview.lender();
         overview.state.upgrade = heldUpgrade(hold, .{ .blocked, .reobserving });
         try held.self.converse(input);
@@ -5419,8 +5428,8 @@ test "upgrade holds refuse archive shortcuts and slash commands without consumin
         const held = try HeldFrontend.create();
         defer held.destroy();
         var overview: ArchiveOverview = .{ .state = undefined };
-        try overview.state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
-        defer overview.state.deinit();
+        try overview.init();
+        defer overview.deinit();
         held.self.lender = overview.lender();
         held.self.live.work.state = switch (work) {
             .idle => .{ .idle = .{ .since = 1 } },
@@ -5469,8 +5478,8 @@ test "upgrade reobservation retains a refused archive command from the completio
         const held = try HeldFrontend.create();
         defer held.destroy();
         var overview: ArchiveOverview = .{ .state = undefined };
-        try overview.state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
-        defer overview.state.deinit();
+        try overview.init();
+        defer overview.deinit();
         held.self.lender = overview.lender();
         try sendKeys(&held.self, line);
         try held.settle();
@@ -8677,8 +8686,8 @@ test "chat info Archive delegates once and settles only its exact Session answer
         const held = try HeldFrontend.createWithDrafts("k7m2qx", null);
         defer held.destroy();
         var overview: ArchiveOverview = .{ .state = undefined };
-        try overview.state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
-        defer overview.state.deinit();
+        try overview.init();
+        defer overview.deinit();
         held.self.lender = overview.lender();
         try captureInfo(held, "Fix retry deadline");
         try held.keys("draft\x1bi");
@@ -8712,8 +8721,8 @@ test "chat info archive admission refuses full and unresolved ledgers without tr
         const held = try HeldFrontend.createWithDrafts("k7m2qx", null);
         defer held.destroy();
         var overview: ArchiveOverview = .{ .state = undefined };
-        try overview.state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
-        defer overview.state.deinit();
+        try overview.init();
+        defer overview.deinit();
         held.self.lender = overview.lender();
         if (full) {
             for (&overview.state.requests, 0..) |*request, i| {
@@ -8941,8 +8950,8 @@ test "chat info retains Session stop and archive bindings in full-page and stand
         const held = try HeldFrontend.createWithDrafts("k7m2qx", null);
         defer held.destroy();
         var overview: ArchiveOverview = .{ .state = undefined };
-        try overview.state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
-        defer overview.state.deinit();
+        try overview.init();
+        defer overview.deinit();
         held.self.lender = overview.lender();
         held.self.live.work.state = .{ .working = .{ .since = 1 } };
         try captureInfo(held, "Fix retry deadline");
