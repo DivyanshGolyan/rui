@@ -16217,6 +16217,55 @@ test "runner action seam covers selection admission input settlement stop and re
     }.run);
 }
 
+test "find_tools and the skill tool leave a call whose Session owes a stop to that stop" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var path: [protocol.max_workspace_bytes]u8 = undefined;
+            var create = try completeConfiguration("owed-calls", "", try canonicalCwd(std.testing.io, &path), "model-a");
+            create.configuration.tools = try .of(&.{ "find_tools", "skill" });
+            const session = (try storage.configure(&create, .{})).accepted.session;
+            // The Session is a child, so its parent's stop makes it owe one.
+            const root = try configureTestSession(&storage, "owed-calls-root");
+            try store_testing.exec(&storage, "UPDATE session SET parent_ref=?1 WHERE session_ref=?2", .{ root.slice(), session.slice() });
+            try submitTestMessage(&storage, &tmp, "owed-calls-input", "owed-calls-key", session.slice(), "find and invoke");
+            const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            const calls = [_]TestingCall{
+                .{ .item_id = "find", .name = "find_tools", .encoded_call_id = "find", .decoded_call_id = "find", .encoded_arguments = "{\\\"words\\\":\\\"skill\\\"}", .decoded_arguments = "{\"words\":\"skill\"}" },
+                .{ .item_id = "invoke", .name = "skill", .encoded_call_id = "invoke", .decoded_call_id = "invoke", .encoded_arguments = "{\\\"operation\\\":\\\"reload\\\"}", .decoded_arguments = "{\"operation\":\"reload\"}" },
+            };
+            try settleCallsForTesting(&storage, &tmp, model, "owed-calls", &calls);
+            const find = (try storage.nextCoreWork()).?.action;
+            try std.testing.expect(find.tool == .find_tools);
+            var skill = find.binding;
+            skill.action_id = try store_testing.queryU64(&storage, "SELECT action_id FROM action_operation WHERE parent_operation_id=?1 AND action_id<>?2", .{ find.binding.parent_operation_id, find.binding.action_id });
+            var stop = try completeSessionStop("owed-calls-root-stop", root.slice());
+            try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+            const open_sql = "SELECT count(*) FROM action_operation WHERE parent_operation_id=?1 AND resolution_code IS NULL";
+            try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, open_sql, .{model.operation_id}));
+            const revisions = try store_testing.queryU64(&storage, "SELECT count(*) FROM session_revision WHERE session_ref=?1", .{session.slice()});
+
+            var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer arena.deinit();
+            var words: @import("../find_tools_words.zig").FindTools = .{ .count = 1 };
+            words.words[0] = "skill";
+            try std.testing.expect(!try storage.findTools(find.binding, arena.allocator(), &words, null, .{}));
+            const invocation: skills_fixture_domain.Capture = .{ .invocation = "a skill's body" };
+            try std.testing.expect(!try storage.settleSkillTool(skill, arena.allocator(), &invocation, .{}));
+            // Neither call saved a command, a revision or a resolution.
+            try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, open_sql, .{model.operation_id}));
+            try std.testing.expectEqual(revisions, try store_testing.queryU64(&storage, "SELECT count(*) FROM session_revision WHERE session_ref=?1", .{session.slice()}));
+            const key = try std.fmt.allocPrint(arena.allocator(), "rui.core/find_tools/{d}", .{find.binding.action_id});
+            try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM core_command WHERE command_key=?1", .{key}));
+            try std.testing.expect(!storage.isFenced());
+        }
+    }.run);
+}
+
 test "MCP read-only ordering uses frozen offers and admits read waves between writes" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {

@@ -4,7 +4,8 @@
 const Bounded = @import("../../bounded.zig").Bounded;
 const session_id = @import("../../session_id.zig");
 const rsql = @import("../rsql.zig");
-const Faults = @import("../Store.zig").Faults;
+const store_core = @import("../Store.zig");
+const transition = @import("../transition.zig");
 
 pub const Kind = enum(u8) { approval = 1, ending = 2 };
 
@@ -47,25 +48,46 @@ const position = rsql.Write(.{
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
-/// Delivers once, retaining both the delivered row and the next obligation.
-/// Repeating an already delivered id is a no-op, including after recovery.
-pub fn deliver(a: anytype, forward_id: u64, faults: Faults) !bool {
-    var facts: pending.Result = undefined;
-    a.read(pending, .{ .forward_id = forward_id }, &facts);
-    try a.run();
-    const found = facts orelse {
-        try a.abandon(.{});
-        return false;
-    };
-    const positions = try a.positions(found.session);
-    a.write(position, .{ .forward_id = forward_id, .position = try positions.take(1) });
-    const kind: Kind = switch (found.kind) {
-        1 => .approval,
-        2 => .ending,
-        else => return error.CorruptStore,
-    };
-    try queue(a, &found.session.ref, found.child_ref.slice(), kind, found.source_id.get());
-    if (faults.before_commit) return error.InjectedCommitFailure;
-    try a.commit();
-    return true;
-}
+/// Delivers forward row `forward_id` once, retaining both the delivered
+/// row and the next obligation, in one transaction. Round `.pending` reads
+/// the row and its target Session; the commit round positions it and
+/// queues the next hop. Repeating an already delivered id is a no-op,
+/// including after recovery: it answers false.
+pub const Deliver = struct {
+    pub const rounds = transition.rounds(.{ .pending = .{.always} });
+    pub const round_budget = 2;
+    pub const commit: transition.Commit = .transaction;
+    pub const begin: ?rounds.At = .pending;
+    pub const Input = struct { forward_id: u64 };
+    pub const Result = bool;
+    pub const Ordinary = store_core.Ordinary.none;
+    pub const Guards = error{};
+    pub const Declined = error{};
+
+    input: Input,
+    /// The next hop's insert reads the Session's reference in place.
+    facts: pending.Result = undefined,
+
+    pub fn step(t: *Deliver, r: *transition.Round(Deliver), ran: ?rounds.At) !transition.Next(Deliver) {
+        const forward_id = t.input.forward_id;
+        if (ran == null) {
+            r.read(pending, .{ .forward_id = forward_id }, &t.facts);
+            return .{ .round = .pending };
+        }
+        const found = if (t.facts) |*row| row else return .{ .done = false };
+        const positions = try r.positions(found.session);
+        r.write(position, .{ .forward_id = forward_id, .position = try positions.take(1) });
+        const kind: Kind = switch (found.kind) {
+            1 => .approval,
+            2 => .ending,
+            else => return error.CorruptStore,
+        };
+        try queue(r, &found.session.ref, found.child_ref.slice(), kind, found.source_id.get());
+        if (r.faults().before_commit) return error.InjectedCommitFailure;
+        return .commit;
+    }
+
+    pub fn committed(_: *const Deliver) Result {
+        return true;
+    }
+};
