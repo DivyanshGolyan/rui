@@ -10,16 +10,7 @@ pub const ActionAttemptBinding = struct {
     action_id: u64,
 };
 
-pub const ActionDispatchPermit = struct {
-    binding: ActionAttemptBinding,
-    available: bool = true,
-
-    pub fn consume(self: *ActionDispatchPermit) !ActionAttemptBinding {
-        if (!self.available) return error.DispatchPermitConsumed;
-        self.available = false;
-        return self.binding;
-    }
-};
+pub const ActionDispatchPermit = DispatchPermitOf(ActionAttemptBinding);
 
 pub const AttemptBinding = struct {
     turn_id: u64,
@@ -27,13 +18,18 @@ pub const AttemptBinding = struct {
     attempt_ordinal: u64,
 };
 
-pub const DispatchPermit = struct {
-    binding: AttemptBinding,
-    available: bool = true,
+pub const DispatchPermit = DispatchPermitOf(AttemptBinding);
 
-    pub fn consume(self: *DispatchPermit) !AttemptBinding {
-        if (!self.available) return error.DispatchPermitConsumed;
-        self.available = false;
-        return self.binding;
-    }
-};
+/// A one-shot permit: `consume` yields `binding` once, then refuses.
+fn DispatchPermitOf(comptime Binding: type) type {
+    return struct {
+        binding: Binding,
+        available: bool = true,
+
+        pub fn consume(self: *@This()) error{DispatchPermitConsumed}!Binding {
+            if (!self.available) return error.DispatchPermitConsumed;
+            self.available = false;
+            return self.binding;
+        }
+    };
+}
