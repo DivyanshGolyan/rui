@@ -672,7 +672,6 @@ test "store.mysql live admission refuses statement binlogging" {
 }
 
 const store_core = @import("Store.zig");
-const store_access = @import("access.zig");
 const transition = @import("transition.zig");
 const TestingAsk = @import("tests.zig").TestingAsk;
 const TestingScript = @import("tests.zig").TestingScript;
