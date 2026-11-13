@@ -20,7 +20,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 73;
+pub const schema_version: u32 = 74;
 
 pub const IdentityMismatch = struct {
     saved_selector: Bounded(store_path.max_bytes) = .{},
@@ -682,6 +682,15 @@ pub const migrations = [_]Migration{
             "ALTER TABLE session ADD COLUMN session_obligation_parent_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN obligation_since IS NOT NULL THEN parent_ref END) STORED AFTER obligation_since, ADD INDEX session_obligation_parent(session_obligation_parent_lead,obligation_since,session_ref)",
             "CREATE INDEX session_forward_owed_message ON session_forward(target_ref,message_delivered)",
             "WITH RECURSIVE own_owed(session_ref,since) AS (SELECT t.session_ref,m.admitted_at AS since FROM turn t JOIN message_admission m ON m.admission_id=t.first_admission_id WHERE t.outcome_code IS NULL UNION SELECT m.session_ref,m.admitted_at FROM message_admission m WHERE m.turn_id IS NULL AND m.admission_id>coalesce((SELECT admission_cutoff FROM session_stop WHERE session_ref=m.session_ref ORDER BY admission_cutoff DESC LIMIT 1),0) UNION SELECT f.target_ref,m.admitted_at FROM session_forward f LEFT JOIN action_operation a ON f.kind=1 AND a.action_id=f.source_id LEFT JOIN model_operation op ON op.operation_id=a.parent_operation_id JOIN turn t ON t.turn_id=CASE WHEN f.kind=2 THEN f.source_id ELSE op.turn_id END JOIN message_admission m ON m.admission_id=t.first_admission_id WHERE f.position IS NULL OR f.message_delivered=0),owed(session_ref,since) AS (SELECT session_ref,since FROM own_owed UNION SELECT s.parent_ref,o.since FROM owed o JOIN session s ON s.session_ref=o.session_ref WHERE s.parent_ref IS NOT NULL) UPDATE session s JOIN (SELECT session_ref,min(since) AS since FROM owed GROUP BY session_ref) o ON o.session_ref=s.session_ref SET s.obligation_since=o.since",
+        },
+    },
+    .{
+        .from = 73,
+        .sqlite = &.{
+            "UPDATE store_meta SET meta_value='17' WHERE meta_key='wire_version' AND meta_value='16'",
+        },
+        .mysql = &.{
+            "UPDATE store_meta SET meta_value='17' WHERE meta_key='wire_version' AND meta_value='16'",
         },
     },
 };
@@ -2961,6 +2970,17 @@ test "MySQL sessions read literals as rsql copies them, and strictly" {
         } else false;
         try std.testing.expect(found);
     }
+}
+
+test "schema 74 migration updates only wire metadata on SQLite and MySQL" {
+    const step = migrations[73 - migration_baseline];
+    try std.testing.expectEqual(@as(u32, 73), step.from);
+    inline for (.{ rsql.Dialect.sqlite, rsql.Dialect.mysql }) |dialect| {
+        const statements = if (dialect == .sqlite) step.sqlite else step.mysql;
+        try std.testing.expectEqual(@as(usize, 1), statements.len);
+        for (statements) |statement| try std.testing.expectEqualStrings("UPDATE store_meta SET meta_value='17' WHERE meta_key='wire_version' AND meta_value='16'", statement);
+    }
+    try std.testing.expectEqualStrings("UPDATE store_meta SET meta_value='17' WHERE meta_key='wire_version' AND meta_value='16';\n", mysqlMigration(73));
 }
 
 test "schema 72 migration updates only wire metadata on SQLite and MySQL" {
