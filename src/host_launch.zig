@@ -117,7 +117,8 @@ pub const max_report_bytes = 4 * protocol.max_store_bytes + Result.max_startup_b
 /// The detailed terminal presentation, shared by shell launch and departure
 /// after screen restoration. No output or terminal custody is acquired here.
 pub fn writeDiagnostics(result: *const Result, writer: *std.Io.Writer, shown: usize) !void {
-    if (result.warning != null) try writer.writeAll(invalid_base_url ++ "; this Host starts without OpenAI.\n");
+    // The child states the same warning in its transcript; show it once.
+    if (result.warning != null and std.mem.indexOf(u8, result.startup(), invalid_base_url) == null) try writer.writeAll(invalid_base_url ++ "; this Host starts without OpenAI.\n");
     switch (result.outcome) {
         .ready => {
             if (result.startup_len != 0) try writer.writeAll(result.startup()[shown..]);

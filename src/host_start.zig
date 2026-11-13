@@ -1282,3 +1282,51 @@ pub noinline fn spawn(init: std.process.Init, request: Spawn, ops: Ops, progress
     }
     return launchFailure(result, .readiness_timeout, error.HostReadinessUnconfirmed, paths.store.slice());
 }
+
+test "Host start starter refuses settings that move the Host away from its directory without resolving secrets" {
+    const gpa = std.testing.allocator;
+    var environment: std.process.Environ.Map = .init(gpa);
+    defer environment.deinit();
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const init = initForTest(&arena, &environment);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const Case = struct { path: []const u8, value: []const u8, refused: ?[]const u8 };
+    var other_root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var other = try tmp.dir.createDirPathOpen(init.io, "other", .{ .permissions = .fromMode(0o700) });
+    defer other.close(init.io);
+    const elsewhere = other_root[0..try other.realPath(init.io, &other_root)];
+    for ([_]Case{
+        .{ .path = "tools.bash.timeoutMs", .value = "1000", .refused = null },
+        .{ .path = "execution.paused", .value = "true", .refused = null },
+        .{ .path = "interface.dir", .value = elsewhere, .refused = "interface.dir:" },
+        .{ .path = "store.mysql.url", .value = "env:HOST_START_NEVER_RESOLVED", .refused = "store.mysql:" },
+        .{ .path = "store.sqlite.dir", .value = elsewhere, .refused = "store.sqlite.dir:" },
+        .{ .path = "store.sqlite.dir", .value = "SELF", .refused = null },
+    }, 0..) |case, index| {
+        var name: [16]u8 = undefined;
+        var host = try tmp.dir.createDirPathOpen(init.io, try std.fmt.bufPrint(&name, "host{d}", .{index}), .{ .permissions = .fromMode(0o700) });
+        defer host.close(init.io);
+        var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const dir = root[0..try host.realPath(init.io, &root)];
+        var failure: start_report.Failure = undefined;
+        try checkReachable(init, dir, .{ .dir = dir }, &failure);
+        const value = if (std.mem.eql(u8, case.value, "SELF")) dir else case.value;
+        // Saved and one-off assignments reach the same verdict.
+        const assignment = try std.fmt.allocPrint(arena.allocator(), "{s}={s}", .{ case.path, value });
+        const once = checkReachable(init, dir, .{ .dir = dir, .assignments = &.{assignment} }, &failure);
+        try savedEdit(init, dir, case.path, value, &failure);
+        const saved_result = checkReachable(init, dir, .{ .dir = dir }, &failure);
+        if (case.refused) |prefix| {
+            try std.testing.expectError(error.SettingsInvalid, once);
+            try std.testing.expectError(error.SettingsInvalid, saved_result);
+            try std.testing.expectEqual(start_report.StartError.settings_invalid, failure.code);
+            try std.testing.expect(std.mem.startsWith(u8, failure.message.slice(), prefix));
+            try std.testing.expect(std.mem.indexOf(u8, failure.message.slice(), "rui host serve --store DIR") != null);
+        } else {
+            try once;
+            try saved_result;
+        }
+    }
+}
