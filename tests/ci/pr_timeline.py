@@ -25,11 +25,13 @@ Adjacent durations are signed minutes: stages can occur out of the listed order,
 and a missing endpoint stays blank rather than bridging to a different stage.
 
 Red-main minutes read main_build.py's record instead of judging runs again:
-main is red from the creation to the close of each "Main build red" issue (the
-ci-red label and main_build.MARKER in its body), and still red now while one is
-open. main_build.py alone decides red and green (a stale rerun of an older SHA
-changes nothing; the build job, not the whole run, is the result), so this
-report agrees with that issue by construction. Intervals split at UTC midnight
+main is red while a "Main build red" issue (the ci-red label and
+main_build.MARKER in its body) is open: from its creation, through its own
+closed and reopened events in time order, and still red now while one is open.
+main_build.py alone decides red and green (a stale rerun of an older SHA
+changes nothing; the build job, not the whole run, is the result), and a
+closed stretch counts green even when the issue is later reopened, so this
+report agrees with that issue's open/closed history by construction. Intervals split at UTC midnight
 and today's end at report time. The record starts with #1430's merge
 (RED_MAIN_KNOWN_FROM, 2026-11-13T11:56:38Z): a day that starts before it is
 unknown, never zero red minutes.
@@ -288,13 +290,26 @@ def red_main(api):
     """main's red intervals as (opened, closed or None) from main_build.py's issues.
 
     Each "Main build red" issue (ci-red label, main_build.MARKER in its body)
-    is open exactly while main_build.py judges main red; an open one is red
+    is open exactly while main_build.py judges main red. Its intervals come
+    from its own record: open at created_at, then each closed event ends an
+    interval and each reopened event starts one; an issue open now is red
     until now.
     """
     result = []
     for row in pages(api, f"repos/{REPO}/issues?state=all&labels={quote(CI_RED_LABEL)}"):
-        if "pull_request" not in row and RED_MAIN_MARKER in (row.get("body") or ""):
-            result.append((utc(row["created_at"]), utc(row["closed_at"]) if row["state"] == "closed" else None))
+        if "pull_request" in row or RED_MAIN_MARKER not in (row.get("body") or ""):
+            continue
+        opened = utc(row["created_at"])
+        events = pages(api, f"repos/{REPO}/issues/{row['number']}/events?")
+        for event in sorted((e for e in events if e["event"] in ("closed", "reopened")),
+                            key=lambda e: instant(e["created_at"])):
+            if event["event"] == "closed" and opened is not None:
+                result.append((opened, utc(event["created_at"])))
+                opened = None
+            elif event["event"] == "reopened" and opened is None:
+                opened = utc(event["created_at"])
+        if opened is not None:
+            result.append((opened, None))
     return sorted(result, key=lambda interval: instant(interval[0]))
 
 

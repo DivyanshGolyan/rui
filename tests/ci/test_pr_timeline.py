@@ -2,6 +2,7 @@ import contextlib
 import copy
 import io
 import json
+import re
 from pathlib import Path
 import unittest
 from unittest.mock import patch
@@ -306,32 +307,65 @@ class TimelineTest(unittest.TestCase):
         # Both days start before main_build.py's record: unknown, not zero.
         self.assertTrue(all(day["red_main_minutes"] is None for day in days))
 
-    def issue(self, number, created, closed=None, state=None, body=MARKER, **extra):
-        return {"number": number, "created_at": created, "closed_at": closed,
-                "state": state or ("closed" if closed else "open"), "body": body, **extra}
+    def issue(self, number, created, *events, body=MARKER, **extra):
+        """A ci-red issue row plus its closed/reopened events as (event, at) pairs."""
+        closes = [at for event, at in events if event == "closed"]
+        state = "open" if not events or events[-1][0] == "reopened" else "closed"
+        row = {"number": number, "created_at": created, "closed_at": closes[-1] if closes else None,
+               "state": state, "body": body, **extra}
+        return row, [{"event": event, "created_at": at} for event, at in events]
 
-    def test_red_main_is_main_build_issues_only(self):
-        rows = [self.issue(1, "2026-11-14T23:00:00Z", "2026-11-15T01:30:00Z"),
-                self.issue(2, "2026-11-15T11:00:00Z"),
-                # Reopened by hand: open again, so red until now.
-                self.issue(3, "2026-11-14T02:00:00Z", "2026-11-14T03:00:00Z", state="open"),
-                # report_issue's per-signature ci-red issue: not main's state.
-                self.issue(4, "2026-11-14T00:00:00Z", body="<!-- ci-signature: {} -->"),
-                self.issue(5, "2026-11-14T00:00:00Z", body=None),
-                self.issue(6, "2026-11-14T00:00:00Z", pull_request={"url": "..."})]
+    def red_main_api(self, issues):
+        rows = [row for row, _ in issues]
+        events = {row["number"]: history for row, history in issues}
         calls = []
         def api(method, path):
             # Runs and jobs are never read: a stale rerun of an older SHA or a
             # failed report job cannot move red; only main_build.py's issue can.
             self.assertEqual(method, "GET")
-            self.assertTrue(path.startswith(f"repos/{timeline.REPO}/issues?"), path)
             calls.append(path)
-            return rows
+            if path.startswith(f"repos/{timeline.REPO}/issues?"):
+                return rows
+            match = re.fullmatch(rf"repos/{timeline.REPO}/issues/(\d+)/events\?&per_page=100&page=1", path)
+            self.assertIsNotNone(match, path)
+            # Unrelated events (labels, mentions) sit beside the transitions.
+            return [{"event": "labeled", "created_at": "2026-11-14T00:00:01Z"}, *events[int(match[1])]]
+        return api, calls
+
+    def test_red_main_is_main_build_issues_only(self):
+        api, calls = self.red_main_api([
+            self.issue(1, "2026-11-14T23:00:00Z", ("closed", "2026-11-15T01:30:00Z")),
+            self.issue(2, "2026-11-15T11:00:00Z"),
+            # Closed, then reopened by hand: green while closed, red again until now.
+            self.issue(3, "2026-11-14T02:00:00Z", ("closed", "2026-11-14T03:00:00Z"),
+                       ("reopened", "2026-11-14T05:00:00Z")),
+            # report_issue's per-signature ci-red issue: not main's state.
+            self.issue(4, "2026-11-14T00:00:00Z", body="<!-- ci-signature: {} -->"),
+            self.issue(5, "2026-11-14T00:00:00Z", body=None),
+            self.issue(6, "2026-11-14T00:00:00Z", pull_request={"url": "..."})])
         self.assertEqual(timeline.red_main(api), [
-            ("2026-11-14T02:00:00Z", None), ("2026-11-14T23:00:00Z", "2026-11-15T01:30:00Z"),
-            ("2026-11-15T11:00:00Z", None)])
+            ("2026-11-14T02:00:00Z", "2026-11-14T03:00:00Z"), ("2026-11-14T05:00:00Z", None),
+            ("2026-11-14T23:00:00Z", "2026-11-15T01:30:00Z"), ("2026-11-15T11:00:00Z", None)])
         self.assertIn("state=all", calls[0])
         self.assertIn(f"labels={LABEL}", calls[0])
+        self.assertEqual(sorted(path.split("/")[4] for path in calls[1:]), ["1", "2", "3"])
+
+    def test_red_main_counts_a_reopened_issue_only_while_open(self):
+        # main_build.py opens at 10:00, a green build closes at 11:00, a hand
+        # reopen at 15:00, the next green build closes at 15:30: 90 red minutes.
+        api, _ = self.red_main_api([self.issue(
+            1, "2026-11-14T10:00:00Z", ("reopened", "2026-11-14T15:00:00Z"),
+            ("closed", "2026-11-14T15:30:00Z"), ("closed", "2026-11-14T11:00:00Z"))])
+        red = timeline.red_main(api)
+        self.assertEqual(red, [("2026-11-14T10:00:00Z", "2026-11-14T11:00:00Z"),
+                               ("2026-11-14T15:00:00Z", "2026-11-14T15:30:00Z")])
+        self.assertEqual(timeline.daily([], "2026-11-14", "2026-11-14T20:00:00Z", red)[0]["red_main_minutes"], 90)
+        # Reopened and still open: red from the reopen until the report.
+        api, _ = self.red_main_api([self.issue(
+            1, "2026-11-14T10:00:00Z", ("closed", "2026-11-14T11:00:00Z"), ("reopened", "2026-11-14T15:00:00Z"))])
+        red = timeline.red_main(api)
+        self.assertEqual(red, [("2026-11-14T10:00:00Z", "2026-11-14T11:00:00Z"), ("2026-11-14T15:00:00Z", None)])
+        self.assertEqual(timeline.daily([], "2026-11-14", "2026-11-14T20:00:00Z", red)[0]["red_main_minutes"], 360)
 
     def test_red_main_minutes_split_midnight_clip_today_and_unknown_before_record(self):
         red = [("2026-11-12T10:00:00Z", "2026-11-14T00:30:00Z"),  # Spans the record's start.
