@@ -938,6 +938,15 @@ while True:
         self.assertIn({"wait": "Docs build"}, state["steps"])
         self.assertEqual(state["expect"], ["Docs build", "Benchmark idle memory", "Settings"])
 
+    def test_fixture_summary_reads_current_and_historical_bash_sections(self):
+        for label in ("stdout:", "stdout tail:"):
+            with self.subTest(label=label):
+                result = {"output": f"Bash succeeded. Exit code: 0.\n{label}\nprinted\nstdout:\nstdout tail:\n"}
+                before = result.copy()
+                self.assertEqual(self.helper["fixture_bash_stdout"](result), "printed\nstdout:\nstdout tail:")
+                self.assertEqual(result, before)
+        self.assertEqual(self.helper["fixture_bash_stdout"]({}), "")
+
     def test_default_frames_use_plain_endings_and_active_tool_marks(self):
         scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
         states = {state["name"]: state for state in scenario["states"]}
@@ -963,10 +972,10 @@ while True:
                 self.assertTrue(any(text.startswith(("✓ ", "× ")) for text in state["expect"]))
                 self.assertIn({"gone": "▸"}, state["steps"])
                 status = "    Bash succeeded. Exit code: 0." if name == "tool-open-long" else "    Bash failed. Exit code: 1."
-                label = "    stdout tail:" if name == "tool-open-long" else "    stderr tail:"
+                label = "    stdout:" if name == "tool-open-long" else "    stderr:"
                 self.assertIn(status, state["expect"])
                 self.assertIn(label, state["expect"])
-                self.assertFalse(any(step.get("gone", "").startswith(("Bash ", "stdout tail:", "stderr tail:")) for step in state["steps"]))
+                self.assertFalse(any(step.get("gone", "").startswith(("Bash ", "stdout:", "stderr:")) for step in state["steps"]))
                 self.assertTrue(any(text.startswith("    ") for text in state["expect"]))
                 # Do not capture the asynchronous opening notice as the finished fold.
                 self.assertIn({"gone": "Opening tool output…"}, state["steps"])
@@ -981,7 +990,9 @@ while True:
         self.assertNotIn("help", states)
         self.assertIn("ctrl+o   tool output", states["keys"]["expect"])
         self.assertIn("ctrl+c   leave", states["keys"]["expect"])
-        self.assertEqual(len(states["keys"]["expect"]), 11)
+        self.assertEqual(len(states["keys"]["expect"]), 14)
+        for meaning in ("next panel/footer field", "previous panel/footer field", "list/chat · info actions"):
+            self.assertIn(meaning, states["keys"]["expect"])
         self.assertIn("/help", states["keys"]["absent"])
         self.assertIn("× Fail with exit 127 · 127", states["chat"]["expect"])
 
@@ -994,7 +1005,7 @@ while True:
         self.assertEqual(state["steps"][:13], [
             {"wait": "The project has a README"},
             {"keys": ["C-o"]},
-            {"wait": "    stderr tail:"},
+            {"wait": "    stderr:"},
             {"gone": "Opening tool output…"},
             {"keys": ["PgDn"]},
             {"wait": "    unknown option --help"},
@@ -1008,7 +1019,7 @@ while True:
         ])
         for text in ("✓ List project files", "    README.md", "    src",
                      "× Fail with exit 127 · 127", "× Fail with an excerpt · 1",
-                     "    Bash succeeded. Exit code: 0.", "    stdout tail:", "    Bash failed. Exit code: 1.", "    stderr tail:",
+                     "    Bash succeeded. Exit code: 0.", "    stdout:", "    Bash failed. Exit code: 1.", "    stderr:",
                      "    usage: example", "    unknown option --help"):
             self.assertIn(text, state["expect"])
 
@@ -1518,6 +1529,48 @@ while True:
                 if ok:
                     self.assertNotIn("This Session", (out / record["files"]["txt"]).read_text())
                     self.assertIn("New Sessions", (out / record["files"]["txt"]).read_text())
+
+    def test_background_expectations_validate_before_launch(self):
+        for value in ({"› Type a task": "#e6ddc8"}, {"New Session": "#ABCDEF"}, {}):
+            data = self.scenario()
+            data["states"][0]["expect_background"] = value
+            self.assertEqual(self.helper["validate_scenario"](data)["states"][0]["expect_background"], value)
+        for value in (None, [], "#ffffff", {"": "#ffffff"}, {"a\nb": "#ffffff"},
+                      {"a\rb": "#ffffff"}, {"a\0b": "#ffffff"}, {"x": "ffffff"},
+                      {"x": "#fff"}, {"x": "#gggggg"}, {"x": None}):
+            data = self.scenario()
+            data["states"][0]["expect_background"] = value
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "expect_background"):
+                self.helper["validate_scenario"](data)
+
+    def test_background_assertion_checks_committed_marker_cells_at_both_widths(self):
+        marker = "› Type a task"
+        for color, ground in (("e6ddc8", "f3eee2"), ("1a2246", "121933")):
+            for width, prefix in ((140, "sidebar │ "), (46, " ")):
+                for bad in (None, 0, len(marker) - 1):
+                    with self.subTest(color=color, width=width, bad=bad), tempfile.TemporaryDirectory() as temp:
+                        cells = tuple(Cell(char, None, False, bg=color if index != bad else ground)
+                                      for index, char in enumerate(marker))
+                        row = tuple(Cell(char, None, False, bg=ground) for char in prefix) + cells
+                        frame = Frame(width, 30, Cursor(2, 3), False, (row,), ground, "d4cebf", "d4cebf")
+                        state = {"name": "input", "steps": [], "expect": [marker],
+                                 "expect_background": {marker: "#" + color}}
+                        terminal = types.SimpleNamespace(frame=frame)
+                        run = types.SimpleNamespace(meta={"sha": "a" * 40})
+                        captured = self.helper["frame_capture"](run, terminal, Path(temp), state, (width, 30), None)
+                        self.assertEqual(captured["ok"], bad is None)
+                        self.assertEqual(captured["reason"],
+                                         None if bad is None else f"{marker!r} must have background=#{color}")
+                        self.assertTrue((Path(temp) / captured["files"]["txt"]).exists())
+                        # Style is a capture verdict: readiness never waits on colour.
+                        observed = []
+                        terminal.wait = lambda check, *_args, **_kw: observed.append(check(
+                            types.SimpleNamespace(completed=frame.text, frame=frame)))
+                        self.helper["frame_ready"](terminal, state)
+                        self.assertEqual(observed, [True])
+                        self.assertEqual(self.helper["frame_background_failure"](
+                            {"expect_background": {"missing": "#" + color}}, frame),
+                            "missing background specimen 'missing'")
 
     def test_capture_expectations_over_sizes_and_state_transitions(self):
         capture = self.helper["frame_capture"]

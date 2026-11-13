@@ -607,11 +607,15 @@ fn infoBackend(self: *Self) ChatInfo.Backend {
             const frontend = owner(raw);
             return if (frontend.lender.models) |read_models| read_models(frontend.lender.context) else .{};
         }
+        fn copied(raw: *anyopaque) bool {
+            const frontend = owner(raw);
+            return frontend.shown_notice.showsPanelCopy(frontend.nowMs());
+        }
         fn caps(raw: *anyopaque) overview_view.Caps {
             return owner(raw).app_caps;
         }
     };
-    return .{ .context = self, .read = Backend.read, .configure = Backend.configure, .archive = Backend.archive, .copy_last_answer = Backend.copy, .state = Backend.state, .models = Backend.models, .caps = Backend.caps };
+    return .{ .context = self, .read = Backend.read, .configure = Backend.configure, .archive = Backend.archive, .copy_last_answer = Backend.copy, .state = Backend.state, .models = Backend.models, .caps = Backend.caps, .copied = Backend.copied };
 }
 
 /// The archive owner delivers its answer to the panel's one outstanding effect.
@@ -897,6 +901,9 @@ fn appKey(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event, delivery:
             try self.showSubmissionFailure();
         },
         .perform => |action| try self.perform(action),
+        // Left on an empty draft: the list beside a wide chat takes keys and
+        // the chat stays. With no list beside it, Left leaves as Esc does.
+        .back_to_list => if (!try self.app_hooks.root.focusList(ctx)) try self.perform(.close),
         .open_choice => try self.startFooterChoice(ctx),
         .start_host => {
             const host = self.app_hooks.host.?;
@@ -956,8 +963,6 @@ fn sessionKey(event: vxfw.Event) session_keys.Key {
         .paste_start => .paste_start,
         .paste_end => .paste_end,
         .key_press => |key| if (keypress.named(key)) |name| .{ .named = name } else if (keypress.isEnter(key)) .enter else if (key.matchExact(vaxis.Key.tab, .{})) .tab else if (key.matchExact(vaxis.Key.tab, .{ .shift = true })) .shift_tab else if (key.matches('i', .{ .alt = true })) .info else if (key.matches('d', .{ .alt = true })) .details else if (hostStartKey(key)) .host_start else switch (keypress.selectKey(conversation_keys, key)) {
-            .left => .left,
-            .right => .right,
             .text => .text,
             else => .other,
         },
@@ -1074,12 +1079,10 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
         .band = style.of(self.app_caps, .{ .background = .bar }).bg,
         .selection = style.of(self.app_caps, .{ .background = .selection }).bg,
     };
-    const facts_style = style.of(self.app_caps, .{ .colour = .quiet, .background = .bar });
+    const facts_style = quiet;
     self.app_screen.style = normal;
-    self.app_input.composer.caret = !self.info_open and !self.app_info.standaloneOpen() and self.footer.focus == .input;
-    self.app_input.composer.style = normal;
-    self.app_input.composer.quiet = quiet;
-    self.app_input.composer.method = self.app_caps.width;
+    self.app_input.composer.caret = !self.app_hooks.root.input.list_focused and !self.info_open and !self.app_info.standaloneOpen() and self.footer.focus == .input;
+    self.app_input.composer.setCaps(self.app_caps);
     self.app_input.composer.placeholder = if (self.line.read != null and self.line.folder != null) "Type a task" else "";
     self.app_input.composer.editor = &self.input.editors[self.input.active];
     self.app_card.style = normal;
@@ -1242,7 +1245,7 @@ test "App Session retains the draft across a permission card arriving during pas
         try std.testing.expect(!user.style.dim);
         try std.testing.expectEqual(case.ground, rendered.readCell(79, 10).?.style.bg);
         try std.testing.expectEqual(case.ground, rendered.readCell(79, 22).?.style.bg);
-        try std.testing.expectEqual(case.band, rendered.readCell(79, 23).?.style.bg);
+        try std.testing.expectEqual(case.ground, rendered.readCell(79, 23).?.style.bg);
     }
     self.app_caps = .{ .depth = .none };
     _ = self.input.append("headTAIL");
@@ -3075,13 +3078,16 @@ fn settleReader(self: *Self) !void {
     // a request left outstanding would refuse every later one.
     if (self.reading.phase == .recall and end != .complete) self.input.abandonStep();
     const phase = self.reading.phase;
+    // Chat info's own Copy last answer, not a typed /copy: only its outcome
+    // settles the panel's effect and labels the panel's action.
+    const panel_copy = phase == .inspection and self.info_effect == .copy;
     if (phase == .inspection and self.info_effect == .configure and self.job.info_edit != null) {
         self.info_effect = if (end == .complete and self.job.result.info_saved) .refreshing else .failed;
         if (self.info_effect == .refreshing) {
             self.inspection.status_requested = true;
             self.poll_at = 0;
         }
-    } else if (phase == .inspection and self.info_effect == .copy) {
+    } else if (panel_copy) {
         self.info_effect = if (end == .complete and self.job.result.copied == .clipboard) .saved else .failed;
     }
     // All terminal outcomes release the retry read, including supersession.
@@ -3118,7 +3124,7 @@ fn settleReader(self: *Self) !void {
         .recalled => try self.showRecalled(),
         .retried => try self.finishRetry(),
         .staged => try self.showStaged(),
-        .copy => try self.showCopy(),
+        .copy => try self.showCopy(if (panel_copy) .panel_copy else .other),
         .page => try self.showInspection(),
     };
     // Shown, or never written: exit no longer prints it.
@@ -3532,10 +3538,11 @@ fn showInspection(self: *Self) !void {
     self.notice = null;
 }
 
-/// A joined /copy. The clipboard's bytes go out between frames, so no frame
-/// splits the sequence.
-fn showCopy(self: *Self) !void {
-    errdefer if (self.info_effect == .saved) {
+/// A joined /copy; `answers` says whether Chat info's Copy last answer ran
+/// it. The clipboard's bytes go out between frames, so no frame splits the
+/// sequence.
+fn showCopy(self: *Self, answers: session_chrome.NoticeAnswers) !void {
+    errdefer if (answers == .panel_copy) {
         self.info_effect = .failed;
     };
     self.dirty = true;
@@ -3544,9 +3551,11 @@ fn showCopy(self: *Self) !void {
         .no_code => "No code block",
         .too_large => TerminalText.clipboard_too_large,
         // Rui cannot see whether the clipboard took it.
-        .clipboard => |range| sent: {
+        .clipboard => |range| {
             try self.app_hooks.copy(self.app_hooks.context, self.files.scratch, range.start, range.length);
-            break :sent "Sent to clipboard";
+            self.notice = null;
+            self.shown_notice.showCopy(self.nowMs(), answers);
+            return;
         },
         .saved => saved: {
             var name: [reads.copy_name_bytes]u8 = undefined;
@@ -3976,7 +3985,7 @@ test "App Session draft handoff preserves valid overflow-rejected and malformed-
                 const a = try HeldFrontend.createWithDrafts("aaaaaa", &drafts);
                 defer a.destroy();
                 try a.keys(case.bytes);
-                try a.keys("\x1b[D\x1b[D");
+                if (case.bytes.len != 0) try a.keys("\x1b[D\x1b[D");
                 if (case.rejected) |why| try a.keys(if (why == .overflow) "x" else "\xff");
                 try std.testing.expectEqualStrings(case.bytes, a.self.input.composition().bytes);
                 try std.testing.expectEqual(cursor, a.self.input.composition().cursor);
@@ -6519,8 +6528,8 @@ test "App Session copy notices are compact state phrases" {
     }) |case| {
         self.dirty = false;
         self.job.result.copied = case.result;
-        try self.showCopy();
-        try std.testing.expectEqualStrings(case.words, self.notice.?);
+        try self.showCopy(.other);
+        try std.testing.expectEqualStrings(case.words, self.notice orelse self.shown_notice.current(self.nowMs()).?);
         try std.testing.expect(self.dirty);
     }
 }
@@ -9207,6 +9216,48 @@ test "chat info repair details never overwrite the active reader staging file" {
     try std.testing.expect(self.reader.thread != null and !self.reader.completed());
 }
 
+test "chat input surface grows with draft while rules and footer stay plain in both themes" {
+    for ([_]vxfw.Size{ .{ .width = 140, .height = 40 }, .{ .width = 46, .height = 30 } }) |size| {
+        for ([_]?overview_view.Rgb{ null, .{ 255, 255, 255 } }) |background| {
+            for ([_]overview_view.Caps.Depth{ .direct, .indexed, .none }) |depth| {
+                for ([_][]const u8{ "", "first line\nsecond line\nthird line" }) |draft| {
+                    for ([_]bool{ false, true }) |list_focused| {
+                        const held = try HeldFrontend.create();
+                        defer held.destroy();
+                        held.size = .{ .width = size.width, .height = size.height };
+                        held.root.size = size;
+                        held.self.app_caps = .{ .background = background, .depth = depth };
+                        try held.keys("\x1b[200~");
+                        try held.keys(draft);
+                        try held.keys("\x1b[201~");
+                        try std.testing.expectEqualStrings(draft, held.self.input.composition().bytes);
+                        held.root.input.list_focused = list_focused;
+                        const surface = try held.draw();
+                        var rendered: vaxis.Screen = try .init(held.arena.allocator(), .{ .rows = size.height, .cols = size.width, .x_pixel = 0, .y_pixel = 0 });
+                        try surface.render(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = size.width, .height = size.height, .screen = &rendered }, held.self.app_input.composer.widget());
+                        const input_style = style.of(held.self.app_caps, .{ .background = .input_surface });
+                        const quiet_input = style.of(held.self.app_caps, .{ .colour = .quiet, .background = .input_surface });
+                        const plain = style.of(held.self.app_caps, .{ .colour = .quiet });
+                        const rows: u16 = if (draft.len == 0) 1 else 3;
+                        const first = size.height - rows - 2;
+                        for (0..size.width) |col| {
+                            for (first..first + rows) |row| {
+                                const actual = rendered.readCell(@intCast(col), @intCast(row)).?.style.bg;
+                                try std.testing.expectEqual(input_style.bg, actual);
+                            }
+                            for ([_]u16{ first - 1, size.height - 2, size.height - 1 }) |row| try std.testing.expectEqual(plain.bg, rendered.readCell(@intCast(col), @intCast(row)).?.style.bg);
+                        }
+                        const prompt = rendered.readCell(1, first).?;
+                        try std.testing.expectEqual(if (list_focused) quiet_input.fg else input_style.fg, prompt.style.fg);
+                        if (draft.len != 0) try std.testing.expectEqual(input_style.fg, rendered.readCell(3, first).?.style.fg);
+                        try std.testing.expectEqual(plain.fg, rendered.readCell(size.width - 1, size.height - 1).?.style.fg);
+                    }
+                }
+            }
+        }
+    }
+}
+
 test "chat info supplies the one bottom footer after the input and both dividers" {
     for ([_]vxfw.Size{ .{ .width = 140, .height = 40 }, .{ .width = 46, .height = 30 } }) |size| for ([_]bool{ false, true }) |choice| {
         const held = try HeldFrontend.create();
@@ -9901,6 +9952,118 @@ test "chat standalone accepted departure ends presentation before handing back a
     };
 }
 
+test "App Session copy button feedback follows only its own clipboard completion and refusal" {
+    const Copies = struct {
+        var result: reads.Copied = .no_answer;
+        fn read(raw: *anyopaque, _: *Task) !void {
+            const job: *Job = @ptrCast(@alignCast(raw));
+            job.result.copied = result;
+        }
+        fn take(_: *anyopaque, _: std.Io.File, _: u64, _: u64) !void {}
+        fn refuse(_: *anyopaque, _: std.Io.File, _: u64, _: u64) !void {
+            return error.AccessDenied;
+        }
+        /// One joined /copy read: Chat info's own when `effect` is `.copy`,
+        /// else a typed one beside whatever the panel last settled.
+        fn run(self: *Self, copy: reads.Copy, effect: @TypeOf(self.info_effect), copied: reads.Copied) !void {
+            self.inspection.kind = .{ .copy = copy };
+            self.info_effect = effect;
+            result = copied;
+            try self.launch(self.freeze(.inspection), read);
+            self.inspection.command_running = true;
+            try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(2)), self, struct {
+                fn done(frontend: *Self) !bool {
+                    return frontend.reader.completed();
+                }
+            }.done);
+            try self.settleReader();
+        }
+    };
+    const clipboard: reads.Copied = .{ .clipboard = .{ .start = 0, .length = 0 } };
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    self.app_hooks.copy = Copies.take;
+    const backend = self.infoBackend();
+
+    // The panel's own copy: Copied while its reply shows.
+    try Copies.run(self, .answer, .copy, clipboard);
+    try std.testing.expectEqual(.saved, self.info_effect);
+    try std.testing.expect(backend.copied(backend.context));
+    self.shown_notice.dismiss();
+    try std.testing.expect(!backend.copied(backend.context));
+
+    // A typed /copy code or /copy reaches the clipboard too, whether the
+    // panel last copied or never did; neither is the panel's copy.
+    for ([_]@TypeOf(self.info_effect){ .idle, .saved }) |before| {
+        for ([_]reads.Copy{ .code, .answer }) |copy| {
+            if (before == .saved) try Copies.run(self, .answer, .copy, clipboard);
+            try Copies.run(self, copy, before, clipboard);
+            try std.testing.expectEqualStrings("Sent to clipboard", self.shown_notice.current(self.nowMs()).?);
+            try std.testing.expectEqual(before, self.info_effect);
+            try std.testing.expect(!backend.copied(backend.context));
+        }
+    }
+
+    // The panel's copy that found no answer.
+    try Copies.run(self, .answer, .copy, .no_answer);
+    try std.testing.expectEqual(.failed, self.info_effect);
+    try std.testing.expect(!backend.copied(backend.context));
+
+    // A refused clipboard fails only the panel's own copy: a typed one
+    // leaves the panel's last outcome as it was.
+    self.app_hooks.copy = Copies.refuse;
+    try std.testing.expectError(error.AccessDenied, Copies.run(self, .code, .saved, clipboard));
+    try std.testing.expectEqual(.saved, self.info_effect);
+    try std.testing.expectError(error.AccessDenied, Copies.run(self, .answer, .copy, clipboard));
+    try std.testing.expectEqual(.failed, self.info_effect);
+    try std.testing.expect(!backend.copied(backend.context));
+}
+
+test "App Session Left on an empty draft alone focuses the list while Esc leaves at every width" {
+    // Esc (and its Ctrl-G alias) keeps its accepted meaning: leave, whatever
+    // the width. Only Left on an empty draft focuses a list beside the chat;
+    // with no list beside it (narrow) Left leaves as Esc does.
+    const Key = enum { left, escape, ctrl_g };
+    for ([_]u16{ 46, 140 }) |width| for ([_]struct { bytes: []const u8, cursor: usize }{
+        .{ .bytes = "", .cursor = 0 },
+        .{ .bytes = "draft", .cursor = 5 },
+        .{ .bytes = "draft", .cursor = 0 },
+    }) |draft| for (std.enums.values(Key)) |key| {
+        errdefer std.debug.print("width={d} draft='{s}'@{d} key={s}\n", .{ width, draft.bytes, draft.cursor, @tagName(key) });
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        held.size = .{ .width = width, .height = 30 };
+        held.root.size = .{ .width = width, .height = 30 };
+        _ = try held.draw();
+        _ = held.self.input.append(draft.bytes);
+        held.self.input.editors[held.self.input.active].setCursor(draft.cursor);
+        try held.keys(switch (key) {
+            .left => "\x1b[D",
+            .escape => "\x1b",
+            .ctrl_g => "\x07",
+        });
+        const empty = draft.bytes.len == 0;
+        const to_list = key == .left and empty and width >= Root.split_at;
+        try std.testing.expectEqual(to_list, held.root.input.list_focused);
+        if (to_list) {
+            try std.testing.expectEqual(@as(?Outcome, null), held.left);
+            _ = try held.draw();
+            try std.testing.expect(!held.self.app_input.composer.caret);
+            try std.testing.expect(held.root.session != null);
+        } else if (empty) {
+            // Esc at both widths, and Left with no list beside the chat.
+            try std.testing.expectEqual(@as(?Outcome, .returned), held.left);
+        } else {
+            // A nonempty Message draft: Left edits, and Esc's guarded
+            // departure keeps an unsaved draft where it is.
+            try std.testing.expectEqual(@as(?Outcome, null), held.left);
+            try std.testing.expectEqualStrings(draft.bytes, held.self.input.composition().bytes);
+            try std.testing.expectEqual(if (key == .left) draft.cursor -| 1 else draft.cursor, held.self.input.composition().cursor);
+        }
+    };
+}
+
 test "empty chat footer folder comes from current line with frontend home" {
     var self: Self = undefined;
     self.home = "/home/u";
@@ -9945,6 +10108,41 @@ test "empty chat composer placeholder follows current no-message facts" {
     fixture.self.line.read = null;
     _ = try fixture.draw();
     try std.testing.expectEqualStrings("", fixture.self.app_input.composer.placeholder);
+}
+
+test "App Session paste completion preserves retained draft caret after empty newline and ordinary pastes" {
+    for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |list_focused| for ([_][]const u8{ "", "\n", "pq" }) |paste| for (0..3) |cursor| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        held.size = .{ .width = width, .height = 30 };
+        held.root.size = .{ .width = width, .height = 30 };
+        _ = try held.draw();
+        _ = held.self.input.append("ab");
+        held.self.input.editors[held.self.input.active].setCursor(cursor);
+        held.root.input.list_focused = list_focused;
+        try held.keys("\x1b[200~");
+        try std.testing.expectEqual(!list_focused, held.self.input.editors[held.self.input.active].pasting());
+        try held.keys(paste);
+        try held.keys("\x1b[201~");
+        try std.testing.expect(!held.root.input.pasting);
+        try std.testing.expect(!held.self.input.editors[held.self.input.active].pasting());
+        try std.testing.expect(held.self.submission.intent == null and held.self.input.submitted == null);
+        // The list has no editor: a paste there cannot alter the hidden chat.
+        var pasted: [32]u8 = undefined;
+        const accepted = if (list_focused) "" else paste;
+        const expected = try std.fmt.bufPrint(&pasted, "{s}{s}{s}", .{ "ab"[0..cursor], accepted, "ab"[cursor..] });
+        try std.testing.expectEqualStrings(expected, held.self.input.composition().bytes);
+        const after_paste = held.self.input.composition().cursor;
+        try std.testing.expectEqual(cursor + accepted.len, after_paste);
+        var ctx = held.context();
+        try held.root.showMain(&ctx);
+        try held.keys("\x1b[DX");
+        const insert = after_paste -| 1;
+        var edited: [32]u8 = undefined;
+        try std.testing.expectEqualStrings(try std.fmt.bufPrint(&edited, "{s}X{s}", .{ expected[0..insert], expected[insert..] }), held.self.input.composition().bytes);
+        try std.testing.expectEqual(insert + 1, held.self.input.composition().cursor);
+        try std.testing.expect(held.self.submission.intent == null and held.self.input.submitted == null);
+    };
 }
 
 test "new and clear navigate without sending or changing the old chat and reject arguments" {

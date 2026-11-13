@@ -29,6 +29,8 @@ const chords = std.enums.EnumArray(Key, []const Chord).init(.{
     // trackpad scrolling as these arrow keys.
     .up = &.{.{ .code = vaxis.Key.up }},
     .down = &.{.{ .code = vaxis.Key.down }},
+    .left = &.{.{ .code = vaxis.Key.left }},
+    .right = &.{.{ .code = vaxis.Key.right }},
     .shift_up = &.{.{ .code = vaxis.Key.up, .mods = .{ .shift = true } }},
     .shift_down = &.{.{ .code = vaxis.Key.down, .mods = .{ .shift = true } }},
     .page_up = &.{ .{ .code = vaxis.Key.page_up }, .{ .code = vaxis.Key.page_up, .mods = .{ .shift = true } } },
@@ -60,8 +62,9 @@ pub fn classify(value: vaxis.Key) Press {
     // Alt-Enter adds a line in every form: Ghostty and other terminals send
     // Shift-Enter as ESC CR, which decodes exactly as Kitty's Alt-Enter.
     if (value.matchExact(vaxis.Key.enter, .{ .shift = true }) or value.matchExact(vaxis.Key.enter, .{ .alt = true }) or value.matchExact('j', .{ .ctrl = true })) return .{ .edit = .newline };
-    if (value.matchExact(vaxis.Key.left, .{}) or value.matchExact('b', .{ .ctrl = true })) return .{ .edit = .left };
-    if (value.matchExact(vaxis.Key.right, .{}) or value.matchExact('f', .{ .ctrl = true })) return .{ .edit = .right };
+    // The bare arrows are named keys above; these are their Emacs aliases.
+    if (value.matchExact('b', .{ .ctrl = true })) return .{ .edit = .left };
+    if (value.matchExact('f', .{ .ctrl = true })) return .{ .edit = .right };
     if (value.matchExact('a', .{ .ctrl = true })) return .{ .edit = .line_start };
     if (value.matchExact('e', .{ .ctrl = true })) return .{ .edit = .line_end };
     if (value.matchExact(vaxis.Key.delete, .{})) return .{ .edit = .delete_next };
@@ -101,16 +104,17 @@ pub fn selectEvent(comptime keys: anytype, event: vaxis.vxfw.Event, pasting: boo
 
 pub fn selectKey(comptime keys: anytype, pressed: vaxis.Key) Selection(@TypeOf(keys).Action) {
     return switch (classify(pressed)) {
-        .key => |key_name| if (keys.get(key_name)) |action| .{ .action = action } else .none,
-        .enter => .enter,
-        // Only the bare arrows move a choice: Ctrl-B and Ctrl-F move the
-        // draft's caret alone. The draft's other edit keys have no use at a
-        // choice; a Ctrl or Alt chord among them is refused like any other.
-        .edit => |command| if (pressed.mods.ctrl or pressed.mods.alt or pressed.mods.super or pressed.mods.hyper or pressed.mods.meta) .refused else switch (command) {
+        // The bare arrows the screen leaves unbound move the choice.
+        .key => |key_name| if (keys.get(key_name)) |action| .{ .action = action } else switch (key_name) {
             .left => .left,
             .right => .right,
             else => .none,
         },
+        .enter => .enter,
+        // Ctrl-B and Ctrl-F move the draft's caret alone. The draft's other
+        // edit keys have no use at a choice; a Ctrl or Alt chord among them
+        // is refused like any other.
+        .edit => if (pressed.mods.ctrl or pressed.mods.alt or pressed.mods.super or pressed.mods.hyper or pressed.mods.meta) .refused else .none,
         .chord, .control => .refused,
         .text => |text| if (text.len != 0) .text else .none,
         .none => .none,
@@ -119,6 +123,13 @@ pub fn selectKey(comptime keys: anytype, pressed: vaxis.Key) Selection(@TypeOf(k
 
 test "a choice takes its arrows and Enter, the screen's keys and typing, and refuses chords" {
     const Name = Key;
+    // A screen that leaves the arrows unbound, as the conversation does.
+    const keys = comptime blk: {
+        var map = keymap.every;
+        map.meanings.set(.left, null);
+        map.meanings.set(.right, null);
+        break :blk map;
+    };
     const AppEvents = @import("testing/app_events.zig").Events;
     const Case = struct { bytes: []const u8, expected: Selection(Name) };
     for ([_]Case{
@@ -159,9 +170,12 @@ test "a choice takes its arrows and Enter, the screen's keys and typing, and ref
         var events: AppEvents = .init(case.bytes);
         var last: Selection(Name) = .none;
         while (events.next()) |event| {
-            const selection = selectEvent(keymap.every, event, events.pasting);
+            const selection = selectEvent(keys, event, events.pasting);
             if (selection != .none) last = selection;
         }
         try std.testing.expectEqual(case.expected, last);
     }
+    // An arrow the screen binds is the screen's action, as the list's Right is.
+    try std.testing.expectEqual(Selection(Name){ .action = .right }, selectKey(keymap.every, .{ .codepoint = vaxis.Key.right }));
+    try std.testing.expectEqual(Selection(Name){ .action = .left }, selectKey(keymap.every, .{ .codepoint = vaxis.Key.left }));
 }

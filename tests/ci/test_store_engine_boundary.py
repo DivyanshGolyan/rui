@@ -52,8 +52,6 @@ DOMAIN_REACH = {
     ("historical.zig", ".queue()"): 8,
     ("historical.zig", "Store.enter"): 8,
     ("historical.zig", "Store.fence"): 8,
-    ("model_admission.zig", ".engine"): 1,
-    ("model_settlement.zig", ".engine"): 1,
     ("model_settlement.zig", ".queue()"): 1,
     ("model_settlement.zig", "Store.enter"): 1,
     ("reads.zig", "Store.fence"): 3,
@@ -182,10 +180,10 @@ class DomainReachTest(unittest.TestCase):
             root = Path(scratch)
             shutil.copytree(ROOT / DOMAIN, root / DOMAIN)
             path = root / DOMAIN / "model_settlement.zig"
-            path.write_text(path.read_text().replace("std.debug.assert(a.store.engine.inWriteTransaction());", ""))
-            self.assertEqual(domain_violations(root), [f"{DOMAIN}/model_settlement.zig reaches through .engine 0 times, "
+            path.write_text(path.read_text().replace("self.queue().run(checkAttemptHeld", "self.run(checkAttemptHeld"))
+            self.assertEqual(domain_violations(root), [f"{DOMAIN}/model_settlement.zig reaches through .queue() 0 times, "
                                                        "1 allowed; lower its DOMAIN_REACH entry"])
-            lowered = {key: count for key, count in DOMAIN_REACH.items() if key != ("model_settlement.zig", ".engine")}
+            lowered = {key: count for key, count in DOMAIN_REACH.items() if key != ("model_settlement.zig", ".queue()")}
             self.assertEqual(domain_violations(root, lowered), [])
 
 

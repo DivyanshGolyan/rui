@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Rui Host",
-    "version": "16",
+    "version": "17",
     "description": "The Rui Host's local protocol: HTTP/1.1 over the Unix socket of a running Host, one POST per request, generated from the Host's own wire types.\n\nRequest bodies list their fields in the order this document lists them; the Host refuses another order. Numbers that may exceed 2^53 travel as decimal strings. String bounds are in UTF-8 bytes (`x-rui-max-bytes`)."
   },
   "paths": {
@@ -1138,7 +1138,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "16"
+            "const": "17"
           },
           "kind": {
             "const": "activity_content"
@@ -2318,7 +2318,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "16"
+                "const": "17"
               },
               "type": {
                 "const": "activity_page"
@@ -2386,7 +2386,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "16"
+                "const": "17"
               },
               "type": {
                 "const": "activity_page"
@@ -2414,7 +2414,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "16"
+            "const": "17"
           },
           "kind": {
             "const": "activity_page"
@@ -2600,7 +2600,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "16"
+            "const": "17"
           },
           "type": {
             "const": "activity_search"
@@ -2634,7 +2634,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "16"
+            "const": "17"
           },
           "kind": {
             "const": "activity_search"
@@ -2958,7 +2958,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "16"
+            "const": "17"
           },
           "type": {
             "const": "configuration_reply"
@@ -3020,7 +3020,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "16"
+                "const": "17"
               },
               "type": {
                 "const": "configuration_reply"
@@ -3084,7 +3084,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "16"
+                "const": "17"
               },
               "type": {
                 "const": "configuration_reply"
@@ -3156,7 +3156,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "16"
+                "const": "17"
               },
               "type": {
                 "const": "configuration_reply"
@@ -3264,7 +3264,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "16"
+            "const": "17"
           },
           "kind": {
             "const": "configure"
@@ -3313,7 +3313,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "16"
+            "const": "17"
           },
           "kind": {
             "const": "conversation_content"
@@ -3358,7 +3358,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "16"
+                "const": "17"
               },
               "type": {
                 "const": "conversation_page"
@@ -3667,7 +3667,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "16"
+                "const": "17"
               },
               "type": {
                 "const": "conversation_page"
@@ -3986,7 +3986,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "16"
+            "const": "17"
           },
           "kind": {
             "const": "conversation_page"
@@ -4031,7 +4031,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "16"
+            "const": "17"
           },
           "type": {
             "type": "string",
@@ -4100,7 +4100,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "16"
+            "const": "17"
           },
           "type": {
             "const": "host_info"
@@ -4212,7 +4212,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "16"
+            "const": "17"
           },
           "kind": {
             "const": "host_info"
@@ -4234,7 +4234,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "16"
+            "const": "17"
           },
           "type": {
             "const": "host_pause_reply"
@@ -4254,7 +4254,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "16"
+            "const": "17"
           },
           "kind": {
             "const": "host_pause"
@@ -4276,11 +4276,785 @@
         ],
         "additionalProperties": false
       },
+      "HostSettings": {
+        "type": "object",
+        "properties": {
+          "store": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "sqlite": {
+                    "type": "object",
+                    "properties": {
+                      "dir": {
+                        "anyOf": [
+                          {
+                            "oneOf": [
+                              {
+                                "type": "string",
+                                "maxLength": 492,
+                                "x-maxBytes": 492
+                              },
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "hex": {
+                                    "type": "string",
+                                    "maxLength": 984,
+                                    "x-maxBytes": 984,
+                                    "pattern": "^([0-9a-f]{2})*(?![\\s\\S])"
+                                  }
+                                },
+                                "required": [
+                                  "hex"
+                                ],
+                                "additionalProperties": false
+                              }
+                            ],
+                            "x-rui-kind": "bytes",
+                            "description": "The SQLite Store directory. Default: the Host directory."
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "x-rui-kind": "bytes"
+                      }
+                    },
+                    "additionalProperties": false,
+                    "description": "SQLite Store."
+                  }
+                },
+                "required": [
+                  "sqlite"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "mysql": {
+                    "type": "object",
+                    "properties": {
+                      "url": {
+                        "anyOf": [
+                          {
+                            "oneOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "env": {
+                                    "oneOf": [
+                                      {
+                                        "type": "string",
+                                        "maxLength": 128,
+                                        "x-maxBytes": 128
+                                      },
+                                      {
+                                        "type": "object",
+                                        "properties": {
+                                          "hex": {
+                                            "type": "string",
+                                            "maxLength": 256,
+                                            "x-maxBytes": 256,
+                                            "pattern": "^([0-9a-f]{2})*(?![\\s\\S])"
+                                          }
+                                        },
+                                        "required": [
+                                          "hex"
+                                        ],
+                                        "additionalProperties": false
+                                      }
+                                    ],
+                                    "x-rui-kind": "bytes"
+                                  }
+                                },
+                                "required": [
+                                  "env"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "file": {
+                                    "oneOf": [
+                                      {
+                                        "type": "string"
+                                      },
+                                      {
+                                        "type": "object",
+                                        "properties": {
+                                          "hex": {
+                                            "type": "string",
+                                            "pattern": "^([0-9a-f]{2})*(?![\\s\\S])"
+                                          }
+                                        },
+                                        "required": [
+                                          "hex"
+                                        ],
+                                        "additionalProperties": false
+                                      }
+                                    ],
+                                    "x-rui-kind": "bytes",
+                                    "x-rui-native-path-limit": true
+                                  }
+                                },
+                                "required": [
+                                  "file"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "value": {
+                                    "type": "string",
+                                    "maxLength": 1048576,
+                                    "x-maxBytes": 1048576
+                                  }
+                                },
+                                "required": [
+                                  "value"
+                                ],
+                                "additionalProperties": false,
+                                "description": "Literal secret; accepted only from a pipe, never from a settings file."
+                              },
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "owner": {
+                                    "const": true
+                                  }
+                                },
+                                "required": [
+                                  "owner"
+                                ],
+                                "additionalProperties": false
+                              }
+                            ],
+                            "format": "mysql-login-source",
+                            "description": "The MySQL login URL source. TCP verifies TLS; ssl-ca names an absolute PEM path."
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "x-rui-kind": "secret"
+                      }
+                    },
+                    "additionalProperties": false,
+                    "description": "MySQL Store."
+                  }
+                },
+                "required": [
+                  "mysql"
+                ],
+                "additionalProperties": false
+              }
+            ],
+            "maxProperties": 1,
+            "minProperties": 1,
+            "description": "Where the Host keeps canonical facts. One Adapter."
+          },
+          "providers": {
+            "type": "object",
+            "properties": {
+              "codex": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "endpoint": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "maxLength": 2048,
+                            "x-maxBytes": 2048,
+                            "format": "https_endpoint",
+                            "description": "Responses endpoint. Default: the provider's own."
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "credentialFile": {
+                        "anyOf": [
+                          {
+                            "oneOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "hex": {
+                                    "type": "string",
+                                    "pattern": "^([0-9a-f]{2})*(?![\\s\\S])"
+                                  }
+                                },
+                                "required": [
+                                  "hex"
+                                ],
+                                "additionalProperties": false
+                              }
+                            ],
+                            "x-rui-kind": "bytes",
+                            "x-rui-native-path-limit": true,
+                            "format": "absolute-path",
+                            "description": "Sign-in file. Default: the Adapter's saved sign-in."
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "x-rui-kind": "bytes",
+                        "x-rui-native-path-limit": true
+                      },
+                      "unauthenticated": {
+                        "type": "boolean",
+                        "description": "Send no credential to a development endpoint."
+                      }
+                    },
+                    "additionalProperties": false,
+                    "description": "The providers served, exactly the listed set when present."
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "openai": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "endpoint": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "maxLength": 2048,
+                            "x-maxBytes": 2048,
+                            "format": "https_endpoint",
+                            "description": "Endpoint. Default: the provider's own."
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "key": {
+                        "anyOf": [
+                          {
+                            "oneOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "env": {
+                                    "oneOf": [
+                                      {
+                                        "type": "string",
+                                        "maxLength": 128,
+                                        "x-maxBytes": 128
+                                      },
+                                      {
+                                        "type": "object",
+                                        "properties": {
+                                          "hex": {
+                                            "type": "string",
+                                            "maxLength": 256,
+                                            "x-maxBytes": 256,
+                                            "pattern": "^([0-9a-f]{2})*(?![\\s\\S])"
+                                          }
+                                        },
+                                        "required": [
+                                          "hex"
+                                        ],
+                                        "additionalProperties": false
+                                      }
+                                    ],
+                                    "x-rui-kind": "bytes"
+                                  }
+                                },
+                                "required": [
+                                  "env"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "file": {
+                                    "oneOf": [
+                                      {
+                                        "type": "string"
+                                      },
+                                      {
+                                        "type": "object",
+                                        "properties": {
+                                          "hex": {
+                                            "type": "string",
+                                            "pattern": "^([0-9a-f]{2})*(?![\\s\\S])"
+                                          }
+                                        },
+                                        "required": [
+                                          "hex"
+                                        ],
+                                        "additionalProperties": false
+                                      }
+                                    ],
+                                    "x-rui-kind": "bytes",
+                                    "x-rui-native-path-limit": true
+                                  }
+                                },
+                                "required": [
+                                  "file"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "value": {
+                                    "type": "string",
+                                    "maxLength": 1024,
+                                    "x-maxBytes": 1024
+                                  }
+                                },
+                                "required": [
+                                  "value"
+                                ],
+                                "additionalProperties": false,
+                                "description": "Literal secret; accepted only from a pipe, never from a settings file."
+                              },
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "owner": {
+                                    "const": true
+                                  }
+                                },
+                                "required": [
+                                  "owner"
+                                ],
+                                "additionalProperties": false
+                              }
+                            ],
+                            "format": "credential-source",
+                            "description": "API-key source. Default: the provider's saved key."
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "x-rui-kind": "secret"
+                      },
+                      "unauthenticated": {
+                        "type": "boolean",
+                        "description": "Send no credential to a development endpoint."
+                      }
+                    },
+                    "additionalProperties": false,
+                    "description": "The providers served, exactly the listed set when present."
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "chatgpt": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "endpoint": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "maxLength": 2048,
+                            "x-maxBytes": 2048,
+                            "format": "https_endpoint",
+                            "description": "Responses endpoint. Default: the provider's own."
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "credentialFile": {
+                        "anyOf": [
+                          {
+                            "oneOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "hex": {
+                                    "type": "string",
+                                    "pattern": "^([0-9a-f]{2})*(?![\\s\\S])"
+                                  }
+                                },
+                                "required": [
+                                  "hex"
+                                ],
+                                "additionalProperties": false
+                              }
+                            ],
+                            "x-rui-kind": "bytes",
+                            "x-rui-native-path-limit": true,
+                            "format": "absolute-path",
+                            "description": "Sign-in file. Default: the Adapter's saved sign-in."
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "x-rui-kind": "bytes",
+                        "x-rui-native-path-limit": true
+                      },
+                      "unauthenticated": {
+                        "type": "boolean",
+                        "description": "Send no credential to a development endpoint."
+                      }
+                    },
+                    "additionalProperties": false,
+                    "description": "The providers served, exactly the listed set when present."
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "additionalProperties": false,
+            "maxProperties": 3,
+            "description": "The providers served, exactly the listed set when present."
+          },
+          "network": {
+            "type": "object",
+            "properties": {
+              "caFile": {
+                "anyOf": [
+                  {
+                    "oneOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "hex": {
+                            "type": "string",
+                            "pattern": "^([0-9a-f]{2})*(?![\\s\\S])"
+                          }
+                        },
+                        "required": [
+                          "hex"
+                        ],
+                        "additionalProperties": false
+                      }
+                    ],
+                    "x-rui-kind": "bytes",
+                    "x-rui-native-path-limit": true,
+                    "description": "Trust only this PEM file; absent uses system trust. Applies to every provider."
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "x-rui-kind": "bytes",
+                "x-rui-native-path-limit": true
+              }
+            },
+            "additionalProperties": false,
+            "description": "Host-wide transport trust."
+          },
+          "tools": {
+            "type": "object",
+            "properties": {
+              "bash": {
+                "type": "object",
+                "properties": {
+                  "path": {
+                    "anyOf": [
+                      {
+                        "oneOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "object",
+                            "properties": {
+                              "hex": {
+                                "type": "string",
+                                "pattern": "^([0-9a-f]{2})*(?![\\s\\S])"
+                              }
+                            },
+                            "required": [
+                              "hex"
+                            ],
+                            "additionalProperties": false
+                          }
+                        ],
+                        "x-rui-kind": "bytes",
+                        "x-rui-native-path-limit": true,
+                        "description": "The Bash executable."
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "x-rui-kind": "bytes",
+                    "x-rui-native-path-limit": true
+                  },
+                  "timeoutMs": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 9223372036854775807,
+                    "description": "The longest one Bash call may run."
+                  }
+                },
+                "additionalProperties": false,
+                "description": "The built-in Bash tool."
+              },
+              "mcp": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "object",
+                  "properties": {
+                    "url": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "maxLength": 2048,
+                          "x-maxBytes": 2048,
+                          "format": "loopback_http",
+                          "description": "Plain HTTP to a loopback literal."
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "bearerToken": {
+                      "anyOf": [
+                        {
+                          "oneOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "env": {
+                                  "oneOf": [
+                                    {
+                                      "type": "string",
+                                      "maxLength": 128,
+                                      "x-maxBytes": 128
+                                    },
+                                    {
+                                      "type": "object",
+                                      "properties": {
+                                        "hex": {
+                                          "type": "string",
+                                          "maxLength": 256,
+                                          "x-maxBytes": 256,
+                                          "pattern": "^([0-9a-f]{2})*(?![\\s\\S])"
+                                        }
+                                      },
+                                      "required": [
+                                        "hex"
+                                      ],
+                                      "additionalProperties": false
+                                    }
+                                  ],
+                                  "x-rui-kind": "bytes"
+                                }
+                              },
+                              "required": [
+                                "env"
+                              ],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "file": {
+                                  "oneOf": [
+                                    {
+                                      "type": "string"
+                                    },
+                                    {
+                                      "type": "object",
+                                      "properties": {
+                                        "hex": {
+                                          "type": "string",
+                                          "pattern": "^([0-9a-f]{2})*(?![\\s\\S])"
+                                        }
+                                      },
+                                      "required": [
+                                        "hex"
+                                      ],
+                                      "additionalProperties": false
+                                    }
+                                  ],
+                                  "x-rui-kind": "bytes",
+                                  "x-rui-native-path-limit": true
+                                }
+                              },
+                              "required": [
+                                "file"
+                              ],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "value": {
+                                  "type": "string",
+                                  "maxLength": 1024,
+                                  "x-maxBytes": 1024
+                                }
+                              },
+                              "required": [
+                                "value"
+                              ],
+                              "additionalProperties": false,
+                              "description": "Literal secret; accepted only from a pipe, never from a settings file."
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "owner": {
+                                  "const": true
+                                }
+                              },
+                              "required": [
+                                "owner"
+                              ],
+                              "additionalProperties": false
+                            }
+                          ],
+                          "format": "credential-source",
+                          "description": "Bearer-token source."
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "x-rui-kind": "secret"
+                    },
+                    "callTimeoutMs": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 4294967295,
+                      "description": "The longest one tool call may run."
+                    }
+                  },
+                  "additionalProperties": false,
+                  "description": "Named MCP servers whose tools Sessions may use."
+                },
+                "propertyNames": {
+                  "pattern": "^[A-Za-z0-9_-]{1,64}(?![\\s\\S])"
+                },
+                "maxProperties": 8,
+                "description": "Named MCP servers whose tools Sessions may use."
+              }
+            },
+            "additionalProperties": false,
+            "description": "The tool Adapters offered to Sessions."
+          },
+          "interface": {
+            "type": "object",
+            "properties": {
+              "dir": {
+                "anyOf": [
+                  {
+                    "oneOf": [
+                      {
+                        "type": "string",
+                        "maxLength": 94,
+                        "x-maxBytes": 94
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "hex": {
+                            "type": "string",
+                            "maxLength": 188,
+                            "x-maxBytes": 188,
+                            "pattern": "^([0-9a-f]{2})*(?![\\s\\S])"
+                          }
+                        },
+                        "required": [
+                          "hex"
+                        ],
+                        "additionalProperties": false
+                      }
+                    ],
+                    "x-rui-kind": "bytes",
+                    "format": "absolute-path",
+                    "description": "Private interface directory. Default: the Host directory; MySQL requires an explicit directory."
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "x-rui-kind": "bytes"
+              },
+              "lifetime": {
+                "type": "string",
+                "enum": [
+                  "detached",
+                  "stdin"
+                ],
+                "description": "detached: until stopped; stdin: also stop when stdin closes."
+              }
+            },
+            "additionalProperties": false,
+            "description": "Where clients reach the Host and what ends it."
+          },
+          "execution": {
+            "type": "object",
+            "properties": {
+              "activeCapacity": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 18446744073709551615,
+                "description": "How many Turns may run at once."
+              },
+              "paused": {
+                "type": "boolean",
+                "description": "Open with Turns held, as after host_pause."
+              }
+            },
+            "additionalProperties": false,
+            "description": "How Turns run."
+          },
+          "presets": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/AgentSpec",
+              "format": "agent-spec",
+              "description": "Named creation specs held only by this Host."
+            },
+            "propertyNames": {
+              "pattern": "^[a-z0-9_-]{1,64}(?![\\s\\S])"
+            },
+            "maxProperties": 64,
+            "description": "Named creation specs held only by this Host."
+          }
+        },
+        "additionalProperties": false,
+        "description": "Host settings."
+      },
       "HostStopReply": {
         "type": "object",
         "properties": {
           "version": {
-            "const": "16"
+            "const": "17"
           },
           "type": {
             "const": "host_stop_reply"
@@ -4300,7 +5074,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "16"
+            "const": "17"
           },
           "kind": {
             "const": "host_stop"
@@ -4324,7 +5098,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "16"
+                "const": "17"
               },
               "type": {
                 "const": "session_report"
@@ -4427,7 +5201,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "16"
+                "const": "17"
               },
               "type": {
                 "const": "session_report"
@@ -4526,7 +5300,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "16"
+                "const": "17"
               },
               "type": {
                 "const": "session_report"
@@ -4579,7 +5353,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "16"
+                "const": "17"
               },
               "type": {
                 "const": "session_report"
@@ -4628,7 +5402,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "16"
+                "const": "17"
               },
               "kind": {
                 "const": "inspect_session"
@@ -4668,7 +5442,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "16"
+                "const": "17"
               },
               "kind": {
                 "const": "inspect_session"
@@ -4700,7 +5474,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "16"
+                "const": "17"
               },
               "kind": {
                 "const": "inspect_session"
@@ -4767,110 +5541,13 @@
         ],
         "additionalProperties": false
       },
-      "LaunchFrame": {
-        "type": "object",
-        "properties": {
-          "v": {
-            "const": 1
-          },
-          "store": {
-            "type": "string"
-          },
-          "provider": {
-            "type": "object",
-            "properties": {
-              "kind": {
-                "const": "openai_key"
-              },
-              "baseUrl": {
-                "type": "string"
-              },
-              "key": {
-                "type": "string"
-              },
-              "caFile": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              }
-            },
-            "required": [
-              "kind",
-              "baseUrl",
-              "key"
-            ],
-            "additionalProperties": false
-          },
-          "runtimeDir": {
-            "type": "string"
-          },
-          "activeCapacity": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "paused": {
-            "type": "boolean"
-          },
-          "presets": {
-            "type": "object",
-            "additionalProperties": {
-              "$ref": "#/components/schemas/AgentSpec"
-            },
-            "maxProperties": 64
-          },
-          "mcpServers": {
-            "type": "array",
-            "items": {
-              "type": "object",
-              "properties": {
-                "name": {
-                  "type": "string"
-                },
-                "url": {
-                  "type": "string"
-                },
-                "bearerToken": {
-                  "type": "string"
-                },
-                "callTimeoutMs": {
-                  "type": "integer"
-                }
-              },
-              "required": [
-                "name",
-                "url",
-                "bearerToken"
-              ],
-              "additionalProperties": false
-            }
-          }
-        },
-        "required": [
-          "v",
-          "store",
-          "provider",
-          "runtimeDir"
-        ],
-        "additionalProperties": false
-      },
       "ListSessionsReply": {
         "anyOf": [
           {
             "type": "object",
             "properties": {
               "version": {
-                "const": "16"
+                "const": "17"
               },
               "type": {
                 "const": "session_list"
@@ -4924,7 +5601,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "16"
+                "const": "17"
               },
               "type": {
                 "const": "session_list"
@@ -4980,7 +5657,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "16"
+                "const": "17"
               },
               "type": {
                 "const": "session_list"
@@ -5023,7 +5700,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "16"
+            "const": "17"
           },
           "kind": {
             "const": "list_sessions"
@@ -5086,7 +5763,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "16"
+            "const": "17"
           },
           "type": {
             "const": "message_reply"
@@ -5198,7 +5875,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "16"
+                "const": "17"
               },
               "type": {
                 "const": "message_reply"
@@ -5293,7 +5970,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "16"
+                "const": "17"
               },
               "type": {
                 "const": "message_reply"
@@ -5424,7 +6101,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "16"
+            "const": "17"
           },
           "kind": {
             "const": "message"
@@ -5523,7 +6200,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "16"
+            "const": "17"
           },
           "type": {
             "const": "model_interruption_reply"
@@ -5585,7 +6262,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "16"
+                "const": "17"
               },
               "type": {
                 "const": "model_interruption_reply"
@@ -5641,7 +6318,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "16"
+                "const": "17"
               },
               "type": {
                 "const": "model_interruption_reply"
@@ -5711,7 +6388,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "16"
+            "const": "17"
           },
           "kind": {
             "const": "model_interruption"
@@ -5811,7 +6488,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "16"
+            "const": "17"
           },
           "type": {
             "const": "model_list"
@@ -5834,7 +6511,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "16"
+            "const": "17"
           },
           "kind": {
             "const": "model_list"
@@ -5885,7 +6562,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "16"
+                "const": "17"
               },
               "type": {
                 "const": "command_observation"
@@ -5928,7 +6605,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "16"
+                "const": "17"
               },
               "type": {
                 "const": "command_observation"
@@ -6108,7 +6785,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "16"
+                "const": "17"
               },
               "type": {
                 "const": "command_observation"
@@ -9386,7 +10063,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "16"
+                "const": "17"
               },
               "type": {
                 "const": "command_observation"
@@ -9632,7 +10309,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "16"
+                "const": "17"
               },
               "type": {
                 "const": "command_observation"
@@ -9838,7 +10515,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "16"
+                "const": "17"
               },
               "type": {
                 "const": "command_observation"
@@ -10048,7 +10725,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "16"
+                "const": "17"
               },
               "type": {
                 "const": "command_observation"
@@ -10254,7 +10931,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "16"
+                "const": "17"
               },
               "type": {
                 "const": "command_observation"
@@ -10288,7 +10965,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "16"
+            "const": "17"
           },
           "kind": {
             "const": "observe_command"
@@ -10432,7 +11109,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "16"
+            "const": "17"
           },
           "type": {
             "const": "permission_decision_reply"
@@ -10489,7 +11166,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "16"
+                "const": "17"
               },
               "type": {
                 "const": "permission_decision_reply"
@@ -10540,7 +11217,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "16"
+                "const": "17"
               },
               "type": {
                 "const": "permission_decision_reply"
@@ -10605,7 +11282,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "16"
+            "const": "17"
           },
           "kind": {
             "const": "permission_decision"
@@ -10675,7 +11352,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "16"
+            "const": "17"
           },
           "kind": {
             "const": "read_action_arguments"
@@ -10707,7 +11384,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "16"
+            "const": "17"
           },
           "kind": {
             "const": "read_action_call_id"
@@ -10739,7 +11416,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "16"
+            "const": "17"
           },
           "kind": {
             "const": "read_result"
@@ -10767,7 +11444,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "16"
+            "const": "17"
           },
           "type": {
             "const": "session_archive_reply"
@@ -10825,7 +11502,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "16"
+                "const": "17"
               },
               "type": {
                 "const": "session_archive_reply"
@@ -10885,7 +11562,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "16"
+                "const": "17"
               },
               "type": {
                 "const": "session_archive_reply"
@@ -10948,7 +11625,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "16"
+            "const": "17"
           },
           "kind": {
             "const": "session_archive"
@@ -11122,7 +11799,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "16"
+            "const": "17"
           },
           "type": {
             "const": "session_stop_reply"
@@ -11180,7 +11857,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "16"
+                "const": "17"
               },
               "type": {
                 "const": "session_stop_reply"
@@ -11260,7 +11937,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "16"
+                "const": "17"
               },
               "type": {
                 "const": "session_stop_reply"
@@ -11322,7 +11999,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "16"
+            "const": "17"
           },
           "kind": {
             "const": "session_stop"
@@ -11401,7 +12078,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "16"
+            "const": "17"
           },
           "type": {
             "const": "skill_suggestions"
@@ -11453,7 +12130,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "16"
+                "const": "17"
               },
               "kind": {
                 "const": "skill_suggestions"
@@ -11487,7 +12164,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "16"
+                "const": "17"
               },
               "kind": {
                 "const": "skill_suggestions"
@@ -11528,7 +12205,6 @@
               "code": {
                 "type": "string",
                 "enum": [
-                  "launch_frame_invalid",
                   "settings_invalid",
                   "invalid_preset",
                   "store_locked",
@@ -13371,7 +14047,7 @@
         "description": "The wire version this document describes. Any other version is refused.",
         "schema": {
           "type": "string",
-          "const": "16"
+          "const": "17"
         }
       },
       "HostInstance": {

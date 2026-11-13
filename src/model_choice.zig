@@ -100,7 +100,7 @@ pub fn validate(self: *Self) bool {
 
 /// Named application actions remain the caller's; arrows and text filter.
 pub fn takesKey(key: vaxis.Key) bool {
-    return keypress.named(key) == null or key.matches(vaxis.Key.up, .{}) or key.matches(vaxis.Key.down, .{});
+    return keypress.named(key) == null or key.matches(vaxis.Key.up, .{}) or key.matches(vaxis.Key.down, .{}) or key.matches(vaxis.Key.left, .{}) or key.matches(vaxis.Key.right, .{});
 }
 
 pub fn cancel(self: *Self) void {

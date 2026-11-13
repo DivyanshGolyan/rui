@@ -1,4 +1,4 @@
-//! One filled row: a left label and right-aligned state, with the right side taking priority.
+//! One row: a left label and right-aligned state, with the right side taking priority.
 const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;

@@ -64,7 +64,8 @@ A running Host keeps its configured capacity through the restart.
 Installation and activation are reported separately.
 Unsupported or application-owned Hosts remain running with an explained successful skip. A failed or unconfirmed Host restart returns `host_restart_failed` (exit 6) after the installation receipt; the binary upgrade is not rolled back.
 Automatic activation supports released and source managed `host serve` launches whose public settings can be preserved and whose executable reports a verified numeric version.
-Unknown managed builds, foreign executables, application-owned `--launch-frame`, hidden-option, and relative configuration-path launches are not paused.
+Unknown managed builds, foreign executables, application-owned `--settings -`, hidden-option, and relative Bash/CA-path launches are not paused.
+`--settings FILE` retains argv replay, including relative file names; this step does not inspect or snapshot the document.
 This does not make a selected source installation eligible for `rui upgrade`; Upgrade still requires a selected managed release.
 When that selection is released but its running Host came from a managed source build, the usual version comparison applies: a newer Host stays running without a downgrade; an equal or older Host can restart on the pinned release.
 Private launch environment is observed only in memory and wiped after the operation.
