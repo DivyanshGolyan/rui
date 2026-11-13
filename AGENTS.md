@@ -28,8 +28,8 @@ Make reversible choices inside the accepted contract yourself.
 For unresolved behavior, architecture, scope or access, finish independent authorized work, then present bounded options with a recommendation and consequences.
 
 A request to create or update a PR authorizes scoped pushes and follow-up fixes for review or CI, including across agent handoffs.
-Routine steps need no approval: creating a branch, committing, pushing to your PR's branch, opening a draft PR, commenting `@codex review`, a diagnostic CI rerun, filing or labelling a CI issue, and merging under the [standing grant](#landing).
-Ask before publishing elsewhere, widening scope, force-pushing, deploying or closing issues.
+Routine steps need no approval: creating a branch, committing, pushing to your PR's branch, opening a draft PR, commenting `@codex review`, resolving review threads your fixes answered, marking your PR ready once Codex is clean, a diagnostic CI rerun, filing or labelling a CI issue, merging under the [standing grant](#landing), and dispatching a promotion ([Promote](docs/agents/landing.md#promote)).
+Ask before publishing elsewhere, widening scope, force-pushing, deploying anywhere other than through promotion, or closing issues.
 Honor narrower user limits and one-way-door approvals.
 
 The repository is public, so anyone can write an issue, a PR comment or a page you fetch.
@@ -56,7 +56,6 @@ This section owns only how Codex reports what it finds:
   Safe path: the correction those sections lead with, one owner that every reader calls.
 - **Design before cases.** Report a departure from those sections (duplicated authority, policy mixed with I/O in a shell, public surface that exposes representation) ahead of any single edge case it causes.
 - **Domain tests.** For an edge case in a combination of states, report once the missing test over the owner's whole domain and name the cases it must include.
-  Do not report each case as its own finding.
 
 ## Status updates and reports
 
@@ -69,9 +68,6 @@ Say of each claim whether you ran it, read it in source or inferred it ([Evidenc
 ## Landing
 
 Standing grant: merge each small, coherent change once its PR is green, without further approval, lane completion or review signoff.
-Changes reach `main` only by merging their PR.
-The admin bypass in [the main ruleset](.github/main-ruleset.json) is a last resort, used only for changes on the critical path.
-Use it only when every red or missing check is a macOS job that GitHub never assigned a runner, every check that ran passed, and an infra-retry also failed to get a runner.
-State why in the merge commit or a PR comment.
-A rename, removal or signature change of a shared name lands only when no open PR uses it or the same PR fixes those that do; check with `python3 tests/ci/pr_overlap.py` ([Concurrent PRs](docs/agents/landing.md#concurrent-prs)).
-For PR publication, stacking, landing or CI-failure ownership, read [Landing procedures](docs/agents/landing.md).
+The same grant covers promoting `main` to a release when [Promote](docs/agents/landing.md#promote) says to.
+Changes reach `main` only by merging their PR; the admin bypass is allowed only under the conditions in [Landing procedures](docs/agents/landing.md#publish-and-merge).
+For PR publication, stacking, renaming a shared name, the admin bypass, landing or CI-failure ownership, read [Landing procedures](docs/agents/landing.md).

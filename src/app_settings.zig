@@ -593,9 +593,9 @@ test "App settings page text and ground at 99x20 and 46x20" {
     defer arena.deinit();
     for ([_]u16{ 99, 46 }) |width| {
         page.narrow = width == 46;
-        const surface = try page.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
+        const surface = try page.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
         var screen = try vaxis.Screen.init(arena.allocator(), .{ .cols = width, .rows = 20, .x_pixel = 0, .y_pixel = 0 });
-        surface.render(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = 20, .screen = &screen }, page.widget());
+        try surface.render(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = 20, .screen = &screen }, page.widget());
         var dump: std.Io.Writer.Allocating = .init(arena.allocator());
         for (0..20) |row| {
             var line: std.Io.Writer.Allocating = .init(arena.allocator());
@@ -609,7 +609,10 @@ test "App settings page text and ground at 99x20 and 46x20" {
         try std.testing.expect(std.mem.indexOf(u8, text, "   Effort          low") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, "   Permissions     run without asking") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, "   Notifications   on") != null);
-        try std.testing.expect(std.mem.indexOf(u8, text, "   Sign-in         Codex") != null);
+        // The product default signs in with a device code, and reads as
+        // the one ChatGPT sign-in.
+        try std.testing.expect(std.mem.indexOf(u8, text, "   Sign-in         ChatGPT") != null);
+        try std.testing.expect(std.ascii.findIgnoreCase(text, "codex") == null);
         try std.testing.expect(std.mem.indexOf(u8, text, "   Version         0.60.0 · up to date") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, if (page.narrow) " ‹ Rui · settings" else " Rui · settings") != null);
         const ground = widget_style.of(.{}, .{ .background = .bar });
@@ -620,6 +623,15 @@ test "App settings page text and ground at 99x20 and 46x20" {
 
 test "App settings sign-in and effort choices reflect saved values without assuming a provider" {
     var fixture: Fixture = .{};
+    // Either way into ChatGPT reads "ChatGPT"; the device code is how,
+    // not what, a person signed in with.
+    for ([_][2][]const u8{ .{ "codex", "ChatGPT" }, .{ "chatgpt", "ChatGPT" }, .{ "openai", "API key" } }) |case| {
+        try fixture.values.provider.set(case[0]);
+        var shown: Self = .{ .backend = fixture.backend() };
+        try shown.refresh();
+        shown.bind();
+        try std.testing.expectEqualStrings(case[1], shown.fields[@backingInt(Row.sign_in)].value);
+    }
     try fixture.values.provider.set("openai");
     var page: Self = .{ .backend = fixture.backend() };
     try page.refresh();
@@ -736,7 +748,7 @@ test "App settings Model shares the provider list at full width and preserves ma
     try press(&page, &ctx, vaxis.Key.enter);
     try std.testing.expect(page.hasChoice());
     for ([_]u16{ 99, 46 }) |width| {
-        const drawn = try page.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
+        const drawn = try page.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
         const parts = drawn.children[0].surface.children;
         const choice = parts[parts.len - 1];
         try std.testing.expectEqual(@as(i17, 0), choice.origin.col);
@@ -754,9 +766,9 @@ test "App settings Model shares the provider list at full width and preserves ma
     try std.testing.expect(page.model_choice.no_match);
     try std.testing.expectEqualStrings("future", page.model_choice.editor.buffer[0..page.model_choice.editor.length]);
     for ([_]u16{ 99, 46 }) |width| {
-        const drawn = try page.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
+        const drawn = try page.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
         var screen = try vaxis.Screen.init(arena.allocator(), .{ .cols = width, .rows = 20, .x_pixel = 0, .y_pixel = 0 });
-        drawn.render(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = 20, .screen = &screen }, page.widget());
+        try drawn.render(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = 20, .screen = &screen }, page.widget());
         try std.testing.expect(screen.cursor_vis);
         try std.testing.expectEqual(@as(u16, 25), screen.cursor.col);
         try std.testing.expectEqual(@as(u16, 2), screen.cursor.row);
@@ -796,7 +808,7 @@ test "App settings shared ASCII capability reaches the panel model choice tails 
             }
             fixture.status = .checking;
             page.failures.set(.notifications, " · couldn't save");
-            const surface = try page.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
+            const surface = try page.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
             try Check.ascii(surface);
             try std.testing.expect(!page.panel.unicode and !page.model_choice.unicode);
             try std.testing.expectEqualStrings("-", surface.children[0].surface.readCell(0, 0).char.grapheme);
@@ -843,7 +855,7 @@ test "App settings mouse hover and click use the same field choices as Enter" {
         var page: Self = .{ .backend = fixture.backend() };
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
-        const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 60, .height = 12 }, .cell_size = .{} };
+        const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 60, .height = 12 }, .cell_size = .{} };
         var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
         try page.refresh();
         _ = try page.widget().draw(draw_ctx);
@@ -897,7 +909,7 @@ test "App settings Keys is last and opens by Enter or click without a backend" {
         try std.testing.expectEqualStrings("", page.fields[@backingInt(Row.keys)].value);
         var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
         if (click) {
-            _ = try page.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
+            _ = try page.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
             // With no backend, Memory is absent and Keys follows Version.
             try page.widget().handleEvent(&ctx, .{ .mouse = .{ .button = .left, .type = .press, .row = 2 + @as(u16, @backingInt(Row.version)) + 1, .col = 4, .mods = .{} } });
         } else {
@@ -906,7 +918,7 @@ test "App settings Keys is last and opens by Enter or click without a backend" {
         }
         try std.testing.expect(page.keys_open);
         try std.testing.expect(ctx.consume_event);
-        const drawn = try page.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
+        const drawn = try page.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
         try std.testing.expectEqualStrings("e", drawn.readCell(1, 0).char.grapheme);
         try std.testing.expect(drawn.widget.eql(page.widget()));
         // Enter on a reference is inert, not a hidden settings edit.
@@ -930,7 +942,7 @@ test "App settings Memory gets the columns from the value column to the edge" {
         .{ .width = Panel.value_column + 9, .expected = "Memory          rui 38 MB" },
         .{ .width = Panel.value_column + 8, .expected = null },
     }) |case| {
-        const surface = try page.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = case.width, .height = 20 }, .cell_size = .{} });
+        const surface = try page.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = case.width, .height = 20 }, .cell_size = .{} });
         const body = surface.children[0].surface;
         var text: std.Io.Writer.Allocating = .init(arena.allocator());
         for (0..body.size.height) |y| {
@@ -967,7 +979,7 @@ test "App settings live Memory is optional read-only and independent of saved pr
             .{ .memory = null, .expected = null },
         }) |case| {
             fixture.memory_value = case.memory;
-            const surface = try page.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
+            const surface = try page.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
             const body = surface.children[0].surface;
             var text: std.Io.Writer.Allocating = .init(arena.allocator());
             for (0..body.size.height) |y| {

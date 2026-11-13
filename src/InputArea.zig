@@ -25,7 +25,7 @@ pub fn widget(self: *Self) vxfw.Widget {
 fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const self: *Self = @ptrCast(@alignCast(raw));
     const size = ctx.max.size();
-    if (size.width == 0 or size.height == 0) return vxfw.Surface.init(ctx.arena, self.widget(), .{});
+    if (size.width == 0 or size.height == 0) return vxfw.Surface.init(ctx.cell_arena, self.widget(), .{});
     // The facts row, then the status: a line, or as many as a command's
     // short result has, while the content keeps a row.
     const facts_rows: u16 = @min(1, size.height - 1);
@@ -65,7 +65,7 @@ test "InputArea keeps facts below the composer when a notice replaces the status
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     for ([_]vxfw.Size{ .{ .width = 80, .height = 24 }, .{ .width = 40, .height = 10 } }) |size| {
-        const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = size.width, .height = size.height }, .cell_size = .{} };
+        const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = size.width, .height = size.height }, .cell_size = .{} };
         status.text = &.{.{ .text = "enter sends" }};
         const idle = try input.widget().draw(ctx);
         try std.testing.expectEqual(@as(u16, 5), idle.size.height);
@@ -88,7 +88,7 @@ test "InputArea keeps facts below the composer when a notice replaces the status
     @memcpy(bytes[0..draft.len], draft);
     editor.length = draft.len;
     editor.cursor = draft.len;
-    const small = try input.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 5 }, .cell_size = .{} });
+    const small = try input.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 5 }, .cell_size = .{} });
     try std.testing.expectEqual(@as(u16, 5), small.size.height);
     try std.testing.expectEqualStrings("s", small.children[0].surface.readCell(3, 1).char.grapheme);
     try std.testing.expectEqualStrings("n", small.children[1].surface.readCell(0, 0).char.grapheme);
@@ -101,7 +101,7 @@ test "InputArea survives one-cell and empty resizes without changing the draft o
     var input: Self = .{ .composer = .{ .editor = &editor } };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 24 }, .cell_size = .{} };
+    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 24 }, .cell_size = .{} };
     const before = try input.widget().draw(ctx);
     for ([_]vxfw.Size{ .{ .width = 1, .height = 1 }, .{ .width = 0, .height = 1 }, .{ .width = 1, .height = 0 }, .{ .width = 2, .height = 2 }, .{ .width = 3, .height = 4 } }) |size| {
         const surface = try input.widget().draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = size.height }));
@@ -139,7 +139,7 @@ test "InputArea permission hides and restores the draft and its caret after deci
     var input: Self = .{ .composer = .{ .editor = &editor } };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 7 }, .cell_size = .{} };
+    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 7 }, .cell_size = .{} };
     const before = try input.widget().draw(ctx);
     consent.adopt(37);
     input.permission = &card;
@@ -170,7 +170,7 @@ test "a draft grows to a third of the screen at most, and the content keeps the 
     defer arena.deinit();
     for ([_]u16{ 10, 24, 60 }) |height| {
         errdefer std.debug.print("height={d}\n", .{height});
-        const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = height }, .cell_size = .{} };
+        const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = height }, .cell_size = .{} };
         const drawn = try input.widget().draw(ctx);
         // The draft's rows sit between the composer's two rules.
         const draft_rows = drawn.children[0].surface.size.height - 2;
@@ -193,11 +193,11 @@ test "InputArea approval has one document title above a choice between composer 
     defer arena.deinit();
     for ([_]u16{ 140, 46 }) |width| {
         consent.adopt(width);
-        const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 12 }, .cell_size = .{} };
+        const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 12 }, .cell_size = .{} };
         const shown = try input.widget().draw(ctx);
         var screen: vaxis.Screen = try .init(arena.allocator(), .{ .rows = shown.size.height, .cols = width, .x_pixel = 0, .y_pixel = 0 });
         const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = shown.size.height, .screen = &screen };
-        shown.render(window, card.widget());
+        try shown.render(window, card.widget());
         var text: std.Io.Writer.Allocating = .init(arena.allocator());
         for (0..shown.size.height) |row| {
             for (0..width) |col| try text.writer.writeAll(screen.readCell(@intCast(col), @intCast(row)).?.char.grapheme);
@@ -237,7 +237,7 @@ test "InputArea has no empty status row below the footer" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     for ([_]vxfw.Size{ .{ .width = 140, .height = 40 }, .{ .width = 46, .height = 30 } }) |size| {
-        const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = size.width, .height = size.height }, .cell_size = .{} };
+        const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = size.width, .height = size.height }, .cell_size = .{} };
 
         const idle = try input.widget().draw(ctx);
         try std.testing.expectEqual(@as(u16, 4), idle.size.height);
@@ -263,7 +263,7 @@ test "InputArea puts the facts row last, under the status's rows, when asked" {
     var input: Self = .{ .composer = .{ .editor = &editor }, .facts = facts.widget(), .status = status.widget(), .facts_at = .bottom };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    const drawn = try input.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 10 }, .cell_size = .{} });
+    const drawn = try input.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 10 }, .cell_size = .{} });
     try std.testing.expectEqual(@as(u16, 6), drawn.size.height);
     try std.testing.expectEqual(@as(i17, 3), drawn.children[2].origin.row);
     try std.testing.expectEqual(@as(i17, 5), drawn.children[1].origin.row);
@@ -278,7 +278,7 @@ test "InputArea a modal footer replaces status without retaining an extra bottom
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     for ([_]u16{ 46, 99, 140 }) |width| {
-        const drawn = try input.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 30 }, .cell_size = .{} });
+        const drawn = try input.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 30 }, .cell_size = .{} });
         try std.testing.expectEqual(@as(u16, 4), drawn.size.height);
         try std.testing.expectEqual(@as(usize, 2), drawn.children.len);
         try std.testing.expectEqual(@as(i17, 3), drawn.children[1].origin.row);

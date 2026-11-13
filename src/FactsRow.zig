@@ -23,7 +23,7 @@ pub fn widget(self: *Self) vxfw.Widget {
 fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const self: *Self = @ptrCast(@alignCast(raw));
     const max = ctx.max.size();
-    var surface = try vxfw.Surface.init(ctx.arena, self.widget(), .{ .width = max.width, .height = @min(1, max.height) });
+    var surface = try vxfw.Surface.init(ctx.cell_arena, self.widget(), .{ .width = max.width, .height = @min(1, max.height) });
     @memset(surface.buffer, .{ .style = self.style });
     if (surface.size.width < 2 or surface.size.height == 0) return surface;
     self.back.label = "‹";
@@ -51,7 +51,7 @@ test "the facts row leads with a clickable ‹ back to the overview" {
     var row: Self = .{ .back = .{ .label = "", .userdata = &back, .on_click = Back.back }, .text = "Fix flaky store test · gpt-6.1-sol · high · 62% left" };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    const drawn = try row.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 1 }, .cell_size = .{} });
+    const drawn = try row.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 1 }, .cell_size = .{} });
     try std.testing.expectEqualStrings("F", drawn.readCell(3, 0).char.grapheme);
     try std.testing.expectEqual(@as(i17, 1), drawn.children[0].origin.col);
     try std.testing.expectEqualStrings("‹", drawn.children[0].surface.readCell(0, 0).char.grapheme);
@@ -61,17 +61,17 @@ test "the facts row leads with a clickable ‹ back to the overview" {
     var release = press;
     release.type = .release;
     try row.back.widget().handleEvent(&ctx, .mouse_enter);
-    const hovered = try row.back.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 1, .height = 1 }, .cell_size = .{} });
+    const hovered = try row.back.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 1, .height = 1 }, .cell_size = .{} });
     try std.testing.expectEqual(.single, hovered.readCell(0, 0).style.ul_style);
     try std.testing.expectEqual(vaxis.Mouse.Shape.pointer, ctx.cmds.items[ctx.cmds.items.len - 1].set_mouse_shape);
     try row.back.widget().handleEvent(&ctx, .{ .mouse = press });
     try row.back.widget().handleEvent(&ctx, .{ .mouse = release });
     try std.testing.expectEqual(@as(usize, 1), back.count);
     try row.back.widget().handleEvent(&ctx, .mouse_leave);
-    const left = try row.back.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 1, .height = 1 }, .cell_size = .{} });
+    const left = try row.back.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 1, .height = 1 }, .cell_size = .{} });
     try std.testing.expectEqual(.off, left.readCell(0, 0).style.ul_style);
     for ([_]vxfw.Size{ .{ .width = 0, .height = 1 }, .{ .width = 1, .height = 1 }, .{ .width = 3, .height = 0 } }) |size| {
-        const tiny = try row.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = size.width, .height = size.height }, .cell_size = .{} });
+        const tiny = try row.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = size.width, .height = size.height }, .cell_size = .{} });
         try std.testing.expect(tiny.size.width <= size.width and tiny.size.height <= size.height);
     }
 }

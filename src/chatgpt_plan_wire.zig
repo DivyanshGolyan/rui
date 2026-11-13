@@ -209,9 +209,11 @@ pub fn requestTarget(received: []const u8) !?[]const u8 {
 /// have ended: a callback's code, state, scope and client id fit well inside.
 pub const max_request_line_bytes = 8 * 1024;
 
-/// The listener's answers to the browser, each one plain line.
+/// The listener's answers to the browser, each one plain line. A failure
+/// sends the person back to Rui, whether the command line or the first-run
+/// screen is waiting there.
 pub const page_signed_in = page("200 OK", "Signed in. You can close this tab.\n");
-pub const page_failed = page("400 Bad Request", "Sign-in did not finish. See the terminal.\n");
+pub const page_failed = page("400 Bad Request", "Sign-in did not finish. Go back to Rui.\n");
 pub const page_not_found = page("404 Not Found", "Not found.\n");
 
 fn page(comptime status: []const u8, comptime body: []const u8) []const u8 {
@@ -882,6 +884,9 @@ test "the listener's pages are one plain line each" {
         try std.testing.expect(std.mem.endsWith(u8, body, "\n"));
         var length: [32]u8 = undefined;
         try std.testing.expect(std.mem.indexOf(u8, answer[0..head_end], try std.fmt.bufPrint(&length, "Content-Length: {d}\r\n", .{body.len})) != null);
+        // The screen and the command line both wait on a login; no page
+        // names only one of them.
+        try std.testing.expect(std.mem.indexOf(u8, body, "terminal") == null);
     }
 }
 

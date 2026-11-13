@@ -984,20 +984,11 @@ pub const SettingsRead = struct {
         if (read.ahead) |*ahead| ahead.queue(a, view, read.admission_position);
     }
 
-    /// This round as the reads an admission's commit carries.
-    pub fn follow(read: *SettingsRead) store_core.Follow {
-        return .{ .context = read, .queue = followQueue, .settle = followSettle };
-    }
-
-    fn followQueue(context: *anyopaque, a: *store_access.Access(.survey, error{})) void {
-        const read: *SettingsRead = @ptrCast(@alignCast(context));
-        read.queue(a);
-    }
-
-    /// A round whose answers do not settle leaves the view unsettled: its
-    /// owner's own `settings` round then answers as it always did.
-    fn followSettle(context: *anyopaque) void {
-        const read: *SettingsRead = @ptrCast(@alignCast(context));
+    /// As the reads an admission's commit carries after COMMIT
+    /// (`Access.commitFollowed`), after the message that ran `queue`: a
+    /// round whose answers do not settle leaves the view unsettled, and
+    /// its owner's own `settings` round then answers as it always did.
+    pub fn followed(read: *SettingsRead) void {
         read.settle() catch return;
         read.view.settled = read.out;
     }

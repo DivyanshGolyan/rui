@@ -1856,7 +1856,7 @@ def provider_line_cases():
         assert scripted.returncode == 6 and "[store_unavailable]" in scripted.stderr, scripted
         assert "› ChatGPT    API key" not in scripted.stdout and "Provider: [c]" not in scripted.stdout
         assert not (no_tty / ".config").exists() and not (no_tty / "store").exists()
-        for choice in ("codex", "ready-key", "key", "device", "escape"):
+        for choice in ("codex", "ready-key", "key", "browser", "device", "escape"):
             home = state / choice
             config = home / ".config/rui"
             config.mkdir(parents=True, mode=0o700)
@@ -1900,8 +1900,24 @@ def provider_line_cases():
                         assert (config / "openai.key").read_text() == "sk-screen-secret\n"
                         assert "provider=openai\n" in (config / "preferences").read_text()
                         assert stat.S_IMODE((config / "openai.key").stat().st_mode) == 0o600
-                    elif choice == "device":
+                    elif choice == "browser":
+                        # ChatGPT begins in the browser, on the fixture's
+                        # loopback issuer; a pasted line that is no address
+                        # leaves it waiting, and Esc cancels it.
                         os.write(master, b"\r")
+                        waiting = read_terminal(master, "Sign in at 127.0.0.1:1")
+                        assert "tab device code · esc back" in waiting, waiting
+                        os.write(master, b"\x1b[200~not-the-address\x1b[201~")
+                        os.write(master, b"\r")
+                        stray = read_terminal(master, "Not the sign-in address")
+                        assert "not-the-address" not in stray, stray
+                        os.write(master, b"\x1b")
+                        read_terminal(master, "› ChatGPT    API key", fresh=True)
+                    elif choice == "device":
+                        # Tab while the browser waits switches to a code.
+                        os.write(master, b"\r")
+                        read_terminal(master, "Sign in at 127.0.0.1:1")
+                        os.write(master, b"\t")
                         waiting = read_terminal(master, "BDL9-KI88H")
                         assert "auth.openai.com/codex/device · BDL9-KI88H" in waiting, waiting
                         assert "Waiting for ChatGPT" in waiting, waiting
@@ -1920,9 +1936,10 @@ def provider_line_cases():
                 assert caller.returncode == 0, (choice, caller.returncode, errors)
                 assert "sk-screen-secret".encode() not in output + errors
                 assert os_semantics.user_termios(termios.tcgetattr(slave)) == os_semantics.user_termios(original)
-                if choice in ("device", "escape"):
+                if choice in ("browser", "device", "escape"):
                     assert not (config / "preferences").exists()
                     assert not (config / "codex.json").exists()
+                    assert not (config / "chatgpt.json").exists()
                 assert not (config / "requests").exists(), "sign-in captured a Message"
             finally:
                 dispose_all(lambda: stop_process(caller, timeout=5) if caller is not None else None,
@@ -1931,7 +1948,7 @@ def provider_line_cases():
                             lambda: close_pty(master), lambda: close_pty(slave))
         assert endpoint.requests == [], endpoint.requests
         completed = True
-        print("provider screen: no-TTY, choices, device back, invalid/masked key and restored terminal passed", flush=True)
+        print("provider screen: no-TTY, choices, browser stray and back, Tab to device and back, invalid/masked key and restored terminal passed", flush=True)
     finally:
         dispose_all(lambda: fixture.stop_host(host) if host is not None else None,
                     endpoint.shutdown, endpoint.server_close, lambda: thread.join(timeout=5))
@@ -2627,7 +2644,7 @@ def main(selected="all"):
             col = line.index("Settings") + 1
             gesture = f"\x1b[<0;{col};{row + 1}M\x1b[<0;{col};{row + 1}m".encode()
             app_settings = keyed_frame(master, gesture, lambda screen, x, y: "Notifications" in screen and "Version" in screen)
-            assert any("Sign-in" in row and "Codex" in row for row in app_settings.splitlines()), app_settings
+            assert any("Sign-in" in row and "ChatGPT" in row for row in app_settings.splitlines()), app_settings
             keys = keyed_frame(master, b"\x1b[B" * 6 + b"\r", lambda screen, x, y: "earlier message" in screen)
             for expected in ('enter    open / send', 'esc      back', '⇧enter   new line', 'ctrl+x   stop', '↑↓       scroll', 'ctrl+o   tool output', 'ctrl+p   earlier message', 'ctrl+r   retry', '/        skills', 'alt+a    archive', 'ctrl+c   leave'):
                 assert expected in keys, (expected, keys)
@@ -2641,14 +2658,15 @@ def main(selected="all"):
             assert "result: completed\nfirst answer" in conversation_text(result), result
             terminal_step(master, "/requests", "Local recovery handles", composer=True)
             assert not (fresh_home / ".config/rui/requests").exists(), "re-entry should not require saved records"
-            before_unsupported = set(json.loads(run(preferences_home, "request", "list")))
-            for command in ("/upgrade", "/login", "/wait", "/inspect-action", "/exit", "/help"):
-                notice = f"! Unknown command {command}"
+            before_misused = set(json.loads(run(preferences_home, "request", "list")))
+            for command in ("/new", "/clear", "/model", "/archive", "/unarchive", "/requests"):
+                notice = f"! Usage: {command}"
+                command += " unexpected"
                 terminal_step(master, command, notice, composer=True)
-                assert set(json.loads(run(preferences_home, "request", "list"))) == before_unsupported
+                assert set(json.loads(run(preferences_home, "request", "list"))) == before_misused
             terminal_step(master, "/setup", "gpt-6-luna", composer=True)
             chat_info_frame(master)
-            assert not credential.exists(), "unsupported in-session login created credentials"
+            assert not credential.exists(), "local chat commands created credentials"
             terminal_step(master, "/setup --model gpt-6-luna", "Saved defaults for future Sessions", composer=True)
             saved_default(master, "/setup --model gpt-5.5", "Model: gpt-5.5")
             interactive_saved = preferences_home / ".config/rui/preferences"
@@ -2684,10 +2702,10 @@ def main(selected="all"):
             chat_info_frame(master)
             assert fixture.command("session", "inspect", "--store", store,
                 "--session", session)["session"]["model"] == "gpt-6-sol"
-            # Removed commands cannot configure or inspect through a second path.
+            # Misused property commands cannot configure through a second path.
             before_configure = fixture.command("session", "inspect", "--store", store, "--session", session)["session"]
-            for command in ("/status", "/configure --model gpt-5.5", "/model"):
-                terminal_step(master, command, "Unknown command", composer=True)
+            for command in ("/model gpt-5.5", "/new --model gpt-5.5"):
+                terminal_step(master, command, "Usage:", composer=True)
             assert fixture.command("session", "inspect", "--store", store, "--session", session)["session"] == before_configure
             chat_info_open(master)
             model_choice_frame(master, b"\x1b[B\x1b[B\x1b[B\r", query="")
