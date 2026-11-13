@@ -40,6 +40,40 @@ pub const Failure = struct {
     }
 };
 
+/// Parse the same bounded line this owner writes. Unrelated startup output,
+/// partial lines and unknown future codes are not refusals. The result owns
+/// its bytes; neither the input nor the temporary parser arena escapes.
+pub fn parseLine(gpa: std.mem.Allocator, bytes: []const u8) error{OutOfMemory}!?Failure {
+    if (bytes.len > max_line_bytes or !std.mem.endsWith(u8, bytes, "\n")) return null;
+    const Envelope = struct { rui_start_error: struct { code: StartError, message: []const u8 } };
+    const parsed = std.json.parseFromSlice(Envelope, gpa, bytes, .{}) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return null,
+    };
+    defer parsed.deinit();
+    const message = parsed.value.rui_start_error.message;
+    if (message.len > max_refusal_message_bytes or !std.unicode.utf8ValidateSlice(message)) return null;
+    return .init(parsed.value.rui_start_error.code, message);
+}
+
+test "start report parser round trips every code and rejects incomplete or foreign lines" {
+    var buffer: [max_line_bytes]u8 = undefined;
+    inline for (comptime std.meta.tags(StartError)) |code| {
+        const original: Failure = .init(code, "line\n\r\t\"\\\u{2028}");
+        const bytes = line(&original, &buffer);
+        const parsed = (try parseLine(std.testing.allocator, bytes)).?;
+        try std.testing.expectEqual(code, parsed.code);
+        try std.testing.expectEqualStrings(original.message.slice(), parsed.message.slice());
+        for (0..bytes.len) |end| try std.testing.expectEqual(null, try parseLine(std.testing.allocator, bytes[0..end]));
+    }
+    for ([_][]const u8{
+        "rui: human refusal [store_locked]\n",
+        "{\"rui_start_error\":{\"code\":\"future\",\"message\":\"no\"}}\n",
+        "{\"rui_start_error\":{\"code\":\"store_locked\",\"message\":\"no\",\"extra\":true}}\n",
+        "{\"rui_start_error\":{\"code\":\"store_locked\"}}\n",
+    }) |bytes| try std.testing.expectEqual(null, try parseLine(std.testing.allocator, bytes));
+}
+
 /// Renders into caller-owned storage; the returned slice borrows that buffer.
 pub fn line(failure: *const Failure, buffer: *[max_line_bytes]u8) []const u8 {
     var out = std.Io.Writer.fixed(buffer);

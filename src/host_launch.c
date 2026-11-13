@@ -199,6 +199,9 @@ static int launch_detached(const char *helper_executable, const char *executable
         if (err != 0) goto attributes_done;
     }
     if (startup_write >= 0) {
+        /* Carry both startup channels as bytes; the caller owns interpretation. */
+        err = posix_spawn_file_actions_adddup2(&actions, startup_write, 1);
+        if (err != 0) goto attributes_done;
         err = posix_spawn_file_actions_adddup2(&actions, startup_write, 2);
         if (err != 0) goto attributes_done;
     }
@@ -243,7 +246,7 @@ spawn_done:
         for (int fd = 0; fd < 3; fd++) {
             if (dup2(null_fd, fd) < 0) fail_launch(report, errno, exact);
         }
-        if (startup_write >= 0 && dup2(startup_write, 2) < 0) fail_launch(report, errno, exact);
+        if (startup_write >= 0 && (dup2(startup_write, 1) < 0 || dup2(startup_write, 2) < 0)) fail_launch(report, errno, exact);
         if (null_fd > 2 && null_fd != report) close(null_fd);
         if (report != launch_report_fd) {
             if (dup2(report, launch_report_fd) < 0) fail_launch(report, errno, exact);
