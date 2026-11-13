@@ -9,9 +9,11 @@
 //! the caller. Every decision about what arrived, and every message sent,
 //! is the wire module's; the record is
 //! published by the caller through the credential custody owner
-//! (`codex_credentials.zig`). Logout revokes the refresh token and signs the
-//! record out under that owner's lock, keeping the issued client id for the
-//! next sign-in; the host id file is never touched after it is made.
+//! (`codex_credentials.zig`). Logout ends both ChatGPT logins under that
+//! owner's lock: it revokes the browser sign-in's refresh token and signs its
+//! record out, keeping the issued client id for the next sign-in, and signs
+//! the device-code record out locally; the host id file is never touched
+//! after it is made.
 const std = @import("std");
 const wire = @import("chatgpt_plan_wire.zig");
 const policy = @import("codex_credential_policy.zig");
@@ -397,15 +399,31 @@ fn callbackFailure(err: anyerror) CallbackFailure {
     };
 }
 
-/// How a logout ended.
-pub const Logout = enum {
+/// How `rui auth logout chatgpt` left the browser sign-in.
+pub const Browser = enum {
     /// There was no sign-in to end; nothing changed.
-    not_signed_in,
+    absent,
     /// The issuer confirmed the revocation, and the tokens are gone.
     revoked,
     /// The tokens are gone, but the issuer did not confirm the revocation.
     unconfirmed,
+    /// Rui could not read or sign out the record, which stays as it was.
+    failed,
 };
+
+/// How `rui auth logout chatgpt` left the device-code sign-in. Rui has no
+/// revocation for it, so ending it only removes its tokens.
+pub const DeviceCode = enum {
+    /// There was no sign-in to end; nothing changed.
+    absent,
+    /// The tokens are gone.
+    removed,
+    /// Rui could not read or sign out the record, which stays as it was.
+    failed,
+};
+
+/// How a logout left each ChatGPT login, settled once both were tried.
+pub const Logout = struct { browser: Browser, device_code: DeviceCode };
 
 const Revoke = struct {
     credentials: credentials.Scratch = undefined,
@@ -414,18 +432,40 @@ const Revoke = struct {
     response: codex_auth.Response = undefined,
 };
 
-/// Revokes the refresh token, best effort, then removes the tokens and keeps
-/// the issued client id (`credentials.signOut`).
-pub fn logout(io: std.Io, credential_path: []const u8, issuer: Issuer) !Logout {
-    const mapped = try pages.Mapped(Revoke).map();
+/// Ends both ChatGPT logins, each under its own credential lock through
+/// `credentials.signOut`: the browser sign-in at `browser_path` revokes its
+/// refresh token, best effort, then removes the tokens and keeps the issued
+/// client id; the device-code one at `device_code_path` only removes its
+/// tokens. A failure to end one never keeps the other from ending.
+pub fn logout(io: std.Io, browser_path: []const u8, device_code_path: []const u8, issuer: Issuer) Logout {
+    const mapped = pages.Mapped(Revoke).map() catch return .{ .browser = .failed, .device_code = .failed };
     defer mapped.unmap();
     const room = mapped.value;
     defer std.crypto.secureZero(u8, std.mem.asBytes(room));
+    return .{
+        .browser = if (revokeBrowser(io, browser_path, issuer, room)) |outcome| outcome else |err| switch (err) {
+            // No private directory: never signed in.
+            error.FileNotFound => .absent,
+            else => .failed,
+        },
+        .device_code = if (credentials.signOut(device_code_path, &room.credentials, {}, keepDeviceCode)) |ended|
+            if (ended) .removed else .absent
+        else |err| switch (err) {
+            error.FileNotFound => .absent,
+            else => .failed,
+        },
+    };
+}
+
+/// The device-code sign-in has no revocation Rui knows of: nothing is sent.
+fn keepDeviceCode(_: void, _: *const policy.Record) !void {}
+
+fn revokeBrowser(io: std.Io, credential_path: []const u8, issuer: Issuer, room: *Revoke) !Browser {
     const Context = struct {
         io: std.Io,
         issuer: Issuer,
         room: *Revoke,
-        outcome: Logout = .unconfirmed,
+        outcome: Browser = .unconfirmed,
 
         fn revoke(self: *@This(), current: *const policy.Record) !void {
             // Only a record issued to the fixture client reaches a fixture.
@@ -450,8 +490,59 @@ pub fn logout(io: std.Io, credential_path: []const u8, issuer: Issuer) !Logout {
         }
     };
     var context: Context = .{ .io = io, .issuer = issuer, .room = room };
-    if (!try credentials.signOut(credential_path, &room.credentials, &context, Context.revoke)) return .not_signed_in;
+    if (!try credentials.signOut(credential_path, &room.credentials, &context, Context.revoke)) return .absent;
     return context.outcome;
+}
+
+test "logout ends the device-code sign-in in each state it can be in, beside a browser one that is absent or unreadable" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var private = try tmp.dir.createDirPathOpen(io, "private", .{ .permissions = .fromMode(0o700) });
+    private.close(io);
+    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &root);
+    var browser_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const browser_path = try std.fmt.bufPrint(&browser_buffer, "{s}/private/chatgpt.json", .{root[0..root_len]});
+    var device_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const device_path = try std.fmt.bufPrint(&device_buffer, "{s}/private/codex.json", .{root[0..root_len]});
+    const ready = "version=3\ngeneration=1\naccount_id=" ++ policy.fixture_account_id ++ "\nfedramp=0\nid_token=" ++ policy.fixture_id_token ++
+        "\naccess_token=" ++ policy.fixture_access_token ++ "\nrefresh_token=synthetic-refresh\nexpires_at=4102444800\nrefreshed_at=100\nstate=";
+    const signed_out = "version=3\ngeneration=2\naccount_id=" ++ policy.fixture_account_id ++
+        "\nfedramp=0\nid_token=\naccess_token=\nrefresh_token=\nexpires_at=0\nrefreshed_at=100\nstate=signed_out\n";
+    const unreadable = "not a credential\n";
+    // The device-code record as status reads it, and what logout makes of
+    // it; the browser path is never revoked, so no issuer is reached.
+    for ([_]struct { ?[]const u8, DeviceCode }{
+        .{ null, .absent }, // missing: no file
+        .{ signed_out, .absent }, // missing: already signed out
+        .{ ready ++ "ready\n", .removed }, // configured, and renewal_due by the clock alone
+        .{ ready ++ "refresh_pending\n", .removed }, // refresh_required
+        .{ unreadable, .failed }, // credential_error
+    }) |case| {
+        for ([_]struct { ?[]const u8, Browser }{ .{ null, .absent }, .{ unreadable, .failed } }) |browser| {
+            tmp.dir.deleteFile(io, "private/codex.json") catch {};
+            tmp.dir.deleteFile(io, "private/chatgpt.json") catch {};
+            if (case[0]) |bytes| try tmp.dir.writeFile(io, .{ .sub_path = "private/codex.json", .data = bytes, .flags = .{ .permissions = .fromMode(0o600) } });
+            if (browser[0]) |bytes| try tmp.dir.writeFile(io, .{ .sub_path = "private/chatgpt.json", .data = bytes, .flags = .{ .permissions = .fromMode(0o600) } });
+            try std.testing.expectEqual(Logout{ .browser = browser[1], .device_code = case[1] }, logout(io, browser_path, device_path, .{ .fixture = "http://127.0.0.1:9" }));
+            var bytes: [policy.max_file_bytes]u8 = undefined;
+            const after: ?[]const u8 = tmp.dir.readFile(io, "private/codex.json", &bytes) catch |err| switch (err) {
+                error.FileNotFound => null,
+                else => return err,
+            };
+            switch (case[1]) {
+                // Nothing changed.
+                .absent, .failed => if (case[0]) |before| try std.testing.expectEqualStrings(before, after.?) else try std.testing.expectEqual(@as(?[]const u8, null), after),
+                // Signed out at the next generation: nothing selects it, and status reads no sign-in.
+                .removed => {
+                    try std.testing.expectEqualStrings("version=3\ngeneration=2\naccount_id=" ++ policy.fixture_account_id ++
+                        "\nfedramp=0\nid_token=\naccess_token=\nrefresh_token=\nexpires_at=0\nrefreshed_at=100\nstate=signed_out\n", after.?);
+                    try std.testing.expectEqual(policy.LocalStatus.missing, try codex_auth.localStatus(device_path, 0));
+                },
+            }
+        }
+    }
 }
 
 test "pasted lines are read whole, and a line that is no callback leaves the wait going" {

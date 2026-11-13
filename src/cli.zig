@@ -721,29 +721,130 @@ fn readStdin(buffer: []u8) ?usize {
     return std.posix.read(std.Io.File.stdin().handle, buffer) catch 0;
 }
 
-/// `rui auth logout chatgpt`: revoke, then remove the tokens, keeping the
-/// issued client id and the host id.
+/// `rui auth logout chatgpt`: ends both ChatGPT logins, the browser sign-in
+/// (revoked, then its tokens removed, keeping the issued client id and the
+/// host id) and the device-code one (its tokens removed), then says how each
+/// ended (Divyansh chose this on 2026-11-13).
 fn planLogout(init: std.process.Init, provider: []const u8, fixture_endpoint: ?[]const u8) !void {
     if (!std.mem.eql(u8, provider, "chatgpt")) {
         stderr.diagnostic("rui: rui auth logout signs out of chatgpt only; Rui keeps no sign-in to end for another provider.\n", .{});
         return usage();
     }
     const issuer = try planIssuer(init, fixture_endpoint);
-    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const path = try credentialPath(init, .chatgpt, &path_buffer, false);
-    const outcome = chatgpt_plan_login.logout(init.io, path, issuer) catch |err| switch (err) {
-        // No private directory: never signed in.
-        error.FileNotFound => .not_signed_in,
-        else => return err,
+    var browser_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const browser_path = try credentialPath(init, .chatgpt, &browser_buffer, false);
+    var device_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const device_path = try credentialPath(init, .codex, &device_buffer, false);
+    const receipt = logoutReceipt(chatgpt_plan_login.logout(init.io, browser_path, device_path, issuer));
+    if (receipt.done) |line| try std.Io.File.stdout().writeStreamingAll(init.io, line);
+    if (receipt.browser) |line| stderr.diagnosticBytes(line);
+    if (receipt.device_code) |line| stderr.diagnosticBytes(line);
+    if (receipt.failed()) {
+        recordExit(.unclassified);
+        return error.Reported;
+    }
+}
+
+/// What a logout says: one stdout line for what it ended, and one stderr
+/// line for each login that may remain, which also fails the command.
+const LogoutReceipt = struct {
+    done: ?[]const u8,
+    browser: ?[]const u8,
+    device_code: ?[]const u8,
+
+    fn failed(self: LogoutReceipt) bool {
+        return self.browser != null or self.device_code != null;
+    }
+};
+
+fn logoutReceipt(ended: chatgpt_plan_login.Logout) LogoutReceipt {
+    const again = "inspect it, then run rui auth logout chatgpt again.\n";
+    const removed_browser = ended.browser == .revoked or ended.browser == .unconfirmed;
+    const removed_device = ended.device_code == .removed;
+    const partial = ended.browser == .failed or ended.device_code == .failed;
+    return .{
+        .done = if (partial)
+            if (removed_browser) "Rui: Signed out of ChatGPT in the browser.\n" else if (removed_device) "Rui: Signed out of ChatGPT with a device code.\n" else null
+        else if (removed_browser or removed_device) "Rui: Signed out of ChatGPT.\n" else "Rui: Not signed in to ChatGPT; nothing changed.\n",
+        .browser = switch (ended.browser) {
+            .absent, .revoked => null,
+            .unconfirmed => "rui: Rui deleted its tokens, but ChatGPT did not confirm it ended the browser sign-in. To end it there too, disconnect Rui in ChatGPT's settings.\n",
+            .failed => "rui: Still signed in to ChatGPT in the browser: Rui could not read or change its private credential; " ++ again,
+        },
+        .device_code = switch (ended.device_code) {
+            .absent, .removed => null,
+            .failed => "rui: Still signed in to ChatGPT with a device code: Rui could not read or change its private credential; " ++ again,
+        },
     };
-    try std.Io.File.stdout().writeStreamingAll(init.io, switch (outcome) {
-        .not_signed_in => "Rui: Not signed in to ChatGPT; nothing changed.\n",
-        .revoked => "Rui: Signed out of ChatGPT.\n",
-        .unconfirmed => "Rui: Signed out of ChatGPT: Rui deleted its tokens, but ChatGPT did not confirm it ended the sign-in. To end it there too, disconnect Rui in ChatGPT's settings.\n",
-    });
-    // Logout ends the browser sign-in only; the device-code one stays.
-    const device = providerReadiness(init, .codex) catch .credential_error;
-    if (device.usable()) try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Still signed in to ChatGPT with a device code; chats that use it keep working.\n");
+}
+
+test "logout says how it left each ChatGPT login, and fails while either may remain" {
+    const Readiness = provider_selection.Readiness;
+    // Written out by hand for every pair of local states, as `rui auth
+    // status` reads them, with the revocation confirmed, and then
+    // unconfirmed for each state that holds a browser sign-in to revoke.
+    // A readable record whose claims status rejects (`credential_error`)
+    // is signed out like any other; these rows are an unreadable one.
+    const out = "Rui: Signed out of ChatGPT.\n";
+    const nothing = "Rui: Not signed in to ChatGPT; nothing changed.\n";
+    const out_browser = "Rui: Signed out of ChatGPT in the browser.\n";
+    const out_device = "Rui: Signed out of ChatGPT with a device code.\n";
+    const unconfirmed = "rui: Rui deleted its tokens, but ChatGPT did not confirm it ended the browser sign-in. To end it there too, disconnect Rui in ChatGPT's settings.\n";
+    const browser_stays = "rui: Still signed in to ChatGPT in the browser: Rui could not read or change its private credential; inspect it, then run rui auth logout chatgpt again.\n";
+    const device_stays = "rui: Still signed in to ChatGPT with a device code: Rui could not read or change its private credential; inspect it, then run rui auth logout chatgpt again.\n";
+    const B = chatgpt_plan_login.Browser;
+    const D = chatgpt_plan_login.DeviceCode;
+    const Row = struct { Readiness, Readiness, B, D, ?[]const u8, ?[]const u8, ?[]const u8, u8 };
+    const rows = [_]Row{
+        .{ .missing, .missing, .absent, .absent, nothing, null, null, 0 },
+        .{ .missing, .configured, .absent, .removed, out, null, null, 0 },
+        .{ .missing, .renewal_due, .absent, .removed, out, null, null, 0 },
+        .{ .missing, .refresh_required, .absent, .removed, out, null, null, 0 },
+        .{ .missing, .credential_error, .absent, .failed, null, null, device_stays, 1 },
+        .{ .configured, .missing, .revoked, .absent, out, null, null, 0 },
+        .{ .configured, .configured, .revoked, .removed, out, null, null, 0 },
+        .{ .configured, .renewal_due, .revoked, .removed, out, null, null, 0 },
+        .{ .configured, .refresh_required, .revoked, .removed, out, null, null, 0 },
+        .{ .configured, .credential_error, .revoked, .failed, out_browser, null, device_stays, 1 },
+        .{ .renewal_due, .missing, .revoked, .absent, out, null, null, 0 },
+        .{ .renewal_due, .configured, .revoked, .removed, out, null, null, 0 },
+        .{ .renewal_due, .renewal_due, .revoked, .removed, out, null, null, 0 },
+        .{ .renewal_due, .refresh_required, .revoked, .removed, out, null, null, 0 },
+        .{ .renewal_due, .credential_error, .revoked, .failed, out_browser, null, device_stays, 1 },
+        .{ .refresh_required, .missing, .revoked, .absent, out, null, null, 0 },
+        .{ .refresh_required, .configured, .revoked, .removed, out, null, null, 0 },
+        .{ .refresh_required, .renewal_due, .revoked, .removed, out, null, null, 0 },
+        .{ .refresh_required, .refresh_required, .revoked, .removed, out, null, null, 0 },
+        .{ .refresh_required, .credential_error, .revoked, .failed, out_browser, null, device_stays, 1 },
+        .{ .credential_error, .missing, .failed, .absent, null, browser_stays, null, 1 },
+        .{ .credential_error, .configured, .failed, .removed, out_device, browser_stays, null, 1 },
+        .{ .credential_error, .renewal_due, .failed, .removed, out_device, browser_stays, null, 1 },
+        .{ .credential_error, .refresh_required, .failed, .removed, out_device, browser_stays, null, 1 },
+        .{ .credential_error, .credential_error, .failed, .failed, null, browser_stays, device_stays, 1 },
+        // ChatGPT did not confirm the revocation.
+        .{ .configured, .missing, .unconfirmed, .absent, out, unconfirmed, null, 1 },
+        .{ .configured, .configured, .unconfirmed, .removed, out, unconfirmed, null, 1 },
+        .{ .configured, .renewal_due, .unconfirmed, .removed, out, unconfirmed, null, 1 },
+        .{ .configured, .refresh_required, .unconfirmed, .removed, out, unconfirmed, null, 1 },
+        .{ .configured, .credential_error, .unconfirmed, .failed, out_browser, unconfirmed, device_stays, 1 },
+    };
+    // Every pair of states is in the table once with a confirmed revocation.
+    var seen = std.EnumArray(Readiness, std.EnumSet(Readiness)).initFill(.empty);
+    for (rows[0..25]) |row| {
+        try std.testing.expect(!seen.get(row[0]).contains(row[1]));
+        seen.getPtr(row[0]).insert(row[1]);
+    }
+    for (std.enums.values(Readiness)) |state| try std.testing.expectEqual(std.enums.values(Readiness).len, seen.get(state).count());
+    for (rows) |row| {
+        const said = logoutReceipt(.{ .browser = row[2], .device_code = row[3] });
+        const lines = [_]?[]const u8{ said.done, said.browser, said.device_code };
+        for (lines, [_]?[]const u8{ row[4], row[5], row[6] }) |actual, expected| {
+            if (expected) |line| try std.testing.expectEqualStrings(line, actual.?) else try std.testing.expectEqual(@as(?[]const u8, null), actual);
+        }
+        try std.testing.expectEqual(row[7], @as(u8, @intFromBool(said.failed())));
+        // No person reads the retired name.
+        for (lines) |text| if (text) |line| try std.testing.expect(std.mem.indexOf(u8, line, "Codex") == null);
+    }
 }
 
 /// The plan's issuer: OpenAI's, or a test's loopback fixture, which only a
