@@ -36,6 +36,23 @@ The breaking signature is `Rui.connect(settings: HostSettings, options?: ClientO
 `HostSettings` is derived recursively from the generated settings schema, not a second list of supported Host options.
 Every configured Adapter is available, including `providers.codex`, `providers.chatgpt`, `tools.bash`, `network`, `execution` and either Store.
 For example, `providers: { codex: {} }` uses the Codex Adapter's saved sign-in.
+Likewise, `providers: { chatgpt: {} }` uses the ChatGPT Adapter's saved sign-in (not an API key).
+To select another private saved sign-in file, use `providers: { chatgpt: { credentialFile: "/private/chatgpt.json" } }`.
+For example, a sign-in provider, MySQL, MCP and a preset can share one start:
+
+```ts
+const rui = await Rui.connect({
+	store: { mysql: { url: { env: "MYSQL_URL" } } },
+	providers: { chatgpt: {} }, // Or { credentialFile: "/private/chatgpt.json" }.
+	tools: { mcp: { drift: { url: "http://127.0.0.1:3000/mcp" } } },
+	presets: { drift: {
+		provider: "chatgpt", model: "gpt-6.1-sol", effort: "low", compactAt: 100000,
+		workspace: "/workspace", tools: ["drift_tool"], permissionMode: "bypass",
+	} },
+});
+const session = await rui.sessions.create({ preset: "drift" });
+```
+
 The client defaults omitted or null `interface.dir` to its private temporary directory and omitted `interface.lifetime` to `"stdin"`; an explicit non-null directory or `"stdin"`/`"detached"` lifetime wins.
 It sends the document to `rui host serve --settings -` using a four-byte big-endian byte length followed by UTF-8 JSON, not argv or environment flags.
 

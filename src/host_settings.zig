@@ -14,11 +14,11 @@ const endpoint_value = @import("endpoint_value.zig");
 const mysql_value = @import("mysql_url_value.zig");
 const MysqlValue = mysql_value.ValueWith(max_path_bytes);
 
-// Moved, not copied, from the retiring launch frame and its platform shell.
+// Admission capacities retained from the existing Host owners.
 pub const max_document_bytes = 1024 * 1024;
 pub const max_base_url_bytes = endpoint_value.max_endpoint_bytes;
 pub const max_path_bytes = std.posix.PATH_MAX - 1;
-pub const max_ca_file_bytes = max_path_bytes; // Retiring frame/URL compatibility alias.
+pub const max_ca_file_bytes = max_path_bytes; // MySQL URL parser compatibility bound.
 pub const max_mcp_servers = 8;
 pub const max_mcp_name_bytes = 64;
 pub const max_secret_env_name_bytes = 128;

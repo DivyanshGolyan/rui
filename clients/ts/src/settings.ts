@@ -35,8 +35,18 @@ export function pipeSettings(value: HostSettings, environmentSource?: (name: unk
 			}
 			return value;
 		}
-		if (!codec?.fields || value === null || typeof value !== "object" || Array.isArray(value)) return value;
-		const normalized = Object.fromEntries(Object.entries(value).map(([name, field]) => [name, visit(field, codec.fields && Object.hasOwn(codec.fields, name) ? codec.fields[name] : codec.fields?.["*"], path ? `${path}.${name}` : name)]));
+		if (!codec?.fields || value === null || typeof value !== "object") return value;
+		if (Array.isArray(value)) {
+			// Invalid record arrays retain their shape, without species, iterators or serializers.
+			const elements = new Array<unknown>(value.length);
+			Object.setPrototypeOf(elements, null);
+			for (let index = 0; index < value.length; index++) {
+				if (Object.hasOwn(value, index)) elements[index] = value[index];
+			}
+			return elements;
+		}
+		// Metadata-owned records are own data; callable fields cannot rewrite later decisions.
+		const normalized = Object.fromEntries(Object.entries(value).filter(([, field]) => typeof field !== "function").map(([name, field]) => [name, visit(field, codec.fields && Object.hasOwn(codec.fields, name) ? codec.fields[name] : codec.fields?.["*"], path ? `${path}.${name}` : name)]));
 		if (codec.kind === "secret" && Object.hasOwn(normalized, "env")) environmentSource?.(normalized.env, `${path}.env`);
 		return normalized;
 	}

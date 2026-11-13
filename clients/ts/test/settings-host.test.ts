@@ -3,14 +3,17 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { once } from "node:events";
-import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { createSecureServer } from "node:http2";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
 
 import { Rui, type HostSettings } from "../src/index.ts";
+import { WIRE_VERSION } from "../src/transport.ts";
+import type { components } from "../src/wire.ts";
 
 const binary = process.env.RUI_BINARY;
 const socket = process.env.RUI_TEST_MYSQL_SOCKET;
@@ -34,8 +37,8 @@ function response(index: number): string {
 	return events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join("") + "data: [DONE]\n\n";
 }
 
-for (const engine of ["sqlite", "mysql"] as const) {
-	test(`TypeScript settings serve codex, the Bash timeout and MCP on ${engine}`, {
+for (const [engine, adapter] of [["sqlite", "codex"], ["mysql", "codex"], ["mysql", "chatgpt"]] as const) {
+	test(`TypeScript settings serve ${adapter}, the Bash timeout, MCP${adapter === "chatgpt" ? " and presets" : ""} on ${engine}`, {
 		skip: !binary ? "set RUI_BINARY to a built rui" : engine === "mysql" && !mysqlRequired && (!socket || !password) ? "no RUI_TEST_MYSQL_* server" : false,
 		timeout: 30_000,
 	}, async (t) => {
@@ -45,20 +48,35 @@ for (const engine of ["sqlite", "mysql"] as const) {
 		const cert = join(root, "cert.pem");
 		const key = join(root, "key.pem");
 		execFileSync("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", key, "-out", cert, "-subj", "/CN=localhost", "-addext", "subjectAltName=IP:127.0.0.1", "-days", "1"], { stdio: "pipe" });
-		const provider = createSecureServer({ key: readFileSync(key), cert: readFileSync(cert) });
+		const token = `e30.${Buffer.from(JSON.stringify({ exp: 4102444800 })).toString("base64url")}.c2ln`;
 		let modelCalls = 0;
 		const providerAuth: unknown[] = [];
-		provider.on("stream", (stream, headers) => {
+		const providerRequests: string[] = [];
+		function answer(method: string | undefined, path: string | undefined, authorization: unknown) {
+			providerRequests.push(`${method} ${path}`);
+			assert.equal(method, path === "/v1/models" ? "GET" : "POST");
+			providerAuth.push(authorization);
+			if (path === "/v1/models") return {
+				type: "application/json",
+				body: JSON.stringify(adapter === "chatgpt" ? { models: [{ slug: "gpt-6.1-sol", display_name: "Fixture Sol", visibility: "list" }] } : { object: "list", data: [] }),
+			};
+			assert.equal(path, "/v1/responses");
+			return { type: "text/event-stream", body: response(++modelCalls) };
+		}
+		// The plan fixture's existing loopback-only test transport is HTTP/1.1.
+		const provider = adapter === "chatgpt" ? createServer((request, reply) => {
+			request.resume();
+			request.on("end", () => {
+				const result = answer(request.method, request.url, request.headers.authorization);
+				reply.writeHead(200, { "content-type": result.type, connection: "close" });
+				reply.end(result.body);
+			});
+		}) : createSecureServer({ key: readFileSync(key), cert: readFileSync(cert) }).on("stream", (stream, headers) => {
 			stream.resume();
 			stream.on("end", () => {
-				providerAuth.push(headers.authorization);
-				if (headers[":path"] === "/v1/models") {
-					stream.respond({ ":status": 200, "content-type": "application/json" });
-					stream.end(JSON.stringify({ object: "list", data: [] }));
-					return;
-				}
-				stream.respond({ ":status": 200, "content-type": "text/event-stream" });
-				stream.end(response(++modelCalls));
+				const result = answer(headers[":method"], headers[":path"], headers.authorization);
+				stream.respond({ ":status": 200, "content-type": result.type });
+				stream.end(result.body);
 			});
 		});
 		const methods: string[] = [];
@@ -85,7 +103,7 @@ for (const engine of ["sqlite", "mysql"] as const) {
 		const oldUrl = process.env[urlName];
 		process.env[tokenName] = "settings-token";
 		let rui: Rui | undefined;
-		const database = `rui_ts_settings_${process.pid}_${engine}`;
+		const database = `rui_ts_settings_${process.pid}_${engine}_${adapter}`;
 		let created = false;
 		const sql = (input: string) => execFileSync(admin!, [], { input, stdio: ["pipe", "pipe", "pipe"] });
 		try {
@@ -103,20 +121,52 @@ for (const engine of ["sqlite", "mysql"] as const) {
 				process.env[urlName] = `mysql://root:${encodeURIComponent(password!)}@${encodeURIComponent(socket!)}/${database}`;
 				store = { mysql: { url: { env: Buffer.from(urlName) } } };
 			}
+			const endpoint = `${adapter === "chatgpt" ? "http" : "https"}://127.0.0.1:${providerAddress.port}/v1/responses`;
+			const credentialFile = join(root, "chatgpt.json");
+			let clientBinary = binary;
+			if (adapter === "chatgpt") {
+				// Same private v3 fixture record as chatgpt_plan_integration.py; never a real sign-in.
+				const id = `e30.${Buffer.from(JSON.stringify({ sub: "plan-subject" })).toString("base64url")}.c2ln`;
+				writeFileSync(credentialFile, `version=3\ngeneration=1\naccount_id=plan-subject\nclient_id=rui-test-plan-client\nfedramp=0\nid_token=${id}\naccess_token=${token}\nrefresh_token=fixture-refresh\nexpires_at=4102444800\nrefreshed_at=1750000000\nstate=ready\n`, { mode: 0o600 });
+				const quote = (text: string) => "'" + text.replaceAll("'", "'\"'\"'") + "'";
+				clientBinary = join(root, "fixture-rui");
+				// exec keeps child ownership intact; only this test wrapper selects fixture transport.
+				// The hidden fixture flag requires this env path even with an explicit credentialFile.
+				writeFileSync(clientBinary, `#!/bin/sh\nexport RUI_CHATGPT_CREDENTIAL_FILE=${quote(credentialFile)}\nexec ${quote(binary)} "$@" --test-chatgpt-fixture-endpoint ${quote(endpoint)}\n`, { mode: 0o700 });
+			}
+			const spec = {
+				provider: adapter, model: "gpt-6.1-sol", effort: "low" as const, compactAt: 100000,
+				workspace: root, tools: ["bash", "settings_echo"], permissionMode: "bypass" as const,
+			};
 			rui = await Rui.connect({
 				store,
-				providers: { codex: { endpoint: `https://127.0.0.1:${providerAddress.port}/v1/responses`, unauthenticated: true } },
-				network: { caFile: Buffer.from(cert) },
+				providers: adapter === "codex" ? { codex: { endpoint, unauthenticated: true } } : { chatgpt: { endpoint, credentialFile: Buffer.from(credentialFile) } },
+				...(adapter === "codex" ? { network: { caFile: Buffer.from(cert) } } : {}),
+				...(adapter === "chatgpt" ? { presets: { drift: spec } } : {}),
 				tools: { bash: { timeoutMs: 37 }, mcp: { fixture: { url: `http://127.0.0.1:${mcpAddress.port}/mcp`, bearerToken: { env: tokenName }, callTimeoutMs: 1000 } } },
-			}, { binary });
-			assert.equal(rui.hostInfo?.capabilities.providers.codex, "endpoint");
+			}, { binary: clientBinary });
+			assert.equal(rui.hostInfo?.capabilities.providers.codex, adapter === "codex" ? "endpoint" : "unserved");
 			assert.equal(rui.hostInfo?.capabilities.providers.openai, "unserved");
-			assert.equal(rui.hostInfo?.capabilities.providers.chatgpt, "unserved");
+			assert.equal(rui.hostInfo?.capabilities.providers.chatgpt, adapter === "chatgpt" ? "chatgpt_plan" : "unserved");
 			assert.ok(methods.includes("tools/list"), "configured MCP Adapter must be listed during start");
-			const session = await rui.sessions.create({
-				provider: "codex", model: "gpt-6.1-sol", effort: "low", compactAt: 100000,
-				workspace: root, tools: ["bash", "settings_echo"], permissionMode: "bypass",
-			}, { idempotencyKey: "settings:create" });
+			if (adapter === "chatgpt") {
+				// Model-list refresh is asynchronous; the catalog may already contain this slug.
+				const deadline = AbortSignal.any([t.signal, AbortSignal.timeout(10_000)]);
+				for (;;) {
+					deadline.throwIfAborted();
+					const bytes = await rui.exchange("/v1/model-list", (canonicalStore) => JSON.stringify({
+						version: WIRE_VERSION, kind: "model_list", store: canonicalStore,
+					}), undefined, { responseMs: 1000 });
+					const reply = JSON.parse(bytes.toString("utf8")) as components["schemas"]["ModelListReply"];
+					const current = reply.providers.find((entry) => entry.provider === "chatgpt");
+					if (current?.source === "live" && current.models.some((model) => model.id === "gpt-6.1-sol")) break;
+					await delay(100, undefined, { signal: deadline });
+				}
+				const listed = await rui.models();
+				assert.ok(listed.some((model) => model.provider === "chatgpt" && model.id === "gpt-6.1-sol"), "live ChatGPT listing must offer the preset's fixture model");
+				assert.ok(providerRequests.includes("GET /v1/models"), "live listing must reach the sign-in fixture, not unknown-model fallback");
+			}
+			const session = await rui.sessions.create(adapter === "chatgpt" ? { preset: "drift" } : spec, { idempotencyKey: "settings:create" });
 			await session.send("Exercise both configured tools", { idempotencyKey: "settings:send" });
 			const results: string[] = [];
 			for await (const entry of session.listActivity({ follow: true, signal: AbortSignal.any([t.signal, AbortSignal.timeout(20_000)]) })) {
@@ -130,7 +180,8 @@ for (const engine of ["sqlite", "mysql"] as const) {
 			assert.ok(results.some((text) => text.includes("mcp-settings-ok")), "configured MCP tool must execute");
 			assert.ok(methods.includes("tools/call"));
 			assert.ok(authorizations.every((value) => value === "Bearer settings-token"));
-			assert.ok(providerAuth.every((value) => value === undefined), "codex development endpoint must stay unauthenticated");
+			assert.ok(providerAuth.length >= 2);
+			assert.ok(providerAuth.every((value) => value === (adapter === "chatgpt" ? `Bearer ${token}` : undefined)), "the selected Adapter must use exactly its sign-in or unauthenticated fixture");
 			assert.equal(modelCalls, 2);
 		} finally {
 			try {

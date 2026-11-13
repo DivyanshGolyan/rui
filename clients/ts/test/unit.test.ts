@@ -64,6 +64,28 @@ test("interface lifetime defaults to stdin and an explicit choice wins", () => {
 	launch.document.fill(0);
 });
 
+test("interface defaults are chosen only after canonical byte projection", () => {
+	for (const value of [undefined, null]) {
+		let projections = 0;
+		let getters = 0;
+		const projected = { get dir() {
+			getters++;
+			return { hex: "2f756e73656c6563746564", toJSON(key: string) { projections++; assert.equal(key, "dir"); return value; } };
+		} };
+		for (const settings of [{}, { interface: undefined }, { interface: {} }, { interface: { dir: value, lifetime: undefined } }, { interface: projected }]) {
+			assert.deepEqual(documentFor(settings as HostSettings).interface, { dir: "/r", lifetime: "stdin" }, "canonical null/omitted directory must select the client default");
+		}
+		assert.equal(projections, 1, "byte projection must run only once before the default choice");
+		assert.equal(getters, 1, "a raw directory getter must not be reread to choose defaults");
+	}
+	assert.deepEqual(documentFor({ interface: { dir: null, lifetime: null } } as unknown as HostSettings).interface, { dir: "/r", lifetime: null }, "explicit lifetime null must reach the Host unchanged");
+	for (const group of [null, [], "invalid", 123, false]) {
+		assert.deepEqual(documentFor({ interface: group } as unknown as HostSettings).interface, group, "invalid interface group shapes must reach the Host unchanged");
+	}
+	assert.deepEqual(documentFor(Object.create({ interface: { dir: "/inherited", lifetime: "detached" } })).interface, { dir: "/r", lifetime: "stdin" });
+	assert.deepEqual(documentFor({ interface: Object.create({ dir: "/inherited", lifetime: "detached" }) }).interface, { dir: "/r", lifetime: "stdin" });
+});
+
 test("schema-derived codecs cover every secret and OS-byte leaf", () => {
 	const schema = JSON.parse(readFileSync(new URL("../../../openapi.json", import.meta.url), "utf8"));
 	const leaves: { path: string[]; kind: string }[] = [];
@@ -194,6 +216,101 @@ test("byte sources use their serialized data once rather than JavaScript represe
 	} finally {
 		if (oldSelected === undefined) delete process.env[selected]; else process.env[selected] = oldSelected;
 		if (oldIgnored === undefined) delete process.env[ignored]; else process.env[ignored] = oldIgnored;
+	}
+});
+
+test("metadata arrays retain their invalid shape without own or inherited serializers", () => {
+	for (const layer of ["root", "interface", "secret"] as const) {
+		for (const hook of ["none", "own", "inherited"] as const) {
+			let hooks = 0;
+			const replacement = layer === "root" ? { providers: {} }
+				: layer === "interface" ? { dir: "/rewritten-interface", lifetime: "stdin" }
+				: { env: "RUI_TS_ARRAY_UNSELECTED" };
+			const array = ["invalid-record", null];
+			const serializer = () => { hooks++; return replacement; };
+			if (hook === "own") Object.assign(array, { toJSON: serializer });
+			if (hook === "inherited") Object.setPrototypeOf(array, { toJSON: serializer });
+			const input = layer === "root" ? array : layer === "interface" ? { interface: array } : { providers: { openai: { key: array } } };
+			let forwarded = 0;
+			const normalized = pipeSettings(input as HostSettings, () => { forwarded++; });
+			const wire = JSON.parse(encodeSettings(normalized).subarray(4).toString("utf8"));
+			const emitted = layer === "root" ? wire : layer === "interface" ? wire.interface : wire.providers.openai.key;
+			assert.deepEqual(emitted, ["invalid-record", null], "metadata array must reach Host as its original invalid shape");
+			assert.equal(hooks, 0, "no array serializer may rewrite canonical data");
+			assert.equal(forwarded, 0, "invalid secret arrays select no environment source");
+			if (layer === "interface" || layer === "root") {
+				const launch = launchFor(input as HostSettings, "/client-interface");
+				try {
+					const final = JSON.parse(launch.document.subarray(4).toString("utf8"));
+					assert.deepEqual(layer === "root" ? final : final.interface, ["invalid-record", null], "launch encoding must retain array shape too");
+					assert.equal(launch.interfaceDir, "/client-interface");
+				} finally { launch.document.fill(0); }
+			}
+		}
+	}
+});
+
+test("invalid root shapes are not reinterpreted by launch defaults", () => {
+	for (const input of [[], ["invalid"], null, 123, false, "invalid"]) {
+		const launch = launchFor(input as unknown as HostSettings, "/client-interface");
+		try {
+			assert.deepEqual(JSON.parse(launch.document.subarray(4).toString("utf8")), input, "invalid root must remain for Host refusal");
+		} finally { launch.document.fill(0); }
+	}
+});
+
+test("canonical settings records cannot rewrite env or interface decisions during encoding", () => {
+	const selected = "RUI_TS_RECORD_SELECTED";
+	const emitted = "RUI_TS_RECORD_EMITTED";
+	const oldSelected = process.env[selected];
+	const oldEmitted = process.env[emitted];
+	process.env[selected] = "selected-private-value";
+	process.env[emitted] = "unselected-private-value";
+	try {
+		for (const layer of ["root", "interface", "secret", "providers", "provider", "literal", "all"]) {
+			let hooks = 0;
+			const literal = layer === "literal";
+			const key = literal ? { value: "selected-literal-value" } : { env: selected };
+			const provider = { key };
+			const providers = { openai: provider };
+			const iface = { dir: "/selected-interface", lifetime: "stdin" as const };
+			const settings = { providers, interface: iface };
+			const replacement = { providers: { openai: { key: { env: emitted } } }, interface: { dir: "/emitted-interface", lifetime: "stdin" } };
+			function attach(target: object, result: unknown) {
+				Object.assign(target, { toJSON() { hooks++; return result; } });
+			}
+			if (layer === "root" || layer === "all") attach(settings, replacement);
+			if (layer === "interface" || layer === "all") attach(iface, replacement.interface);
+			if (layer === "providers" || layer === "all") attach(providers, replacement.providers);
+			if (layer === "provider" || layer === "all") attach(provider, replacement.providers.openai);
+			if (layer === "secret" || layer === "all") attach(key, { env: emitted });
+			if (literal) attach(key, { value: "emitted-literal-value" });
+			const launch = launchFor(settings, "/r");
+			try {
+				const wire = JSON.parse(launch.document.subarray(4).toString("utf8"));
+				assert.deepEqual(wire.providers.openai.key, literal ? { value: "selected-literal-value" } : { env: selected }, "canonical environment/literal decision must match emitted source");
+				assert.deepEqual(launch.interfaceDir, wire.interface.dir, "canonical interface decision must match emitted directory");
+				assert.equal(wire.interface.dir, "/selected-interface");
+				assert.equal(launch.env[selected], literal ? undefined : "selected-private-value");
+				assert.equal(launch.env[emitted], undefined);
+				assert.equal(hooks, 0, "record/source hooks must never run, including during final encode");
+			} finally {
+				launch.document.fill(0);
+			}
+		}
+		for (const marker of ["unknown", 123, null, { unknown: true }]) {
+			const settings = { toJSON: marker, extra: "root-data", interface: { toJSON: marker, extra: "interface-data" }, providers: { openai: { key: { env: selected, toJSON: marker, extra: "source-data" } } } };
+			const wire = documentFor(settings as HostSettings);
+			assert.deepEqual(wire.toJSON, marker, "noncallable unknown data must remain for Host refusal");
+			assert.deepEqual(wire.interface.toJSON, marker);
+			assert.deepEqual(wire.providers.openai.key.toJSON, marker);
+			assert.equal(wire.extra, "root-data");
+			assert.equal(wire.interface.extra, "interface-data");
+			assert.equal(wire.providers.openai.key.extra, "source-data");
+		}
+	} finally {
+		if (oldSelected === undefined) delete process.env[selected]; else process.env[selected] = oldSelected;
+		if (oldEmitted === undefined) delete process.env[emitted]; else process.env[emitted] = oldEmitted;
 	}
 });
 

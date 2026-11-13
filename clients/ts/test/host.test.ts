@@ -144,6 +144,91 @@ test("a caller's OS-byte interface directory reaches the Host without lossy deco
 	}
 });
 
+const invalidInterfaceDirs: unknown[] = [
+	{ hex: "00" }, { hex: 123 }, { hex: "gg" }, { hex: "2f", extra: true },
+	123, false, "relative/path", "", "absolute\0path",
+];
+
+test("invalid interface settings reach their refusing child before any alias effect", { timeout: 10_000 }, async () => {
+	const root = realpathSync(mkdtempSync(join(tmpdir(), "rui-ts-invalid-interface-")));
+	const executable = join(root, "refuse.cjs");
+	const receipt = join(root, "receipt.json");
+	const oldTmp = process.env.TMPDIR;
+	writeFileSync(executable, `#!/usr/bin/env node
+const fs = require("node:fs"), path = require("node:path");
+let bytes = Buffer.alloc(0);
+process.stdin.on("data", chunk => {
+  bytes = Buffer.concat([bytes, chunk]);
+  if (bytes.length < 4 || bytes.length < 4 + bytes.readUInt32BE()) return;
+  const document = JSON.parse(bytes.subarray(4, 4 + bytes.readUInt32BE()).toString());
+  bytes.fill(0);
+  const runtime = fs.readdirSync(process.env.TMPDIR).find(name => name.startsWith("rui-"));
+  const runtimeDir = path.join(process.env.TMPDIR, runtime);
+  fs.writeFileSync(${JSON.stringify(receipt)}, JSON.stringify({dir:document.interface.dir,runtimeDir,files:fs.readdirSync(runtimeDir)}));
+  process.stdout.write(JSON.stringify({rui_start_error:{code:"settings_invalid",message:"interface.dir: invalid settings"}})+"\\n",()=>process.exit(1));
+});
+`, { mode: 0o700 });
+	process.env.TMPDIR = root;
+	try {
+		for (const dir of invalidInterfaceDirs) {
+			await assert.rejects(Rui.connect({ providers: {}, interface: { dir } } as HostSettings, { binary: executable }), (error: unknown) => {
+				assert.ok(error instanceof RuiStartError, "the child settings refusal must win over Node path errors");
+				assert.equal(error.code, "settings_invalid");
+				assert.match(error.message, /interface\.dir/);
+				return true;
+			});
+			const observed = JSON.parse(readFileSync(receipt, "utf8"));
+			assert.deepEqual(observed.dir, dir, "the child must receive the malformed directory unchanged");
+			assert.deepEqual(observed.files, [], "no alias effect may run before child readiness");
+			assert.equal(existsSync(observed.runtimeDir), false, "failed connect must clean its private runtime directory");
+		}
+	} finally {
+		if (oldTmp === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = oldTmp;
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("a real Host owns malformed interface settings refusals", { skip, timeout: 15_000 }, async () => {
+	for (const dir of invalidInterfaceDirs) {
+		await assert.rejects(Rui.connect({ providers: {}, interface: { dir } } as HostSettings, { binary: binary ?? "rui" }), (error: unknown) => {
+			assert.ok(error instanceof RuiStartError);
+			assert.equal(error.code, "settings_invalid");
+			assert.match(error.message, /interface\.dir/);
+			return true;
+		});
+	}
+});
+
+test("an alias failure after readiness kills and reaps its own child before cleanup", { timeout: 10_000 }, async () => {
+	const root = realpathSync(mkdtempSync(join(tmpdir(), "rui-ts-alias-failure-")));
+	const executable = join(root, "ready.cjs");
+	const receipt = join(root, "receipt.json");
+	const oldTmp = process.env.TMPDIR;
+	writeFileSync(executable, `#!/usr/bin/env node
+const fs = require("node:fs");
+let bytes = Buffer.alloc(0);
+process.stdin.on("data", chunk => {
+  bytes = Buffer.concat([bytes, chunk]);
+  if (bytes.length < 4 || bytes.length < 4 + bytes.readUInt32BE()) return;
+  const document = JSON.parse(bytes.subarray(4, 4 + bytes.readUInt32BE()).toString());
+  bytes.fill(0);
+  fs.writeFileSync(require("node:path").join(document.interface.dir,"interface"), "occupied");
+  fs.writeFileSync(${JSON.stringify(receipt)}, JSON.stringify({pid:process.pid,runtimeDir:document.interface.dir}));
+  process.stdout.write("ready instance="+"a".repeat(32)+" store=fixture\\n");
+});
+`, { mode: 0o700 });
+	process.env.TMPDIR = root;
+	try {
+		await assert.rejects(Rui.connect({ providers: {} }, { binary: executable }), (error: unknown) => (error as NodeJS.ErrnoException).code === "EEXIST");
+		const observed = JSON.parse(readFileSync(receipt, "utf8"));
+		assert.throws(() => process.kill(observed.pid, 0), (error: unknown) => (error as NodeJS.ErrnoException).code === "ESRCH", "the owned child must be reaped before connect rejects");
+		assert.equal(existsSync(observed.runtimeDir), false);
+	} finally {
+		if (oldTmp === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = oldTmp;
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("without its child's readiness receipt connect never probes an existing socket", { timeout: 10_000 }, async () => {
 	const root = realpathSync(mkdtempSync(join(tmpdir(), "rui-ts-existing-interface-")));
 	const executable = join(root, "refuse.cjs");

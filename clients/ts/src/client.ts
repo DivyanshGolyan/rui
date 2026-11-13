@@ -10,7 +10,7 @@ import { EventEmitter } from "node:events";
 import { mkdtemp, rm, stat, symlink } from "node:fs/promises";
 import type { Socket } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 
 import { pipeSettings, type HostSettings } from "./settings.ts";
@@ -77,7 +77,8 @@ interface Waiter {
 interface Launch {
 	binary: string;
 	document: Buffer;
-	interfaceDir: string | Buffer;
+	interfaceDir: NonNullable<NonNullable<Schemas["HostSettings"]["interface"]>["dir"]>;
+	aliasReady?: Promise<void>;
 	detached: boolean;
 	socketPath: string;
 	env: NodeJS.ProcessEnv;
@@ -124,8 +125,6 @@ export class Rui extends EventEmitter<{ exit: [ExitEvent] }> {
 		let launch: Launch | undefined;
 		try {
 			launch = launchFor(settings, runtimeDir, options);
-			// An ASCII alias lets Node's string-only socket API reach OS-byte directories.
-			await symlink(launch.interfaceDir, join(runtimeDir, "interface"));
 			const deadline = Date.now() + (options.lockWaitMs ?? DEFAULT_LOCK_WAIT_MS);
 			for (;;) {
 				try {
@@ -308,24 +307,36 @@ export function launchFor(settings: HostSettings, runtimeDir: string, options: C
 		const value = process.env[name];
 		if (value !== undefined) env[name] = value;
 	}
-	const document = pipeSettings({
-		...settings,
-		interface: { ...settings.interface, dir: settings.interface?.dir ?? runtimeDir, lifetime: settings.interface?.lifetime === undefined ? "stdin" : settings.interface.lifetime },
-		...(settings.presets === undefined ? {} : {
-			presets: Object.fromEntries(Object.entries(settings.presets).map(([name, spec]) => [name, presetFor(spec)])),
-		}),
-	}, (source, path) => {
+	let document = pipeSettings(settings, (source, path) => {
 		const name = environmentName(source, path);
 		if (name === undefined) return;
 		const value = process.env[name];
 		if (value !== undefined) env[name] = value;
 	});
-	const dir = document.interface?.dir;
-	const interfaceDir = typeof dir === "object" && dir !== null ? Buffer.from(dir.hex, "hex") : (dir ?? runtimeDir);
+	let interfaceDir: Launch["interfaceDir"] = runtimeDir;
+	let detached = false;
+	if (document !== null && typeof document === "object" && !Array.isArray(document)) {
+		if (Object.hasOwn(document, "presets") && document.presets !== undefined) {
+			// Presets retain their existing friendly spec writer after settings normalization.
+			const presets = document.presets as HostSettings["presets"];
+			document = { ...document, presets: Object.fromEntries(Object.entries(presets!).map(([name, spec]) => [name, presetFor(spec)])) };
+		}
+		const supplied = Object.hasOwn(document, "interface") && document.interface !== undefined ? document.interface : {};
+		if (supplied !== null && typeof supplied === "object" && !Array.isArray(supplied)) {
+			// Choose client defaults once, from canonical own data; invalid groups reach the Host unchanged.
+			const selected = {
+				...supplied,
+				...(!Object.hasOwn(supplied, "dir") || supplied.dir == null ? { dir: runtimeDir } : {}),
+				...(!Object.hasOwn(supplied, "lifetime") || supplied.lifetime === undefined ? { lifetime: "stdin" as const } : {}),
+			};
+			document = { ...document, interface: selected };
+			interfaceDir = selected.dir!; // The single default choice above supplies every omitted/null directory.
+			detached = selected.lifetime !== "stdin";
+		}
+	}
 	return {
 		binary: resolveBinary(options.binary), document: encodeSettings(document), interfaceDir,
-		socketPath: join(runtimeDir, "interface", SOCKET_NAME), env,
-		detached: document.interface?.lifetime !== "stdin",
+		socketPath: join(runtimeDir, "interface", SOCKET_NAME), env, detached,
 	};
 }
 
@@ -358,8 +369,8 @@ function environmentName(source: unknown, path: string): string | undefined {
 }
 
 /** Presets and Session mutation requests use the same wire writer. */
-function presetFor(spec: AgentSpec): AgentSpec {
-	return agentSpec(spec) as AgentSpec;
+function presetFor(spec: AgentSpec): Schemas["AgentSpec"] {
+	return agentSpec(spec) as Schemas["AgentSpec"];
 }
 
 /** Starts one child and resolves once it answers host-info, or throws AttemptFailed. */
@@ -446,7 +457,16 @@ async function start(launch: Launch, spawned: (child: ChildProcess) => void): Pr
 	}
 }
 
+/** Readiness proves the Host admitted the path; decoding and alias effects belong after it. */
+async function createInterfaceAlias(launch: Launch): Promise<void> {
+	const dir = launch.interfaceDir;
+	const target = typeof dir === "string" ? dir : Buffer.from(dir.hex, "hex");
+	// An ASCII alias lets Node's string-only socket API reach OS-byte directories.
+	await symlink(target, dirname(launch.socketPath));
+}
+
 async function probe(launch: Launch, instance: string): Promise<HostInfo | undefined> {
+	await (launch.aliasReady ??= createInterfaceAlias(launch));
 	try {
 		await stat(launch.socketPath);
 	} catch {
