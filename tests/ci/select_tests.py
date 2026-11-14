@@ -373,7 +373,7 @@ def tree_uncommon_texts(candidates):
     for name in tracked:
         if not name or matches(name, TEST_CODE) or not (ROOT / name).is_file():
             continue
-        source = source_strings((ROOT / name).read_text())
+        source = source_strings((ROOT / name).read_text(encoding="utf-8", errors="surrogateescape"))
         for text, count in counts.items():
             if count < 3 and text in source:
                 counts[text] += 1
@@ -979,8 +979,9 @@ def changed_paths(base, head):
 
 
 def revision_text(commit, path):
-    """The path's text at commit, or None where the commit has no such file."""
-    shown = subprocess.run(["git", "show", f"{commit}:{path}"], capture_output=True, text=True)
+    """The path's text at commit, retaining non-UTF-8 octets; None if absent."""
+    shown = subprocess.run(["git", "show", f"{commit}:{path}"], capture_output=True,
+                           encoding="utf-8", errors="surrogateescape")
     return shown.stdout if shown.returncode == 0 else None
 
 

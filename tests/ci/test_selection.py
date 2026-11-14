@@ -121,8 +121,10 @@ class BinarySourceSelectionTest(unittest.TestCase):
                     self.commit()
                     result = self.selection(base)
                     for family in ("targets", "native_targets"):
-                        self.assertEqual(set(result[family]),
-                                         {"test-native", "test-logic", "overview-integration"} if reached else {"check"})
+                        expected = {"test-logic", "overview-integration", "test-native" if reached else "check"}
+                        if reached and family == "targets":
+                            expected.add("stack-frames")
+                        self.assertEqual(set(result[family]), expected)
                     self.assertIn("Asserted text: a fixture waits for text this file draws", result["reasons"])
                     self.assertIn("Import graph: the unit roots and fixtures that reach the changed file"
                                   if reached else "Source no import or rule reaches: full fallback", result["reasons"])
@@ -135,8 +137,8 @@ class BinarySourceSelectionTest(unittest.TestCase):
         self.write("src/data.bin", b'\x00\x80"A fixture waits for this message"\xff')
         self.commit()
         result = self.selection(base)
-        self.assertEqual(result["targets"], ["overview-integration", "test-native"])
-        self.assertEqual(result["native_targets"], result["targets"])
+        self.assertEqual(result["targets"], ["overview-integration", "stack-frames", "test-native"])
+        self.assertEqual(result["native_targets"], ["overview-integration", "test-native"])
         self.assertIn("Asserted text: a fixture waits for text this file draws", result["reasons"])
 
     def test_unchanged_binary_does_not_break_source_text_prevalence(self):
