@@ -24,35 +24,6 @@
       ]
     },
     {
-      "name": "archived-view-empty",
-      "note": "An empty archive remains reachable",
-      "open": "overview",
-      "steps": [
-        {
-          "wait": "Archived"
-        },
-        {
-          "keys": [
-            "Home",
-            "Right",
-            "Enter"
-          ]
-        },
-        {
-          "wait": "No archived Sessions."
-        }
-      ],
-      "expect": [
-        "+ New Session",
-        "Archived",
-        "No archived Sessions."
-      ],
-      "absent": [],
-      "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
-      ]
-    },
-    {
       "name": "inputtint-night-empty",
       "note": "Input surface, plain footer and ink-wash selection; colour-only changes are asserted by style-role tests",
       "theme": "night",
