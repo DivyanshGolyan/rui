@@ -291,22 +291,8 @@ pub fn fillAt(init: std.process.Init, parsed: *const cli_args.Parsed, dir: []con
     if (parsed.get("test-codex-fixture-endpoint") != null and init.environ_map.get("RUI_CODEX_CREDENTIAL_FILE") == null) return error.FixtureCredentialPathRequired;
     if (parsed.get("test-chatgpt-fixture-endpoint") != null and init.environ_map.get("RUI_CHATGPT_CREDENTIAL_FILE") == null) return error.FixtureCredentialPathRequired;
     if (parsed.get("test-openai-fixture-endpoint") != null and init.environ_map.get(api_key.path_variable) == null) return error.FixtureCredentialPathRequired;
-    var wiping: secret_value.WipingAllocator = .{ .backing = init.gpa };
-    var memory: std.heap.ArenaAllocator = .init(wiping.allocator());
-    defer memory.deinit();
-    const gpa = memory.allocator();
-    const document = try saved(init, gpa, dir, settings, failure);
-    var explicit_providers = document == .object and document.object.contains("providers");
-    if (parsed.get("settings")) |source| explicit_providers = (try readDocumentAt(init, source, settings, failure)) or explicit_providers;
-    for (parsed.all("set")) |assignment| {
-        const equals = std.mem.indexOfScalar(u8, assignment, '=') orelse return invalid(failure, "settings", "--set requires PATH=VALUE");
-        const path = assignment[0..equals];
-        const selects_providers = std.mem.eql(u8, path, "providers") or std.mem.startsWith(u8, path, "providers.");
-        if (selects_providers and !explicit_providers) try assign(settings, init.gpa, "providers", "{}", failure);
-        try input(init, settings, path, assignment[equals + 1 ..], failure);
-        if (selects_providers) explicit_providers = true;
-    }
-    if (!explicit_providers) try defaultProviders(init, settings, failure) else try explicitBaseUrl(init, settings, failure);
+    const intent = try readSources(init, .{ .dir = dir, .settings_file = parsed.get("settings"), .assignments = parsed.all("set") }, settings, failure);
+    try finishSources(init, settings, intent, failure);
     try fixtureInputs(init, parsed, settings, fixtures, failure);
     // --store is an interface anchor for MySQL, never a SQLite Adapter override.
     if (settings.store == .mysql and settings.interface.dir.anchored and parsed.get("store") != null) {
@@ -1186,18 +1172,37 @@ pub fn launchReady(result: *HostLaunchResult, ready: @import("protocol_reply.zig
 
 const moved = "bare rui and rui host start reach only a Host that listens in its Host directory; start this one with rui host serve --store DIR";
 
-/// The layers a `host serve --store DIR [--settings FILE] [--set ...]` launch
-/// applies, in its order: saved host.json, the document, then each --set.
-/// Source descriptions only: no secret is resolved and no login made.
-pub fn readLaunch(init: std.process.Init, request: Spawn, settings: *hs.Settings, failure: *start_report.Failure) !void {
+pub const ProviderIntent = enum { automatic, explicit };
+
+/// Read saved host.json, the optional document, then ordered assignments into
+/// caller-owned settings. Source admission never resolves a secret or login.
+/// Provider intent cannot be inferred from Settings' implicit provider entries.
+pub fn readSources(init: std.process.Init, request: Spawn, settings: *hs.Settings, failure: *start_report.Failure) !ProviderIntent {
     var wiping: secret_value.WipingAllocator = .{ .backing = init.gpa };
     var memory: std.heap.ArenaAllocator = .init(wiping.allocator());
     defer memory.deinit();
-    _ = try saved(init, memory.allocator(), request.dir, settings, failure);
-    if (request.settings_file) |file| _ = try readDocumentAt(init, file, settings, failure);
+    const document = try saved(init, memory.allocator(), request.dir, settings, failure);
+    var intent: ProviderIntent = if (document == .object and document.object.contains("providers")) .explicit else .automatic;
+    if (request.settings_file) |file| {
+        if (try readDocumentAt(init, file, settings, failure)) intent = .explicit;
+    }
     for (request.assignments) |assignment| {
         const equals = std.mem.indexOfScalar(u8, assignment, '=') orelse return invalid(failure, "settings", "--set requires PATH=VALUE");
-        try input(init, settings, assignment[0..equals], assignment[equals + 1 ..], failure);
+        const path = assignment[0..equals];
+        const selects_providers = std.mem.eql(u8, path, "providers") or std.mem.startsWith(u8, path, "providers.");
+        if (selects_providers and intent == .automatic) try assign(settings, init.gpa, "providers", "{}", failure);
+        try input(init, settings, path, assignment[equals + 1 ..], failure);
+        if (selects_providers) intent = .explicit;
+    }
+    return intent;
+}
+
+/// Finish provider selection without rereading sources, resolving credentials,
+/// anchoring paths or sealing settings. Detached admission only reads sources.
+pub fn finishSources(init: std.process.Init, settings: *hs.Settings, intent: ProviderIntent, failure: *start_report.Failure) !void {
+    switch (intent) {
+        .automatic => try defaultProviders(init, settings, failure),
+        .explicit => try explicitBaseUrl(init, settings, failure),
     }
 }
 
@@ -1275,7 +1280,7 @@ fn readDetached(init: std.process.Init, request: Spawn, settings: *hs.Settings, 
         const value = assignment[equals + 1 ..];
         if (std.mem.startsWith(u8, value, "@") and !std.fs.path.isAbsolute(value[1..])) return invalid(failure, "settings", "@FILE " ++ relative);
     }
-    try readLaunch(init, request, settings, failure);
+    _ = try readSources(init, request, settings, failure);
     if (settings.interface.lifetime.value == .stdin) return invalid(failure, "interface.lifetime", "a Host started by bare rui or rui host start has no stdin; use detached, or run rui host serve");
     var name: LeafName = .{};
     if (relativeLeaf(hs.Settings, settings, &name)) {
@@ -1536,6 +1541,128 @@ pub noinline fn spawn(init: std.process.Init, typed: Spawn, ops: Ops, progress: 
         if (remaining > 0) ops.pause(ops.context, io, @intCast(@min(remaining, 100 * std.time.ns_per_ms))) catch |err| return launchFailure(result, .interrupted, err, paths.store.slice());
     }
     return launchFailure(result, .readiness_timeout, error.HostReadinessUnconfirmed, paths.store.slice());
+}
+
+test "Host start source provider intent distinguishes omission empty and exact sets in every layer" {
+    const gpa = std.testing.allocator;
+    var environment: std.process.Environ.Map = .init(gpa);
+    defer environment.deinit();
+    try environment.put("HOME", "/nonexistent-host-start-test-home");
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const init = initForTest(&arena, &environment);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const settings = try gpa.create(hs.Settings);
+    defer gpa.destroy(settings);
+    const Layer = enum { saved, document, set, file };
+    const cases = [_]struct { document: []const u8, path: []const u8, value: []const u8, intent: ProviderIntent, before: [3]bool, after: [3]bool }{
+        .{ .document = "{}", .path = "execution.paused", .value = "true", .intent = .automatic, .before = .{ true, true, true }, .after = .{ false, true, false } },
+        .{ .document = "{\"providers\":{}}", .path = "providers", .value = "{}", .intent = .explicit, .before = .{ false, false, false }, .after = .{ false, false, false } },
+        .{ .document = "{\"providers\":{\"openai\":{}}}", .path = "providers", .value = "{\"openai\":{}}", .intent = .explicit, .before = .{ true, false, false }, .after = .{ true, false, false } },
+        .{ .document = "{\"providers\":{\"codex\":{},\"chatgpt\":{}}}", .path = "providers", .value = "{\"codex\":{},\"chatgpt\":{}}", .intent = .explicit, .before = .{ false, true, true }, .after = .{ false, true, true } },
+    };
+    for (cases, 0..) |case, index| for (std.enums.values(Layer)) |layer| {
+        settings.* = .{};
+        defer settings.deinit();
+        var name: [48]u8 = undefined;
+        var host = try tmp.dir.createDirPathOpen(init.io, try std.fmt.bufPrint(&name, "host-{d}-{s}", .{ index, @tagName(layer) }), .{ .permissions = .fromMode(0o700) });
+        defer host.close(init.io);
+        var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const dir = root[0..try host.realPath(init.io, &root)];
+        var request: Spawn = .{ .dir = dir };
+        switch (layer) {
+            .saved, .document => {
+                const filename = if (layer == .saved) "host.json" else "document.json";
+                try host.writeFile(init.io, .{ .sub_path = filename, .data = case.document });
+                try host.setFilePermissions(init.io, filename, .fromMode(0o600), .{});
+                if (layer == .document) request.settings_file = try std.fs.path.join(arena.allocator(), &.{ dir, filename });
+            },
+            .set, .file => {
+                const value = if (layer == .set) case.value else value: {
+                    try host.writeFile(init.io, .{ .sub_path = "value.json", .data = case.value });
+                    break :value try std.fmt.allocPrint(arena.allocator(), "@{s}/value.json", .{dir});
+                };
+                const assignments = try arena.allocator().alloc([]const u8, 1);
+                assignments[0] = try std.fmt.allocPrint(arena.allocator(), "{s}={s}", .{ case.path, value });
+                request.assignments = assignments;
+            },
+        }
+        var failure: start_report.Failure = undefined;
+        const intent = try readSources(init, request, settings, &failure);
+        try std.testing.expectEqual(case.intent, intent);
+        try std.testing.expectEqual(case.before, [3]bool{ settings.providers.entries.openai != null, settings.providers.entries.codex != null, settings.providers.entries.chatgpt != null });
+        try finishSources(init, settings, intent, &failure);
+        try std.testing.expectEqual(case.after, [3]bool{ settings.providers.entries.openai != null, settings.providers.entries.codex != null, settings.providers.entries.chatgpt != null });
+    };
+}
+
+test "Host start source layers preserve explicit provider intent and assignment order" {
+    const gpa = std.testing.allocator;
+    var environment: std.process.Environ.Map = .init(gpa);
+    defer environment.deinit();
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const init = initForTest(&arena, &environment);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const settings = try gpa.create(hs.Settings);
+    defer gpa.destroy(settings);
+    const cases = [_]struct { saved: []const u8, document: []const u8, assignments: []const []const u8, providers: [3]bool }{
+        .{ .saved = "{\"providers\":{\"codex\":{},\"chatgpt\":{}}}", .document = "{}", .assignments = &.{"providers.openai={}"}, .providers = .{ true, true, true } },
+        .{ .saved = "{\"providers\":{\"openai\":{}}}", .document = "{\"providers\":{}}", .assignments = &.{ "providers.codex={}", "providers.chatgpt={}", "providers.codex=null" }, .providers = .{ false, false, true } },
+        .{ .saved = "{\"providers\":{\"codex\":{}}}", .document = "{\"providers\":{\"openai\":{}}}", .assignments = &.{"providers.openai=null"}, .providers = .{ false, false, false } },
+        .{ .saved = "{}", .document = "{}", .assignments = &.{ "providers.chatgpt={}", "providers.openai={}", "providers.chatgpt=null" }, .providers = .{ true, false, false } },
+        .{ .saved = "{}", .document = "{}", .assignments = &.{"providers.openai=null"}, .providers = .{ false, false, false } },
+    };
+    for (cases, 0..) |case, index| {
+        settings.* = .{};
+        defer settings.deinit();
+        var name: [32]u8 = undefined;
+        var host = try tmp.dir.createDirPathOpen(init.io, try std.fmt.bufPrint(&name, "host-{d}", .{index}), .{ .permissions = .fromMode(0o700) });
+        defer host.close(init.io);
+        var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const dir = root[0..try host.realPath(init.io, &root)];
+        try host.writeFile(init.io, .{ .sub_path = "host.json", .data = case.saved });
+        try host.setFilePermissions(init.io, "host.json", .fromMode(0o600), .{});
+        try host.writeFile(init.io, .{ .sub_path = "document.json", .data = case.document });
+        try host.setFilePermissions(init.io, "document.json", .fromMode(0o600), .{});
+        var failure: start_report.Failure = undefined;
+        const intent = try readSources(init, .{ .dir = dir, .settings_file = try std.fs.path.join(arena.allocator(), &.{ dir, "document.json" }), .assignments = case.assignments }, settings, &failure);
+        try std.testing.expectEqual(ProviderIntent.explicit, intent);
+        try std.testing.expectEqual(case.providers, [3]bool{ settings.providers.entries.openai != null, settings.providers.entries.codex != null, settings.providers.entries.chatgpt != null });
+    }
+}
+
+test "Host start detached first provider assignment selects an exact ordered set" {
+    const gpa = std.testing.allocator;
+    var environment: std.process.Environ.Map = .init(gpa);
+    defer environment.deinit();
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const init = initForTest(&arena, &environment);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const dir = try testHostDir(&tmp, &root);
+    const settings = try gpa.create(hs.Settings);
+    defer gpa.destroy(settings);
+    const cases = [_]struct { assignments: []const []const u8, openai: bool, codex: bool, chatgpt: bool }{
+        .{ .assignments = &.{"providers.openai={}"}, .openai = true, .codex = false, .chatgpt = false },
+        .{ .assignments = &.{"providers.codex={}"}, .openai = false, .codex = true, .chatgpt = false },
+        .{ .assignments = &.{"providers.chatgpt={}"}, .openai = false, .codex = false, .chatgpt = true },
+        .{ .assignments = &.{ "providers.openai={}", "providers.codex={}", "providers.openai=null" }, .openai = false, .codex = true, .chatgpt = false },
+        .{ .assignments = &.{ "providers.codex={}", "providers={}", "providers.chatgpt={}" }, .openai = false, .codex = false, .chatgpt = true },
+    };
+    for (cases) |case| {
+        settings.* = .{};
+        defer settings.deinit();
+        var failure: start_report.Failure = undefined;
+        try readDetached(init, .{ .dir = dir, .assignments = case.assignments }, settings, &failure);
+        try std.testing.expectEqual(case.openai, settings.providers.entries.openai != null);
+        try std.testing.expectEqual(case.codex, settings.providers.entries.codex != null);
+        try std.testing.expectEqual(case.chatgpt, settings.providers.entries.chatgpt != null);
+    }
 }
 
 test "Host start detached launches rebase typed paths and refuse paths with no base over every layer and door" {
