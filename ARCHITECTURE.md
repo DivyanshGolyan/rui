@@ -1778,7 +1778,14 @@ Only private report-scratch writes may occur under their owning read transaction
 Core invokes private provider/Bash/Edit interfaces through closed effect-specific inputs and evidence.
 No public provider module or generic dispatch registry is required.
 A provider's wire format is a codec, pinned per Session by name and version, behind one value contract (`src/codec_abi.zig`): plain values, with no calls back into the Host, no file access and no state the Host does not store, so the same contract can later run a codec outside the Host's address space; the built-in codecs are linked in natively.
-To encode a request the shell gives the codec one neutral item at a time, with Rui's text named by handle, and writes the literal and content pieces the codec answers with through its own request cursors under the preparation allowance before it asks for the next item.
+To encode a request the shell gives the codec one neutral item at a time, with canonical content named by handle, and writes the literal, content and raw-image base64 pieces the codec answers with through its own request cursors under the preparation allowance before it asks for the next item.
+The Responses `/1`, `/2` and `/3` input domains extend additively with image-bearing Message or tool-result open, ordered Text or Image parts, and close.
+PNG and JPEG Image parts name raw Content; the codec supplies data-URL MIME framing and `detail:auto`, and the shell reads verified bounded windows through a pinned standard-base64 cursor.
+Source reads and emitted bytes consume the existing preparation allowance; request scratch, cancellation and sealing keep their existing owners.
+An image-bearing tool result uses an actual `function_call_output.output` array under its original `call_id`, never a synthetic user Message.
+Text-only results remain strings, saved MCP JSON stays opaque text, and every old handler, escape, Carry and route dialect keeps its original bytes.
+Only the open resumes and the close ends the new history element; partial image state never enters Carry.
+These codec and raw-byte transforms do not themselves admit or persist typed images, validate media containers, or qualify provider image support.
 The codec's encoder state is a small value of the codec's own type that the shell stores, and it holds the codec's carry.
 Before each history element and `history_end` the shell resumes the codec from its carry, also a value of the codec's type, which the shell kept after the previous element or took from a history memo, so a memo copy and a rebuild continue identically.
 A built-in codec is trusted Host code: a piece naming a handle the item lacks, or more pieces than an item holds, is a Host defect caught by assertion and tested over the codec's whole item domain, not a runtime failure.
