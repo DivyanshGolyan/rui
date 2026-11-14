@@ -728,16 +728,18 @@ class FixtureEntryTest(unittest.TestCase):
 
     def test_importing_the_boundary_leaves_the_process_alone(self):
         source = ("import json, os, sys\n"
+                  "before = dict(os.environ)\n"
                   "sys.path.insert(0, sys.argv[1])\n"
                   "import host_process\n"
-                  "print(json.dumps(dict(os.environ)))\n")
+                  "print(json.dumps({'before': before, 'after': dict(os.environ)}))\n")
         with tempfile.TemporaryDirectory() as directory:
             environment = {"PATH": os.environ["PATH"], "HOME": directory, "LANG": "C.UTF-8", "RUI_STORE": "inherited",
                            "HTTPS_PROXY": "http://127.0.0.1:9", "PYTHONPATH": self.simulated_user(directory, 0)}
             result = subprocess.run([sys.executable, "-B", "-c", source, str(ROOT / "tests/integration")],
                                     env=environment, capture_output=True, text=True, timeout=30)
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(json.loads(result.stdout), environment)
+            observed = json.loads(result.stdout)
+            self.assertEqual(observed["before"], observed["after"])
 
     def test_fixture_children_receive_only_the_fixture_environment(self):
         source = ("import json, subprocess, sys\n"
@@ -786,8 +788,13 @@ class FixtureEntryTest(unittest.TestCase):
             admitted = subprocess.run(command, env={**caller, "PYTHONPATH": self.simulated_user(directory, 30033)},
                                       capture_output=True, text=True, timeout=30)
             self.assertEqual(admitted.returncode, 0, admitted.stderr)
-            self.assertEqual(json.loads(ran.read_text()),
-                             {"PATH": os.environ["PATH"], "HOME": directory, "LANG": "C.UTF-8", "TERM": "xterm-256color", "RUI_TEST_MODELS_DEV_URL": ""})
+            expected = {"PATH": os.environ["PATH"], "HOME": directory, "LANG": "C.UTF-8",
+                        "TERM": "xterm-256color", "RUI_TEST_MODELS_DEV_URL": ""}
+            control = subprocess.run([sys.executable, "-c",
+                                      "import json, os; print(json.dumps(dict(os.environ)))"],
+                                     env=expected, capture_output=True, text=True, timeout=30)
+            self.assertEqual(control.returncode, 0, control.stderr)
+            self.assertEqual(json.loads(ran.read_text()), json.loads(control.stdout))
 
     def test_go_measurements_run_through_the_exec_entry(self):
         build = build_files.source()

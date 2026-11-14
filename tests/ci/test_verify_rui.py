@@ -563,7 +563,7 @@ class FramesTest(unittest.TestCase):
 
     def test_renderer_jobs_for_stills_and_movie_and_concat_durations(self):
         with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
+            root = Path(temp).resolve()
             jobs = io.StringIO()
             self.helper["render_job"](jobs, root / "still.html")
             function = self.helper["recording_jobs"]
@@ -581,6 +581,24 @@ class FramesTest(unittest.TestCase):
                 f"file '{root}/movie/000000.png'", "duration 0.100",
                 f"file '{root}/movie/000001.png'", "duration 2.000", f"file '{root}/movie/000001.png'",
             ])
+
+    def test_renderer_job_canonicalizes_absolute_and_relative_aliases(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            actual = root / "actual"
+            actual.mkdir()
+            alias = root / "alias"
+            alias.symlink_to(actual, target_is_directory=True)
+            with contextlib.chdir(root):
+                for path in (alias / "still.html", Path("alias/still.html")):
+                    for movie in (False, True):
+                        with self.subTest(path=path, movie=movie):
+                            jobs = io.StringIO()
+                            self.helper["render_job"](jobs, path, movie=movie)
+                            self.assertEqual(json.loads(jobs.getvalue()), {
+                                "html": str(actual / "still.html"), "png": str(actual / "still.png"),
+                                "scale": 1 if movie else 2, "opaque": movie,
+                            })
 
     def test_encoder_uses_separate_palette_pass_and_same_concat(self):
         with patch("subprocess.run", return_value=types.SimpleNamespace(returncode=0, stderr="")) as run:
