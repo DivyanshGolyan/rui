@@ -461,7 +461,7 @@
     },
     {
       "name": "appcmds-conversation",
-      "note": "All chat commands are listed beside skills with their descriptions",
+      "note": "Untitled bounded panel shows the first commands and an overflow label",
       "open": "App command replacements",
       "cast": [
         {
@@ -487,13 +487,7 @@
         "/copy           copy the last answer",
         "/effort         change effort",
         "/model          change model",
-        "/new            start a new chat",
-        "/reload-skills  reload skills",
-        "/rename         rename this chat",
-        "/requests       recover a lost request",
-        "/result         show a saved answer",
-        "/setup          defaults for new chats",
-        "/unarchive      restore this chat"
+        "more \u00b7 type to narrow"
       ],
       "absent": [
         "/configure",
@@ -509,11 +503,21 @@
       ],
       "absent_regex": [
         "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+      ],
+      "expect_dim": [
+        {
+          "text": "archive this chat",
+          "dim": false
+        },
+        {
+          "text": "change model",
+          "dim": false
+        }
       ]
     },
     {
       "name": "appcmds-conversation-end",
-      "note": "The end selection keeps every short chat command phrase visible",
+      "note": "Moving selection scrolls the bounded panel to the last command",
       "open": "App command replacements",
       "steps": [
         {
@@ -542,18 +546,12 @@
         }
       ],
       "expect": [
-        "/archive        archive this chat",
-        "/clear          start a new chat",
-        "/copy           copy the last answer",
-        "/effort         change effort",
-        "/model          change model",
-        "/new            start a new chat",
-        "/reload-skills  reload skills",
         "/rename         rename this chat",
         "/requests       recover a lost request",
         "/result         show a saved answer",
         "/setup          defaults for new chats",
-        "/unarchive      restore this chat"
+        "/unarchive      restore this chat",
+        "more \u00b7 type to narrow"
       ],
       "absent": [
         "/configure",
@@ -569,6 +567,12 @@
       ],
       "absent_regex": [
         "^ *\u25cb [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:\u2502.*)?$"
+      ],
+      "expect_dim": [
+        {
+          "text": "restore this chat",
+          "dim": false
+        }
       ]
     },
     {
