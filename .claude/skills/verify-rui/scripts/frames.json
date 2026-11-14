@@ -674,20 +674,14 @@
         }
       ],
       "expect": [
-        "/archive        archive this chat",
-        "/clear          start a new chat",
-        "/copy           copy the last answer",
-        "/effort         change effort",
-        "/model          change model",
-        "/new            start a new chat",
-        "/reload-skills  reload skills",
         "/rename         rename this chat",
         "/requests       recover a lost request",
         "/result         show a saved answer",
         "/setup          defaults for new chats",
         "/unarchive      restore this chat",
         "/review",
-        "Verify the project and review"
+        "Verify the project and review",
+        "more \u00b7 type to narrow"
       ],
       "absent": [
         "/configure",

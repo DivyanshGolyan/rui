@@ -440,7 +440,6 @@ test "Palette border padding and overflow consume clicks without activating rows
         defer arena.deinit();
         const surface = try palette.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 5 }, .cell_size = .{} });
         var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
-        // Keyboard movement after the draw must not retarget a press.
         shown.move(false);
         for (0..surface.size.height) |row| for (0..surface.size.width) |col| {
             selected.pick = null;
