@@ -24,6 +24,7 @@ const std = @import("std");
 const wire_version = @import("../wire_version.zig").wire_version;
 const rsql = @import("rsql.zig");
 const schema = @import("schema.zig");
+const validStoreId = @import("../store_id.zig").valid;
 const sqlite = @import("sqlite.zig");
 const store_testing = @import("testing.zig");
 const mysql_connection = @import("wire/mysql_connection.zig");
@@ -565,7 +566,7 @@ test "a MySQL Store at the migration baseline with its rows takes every migratio
     const opened = try @import("engine/mysql_open.zig").open(probe, io, .{ .database = migrated_database, .found_schema_version = &found }, selector);
     try std.testing.expectEqual(schema.schema_version, found);
     try std.testing.expect(opened.epoch > 0);
-    try std.testing.expect(schema.isStoreId(&opened.store_id));
+    try std.testing.expect(validStoreId(&opened.store_id));
     done.migrations += 1;
     writeRecord();
 }
@@ -802,8 +803,8 @@ test "metadata seed MySQL missing masks retain canonical selector and id" {
     }
     const first = schema.drawStoreId(std.testing.io);
     const second = schema.drawStoreId(std.testing.io);
-    try std.testing.expect(schema.isStoreId(&first));
-    try std.testing.expect(schema.isStoreId(&second));
+    try std.testing.expect(validStoreId(&first));
+    try std.testing.expect(validStoreId(&second));
     try std.testing.expect(!std.mem.eql(u8, &first, &second));
 }
 

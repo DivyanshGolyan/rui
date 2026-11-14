@@ -476,16 +476,38 @@ pub fn tokenPayload(token: []const u8, destination: []u8) ![]u8 {
 
 pub const Account = struct { id: Required(max_account_id_bytes), fedramp: bool };
 
-/// Decoded routing claims from the TLS peer's ID token, not a verified JWT.
-pub fn parseAccount(id_token: []const u8, scratch: *ClaimScratch, account: *Account) !void {
-    const payload = try tokenPayload(id_token, &scratch.decoded);
-    defer std.crypto.secureZero(u8, payload);
+/// A token's claims decoded as `T`, not a verified JWT. `value` borrows
+/// `scratch`; `wipe` clears the decoded payload and the parsed claims.
+fn ReadClaims(comptime T: type) type {
+    return struct {
+        value: T,
+        payload: []u8,
+        scratch: *ClaimScratch,
 
-    defer std.crypto.secureZero(u8, &scratch.arena);
+        fn wipe(self: @This()) void {
+            std.crypto.secureZero(u8, &self.scratch.arena);
+            std.crypto.secureZero(u8, self.payload);
+        }
+    };
+}
+
+/// Decodes `token`'s payload and its claims as `T` in `scratch`. On failure
+/// nothing decoded is left in `scratch`.
+fn readClaims(comptime T: type, token: []const u8, scratch: *ClaimScratch) !ReadClaims(T) {
+    const payload = try tokenPayload(token, &scratch.decoded);
+    errdefer std.crypto.secureZero(u8, payload);
+    errdefer std.crypto.secureZero(u8, &scratch.arena);
     var fixed = std.heap.FixedBufferAllocator.init(&scratch.arena);
-    const parsed = std.json.parseFromSlice(Claims, fixed.allocator(), payload, .{
+    const parsed = std.json.parseFromSlice(T, fixed.allocator(), payload, .{
         .ignore_unknown_fields = true,
     }) catch return error.InvalidTokenClaims;
+    return .{ .value = parsed.value, .payload = payload, .scratch = scratch };
+}
+
+/// Decoded routing claims from the TLS peer's ID token, not a verified JWT.
+pub fn parseAccount(id_token: []const u8, scratch: *ClaimScratch, account: *Account) !void {
+    const parsed = try readClaims(Claims, id_token, scratch);
+    defer parsed.wipe();
     const claim = if (parsed.value.@"https://api.openai.com/auth") |namespace|
         namespace.chatgpt_account_id orelse parsed.value.chatgpt_account_id
     else
@@ -502,13 +524,8 @@ pub fn parseAccount(id_token: []const u8, scratch: *ClaimScratch, account: *Acco
 /// A plan sign-in's account: the ID token's top-level `sub`, as the issuer's
 /// sign-in guide directs. Its other claims are checked at the exchange.
 fn parseSubject(id_token: []const u8, scratch: *ClaimScratch, account: *Account) !void {
-    const payload = try tokenPayload(id_token, &scratch.decoded);
-    defer std.crypto.secureZero(u8, payload);
-    defer std.crypto.secureZero(u8, &scratch.arena);
-    var fixed = std.heap.FixedBufferAllocator.init(&scratch.arena);
-    const parsed = std.json.parseFromSlice(struct { sub: ?json_scalar.Text = null }, fixed.allocator(), payload, .{
-        .ignore_unknown_fields = true,
-    }) catch return error.InvalidTokenClaims;
+    const parsed = try readClaims(struct { sub: ?json_scalar.Text = null }, id_token, scratch);
+    defer parsed.wipe();
     const id = (parsed.value.sub orelse return error.MissingAccountClaim).slice;
     if (!safeAscii(id)) return error.InvalidAccountClaim;
     account.* = .{ .id = .{}, .fedramp = false };
@@ -523,13 +540,8 @@ pub const Email = Bounded(max_email_bytes);
 /// decides nothing.
 pub fn emailOf(id_token: []const u8, scratch: *ClaimScratch, email: *Email) !void {
     email.* = .{};
-    const payload = try tokenPayload(id_token, &scratch.decoded);
-    defer std.crypto.secureZero(u8, payload);
-    defer std.crypto.secureZero(u8, &scratch.arena);
-    var fixed = std.heap.FixedBufferAllocator.init(&scratch.arena);
-    const parsed = std.json.parseFromSlice(struct { email: ?json_scalar.Text = null }, fixed.allocator(), payload, .{
-        .ignore_unknown_fields = true,
-    }) catch return error.InvalidTokenClaims;
+    const parsed = try readClaims(struct { email: ?json_scalar.Text = null }, id_token, scratch);
+    defer parsed.wipe();
     const named = (parsed.value.email orelse return).slice;
     if (!safeAscii(named) or named.len > max_email_bytes) return;
     email.set(named) catch unreachable;
@@ -540,13 +552,8 @@ pub fn emailOf(id_token: []const u8, scratch: *ClaimScratch, email: *Email) !voi
 pub fn parseExpiry(access_token: []const u8, scratch: *ClaimScratch) !?i64 {
     if (!safeAscii(access_token)) return error.InvalidAccessToken;
     if (std.mem.indexOfScalar(u8, access_token, '.') == null) return null;
-    const payload = try tokenPayload(access_token, &scratch.decoded);
-    defer std.crypto.secureZero(u8, payload);
-    defer std.crypto.secureZero(u8, &scratch.arena);
-    var fixed = std.heap.FixedBufferAllocator.init(&scratch.arena);
-    const parsed = std.json.parseFromSlice(struct { exp: ?json_scalar.Int(i64) = null }, fixed.allocator(), payload, .{
-        .ignore_unknown_fields = true,
-    }) catch return error.InvalidTokenClaims;
+    const parsed = try readClaims(struct { exp: ?json_scalar.Int(i64) = null }, access_token, scratch);
+    defer parsed.wipe();
     const expiry = (parsed.value.exp orelse return null).value;
     if (expiry <= 0) return error.InvalidTokenClaims;
     return expiry;

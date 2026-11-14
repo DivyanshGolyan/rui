@@ -1620,7 +1620,7 @@ func measureCapacity(binary, root string, scenario capacityScenario, duration ti
 		if fixture.providerCA == "" || !strings.HasPrefix(fixture.ProviderURL(), "https://") {
 			return nil, errors.New("concurrent provider fixture requires trusted HTTPS")
 		}
-		hostOptions = []string{"--provider-ca-file", fixture.providerCA}
+		hostOptions = []string{"--set", "network.caFile=" + fixture.providerCA}
 	}
 	var launch measurement.Launch
 	if diagnostics {
@@ -1924,7 +1924,7 @@ func measureSessions(binary, output string, sessions int, hold bool, expectation
 		return result, err
 	}
 	defer measurement.JoinCleanup(&resultError, fixture.Close)
-	host, err := measurement.StartHost(binary, store, fixture.ProviderURL(), 100, filepath.Join(directory, "host-stderr.log"), deadline, "--provider-ca-file", fixture.providerCA)
+	host, err := measurement.StartHost(binary, store, fixture.ProviderURL(), 100, filepath.Join(directory, "host-stderr.log"), deadline, "--set", "network.caFile="+fixture.providerCA)
 	if err != nil {
 		return result, err
 	}

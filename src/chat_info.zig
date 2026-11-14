@@ -11,7 +11,9 @@ const capability = @import("model_capability.zig");
 const client_defaults = @import("client_defaults.zig");
 const tools = @import("built_in_tool.zig");
 const ModelChoice = @import("model_choice.zig");
-const Editor = @import("TerminalEditor.zig");
+const keymap = @import("keymap.zig");
+const keypress = @import("keypress.zig");
+const Editor = @import("DraftEditor.zig");
 const panel_editor = @import("panel_editor.zig");
 const TerminalText = @import("TerminalText.zig");
 const shortPath = @import("home_path.zig").shortPath;
@@ -77,7 +79,7 @@ tool_labels: [std.enums.values(tools.BuiltInTool).len][]const u8 = undefined,
 model_choice: ModelChoice = .{},
 renaming: bool = false,
 rename_bytes: [status.max_label_bytes]u8 = undefined,
-rename_editor: Editor = .{ .buffer = &.{} },
+rename_editor: Editor = .init(&.{}),
 pasting: bool = false,
 
 /// Standalone composition for callers that want a body and its footer together.
@@ -270,7 +272,7 @@ fn activate(raw: *anyopaque, ctx: *vxfw.EventContext, row: usize) !void {
         },
         4 => self.openModel(),
         6 => {
-            self.rename_editor = .{ .buffer = &self.rename_bytes };
+            self.rename_editor = .init(&self.rename_bytes);
             _ = self.rename_editor.append(self.session.label.slice());
             self.renaming = true;
         },
@@ -379,7 +381,7 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
     defer if (input == .paste_end) {
         self.pasting = false;
     };
-    if (input == .key_press and (Editor.named(input.key_press) == .escape or Editor.named(input.key_press) == .ctrl_g) and (self.hasChoice() or self.standalone != null) and !self.pasting) {
+    if (input == .key_press and (keypress.named(input.key_press) == .escape or keypress.named(input.key_press) == .ctrl_g) and (self.hasChoice() or self.standalone != null) and !self.pasting) {
         if (self.standalone != null) self.closeStandaloneChoice() else self.cancelChoice();
         ctx.consumeAndRedraw();
         return;
@@ -393,7 +395,7 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
         const outcome = panel_editor.event(&self.rename_editor, input, self.pasting, &self.failures[6]);
         switch (outcome) {
             .submit => {
-                const text = self.rename_editor.buffer[0..self.rename_editor.length];
+                const text = self.rename_editor.text();
                 if (std.mem.indexOfAny(u8, text, "\r\n\t") != null) {
                     self.failures[6] = " · name must be one line";
                 } else {
@@ -589,9 +591,9 @@ fn drawTitle(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxf
     const failure = try Panel.displayText(ctx.arena, self.failures[6] orelse if (self.pending == 6) " · saving" else "", self.panel.unicode);
     const tail_width: u16 = @intCast(@min(ctx.stringWidth(failure), size.width));
     const edit_width = size.width - tail_width;
-    const original = if (self.renaming) self.rename_editor.buffer[0..self.rename_editor.length] else self.panel.title;
+    const original = if (self.renaming) self.rename_editor.text() else self.panel.title;
     const bytes = try Panel.displayText(ctx.arena, original, self.panel.unicode);
-    const cursor = if (self.renaming) (try Panel.displayText(ctx.arena, original[0..self.rename_editor.cursor], self.panel.unicode)).len else 0;
+    const cursor = if (self.renaming) (try Panel.displayText(ctx.arena, original[0..self.rename_editor.cursor()], self.panel.unicode)).len else 0;
     var start: usize = 0;
     var iter = ctx.graphemeIterator(bytes);
     while (ctx.stringWidth(bytes[start..cursor]) >= edit_width and start < cursor) {
@@ -1419,7 +1421,7 @@ test "Chat info Rename recovers refused input without reopening its field" {
             .invalid_utf8 => try typeText(&page, &ctx, "\xff"),
             .invalid_scalar => try typeText(&page, &ctx, "z\x01"),
             .edit_rejected => {
-                page.rename_editor.cursor = 0;
+                page.rename_editor.setCursor(0);
                 try typeText(&page, &ctx, "\u{301}");
             },
             .unbound => try page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = 'u', .mods = .{ .alt = true } } }),
@@ -1432,27 +1434,27 @@ test "Chat info Rename recovers refused input without reopening its field" {
                     else => unreachable,
                 });
                 try page.widget().handleEvent(&ctx, .paste_end);
-                if (fault == .paste_overflow) try std.testing.expectEqualStrings(page.title(), page.rename_editor.buffer[0..page.rename_editor.length]);
+                if (fault == .paste_overflow) try std.testing.expectEqualStrings(page.title(), page.rename_editor.text());
             },
         }
-        const retained = try arena.allocator().dupe(u8, page.rename_editor.buffer[0..page.rename_editor.length]);
-        const caret = page.rename_editor.cursor;
+        const retained = try arena.allocator().dupe(u8, page.rename_editor.text());
+        const caret = page.rename_editor.cursor();
         if (page.rename_editor.rejected != null) try press(&page, &ctx, vaxis.Key.enter);
         try std.testing.expect(page.renaming);
         try std.testing.expectEqual(@as(?Edit, null), fixture.edit);
-        try std.testing.expectEqualStrings(retained, page.rename_editor.buffer[0..page.rename_editor.length]);
-        try std.testing.expectEqual(caret, page.rename_editor.cursor);
+        try std.testing.expectEqualStrings(retained, page.rename_editor.text());
+        try std.testing.expectEqual(caret, page.rename_editor.cursor());
         try std.testing.expect(page.rename_editor.rejected == null);
-        try std.testing.expectEqual(@as(u3, 0), page.rename_editor.partial_length);
-        try std.testing.expect(!page.rename_editor.pasting);
+        try std.testing.expectEqual(@as(u3, 0), page.rename_editor.area.partial_length);
+        try std.testing.expect(!page.rename_editor.pasting());
         for ([_]u16{ 99, 46 }) |width| {
             try std.testing.expect(std.mem.indexOf(u8, try dump(&page, arena.allocator(), width, 12), "couldn't be entered") != null);
         }
         if (caret == 0) try press(&page, &ctx, vaxis.Key.right);
         try press(&page, &ctx, vaxis.Key.backspace);
-        try std.testing.expectEqual(retained.len - 1, page.rename_editor.length);
+        try std.testing.expectEqual(retained.len - 1, page.rename_editor.text().len);
         try typeText(&page, &ctx, "X");
-        const corrected = try arena.allocator().dupe(u8, page.rename_editor.buffer[0..page.rename_editor.length]);
+        const corrected = try arena.allocator().dupe(u8, page.rename_editor.text());
         try press(&page, &ctx, vaxis.Key.enter);
         try std.testing.expect(!page.renaming);
         try std.testing.expectEqualStrings(corrected, fixture.edit.?.label);

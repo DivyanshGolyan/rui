@@ -38,7 +38,7 @@ pub const ItemJson = struct {
     }
     pub const tail = .{"}}"};
     /// Each value kind's JSON, named by its tag.
-    const call_details = .{ ",\"description\":", H{ .optional_string = @import("tool_presentation.zig").max_description_bytes }, ",\"tool\":", H{ .optional_string = @import("tool_name.zig").max_bytes }, ",\"server\":", H{ .optional_string = @import("tool_record.zig").max_server_bytes } };
+    const call_details = .{ ",\"description\":", H{ .optional_string = activity_read.CallText.max_description_bytes }, ",\"tool\":", H{ .optional_string = activity_read.CallText.max_tool_bytes }, ",\"server\":", H{ .optional_string = activity_read.CallText.max_server_bytes } };
     pub const value_shapes = struct {
         /// Holes: admission, key, turn, state, admitted at, sender, content.
         const message = .{ "{\"admission\":\"", H.decimal, "\",\"key\":", H{ .string = protocol.max_key_bytes }, ",\"turn\":", H.optional_id, ",\"state\":\"", H{ .tag = @FieldType(Item.Message, "state") }, "\",\"admitted_at\":\"", H.decimal, "\",\"sender\":", H{ .optional_json = NamedPeerJson }, ",\"content\":", H{ .json = ContentJson }, "}" };

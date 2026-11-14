@@ -1,6 +1,7 @@
 //! One persistent caller owns drafts, terminal and joined Client borrowers.
 //! No worker writes the terminal; canonical activity supplies live output.
 const std = @import("std");
+const utf8_validation = @import("utf8_validation.zig");
 const session_list = @import("session_list.zig");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
@@ -25,8 +26,9 @@ const Submission = @import("SessionSubmission.zig");
 const original_state = @import("submission_state.zig");
 const Task = @import("ClientTask.zig");
 const Screen = @import("SessionScreen.zig");
-const Editor = @import("TerminalEditor.zig");
+const Editor = @import("DraftEditor.zig");
 const keymap = @import("keymap.zig");
+const keypress = @import("keypress.zig");
 const overview_view = @import("overview_view.zig");
 const test_poll = @import("test_poll");
 const View = @import("session_view.zig");
@@ -143,7 +145,6 @@ reading: struct {
     fills: FeedPolicy.Fills = .{},
     // An Action the reader found, adopted once input is idle.
     prepared_action: ?u64 = null,
-    prepared_summary: View.ActionSummary = .{},
     // One joined read at a time; no reuse until its live diagnostic is delivered.
     pending_diagnostic: ?struct { failure: protocol_reply.ReadFailure, phase: ReadPhase, recoverable: bool } = null,
 } = .{},
@@ -190,7 +191,6 @@ expansion: struct {
     reading: ?OpenRequest = null,
     generation: u64 = 0,
 } = .{},
-action_summary: View.ActionSummary = .{},
 // A frontend-owned change the next frame must show: input, notices, status,
 // live text or scrolling. The Screen's own changes make it stale() instead.
 dirty: bool = true,
@@ -466,7 +466,7 @@ pub fn attach(self: *Self, hooks: AppHooks, caps: overview_view.Caps) vxfw.Widge
     self.app_caps = caps;
     self.screen.setWidth(caps.width);
     self.app_preview = .{ .document = &self.screen.browsing, .colour = self.colour, .more = true, .handler = .{ .userdata = self, .on_notice = appNotice, .on_scroll = appDragScroll, .on_click = appPreviewClick } };
-    self.app_card = .{ .consent = &self.app_consent, .description = "", .body = self.app_preview.widget(), .userdata = self, .on_decision = appDecision };
+    self.app_card = .{ .consent = &self.app_consent, .body = self.app_preview.widget(), .userdata = self, .on_decision = appDecision };
     self.chrome = .init(.{ .userdata = self, .key = chromeClick(.needs), .stop = chromeClick(.{ .action = .stop }), .back = chromeClick(.{ .action = .close }), .latest = chromeClick(.{ .action = .latest }), .status_page = chromeClick(.status), .details = chromeClick(.details), .pick = chromeClick(.footer_pick), .close = chromeClick(.footer_close), .model = chromeClick(.{ .footer = .model }), .effort = chromeClick(.{ .footer = .effort }) });
     return self.widget();
 }
@@ -961,7 +961,7 @@ fn sessionKey(event: vxfw.Event) session_keys.Key {
     return switch (event) {
         .paste_start => .paste_start,
         .paste_end => .paste_end,
-        .key_press => |key| if (Editor.named(key)) |name| .{ .named = name } else if (Editor.isEnter(key)) .enter else if (key.matchExact(vaxis.Key.tab, .{})) .tab else if (key.matchExact(vaxis.Key.tab, .{ .shift = true })) .shift_tab else if (key.matches('i', .{ .alt = true })) .info else if (key.matches('d', .{ .alt = true })) .details else if (hostStartKey(key)) .host_start else switch (Editor.selectKey(conversation_keys, key)) {
+        .key_press => |key| if (keypress.named(key)) |name| .{ .named = name } else if (keypress.isEnter(key)) .enter else if (key.matchExact(vaxis.Key.tab, .{})) .tab else if (key.matchExact(vaxis.Key.tab, .{ .shift = true })) .shift_tab else if (key.matches('i', .{ .alt = true })) .info else if (key.matches('d', .{ .alt = true })) .details else if (hostStartKey(key)) .host_start else switch (keypress.selectKey(conversation_keys, key)) {
             .text => .text,
             else => .other,
         },
@@ -997,7 +997,6 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
                 const blurred = self.input.appEvent(conversation_keys, .focus_out, self.app_hooks.root.input.pasting, false);
                 if (blurred == .editor and blurred.editor == .refused) self.notice = refusedNotice(blurred.editor.refused);
                 try self.screen.showFile(self.init.io, self.files.action, .action);
-                self.action_summary = self.reading.prepared_summary;
                 self.reading.prepared_action = null;
                 self.reading.phase = .activity;
                 self.app_consent.adopt(request);
@@ -1087,7 +1086,6 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     self.app_card.style = normal;
     self.app_card.quiet = quiet;
     self.app_card.hover_style = hover;
-    self.app_card.description = self.action_summary.description.slice();
     self.app_card.method = self.app_caps.width;
     self.app_preview.style = normal;
     self.app_preview.colours = colours;
@@ -1248,7 +1246,7 @@ test "App Session retains the draft across a permission card arriving during pas
     }
     self.app_caps = .{ .depth = .none };
     _ = self.input.append("headTAIL");
-    self.input.editors[self.input.active].cursor = 4;
+    self.input.editors[self.input.active].setCursor(4);
     // Root hands the Session's core its keys with the paste they arrive in.
     const pasted: @import("app_input.zig").Effects.Delivery = .{ .under = .main, .pasted = true };
     const typed: @import("app_input.zig").Effects.Delivery = .{ .under = .main, .pasted = false };
@@ -1289,7 +1287,7 @@ test "App Session approval keeps typed abc through Esc and Allow once with its c
         const self = &held.self;
         if (existing_draft) {
             _ = self.input.append("leftTAIL");
-            self.input.editors[self.input.active].cursor = 4;
+            self.input.editors[self.input.active].setCursor(4);
         }
         const file = try held.adopt(3);
         defer file.close(std.testing.io);
@@ -1327,7 +1325,7 @@ test "App Session approval pastes into the kept draft and draft arrows never mov
     defer held.destroy();
     const self = &held.self;
     _ = self.input.append("leftTAIL");
-    self.input.editors[self.input.active].cursor = 4;
+    self.input.editors[self.input.active].setCursor(4);
     const file = try held.adopt(3);
     defer file.close(std.testing.io);
     try held.keys("\x1b[200~abc\r\nxyz\x1b[201~");
@@ -1368,7 +1366,7 @@ test "App Session approval routing gives the draft editor first refusal for sing
         _ = normal.appEvent(conversation_keys, .{ .key_press = .{ .codepoint = 0, .text = draft.text } }, true, true);
         _ = normal.appEvent(conversation_keys, .paste_end, false, true);
         try std.testing.expectEqualStrings(draft.text, normal.composition().bytes);
-        normal.editors[normal.active].cursor = draft.cursor;
+        normal.editors[normal.active].setCursor(draft.cursor);
         const outcome = normal.appEvent(conversation_keys, .{ .key_press = case.press }, false, true);
         const vertical = case.key == .up or case.key == .down;
         const falls_through = vertical and !draft.multiline;
@@ -1388,7 +1386,7 @@ test "App Session approval routing gives the draft editor first refusal for sing
         try held.keys(draft.text);
         try held.keys("\x1b[201~");
         try std.testing.expectEqualStrings(draft.text, self.input.composition().bytes);
-        self.input.editors[self.input.active].cursor = draft.cursor;
+        self.input.editors[self.input.active].setCursor(draft.cursor);
         const file = try held.adopt(100);
         defer file.close(std.testing.io);
         if (row == .draft) try held.keys("x\x7f"); // Enter the draft row without changing its contents.
@@ -1471,7 +1469,7 @@ test "App Session leaves from a permission card on Ctrl-C or Ctrl-D and keeps th
         // A hidden draft with its caret at the start: leaving never deletes
         // what the card hides.
         _ = self.input.append("kept");
-        self.input.editors[self.input.active].cursor = 0;
+        self.input.editors[self.input.active].setCursor(0);
         self.reading.prepared_action = 17;
         self.live.work.first_action = 17;
         try widget_.handleEvent(&ctx, .tick);
@@ -1839,6 +1837,11 @@ fn slashCommand(self: *Self, text: []const u8) !void {
     }
 }
 
+pub fn newSession(self: *Self, ctx: *vxfw.EventContext) !void {
+    self.newChat();
+    try self.afterInput(ctx);
+}
+
 fn newChat(self: *Self) void {
     if (self.leaving != null) return;
     const action = self.screen.action_view != null or self.live.work.first_action != null or self.reading.prepared_action != null;
@@ -2023,7 +2026,7 @@ test "Enter, Esc and Ctrl-G read every draft as the grammar does, with and witho
                 defer _ = self.skills.reset();
                 try std.testing.expect(self.skills.answer(self.skills.ask("").?.read, .{ .entries = @constCast(&entries), .total = entries.len }, "") == null);
                 _ = self.input.append(case.text);
-                self.input.editors[self.input.active].cursor = case.caret orelse case.text.len;
+                self.input.editors[self.input.active].setCursor(case.caret orelse case.text.len);
                 if (drawn) _ = try held.draw();
                 const listed = drawn and case.list;
                 try std.testing.expectEqual(listed, self.shownCommands() != null);
@@ -2574,9 +2577,7 @@ fn statusLines(buffer: *[status_capacity]u8, context: []const u8, base: []const 
     const room = buffer.len - base.len - (if (badge) |text| text.len else 0) - "\n… · ".len;
     var context_line = context;
     if (context_line.len > room) {
-        var end = room;
-        while (end > 0 and (context_line[end] & 0xc0) == 0x80) end -= 1;
-        context_line = context_line[0..end];
+        context_line = context_line[0..utf8_validation.scalarStart(context_line, room)];
     }
     if (context_line.len != 0) {
         status.writeAll(context_line) catch unreachable;
@@ -3147,9 +3148,10 @@ fn readInspection(self: *const Self) reader_policy.Inspection {
     };
 }
 
-/// What the queued row shows, if it shows (see `queued_line.unshown`): the
-/// newest waiting Message, by the line read from it, and how many wait
-/// that live output has not shown.
+/// What the queued row shows, if it shows: the newest waiting Message, by
+/// the line read from it, and how many wait. While the work holds nothing
+/// back, the oldest waiting Message is already being taken, so it is not
+/// counted.
 pub fn queuedRow(self: *const Self) ?struct { newest: u64, waiting: queued_line.Waiting } {
     const queued = self.live.queued;
     const count = queued.count - @intFromBool(queued.count != 0 and !self.live.work.state.holdsQueue());
@@ -3438,7 +3440,6 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
         }
         if (phase == .permission) {
             self.reading.prepared_action = self.job.result.action;
-            self.reading.prepared_summary = self.job.result.summary;
             if (self.reading.prepared_action == null) self.reading.phase = .activity;
         }
     }
@@ -4903,11 +4904,11 @@ test "chat info owns typed keys before Host restart across every modal editor an
         switch (mode) {
             .rename => {
                 try std.testing.expect(page.renaming);
-                try std.testing.expectEqualStrings("Beforerra", page.rename_editor.buffer[0..page.rename_editor.length]);
+                try std.testing.expectEqualStrings("Beforerra", page.rename_editor.text());
             },
             .model => {
                 try std.testing.expect(page.model_choice.active);
-                try std.testing.expectEqualStrings("rra", page.model_choice.editor.buffer[0..page.model_choice.editor.length]);
+                try std.testing.expectEqualStrings("rra", page.model_choice.editor.text());
             },
             .rows => try std.testing.expect(!page.hasChoice()),
             .effort, .permissions, .tools => try std.testing.expect(page.panel.choice != null),
@@ -4965,8 +4966,8 @@ test "app settings starts the overview's run and keeps the original submission; 
     const held = try HeldFrontend.create();
     defer held.destroy();
     var overview: ArchiveOverview = .{ .state = undefined };
-    try overview.state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
-    defer overview.state.deinit();
+    try overview.init();
+    defer overview.deinit();
     held.self.lender = overview.lender();
     const self = &held.self;
     const original = self.input.submitText("original indeterminate model input");
@@ -5081,8 +5082,8 @@ test "an Upgrade hold refuses commands without losing their drafts" {
         const held = try HeldFrontend.create();
         defer held.destroy();
         var overview: ArchiveOverview = .{ .state = undefined };
-        try overview.state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
-        defer overview.state.deinit();
+        try overview.init();
+        defer overview.deinit();
         held.self.lender = overview.lender();
         const self = &held.self;
         _ = try overview_view.step(&overview.state, .start_upgrade);
@@ -5147,6 +5148,15 @@ const ArchiveOverview = struct {
     archived: ?overview_view.Reference = null,
     requested: bool = true,
 
+    /// Starts the Overview in place: its lender points into `self`.
+    fn init(self: *ArchiveOverview) !void {
+        try self.state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
+    }
+
+    fn deinit(self: *ArchiveOverview) void {
+        self.state.deinit();
+    }
+
     fn step(raw: *anyopaque, work: protocol.session_work.Kind, input: overview_view.ConversationInput) !overview_view.ArchiveAdmission {
         const self: *ArchiveOverview = @ptrCast(@alignCast(raw));
         switch (input) {
@@ -5195,8 +5205,8 @@ test "one settled stop read updates the chat and its list row without a listing"
     const held = fixture.held;
     const self = &held.self;
     var overview: ArchiveOverview = .{ .state = undefined };
-    try overview.state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
-    defer overview.state.deinit();
+    try overview.init();
+    defer overview.deinit();
     _ = try overview_view.step(&overview.state, .{ .host = .{ .instance = @splat(0xab), .started_at = 1, .slots = 2, .slots_in_use = 0 } });
     const ref = "k7m2qx".*;
     const stopping: protocol.WorkState = .{ .stopping = .{ .since = 1 } };
@@ -5247,8 +5257,8 @@ test "Alt-A archives the open conversation at once without submitting or changin
         const held = try HeldFrontend.create();
         defer held.destroy();
         var overview: ArchiveOverview = .{ .state = undefined };
-        try overview.state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
-        defer overview.state.deinit();
+        try overview.init();
+        defer overview.deinit();
         held.self.lender = overview.lender();
         held.self.live.work.state = .{ .working = .{ .since = 1 } };
         const ticket: ?Input.Ticket = if (original) held.self.input.submitText("retained original") else null;
@@ -5274,8 +5284,8 @@ test "Alt-A and Ctrl-X during opening forward no intent and keep the draft" {
         const held = try HeldFrontend.create();
         defer held.destroy();
         var overview: ArchiveOverview = .{ .state = undefined };
-        try overview.state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
-        defer overview.state.deinit();
+        try overview.init();
+        defer overview.deinit();
         held.self.lender = overview.lender();
         try sendKeys(&held.self, "keep draft\x1b[D");
         const revision = held.self.input.revision;
@@ -5305,8 +5315,8 @@ test "conversation slash archive archives a busy Session at once and consumes on
         const held = try HeldFrontend.create();
         defer held.destroy();
         var overview: ArchiveOverview = .{ .state = undefined };
-        try overview.state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
-        defer overview.state.deinit();
+        try overview.init();
+        defer overview.deinit();
         held.self.lender = overview.lender();
         held.self.command = UnusedArchiveCommand.command;
         UnusedArchiveCommand.calls = 0;
@@ -5336,8 +5346,8 @@ test "conversation slash and shortcut archive restore share one pending or unkno
         const held = try HeldFrontend.create();
         defer held.destroy();
         var overview: ArchiveOverview = .{ .state = undefined };
-        try overview.state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
-        defer overview.state.deinit();
+        try overview.init();
+        defer overview.deinit();
         held.self.lender = overview.lender();
         held.self.command = UnusedArchiveCommand.command;
         UnusedArchiveCommand.calls = 0;
@@ -5369,8 +5379,8 @@ test "Ctrl-X stops at once beside a typed slash archive, and Enter then archives
         const held = try HeldFrontend.create();
         defer held.destroy();
         var overview: ArchiveOverview = .{ .state = undefined };
-        try overview.state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
-        defer overview.state.deinit();
+        try overview.init();
+        defer overview.deinit();
         held.self.lender = overview.lender();
         held.self.live.work.state = .{ .working = .{ .since = 1 } };
         try sendKeys(&held.self, "/archive\x18");
@@ -5408,8 +5418,8 @@ test "upgrade holds classify every lender intent before forwarding and allow loc
         const held = try HeldFrontend.create();
         defer held.destroy();
         var overview: ArchiveOverview = .{ .state = undefined };
-        try overview.state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
-        defer overview.state.deinit();
+        try overview.init();
+        defer overview.deinit();
         held.self.lender = overview.lender();
         overview.state.upgrade = heldUpgrade(hold, .{ .blocked, .reobserving });
         try held.self.converse(input);
@@ -5428,8 +5438,8 @@ test "upgrade holds refuse archive shortcuts and slash commands without consumin
         const held = try HeldFrontend.create();
         defer held.destroy();
         var overview: ArchiveOverview = .{ .state = undefined };
-        try overview.state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
-        defer overview.state.deinit();
+        try overview.init();
+        defer overview.deinit();
         held.self.lender = overview.lender();
         held.self.live.work.state = switch (work) {
             .idle => .{ .idle = .{ .since = 1 } },
@@ -5478,8 +5488,8 @@ test "upgrade reobservation retains a refused archive command from the completio
         const held = try HeldFrontend.create();
         defer held.destroy();
         var overview: ArchiveOverview = .{ .state = undefined };
-        try overview.state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
-        defer overview.state.deinit();
+        try overview.init();
+        defer overview.deinit();
         held.self.lender = overview.lender();
         try sendKeys(&held.self, line);
         try held.settle();
@@ -8686,8 +8696,8 @@ test "chat info Archive delegates once and settles only its exact Session answer
         const held = try HeldFrontend.createWithDrafts("k7m2qx", null);
         defer held.destroy();
         var overview: ArchiveOverview = .{ .state = undefined };
-        try overview.state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
-        defer overview.state.deinit();
+        try overview.init();
+        defer overview.deinit();
         held.self.lender = overview.lender();
         try captureInfo(held, "Fix retry deadline");
         try held.keys("draft\x1bi");
@@ -8721,8 +8731,8 @@ test "chat info archive admission refuses full and unresolved ledgers without tr
         const held = try HeldFrontend.createWithDrafts("k7m2qx", null);
         defer held.destroy();
         var overview: ArchiveOverview = .{ .state = undefined };
-        try overview.state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
-        defer overview.state.deinit();
+        try overview.init();
+        defer overview.deinit();
         held.self.lender = overview.lender();
         if (full) {
             for (&overview.state.requests, 0..) |*request, i| {
@@ -8950,8 +8960,8 @@ test "chat info retains Session stop and archive bindings in full-page and stand
         const held = try HeldFrontend.createWithDrafts("k7m2qx", null);
         defer held.destroy();
         var overview: ArchiveOverview = .{ .state = undefined };
-        try overview.state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
-        defer overview.state.deinit();
+        try overview.init();
+        defer overview.deinit();
         held.self.lender = overview.lender();
         held.self.live.work.state = .{ .working = .{ .since = 1 } };
         try captureInfo(held, "Fix retry deadline");
@@ -10036,7 +10046,7 @@ test "App Session Left on an empty draft alone focuses the list while Esc leaves
         held.root.size = .{ .width = width, .height = 30 };
         _ = try held.draw();
         _ = held.self.input.append(draft.bytes);
-        held.self.input.editors[held.self.input.active].cursor = draft.cursor;
+        held.self.input.editors[held.self.input.active].setCursor(draft.cursor);
         try held.keys(switch (key) {
             .left => "\x1b[D",
             .escape => "\x1b",
@@ -10117,14 +10127,14 @@ test "App Session paste completion preserves retained draft caret after empty ne
         held.root.size = .{ .width = width, .height = 30 };
         _ = try held.draw();
         _ = held.self.input.append("ab");
-        held.self.input.editors[held.self.input.active].cursor = cursor;
+        held.self.input.editors[held.self.input.active].setCursor(cursor);
         held.root.input.list_focused = list_focused;
         try held.keys("\x1b[200~");
-        try std.testing.expectEqual(!list_focused, held.self.input.editors[held.self.input.active].pasting);
+        try std.testing.expectEqual(!list_focused, held.self.input.editors[held.self.input.active].pasting());
         try held.keys(paste);
         try held.keys("\x1b[201~");
         try std.testing.expect(!held.root.input.pasting);
-        try std.testing.expect(!held.self.input.editors[held.self.input.active].pasting);
+        try std.testing.expect(!held.self.input.editors[held.self.input.active].pasting());
         try std.testing.expect(held.self.submission.intent == null and held.self.input.submitted == null);
         // The list has no editor: a paste there cannot alter the hidden chat.
         var pasted: [32]u8 = undefined;

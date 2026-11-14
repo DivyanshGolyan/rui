@@ -18,6 +18,8 @@ const policy = @import("codex_credential_policy.zig");
 const codex = @import("codex_token_wire.zig");
 const json_scalar = @import("json_scalar.zig");
 const model_list = @import("model_list.zig");
+const url_value = @import("url");
+const hex_value = @import("hex_value.zig");
 
 pub const Request = codex.Request;
 pub const issuer = codex.issuer;
@@ -232,23 +234,9 @@ const Query = struct {
 /// value must be nonempty printable ASCII once decoded and fit `out`;
 /// otherwise `refusal` is returned.
 fn decode(value: []const u8, out: []u8, comptime refusal: anyerror) ![]u8 {
-    var len: usize = 0;
-    var index: usize = 0;
-    while (index < value.len) : (len += 1) {
-        if (len == out.len) return refusal;
-        var byte = value[index];
-        if (byte == '%') {
-            if (index + 3 > value.len) return refusal;
-            byte = std.fmt.parseInt(u8, value[index + 1 .. index + 3], 16) catch return refusal;
-            index += 3;
-        } else {
-            if (byte == '+') byte = ' ';
-            index += 1;
-        }
-        out[len] = byte;
-    }
-    if (!policy.safeAscii(out[0..len])) return refusal;
-    return out[0..len];
+    const decoded = url_value.percentDecode(value, out, .space) orelse return refusal;
+    if (!policy.safeAscii(decoded)) return refusal;
+    return decoded;
 }
 
 /// The authorization-code exchange for a granted callback.
@@ -425,7 +413,7 @@ pub fn validateHostId(text: []const u8) !void {
     const uuid = text[uuid_prefix.len..];
     for (uuid, 0..) |byte, index| switch (index) {
         8, 13, 18, 23 => if (byte != '-') return error.InvalidHostId,
-        else => if (!std.ascii.isDigit(byte) and !(byte >= 'a' and byte <= 'f')) return error.InvalidHostId,
+        else => if (!hex_value.isLowerDigit(byte)) return error.InvalidHostId,
     };
     if (uuid[14] != '4' or std.mem.indexOfScalar(u8, "89ab", uuid[19]) == null) return error.InvalidHostId;
 }

@@ -11,7 +11,7 @@ const pages = @import("../../os/pages.zig");
 const activity_facts = @import("../../activity_facts.zig");
 const conversation_read = @import("../../conversation_read.zig");
 const activity_read = @import("../../activity_read.zig");
-const session_field = @import("../../session_field.zig");
+const session_settings = @import("../../session_settings.zig");
 const tool_proposal = @import("../../tool_proposal.zig");
 const workspace_path = @import("../../workspace_path.zig");
 const outcome_code = @import("../../outcome_code.zig");
@@ -410,15 +410,6 @@ fn readNextPosition(a: *ReadAccess, session: []const u8) !?u64 {
     a.read(next_position, .{ .session = session }, &row);
     try store_access.runAs(a, error.SessionReadFailed);
     return if (row) |found| found.next_position.get() else null;
-}
-
-/// The public metadata of the content row `content_id`, in a round of its
-/// own. A failed step is `CorruptStore`, main's answer for it.
-fn readPublicMetadata(a: *ReadAccess, content_id: u64) !ContentMetadata {
-    var row: content_metadata.Row = undefined;
-    a.read(content_metadata, .{ .content_id = content_id }, &row);
-    try store_access.runAs(a, error.CorruptStore);
-    return content_domain.publicMetadata(&row);
 }
 
 /// Round 1 reads the saved Session; round 2 its instructions' and output
@@ -948,19 +939,6 @@ fn finishPresentation(result: *tool_presentation.ToolPresentation, code: ?tool_p
     };
 }
 
-/// `PresentationRead` alone, in rounds of its own.
-fn toolPresentation(a: *ReadAccess, operation: u64, ordinal: u64, publication_position: ?u64) !tool_presentation.ToolPresentation {
-    var presentation: tool_presentation.ToolPresentation = undefined;
-    var read: PresentationRead = .init(operation, ordinal, publication_position, &presentation);
-    read.queue(a);
-    try runRows(a);
-    try read.checkCall();
-    read.queueProposal(a);
-    try runRows(a);
-    try read.finish();
-    return presentation;
-}
-
 /// The hosted call at a position, with whether an accepted Operation
 /// recorded it.
 const hosted_call = rsql.Read(.{
@@ -1457,7 +1435,7 @@ const approval_request = rsql.Read(.{
 const session_change = rsql.Read(.{
     .sql = "SELECT revision,field,changed_at,provider_text FROM session_change WHERE session_ref=?1 AND position=?2 AND ordinal=?3",
     .Args = struct { session: []const u8, position: u64, ordinal: u64 },
-    .Row = struct { revision: rsql.Positive, field: session_field.SessionField, changed_at: rsql.Positive, provider_text: *?Bounded(outcome_code.max_report_bytes) },
+    .Row = struct { revision: rsql.Positive, field: session_settings.SessionField, changed_at: rsql.Positive, provider_text: *?Bounded(outcome_code.max_report_bytes) },
     .cardinality = .optional,
 });
 
@@ -1527,14 +1505,14 @@ const ModelCallRead = struct {
 };
 
 const call_details = rsql.Read(.{
-    .sql = "SELECT op.resolved_at,c.description,CASE WHEN name.byte_length<=" ++ std.fmt.comptimePrint("{d}", .{@import("../../tool_name.zig").max_bytes}) ++ " THEN @payload(name) END AS tool," ++
+    .sql = "SELECT op.resolved_at,c.description,CASE WHEN name.byte_length<=" ++ std.fmt.comptimePrint("{d}", .{activity_read.CallText.max_tool_bytes}) ++ " THEN @payload(name) END AS tool," ++
         action_domain.mcpServerForNameSql("op", "c.name_content_id") ++ " AS server FROM model_operation op " ++
         "JOIN model_tool_call c ON c.operation_id=op.operation_id JOIN content name ON name.content_id=c.name_content_id " ++
         "WHERE op.operation_id=?1 AND op.session_ref=?2 AND c.call_ordinal=?3",
     .Args = struct { operation: u64, session: []const u8, ordinal: u64 },
     // Text has one address, in the output item, not a second bounded copy
     // in every slot of the page's read-state union.
-    .Row = struct { resolved_at: rsql.Positive, description: *?Bounded(tool_presentation.max_description_bytes), tool: *?Bounded(@import("../../tool_name.zig").max_bytes), server: *?Bounded(@import("../../tool_record.zig").max_server_bytes) },
+    .Row = struct { resolved_at: rsql.Positive, description: *?activity_read.CallText.Description, tool: *?activity_read.CallText.Tool, server: *?activity_read.CallText.Server },
     .cardinality = .optional,
 });
 
@@ -1543,7 +1521,7 @@ fn checkCallDetails(details: *const call_details.Row, metadata: *const activity_
     const field = metadata.fields[@backingInt(tool_proposal.Field.name)];
     if (details.tool.*) |*tool| {
         if (tool.slice().len != field.length or !std.mem.eql(u8, &content_string.digest(tool.slice()), &field.digest)) return error.CorruptStore;
-    } else if (field.length <= @import("../../tool_name.zig").max_bytes) return error.CorruptStore;
+    } else if (field.length <= activity_read.CallText.max_tool_bytes) return error.CorruptStore;
 }
 
 /// A Message the Session sent from position ?3, with whether its command
@@ -2268,7 +2246,7 @@ pub const proposal_row = rsql.Read(.{
         arguments_content_id: rsql.Positive,
         consistent: bool,
         /// Three admission-certified (little-endian length, SHA-256) pairs.
-        field_metadata: [120]u8,
+        field_metadata: activity_read.FieldCertificate.Bytes,
         length0: u64,
         digest0: [32]u8,
         private0: bool,
@@ -2329,9 +2307,9 @@ fn certifiedFields(row: *const proposal_row.Row) error{CorruptStore}![3]activity
         const suffix = std.fmt.comptimePrint("{d}", .{index});
         const length: u64 = @field(row, "length" ++ suffix);
         const digest: [32]u8 = @field(row, "digest" ++ suffix);
-        const certified = row.field_metadata[index * 40 ..][0..40];
-        if (@field(row, "private" ++ suffix) or length != std.mem.readInt(u64, certified[0..8], .little) or
-            !std.mem.eql(u8, &digest, certified[8..40])) return error.CorruptStore;
+        const certified = activity_read.FieldCertificate.read(&row.field_metadata, index);
+        if (@field(row, "private" ++ suffix) or length != certified.length or
+            !std.mem.eql(u8, &digest, &certified.digest)) return error.CorruptStore;
         fields[index] = .{ .length = length, .digest = digest };
     }
     return fields;
@@ -2395,7 +2373,7 @@ pub const ToolOutcomeRow = struct {
     call_id_content_id: ?rsql.Positive,
     arguments_content_id: ?rsql.Positive,
     consistent: bool,
-    field_metadata: ?[120]u8,
+    field_metadata: ?activity_read.FieldCertificate.Bytes,
     length0: ?u64,
     digest0: ?[32]u8,
     private0: ?bool,

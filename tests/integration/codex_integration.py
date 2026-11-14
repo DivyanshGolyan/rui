@@ -70,7 +70,7 @@ def proposal_with_private_reasoning(command):
 
 def start(store, endpoint, *extra):
     host, _ = start_ready_process(
-        [fixture.RUI, "host", "serve", "--store", store, "--active-capacity", "2",
+        [fixture.RUI, "host", "serve", "--store", store, "--set", 'execution.activeCapacity=2',
          "--test-codex-fixture-endpoint", endpoint, *extra],
         required_fields={"execution": "enabled", "nghttp2": "1.70.0"},
         observations="managed" if "--test-phase-trace" in extra else None,
@@ -703,7 +703,7 @@ def openai_journey():
     complete = False
     try:
         # No key: the Host refuses to start rather than serve openai unready.
-        for serve in (["--test-openai-fixture-endpoint", url], ["--provider", "openai"]):
+        for serve in (["--test-openai-fixture-endpoint", url], ["--set", 'providers={"openai":{}}']):
             refused = subprocess.run([fixture.RUI, "host", "serve", "--store", store, *serve],
                                      capture_output=True, text=True, timeout=15)
             assert refused.returncode != 0 and "no OpenAI API key" in refused.stderr, refused
@@ -716,7 +716,7 @@ def openai_journey():
         assert refused.returncode != 0, refused
         key_file.chmod(0o600)
         # A base URL must be https, and names the only place the key goes.
-        refused = subprocess.run([fixture.RUI, "host", "serve", "--store", store, "--provider", "openai"],
+        refused = subprocess.run([fixture.RUI, "host", "serve", "--store", store, "--set", 'providers={"openai":{}}'],
                                  capture_output=True, text=True, timeout=15,
                                  env={**os.environ, "RUI_OPENAI_BASE_URL": "http://api.openai.com/v1"})
         assert refused.returncode != 0 and "RUI_OPENAI_BASE_URL must be an https:// URL" in refused.stderr, refused

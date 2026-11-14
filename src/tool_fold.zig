@@ -12,6 +12,20 @@ pub const more_uri = "rui-tool-more";
 pub const heading_marker = Text.link_open ++ heading_uri ++ Text.link_end ++ Text.link_close;
 pub const output_marker = Text.link_open ++ output_uri ++ Text.link_end ++ Text.link_close;
 pub const more_marker = Text.link_open ++ more_uri ++ Text.link_end ++ Text.link_close;
+/// What a line marker's address names: a tool row's heading, or one of its
+/// output lines (a body line or the line saying more follows).
+pub const Marker = enum {
+    heading,
+    output,
+
+    /// The marker `uri` names, or null for any other address.
+    pub fn of(uri: []const u8) ?Marker {
+        if (std.mem.eql(u8, uri, heading_uri)) return .heading;
+        if (std.mem.eql(u8, uri, output_uri) or std.mem.eql(u8, uri, more_uri)) return .output;
+        return null;
+    }
+};
+
 pub const max_lines = 20;
 pub const max_bytes = 8192;
 

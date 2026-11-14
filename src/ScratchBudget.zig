@@ -14,10 +14,15 @@ pub fn narrowed(self: ScratchBudget, limit: u64) ScratchBudget {
 
 /// Acquire a full charge, reclaiming eligible retained output if necessary.
 pub fn allocate(self: ScratchBudget, amount: u64) bool {
-    if (self.charge(amount)) return true;
-    const reclaim = self.reclaim_fn orelse return false;
+    return self.charge(amount) or self.reclaim(amount);
+}
+
+/// Ask the owner of retained output to make room for `amount`; false
+/// when no reclaimer is installed.
+fn reclaim(self: ScratchBudget, amount: u64) bool {
+    const reclaim_fn = self.reclaim_fn orelse return false;
     const context = self.reclaim_context orelse return false;
-    return reclaim(context, amount, self.limit);
+    return reclaim_fn(context, amount, self.limit);
 }
 
 /// Accounting only: failure changes no charge and never invokes reclamation.
@@ -35,9 +40,7 @@ pub fn charge(self: ScratchBudget, amount: u64) bool {
 pub fn allocateUpTo(self: ScratchBudget, maximum: u64) u64 {
     const reserved = self.chargeUpTo(maximum);
     if (reserved != 0 or maximum == 0) return reserved;
-    const reclaim = self.reclaim_fn orelse return 0;
-    const context = self.reclaim_context orelse return 0;
-    return if (reclaim(context, 1, self.limit)) 1 else 0;
+    return if (self.reclaim(1)) 1 else 0;
 }
 
 /// Accounting-only partial reservation, with no cleanup or filesystem effects.

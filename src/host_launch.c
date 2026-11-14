@@ -142,7 +142,7 @@ int rui_write_readiness(int fd, const unsigned char *data, size_t length) {
  * argv[0] is executable and argc excludes the NULL terminator. */
 static int launch_detached(const char *helper_executable, const char *executable,
                            const char *const *argv, size_t argc,
-                           const char *const *envp, int startup_write, int *launched_pid,
+                           const char *const *envp, int startup_write, int output_write, int *launched_pid,
                            unsigned long long *launched_started) {
     int exact = launched_pid != NULL;
 #if defined(__APPLE__)
@@ -198,6 +198,10 @@ static int launch_detached(const char *helper_executable, const char *executable
         err = posix_spawn_file_actions_addopen(&actions, fd, "/dev/null", O_RDWR, 0);
         if (err != 0) goto attributes_done;
     }
+    if (output_write >= 0) {
+        err = posix_spawn_file_actions_adddup2(&actions, output_write, 1);
+        if (err != 0) goto attributes_done;
+    }
     if (startup_write >= 0) {
         err = posix_spawn_file_actions_adddup2(&actions, startup_write, 2);
         if (err != 0) goto attributes_done;
@@ -243,6 +247,7 @@ spawn_done:
         for (int fd = 0; fd < 3; fd++) {
             if (dup2(null_fd, fd) < 0) fail_launch(report, errno, exact);
         }
+        if (output_write >= 0 && dup2(output_write, 1) < 0) fail_launch(report, errno, exact);
         if (startup_write >= 0 && dup2(startup_write, 2) < 0) fail_launch(report, errno, exact);
         if (null_fd > 2 && null_fd != report) close(null_fd);
         if (report != launch_report_fd) {
@@ -311,7 +316,7 @@ spawn_done:
 
 static int launch_with_signals(const char *helper_executable, const char *executable,
                                const char *const *argv, size_t argc,
-                               const char *const *envp, int startup_write, int *launched_pid,
+                               const char *const *envp, int startup_write, int output_write, int *launched_pid,
                                unsigned long long *launched_started) {
     struct sigaction previous, normal = {0};
     normal.sa_handler = SIG_DFL;
@@ -319,13 +324,13 @@ static int launch_with_signals(const char *helper_executable, const char *execut
     if (sigaction(SIGCHLD, &normal, &previous) != 0) return errno;
     // The helper must remain waitable even when the caller inherited
     // SIG_IGN or SA_NOCLDWAIT. Its Host grandchild also inherits SIG_DFL.
-    int result = launch_detached(helper_executable, executable, argv, argc, envp, startup_write, launched_pid, launched_started);
+    int result = launch_detached(helper_executable, executable, argv, argc, envp, startup_write, output_write, launched_pid, launched_started);
     int restore_error = sigaction(SIGCHLD, &previous, NULL) == 0 ? 0 : errno;
     return result != 0 ? result : restore_error;
 }
 
 int rui_launch_detached(const char *executable, const char *const *argv, size_t argc) {
-    return launch_with_signals(executable, executable, argv, argc, (const char *const *)environ, -1, NULL, NULL);
+    return launch_with_signals(executable, executable, argv, argc, (const char *const *)environ, -1, -1, NULL, NULL);
 }
 
 static int launch_observed(const char *helper_executable, const char *executable,
@@ -338,7 +343,7 @@ static int launch_observed(const char *helper_executable, const char *executable
     close(channel[1]);
     if (result == 0 && (fcntl(channel[0], F_SETFD, FD_CLOEXEC) < 0 ||
         fcntl(channel[0], F_SETFL, O_NONBLOCK) < 0)) result = errno;
-    if (result == 0) result = launch_with_signals(helper_executable, executable, argv, argc, envp, writer, launched_pid, launched_started);
+    if (result == 0) result = launch_with_signals(helper_executable, executable, argv, argc, envp, writer, -1, launched_pid, launched_started);
     if (writer >= 0) close(writer);
     if (result != 0) close(channel[0]);
     else *startup_read = channel[0];
@@ -365,5 +370,36 @@ int rui_launch_pinned(const char *helper_executable, const char *executable,
     for (size_t i = 0; i < argc; i++) if (!argv[i]) return EINVAL;
     int result = launch_observed(helper_executable, executable, argv, argc, envp, startup_read, launched_pid, launched_started);
     if (result != 0) *launched_started = 0;
+    return result;
+}
+
+/* Two independently bounded byte channels. The application decides whether any
+ * stdout line is a startup refusal; this transport knows no application grammar. */
+int rui_launch_detached_reported(const char *executable, const char *const *argv,
+                                 size_t argc, int *startup_read, int *output_read) {
+    int channels[2][2];
+    int writers[2] = {-1, -1};
+    int opened = 0;
+    int result = 0;
+    *startup_read = -1;
+    *output_read = -1;
+    for (int i = 0; i < 2; ++i) {
+        if (pipe(channels[i]) != 0) { result = errno; break; }
+        opened++;
+        writers[i] = fcntl(channels[i][1], F_DUPFD_CLOEXEC, launch_first_unreserved_fd);
+        close(channels[i][1]);
+        if (writers[i] < 0 || fcntl(channels[i][0], F_SETFD, FD_CLOEXEC) < 0 ||
+            fcntl(channels[i][0], F_SETFL, O_NONBLOCK) < 0) { result = errno; break; }
+    }
+    if (!result) result = launch_with_signals(executable, executable, argv, argc,
+        (const char *const *)environ, writers[0], writers[1], NULL, NULL);
+    for (int i = 0; i < opened; ++i) {
+        if (writers[i] >= 0) close(writers[i]);
+        if (result) close(channels[i][0]);
+    }
+    if (!result) {
+        *startup_read = channels[0][0];
+        *output_read = channels[1][0];
+    }
     return result;
 }

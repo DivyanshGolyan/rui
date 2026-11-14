@@ -727,8 +727,10 @@ def tap_main(args):
 def launch_host(run):
     """Start this run's Host from the options saved at `new`; return its ready status."""
     options = run.meta["host_options"]
-    host_argv = [str(run.rui), "host", "serve", "--store", str(run.store), "--active-capacity", str(options["active_capacity"]),
-                 "--provider-endpoint", run.meta["fixture_url"], "--test-retry-waits-ms", "50,100,150"]
+    host_argv = [str(run.rui), "host", "serve", "--store", str(run.store),
+                 "--set", f"execution.activeCapacity={options['active_capacity']}",
+                 "--set", "providers={}", "--set", f"providers.codex.endpoint={run.meta['fixture_url']}",
+                 "--set", "providers.codex.unauthenticated=true", "--test-retry-waits-ms", "50,100,150"]
     host_env = run.env()
     for assignment in options["host_setenv"]:
         key, _, value = assignment.partition("=")

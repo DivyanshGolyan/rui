@@ -2,17 +2,14 @@
 //! then rui alone (tools drops first), then nothing.
 const std = @import("std");
 const Memory = @import("process_memory.zig").Memory;
+const display_text = @import("display_text.zig");
 const mib = 1024 * 1024;
 
 /// The widest form of the memory figure that fits `columns`, or "" when none
 /// does. Null memory draws nothing before the first read. The result belongs to arena.
 pub fn fit(arena: std.mem.Allocator, memory: ?Memory, unicode: bool, columns: u16) error{OutOfMemory}![]const u8 {
     for (try choices(arena, memory, unicode)) |text| {
-        // Every character the figure uses is one column wide, so its width is
-        // its count of UTF-8 lead bytes.
-        var width: usize = 0;
-        for (text) |byte| width += @intFromBool(byte & 0xC0 != 0x80);
-        if (width <= columns) return text;
+        if (display_text.width(text, .terminal) <= columns) return text;
     }
     return "";
 }

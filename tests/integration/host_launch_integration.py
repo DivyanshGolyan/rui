@@ -29,9 +29,10 @@ from host_process import (canonical_fixture_root, start_ready_process, stop_proc
                           dispose_all, preserve_failure_metadata, _failure_destination,
                           copy_failure_diagnostics, wait_for, STORE_SCHEMA)
 import codex_fixture
+from model_fixture import stop_endpoint
 from product_defaults import DEFAULTS
 import os_semantics
-from host_launch_fixture import COMMAND_TIMEOUT, RUI, forced_crash_cleanup, matching_processes, run_start
+from host_launch_fixture import COMMAND_TIMEOUT, RUI, dispose_provider_case, forced_crash_cleanup, matching_processes, run_start
 
 
 # The format this build supports; older formats are refused, never migrated.
@@ -575,6 +576,424 @@ def moved_store_identity(root, env, *, terminal=False):
     print(f"moved Store identity passed: {surface}, old-path symlink, unchanged identity, restored readiness", flush=True)
 
 
+def host_command(env, *arguments):
+    return subprocess.run([RUI, "host", *map(str, arguments)], env=env, capture_output=True,
+                          text=True, timeout=COMMAND_TIMEOUT)
+
+
+def host_ok(env, *arguments):
+    """A host command that must succeed; a failure shows its own report."""
+    completed = host_command(env, *arguments)
+    assert completed.returncode == 0, (arguments, completed.returncode, completed.stderr)
+    return completed
+
+
+def new_host_provider_policy(root, env):
+    """New-Host omission is automatic at every settings intake, never on replay.
+
+    Expected route maps are the accepted policy, not derived from provider facts.
+    A route advertised while signed out is not proof of a usable credential or
+    a successful model call. No case here submits a model request.
+    """
+    import http.client
+    import http.server
+    import threading
+    from settings_fixture import frame
+
+    class RejectProxy(http.server.BaseHTTPRequestHandler):
+        def do_CONNECT(self):
+            with self.server.receipt_lock:
+                self.server.targets.add(self.path)
+                self.server.authorized |= any(name in self.headers for name in ("Authorization", "Proxy-Authorization"))
+                self.server.requests += 1
+            self.send_response(403)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            self.close_connection = True
+
+        def log_message(self, *args):
+            pass
+
+    proxy = host_process.TestHTTPServer(("127.0.0.1", 0), RejectProxy)
+    proxy.receipt_lock = threading.Lock()
+    proxy.targets = set()
+    proxy.requests = 0
+    proxy.authorized = False
+    proxy_thread = threading.Thread(target=proxy.serve_forever)
+    proxy_threads = {proxy: proxy_thread}
+    proxy_url = f"http://127.0.0.1:{proxy.server_port}"
+
+    private = root / "provider-policy"
+    private.mkdir(mode=0o700)
+    browser = private / "chatgpt.json"
+    key = private / "openai.key"
+    missing = private / "missing.json"
+    policy_env = {**env, "RUI_CODEX_CREDENTIAL_FILE": str(missing),
+                  "RUI_CHATGPT_CREDENTIAL_FILE": str(browser), "RUI_OPENAI_KEY_FILE": str(key),
+                  "https_proxy": proxy_url, "HTTPS_PROXY": proxy_url, "no_proxy": "", "NO_PROXY": ""}
+    none = {"codex": "unserved", "chatgpt": "unserved", "openai": "unserved"}
+    exact = {"codex": "unserved", "chatgpt": "chatgpt_plan", "openai": "unserved"}
+    checked = 0
+    intercepted_cases = 0
+    proxy_thread.start()
+    try:
+        with closing(http.client.HTTPConnection("127.0.0.1", proxy.server_port, timeout=5)) as probe:
+            probe.request("CONNECT", "api.openai.com:443")
+            assert probe.getresponse().status == 403
+        for state, automatic in (
+                ("missing", {"codex": "chatgpt_device", "chatgpt": "unserved", "openai": "unserved"}),
+                ("invalid", {"codex": "chatgpt_device", "chatgpt": "unserved", "openai": "unserved"}),
+                ("browser", {"codex": "chatgpt_device", "chatgpt": "chatgpt_plan", "openai": "unserved"}),
+                ("key", {"codex": "chatgpt_device", "chatgpt": "unserved", "openai": "key_file"}),
+                ("both", {"codex": "chatgpt_device", "chatgpt": "chatgpt_plan", "openai": "key_file"})):
+            browser.unlink(missing_ok=True)
+            key.unlink(missing_ok=True)
+            if state == "invalid":
+                browser.write_text("not a credential record\n")
+                key.write_text("two words\n")
+            if state in ("browser", "both"):
+                browser.write_text(
+                    "version=3\ngeneration=1\naccount_id=policy-subject\nclient_id=policy-client\n"
+                    "fedramp=0\nid_token=e30.eyJzdWIiOiJwb2xpY3ktc3ViamVjdCJ9.c2ln\n"
+                    "access_token=" + codex_fixture.ACCESS + "\nrefresh_token=synthetic-not-real\n"
+                    "expires_at=4102444800\nrefreshed_at=1750000000\nstate=ready\n")
+            if state in ("key", "both"):
+                key.write_text("sk-synthetic-provider-policy\n")
+            for credential in (browser, key):
+                if credential.exists():
+                    credential.chmod(0o600)
+            for selection, providers, expected in (("omitted", None, automatic),
+                                                    ("empty", {}, none),
+                                                    ("exact", {"chatgpt": {}}, exact)):
+                # Exact selection uses a usable local sign-in. Missing or invalid
+                # explicit credentials belong to the credential-owner tests.
+                if selection == "exact" and state not in ("browser", "both"):
+                    continue
+                for door in ("serve", "start", "file", "stdin", "saved"):
+                    store = private / f"{state}-{selection}-{door}"
+                    document = {"store": {"sqlite": {"dir": str(store)}},
+                                "interface": {"lifetime": "stdin"}}
+                    if providers is not None:
+                        document["providers"] = providers
+                    process = None
+                    with proxy.receipt_lock:
+                        previous_requests = proxy.requests
+                    try:
+                        if door in ("start", "saved"):
+                            if door == "saved":
+                                store.mkdir(mode=0o700)
+                                saved = store / "host.json"
+                                saved.write_text(json.dumps({} if providers is None else {"providers": providers}))
+                                saved.chmod(0o600)
+                                shown = host_ok(policy_env, "settings", "--store", store)
+                                assert set(json.loads(shown.stdout)["providers"]) == {
+                                    name for name, route in expected.items() if route != "unserved"}, (state, selection, shown)
+                                arguments = ()
+                            else:
+                                arguments = () if providers is None else ("--set", "providers=" + json.dumps(providers))
+                            started = run_start(store, policy_env, *arguments)
+                            assert started.returncode == 0, (state, selection, door, started)
+                        else:
+                            arguments = [RUI, "host", "serve", "--store", store]
+                            if door == "file":
+                                source = private / "input.json"
+                                source.write_text(json.dumps(document))
+                                source.chmod(0o600)
+                                arguments += ["--settings", source]
+                            elif door == "stdin":
+                                arguments += ["--settings", "-"]
+                            else:
+                                arguments += ["--set", "interface.lifetime=stdin"]
+                                if providers is not None:
+                                    arguments += ["--set", "providers=" + json.dumps(providers)]
+                            process = subprocess.Popen(arguments, env=policy_env, stdin=subprocess.PIPE,
+                                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                            if door == "stdin":
+                                process.stdin.write(frame(document))
+                                process.stdin.flush()
+                        def ready():
+                            if process is not None:
+                                assert process.poll() is None, (state, selection, door, process.communicate())
+                            observed = host_command(policy_env, "status", "--store", store)
+                            if observed.returncode != 0:
+                                return None
+                            info = json.loads(observed.stdout)
+                            return info if info["status"] == "ready" else None
+                        info = wait_for(ready, f"{state} {selection} {door} Host readiness", timeout=20)
+                        assert info["capabilities"]["providers"] == expected, (state, selection, door, info)
+                        assert not missing.exists(), "signed-out startup created credentials"
+                        if expected["chatgpt"] != "unserved" or expected["openai"] != "unserved":
+                            def intercepted():
+                                with proxy.receipt_lock:
+                                    return proxy.requests > previous_requests
+                            wait_for(intercepted, f"{state} {selection} {door} loopback CONNECT refusal", timeout=10)
+                            intercepted_cases += 1
+                        checked += 1
+                    finally:
+                        dispose_provider_case(process, store)
+        assert checked == 60 and intercepted_cases == 25, (checked, intercepted_cases)
+        with proxy.receipt_lock:
+            assert proxy.targets == {"api.openai.com:443"}, proxy.targets
+            assert not proxy.authorized, "provider authorization escaped a refused CONNECT"
+    finally:
+        stop_endpoint(proxy, proxy_threads)
+    print(f"new Host provider policy: {checked} Host cases passed across serve/start/file/framed stdin/saved settings; "
+          f"{intercepted_cases} usable-credential cases observed loopback CONNECT refusal to api.openai.com:443; "
+          "no authorization headers or forwarding", flush=True)
+
+
+def saved_settings(root, env):
+    """DIR/host.json reaches the Host that the shared starter (bare rui and host start) launches."""
+    store = root / "saved-settings"
+    for path, value in (("execution.activeCapacity", "3"), ("execution.paused", "true"),
+                        ("tools.bash.timeoutMs", "1234")):
+        saved = host_command(env, "set", "--store", store, path, value)
+        assert saved.returncode == 0 and not saved.stdout, saved
+    document = store / "host.json"
+    assert document.stat().st_mode & 0o777 == 0o600, oct(document.stat().st_mode)
+    # Sparse: only what was set, never a defaults snapshot.
+    assert json.loads(document.read_text()) == {
+        "execution": {"activeCapacity": 3, "paused": True}, "tools": {"bash": {"timeoutMs": 1234}}}, document.read_text()
+    shown = host_command(env, "settings", "--store", store)
+    assert shown.returncode == 0, shown
+    effective = json.loads(shown.stdout)
+    assert effective["tools"]["bash"]["timeoutMs"] == 1234 and effective["execution"]["paused"] is True, effective
+    assert "codex" in effective["providers"], effective  # Derived defaults are shown when none are saved.
+    check = host_command(env, "settings", "--store", store, "--check")
+    assert check.returncode == 0 and not check.stdout, check
+    try:
+        started = run_start(store, env)
+        assert started.returncode == 0, started.stderr
+        observed = status(store, env)
+        assert instance(observed, 3) and observed["paused"] is True, observed
+    finally:
+        forced_crash_cleanup(store)
+    unset = host_command(env, "unset", "--store", store, "execution.paused")
+    assert unset.returncode == 0, unset
+    assert "paused" not in json.loads(document.read_text())["execution"], document.read_text()
+
+    # Literal secrets are refused from the saved file, and never echoed.
+    literal = host_command(env, "set", "--store", store, "providers.openai.key", '{"value":"never-print-this"}')
+    assert literal.returncode != 0 and "never-print-this" not in literal.stdout + literal.stderr, literal
+    assert '"code":"settings_invalid"' in literal.stdout and "providers.openai.key" in literal.stdout, literal
+    unknown = host_command(env, "set", "--store", store, "tools.bash.timeoutMS", "5")
+    assert unknown.returncode != 0 and "nearest leaf: tools.bash.timeoutMs" in unknown.stdout, unknown
+
+    # Order of application: defaults, saved, --settings FILE, then --set in order.
+    private = root / "saved-settings-files"
+    private.mkdir(mode=0o700)
+    override = private / "settings.json"
+    override.write_text('{"execution":{"activeCapacity":4}}')
+    override.chmod(0o600)
+    for arguments, capacity in ((("--settings", override), 4),
+                                (("--settings", override, "--set", "execution.activeCapacity=6",
+                                  "--set", "execution.activeCapacity=5"), 5)):
+        ordered = root / f"saved-order-{capacity}"
+        host_ok(env, "set", "--store", ordered, "execution.activeCapacity", "2")
+        try:
+            started = run_start(ordered, env, *map(str, arguments))
+            assert started.returncode == 0, started.stderr
+            assert instance(status(ordered, env), capacity)
+        finally:
+            forced_crash_cleanup(ordered)
+    piped = run_start(root / "saved-pipe", env, "--settings", "-")
+    assert piped.returncode != 0 and "rui host serve --settings -" in piped.stderr, piped
+
+    # Settings that move the Host out of its directory are refused before any launch.
+    moved = root / "saved-moved"
+    # An interface directory holds the socket, so its path is bounded (94
+    # bytes); a sibling of root can exceed that under a long TMPDIR.
+    elsewhere = pathlib.Path(tempfile.mkdtemp(prefix="rui-if-", dir="/tmp")).resolve()
+    try:
+        host_ok(env, "set", "--store", moved, "interface.dir", elsewhere)
+        too_long = host_command(env, "set", "--store", moved, "interface.dir", "/" + "d" * 94)
+        assert too_long.returncode == 2 and "interface.dir: path is longer than 94 bytes" in too_long.stderr, too_long
+    finally:
+        os.rmdir(elsewhere)
+    refused = run_start(moved, env)
+    assert refused.returncode != 0 and "interface.dir: bare rui and rui host start reach only" in refused.stderr, refused
+    assert "[settings_invalid]" in refused.stderr and not matching_processes(moved), refused
+
+    # A started Host runs in `/`: a path typed relative is taken from the
+    # caller's directory, and a relative path saved in host.json, which has no
+    # such directory, is refused before launch, like the stdin lifetime.
+    typed = root / "saved-typed-relative"
+    try:
+        started = run_start(typed, env, "--set", f"store.sqlite.dir={typed.name}", cwd=root)
+        assert started.returncode == 0, started.stderr
+        assert (typed / "rui.sqlite3").is_file() and not pathlib.Path("/" + typed.name).exists(), started
+    finally:
+        forced_crash_cleanup(typed)
+    # The caller's directory is looked up only for a relative typed value: a
+    # start from a deleted directory with absolute values still starts.
+    def deleted_cwd(name):
+        gone = root / name
+        gone.mkdir()
+        return lambda: (os.chdir(gone), os.rmdir(gone))
+    orphaned = root / "saved-deleted-cwd"
+    try:
+        started = run_start(orphaned, env, "--set", "tools.bash.path=/bin/bash", preexec_fn=deleted_cwd("gone-absolute"))
+        assert started.returncode == 0, started.stderr
+    finally:
+        forced_crash_cleanup(orphaned)
+    refused = run_start(root / "saved-deleted-cwd-relative", env, "--set", "tools.bash.path=relative/bash",
+                        preexec_fn=deleted_cwd("gone-relative"))
+    assert refused.returncode == 2 and "tools.bash.path: the current directory no longer exists" in refused.stderr, refused
+    assert not (root / "saved-deleted-cwd-relative").exists(), refused
+    for path, value, leaf in (("tools.bash.path", "relative/bash", "tools.bash.path: a Host started in / has no base"),
+                              ("interface.lifetime", "stdin", "interface.lifetime: a Host started by bare rui")):
+        unrooted = root / f"saved-unrooted-{path}"
+        host_ok(env, "set", "--store", unrooted, path, value)
+        refused = run_start(unrooted, env)
+        assert refused.returncode == 2 and leaf in refused.stderr and '"settings_invalid"' in refused.stdout, refused
+        assert not matching_processes(unrooted), refused
+
+    # Start failures outside the document keep the child's own report: no
+    # stdout line, no settings refusal, and no Host left behind.
+    proxy_dir = root / "saved-proxy"
+    for path, value in (("providers.openai.endpoint", "http://127.0.0.1:9/responses"),
+                        ("providers.openai.unauthenticated", "true")):
+        host_ok(env, "set", "--store", proxy_dir, path, value)
+    keyless = root / "saved-keyless"
+    host_ok(env, "set", "--store", keyless, "providers", '{"openai":{}}')
+    for directory, changes, report in (
+            (proxy_dir, {"HTTPS_PROXY": "https://proxy.example:1", "https_proxy": "https://proxy.example:1"},
+             "Rui tunnels only through an http:// proxy. The Host did not start."),
+            (keyless, {"RUI_OPENAI_KEY_FILE": str(root / "saved-absent-key")}, "[sign_in_required]")):
+        failed = run_start(directory, dict(env, **changes))
+        assert failed.returncode != 0 and not failed.stdout and report in failed.stderr, failed
+        assert "settings_invalid" not in failed.stderr and not matching_processes(directory), failed
+
+    # A deleted serve flag names its replacement path.
+    for flag, value, replacement in (("--bash-timeout-ms", "1000", "--set tools.bash.timeoutMs=1000"),
+                                     ("--active-capacity", "4", "--set execution.activeCapacity=4")):
+        retired = host_command(env, "serve", "--store", root / "retired", flag, value)
+        assert retired.returncode != 0 and replacement in retired.stderr, retired
+    print("saved settings passed: sparse private host.json, settings/check, starter, unset, literal and unknown"
+          " refusals, ordered sources, unreachable refusal, relative paths, child start failures, retired flags", flush=True)
+
+
+def saved_settings_served(root, env):
+    """A Host the starter launches serves saved MCP, preset, CA file and Bash timeout values.
+
+    Each is observed through what the Host already exposes, with the fixtures
+    the owning suites use: the loopback MCP server and its tool-name collision
+    refusal, a preset Session creation, a TLS provider whose self-signed
+    certificate only the saved CA file trusts, and a fixture Bash call that
+    outlives the saved timeout.
+    """
+    import bash_fixture
+    import h2_fixture
+    import model_fixture
+    import ssl
+    import threading
+    from settings_fixture import WIRE, post
+    from settings_fixture import mcp_server
+
+    state = root / "saved-served-state"
+    state.mkdir(mode=0o700)
+
+    def save(store, path, value):
+        saved = host_command(env, "set", "--store", store, path, value)
+        assert saved.returncode == 0, saved
+
+    # MCP: the Host asks every saved server for its tools before it serves.
+    # A saved server that offers the built-in name bash is refused by name.
+    docs, clash = mcp_server(["search"]), mcp_server(["bash"])
+    mcp_store = root / "saved-mcp"
+    try:
+        # A saved file holds only a secret's source; the Host reads the token.
+        token_env = {**env, "RUI_TEST_MCP_TOKEN": "t"}
+        for name, server in (("docs", docs), ("clash", clash)):
+            save(mcp_store, f"tools.mcp.{name}.url", f"http://127.0.0.1:{server.server_port}/mcp")
+            save(mcp_store, f"tools.mcp.{name}.bearerToken", "env:RUI_TEST_MCP_TOKEN")
+        refused = run_start(mcp_store, token_env)
+        assert refused.returncode != 0 and "[tool_name_collision]" in refused.stderr, refused
+        assert "clash" in refused.stderr and "bash" in refused.stderr, refused.stderr
+        host_ok(env, "unset", "--store", mcp_store, "tools.mcp.clash")
+        started = run_start(mcp_store, token_env)
+        assert started.returncode == 0, started.stderr
+    finally:
+        forced_crash_cleanup(mcp_store)
+        for server in (docs, clash):
+            server.shutdown()
+            server.server_close()
+
+    # Preset and Bash timeout: one Host on a plain fixture provider.
+    responses = []
+    bash_fixture.add_exchange(responses, "timeout", "printf before; sleep 30")
+    endpoint = model_fixture.SuccessEndpoint(responses)
+    thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+    thread.start()
+    store = root / "saved-served"
+    preset = {"model": "gpt-6-sol", "effort": "low", "compactAt": 100000,
+              "tools": [], "permissionMode": "ask", "label": "Review"}
+    preset_file = state / "preset.json"
+    preset_file.write_text(json.dumps(preset))
+    try:
+        save(store, "providers.codex.endpoint", f"http://127.0.0.1:{endpoint.server_port}/responses")
+        save(store, "providers.codex.unauthenticated", "true")
+        save(store, "tools.bash.timeoutMs", "500")
+        save(store, "presets.review", f"@{preset_file}")
+        started = run_start(store, env)
+        assert started.returncode == 0, started.stderr
+        sock = f"/tmp/rui-{os.getuid()}/{hashlib.sha256(str(store.resolve()).encode()).hexdigest()[:32]}.sock"
+        create = {"version": WIRE, "kind": "configure", "store": str(store.resolve()), "key": "preset:create",
+                  "session": "", "preset": "review", "configuration": {"label": None}}
+        created = post(sock, "configure", create)
+        assert created["answer"]["status"] == "accepted", created
+        inspected = post(sock, "inspect-session", {"version": WIRE, "kind": "inspect_session",
+                                                   "store": str(store.resolve()), "session": created["answer"]["session"]})
+        assert inspected["session"]["model"] == "gpt-6-sol" and inspected["session"]["reasoning_effort"] == "low", inspected
+        session = bash_fixture.configure(state, store, "timeout-config")
+        model_fixture.message(state, store, "timeout-message", session, "execute")
+        action = model_fixture.wait_for(lambda: bash_fixture.action_for(store, session), "timeout Action")
+        bash_fixture.allow(state, store, "timeout-allow", session, action["action"])
+        model_fixture.wait_for(lambda: model_fixture.completed_observation(store, "timeout-message"), "timeout continuation")
+        result = bash_fixture.result_text(store, session)
+        assert result.startswith("Bash timed_out.") and "after a 500 ms total budget" in result, result
+    finally:
+        forced_crash_cleanup(store)
+        endpoint.shutdown()
+        endpoint.server_close()
+
+    # CA file: the provider's certificate is self-signed; only the saved file trusts it.
+    tls_root = root / "saved-tls"
+    tls_root.mkdir(mode=0o700)
+    subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                    "-keyout", str(tls_root / "key.pem"), "-out", str(tls_root / "cert.pem"),
+                    "-days", "1", "-subj", "/CN=localhost", "-addext", "subjectAltName=DNS:localhost"],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+    tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    tls.load_cert_chain(tls_root / "cert.pem", tls_root / "key.pem")
+    tls.set_alpn_protocols(["h2"])
+    secure = h2_fixture.Endpoint(tls, 1, sse=True, eager_sse=True)
+    threading.Thread(target=secure.serve_forever, daemon=True).start()
+    tls_store = root / "saved-tls-store"
+    try:
+        save(tls_store, "providers.codex.endpoint", f"https://localhost:{secure.server_address[1]}/responses")
+        save(tls_store, "providers.codex.unauthenticated", "true")
+        save(tls_store, "network.caFile", tls_root / "cert.pem")
+        started = run_start(tls_store, env)
+        assert started.returncode == 0, started.stderr
+        configured = model_fixture.command(
+            "session", "configure", "--store", tls_store, "--record", state / "tls-config.json", "--key", "tls-config",
+            "--workspace", model_fixture.ROOT, "--provider", "codex", "--model", "gpt-6-sol", "--tools", "none")
+        assert configured["answer"]["status"] == "accepted", configured
+        tls_session = configured["answer"]["session"]
+        model_fixture.message(state, tls_store, "tls-message", tls_session, "over-tls")
+        observation, answer, _ = model_fixture.wait_for_result_release(
+            tls_store, "tls-message", tls_session, time.monotonic() + 20)
+        assert observation["result"]["status"] == "completed" and answer == b"answer-over-tls", (observation, answer)
+        assert len(secure.streams) == 1, secure.streams
+    finally:
+        forced_crash_cleanup(tls_store)
+        secure.shutdown()
+        secure.server_close()
+    print("saved settings served: MCP tools listed and a collision refused, preset Session created,"
+          " Bash timed out at the saved 500 ms, provider reached over TLS with the saved CA file", flush=True)
+
+
 def wait_for_terminal_exit(caller, master, output, deadline):
     """Drain output through reap, including a retained slave without EOF."""
     while True:
@@ -637,17 +1056,21 @@ def launch_fixture_root():
 
 
 def main():
-    assert len(sys.argv) in (2, 3), "usage: host_launch_integration.py /absolute/path/to/rui [startup-limits|store-identity]"
-    from host_launch_exit_test import check_exit_reader, check_process_discovery, check_failure_retention
-    check_process_discovery(forced_crash_cleanup)
-    check_exit_reader(wait_for_terminal_exit)
-    check_failure_retention(launch_fixture_root, status)
+    assert len(sys.argv) in (2, 3), "usage: host_launch_integration.py /absolute/path/to/rui [startup-limits|store-identity|provider-policy]"
+    from host_launch_exit_test import check_exit_reader, check_process_discovery, check_failure_retention, check_provider_disposal
     with launch_fixture_root() as root_text:
         root = canonical_fixture_root(pathlib.Path(root_text))
         home = root / "home"
         home.mkdir(mode=0o700)
         credential = root / "credentials" / "missing.json"
         env = environment(home, credential)
+        check_provider_disposal(dispose_provider_case, stop_endpoint)
+        if len(sys.argv) == 3 and sys.argv[2] == "provider-policy":
+            new_host_provider_policy(root, env)
+            return
+        check_process_discovery(forced_crash_cleanup)
+        check_exit_reader(wait_for_terminal_exit)
+        check_failure_retention(launch_fixture_root, status)
         if len(sys.argv) == 3 and sys.argv[2] == "store-identity":
             moved_store_identity(root, env)
             moved_store_identity(root, env, terminal=True)
@@ -663,7 +1086,7 @@ def main():
         # A held lease is attached, not replaced or reconfigured.
         held_store = root / "held-store"
         held, _ = start_ready_process(
-            [RUI, "host", "serve", "--store", held_store, "--active-capacity", "3"],
+            [RUI, "host", "serve", "--store", held_store, "--set", 'execution.activeCapacity=3'],
             required_fields={"active_capacity": "3"},
         )
         try:
@@ -680,28 +1103,33 @@ def main():
             # One Host keeps one start time, and holds no custody while idle.
             assert reported["started_at"] == later["started_at"] == first["started_at"], (first, later)
             assert later["custody_occupied"] == "0", later
-            same = run_start(held_store, env, "--active-capacity", "3")
-            assert same.returncode == 0 and "--active-capacity" not in same.stderr, same
+            same = run_start(held_store, env, "--set", 'execution.activeCapacity=3')
+            assert same.returncode == 0 and "--set assignments apply only to a new Host" in same.stderr, same
             assert instance(json.loads(same.stdout), 3) == before, same
-            # A differing request is reported, not silently dropped or applied.
-            differing = run_start(held_store, env, "--active-capacity", "7")
+            # Explicit overrides are reported, never applied to the running Host.
+            differing = run_start(held_store, env, "--set", 'execution.activeCapacity=7')
             assert differing.returncode == 0, differing.stderr
             assert instance(json.loads(differing.stdout), 3) == before, differing
-            assert ("rui: the running Host keeps active capacity 3; --active-capacity 7 applies only to a new Host. "
-                    f"Changing it means pausing this Host and all its work: rui host pause --store $'{held_store.resolve()}'\n"
+            assert ("rui: the running Host keeps its settings; --set assignments apply only to a new Host. "
+                    f"Changing settings means pausing this Host and all its work: rui host pause --store $'{held_store.resolve()}'\n"
                     ) in differing.stderr, differing.stderr
             assert instance(status(held_store, env), 3) == before
             assert wait_for_processes(held_store, 1) == [held.pid]
         finally:
             stop_process(held)
 
+        new_host_provider_policy(root, env)
+        saved_settings(root, env)
+        saved_settings_served(root, env)
+
         unparsed_store = root / "unparsed-capacity"
-        unparsed = run_start(unparsed_store, env, "--active-capacity", "-1")
-        assert unparsed.returncode != 0 and not unparsed.stdout, unparsed
+        unparsed = run_start(unparsed_store, env, "--set", 'execution.activeCapacity=-1')
+        # Refused before any launch, it is reported as host serve reports it.
+        assert unparsed.returncode == 2 and '"code":"settings_invalid"' in unparsed.stdout, unparsed
         assert not unparsed_store.exists(), "unparsed capacity created a candidate Store"
         sized_store = root / "sized-store"
         try:
-            sized = run_start(sized_store, env, "--active-capacity", "5")
+            sized = run_start(sized_store, env, "--set", 'execution.activeCapacity=5')
             assert sized.returncode == 0, sized.stderr
             assert instance(json.loads(sized.stdout), 5) == instance(status(sized_store, env), 5)
             assert len(wait_for_processes(sized_store, 1)) == 1
@@ -773,11 +1201,12 @@ def main():
             pids = wait_for_processes(store, 1)
             assert pids[0] not in launcher_pids, "Host remained the CLI launcher process"
             if os_semantics.PROC_FS:
-                for descriptor in range(2):
-                    assert os.readlink(f"/proc/{pids[0]}/fd/{descriptor}") == "/dev/null"
-                # The private startup error channel is not a retained caller
-                # pipe: all launchers already drained their own stderr to EOF.
-                assert os.readlink(f"/proc/{pids[0]}/fd/2").startswith("pipe:[")
+                assert os.readlink(f"/proc/{pids[0]}/fd/0") == "/dev/null"
+                # The private startup report (stdout) and error (stderr) channels
+                # are not retained caller pipes: all launchers already drained
+                # their own output to EOF.
+                for descriptor in (1, 2):
+                    assert os.readlink(f"/proc/{pids[0]}/fd/{descriptor}").startswith("pipe:[")
                 assert os.readlink(f"/proc/{pids[0]}/cwd") == "/", "detached Host retained launcher cwd"
                 assert os.getsid(pids[0]) not in launcher_pids
             assert not credential.exists(), "Host startup opened or created credentials"
@@ -834,7 +1263,7 @@ def main():
         # Unflagged serve uses the shared default. Its descriptor admission
         # runs before the lease/diagnostic writer, so rejection creates no Store.
         rejected_store = root / "default-capacity-rejected"
-        rejected = subprocess.run([RUI, "host", "serve", "--store", rejected_store],
+        rejected = subprocess.run([RUI, "host", "serve", "--store", rejected_store, "--set", "providers={}"],
             env=clean_env, preexec_fn=lower_descriptor_limit,
             capture_output=True, text=True, timeout=COMMAND_TIMEOUT)
         assert rejected.returncode == 1, rejected
@@ -855,7 +1284,7 @@ def main():
         # Capacity 8 is the existing desktop profile. Admit this child so the
         # disconnected pipe exercises readiness output, not pre-lease refusal.
         disconnected_store = root / "disconnected-stdout"
-        disconnected = subprocess.Popen([RUI, "host", "serve", "--store", disconnected_store, "--active-capacity", "8"],
+        disconnected = subprocess.Popen([RUI, "host", "serve", "--store", disconnected_store, "--set", 'execution.activeCapacity=8', "--set", "providers={}"],
             env=clean_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         try:
             disconnected.stdout.close()
@@ -912,6 +1341,8 @@ def main():
             assert "Bash commands can run without asking you" not in screen.completed, screen.completed
             assert not list((bare_home / ".config/rui/requests").glob("*.json")), "the overview captured a request"
             assert len(wait_for_processes(bare_store, 1)) == 1
+            assert status(bare_store, bare_env)["capabilities"]["providers"] == {
+                "codex": "chatgpt_device", "chatgpt": "unserved", "openai": "unserved"}
             # Transfer this thread's reader from prompt to exit without
             # withholding output credit or discarding any transcript bytes.
             os.set_blocking(master, False)

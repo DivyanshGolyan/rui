@@ -5,6 +5,7 @@ const protocol = @import("protocol.zig");
 const wire_request = @import("wire_request.zig");
 const core = @import("core_tools.zig");
 const storage = @import("store.zig");
+const utf8_validation = @import("utf8_validation.zig");
 
 const window_bytes = 16 * 1024;
 
@@ -175,20 +176,12 @@ fn readLocation(arena: std.mem.Allocator, location: storage.ContentLocation, off
     return bytes;
 }
 
-/// Only the final character may be partial in a prefix of valid UTF-8.
-fn wholePrefix(bytes: []const u8) []const u8 {
-    var end = bytes.len;
-    while (end > 0 and !std.unicode.utf8ValidateSlice(bytes[0..end])) : (end -= 1) {
-        if (bytes.len - end == 3) return bytes[0..0];
-    }
-    return bytes[0..end];
-}
-
 fn nameText(store: *storage.Store, arena: std.mem.Allocator, name: protocol.ProposalFieldReference) ![]const u8 {
     const location = try store.openContent(.{ .length = name.length, .digest = name.digest });
     // Known tool names fit the wire's name bound. Rejected calls can name
     // arbitrarily long tools; keep their outline bounded as well.
-    return wholePrefix(try readLocation(arena, location, 0, protocol.max_tool_name_bytes));
+    const read = try readLocation(arena, location, 0, protocol.max_tool_name_bytes);
+    return utf8_validation.wholePrefix(read) orelse read[0..0];
 }
 
 fn outline(store: *storage.Store, arena: std.mem.Allocator, session: []const u8, item: *const protocol.ActivityItem, out: *std.Io.Writer) !void {
@@ -231,7 +224,7 @@ fn outline(store: *storage.Store, arena: std.mem.Allocator, session: []const u8,
             const bytes = try readLocation(arena, try store.openActivityContent(request), 0, 100);
             const line = bytes[0 .. std.mem.indexOfAny(u8, bytes, "\r\n") orelse bytes.len];
             try out.writeAll(": ");
-            try std.json.Stringify.value(wholePrefix(line), .{}, out);
+            try std.json.Stringify.value(utf8_validation.wholePrefix(line) orelse "", .{}, out);
         }
     }
     if (note) |description| try out.print(": {s}", .{description.slice()});
@@ -278,7 +271,7 @@ fn full(store: *storage.Store, arena: std.mem.Allocator, session: []const u8, it
         return outline(store, arena, session, item, out);
     }
     if (text.len > 0 and text[0] & 0xc0 == 0x80) return error.InvalidOffset;
-    const prefix = wholePrefix(text);
+    const prefix = utf8_validation.wholePrefix(text) orelse "";
     // Canonical content is byte-oriented. Never return a continuation at the
     // same offset if a public result contains malformed text in its interior.
     if (text.len != 0 and prefix.len == 0) return error.InvalidEntryText;
@@ -290,9 +283,9 @@ fn full(store: *storage.Store, arena: std.mem.Allocator, session: []const u8, it
 }
 
 test "read_transcript previews and windows cut only at whole UTF-8 characters" {
-    try std.testing.expectEqualStrings("abc", wholePrefix("abc\xc3"));
-    try std.testing.expectEqualStrings("aé", wholePrefix("aé\xf0\x9f\x98"));
-    try std.testing.expectEqualStrings("aé😀", wholePrefix("aé😀"));
+    try std.testing.expectEqualStrings("abc", utf8_validation.wholePrefix("abc\xc3").?);
+    try std.testing.expectEqualStrings("aé", utf8_validation.wholePrefix("aé\xf0\x9f\x98").?);
+    try std.testing.expectEqualStrings("aé😀", utf8_validation.wholePrefix("aé😀").?);
 }
 
 test "read_transcript core runner reads other Session outlines before full windows unknown id and self" {

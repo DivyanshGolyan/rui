@@ -10,7 +10,6 @@ const Hover = @import("widgets/Hover.zig");
 const Self = @This();
 
 consent: *Consent,
-description: []const u8,
 body: vxfw.Widget,
 userdata: *anyopaque,
 on_decision: *const fn (*anyopaque, *vxfw.EventContext, Policy.Decision) anyerror!void,
@@ -94,7 +93,8 @@ pub fn drawInput(self: *Self, ctx: vxfw.DrawContext, composer: ?vxfw.Widget) std
     const input_height: u16 = if (draft) |drawn| drawn.size.height else @min(3, size.height);
     const rule: u16 = if (input_height >= 3) 1 else 0;
     const body_height = size.height - input_height;
-    self.choice_column = if (size.width >= 6 and size.height >= 4) 2 else 0;
+    // With room for the prompt, the body aligns with the labels after it.
+    self.choice_column = if (size.width >= 6 and size.height >= 4) input_choice.prompt_cells else 0;
     self.choice_width = size.width - 2 * self.choice_column;
     var surface = try vxfw.Surface.init(ctx.cell_arena, self.widget(), size);
     @memset(surface.buffer, .{ .style = self.style });
@@ -115,16 +115,19 @@ pub fn drawInput(self: *Self, ctx: vxfw.DrawContext, composer: ?vxfw.Widget) std
             surface.writeCell(@intCast(col), size.height - 1, cell);
         };
         self.choice_row = size.height - 1 - rule;
+        const labels: [2][]const u8 = .{ "Allow once", "Deny" };
         const targets = try ctx.arena.alloc(Hover.Rect, 2);
-        targets[0] = .{ .row = self.choice_row.?, .col = self.choice_column, .width = @min(self.choice_width, " Allow once ".len) };
-        const deny_column = @min(self.choice_width, " Allow once   ".len);
-        targets[1] = .{ .row = self.choice_row.?, .col = self.choice_column + deny_column, .width = @min(self.choice_width - deny_column, " Deny ".len) };
+        const end = self.choice_column + self.choice_width;
+        for (targets, input_choice.spans(labels, self.choice_column != 0)) |*target, span| {
+            const col = @min(span.col, end);
+            target.* = .{ .row = self.choice_row.?, .col = col, .width = @min(span.width, end - col) };
+        }
         self.hover.targets = targets;
         const looks: [2]input_choice.Look = .{
             self.choiceLook(self.consent.highlight == .allow_once, targets[0]),
             self.choiceLook(self.consent.highlight == .deny, targets[1]),
         };
-        const choices = input_choice.segments(.{ "Allow once", "Deny" }, looks, self.style, self.hover_style, self.choice_column != 0);
+        const choices = input_choice.segments(labels, looks, self.style, self.hover_style, self.choice_column != 0);
         _ = window.child(.{ .width = size.width - self.choice_column, .y_off = self.choice_row.?, .height = 1 }).print(&choices, .{ .wrap = .none });
         if (self.consent.draw()) self.ready_pending = true;
     }
@@ -143,7 +146,7 @@ test "PermissionCard decides the drawn request at tiny sizes and ignores pasted 
     var owner: Owner = .{};
     var consent: Consent = .{};
     const body: vxfw.Text = .{ .text = "$ zig build test\nsecond line\nthird line" };
-    var card: Self = .{ .consent = &consent, .description = "Run the tests", .body = body.widget(), .userdata = &owner, .on_decision = Owner.decide };
+    var card: Self = .{ .consent = &consent, .body = body.widget(), .userdata = &owner, .on_decision = Owner.decide };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty, .redraw = false };
@@ -218,7 +221,7 @@ test "PermissionCard takes no choice from a key handed inside a paste, across re
     var owner: Owner = .{};
     var consent: Consent = .{};
     const text: vxfw.Text = .{ .text = "Kept draft" };
-    var card: Self = .{ .consent = &consent, .description = "Run", .body = text.widget(), .userdata = &owner, .on_decision = Owner.decide };
+    var card: Self = .{ .consent = &consent, .body = text.widget(), .userdata = &owner, .on_decision = Owner.decide };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
@@ -247,7 +250,7 @@ test "PermissionCard hover is quieter than the choice selection and changes neit
     var owner: Owner = .{};
     var consent: Consent = .{};
     const text: vxfw.Text = .{ .text = "Run tests" };
-    var card: Self = .{ .consent = &consent, .description = "Run", .body = text.widget(), .userdata = &owner, .on_decision = Owner.decide, .style = .{ .fg = .{ .index = 2 } } };
+    var card: Self = .{ .consent = &consent, .body = text.widget(), .userdata = &owner, .on_decision = Owner.decide, .style = .{ .fg = .{ .index = 2 } } };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };

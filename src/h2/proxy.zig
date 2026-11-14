@@ -3,6 +3,7 @@
 //! the tunnel's request and answer. A functional core: `Engine` reads the
 //! settings and `Connection` does the I/O. Internal.
 const std = @import("std");
+const url = @import("url");
 
 pub const UrlError = error{ HttpsProxyInvalid, HttpsProxySchemeUnsupported };
 
@@ -65,20 +66,9 @@ pub fn basicCredentials(allocator: std.mem.Allocator, user_info: []const u8) (Ur
 /// `%XX` escapes decoded into `out`; null when malformed, when it does not
 /// fit, or when it decodes to a control byte, which no header may carry.
 fn percentDecode(text: []const u8, out: []u8) ?[]u8 {
-    var len: usize = 0;
-    var index: usize = 0;
-    while (index < text.len) : (len += 1) {
-        if (len == out.len) return null;
-        var byte = text[index];
-        if (byte == '%') {
-            if (index + 3 > text.len) return null;
-            byte = std.fmt.parseInt(u8, text[index + 1 .. index + 3], 16) catch return null;
-            index += 3;
-        } else index += 1;
-        if (std.ascii.isControl(byte)) return null;
-        out[len] = byte;
-    }
-    return out[0..len];
+    const decoded = url.percentDecode(text, out, .literal) orelse return null;
+    for (decoded) |byte| if (std.ascii.isControl(byte)) return null;
+    return decoded;
 }
 
 /// Whether `host` (a URL host without brackets or trailing dot) is a

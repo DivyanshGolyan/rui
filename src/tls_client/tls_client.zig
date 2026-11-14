@@ -2,7 +2,7 @@
 //! context settings, host naming and trust loading. The HTTP/2 client and
 //! the Store's Postgres and MySQL wire each build their own context and
 //! sessions from these, so `SSL_CERT_FILE`, `SSL_CERT_DIR`, the host's
-//! certificate directory and bundles and `--provider-ca-file` mean the same
+//! certificate directory and bundles and `network.caFile` mean the same
 //! everywhere.
 //!
 //! A transport build module, like h2: it shares only the value-only URL
@@ -50,7 +50,7 @@ pub const Trust = union(enum) {
     /// certificate directory when it has one; otherwise the first readable
     /// bundle among the host's usual CA bundle paths.
     system,
-    /// Only the certificates in this PEM file (`--provider-ca-file`).
+    /// Only the certificates in this PEM file (`network.caFile`).
     ca_file: []const u8,
 };
 

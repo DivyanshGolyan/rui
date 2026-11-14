@@ -23,16 +23,17 @@ pub fn path(environ: *const std.process.Environ.Map, buffer: []u8) ![]const u8 {
     return std.fmt.bufPrint(buffer, "{s}/.config/rui/openai.key", .{home});
 }
 
-/// The key at `file`, or null when there is none. A file that holds
-/// anything but one key, with at most one trailing newline, is an error.
-pub fn read(file: []const u8, key: *Key) !?void {
+/// Loads the key at `file` into `key`: false when there is none. A file that
+/// holds anything but one key, with at most one trailing newline, is an error.
+pub fn read(file: []const u8, key: *Key) !bool {
     var buffer: [max_key_bytes + 2]u8 = undefined;
     defer std.crypto.secureZero(u8, &buffer);
-    const bytes = try codex_credentials.readPrivate(file, &buffer) orelse return null;
+    const bytes = try codex_credentials.readPrivate(file, &buffer) orelse return false;
     const trimmed = trimNewline(bytes);
     if (!valid(trimmed)) return error.InvalidApiKey;
     @memcpy(key.bytes[0..trimmed.len], trimmed);
     key.len = trimmed.len;
+    return true;
 }
 
 /// Whether `file` holds a usable key, by the same reading a Host does at
@@ -40,7 +41,7 @@ pub fn read(file: []const u8, key: *Key) !?void {
 pub fn present(file: []const u8) !bool {
     var key: Key = .{ .len = 0 };
     defer key.wipe();
-    return try read(file, &key) != null;
+    return try read(file, &key);
 }
 
 /// Replaces the key at `file`; its directory must already be private.
@@ -65,7 +66,7 @@ test "a pasted line keeps only the key" {
     try std.testing.expectEqualStrings("sk-1\n", trimNewline("sk-1\n\n"));
 }
 
-test "an installed key reads back, an absent one is null, and an open file is refused" {
+test "an installed key reads back, an absent one is not there, and an open file is refused" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -76,11 +77,11 @@ test "an installed key reads back, an absent one is null, and an open file is re
     var file_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const file = try std.fmt.bufPrint(&file_buffer, "{s}/private/openai.key", .{root});
     var key: Key = .{ .len = 0 };
-    try std.testing.expectEqual(@as(?void, null), try read(file, &key));
+    try std.testing.expect(!try read(file, &key));
     try std.testing.expect(!try present(file));
     try install(file, "sk-test-1");
     try std.testing.expect(try present(file));
-    try std.testing.expect(try read(file, &key) != null);
+    try std.testing.expect(try read(file, &key));
     try std.testing.expectEqualStrings("sk-test-1", key.slice());
     try std.testing.expectError(error.InvalidApiKey, install(file, "two words"));
     // Readiness reads the key as a Host would: a private file holding no key is not one.
@@ -117,6 +118,6 @@ test "overlapping installs each publish a whole key" {
     for (threads) |thread| thread.join();
     for (failures) |failed| try std.testing.expectEqual(@as(?anyerror, null), failed);
     var key: Key = .{ .len = 0 };
-    try std.testing.expect(try read(file, &key) != null);
+    try std.testing.expect(try read(file, &key));
     try std.testing.expect(std.mem.eql(u8, key.slice(), keys[0]) or std.mem.eql(u8, key.slice(), keys[1]));
 }

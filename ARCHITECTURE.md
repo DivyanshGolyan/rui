@@ -1174,26 +1174,33 @@ Account IDs are nonempty opaque exact strings, not UUIDs.
 No independent token/account length quota, JWT verification/JWKS/discovery or generic OAuth framework; bounded credential/encoding owners fail explicitly on exhaustion.
 
 `rui auth login chatgpt --device-code` (also the unlisted `rui auth login codex`) uses the pinned device-code flow and installs one global account in an owner-only `~/.config/rui/codex.json`, or an absolute path selected by `RUI_CODEX_CREDENTIAL_FILE`.
-`rui host serve --provider codex` activates the fixed HTTPS subscription endpoint; it cannot be combined with a development endpoint or private CA.
-A Host serves only the providers it names; model admission skips Sessions of any other provider, and `host_info` reports each provider's route.
+`rui host serve --set 'providers.codex={}'` activates the fixed HTTPS subscription endpoint; a development endpoint and credential-free requests can instead be configured through provider settings.
+An explicit `providers` object selects exactly the providers a new Host serves; `providers={}` selects none.
+When `providers` is omitted, every new-Host entry uses automatic selection, including plain `rui`, `host start`, foreground `host serve`, saved `host.json`, and file or framed-stdin settings documents.
+Automatic selection offers device-code sign-in (`codex`) even while signed out, browser sign-in (`chatgpt`) with a usable local credential, and OpenAI (`openai`) with a usable local key.
+Offering the device-code route while signed out does not imply usable credentials or that a model request can succeed before sign-in.
+Divyansh chose automatic omission on November 14, 2026, answering "yes, automatic" to automatic services from sign-ins and API keys versus none until explicit setup (#1461, under #1459).
+This decision supersedes the unresolved omission finding in #1452's body and review; merging #1452 did not itself approve the policy.
+Upgrade replay preserves the previously observed provider selection exactly rather than re-evaluating omitted settings against new defaults or changed local credentials.
+Model admission skips Sessions of any provider the Host does not serve, and `host_info` reports each provider's route.
 Configuration and saved-result inspection need no credential.
 The credential file and stable lock live in the same private directory and reject symlinks, wrong ownership and permissive modes; symlinks above that directory are followed, as macOS's `/var` needs, but the directory itself must not be one.
 They carry a closed versioned format.
 There is no Session account binding or Codex CLI credential fallback.
 
 `rui auth login openai` reads one line from stdin (unechoed on a terminal) and installs it as an owner-only `~/.config/rui/openai.key`, or the absolute path `RUI_OPENAI_KEY_FILE` names; it then saves the provider default as every `rui auth login` does ([Human entry and authentication](#human-entry-and-authentication)).
-`--provider openai` reads that key once at startup and sends it as `authorization: Bearer` only to `https://api.openai.com/v1/responses` and the model list beside it (`/v1/models`), or to `BASE/responses` and `BASE/models` when `RUI_OPENAI_BASE_URL` names an OpenAI-compatible `https://` base URL with a host and no credentials, query or fragment (an invalid one fails `host serve --provider openai`, and an auto-started Host then starts without OpenAI), with no ChatGPT account header.
+An explicitly selected OpenAI provider reads that key once at startup and sends it as `authorization: Bearer` only to `https://api.openai.com/v1/responses` and the model list beside it (`/v1/models`), or to `BASE/responses` and `BASE/models` when `RUI_OPENAI_BASE_URL` names an OpenAI-compatible `https://` base URL with a host and no credentials, query or fragment (an invalid one fails an explicitly selected OpenAI provider, and automatic provider selection then starts without OpenAI), with no ChatGPT account header.
 It speaks the same Responses codec and model catalog as Codex, so a Session's request body is the same on either.
 A missing or unreadable key fails startup.
 A 401 on the key is final, `provider_api_key_rejected`, with no refresh or resend; the Session and overview say to save a new key and restart the Host, which keeps the key it started with.
-An auto-started Host adds `--provider openai` whenever a usable key is saved.
+Automatic provider selection serves OpenAI whenever a usable key is saved.
 
-`--provider chatgpt` serves a ChatGPT plan sign-in from an owner-only `~/.config/rui/chatgpt.json`, or the absolute path `RUI_CHATGPT_CREDENTIAL_FILE` names, in the same credential format and custody as Codex; its record carries the issued client id and its account is the ID token's `sub`.
+An explicitly selected `chatgpt` provider serves a ChatGPT plan sign-in from an owner-only `~/.config/rui/chatgpt.json`, or the absolute path `RUI_CHATGPT_CREDENTIAL_FILE` names, in the same credential format and custody as Codex; its record carries the issued client id and its account is the ID token's `sub`.
 It speaks `openai-responses/3` and sends the access token as `authorization: Bearer` with user-agent only to `https://api.openai.com/v1/responses` and the model list beside it (`https://api.openai.com/v1/models`), with no account or FedRAMP header; its route is `chatgpt_plan`, and it accepts structured output.
 Its token must carry `exp`, so it refreshes within 300 seconds of expiry and never on the eight-day opaque clock; a 401 forces one refresh over the plan's token wire, as Codex's does over its own.
 Its provider fact names `rui auth login chatgpt`, and the device-code provider's names `rui auth login chatgpt --device-code`, so the Host line and the overview's notices name the command for the sign-in at hand; an expired sign-in's band names it too when the line holds it whole, and otherwise reads only "ChatGPT sign-in expired." or "ChatGPT (device code) sign-in expired." so the 40-column list pane keeps it whole.
 The Host's one sign-in worker serves both sign-ins; each lease or forced refresh names the sign-in it is for.
-An auto-started Host adds `--provider chatgpt` whenever that credential is usable.
+Automatic provider selection serves `chatgpt` whenever that credential is usable.
 
 `rui auth login chatgpt` (`src/chatgpt_plan_login.zig`) makes the host id `~/.config/rui/host-id` (owner-only, a version 4 UUID URN, never replaced) before its first authorization.
 It listens on `127.0.0.1:1455`, else any free loopback port, prints the authorization link, opens a browser when there is one, and reads a callback address pasted on stdin at the same time; the first answer that is this attempt's wins, so a machine whose browser cannot reach the listener signs in by pasting.
@@ -2380,7 +2387,7 @@ This read never starts a Host, imports local records or selects a Session for re
 
 Client interprets each list exchange as owned `SessionListReply` facts: a complete eight-row-bounded page or a validated HTTP status/type/code read failure.
 Rows retain the exact reference, Workspace, model and Label strings, named provider, closed tools, Permission Mode, times, first Message, Session work and `from_person_at`; slices borrow the fact value independently of scratch/reply-buffer reuse.
-Validation also checks that the Label is valid, that each work state carries exactly its own facts, that the first Message's sender is a canonical reference, and that `delta` and `since` are present, with no rows on `not_modified` and the request's own token echoed there, and that `archived` stands on a full or changed listing's last page and nowhere else.
+Validation also checks that the Label is valid, that each work state carries exactly its own facts, that the first Message's sender is a canonical reference, and that `delta` and `since` are present, with no rows on `not_modified` and the request's own token echoed there.
 `SessionTraversal` in `src/protocol_reply.zig` owns one traversal's cursor, ceiling and `since`.
 Validation requires the version/type, all row fields and explicit nullable `next`, rejects consumed duplicates and duplicate references/tools, checks every row against the requested Workspace, and requires a full page plus increasing canonical signed-SQLite cursor positions with the same continuation ceiling.
 Non-null `next` requires `after < ceiling`: a ninth matching row must exist beyond the eighth row's position.
@@ -2471,8 +2478,9 @@ At most one automatic start runs per overview: a failed start or a second crash 
 
 The overview refreshes about once a second with `session list` `since`, keeping its rows and replacing those reported changed.
 The overview has no slash-command parser or view command surface; the former `/sessions` archive-view commands and counts-line view-name click are removed.
-The full list's pinned `+ New Session` row draws a quiet `Archived` at its right end, at every width, while the last full or changed listing's `archived` fact says some Session is archived, and always inside the archived view; `overview_view.offersArchived` alone decides it, and the chat sidebar, which has no pinned row, never shows it (Divyansh, 2026-11-13, mock X3cnQ7RiEqcsHkxcSp9Up8).
-On that row → selects `Archived` and ← selects `New Session` again; ↑, ↓, Home and End leave the row as before. Enter on `Archived`, or a click on it, opens the existing archived view (plain names, no `· archived` marker), and from inside the archived view returns to the usual list; a click elsewhere on the row is still New Session. Esc in the archived view returns to the usual list. A click drawn before the last archived Session left opens nothing.
+The pinned `+ New Session` row always draws a quiet `Archived` at its right end wherever the list is visible, including the conversation sidebar and empty Stores or archives. `OverviewLines.NewSession` draws the same control and press regions in both layouts; no Store existence query or listing availability fact is needed.
+On that row Right selects `Archived` and Left selects `New Session`; Enter or a click on `Archived` toggles the existing archived view, and Esc there returns to the usual list. Empty archives show `No archived Sessions.`. A click elsewhere on the row remains New Session.
+New Session from a conversation follows the frontend’s existing new-chat departure policy, preserving retained drafts and refusing unsafe departures before retiring the frontend. After ordinary retirement, the same Configure creation owner opens the new focused chat.
 Alt-A puts away the selected Session through the existing archive owner, stopping its work first when required. Shell archive/list/unarchive commands remain available, and `/archive` and `/unarchive` in an open chat retain their existing Session-local behavior.
 A row remains visible with archive progress until the server reports it archived.
 Archived rows and exact conversations show their archive state.
@@ -2503,8 +2511,8 @@ One line map, `listItem` in `src/overview_view.zig`, names each list line for dr
 Each drawn row keeps that name, so a click means what the person saw even when the list changed since the frame, and a Session gone by then opens nothing.
 The Sessions list, a panel and the model picker are three widgets in the list's place; the screen shows the one the core names (`State.listArea`), and only the Sessions hear a press.
 Ctrl-X sends an ordinary `session stop` for the selected row, with the same capture and recovery as the CLI command.
-List input reaches `overview_view.step` as a semantic action from the list's one key table (Right is `open_session` there), Enter or ignored input; clicks carry the Session, New Session or Settings identity drawn in the frame.
-Enter on a Session row opens it, and Right does the same on a Session row and nothing on New Session or Settings; on the row of the chat already open, either one, or a click on that row, returns keys to that chat's input instead, keeping its draft and anything it presents, such as Chat Info, and sends the Host nothing.
+List input reaches `overview_view.step` as a semantic action from the list's one key table (Right is `open_session` there), Enter, semantic Left or ignored input; clicks carry the Session, New Session, Archived or Settings identity drawn in the frame.
+Enter on a Session row opens it, and Right does the same on a Session row, selects Archived on New Session, and does nothing on Settings; on the row of the chat already open, either one, or a click on that row, returns keys to that chat's input instead, keeping its draft and anything it presents, such as Chat Info, and sends the Host nothing.
 Printable keys and bracketed paste are ignored: no editor, hidden draft, frozen-editor state, command list, skill cache or duplicate footer focus exists on the overview.
 Arrows, Home and End keep whole-list navigation, including the pinned New Session and Settings rows; Settings is the penultimate row immediately before the footer.
 The core owns selection, opening admission and pending/uncertain creation; the shell applies its effects.
@@ -2696,7 +2704,7 @@ Recalling sent Messages (approved 2026-10-31; keys chosen 2026-11-01): in a conv
 Up, Down and the wheel keep scrolling, and no history file is kept.
 As built, only Messages without a Session sender come back.
 Each step asks the Host for a one-row activity page of `admission` rows before or after the shown one's position, at the end its first step read, then reads that Message's content alone; the client keeps that position and the draft, never a list or copy of Messages.
-One the draft cannot hold as typed text (over 65,536 bytes, or holding a control character) is passed over with a notice.
+One the draft cannot hold as typed text (over 65,536 bytes, holding a control character, or text the editor refuses to draw, such as a leading standalone combining mark) is passed over with a notice.
 Text that begins with `/` comes back with a second one, so Enter sends it again.
 Steps are read one at a time: presses made while one is read add up and opposite ones cancel.
 Each edit, clear or send of the draft makes it an ordinary one and drops the presses not yet read, and a step shows only on the draft it began from.
@@ -2873,6 +2881,8 @@ A command the Host received completes there, and the output it wrote before the 
 No borrower is joined while the terminal is raw, except the reader of a conversation that returned to the overview: with no command or submission running, it waits at most for the transport's cancellation poll.
 
 One invocation owns two 65,536-byte draft banks with independent grapheme cursors and one same-size command snapshot.
+Each bank's editing mechanism is libvaxis's `vxfw.TextArea`; Rui's `DraftEditor` adapter keeps every key meaning, Tab completion and refusal, and Composer keeps the rules, prompt and hidden-line label around it.
+`keypress.zig` is the one classification of a terminal key that the draft and every choice share; the values it classifies into stay in the `keymap.zig` functional core.
 Submission seals the original bank while the other remains editable through capture and Admission.
 A second Enter cannot create replacement intent while the original is unresolved.
 Only a joined, validated Host acceptance releases the submitted bank.
@@ -2957,8 +2967,6 @@ The queued strip keeps its row when space runs short and leaves in the same fram
 A stop finds excluded Messages by walking Admission-only pages backward from itself, then renders them in admission order; no previous read's queue or drawing state decides placement.
 Every page carries `queued`: the field came with wire version 3, and a frontend and Host on different wire versions refuse each other as incompatible.
 Wire version 10 makes the refused-send target required and nullable under the [public activity contract](#public-session-activity); non-null peers keep their canonical ID grammar.
-
-Wire version 18 adds `archived` to the last page of a full or changed `session list`: whether any Session in the listing's scope is archived, whatever its archive filter. A `not_modified` page carries none, since nothing changed, that fact included, and the Host still answers it without the Store.
 
 Wire version 14 requires the `chatgpt` provider key, and supports the `chatgpt_plan` route, in `host_info`'s `capabilities.providers`; ordinary clients and Hosts on different wire versions refuse each other.
 Until format 74 the Store saved its wire label, so each wire bump also appended a Store format step (format 72 moved the saved label from 15 to 16); format 74 deletes the label, and a wire bump now needs only the historical Host-info profile below.
@@ -3937,7 +3945,7 @@ Keep platform memory metrics and unavailable counters distinct.
 
 | Owner | Selected mechanism |
 | --- | --- |
-| Transport | Rui's own HTTP/2 client on pinned nghttp2 and OpenSSL, with name lookup on short-lived threads and addresses raced by family (Happy Eyeballs, RFC 8305: families alternate, the next attempt starts after 250 ms or as soon as one fails, and with two in flight the oldest gives way). `https://` origins tunnel through the `http://` proxy that `https_proxy`/`HTTPS_PROXY` names (a set lowercase name decides, even empty), read once when the transport starts, with `Proxy-Authorization: Basic` from the proxy URL's credentials; loopback and `no_proxy`/`NO_PROXY` hosts (`*`, names with their subdomains, IP addresses, CIDR ranges; no ports) connect directly; a proxy's 407 and 403 are distinct causes; an `https://` or other proxy scheme fails a provider-serving Host's startup before readiness, and only disables models.dev discovery on a provider-free Host; HTTP/1.1 and HTTP/3/QUIC are absent. Use Apple SecTrust on macOS; on Linux, OpenSSL's `SSL_CERT_FILE` / `SSL_CERT_DIR` when set (an unloadable path fails, never falls back), else the host's hashed certificate directory (`/etc/ssl/certs`, then `/etc/pki/tls/certs`) when it holds a readable subject-hash entry, else the host's CA bundle; a directory's roots are read only when a peer's chain names one, so a Host parses the few roots it uses rather than the whole bundle (about 0.7 MB on Linux), and a damaged root fails the first connection that needs it as `untrusted_peer` rather than startup, while a missing store still fails startup (Divyansh, 2026-11-12); and explicit CA-file configuration (`--provider-ca-file`), which takes precedence, where needed. Missing trust/capabilities fail; never disable verification. Transport owns initialization, resolver lifetime and cleanup. |
+| Transport | Rui's own HTTP/2 client on pinned nghttp2 and OpenSSL, with name lookup on short-lived threads and addresses raced by family (Happy Eyeballs, RFC 8305: families alternate, the next attempt starts after 250 ms or as soon as one fails, and with two in flight the oldest gives way). `https://` origins tunnel through the `http://` proxy that `https_proxy`/`HTTPS_PROXY` names (a set lowercase name decides, even empty), read once when the transport starts, with `Proxy-Authorization: Basic` from the proxy URL's credentials; loopback and `no_proxy`/`NO_PROXY` hosts (`*`, names with their subdomains, IP addresses, CIDR ranges; no ports) connect directly; a proxy's 407 and 403 are distinct causes; an `https://` or other proxy scheme fails a provider-serving Host's startup before readiness, and only disables models.dev discovery on a provider-free Host; HTTP/1.1 and HTTP/3/QUIC are absent. Use Apple SecTrust on macOS; on Linux, OpenSSL's `SSL_CERT_FILE` / `SSL_CERT_DIR` when set (an unloadable path fails, never falls back), else the host's hashed certificate directory (`/etc/ssl/certs`, then `/etc/pki/tls/certs`) when it holds a readable subject-hash entry, else the host's CA bundle; a directory's roots are read only when a peer's chain names one, so a Host parses the few roots it uses rather than the whole bundle (about 0.7 MB on Linux), and a damaged root fails the first connection that needs it as `untrusted_peer` rather than startup, while a missing store still fails startup (Divyansh, 2026-11-12); and explicit CA-file configuration (`--set network.caFile=PATH`), which takes precedence, where needed. Missing trust/capabilities fail; never disable verification. Transport owns initialization, resolver lifetime and cleanup. |
 | Storage | Bundle pinned thread-safe SQLite with single-owner access and native VFS. Use local filesystems; network/shared-mounted Stores are unsupported. Enable macOS fullfsync. |
 | Credentials | One Rui-owned file on Linux and macOS. Check ownership/access, preserve account binding and atomically persist refresh; do not fall back to Codex CLI state or another backend. The file is readable by same-user programs, including authorized Bash; credentials never enter semantic data, logs or child environments. |
 | Files/processes | Configurable disk-backed scratch and installed Bash with optional executable path. Report known memory-backed scratch as incompatible with disk-first guarantees; unknown backing is a deployment assumption. A target-header C shim supplies non-consuming child observation and queued-pipe-byte counts; lifecycle policy remains in Zig. Process-group cleanup promises neither detached-descendant containment nor rollback. |
@@ -4054,7 +4062,7 @@ A client first probes the existing `host.lock` with a nonblocking shared lock, w
 One absolute probe deadline covers connect, write, first byte, header and full body; ordinary commands retain their separate processing and transfer waits.
 The shared response parser accepts only valid bounded HTTP/1.1 headers with one decimal Content-Length, supported Content-Type and wire version; it rejects malformed field names/values, duplicates of consequential fields and unsupported transfer or content encodings rather than interpreting ambiguous framing.
 A complete compatible reply from that owner means ready and reports the canonical Store selector, wire version, actual allocated Active Capacity, slots in use, the Host's start time, whether it holds new Turns (`paused`), its Bash capability and each built-in provider's route (`unserved`, `endpoint`, `chatgpt_device`, `key_file` or `chatgpt_plan`). **Slots in use** (`custody_occupied`) counts held custody records, including detached cleanup; it is the value Current reports as `execution.custody_occupied`.
-Only the historical wire-13 Host-info profile accepts an absent `chatgpt` route as `unserved`, covering v0.69.1 alongside v0.69.2's complete provider facts. Current wire-18 facts require the provider; the wire-17, wire-16, wire-15 and wire-14 profiles freeze v0.74.0’s, v0.73.0’s, v0.71.0’s and v0.70.0’s complete provider facts; historical normalization serves upgrade/restart discovery and exact-instance activation, never ordinary status or client readiness.
+Only the historical wire-13 Host-info profile accepts an absent `chatgpt` route as `unserved`, covering v0.69.1 alongside v0.69.2's complete provider facts. Current wire-16 facts require the provider; the wire-15 and wire-14 profiles freeze v0.71.0’s and v0.70.0’s complete provider facts; historical normalization serves upgrade/restart discovery and exact-instance activation, never ordinary status or client readiness.
 Codex, OpenAI and the existing required identity/control fields remain required; unknown, duplicate and malformed fields still fail decoding.
 The start time (`started_at`) is the Host Unix second read once before execution starts; every reply of one Host reports the same value, and like every Host time it orders nothing across clock changes.
 Both are read from Host memory, so the reply still never touches SQLite.
@@ -4070,10 +4078,10 @@ Ready output includes the canonical Store, compatible wire, actual capacity, slo
 Unavailable and owned-but-unavailable never claim that outstanding effects have finished.
 
 `rui host start [--store PATH]` attaches to a ready Host without changing it.
-Otherwise it creates only a candidate private Store directory, resolves the canonical selector and launches this executable's `host serve --provider codex` (plus `--provider openai` when a usable OpenAI key is saved) in a separate session.
-Bare `rui`, `host start` and `host serve` without `--active-capacity` all use the product default Active Capacity of 100; `host start --active-capacity N` overrides it for the Host it launches, and `host serve --active-capacity N` overrides it with caller-owned lifetime.
+Otherwise it creates only a candidate private Store directory, resolves the canonical selector and launches this executable's `host serve --store DIR` with generic settings assignments in a separate session; the Host reads saved settings and owns automatic provider selection.
+Bare `rui`, `host start` and `host serve` all use the product default Active Capacity of 100 unless settings override it; `host start --set execution.activeCapacity=N` overrides it for the Host it launches, and `host serve --set execution.activeCapacity=N` overrides it with caller-owned lifetime.
 A running Host keeps the capacity it started with, including across Rui upgrades, until it stops and a new Host starts.
-When `host start` finds or loses a launch race to a ready Host whose capacity differs from its `--active-capacity`, it still reports that Host and exits zero, and stderr says the request applies only to a new Host.
+When `host start` finds or loses a launch race to a ready Host, it still reports that Host and exits zero; settings apply only to a new Host, never reconfigure the running one, and when the command gave `--settings` or `--set`, stderr says so.
 Startup raises only its own soft descriptor limit, up to the hard limit, to fit that capacity.
 It never reduces Active Capacity to fit: when even minimum intake cannot fit, startup fails before the Store lease and names the limit to raise.
 From macOS's default soft limit of 256, the default Host starts with full intake when the hard limit and OS per-process ceiling cover its full requirement.
@@ -4163,9 +4171,9 @@ Orphan tools may retain each bounded unlinked stdin file until exit; replacement
 
 A Host whose settings give `interface.lifetime` as `stdin` (the TypeScript client's default with `rui host serve --settings -`) is the exception: its shutdown is bounded.
 The program that starts it writes one frame to its stdin, a 4-byte big-endian length and then UTF-8 JSON naming `v` (1), the Store directory, the OpenAI key provider `{kind: "openai_key", baseUrl, key, caFile?}`, the `runtimeDir` that holds its socket `rui.sock`, and optionally `activeCapacity`.
-Serve flags given beside `--settings` are applied on top of the document.
-The provider's optional `caFile` names a PEM file trusted exclusively for that provider, on macOS as on Linux, with the same trust semantics as `--provider-ca-file`; omitted or null uses system trust.
-A supplied `caFile` must be a nonempty UTF-8 path without NUL bytes and shorter than the platform's path limit; a relative path is relative to the Host's working directory, and an unloadable file or failed verification never falls back to system trust.
+The settings frame overlays defaults and saved settings; later `--set` assignments override its leaves.
+The optional `network.caFile` names a PEM file trusted exclusively for provider transport, on macOS as on Linux; omitted or null uses system trust.
+A supplied `caFile` must be a nonempty UTF-8 path without NUL bytes and shorter than the platform's path limit; a relative path is relative to the Host's working directory (a Host started by bare `rui`, `rui host start` or upgrade runs in `/`, so those starts take a path typed relative on their command line from the caller's directory and refuse any other relative path), and an unloadable file or failed verification never falls back to system trust.
 The optional `presets` object maps at most 64 names (1–64 bytes of `[a-z0-9_-]`) to complete agent specs, checked by the shared agent-spec parser and held only in Host memory (D22, D112).
 A `start_agent` call may name a preset and override its fields, but still refuses provider or Workspace fields, including those supplied by the preset (D221).
 The key stays in memory only, never on disk, in argv or in the environment.
@@ -4289,7 +4297,7 @@ On Linux with glibc, the execution loop calls `malloc_trim(0)` once each time it
 
 | Boundary | Selected value and scope |
 | --- | --- |
-| Active Capacity | Startup default 100 shared model/Bash/Edit executions and cleanup, the product default for every start path; adjustable with `--active-capacity`, no independent hard maximum. A running Host keeps its startup value. |
+| Active Capacity | Startup default 100 shared model/Bash/Edit executions and cleanup, the product default for every start path; adjustable with `--set execution.activeCapacity=N`, no independent hard maximum. A running Host keeps its startup value. |
 | Shared scratch | Startup default 8 GiB logical owned bytes, including pending growth and overlapping copies; no allowance-sized allocation/reservation. |
 | History memo | At most 1 GiB of [memo](#history-memo) file bytes in the scratch directory, additional to shared scratch; one fixed-size index entry per unit of Active Capacity. |
 | Session list page | Eight rows. The worst-case row is derived at compile time from its field bounds and must fit 32 KiB; the derived page bound covers the capture. |

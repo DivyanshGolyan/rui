@@ -9,6 +9,8 @@ const product_defaults = @import("product_defaults.zig");
 const model_capability = @import("model_capability.zig");
 const model_list = @import("model_list.zig");
 const provider_name = @import("provider_name.zig");
+const nextToken = model_list.nextToken;
+const objectKey = model_list.objectKey;
 
 pub const Provider = provider_name.Provider;
 pub const Providers = std.enums.EnumSet(Provider);
@@ -354,25 +356,9 @@ pub fn read(gpa: std.mem.Allocator, providers: []const u8) error{ OutOfMemory, I
     return menu;
 }
 
-fn nextToken(scanner: *std.json.Scanner, scratch: std.mem.Allocator) error{ OutOfMemory, InvalidModelList }!std.json.Token {
-    return scanner.nextAlloc(scratch, .alloc_if_needed) catch |err| switch (err) {
-        error.OutOfMemory => error.OutOfMemory,
-        else => error.InvalidModelList,
-    };
-}
-
 fn string(scanner: *std.json.Scanner, scratch: std.mem.Allocator) error{ OutOfMemory, InvalidModelList }![]const u8 {
     return switch (try nextToken(scanner, scratch)) {
         .string, .allocated_string => |text| text,
-        else => error.InvalidModelList,
-    };
-}
-
-/// The next member's key, or null at the object's end.
-fn objectKey(scanner: *std.json.Scanner, scratch: std.mem.Allocator) error{ OutOfMemory, InvalidModelList }!?[]const u8 {
-    return switch (try nextToken(scanner, scratch)) {
-        .object_end => null,
-        .string, .allocated_string => |key| key,
         else => error.InvalidModelList,
     };
 }

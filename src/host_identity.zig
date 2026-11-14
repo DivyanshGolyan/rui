@@ -24,11 +24,10 @@ pub const Snapshot = struct {
     entries: [][]const u8,
 
     pub fn deinit(self: *Snapshot, allocator: std.mem.Allocator) void {
-        std.crypto.secureZero(u8, self.storage);
         allocator.free(self.entries);
         // Preserve the secure wipe through allocators whose free is a no-op
         // (arenas), rather than replacing it with debug undefined poisoning.
-        allocator.rawFree(self.storage, .fromByteUnits(@alignOf(u8)), @returnAddress());
+        @import("secret_value.zig").wipeAndFree(allocator, self.storage, .fromByteUnits(@alignOf(u8)), @returnAddress());
         self.* = undefined;
     }
 };

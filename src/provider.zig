@@ -292,6 +292,12 @@ pub const Credentials = struct {
 /// completions, each a short call under `mutex`, and it never holds `mutex`
 /// across anything else. The transport thread never touches the Store.
 pub const Reactor = struct {
+    comptime {
+        const required_endpoints = std.enums.values(protocol.Provider).len + std.enums.values(ListingKind).len;
+        if (h2.max_endpoints < required_endpoints)
+            @compileError("provider request and independent listing URLs exceed H2 endpoint capacity");
+    }
+
     client: h2.Client,
     endpoints: std.EnumArray(protocol.Provider, ?h2.Endpoint),
     io: std.Io,
@@ -997,6 +1003,45 @@ test "idle reactor reports zero finished transfers and no completion" {
     reactor.stop();
     transport.join();
     try std.testing.expectEqual(@as(?h2.DriveError, null), reactor.failed());
+}
+
+test "Reactor registers every provider and independent listing subset without endpoint exhaustion" {
+    const request_urls = [_][]const u8{
+        "http://127.0.0.1:1/codex/responses",
+        "http://127.0.0.1:2/openai/responses",
+        "http://127.0.0.1:3/chatgpt/responses",
+    };
+    const listing_urls = [_][]const u8{
+        "http://127.0.0.1:4/catalog",
+        "http://127.0.0.1:5/openai/models",
+        "http://127.0.0.1:6/chatgpt/models",
+    };
+    for (0..8) |served_mask| for (0..8) |listing_mask| {
+        var used: std.atomic.Value(u64) = .init(0);
+        var reactor: Reactor = undefined;
+        var options: Options = .{
+            .endpoints = .initFill(null),
+            .capacity = 1,
+            .inactivity_seconds = 1,
+            .scratch_path = "/nonexistent",
+            .budget = .{ .used = &used, .limit = 1 },
+        };
+        for (&options.endpoints.values, request_urls, 0..) |*url, value, bit| {
+            if (served_mask & (@as(usize, 1) << @intCast(bit)) != 0) url.* = value;
+        }
+        for (&options.listing_urls.values, listing_urls, 0..) |*url, value, bit| {
+            if (listing_mask & (@as(usize, 1) << @intCast(bit)) != 0) url.* = value;
+        }
+        try reactor.init(std.testing.allocator, std.testing.io, options);
+        defer reactor.deinit();
+        try std.testing.expectEqual(@as(?h2.EndpointError, null), reactor.catalog_endpoint_error);
+        for (reactor.endpoints.values, 0..) |endpoint, bit| {
+            try std.testing.expectEqual(served_mask & (@as(usize, 1) << @intCast(bit)) != 0, endpoint != null);
+        }
+        for (reactor.listing_endpoints.values, 0..) |endpoint, bit| {
+            try std.testing.expectEqual(listing_mask & (@as(usize, 1) << @intCast(bit)) != 0, endpoint != null);
+        }
+    };
 }
 
 test "catalog endpoint setup failure leaves HTTP provider and listing usable" {

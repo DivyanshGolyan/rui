@@ -27,6 +27,8 @@ class DialectTest(unittest.TestCase):
              False, False, (True, True, False, False)),
             ("short IDs before pause", "rui session send [--to ID]\n",
              True, False, (True, False, True, True)),
+            ("settings document only", "rui session send [--to ID]\n",
+             True, True, (True, False, True, True)),
             ("candidate", "rui session send [--to ID]\n",
              True, True, (True, False, True, True)),
         ):
@@ -37,6 +39,10 @@ class DialectTest(unittest.TestCase):
                     if send is not None:
                         replies.update({("request", "inspect"): "rui request inspect [HANDLE]\n",
                                         ("session", "send"): send})
+                    if name == "settings document only":
+                        replies[("host", "serve")] = "rui host serve [--settings FILE|-]\n"
+                    if name == "candidate":
+                        replies[("host", "serve")] = "rui host serve [--set PATH=VALUE]\n"
                     if start:
                         replies[("session", "start")] = "rui session start [--store PATH]\n"
                     if pause:
@@ -56,6 +62,7 @@ class DialectTest(unittest.TestCase):
                         dialect = upgrade.Dialect(binary)
                     self.assertEqual((dialect.resource_first, dialect.address_send,
                                       dialect.short_ids, dialect.stdin_message), expected)
+                    self.assertEqual(dialect.host_settings, name == "candidate")
                     self.assertEqual(dialect.pause, ("host", "pause" if pause else "stop"))
                     self.assertEqual(dialect.serve(), ("host", "serve") if send else ("serve",))
                     with patch.object(upgrade.fixture, "command", return_value={
@@ -175,10 +182,40 @@ class RunningUpgradeTest(unittest.TestCase):
     def test_running_host_does_not_use_unrestartable_hidden_test_flags(self):
         dialect = upgrade.Dialect.__new__(upgrade.Dialect)
         dialect.resource_first = True
+        dialect.host_settings = False
+        dialect.binary = Path("/previous/bin/rui")
         with patch.object(upgrade.fixture, "RUI", Path("/previous/bin/rui")):
             args = dialect.host_arguments(Path("/store"), "http://127.0.0.1/responses", retry_waits=False)
         self.assertEqual(args, ["/previous/bin/rui", "host", "serve", "--store", "/store",
                                "--active-capacity", "1", "--provider-endpoint", "http://127.0.0.1/responses"])
+
+    def test_candidate_host_uses_generic_settings_without_hidden_restart_flags(self):
+        dialect = upgrade.Dialect.__new__(upgrade.Dialect)
+        dialect.resource_first = True
+        dialect.host_settings = True
+        dialect.binary = Path("/candidate/bin/rui")
+        with patch.object(upgrade.fixture, "RUI", Path("/candidate/bin/rui")):
+            args = dialect.host_arguments(Path("/store"), "http://127.0.0.1/responses", retry_waits=False)
+        self.assertEqual(args, ["/candidate/bin/rui", "host", "serve", "--store", "/store",
+                               "--set", "execution.activeCapacity=1", "--set", "providers={}",
+                               "--set", "providers.codex.endpoint=http://127.0.0.1/responses",
+                               "--set", "providers.codex.unauthenticated=true"])
+
+    def test_resource_diagnostics_keep_the_baseline_executable_and_grammar(self):
+        for modern in (False, True):
+            dialect = upgrade.Dialect.__new__(upgrade.Dialect)
+            dialect.binary = Path("/historical/bin/rui")
+            dialect.resource_first = modern
+            dialect.host_settings = modern
+            with patch.object(upgrade.fixture, "RUI", Path("/candidate/bin/rui")):
+                args = dialect.host_arguments(Path("/store"))
+            self.assertEqual(args[:4] if not modern else args[:5],
+                             ["/historical/bin/rui", "serve", "--store", "/store"] if not modern else
+                             ["/historical/bin/rui", "host", "serve", "--store", "/store"])
+            self.assertEqual(args[-4:] if modern else args[-2:],
+                             ["--set", "execution.activeCapacity=1", "--set", "providers={}"] if modern else
+                             ["--active-capacity", "1"])
+            self.assertNotIn("--test-retry-waits-ms", args)
 
     def test_release_installer_uses_real_template_and_local_archive_only(self):
         with tempfile.TemporaryDirectory() as directory:

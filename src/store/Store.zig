@@ -334,11 +334,6 @@ pub const Store = struct {
         return ids.items.toOwnedSlice(allocator);
     }
 
-    /// Compatibility convenience; all initialization belongs to openTarget.
-    pub fn openMysql(self: *Store, io: std.Io, connection: mysql_connection.Options, selector: []const u8, options: OpenOptions) !void {
-        return self.openTarget(io, .{ .mysql = connection }, selector, options);
-    }
-
     pub fn kind(self: *const Store) Kind {
         return std.meta.activeTag(self.engine);
     }

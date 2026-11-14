@@ -776,3 +776,17 @@ func TestConfigureContract(t *testing.T) {
 		t.Fatalf("replayed configure record allocated %q, %v; want a new Session", session, err)
 	}
 }
+
+func TestHostArgumentsUseOrderedSettingsAndExactProviders(t *testing.T) {
+	for _, endpoint := range []string{"", "http://127.0.0.1/responses"} {
+		got := hostArguments("/store", endpoint, 2, []string{"--set", "execution.activeCapacity=7"})
+		want := []string{"host", "serve", "--store", "/store", "--set", "execution.activeCapacity=2", "--set", "providers={}"}
+		if endpoint != "" {
+			want = append(want, "--set", "providers.codex.endpoint="+endpoint, "--set", "providers.codex.unauthenticated=true")
+		}
+		want = append(want, "--set", "execution.activeCapacity=7")
+		if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+			t.Fatalf("endpoint %q: got %q, want %q", endpoint, got, want)
+		}
+	}
+}

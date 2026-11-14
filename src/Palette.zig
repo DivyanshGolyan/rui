@@ -80,14 +80,14 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         const row: u16 = @intCast(index - first);
         const hovered = index != self.shown.highlight and self.on_select != null and self.hover.contains(.{ .row = row, .width = width });
         style.reverse = index == self.shown.highlight;
-        if (hovered) hovering(&style, self.hover_style);
+        if (hovered) style = Hover.look(style, self.hover_style);
         if (style.reverse or hovered) @memset(surface.buffer[@as(usize, row) * width ..][0..width], .{ .style = style });
         const line = window.child(.{ .y_off = row, .height = 1 });
         _ = line.printSegment(.{ .text = entry.shown, .style = style }, .{ .wrap = .none });
         if (column < width) {
             var description = self.quiet;
             description.reverse = style.reverse;
-            if (hovered) hovering(&description, self.hover_style);
+            if (hovered) description = Hover.look(description, self.hover_style);
             const fitted = try overview.fitted(ctx.arena, self.caps, entry.description, width - column, .head);
             _ = line.child(.{ .x_off = @intCast(column) }).printSegment(.{ .text = fitted.bytes, .style = description }, .{ .wrap = .none });
         }
@@ -97,12 +97,6 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         _ = window.child(.{ .y_off = @intCast(count), .height = 1 }).printSegment(.{ .text = label, .style = self.quiet }, .{ .wrap = .none });
     }
     return surface;
-}
-
-fn hovering(style: *vaxis.Style, hover: vaxis.Style) void {
-    style.bg = hover.bg;
-    style.reverse = hover.reverse;
-    style.ul_style = hover.ul_style;
 }
 
 test "Palette keeps the selected command visible at one row and hides closed or clipped choices" {

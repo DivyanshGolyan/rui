@@ -2255,7 +2255,7 @@ const GroupCallRow = struct {
     call_id_content_id: ?rsql.Positive,
     arguments_content_id: ?rsql.Positive,
     consistent: bool,
-    field_metadata: ?[120]u8,
+    field_metadata: ?activity_read.FieldCertificate.Bytes,
     length0: ?u64,
     digest0: ?[32]u8,
     private0: ?bool,

@@ -149,18 +149,16 @@ test "pinned New Session row presses Archived at its drawn word and New Session 
     defer state.deinit();
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    for ([_]bool{ false, true }) |archived| for ([_]u16{ 46, 140 }) |width| {
-        state.some_archived = archived;
+    for ([_]bool{ false, true }) |sidebar| for ([_]u16{ 46, 140 }) |width| {
+        state.conversing = if (sidebar) "aaaaaa".* else null;
         var clicks: Clicks = .{};
         var row: NewSession = .{ .state = &state, .userdata = &clicks, .on_click = Clicks.take };
-        // The core owns the words (`overview_view` tests); the draw records the press spans.
         _ = try row.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 1 }, .cell_size = .{} });
         var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
-        // The word's first and last cells, then the name and the gap between.
         for ([_]u16{ width - 9, width - 2, 4, width - 12 }, 0..) |column, at| {
             clicks.got = null;
             try row.widget().handleEvent(&events, .{ .mouse = .{ .col = @intCast(column), .row = 0, .button = .left, .type = .press, .mods = .{} } });
-            const expected: overview_view.Click = if (archived and at < 2) .archived else .new_session;
+            const expected: overview_view.Click = if (at < 2) .archived else .new_session;
             try std.testing.expectEqual(expected, clicks.got.?);
         }
     };

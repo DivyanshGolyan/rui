@@ -47,6 +47,7 @@ const cores = .{
     .{ "draft_layout.zig", @import("draft_layout.zig") },
     .{ "endpoint_value.zig", @import("endpoint_value.zig") },
     .{ "environment.zig", @import("environment.zig") },
+    .{ "error_set.zig", @import("error_set.zig") },
     .{ "failure_class.zig", @import("failure_class.zig") },
     .{ "feed_reads.zig", @import("feed_reads.zig") },
     .{ "find_tools_words.zig", @import("find_tools_words.zig") },
@@ -111,7 +112,6 @@ const cores = .{
     .{ "schema_json.zig", @import("schema_json.zig") },
     .{ "session_consent.zig", @import("session_consent.zig") },
     .{ "session_departure.zig", @import("session_departure.zig") },
-    .{ "session_field.zig", @import("session_field.zig") },
     .{ "session_settings.zig", @import("session_settings.zig") },
     .{ "session_id.zig", @import("session_id.zig") },
     .{ "session_keys.zig", @import("session_keys.zig") },
@@ -176,6 +176,8 @@ test {
     _ = @import("session_drafts.zig");
     _ = @import("SessionInput.zig");
     _ = @import("TerminalEditor.zig");
+    _ = @import("DraftEditor.zig");
+    _ = @import("keypress.zig");
     _ = @import("tools.zig");
     _ = @import("core_tools.zig");
     inline for (cores) |core| _ = core[1];

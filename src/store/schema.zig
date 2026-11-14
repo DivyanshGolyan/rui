@@ -5,6 +5,7 @@
 const std = @import("std");
 const session_settings = @import("../session_settings.zig");
 const store_path = @import("../store_path.zig");
+const validStoreId = @import("../store_id.zig").valid;
 const tool_name = @import("../tool_name.zig");
 const Bounded = @import("../bounded.zig").Bounded;
 const tool_defs = @import("../tool_record.zig");
@@ -2754,7 +2755,7 @@ fn validateCurrent(database: *c.sqlite3, selector: []const u8, identity_mismatch
         const statement = try sqlite.prepare(database, "SELECT meta_value FROM store_meta WHERE meta_key='store_id'");
         defer _ = c.sqlite3_finalize(statement);
         if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.WrongStoreIdentity;
-        if (!isStoreId(try columnText(statement, 0))) return error.WrongStoreIdentity;
+        if (!validStoreId(try columnText(statement, 0))) return error.WrongStoreIdentity;
     }
     {
         const statement = try sqlite.prepare(database, "SELECT meta_value FROM store_meta WHERE meta_key='store_selector'");
@@ -2767,11 +2768,6 @@ fn validateCurrent(database: *c.sqlite3, selector: []const u8, identity_mismatch
             return error.StoreIdentityMismatch;
         }
     }
-}
-
-/// Whether `text` is a Store id as store_meta holds it.
-pub fn isStoreId(text: []const u8) bool {
-    return @import("../store_id.zig").valid(text);
 }
 
 /// Column `column` of the current row, which is not NULL, as text.

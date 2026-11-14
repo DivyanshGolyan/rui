@@ -340,7 +340,7 @@ pub const NamedPeerJson = struct {
 
 /// A Session setting a revision can change, named on the wire as in a
 /// configuration.
-pub const SessionField = @import("session_field.zig").SessionField;
+pub const SessionField = session_settings.SessionField;
 
 pub const ActivityItem = activity_facts.Item;
 
@@ -638,13 +638,9 @@ pub const session_list_reply = struct {
     pub const full_tail = facts ++ .{ "{\"after\":\"", Hole.decimal, "\",\"ceiling\":\"", Hole.decimal, "\"}}" };
     /// Holes: delta, token, through, after reference.
     pub const changed_tail = facts ++ .{ "{\"through\":\"", Hole.decimal, "\",\"after_reference\":", Hole{ .string = session_id_bytes }, "}}" };
-    /// Holes: delta, token, archived. The last page of a full or changed
-    /// listing says whether any Session in its scope is archived.
-    pub const last_tail = facts ++ .{ "null,\"archived\":", Hole.boolean, "}" };
-    /// Holes: delta, token. Nothing changed since the token, the archived
-    /// fact included, so the Host answers it without the Store.
-    pub const unchanged_tail = facts ++ .{"null}"};
-    pub const max_bytes = shapeBytes(head) + jsonListBytes(session_list_page_size, SessionRow.max_json_bytes) + maxShapeBytes(.{ full_tail, changed_tail, last_tail, unchanged_tail });
+    /// Holes: delta, token.
+    pub const last_tail = facts ++ .{"null}"};
+    pub const max_bytes = shapeBytes(head) + jsonListBytes(session_list_page_size, SessionRow.max_json_bytes) + maxShapeBytes(.{ full_tail, changed_tail, last_tail });
 };
 
 pub const ActivityFacts = activity_facts.Page;
@@ -2331,9 +2327,6 @@ pub const max_mutation_response_bytes = @max(
     @max(@max(configuration_reply.max_bytes, message_reply.max_bytes), @max(session_stop_reply.max_bytes, model_interruption_reply.max_bytes)),
     @max(session_archive_reply.max_bytes, @max(permission_decision_reply.max_bytes, max_control_error_response_bytes)),
 );
-/// Maximum wire payload across mutation and observation control routes; not
-/// a resident Host buffer capacity. Observations use their exchange writer.
-pub const max_control_response_bytes = @max(max_mutation_response_bytes, command_observation_reply.max_bytes);
 
 /// Holes: Store, instance, Active and intake capacity, descriptor limit
 /// (decimal or `unlimited`), start time, slots in use, whether new Turns

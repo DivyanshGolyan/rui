@@ -6,6 +6,7 @@
 //! returns text; it holds no terminal, clock or Store fact.
 const std = @import("std");
 const Bounded = @import("bounded.zig").Bounded;
+const utf8_validation = @import("utf8_validation.zig");
 const model_capability = @import("model_capability.zig");
 const unicode = @import("terminal_unicode");
 const gwidth = @import("terminal_width");
@@ -44,7 +45,7 @@ pub fn firstLine(bytes: []const u8) []const u8 {
 /// when it is longer.
 pub fn cut(comptime limit: usize, bytes: []const u8) Bounded(limit) {
     var value: Bounded(limit) = .{};
-    const kept = if (bytes.len <= limit) bytes.len else codepointStart(bytes, limit - ellipsis.len);
+    const kept = if (bytes.len <= limit) bytes.len else utf8_validation.scalarStart(bytes, limit - ellipsis.len);
     @memcpy(value.bytes[0..kept], bytes[0..kept]);
     value.len = kept;
     if (kept < bytes.len) {
@@ -52,14 +53,6 @@ pub fn cut(comptime limit: usize, bytes: []const u8) Bounded(limit) {
         value.len += ellipsis.len;
     }
     return value;
-}
-
-/// The start of the code point holding byte `at`, so a cut there keeps whole
-/// code points.
-fn codepointStart(bytes: []const u8, at: usize) usize {
-    var start = at;
-    while (start > 0 and start < bytes.len and bytes[start] & 0xc0 == 0x80) start -= 1;
-    return start;
 }
 
 /// The percentage of `trigger` still left before `pressure` reaches it,

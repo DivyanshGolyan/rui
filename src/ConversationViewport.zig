@@ -2,11 +2,11 @@
 //! vaxis lays out and draws rows (`Window.print`); this module keeps retained
 //! bytes, trusted styles and which row of which logical line a view starts at.
 const std = @import("std");
+const utf8_validation = @import("utf8_validation.zig");
 const vaxis = @import("vaxis");
 const gwidth = @import("terminal_width");
 const unicode = @import("terminal_unicode");
 const state_marks = @import("marks.zig");
-const draft_layout = @import("draft_layout.zig");
 const TerminalText = @import("TerminalText.zig");
 const tool_fold = @import("tool_fold.zig");
 const display_text = @import("display_text.zig");
@@ -52,24 +52,6 @@ pub var measured_lines: if (@import("builtin").is_test) usize else void = if (@i
 fn rowsUsed(result: vaxis.Window.PrintResult) u16 {
     return if (result.col == 0 and result.row != 0 and !result.overflow) result.row else result.row +| 1;
 }
-
-/// The draft as the input draws it, for `draft_layout`: whole clusters
-/// measured as the terminal measures them. The screen has already shown
-/// tabs as one space and refused clusters the terminal cannot draw.
-pub const DraftPieces = struct {
-    bytes: []const u8,
-    method: gwidth.Method,
-    at: usize = 0,
-
-    pub fn next(self: *DraftPieces) ?draft_layout.Piece {
-        if (self.at == self.bytes.len) return null;
-        var clusters = unicode.graphemeIterator(self.bytes[self.at..]);
-        const cluster = clusters.next().?.bytes(self.bytes[self.at..]);
-        self.at += cluster.len;
-        const kind = draft_layout.kindOf(cluster);
-        return .{ .len = cluster.len, .cells = if (kind == .newline) 0 else gwidth.gwidth(cluster, self.method), .kind = kind };
-    }
-};
 
 /// Leading spaces and a list or role marker stay in the first row;
 /// continuation rows start under the text after them, up to half the width.
@@ -321,44 +303,6 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             return if (std.mem.startsWith(u8, uri, TerminalText.session_link)) uri[TerminalText.session_link.len..] else null;
         }
 
-        /// The last position in `[from, to)` on a peer's name that its line,
-        /// laid out at `layout`, shows in a cell. A name clipped off its row
-        /// entirely is not on screen, so it is not there to open.
-        pub fn lastShownSession(self: *const Self, gpa: std.mem.Allocator, layout: Layout, from: usize, to: usize) !?usize {
-            comptime std.debug.assert(styled);
-            var end = @min(to, self.text().len);
-            while (end > from) {
-                end -= 1;
-                const id = self.sessionAt(end) orelse continue;
-                var start = end;
-                while (start > from) : (start -= 1) {
-                    const before = self.sessionAt(start - 1) orelse break;
-                    if (!std.mem.eql(u8, before, id)) break;
-                }
-                if (try self.shows(gpa, layout, start, end + 1)) return end;
-                end = start;
-            }
-            return null;
-        }
-
-        /// Whether laying out the line holding `[from, to)` puts any of
-        /// those bytes in a cell.
-        fn shows(self: *const Self, gpa: std.mem.Allocator, layout: Layout, from: usize, to: usize) !bool {
-            const line = if (std.mem.lastIndexOfScalar(u8, self.text()[0..from], '\n')) |at| at + 1 else 0;
-            const rows = self.lineRows(layout, line);
-            const cells = try gpa.alloc(vaxis.Cell, @as(usize, layout.width) * rows);
-            defer gpa.free(cells);
-            @memset(cells, .{});
-            var screen: vaxis.Screen = .{ .width = layout.width, .height = rows, .width_method = layout.method, .buf = cells };
-            const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = layout.width, .height = rows, .screen = &screen };
-            _ = self.printLine(window, 0, line, true, false, .{}, .{});
-            for (cells) |cell| {
-                const at = self.cellOffset(cell) orelse continue;
-                if (at >= from and at < to) return true;
-            }
-            return false;
-        }
-
         /// Where in the current text a cell laid out from it starts, or
         /// null for a cell that shows none of it: blank, indent, `…` or
         /// `┆`. A text cell's grapheme points into the text.
@@ -410,14 +354,7 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
         }
 
         pub fn text(self: *const Self) []const u8 {
-            var end = self.length;
-            if (end != 0) {
-                var start = end - 1;
-                while (start > 0 and self.bytes[start] & 0xc0 == 0x80) start -= 1;
-                const n = std.unicode.utf8ByteSequenceLength(self.bytes[start]) catch 1;
-                if (end - start < n) end = start;
-            }
-            return self.bytes[0..end];
+            return utf8_validation.completePrefix(self.bytes[0..self.length]);
         }
 
         /// Output has no canonical byte offsets: escape standalone invisible
@@ -465,28 +402,32 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
 
         /// Tool identity uses the same retained, hidden address representation as
         /// internal Session links, with no new style bytes or closed output cache.
-        fn lineMarker(self: *const Self, offset: usize) ?struct { uri: []const u8, end: usize } {
+        const LineMarker = struct { marker: tool_fold.Marker, end: usize };
+
+        fn lineMarker(self: *const Self, offset: usize) ?LineMarker {
             if (!styled or offset >= self.text().len or foregroundIndex(self.styles[offset]) != address_index) return null;
             var end = offset;
             while (end < self.text().len and foregroundIndex(self.styles[end]) == address_index) : (end += 1) {}
-            const uri = self.bytes[offset..end];
-            if (!std.mem.eql(u8, uri, tool_fold.heading_uri) and !std.mem.eql(u8, uri, tool_fold.output_uri) and !std.mem.eql(u8, uri, tool_fold.more_uri)) return null;
-            return .{ .uri = uri, .end = end };
+            return .{ .marker = tool_fold.Marker.of(self.bytes[offset..end]) orelse return null, .end = end };
+        }
+
+        fn markerAt(self: *const Self, offset: usize) ?tool_fold.Marker {
+            return (self.lineMarker(offset) orelse return null).marker;
         }
 
         /// A tool row's heading line: the row Ctrl-O or a click folds.
         pub fn toolHeading(self: *const Self, offset: usize) bool {
-            const mark = self.lineMarker(offset) orelse return false;
-            return std.mem.eql(u8, mark.uri, tool_fold.heading_uri);
+            return self.markerAt(offset) == .heading;
         }
 
-        fn toolOutput(self: *const Self, offset: usize) bool {
-            const mark = self.lineMarker(offset) orelse return false;
-            return std.mem.eql(u8, mark.uri, tool_fold.output_uri) or std.mem.eql(u8, mark.uri, tool_fold.more_uri);
+        /// Whether the heading line at `offset` has its output shown on the
+        /// lines after it.
+        fn headingOpen(self: *const Self, offset: usize) bool {
+            return self.markerAt(self.nextLine(offset) orelse return false) == .output;
         }
 
         pub fn toolIsOpen(self: *const Self, offset: usize) bool {
-            return self.toolHeading(offset) and self.toolOutput(self.nextLine(offset) orelse return false);
+            return self.toolHeading(offset) and self.headingOpen(offset);
         }
 
         /// Where the line starting at `offset` ends (its newline or the text end).
@@ -526,11 +467,11 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
 
         /// A line's trusted marker owns its band, never an independent code
         /// painter or a retained list of byte offsets to repair after edits.
-        fn lineKind(self: *const Self, offset: usize) Line {
-            if (self.lineMarker(offset)) |mark| {
-                if (std.mem.eql(u8, mark.uri, tool_fold.output_uri) or std.mem.eql(u8, mark.uri, tool_fold.more_uri)) return .output;
-                if (self.toolIsOpen(offset)) return .selected;
-            }
+        fn lineKind(self: *const Self, offset: usize, mark: ?LineMarker) Line {
+            if (mark) |value| switch (value.marker) {
+                .output => return .output,
+                .heading => if (self.headingOpen(offset)) return .selected,
+            };
             if (styled and offset < self.length and foregroundIndex(self.styles[offset]) == code_index) return .code;
             return .plain;
         }
@@ -542,7 +483,7 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             const end = self.lineEnd(offset);
             const mark = self.lineMarker(offset);
             const content_start = if (mark) |value| value.end else offset;
-            const kind = self.lineKind(offset);
+            const kind = self.lineKind(offset, mark);
             const output = kind == .output;
             const plain = kind.style(colour, base, colours);
             // Every band (including selection) is painted here, over the
@@ -982,10 +923,6 @@ test "vaxis wraps reading text at words with hanging indentation" {
     var wide: Sized(64, false) = .{};
     try wide.append("abc中");
     try std.testing.expectEqual(@as(u16, 2), wide.lineRows(.{ .width = 4, .method = .unicode }, 0));
-    // A draft's wide cluster moves whole to the next row.
-    const whole = draft_layout.shape(DraftPieces{ .bytes = "abcd中", .method = .unicode }, 5, 7, 0);
-    try std.testing.expectEqual(@as(usize, 2), whole.lines);
-    try std.testing.expectEqual(@as(u16, 2), whole.caret_column);
 }
 
 test "a clipped final wrapped line leaves an unread row in plain and styled documents" {

@@ -11,8 +11,7 @@ import os_semantics
 def assert_empty_full(page):
     """A first listing of a Store with no Sessions: everything, which is nothing."""
     assert {key: value for key, value in page.items() if key != "since"} == {
-        "version": host_process.WIRE_VERSION, "type": "session_list", "sessions": [], "delta": "full", "next": None,
-        "archived": False}, page
+        "version": host_process.WIRE_VERSION, "type": "session_list", "sessions": [], "delta": "full", "next": None}, page
     assert re.fullmatch(r"[0-9a-f]{32}\.(0|[1-9][0-9]*)", page["since"]), page
 
 

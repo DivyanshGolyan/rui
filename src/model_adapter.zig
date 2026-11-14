@@ -189,7 +189,7 @@ test "provider interpretation preserves independently reported model evidence" {
             try std.testing.expectEqualSlices(u8, &protocol.contentDigest("ok"), &interpreted.accepted.output.answer_digest);
             try std.testing.expectEqualStrings("r", interpreted.accepted.output.evidence.response_id.slice());
             try std.testing.expectEqualSlices(u8, case.certificate, interpreted.accepted.model_evidence.slice());
-            var reader = try output_format.OutputMetadataReader.init(std.testing.io, metadata.file, interpreted.accepted.output.item_count);
+            var reader = try output_format.OutputMetadataReader.init(std.testing.io, metadata.file);
             var usage: ?output_format.Usage = null;
             while (try reader.next()) |record| if (record.tag == .usage) {
                 usage = record.usage;
@@ -1927,8 +1927,6 @@ const DrainedRequest = struct { bytes: []u8, length: u64, digest: [32]u8 };
 // Share the tool's prose and schema, not the request's tool envelope.
 const bash_tool_json = "{\"type\":\"function\",\"name\":\"bash\",\"description\":\"" ++ tools.bash_record.description ++
     "\",\"strict\":false,\"parameters\":" ++ tools.bash_record.input_schema ++ "}";
-// A Session created with the product's default tools.
-const default_tools_json = bash_tool_json ++ ",{\"type\":\"web_search\",\"external_web_access\":true}";
 /// Version two's declaration of Bash inside the history, and its top-level
 /// tools for the default set: only the provider-run one.
 const declared_bash_json = "{\"type\":\"additional_tools\",\"role\":\"developer\",\"tools\":[" ++ bash_tool_json ++ "]}";

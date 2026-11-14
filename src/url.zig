@@ -87,6 +87,45 @@ pub fn parseHostPort(authority: []const u8, default_port: u16) UrlError!struct {
     return .{ host, port };
 }
 
+/// How a percent-decoded text reads `+`: as itself, or as a space (a form
+/// or query value).
+pub const Plus = enum { literal, space };
+
+/// `%XX` escapes in `text` decoded into `out`; null when an escape is
+/// malformed or the result does not fit. What the decoded bytes may hold is
+/// the caller's policy.
+pub fn percentDecode(text: []const u8, out: []u8, plus: Plus) ?[]u8 {
+    var len: usize = 0;
+    var index: usize = 0;
+    while (index < text.len) : (len += 1) {
+        if (len == out.len) return null;
+        var byte = text[index];
+        if (byte == '%') {
+            if (index + 3 > text.len) return null;
+            // Digit by digit: a number parser would also take a sign.
+            const high = std.fmt.charToDigit(text[index + 1], 16) catch return null;
+            const low = std.fmt.charToDigit(text[index + 2], 16) catch return null;
+            byte = high * 16 + low;
+            index += 3;
+        } else {
+            if (plus == .space and byte == '+') byte = ' ';
+            index += 1;
+        }
+        out[len] = byte;
+    }
+    return out[0..len];
+}
+
+test "percentDecode decodes escapes and reads plus as asked" {
+    var out: [8]u8 = undefined;
+    try std.testing.expectEqualStrings("a b+c", percentDecode("a%20b+c", &out, .literal).?);
+    try std.testing.expectEqualStrings("a b c", percentDecode("a%20b+c", &out, .space).?);
+    try std.testing.expectEqualStrings("", percentDecode("", &out, .literal).?);
+    try std.testing.expectEqualStrings("A\xff", percentDecode("%41%fF", &out, .literal).?);
+    for ([_][]const u8{ "%", "%2", "%4", "%zz", "%G0", "%+1", "%-0", "%0+", "123456789" }) |bad|
+        try std.testing.expectEqual(@as(?[]u8, null), percentDecode(bad, &out, .literal));
+}
+
 test "URLs: https anywhere, cleartext only to loopback literals" {
     const parsed = try parseUrl("https://chatgpt.com/backend-api/codex/responses");
     try std.testing.expectEqual(Scheme.https, parsed.scheme);

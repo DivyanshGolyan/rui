@@ -208,10 +208,10 @@ class Case:
         if source:
             (build / "revision").write_text("synthetic-source-revision-marker\n")
         destination = ["--store-hex", os.fsencode(self.store).hex()] if store_hex else ["--store", self.store]
-        provider = [] if "--provider-endpoint" in extra else ["--provider", "codex"]
+        provider = [] if any(str(value).startswith("providers.") or str(value).startswith("providers=") for value in extra) else ["--set", 'providers={"codex":{}}']
         process, ready = start_ready_process(
             [build / "bin/rui", "host", "serve", *destination,
-             "--active-capacity", "2", *provider, *extra], env=self.env)
+             "--set", 'execution.activeCapacity=2', *provider, *extra], env=self.env)
         self.hosts.append(process)
         self.ready = ready
         status = self.status()
@@ -499,7 +499,7 @@ def lifecycle_cases(root, binary, releases):
     with case(root, binary, releases, "relative-launch-path-not-restarted") as c:
         c.old_selection()
         relative_bash = os.path.relpath("/bin/bash", pathlib.Path.cwd())
-        old_host, previous = c.start_host(extra=("--bash-path", relative_bash))
+        old_host, previous = c.start_host(extra=("--set", "tools.bash.path=" + str(relative_bash)))
         output = c.finish_upgrade(c.spawn_upgrade())
         assert "Installed Rui" in output and "left running: launch configuration cannot be safely reconstructed" in output, output
         assert old_host.poll() is None and c.status()["instance"] == previous["instance"]
@@ -921,7 +921,9 @@ def tool_custody_cases(root, binary, releases, operation):
             thread.start()
             endpoints = {endpoint: thread}
             try:
-                extra = ("--provider-endpoint", f"http://127.0.0.1:{endpoint.server_port}/responses")
+                extra = ("--set", "providers={}",
+                    "--set", "providers.codex.endpoint=" + str(f"http://127.0.0.1:{endpoint.server_port}/responses"),
+                    "--set", "providers.codex.unauthenticated=true")
                 old_first, previous_first = first.start_host("retained-a", extra=extra)
                 old_second, previous_second = second.start_host("retained-b", extra=extra)
                 # Take ordering from readiness socket paths, never duplicate the

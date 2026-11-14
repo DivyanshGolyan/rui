@@ -31,6 +31,11 @@ const test_poll = @import("test_poll");
 const bash_service = @import("testing/bash_service.zig");
 const environment = @import("environment.zig");
 const SessionEnvironments = @import("SessionEnvironments.zig");
+const child_environment = @import("child_environment.zig");
+const find_tools = @import("find_tools.zig");
+const h2 = @import("h2");
+const read_transcript = @import("read_transcript.zig");
+const session_skills = @import("session_skills.zig");
 const Host = server_host.Host;
 const AuthWorker = server_host.AuthWorker;
 const pages = @import("os/pages.zig");
@@ -952,8 +957,8 @@ noinline fn startListing(host: *Host, reactor: *provider.Reactor, kind: provider
     var headers: providers.Headers = .{};
     defer headers.deinit();
     var source: ?store_module.ModelCatalogSource = null;
-    var fields: [1]@import("h2").Field = undefined;
-    const request_fields: []const @import("h2").Field = if (listingCredential(host, kind)) |credential| fields: {
+    var fields: [1]h2.Field = undefined;
+    const request_fields: []const h2.Field = if (listingCredential(host, kind)) |credential| fields: {
         // The credential checks the list's own address, where it goes.
         try credential.fields(work.url.?, host.providers.ca_file, lease, &reactor.credentials, &headers);
         work.credential = headers.takeCredential();
@@ -961,7 +966,7 @@ noinline fn startListing(host: *Host, reactor: *provider.Reactor, kind: provider
     } else fields: {
         source = try host.store.readModelCatalogSource();
         if (source) |*saved| if (saved.etag) |*etag| {
-            fields[0] = @import("h2").Field{ .name = "if-none-match", .value = etag.slice() };
+            fields[0] = h2.Field{ .name = "if-none-match", .value = etag.slice() };
             break :fields &fields;
         };
         break :fields &.{};
@@ -1353,7 +1358,7 @@ noinline fn runOwedEnding(host: *Host, owed: *const store_module.OwedEnding) exe
     // A done Turn's answer is the Message; its `/name` words bind the
     // parent's skills as any Message's do. Other endings are Rui's line.
     const captured: ?store_module.CapturedMessageSkills = if (owed.answer != null and !owed.quiet)
-        @import("session_skills.zig").bindTo(arena_state.allocator(), host.io, host.store, owed.parent.slice(), .{ .stored = .{ .store = host.store, .reference = owed.answer.? } }) catch |err| switch (err) {
+        session_skills.bindTo(arena_state.allocator(), host.io, host.store, owed.parent.slice(), .{ .stored = .{ .store = host.store, .reference = owed.answer.? } }) catch |err| switch (err) {
             error.OutOfMemory => return .retry_later,
             else => {
                 fenceDispatch(host, "child ending", err);
@@ -1413,7 +1418,7 @@ noinline fn runMessageAgent(host: *Host, input: *const store_module.CoreActionIn
     };
     var arena_state: std.heap.ArenaAllocator = .init(host.allocator);
     defer arena_state.deinit();
-    const captured = @import("session_skills.zig").bindTo(arena_state.allocator(), host.io, host.store, arguments.id.slice(), .{ .bytes = text.list.items }) catch |err| switch (err) {
+    const captured = session_skills.bindTo(arena_state.allocator(), host.io, host.store, arguments.id.slice(), .{ .bytes = text.list.items }) catch |err| switch (err) {
         error.OutOfMemory => return .retry_later,
         else => {
             fenceDispatch(host, "core tool command", err);
@@ -1435,7 +1440,7 @@ noinline fn runMessageAgent(host: *Host, input: *const store_module.CoreActionIn
 noinline fn runFindTools(host: *Host, input: *const store_module.CoreActionInput) execution_turn.Admission {
     var arena: std.heap.ArenaAllocator = .init(host.allocator);
     defer arena.deinit();
-    @import("find_tools.zig").run(host.store, arena.allocator(), input, host.hooks.storeFaults(.action_result)) catch |err| switch (err) {
+    find_tools.run(host.store, arena.allocator(), input, host.hooks.storeFaults(.action_result)) catch |err| switch (err) {
         error.OutOfMemory => return .retry_later,
         // A stop may resolve the call before its command starts.
         error.StaleActionAttemptBinding => return .admitted,
@@ -1452,7 +1457,7 @@ noinline fn runFindTools(host: *Host, input: *const store_module.CoreActionInput
 noinline fn runReadTranscript(host: *Host, input: *const store_module.CoreActionInput) execution_turn.Admission {
     var arena: std.heap.ArenaAllocator = .init(host.allocator);
     defer arena.deinit();
-    @import("read_transcript.zig").run(host.store, arena.allocator(), input, host.hooks.storeFaults(.action_result)) catch |err| switch (err) {
+    read_transcript.run(host.store, arena.allocator(), input, host.hooks.storeFaults(.action_result)) catch |err| switch (err) {
         error.OutOfMemory => return .retry_later,
         // A stop resolved the call while the public feed was being read.
         error.StaleActionAttemptBinding => return .admitted,
@@ -1482,7 +1487,7 @@ noinline fn runSkill(host: *Host, input: *const store_module.CoreActionInput) ex
     const captured: store_module.CapturedSkill = if (check == .rejected)
         .{ .failed = .{ .code = .skills_unavailable, .bytes = check.rejected } }
     else
-        @import("session_skills.zig").capture(arena, host.allocator, host.io, host.store, input.session.slice(), &request, host.bash_facts.home) catch |err| {
+        session_skills.capture(arena, host.allocator, host.io, host.store, input.session.slice(), &request, host.bash_facts.home) catch |err| {
             if (err != error.OutOfMemory) fenceDispatch(host, "skill capture", err);
             return .retry_later;
         };
@@ -1529,12 +1534,12 @@ noinline fn runStartAgent(host: *Host, input: *const store_module.CoreActionInpu
             return .admitted;
         },
     }
-    var inheritance = @import("child_environment.zig").Inheritance.init(host.environments, input.session.slice(), host.allocator, arena) catch return .retry_later;
+    var inheritance = child_environment.Inheritance.init(host.environments, input.session.slice(), host.allocator, arena) catch return .retry_later;
     defer inheritance.deinit(host.allocator);
     const committed = inheritance.messageCallback();
     const parent_skills = host.store.readSkills(arena, input.session.slice()) catch return .retry_later;
     // The task binds against the tool set the new Session starts with.
-    const prepared = @import("session_skills.zig").prepareCreation(arena, host.allocator, host.io, parent_skills.workspace.slice(), host.bash_facts.home, .{ .bytes = start.task }) catch return .retry_later;
+    const prepared = session_skills.prepareCreation(arena, host.allocator, host.io, parent_skills.workspace.slice(), host.bash_facts.home, .{ .bytes = start.task }) catch return .retry_later;
     _ = host.store.startAgentWithInitialSkills(input.binding, input.session.slice(), start.task, start.attached, &start.configuration, committed, prepared.initial, if (prepared.captured) |*value| value else null, host.hooks.storeFaults(.action_result)) catch |err| switch (err) {
         // A stop resolved the call first.
         error.StaleActionAttemptBinding => return .admitted,

@@ -344,6 +344,11 @@ pub fn Blob(comptime capacity: usize) type {
     };
 }
 
+/// Whether `T` is a `Blob`: bytes up to its capacity.
+pub fn isBlob(comptime T: type) bool {
+    return @typeInfo(T) == .@"struct" and @hasDecl(T, "blob_capacity") and T == Blob(T.blob_capacity);
+}
+
 /// A stored integer that is never 0 or negative: an id or a position.
 pub const Positive = enum(u64) {
     _,
@@ -355,6 +360,11 @@ pub const Positive = enum(u64) {
 
     pub fn get(self: Positive) u64 {
         return @backingInt(self);
+    }
+
+    /// A nullable column's value, null when the row holds none.
+    pub fn optional(value: ?Positive) ?u64 {
+        return if (value) |positive| positive.get() else null;
     }
 };
 

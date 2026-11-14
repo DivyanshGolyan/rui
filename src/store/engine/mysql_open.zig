@@ -7,6 +7,7 @@ const rows = @import("../mysql_row.zig");
 const literal = @import("../mysql_literal.zig");
 const schema = @import("../schema.zig");
 const store_path = @import("../../store_path.zig");
+const validStoreId = @import("../../store_id.zig").valid;
 const Bounded = @import("../../bounded.zig").Bounded;
 const policy = @import("mysql_refusal.zig");
 
@@ -105,7 +106,7 @@ pub fn open(conn: *wire.Connection, io: std.Io, options: Options, selector: []co
             // The canonical selector is checked independently of the durable id.
             .store_selector => if (!std.mem.eql(u8, value, selector)) return error.WrongStoreIdentity,
             .store_id => {
-                if (!schema.isStoreId(value)) return error.WrongStoreIdentity;
+                if (!validStoreId(value)) return error.WrongStoreIdentity;
                 store_id = value[0..store_id.len].*;
             },
         }

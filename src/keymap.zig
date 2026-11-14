@@ -1,8 +1,9 @@
-//! The keys a screen may bind, and each screen's one table of what they do
-//! there. Value-only, so the pure overview core names them without the line
-//! editor: the editor turns terminal input into a `Key` and hands back the
-//! screen's own action for every key it has no editing use for.
+//! The keys a screen may bind, each screen's one table of what they do
+//! there, and the values a terminal key is classified into
+//! (`keypress.zig` classifies). Nothing here edits: the draft editor turns
+//! a `Key` it has no editing use for into the screen's own action.
 const std = @import("std");
+const unicode = @import("terminal_unicode");
 
 /// A key that is a key, not text. It names the key, never a meaning: each
 /// screen's `Keymap` says what it does there. Adding one fails the build at
@@ -105,6 +106,42 @@ pub fn Outcome(comptime A: type) type {
             };
         }
     };
+}
+
+/// Whether `point` may be text: tab always, a line feed only where a draft
+/// takes lines, and no other C0 or C1 control or format character except
+/// the zero-width joiner emoji sequences need. A terminal key code past
+/// Unicode, such as the one for a several-scalar cluster, has no category.
+pub fn textScalar(point: u21, multiline: bool) bool {
+    return !((point < 32 and !(point == '\t' or (multiline and point == '\n'))) or
+        (point >= 0x7f and point < 0xa0) or
+        (point <= 0x10ffff and unicode.generalCategory(point) == .other_format and point != 0x200d));
+}
+
+/// An edit the draft makes with a typed key.
+pub const Edit = enum { tab, newline, left, right, line_start, line_end, delete_next, delete_previous, delete_to_line_start, delete_to_line_end, delete_word, delete_word_part, word_left, word_right };
+
+/// What one typed (not pasted) key is, before the draft or a choice gives it
+/// a use: the one classification both share.
+pub const Press = union(enum) {
+    /// A named screen key.
+    key: Key,
+    enter,
+    edit: Edit,
+    /// An unbound Ctrl, Alt, Super, Hyper or Meta chord or C0 control:
+    /// dropped whole and reported.
+    chord,
+    /// An invalid scalar: never text.
+    control,
+    text: []const u8,
+    none,
+};
+
+test "text excludes controls and format characters but keeps the joiner, and a key code past Unicode" {
+    for ([_]u21{ 0x00ad, 0x200b, 0x2060, 0xfeff, 0x0600, 0x01, 0x85 }) |point| try std.testing.expect(!textScalar(point, true));
+    for ([_]u21{ 0x200d, '\t', 'a', 0x00e9, 0x1f9d1, 0x10ffff + 2 }) |point| try std.testing.expect(textScalar(point, false));
+    try std.testing.expect(textScalar('\n', true));
+    try std.testing.expect(!textScalar('\n', false));
 }
 
 /// Every key as itself, for tests of an editor without a screen.

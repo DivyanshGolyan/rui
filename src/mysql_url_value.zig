@@ -2,6 +2,7 @@
 const std = @import("std");
 const Bounded = @import("bounded.zig").Bounded;
 const mysql = @import("store/wire/mysql.zig");
+const url = @import("url");
 
 /// Caller-owned parsed fields. Slices borrow this storage until parse or wipe.
 pub fn ValueWith(comptime ca_file_bytes: usize) type {
@@ -83,23 +84,13 @@ pub fn parseInto(self: anytype, text: []const u8) error{InvalidMysqlUrl}!void {
     }
 }
 
+/// `text` percent-decoded into `out`. MySQL's rules on top of the URL
+/// decoding: no NUL, and outside OS paths no other control and only UTF-8.
 fn decode(out: anytype, text: []const u8, comptime os_path: bool) error{InvalidMysqlUrl}!void {
-    var at: usize = 0;
-    while (at < text.len) {
-        var byte = text[at];
-        if (byte == '%') {
-            if (text.len - at < 3) return error.InvalidMysqlUrl;
-            const hi = std.fmt.charToDigit(text[at + 1], 16) catch return error.InvalidMysqlUrl;
-            const lo = std.fmt.charToDigit(text[at + 2], 16) catch return error.InvalidMysqlUrl;
-            byte = @as(u8, hi) * 16 + lo;
-            at += 2;
-        }
-        if (byte == 0 or (!os_path and (byte < 0x20 or byte == 0x7f)) or out.len == out.bytes.len) return error.InvalidMysqlUrl;
-        out.bytes[out.len] = byte;
-        out.len += 1;
-        at += 1;
-    }
-    if (!os_path and !std.unicode.utf8ValidateSlice(out.slice())) return error.InvalidMysqlUrl;
+    const decoded = url.percentDecode(text, &out.bytes, .literal) orelse return error.InvalidMysqlUrl;
+    for (decoded) |byte| if (byte == 0 or (!os_path and (byte < 0x20 or byte == 0x7f))) return error.InvalidMysqlUrl;
+    if (!os_path and !std.unicode.utf8ValidateSlice(decoded)) return error.InvalidMysqlUrl;
+    out.len = decoded.len;
 }
 
 test "mysql URL value parses TLS and socket targets and replaces prior fields" {
@@ -123,10 +114,11 @@ test "mysql URL value rejects malformed values and wipes partial secrets" {
     const Value = ValueWith(@import("host_settings.zig").max_ca_file_bytes);
     var value: Value = .{};
     for ([_][]const u8{
-        "",                        "https://u:p@h/d",                 "mysql://u:p@h",                 "mysql://:p@h/d",
-        "mysql://u:p@h:0/d",       "mysql://u:p@h:65536/d",           "mysql://u:p@h:+1/d",            "mysql://u:p@[::1/d",
-        "mysql://u:p@h/d%2Fother", "mysql://u:p@h/d#x",               "mysql://u:%00@h/d",             "mysql://u:%ff@h/d",
-        "mysql://u:%gg@h/d",       "mysql://u:p@h/d?ssl-ca=relative", "mysql://u:p@h/d?ssl-ca=/a&x=y", "mysql://u:p@/tmp/mysql.sock/d?ssl-ca=/a",
+        "",                                "https://u:p@h/d",               "mysql://u:p@h",                           "mysql://:p@h/d",
+        "mysql://u:p@h:0/d",               "mysql://u:p@h:65536/d",         "mysql://u:p@h:+1/d",                      "mysql://u:p@[::1/d",
+        "mysql://u:p@h/d%2Fother",         "mysql://u:p@h/d#x",             "mysql://u:%00@h/d",                       "mysql://u:%ff@h/d",
+        "mysql://u:%gg@h/d",               "mysql://u:%+1@h/d",             "mysql://u:%-0@h/d",                       "mysql://u:p%4@h/d",
+        "mysql://u:p@h/d?ssl-ca=relative", "mysql://u:p@h/d?ssl-ca=/a&x=y", "mysql://u:p@/tmp/mysql.sock/d?ssl-ca=/a",
     }) |text| {
         try std.testing.expectError(error.InvalidMysqlUrl, value.parse(text));
         for (value.password.bytes) |byte| try std.testing.expectEqual(@as(u8, 0), byte);

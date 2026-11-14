@@ -3,6 +3,7 @@
 //! read steps, then the page's tail. The Host writes the reply.
 
 const std = @import("std");
+const utf8_validation = @import("../../utf8_validation.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
 const change_ring = @import("../../change_ring.zig");
 const model_capability = @import("../../model_capability.zig");
@@ -67,8 +68,6 @@ pub const list_failures = .{
     .{ workspace_key, error.SessionReadFailed },
     .{ list_row, error.SessionReadFailed },
     .{ list_row_bare, error.SessionReadFailed },
-    .{ archived_exists, error.SessionReadFailed },
-    .{ workspace_archived_exists, error.SessionReadFailed },
 } ++ report_domain.report_failures;
 
 /// Ends a round of this file's reads, naming a failed step by
@@ -123,36 +122,6 @@ const workspace_key = rsql.Read(.{
     .Row = struct { workspace_key: rsql.Positive },
     .cardinality = .optional,
 });
-
-const Found = struct { found: bool };
-
-/// Some Session is archived, whatever the request's archive filter: the
-/// overview offers the archived view only then. The walk visits
-/// `session_archive` rows alone, and stops at the first archived Session.
-const archived_exists = rsql.Read(.{
-    .sql = "SELECT 1 AS found FROM session_archive ar JOIN session ON session.session_ref=ar.session_ref " ++
-        "WHERE ar.command_key IS NOT NULL AND (" ++ command_domain.archive_state_sql ++ ")='archived' LIMIT 1",
-    .Args = struct {},
-    .Row = Found,
-    .cardinality = .optional,
-});
-
-/// `archived_exists` within one Workspace.
-const workspace_archived_exists = rsql.Read(.{
-    .sql = "SELECT 1 AS found FROM session_archive ar JOIN session ON session.session_ref=ar.session_ref " ++
-        "WHERE ar.command_key IS NOT NULL AND session.workspace_digest=?1 AND session.workspace=?2 AND (" ++ command_domain.archive_state_sql ++ ")='archived' LIMIT 1",
-    .Args = struct { digest: [32]u8, workspace: []const u8 },
-    .Row = Found,
-    .cardinality = .optional,
-});
-
-/// Queues reading whether the request's scope holds an archived Session.
-fn readArchived(a: *ReadAccess, request: *const session_list.ListSessions, destination: *archived_exists.Result) void {
-    if (request.workspace) |*workspace|
-        a.read(workspace_archived_exists, .{ .digest = store_core.workspaceDigest(workspace.slice()), .workspace = workspace.slice() }, destination)
-    else
-        a.read(archived_exists, .{}, destination);
-}
 
 /// A page of a full traversal: its Sessions' references, up to a page,
 /// and whether a Session follows them (`list_limit`).
@@ -213,8 +182,6 @@ fn readAllSessions(a: *ReadAccess, request: *const session_list.ListSessions, ge
     if (request.after == 0) a.readEach(list_ceiling, .{}, 1, &maximum);
     const bound: u64 = if (request.after == 0) std.math.maxInt(i64) else request.ceiling;
     var page: ListPage = .{};
-    var archived: archived_exists.Result = undefined;
-    readArchived(a, request, &archived);
     if (request.workspace) |*workspace|
         a.readEach(workspace_list_page, .{ .after = request.after, .ceiling = bound, .digest = store_core.workspaceDigest(workspace.slice()), .workspace = workspace.slice(), .archive = request.archive }, list_limit, &page)
     else
@@ -228,7 +195,7 @@ fn readAllSessions(a: *ReadAccess, request: *const session_list.ListSessions, ge
     try visitor.tail(if (page.more)
         .{ .full = .{ .since = since, .after = page.last, .ceiling = ceiling } }
     else
-        .{ .last = .{ .delta = .full, .since = since, .archived = archived != null } });
+        .{ .last = .{ .delta = .full, .since = since } });
 }
 
 /// The Sessions in scope that the hint says changed in (since, through],
@@ -240,13 +207,12 @@ fn readAllSessions(a: *ReadAccess, request: *const session_list.ListSessions, ge
 /// a fresh full traversal, not reuse of the previous scope's token.
 fn readChangedSessions(a: *ReadAccess, request: *const session_list.ListSessions, since: u64, through: u64, visitor: anytype) !void {
     var workspace: ?u64 = null;
-    var archived: archived_exists.Result = undefined;
-    readArchived(a, request, &archived);
-    var key: workspace_key.Result = null;
-    if (request.workspace) |*scope|
+    if (request.workspace) |*scope| {
+        var key: workspace_key.Result = undefined;
         a.read(workspace_key, .{ .digest = store_core.workspaceDigest(scope.slice()), .workspace = scope.slice() }, &key);
-    try store_access.runAs(a, error.SessionReadFailed);
-    if (request.workspace != null) workspace = if (key) |row| row.workspace_key.get() else 0;
+        try store_access.runAs(a, error.SessionReadFailed);
+        workspace = if (key) |row| row.workspace_key.get() else 0;
+    }
     const self = a.store;
     const after: ?*const change_ring.Id = if (request.changed) |*changed| &changed.after_reference else null;
     var references: [session_list.session_list_page_size + 1]change_ring.Id = undefined;
@@ -258,7 +224,7 @@ fn readChangedSessions(a: *ReadAccess, request: *const session_list.ListSessions
     try visitor.tail(if (changed.len > count)
         .{ .changed = .{ .since = next, .through = through, .after_reference = &changed[count - 1] } }
     else
-        .{ .last = .{ .delta = .changed, .since = next, .archived = archived != null } });
+        .{ .last = .{ .delta = .changed, .since = next } });
 }
 
 const settings_columns = "session.session_ref,session.parent_ref,session.workspace,session.provider,session.model," ++ tool_set.namesSql("session.tool_set_id") ++ " AS tools,session.permission_mode,session.label,session.created_at,session.revision,session.next_position," ++
@@ -410,9 +376,7 @@ fn RowsRead(comptime Visitor: type) type {
     };
 }
 
-fn ErrorOf(comptime function: anytype) type {
-    return @typeInfo(@typeInfo(@TypeOf(function)).@"fn".return_type.?).error_union.error_set;
-}
+const ErrorOf = @import("../../error_set.zig").Of;
 
 /// The plain values of the shown row `index`, checked in main's order.
 /// They borrow `row`, `sorted` and `last_text`.
@@ -457,13 +421,7 @@ fn lastLine(row: anytype, text: *Bounded(session_list.max_last_line_bytes)) ?ses
     if (row.last_answer) |*prefix| {
         // The bounded byte prefix can end inside a UTF-8 code point. Drop
         // only that incomplete suffix before choosing a non-blank line.
-        var bytes = prefix.slice();
-        if (bytes.len != 0) {
-            var start = bytes.len - 1;
-            while (start > 0 and bytes[start] & 0xc0 == 0x80) start -= 1;
-            const width = std.unicode.utf8ByteSequenceLength(bytes[start]) catch 1;
-            if (start + width > bytes.len) bytes = bytes[0..start];
-        }
+        const bytes = utf8_validation.completePrefix(prefix.slice());
         var lines = std.mem.splitAny(u8, bytes, "\r\n");
         while (lines.next()) |line| {
             const trimmed = session_line.firstLine(line);

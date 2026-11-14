@@ -50,6 +50,13 @@ test "key validation checks every byte against visible ASCII" {
     }
 }
 
+/// Zeroes `bytes`, then returns them to `allocator` through rawFree:
+/// Allocator.free would write debug poison over the wipe first.
+pub fn wipeAndFree(allocator: std.mem.Allocator, bytes: []u8, alignment: std.mem.Alignment, ret: usize) void {
+    std.crypto.secureZero(u8, bytes);
+    allocator.rawFree(bytes, alignment, ret);
+}
+
 /// Wipes every backing allocation before freeing; temporary arenas never move.
 pub const WipingAllocator = struct {
     backing: std.mem.Allocator,
@@ -63,8 +70,7 @@ pub const WipingAllocator = struct {
     }
     fn free(context: *anyopaque, bytes: []u8, alignment: std.mem.Alignment, ret: usize) void {
         const self: *WipingAllocator = @ptrCast(@alignCast(context));
-        std.crypto.secureZero(u8, bytes);
-        self.backing.rawFree(bytes, alignment, ret);
+        wipeAndFree(self.backing, bytes, alignment, ret);
     }
 };
 

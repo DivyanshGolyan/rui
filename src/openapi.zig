@@ -218,7 +218,6 @@ pub const routes = [_]Route{
             protocol.session_list_reply.head ++ .{ListOf(protocol.SessionRow)} ++ protocol.session_list_reply.full_tail,
             protocol.session_list_reply.head ++ .{ListOf(protocol.SessionRow)} ++ protocol.session_list_reply.changed_tail,
             protocol.session_list_reply.head ++ .{ListOf(protocol.SessionRow)} ++ protocol.session_list_reply.last_tail,
-            protocol.session_list_reply.head ++ .{ListOf(protocol.SessionRow)} ++ protocol.session_list_reply.unchanged_tail,
         }),
     },
     .{
@@ -1206,10 +1205,6 @@ fn camel(arena: std.mem.Allocator, snake: []const u8) ![]const u8 {
 /// Writes `shape` with an example value in each hole: the hole's default,
 /// or the JSON `examples` gives for its index, as `.{ index, json }` pairs.
 /// A third entry overrides the example when optional members are absent.
-pub fn writeExample(out: *std.Io.Writer, comptime shape: anytype, comptime examples: anytype) !void {
-    return writeExampleWith(out, shape, examples, true);
-}
-
 fn writeExampleWith(out: *std.Io.Writer, comptime shape: anytype, comptime examples: anytype, optional: bool) anyerror!void {
     return writeExampleFrom(out, shape, examples, optional, 0);
 }
@@ -1738,10 +1733,7 @@ test "replies the Host renders conform to their schemas" {
     const row: protocol.SessionRow = .{ .tools = try .of(&.{"bash"}), .label = .{} };
     try protocol.writeShape(&out.writer, protocol.session_list_reply.head, .{});
     try row.writeJson(&out.writer);
-    try protocol.writeShape(&out.writer, protocol.session_list_reply.last_tail, .{ protocol.ListDelta.full, "x", true });
-    try Case.check(schemas, "ListSessionsReply", out.written(), a);
-    out.clearRetainingCapacity();
-    try protocol.writeShape(&out.writer, protocol.session_list_reply.head ++ protocol.session_list_reply.unchanged_tail, .{ protocol.ListDelta.not_modified, "x" });
+    try protocol.writeShape(&out.writer, protocol.session_list_reply.last_tail, .{ protocol.ListDelta.full, "x" });
     try Case.check(schemas, "ListSessionsReply", out.written(), a);
 
     // These are the Store's real streaming reports, not schema examples:

@@ -1,6 +1,7 @@
 //! Owns one call's buffers and deadline until its single resolution. The Host
 //! supplies time and readiness; this owner never waits or retries.
 const std = @import("std");
+const utf8_validation = @import("../utf8_validation.zig");
 const Call = @import("Call.zig");
 const post = @import("post.zig");
 const result_text = @import("result_text.zig");
@@ -445,8 +446,7 @@ test "Running retains only omitted rendered MCP answers and preserves the excerp
                 try std.testing.expectEqual(@as(usize, 0), queue.occupied());
                 try std.testing.expectError(error.FileNotFound, tmp.dir.openFile(std.testing.io, "mcp-output-17-1.tmp", .{}));
             } else {
-                var kept: usize = result_text.excerpt_bytes;
-                while (full[kept] & 0xc0 == 0x80) kept -= 1;
+                const kept = utf8_validation.scalarStart(full, result_text.excerpt_bytes);
                 var expected: std.Io.Writer.Allocating = .init(gpa);
                 defer expected.deinit();
                 try expected.writer.print("{s}\n[{d} more bytes not shown]", .{ full[0..kept], full.len - kept });

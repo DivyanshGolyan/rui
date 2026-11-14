@@ -1688,7 +1688,7 @@ def main():
             ("stopped-pipes-allow", "stopped-pipes-stop")), milestones.records
         assert len(milestones.records) == 3, milestones.records
         milestones = None
-        host = fixture.start_host(store, endpoint_url, "--bash-timeout-ms", "30000")
+        host = fixture.start_host(store, endpoint_url, "--set", 'tools.bash.timeoutMs=30000')
         session = configure(state, store, "timeout-config")
         fixture.message(state, store, "timeout-message", session, "execute")
         timeout_action = fixture.wait_for(

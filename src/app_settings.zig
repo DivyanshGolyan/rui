@@ -779,7 +779,7 @@ test "App settings Model shares the provider list at full width and preserves ma
     try page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = 'f', .text = "future" } });
     try page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = 'z', .text = "zzzz" } });
     try std.testing.expect(page.model_choice.no_match);
-    try std.testing.expectEqualStrings("future", page.model_choice.editor.buffer[0..page.model_choice.editor.length]);
+    try std.testing.expectEqualStrings("future", page.model_choice.editor.text());
     for ([_]u16{ 99, 46 }) |width| {
         const drawn = try page.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
         var screen = try vaxis.Screen.init(arena.allocator(), .{ .cols = width, .rows = 20, .x_pixel = 0, .y_pixel = 0 });
