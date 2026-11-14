@@ -75,9 +75,9 @@ pub const CommandObservation = struct {
         message: ?MessageObservation,
         session_stop: ?SessionStopObservation,
         session_archive: ?mutation_answer.SessionArchiveObservation,
-        session_pin: ?mutation_answer.SessionPinObservation,
         model_interruption: ModelInterruptionTarget,
         permission_decision: struct { action_id: u64, decision: mutation_answer.PermissionDecision },
+        session_pin: ?mutation_answer.SessionPinObservation,
     } = .{ .configure = .{} },
 
     /// The Host's one ordered Message-state rule. Clients consume this value.
