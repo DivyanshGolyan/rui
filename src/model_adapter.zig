@@ -5527,13 +5527,11 @@ test "MCP projected offers preserve request prefixes and memo rebuilds" {
     }
 }
 
-// The durable typed-part cursor belongs to the storage slice. These fixtures
-// supply neutral items directly to the production piece/reader/writer path.
 const image_test_png = @embedFile("codecs/fixtures/image-input/pixel.png");
 const image_test_base64 = @embedFile("codecs/fixtures/image-input/pixel.base64");
 const image_test_part = "{\"type\":\"input_image\",\"image_url\":\"data:image/png;base64," ++ image_test_base64 ++ "\",\"detail\":\"auto\"}";
 
-fn openRawImagePreparation(
+fn openRawImagePreparationWithDigestRecheck(
     setup: *PreparationTestSetup,
     binding: store.AttemptBinding,
     preparation: *Preparation,
@@ -5551,8 +5549,6 @@ fn openRawImagePreparation(
         position = entry.position;
         if (entry.kind != .user) continue;
         var content = entry.content.?;
-        // Exercise ordered digest verification even when the initial page
-        // already verified and retained this small fixture's bytes.
         content.verified = false;
         return content;
     }
@@ -5606,7 +5602,7 @@ test "raw image preparation streams canonical PNG into user and tool arrays" {
         for ([_]usize{ 1, 2, 3, 5, 17, preparation_byte_allowance }) |allowance| {
             var used: std.atomic.Value(u64) = .init(0);
             var preparation: Preparation = undefined;
-            const content = try openRawImagePreparation(&setup, binding, &preparation, &used, expected.len);
+            const content = try openRawImagePreparationWithDigestRecheck(&setup, binding, &preparation, &used, expected.len);
             defer if (preparation.state.active) preparation.cancel();
             preparation.settings.codec = codec;
             preparation.carry = codecs.initialCarry(codec, null);
@@ -5654,7 +5650,7 @@ test "raw image preparation cancels every read and base64 output boundary" {
     for (0..work + 1) |cut| {
         var used: std.atomic.Value(u64) = .init(0);
         var preparation: Preparation = undefined;
-        const content = try openRawImagePreparation(&setup, binding, &preparation, &used, image_test_part.len);
+        const content = try openRawImagePreparationWithDigestRecheck(&setup, binding, &preparation, &used, image_test_part.len);
         defer if (preparation.state.active) preparation.cancel();
         preparation.carry = codecs.initialCarry(.@"openai-responses/1", null);
         preparation.encoder = codecs.resumeFrom(preparation.carry);
@@ -5691,7 +5687,7 @@ test "raw image preparation releases capacity and write failures without sealing
     for ([_]enum { capacity, write }{ .capacity, .write }) |fault| {
         var used: std.atomic.Value(u64) = .init(0);
         var preparation: Preparation = undefined;
-        const content = try openRawImagePreparation(&setup, binding, &preparation, &used, if (fault == .capacity) image_test_part.len - 1 else image_test_part.len);
+        const content = try openRawImagePreparationWithDigestRecheck(&setup, binding, &preparation, &used, if (fault == .capacity) image_test_part.len - 1 else image_test_part.len);
         defer if (preparation.state.active) preparation.cancel();
         preparation.carry = codecs.initialCarry(.@"openai-responses/1", null);
         preparation.encoder = codecs.resumeFrom(preparation.carry);
@@ -5721,7 +5717,7 @@ test "raw image preparation rejects a wrong canonical digest before sealing" {
     const binding = try admitted.permit.consume();
     var used: std.atomic.Value(u64) = .init(0);
     var preparation: Preparation = undefined;
-    var content = try openRawImagePreparation(&setup, binding, &preparation, &used, image_test_part.len);
+    var content = try openRawImagePreparationWithDigestRecheck(&setup, binding, &preparation, &used, image_test_part.len);
     defer if (preparation.state.active) preparation.cancel();
     content.digest[0] ^= 1;
     preparation.carry = codecs.initialCarry(.@"openai-responses/1", null);

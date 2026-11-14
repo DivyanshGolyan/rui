@@ -1,4 +1,3 @@
-"""Independent raw image and typed-wire fixture integrity checks."""
 import base64
 import json
 from pathlib import Path
