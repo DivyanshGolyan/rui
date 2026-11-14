@@ -109,7 +109,7 @@ pub const Settings = struct {
         try self.hover.handleEvent(ctx, input);
         if (input != .mouse) return;
         const mouse = input.mouse;
-        if (mouse.button != .left or mouse.type != .press or mouse.row != 1 or self.size.height < 2 or mouse.col < 0 or mouse.col >= self.size.width) return;
+        if (mouse.button != .left or mouse.mods.alt or mouse.type != .press or mouse.row != 1 or self.size.height < 2 or mouse.col < 0 or mouse.col >= self.size.width) return;
         try self.on_click(self.userdata, ctx, .settings);
         ctx.consumeAndRedraw();
     }
@@ -251,4 +251,31 @@ test "overview Settings memory gets the columns between the label and the versio
         } else try std.testing.expect(std.mem.indexOf(u8, text, "rui ") == null);
         if (case.expected.len == 9) try std.testing.expect(std.mem.indexOf(u8, text, "tools ") == null);
     }
+}
+
+test "Session pin alternate gestures never activate New Session or Settings" {
+    var state: overview_view.State = undefined;
+    try state.init(std.testing.allocator, .{ .cwd = "/w", .home = "/h" });
+    defer state.deinit();
+    var clicks: Clicks = .{};
+    var new_session: NewSession = .{ .state = &state, .userdata = &clicks, .on_click = Clicks.take };
+    var settings: Settings = .{ .selected = false, .caps = .{}, .userdata = &clicks, .on_click = Clicks.take };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 2 }, .cell_size = .{} };
+    _ = try new_session.widget().draw(draw_ctx);
+    _ = try settings.widget().draw(draw_ctx);
+    var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    defer events.cmds.deinit(std.testing.allocator);
+    for ([_]vaxis.Mouse{
+        .{ .col = 3, .row = 0, .button = .right, .type = .press, .mods = .{} },
+        .{ .col = 3, .row = 0, .button = .left, .type = .press, .mods = .{ .alt = true } },
+    }) |mouse| {
+        try new_session.widget().handleEvent(&events, .{ .mouse = mouse });
+        var second = mouse;
+        second.row = 1;
+        try settings.widget().handleEvent(&events, .{ .mouse = second });
+        try std.testing.expectEqual(null, clicks.got);
+    }
+    try std.testing.expectEqual(@as(usize, 0), events.cmds.items.len);
 }

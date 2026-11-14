@@ -11,6 +11,7 @@ pub const Row = struct {
     /// At least one line. Borrowed until rowFn returns; copied into the frame arena.
     lines: []const Line,
     target: ?u32 = null,
+    alternate_target: ?u32 = null,
     /// Column-specific actions override the whole-row target.
     regions: []const Region = &.{},
 };
@@ -48,7 +49,7 @@ pub const Press = struct {
     userdata: *anyopaque,
     pressed: *const fn (*anyopaque, *vxfw.EventContext, u32) anyerror!void,
 };
-pub const Span = struct { row: i17, height: u16, target: ?u32, regions: []const Region = &.{} };
+pub const Span = struct { row: i17, height: u16, target: ?u32, alternate_target: ?u32 = null, regions: []const Region = &.{} };
 pub const Range = struct { first: u32 = 0, end: u32 = 0 };
 
 rows: Rows = .none,
@@ -82,13 +83,14 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
     // Navigation belongs to the caller, never to ListView.
     if (input != .mouse) return;
     const mouse = input.mouse;
-    if (mouse.button == .left and mouse.type == .press) {
+    if ((mouse.button == .left or mouse.button == .right) and mouse.type == .press) {
         const press = self.on_press orelse return;
         const size = self.last_size orelse return;
         if (mouse.col < 0 or mouse.col >= size.width) return;
         for (self.shown_at) |span| {
             if (mouse.row >= span.row and mouse.row < span.row + span.height) {
-                const target = for (span.regions) |region| {
+                const alternate = mouse.button == .right or mouse.mods.alt;
+                const target = if (alternate) span.alternate_target orelse return else for (span.regions) |region| {
                     if (mouse.col >= region.start and mouse.col < region.end) break region.target;
                 } else span.target orelse return;
                 ctx.consume_event = true;
@@ -131,7 +133,7 @@ const Lazy = struct {
                 }
                 copy.* = segments;
             }
-            self.row = .{ .lines = lines, .target = row.target, .regions = try arena.dupe(Region, row.regions) };
+            self.row = .{ .lines = lines, .target = row.target, .alternate_target = row.alternate_target, .regions = try arena.dupe(Region, row.regions) };
         }
     }
 
@@ -312,7 +314,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         }
         const drawn = try row.widget().draw(ctx);
         child.* = .{ .origin = .{ .row = y, .col = 0 }, .surface = drawn };
-        span.* = .{ .row = y + above_rows, .height = drawn.size.height, .target = target, .regions = regions };
+        span.* = .{ .row = y + above_rows, .height = drawn.size.height, .target = target, .alternate_target = row.row.?.alternate_target, .regions = regions };
         y += drawn.size.height;
     }
     var surface: vxfw.Surface = .{ .widget = self.list.widget(), .size = .{ .width = size.width, .height = window.height }, .buffer = &.{}, .children = content };

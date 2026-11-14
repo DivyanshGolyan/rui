@@ -1414,6 +1414,7 @@ pub const SessionListPage = struct {
             const Wire = struct {
                 read_version: JsonString(protocol.SinceToken.max_bytes),
                 archive_state: JsonEnum(protocol.SessionArchiveState),
+                pin_order: ?JsonString(20),
                 reference: JsonString(protocol.max_session_bytes),
                 parent: ?JsonString(protocol.session_id_bytes),
                 workspace: JsonString(protocol.max_workspace_bytes),
@@ -1441,6 +1442,7 @@ pub const SessionListPage = struct {
             var row: Row = .{
                 .read_version = try protocol.SinceToken.parse(wire.read_version.slice()),
                 .archive_state = wire.archive_state.value,
+                .pin_order = if (wire.pin_order) |rank| try ActivityPage.id(rank, false) else null,
                 .reference = wire.reference.value,
                 .parent = if (wire.parent) |parent| parent.value else null,
                 .workspace = wire.workspace.value,
@@ -1633,6 +1635,7 @@ pub const CommandObservation = struct {
     recovery: ?Recovery = null,
     selection: ?struct { turn: ?u64, admission_cutoff: u64 } = null,
     archived: ?bool = null,
+    pinned: ?bool = null,
     completion: ?protocol.SessionStopCompletion = null,
     interruption_target: ?struct { session: protocol.Bounded(protocol.max_session_bytes), turn: u64, operation: u64 } = null,
     permission_target: ?struct { action: u64, decision: protocol.PermissionDecision } = null,
@@ -1707,6 +1710,7 @@ pub const CommandObservation = struct {
         if (self.archived) |archived| {
             try writer.print(",\"archived\":{s},\"completion\":{{\"status\":\"{s}\"}}", .{ if (archived) "true" else "false", @tagName(self.completion.?) });
         }
+        if (self.pinned) |pinned| try writer.print(",\"pinned\":{}", .{pinned});
         if (self.interruption_target) |*target| {
             try writer.writeAll(",\"interruption_target\":{\"session\":");
             try std.json.Stringify.value(target.session.slice(), .{}, writer);
@@ -1749,6 +1753,7 @@ pub const CommandObservation = struct {
             work: OmittableJson(struct { state: JsonWorkState, first_action: ?JsonString(20) }) = .{},
             recovery: OmittableJson(struct { unknown_outcomes: Outcomes, more: bool }) = .{},
             archived: OmittableJson(bool) = .{},
+            pinned: OmittableJson(bool) = .{},
             selection: OmittableJson(struct { turn: ?JsonString(20), admission_cutoff: JsonString(20) }) = .{},
             completion: OmittableJson(struct { status: JsonEnum(@typeInfo(@FieldType(CommandObservation, "completion")).optional.child) }) = .{},
             interruption_target: OmittableJson(struct { session: JsonString(protocol.max_session_bytes), turn: JsonString(20), operation: JsonString(20) }) = .{},
@@ -1776,7 +1781,7 @@ pub const CommandObservation = struct {
             return .{ .not_modified = since orelse return error.InvalidObservation };
         }
         const facts = wire.observation.value orelse return error.InvalidObservation;
-        var observed: CommandObservation = .{ .key = wire.key.value, .status = facts.status.value, .kind = if (facts.kind.value) |kind| kind.value else null, .created = facts.created.value, .archived = facts.archived.value };
+        var observed: CommandObservation = .{ .key = wire.key.value, .status = facts.status.value, .kind = if (facts.kind.value) |kind| kind.value else null, .created = facts.created.value, .archived = facts.archived.value, .pinned = facts.pinned.value };
         inline for (.{ "target", "code" }) |name| if (@field(facts, name).value) |value| {
             @field(observed, name) = value.value;
         };
@@ -1823,7 +1828,7 @@ pub const CommandObservation = struct {
 
     fn validate(self: *const CommandObservation) !void {
         if (self.status == .absent) {
-            inline for (.{ "kind", "target", "code", "revision", "created", "input", "state", "queue", "binding", "result", "work", "recovery", "selection", "archived", "completion", "interruption_target", "permission_target" }) |name| if (@field(self, name) != null) return error.InvalidObservation;
+            inline for (.{ "kind", "target", "code", "revision", "created", "input", "state", "queue", "binding", "result", "work", "recovery", "selection", "archived", "pinned", "completion", "interruption_target", "permission_target" }) |name| if (@field(self, name) != null) return error.InvalidObservation;
             return;
         }
         const kind = self.kind orelse return error.InvalidObservation;
@@ -1836,6 +1841,7 @@ pub const CommandObservation = struct {
         if ((self.revision != null) != (accepted and kind == .configure) or (self.created != null) != (accepted and kind == .configure)) return error.InvalidObservation;
         if ((self.selection != null) != (accepted and kind == .session_stop) or
             (self.archived != null) != (accepted and kind == .session_archive) or
+            (self.pinned != null) != (accepted and kind == .session_pin) or
             (self.completion != null) != (accepted and (kind == .session_stop or kind == .session_archive))) return error.InvalidObservation;
         if ((self.interruption_target != null) != (kind == .model_interruption) or (self.permission_target != null) != (kind == .permission_decision)) return error.InvalidObservation;
         if (self.interruption_target) |target| if (!target.session.eql(self.target.?.slice())) return error.RequestBindingMismatch;
@@ -2745,11 +2751,11 @@ test "canonical failure classifier bounds deep wide and escaped maximum replies"
 /// A full page's facts after its rows, up to `next`.
 const testing_list_facts = "],\"delta\":\"full\",\"since\":\"abababababababababababababababab.42\",\"next\":";
 /// A list row's facts after its settings, for a Session no one has messaged.
-const testing_row_facts = ",\"read_version\":\"00000000000000000000000000000000.0\",\"archive_state\":\"active\"" ++ testing_row_details;
+const testing_row_facts = ",\"read_version\":\"00000000000000000000000000000000.0\",\"archive_state\":\"active\",\"pin_order\":null" ++ testing_row_details;
 const testing_row_details = ",\"parent\":null,\"label\":null,\"created_at\":\"1\",\"revision\":\"1\",\"end\":\"0\",\"first_message\":null,\"last_line\":null," ++
     "\"work\":{\"state\":{\"kind\":\"idle\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null},\"peers\":{\"from_person_at\":null}";
 /// The same for a Session a person started, now working.
-const testing_started_row_facts = ",\"read_version\":\"00000000000000000000000000000000.0\",\"archive_state\":\"active\",\"parent\":null,\"label\":\"Review PR 412\",\"created_at\":\"1792925000\",\"revision\":\"1\",\"end\":\"9\"," ++
+const testing_started_row_facts = ",\"read_version\":\"00000000000000000000000000000000.0\",\"archive_state\":\"active\",\"pin_order\":null,\"parent\":null,\"label\":\"Review PR 412\",\"created_at\":\"1792925000\",\"revision\":\"1\",\"end\":\"9\"," ++
     "\"first_message\":{\"position\":\"1\",\"admission\":\"4\",\"admitted_at\":\"1792925001\",\"sender\":null,\"content\":{\"bytes\":\"5\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"}}," ++
     "\"last_line\":null,\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"1792925300\"},\"turn\":\"2\",\"operation\":\"6\",\"first_action\":null},\"peers\":{\"from_person_at\":\"1792925001\"}";
 
@@ -2760,7 +2766,7 @@ test "Session list facts own complete rows and render semantic output after scra
     const file = try tmp.dir.createFile(io, "page", .{ .read = true });
     defer file.close(io);
     const digest = @as([64]u8, @splat('a'));
-    const facts = "\"read_version\":\"00000000000000000000000000000000.0\",\"archive_state\":\"active\",\"parent\":\"p33rs1\",\"label\":\"Review \\u0050R\",\"created_at\":\"1792925000\",\"revision\":\"3\",\"end\":\"9\"," ++
+    const facts = "\"read_version\":\"00000000000000000000000000000000.0\",\"archive_state\":\"active\",\"pin_order\":null,\"parent\":\"p33rs1\",\"label\":\"Review \\u0050R\",\"created_at\":\"1792925000\",\"revision\":\"3\",\"end\":\"9\"," ++
         "\"first_message\":{\"position\":\"1\",\"admission\":\"4\",\"admitted_at\":\"1792925001\",\"sender\":{\"session\":\"p33rs1\"},\"content\":{\"bytes\":\"5\",\"sha256\":\"" ++ digest ++ "\"}}," ++
         "\"last_line\":{\"position\":\"8\",\"text\":\"Saved preview\"},\"work\":{\"state\":{\"kind\":\"bash\",\"since\":\"1792925300\",\"call\":\"0\",\"description\":\"Run the tests\",\"running\":\"1\",\"approvals\":\"0\"},\"turn\":\"2\",\"operation\":\"6\",\"first_action\":null}," ++
         "\"peers\":{\"from_person_at\":\"1792925200\"}";
@@ -2787,8 +2793,8 @@ test "Session list facts own complete rows and render semantic output after scra
     var output: [2048]u8 = undefined;
     var writer = std.Io.Writer.fixed(&output);
     try page.writeJson(&writer);
-    try std.testing.expectEqualStrings("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[{\"read_version\":\"00000000000000000000000000000000.0\",\"archive_state\":\"active\",\"reference\":\"k7m2qx\",\"workspace\":\"/w\\nµ\",\"provider\":\"codex\",\"model\":\"m\\\"\",\"tools\":[\"bash\"],\"permission_mode\":\"ask\"," ++
-        "\"parent\":\"p33rs1\",\"label\":\"Review PR\"" ++ facts["\"read_version\":\"00000000000000000000000000000000.0\",\"archive_state\":\"active\",\"parent\":\"p33rs1\",\"label\":\"Review \\u0050R\"".len..] ++ "}" ++ testing_list_facts ++ "null}", writer.buffered());
+    try std.testing.expectEqualStrings("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[{\"read_version\":\"00000000000000000000000000000000.0\",\"archive_state\":\"active\",\"pin_order\":null,\"reference\":\"k7m2qx\",\"workspace\":\"/w\\nµ\",\"provider\":\"codex\",\"model\":\"m\\\"\",\"tools\":[\"bash\"],\"permission_mode\":\"ask\"," ++
+        "\"parent\":\"p33rs1\",\"label\":\"Review PR\"" ++ facts["\"read_version\":\"00000000000000000000000000000000.0\",\"archive_state\":\"active\",\"pin_order\":null,\"parent\":\"p33rs1\",\"label\":\"Review \\u0050R\"".len..] ++ "}" ++ testing_list_facts ++ "null}", writer.buffered());
     var exhausted = std.Io.Writer.fixed(&.{});
     try std.testing.expectError(error.WriteFailed, page.writeJson(&exhausted));
 }
@@ -2927,9 +2933,13 @@ test "Session list facts reject malformed metadata and consequential ambiguity" 
     for ([_][2][]const u8{
         .{ "\"read_version\":\"00000000000000000000000000000000.0\",", "" },
         .{ "\"read_version\":\"00000000000000000000000000000000.0\"", "\"read_version\":\"bad\"" },
-        .{ ",\"archive_state\":\"active\"", "" },
-        .{ "\"archive_state\":\"active\"", "\"archive_state\":null" },
-        .{ "\"archive_state\":\"active\"", "\"archive_state\":\"unknown\"" },
+        .{ ",\"archive_state\":\"active\",\"pin_order\":null", "" },
+        .{ "\"archive_state\":\"active\",\"pin_order\":null", "\"archive_state\":null" },
+        .{ "\"archive_state\":\"active\",\"pin_order\":null", "\"archive_state\":\"unknown\"" },
+        .{ ",\"pin_order\":null", "" },
+        .{ "\"pin_order\":null", "\"pin_order\":\"0\"" },
+        .{ "\"pin_order\":null", "\"pin_order\":1" },
+        .{ "\"pin_order\":null", "\"pin_order\":\"9223372036854775808\"" },
         .{ "\"parent\":null", "\"parent\":\"k7m2qX\"" },
         .{ "\"parent\":null", "\"parent\":\"k7m2qx\"" },
         .{ "\"parent\":null", "\"parent\":\"abcdefg\"" },
@@ -2974,7 +2984,7 @@ fn testingListPage(buffer: []u8, references: []const []const u8, facts: []const 
     try writer.writeAll("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[");
     for (references, 0..) |reference, index| {
         if (index != 0) try writer.writeAll(",");
-        try writer.print("{{\"read_version\":\"00000000000000000000000000000000.0\",\"archive_state\":\"active\",\"reference\":\"{s}\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"tools\":[],\"permission_mode\":\"ask\"", .{reference});
+        try writer.print("{{\"read_version\":\"00000000000000000000000000000000.0\",\"archive_state\":\"active\",\"pin_order\":null,\"reference\":\"{s}\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"tools\":[],\"permission_mode\":\"ask\"", .{reference});
         try writer.writeAll(testing_row_details ++ "}");
     }
     try writer.writeAll(facts);
@@ -3234,13 +3244,14 @@ test "keyed observation retains Host state independently of admission and bindin
     }
 }
 
-test "keyed observation validates all six operation shapes and binding" {
+test "keyed observation validates every operation shape and binding" {
     const prefix = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"command_observation\",\"key\":\"k\",\"delta\":\"full\",\"since\":null,\"observation\":{\"target\":\"k7m2qx\",";
     inline for (.{
         .{ "configure", ",\"revision\":\"31\",\"created\":true", "" },
         .{ "message", ",\"state\":\"queued\"" ++ testing_observation_input ++ testing_observation_queue ++ testing_observation_work, ",\"state\":\"rejected\"" },
         .{ "session_stop", ",\"selection\":{\"turn\":null,\"admission_cutoff\":\"0\"},\"completion\":{\"status\":\"completed\"}", "" },
         .{ "session_archive", ",\"archived\":false,\"completion\":{\"status\":\"completed\"}", "" },
+        .{ "session_pin", ",\"pinned\":false", "" },
         .{ "model_interruption", ",\"interruption_target\":{\"session\":\"k7m2qx\",\"turn\":\"3\",\"operation\":\"7\"}", ",\"interruption_target\":{\"session\":\"k7m2qx\",\"turn\":\"0\",\"operation\":\"0\"}" },
         .{ "permission_decision", ",\"permission_target\":{\"action\":\"29\",\"decision\":\"allow_once\"}", ",\"permission_target\":{\"action\":\"0\",\"decision\":\"deny\"}" },
     }) |case| {
@@ -4049,4 +4060,23 @@ test "activity golden model call null evidence and zero usage roundtrip" {
         try std.testing.expectEqual(@field(facts.items[0].value.model_call, field_name), @field(native.facts.items[0].value.model_call, field_name));
     }
     try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"input_tokens\":\"0\",\"output_tokens\":\"0\",\"cached_tokens\":\"0\"") != null);
+}
+
+test "Session pin list ranks round trip as positive decimal strings" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "pin-rank", .{ .read = true });
+    defer file.close(io);
+    var input: [2048]u8 = undefined;
+    const unpinned = try testingListPage(&input, &.{"k7m2qx"}, testing_list_facts, "null");
+    const pinned = try std.mem.replaceOwned(u8, std.testing.allocator, unpinned, "\"pin_order\":null", "\"pin_order\":\"9223372036854775807\"");
+    defer std.testing.allocator.free(pinned);
+    try file.writePositionalAll(io, pinned, 0);
+    const decoded = try SessionListReply.decode(io, file, "/w", .{}, .{ .report = .{ .bytes = pinned.len } });
+    try std.testing.expectEqual(@as(?u64, std.math.maxInt(i64)), decoded.page.rows[0].pin_order);
+    var output: [2048]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&output);
+    try decoded.page.writeJson(&writer);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "\"pin_order\":\"9223372036854775807\"") != null);
 }

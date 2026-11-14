@@ -458,3 +458,65 @@ test "Session archive ending causality survives restored parents and ordinary ch
         }
     }.run);
 }
+
+test "Session pin archive admission clears immediately through pending stop and Message restore" {
+    const pin = @import("pin_tests.zig");
+    try testing.forEachEngine(struct {
+        fn run(case: *testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const receiver = try runningBash(&storage, &tmp, "pin-archive-busy");
+            var request = try pin.command("pin-before-busy-archive", receiver.session.slice(), true);
+            try std.testing.expect(storage.pinSession(&request, .{}) == .accepted);
+            var archive = try archiveCommand("pin-busy-archive", receiver.session.slice(), true);
+            const accepted = storage.archiveSession(&archive, .{});
+            try std.testing.expectEqual(protocol.SessionStopCompletion.pending, accepted.accepted.completion);
+            try std.testing.expectEqual(@as(?u64, null), try pin.order(&storage, &tmp, receiver.session.slice()));
+            try request.key.set("pin-during-archive");
+            try std.testing.expectEqual(protocol.SessionPinRejection.session_archiving, storage.pinSession(&request, .{}).rejected.code);
+            request.pinned = false;
+            try request.key.set("unpin-during-archive");
+            try std.testing.expect(storage.pinSession(&request, .{}) == .accepted);
+            _ = try storage.settleActionAttempt(receiver.binding, .cancelled, "Bash stopped.", .{});
+            var incoming = try message(&tmp, "pin-message-restore", receiver.session.slice());
+            defer incoming.removeTemporaryContent(std.testing.io) catch unreachable;
+            try std.testing.expect(storage.submitMessageWithModel(&incoming, null, .{}) == .accepted);
+            try std.testing.expectEqual(@as(?u64, null), try pin.order(&storage, &tmp, receiver.session.slice()));
+            request.pinned = true;
+            try request.key.set("pin-after-message-restore");
+            try std.testing.expect(storage.pinSession(&request, .{}) == .accepted);
+        }
+    }.run);
+}
+
+test "Session pin parent and child organization stays independent during attached stop forwarding" {
+    const pin = @import("pin_tests.zig");
+    try testing.forEachEngine(struct {
+        fn run(case: *testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const family = try attachedFamily(&storage, &tmp);
+            var parent = try pin.command("pin-family-parent", family.parent.slice(), true);
+            var child = try pin.command("pin-family-child", family.child.slice(), true);
+            try std.testing.expect(storage.pinSession(&parent, .{}) == .accepted);
+            try std.testing.expect(storage.pinSession(&child, .{}) == .accepted);
+            const child_rank = (try pin.order(&storage, &tmp, family.child.slice())).?;
+            var archive = try archiveCommand("pin-family-archive-parent", family.parent.slice(), true);
+            try std.testing.expect(storage.archiveSession(&archive, .{}) == .accepted);
+            try drainChildStop(&storage);
+            try std.testing.expectEqual(@as(?u64, null), try pin.order(&storage, &tmp, family.parent.slice()));
+            try std.testing.expectEqual(child_rank, (try pin.order(&storage, &tmp, family.child.slice())).?);
+            archive = try archiveCommand("pin-family-archive-child", family.child.slice(), true);
+            try std.testing.expect(storage.archiveSession(&archive, .{}) == .accepted);
+            try std.testing.expectEqual(@as(?u64, null), try pin.order(&storage, &tmp, family.child.slice()));
+            try std.testing.expect(storage.pinSession(&child, .{}).accepted.replayed);
+            try std.testing.expectEqual(@as(?u64, null), try pin.order(&storage, &tmp, family.child.slice()));
+        }
+    }.run);
+}

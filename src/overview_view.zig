@@ -216,6 +216,7 @@ pub const Listed = struct {
     read_version: Token = .{ .instance = @splat(0), .generation = 0 },
     operation: ?u64 = null,
     archive_state: ArchiveState = .active,
+    pin_order: ?@import("session_pin.zig").PinOrder = null,
     workspace: []const u8,
     provider: Provider,
     label: ?[]const u8 = null,
@@ -237,6 +238,7 @@ pub const Listed = struct {
             .read_version = row.read_version,
             .operation = row.work.operation,
             .archive_state = row.archive_state,
+            .pin_order = row.pin_order,
             .workspace = row.workspace.slice(),
             .provider = row.provider,
             .label = if (row.label) |*text| text.slice() else null,
@@ -325,6 +327,9 @@ pub const StopOutcome = union(enum) {
     unconfirmed: []const u8,
 };
 
+pub const PinRequest = struct { reference: Reference, pinned: bool };
+pub const PinResult = struct { request: PinRequest, outcome: union(enum) { accepted, failed: []const u8, unconfirmed: []const u8 } };
+
 pub const ArchiveRequest = struct {
     reference: Reference,
     archived: bool = true,
@@ -369,6 +374,7 @@ pub const Event = union(enum) {
     first_line: FirstLine,
     stop: StopResult,
     archive: ArchiveResult,
+    pin: PinResult,
     created: CreateResult,
 
     /// The overview ended: later results are kept for `writeDeparture`.
@@ -413,6 +419,7 @@ pub const Event = union(enum) {
 
 pub const Click = union(enum) {
     open: Reference,
+    pin: PinRequest,
     new_session,
     archived,
     settings,
@@ -424,6 +431,17 @@ pub fn clickOf(state: *const State, item: Item) ?Click {
         .empty, .gap => null,
         .new_session => .new_session,
         .row => |at| .{ .open = state.rows.items[state.order.items[at]].reference },
+    };
+}
+
+/// The desired value and target come from the drawn Session, not live selection.
+pub fn pinClickOf(state: *const State, item: Item) ?Click {
+    return switch (item) {
+        .row => |at| blk: {
+            const row = state.rows.items[state.order.items[at]];
+            break :blk .{ .pin = .{ .reference = row.reference, .pinned = row.pin_order == null } };
+        },
+        .empty, .gap, .new_session => null,
     };
 }
 
@@ -568,6 +586,7 @@ pub const ConversationInput = union(enum) {
     stop,
     archive: ArchiveState,
     unarchive,
+    pin: bool,
 
     cancel_upgrade,
 
@@ -627,6 +646,7 @@ pub const Effect = union(enum) {
 
     stop: Reference,
     archive: ArchiveRequest,
+    pin: PinRequest,
 
     /// Read the Host's model lists.
     list_models,
@@ -662,13 +682,13 @@ pub const Binding = struct {
 /// The screen in cells.
 pub const Size = struct { width: u16 = 0, height: u16 = 0 };
 
-/// A synchronous archive intent either admitted one new request or did not.
+/// A synchronous organization intent either admitted one new request or did not.
 /// Existing pending or uncertain requests are not a second admission.
-pub const ArchiveAdmission = enum { admitted, refused };
+pub const IntentAdmission = enum { admitted, refused };
 
 /// Effects are run in order; admission describes only this event's attempt.
 pub const Effects = struct {
-    archive_admission: ArchiveAdmission = .refused,
+    intent_admission: IntentAdmission = .refused,
     items: [3]Effect = undefined,
     len: usize = 0,
 
@@ -712,7 +732,7 @@ fn statusSaid(state: *const State, caps: Caps, buffer: *[upgrade_status.max_line
 /// a conversation's original left unconfirmed, held for its departure line.
 /// Nothing is evicted: a full ledger refuses new requests.
 pub const Request = struct {
-    kind: enum { create, stop, archive, unarchive, send },
+    kind: enum { create, stop, archive, unarchive, pin, unpin, send },
 
     /// The request target, or the reference returned by accepted creation.
     session: ?Reference = null,
@@ -748,6 +768,7 @@ pub const Row = struct {
     read_version: ?Token = null,
     operation: ?u64 = null,
     archive_state: ArchiveState = .active,
+    pin_order: ?@import("session_pin.zig").PinOrder = null,
 
     /// Index of its Workspace in `State.workspaces`.
     workspace: u32,
@@ -1328,7 +1349,7 @@ pub const StatusRecord = struct {
         return .{ .reference = self.reference, .delivered = if (self.status != null) .{ .version = self.version } else .none };
     }
 };
-const SortKey = struct { key: u128, index: u32 };
+const SortKey = struct { pin_order: ?u64, key: u128, index: u32 };
 
 /// A growable array of the state's allocator. Cores name no `std` list.
 fn Vec(comptime T: type) type {
@@ -1411,6 +1432,7 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
         .first_line => |result| try firstLine(state, result),
         .clicked => |input| if (!state.creating()) switch (input.target) {
             .open => |reference| try clickOpen(state, reference, &effects),
+            .pin => |request| pinIntent(state, request, &effects),
             .new_session => {
                 state.selected = .new_session;
                 try enter(state, &effects);
@@ -1434,6 +1456,7 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
                 .stop => stopKey(state, .{ .reference = input.reference, .work = input.work }, &effects),
                 .archive => |archive| archiveIntent(state, .{ .ask = .{ .reference = input.reference, .work = input.work, .archive = archive } }, &effects),
                 .unarchive => archiveIntent(state, .{ .restore = input.reference }, &effects),
+                .pin => |pinned| pinIntent(state, .{ .reference = input.reference, .pinned = pinned }, &effects),
                 .cancel_upgrade => if (state.upgrade.takesEscape()) effects.add(.cancel_upgrade),
                 .upgrade_failed => {
                     state.upgrade.block();
@@ -1441,6 +1464,23 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
                     if (state.upgrade.takesEscape()) effects.add(.cancel_upgrade);
                 },
             }
+        },
+        .pin => |result| {
+            const kind: @FieldType(Request, "kind") = if (result.request.pinned) .pin else .unpin;
+            const at = state.pendingAt(kind, result.request.reference).?;
+            const ref = result.request.reference;
+            switch (result.outcome) {
+                .accepted => state.answer(at, .done, ""),
+                .failed => |code| {
+                    state.answer(at, .failed, code);
+                    state.say(.attention, "! {s} not {s}: {s}", .{ &ref, if (result.request.pinned) "pinned" else "unpinned", code });
+                },
+                .unconfirmed => |handle| {
+                    state.answer(at, .unknown, handle);
+                    state.say(.attention, "! {s} pin unsure; recover {s}. Nothing reordered locally.", .{ &ref, handle });
+                },
+            }
+            state.next_list_ms = 0;
         },
         .archive => |result| {
             const kind: @FieldType(Request, "kind") = if (result.request.archived) .archive else .unarchive;
@@ -1612,6 +1652,12 @@ pub fn writeDeparture(state: *const State, _: ?ReasoningEffort, writer: *std.Io.
                 .unknown => try writer.print("rui: Not sure {s} {s}. Check with: rui request recover {s}\n", .{ &request.session.?, if (request.kind == .archive) "archived" else "restored", text }),
                 .done => try writer.print("rui: {s} request accepted for {s}.\n", .{ if (request.kind == .archive) "Archive" else "Restore", &request.session.? }),
             },
+            .pin, .unpin => switch (request.status) {
+                .pending => try writer.print("rui: {s} request for {s} did not run.\n", .{ if (request.kind == .pin) "Pin" else "Unpin", &request.session.? }),
+                .failed => try writer.print("rui: Could not {s} {s}: {s}\n", .{ if (request.kind == .pin) "pin" else "unpin", &request.session.?, text }),
+                .unknown => try writer.print("rui: Not sure {s} {s}. Check with: rui request recover {s}\n", .{ &request.session.?, if (request.kind == .pin) "pinned" else "unpinned", text }),
+                .done => try writer.print("rui: {s} request accepted for {s}.\n", .{ if (request.kind == .pin) "Pin" else "Unpin", &request.session.? }),
+            },
             .stop => switch (request.status) {
                 .pending => try writer.print("rui: {s} was not stopped.\n", .{&request.session.?}),
                 .failed => try writer.print("rui: Could not stop {s}: {s}\n", .{ &request.session.?, text }),
@@ -1683,6 +1729,7 @@ fn listPage(state: *State, page: Page, effects: *Effects) error{OutOfMemory}!voi
             .read_version = listed.read_version,
             .operation = listed.operation,
             .archive_state = listed.archive_state,
+            .pin_order = listed.pin_order,
             .workspace = try state.intern(listed.workspace),
             .provider = listed.provider,
             .label = if (listed.label) |text| labelOf(text) else null,
@@ -1755,6 +1802,7 @@ fn commit(state: *State, answer: Answer) error{OutOfMemory}!void {
         const was = row.*;
         const same = if (incoming.first) |first| if (row.first) |known| first.admission == known.admission else false else false;
         row.archive_state = incoming.archive_state;
+        row.pin_order = incoming.pin_order;
         row.workspace = incoming.workspace;
         row.provider = incoming.provider;
         row.label = incoming.label;
@@ -1871,9 +1919,9 @@ fn reindex(state: *State) error{OutOfMemory}!void {
 }
 
 /// List membership and observed facts survive independently of presentation.
-/// An empty Session appears only while its conversation is open.
+/// An empty Session appears while pinned or while its conversation is open.
 fn visible(state: *const State, row: *const Row) bool {
-    return row.listed and (row.first != null or if (state.conversing) |open| std.mem.eql(u8, &open, &row.reference) else false);
+    return row.listed and (row.pin_order != null or row.first != null or if (state.conversing) |open| std.mem.eql(u8, &open, &row.reference) else false);
 }
 
 /// Rebuilds the flat screen order and the summary.
@@ -1890,10 +1938,12 @@ fn arrange(state: *State) error{OutOfMemory}!void {
         // Priority class first, then newest; queued rows keep longest wait first.
         const since = @min(shownSince(state, row), latest);
         const age: u128 = if (queued) since else latest - since;
-        state.sort_keys.appendAssumeCapacity(.{ .key = @as(u128, @backingInt(orderClass(state, row))) << 82 | age << 48 | referenceKey(row.reference), .index = @intCast(at) });
+        state.sort_keys.appendAssumeCapacity(.{ .pin_order = row.pin_order, .key = @as(u128, @backingInt(orderClass(state, row))) << 82 | age << 48 | referenceKey(row.reference), .index = @intCast(at) });
     }
     std.mem.sortUnstable(SortKey, state.sort_keys.items, {}, struct {
         fn less(_: void, a: SortKey, b: SortKey) bool {
+            if (a.pin_order) |rank| return if (b.pin_order) |other| rank > other else true;
+            if (b.pin_order != null) return false;
             return a.key < b.key;
         }
     }.less);
@@ -2188,7 +2238,7 @@ const ArchiveIntent = union(enum) {
 fn archiveIntent(state: *State, intent: ArchiveIntent, effects: *Effects) void {
     if (!admitHostRequest(state)) return;
     state.notice = null;
-    effects.archive_admission = switch (intent) {
+    effects.intent_admission = switch (intent) {
         .selected_archive => blk: {
             const row = state.selectedRow() orelse {
                 state.say(.attention, no_selection, .{});
@@ -2208,21 +2258,35 @@ fn archiveIntent(state: *State, intent: ArchiveIntent, effects: *Effects) void {
     };
 }
 
-fn askArchive(state: *State, ref: Reference, work: Kind, archive: ArchiveState, effects: *Effects) ArchiveAdmission {
+fn askArchive(state: *State, ref: Reference, work: Kind, archive: ArchiveState, effects: *Effects) IntentAdmission {
     _ = work;
     if (archive != .active) return .refused; // Its durable badge already says so.
     return archiveSession(state, .{ .reference = ref }, effects);
 }
 
-fn archiveSession(state: *State, request: ArchiveRequest, effects: *Effects) ArchiveAdmission {
+fn organizationHeld(state: *State, reference: Reference) bool {
     for (state.requests[0..state.request_count]) |held| {
-        if (held.kind != .archive and held.kind != .unarchive) continue;
+        if (held.kind != .archive and held.kind != .unarchive and held.kind != .pin and held.kind != .unpin) continue;
         if (held.status != .pending and held.status != .unknown) continue;
-        if (std.mem.eql(u8, &held.session.?, &request.reference)) {
-            state.say(.attention, "! {s} archive request {s}; details on exit.", .{ &request.reference, if (held.status == .pending) "pending" else "unsure" });
-            return .refused;
+        if (std.mem.eql(u8, &held.session.?, &reference)) {
+            state.say(.attention, "! {s} organization request {s}; details on exit.", .{ &reference, if (held.status == .pending) "pending" else "unsure" });
+            return true;
         }
     }
+    return false;
+}
+
+fn pinIntent(state: *State, request: PinRequest, effects: *Effects) void {
+    if (!admitHostRequest(state)) return;
+    if (organizationHeld(state, request.reference)) return;
+    if (state.request(if (request.pinned) .pin else .unpin, request.reference)) {
+        effects.add(.{ .pin = request });
+        effects.intent_admission = .admitted;
+    }
+}
+
+fn archiveSession(state: *State, request: ArchiveRequest, effects: *Effects) IntentAdmission {
+    if (organizationHeld(state, request.reference)) return .refused;
     if (state.request(if (request.archived) .archive else .unarchive, request.reference)) {
         effects.add(.{ .archive = request });
         if (!request.archived) state.say(.quiet, "Restore request pending for {s}; waiting for the Host.", .{&request.reference});
@@ -3101,6 +3165,7 @@ fn bounded(comptime capacity: usize, text: []const u8) Bounded(capacity) {
 const TestSession = struct {
     read_version: Token = testToken(0),
     archive_state: ArchiveState = .active,
+    pin_order: ?@import("session_pin.zig").PinOrder = null,
     label: ?[]const u8 = null,
     workspace: []const u8 = "/home/d/code/rui",
     provider: Provider = .codex,
@@ -3115,6 +3180,7 @@ fn session(ref: *const [6]u8, state: WorkState, options: TestSession) Listed {
         .reference = ref.*,
         .read_version = options.read_version,
         .archive_state = options.archive_state,
+        .pin_order = options.pin_order,
         .workspace = options.workspace,
         .provider = options.provider,
         .label = options.label,
@@ -3202,6 +3268,7 @@ fn expectEffects(expected: []const Effect, actual: Effects) !void {
             },
             .open => |ref| try std.testing.expectEqualStrings(&ref, &got.open),
             .stop => |ref| try std.testing.expectEqualStrings(&ref, &got.stop),
+            .pin => |request| try std.testing.expectEqualDeep(request, got.pin),
             .archive => |request| {
                 try std.testing.expectEqualStrings(&request.reference, &got.archive.reference);
                 try std.testing.expectEqual(request.archived, got.archive.archived);
@@ -5945,7 +6012,7 @@ test "archive admission reports only a new ledger request across every surface c
             const retained = state.requests;
             const effects = try step(&state, case.event);
             const admitted = hold == .active and !full and held == .none and (case.restore or archive == .active);
-            try std.testing.expectEqual(if (admitted) ArchiveAdmission.admitted else .refused, effects.archive_admission);
+            try std.testing.expectEqual(if (admitted) IntentAdmission.admitted else .refused, effects.intent_admission);
             var requests: usize = 0;
             for (effects.slice()) |effect| if (effect == .archive) {
                 requests += 1;
@@ -5971,13 +6038,13 @@ test "archive admission reports only a new ledger request across every surface c
                 try std.testing.expectEqualStrings("! Busy; try again shortly.", state.notice.?.text());
             }
             // Admission belongs to this one attempt, never retained State.
-            try std.testing.expectEqual(ArchiveAdmission.refused, (try step(&state, .{ .resized = .{ .width = 46, .height = 18 } })).archive_admission);
+            try std.testing.expectEqual(IntentAdmission.refused, (try step(&state, .{ .resized = .{ .width = 46, .height = 18 } })).intent_admission);
         }
     };
     var empty = try opened(&.{});
     defer empty.deinit();
     const refused = try press(&empty, .archive);
-    try std.testing.expectEqual(ArchiveAdmission.refused, refused.archive_admission);
+    try std.testing.expectEqual(IntentAdmission.refused, refused.intent_admission);
     try std.testing.expectEqual(@as(usize, 0), empty.request_count);
 }
 
@@ -6588,4 +6655,70 @@ test "Option session navigation skips paired New Session Archived and Settings c
         try expectEffects(&.{}, effects);
         try std.testing.expectEqual(control, empty.selected);
     };
+}
+
+test "Session pins precede exactly the existing unpinned order across work changes" {
+    var baseline = try opened(&mixed);
+    defer baseline.deinit();
+    var rows = mixed;
+    rows[0].pin_order = 7;
+    rows[1].pin_order = std.math.maxInt(i64);
+    var state = try opened(&rows);
+    defer state.deinit();
+    try std.testing.expectEqual(rows[1].reference, state.rows.items[state.order.items[0]].reference);
+    try std.testing.expectEqual(rows[0].reference, state.rows.items[state.order.items[1]].reference);
+    var remaining: usize = 2;
+    for (baseline.order.items) |index| {
+        const reference = baseline.rows.items[index].reference;
+        if (std.mem.eql(u8, &reference, &rows[0].reference) or std.mem.eql(u8, &reference, &rows[1].reference)) continue;
+        try std.testing.expectEqual(reference, state.rows.items[state.order.items[remaining]].reference);
+        remaining += 1;
+    }
+    try std.testing.expectEqual(mixed.len, remaining);
+    rows[0].state = .{ .working = ago(0) };
+    rows[1].state = .{ .idle = ago(100) };
+    _ = try refresh(&state, .changed, testToken(3), rows[0..2]);
+    try std.testing.expectEqual(rows[1].reference, state.rows.items[state.order.items[0]].reference);
+    try std.testing.expectEqual(rows[0].reference, state.rows.items[state.order.items[1]].reference);
+    try std.testing.expectEqual(mixed.len, state.order.items.len);
+}
+
+test "Session pin empty visibility keeps archive membership and never counts a row twice" {
+    for (std.enums.values(ArchiveFilter)) |filter| for (std.enums.values(ArchiveState)) |archive| {
+        const row = session("k7m2qx", .{ .idle = ago(1) }, .{ .first = null, .pin_order = 1, .archive_state = archive });
+        var state = try opened(&.{});
+        defer state.deinit();
+        state.archive = filter;
+        state.listing_archive = filter;
+        _ = try refresh(&state, .full, testToken(1), &.{row});
+        try std.testing.expectEqual(@as(usize, @intFromBool(filter.includes(archive))), state.order.items.len);
+        _ = try step(&state, .{ .conversation = row.reference });
+        _ = try step(&state, .{ .conversation = null });
+        try std.testing.expectEqual(@as(usize, @intFromBool(filter.includes(archive))), state.order.items.len);
+    };
+}
+
+test "Session pin captured intent changes no selection or conversation and awaits canonical listing" {
+    var state = try opened(&mixed);
+    defer state.deinit();
+    _ = try step(&state, .{ .conversation = mixed[1].reference });
+    state.selected = .{ .session = mixed[1].reference };
+    const selected = state.selected;
+    const captured = pinClickOf(&state, .{ .row = 0 }).?;
+    const target = captured.pin.reference;
+    const row = state.find(target).?;
+    try std.testing.expect(row.pin_order == null);
+    state.selected = .settings;
+    const effects = try step(&state, .{ .clicked = .{ .target = captured } });
+    try expectEffects(&.{.{ .pin = .{ .reference = target, .pinned = true } }}, effects);
+    try std.testing.expectEqual(IntentAdmission.admitted, effects.intent_admission);
+    try std.testing.expectEqual(Selection.settings, state.selected);
+    try std.testing.expectEqual(mixed[1].reference, state.conversing.?);
+    try std.testing.expect(state.find(target).?.pin_order == null);
+    try std.testing.expectEqual(IntentAdmission.refused, (try step(&state, .{ .clicked = .{ .target = captured } })).intent_admission);
+    _ = try step(&state, .{ .pin = .{ .request = captured.pin, .outcome = .{ .unconfirmed = "pin-handle" } } });
+    try std.testing.expectEqual(IntentAdmission.refused, (try step(&state, .{ .conversed = .{ .reference = target, .work = .idle, .input = .{ .pin = false } } })).intent_admission);
+    try std.testing.expect(state.find(target).?.pin_order == null);
+    for ([_]Item{ .new_session, .gap, .empty }) |item| try std.testing.expect(pinClickOf(&state, item) == null);
+    state.selected = selected;
 }

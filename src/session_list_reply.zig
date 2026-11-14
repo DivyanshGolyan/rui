@@ -28,6 +28,7 @@ pub fn Reply(comptime Capture: type) type {
             const fields: protocol.SessionRow.Fields = .{
                 .read_version = values.read_version,
                 .archive_state = values.archive_state,
+                .pin_order = values.pin_order,
                 .reference = values.reference,
                 .parent = values.parent,
                 .workspace = values.workspace,

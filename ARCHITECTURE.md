@@ -1548,6 +1548,12 @@ This pins legacy escalation policy; the old rows did not retain their admission-
 Existing floors, levels, counts, resolutions and references are preserved.
 The step to 74 deletes the saved wire label from `store_meta` on both engines (Divyansh, 2026-11-13), whatever it reads; a new Store writes none and opening compares none.
 `store_meta`'s key CHECK still names `wire_version`, because narrowing it would rebuild the table on SQLite.
+The step to 75 adds retained current pin pointers and immutable requested pin values, and extends the Command kind set to include pinning.
+A nullable unique `session_pin.command_key` references the immutable Command that established the current pin; its existing `command_seq` is the pin order.
+Unpin and archive intent clear that pointer with a typed Session-head update, retaining the row.
+The SQLite step preserves all Commands and their references while widening the kind CHECK.
+The operator-run MySQL step resolves the exact old kind CHECK in the current database catalog, because its generated name can differ between fresh and previously migrated Stores.
+An absent or ambiguous match refuses before DDL; unrelated checks and foreign keys remain unchanged.
 Each format PR appends its own version and step; even unreleased steps and digests already on main are immutable (D226).
 The schema writes each closed value set as fixed literals, so the Store format never silently follows a code enum, and changing a set is a format change that needs a new version.
 Provider labels and codec names are open by design (Divyansh, 2026-10-31 provider-plugin design): the schema checks their syntax, and a Host refuses a label or codec it does not serve.
@@ -2127,6 +2133,37 @@ Callers retain key and exact inputs before sending, without managing Turn identi
 Concurrent Session use remains outside the expected usage.
 `rui session stop --all` reads the Session listing and sends one ordinary Session stop, with its own generated key, for each Session the overview's Ctrl-X could stop; it adds no cross-Session stop authority, and a Session that starts work after its listing page is read is not stopped.
 
+### Pinning a Session
+
+Pinning is shared organization for one Store, independent of configuration, work, and model Messages.
+`POST /v1/control/session-pin` accepts `session`, `key`, and an explicit desired `pinned` boolean.
+The existing serialized Store transition owns admission, replay classification, and fault fencing.
+Repeating pin with a fresh key is an accepted no-op that preserves the first pin order; repeating unpin is harmless.
+Unpin followed by pin gives the Session the newest pin order.
+An unknown Session rejects either desired value.
+Pinning an archiving or archived Session rejects; unpinning an existing archived Session is accepted.
+Replay classifies the saved key and semantic digest before inspecting current state.
+It returns the historical answer without applying an old pin after unpin or archive; reusing a key for another target or desired value conflicts.
+
+`/pin` and `/unpin` in chat use the overview's existing request ledger, worker effects, captured requests, and recovery outcomes.
+They appear in shared slash completion and admit no Message or Configure.
+The shell exposes `rui session pin --session ID` and `rui session unpin --session ID` through the same captured-command protocol.
+Right-click or Option/Alt-left-click on an actual Session row toggles the desired value captured in the drawn frame.
+The generic List hit test and GroupedList frame retain its Session identity and desired value; the overview does not re-hit-test coordinates or reread selection.
+The gesture neither opens the row nor changes the active conversation, focus, selection, or draft.
+Release does not repeat it, and alternate gestures on New Session, Settings, or other non-Session controls never fall through to normal activation.
+A normal left-click still opens the Session.
+There is no pin marker or menu.
+
+Pinned rows appear once, below the fixed New Session control, newest pin first.
+Activity changes never reorder pins.
+`overview_view.visible` and `arrange` produce the one visible and navigation order in `State.order`; unpinned rows retain their existing comparator exactly.
+Pinned empty Sessions remain visible after leaving the conversation, subject to the ordinary archive filter.
+Admission of archive intent clears the pin in that same transaction, including while its stop is pending.
+Restore and Message-unarchive never resurrect it, and ordinary stop never clears it.
+Parents and children have independent organization.
+No optimistic durable pin state, second list, or second comparator exists in the client.
+
 ### Archiving a Session
 
 Archive organization is independent of the derived work state.
@@ -2137,7 +2174,7 @@ An incomplete stop derives `archiving`; a completed stop derives `archived`.
 There is no separate archive worker or recovery queue.
 
 `POST /v1/control/session-archive` accepts `session`, `key`, and the `archived` boolean.
-An archive request atomically saves its intent and selects the current work for stop.
+An archive request atomically saves its intent, clears its current pin, and selects the current work for stop.
 Acknowledgment reports `pending` until that stop completes, then `completed`.
 The Session stays in the unarchived view while its stop is pending.
 Stop completion has the existing semantic guarantee, not proof of remote termination or complete local transport disposal.
@@ -2345,7 +2382,7 @@ The public client `listSessions` streams one complete JSON page to caller-owned 
 Request fields are `version`, `kind`, canonical `store`, `workspace` (exact canonical stored path or `null` for all), string-valued `after`/`ceiling` (both `"0"` initially), and optional `archive` (`active`, `archived`, or `all`, default `active`).
 A first page may also carry `since`, an opaque token from an earlier reply.
 Response `session_list` has up to eight `sessions`, then `delta`, a new `since` token, and `next` as either `null` or a continuation.
-Each row has exact `reference`, `workspace`, `provider`, `model`, `tools`, `permission_mode`, and `archive_state`; nullable `parent` (the creator’s six-character Session reference for an attached agent, otherwise `null`); nullable `label`; `created_at`; configuration `revision`; activity `end`; nullable `first_message` (position, admission, `admitted_at`, nullable Session `sender` and content reference); `work`, the Session's [Session work](#work-state-and-wait-conditions) state with `since` and that state's facts plus the latest Turn, Operation and first actionable Action; and `peers.from_person_at`, the admission time of the latest Message without a Session sender.
+Each row has exact `reference`, `workspace`, `provider`, `model`, `tools`, `permission_mode`, and `archive_state`; nullable decimal-string `pin_order`, derived from the current pin Command; nullable `parent` (the creator’s six-character Session reference for an attached agent, otherwise `null`); nullable `label`; `created_at`; configuration `revision`; activity `end`; nullable `first_message` (position, admission, `admitted_at`, nullable Session `sender` and content reference); `work`, the Session's [Session work](#work-state-and-wait-conditions) state with `since` and that state's facts plus the latest Turn, Operation and first actionable Action; and `peers.from_person_at`, the admission time of the latest Message without a Session sender.
 Rows also carry nullable `last_line`: `{position, text}`, with a string-valued activity position and nullable text.
 It is the later by position of the newest ended Turn's outcome and the oldest pending approval's call.
 Completed Turn text is the first non-blank line from at most the first 1 KiB of public answer content, cut to at most 200 UTF-8 bytes at a code point with “…” when longer.
@@ -2564,10 +2601,10 @@ Each frame clears every line to the skin's ground, draws its spans in 24-bit col
 Enter on the pinned `+ New Session` row (Home then Enter), or one click on it, captures Configure only, creates an empty Session with zero Messages and opens that reference through the existing `SessionFrontend`, with its chat input focused.
 The core admits creation and emits its copied provider/model binding. While interpreting that effect, the native owner reads saved preferences once and copies effort and permission mode (or the read failure) into the queued creation snapshot; neither a default-state effort cache nor the worker rereads them. `configure_input.ConfigureInput.completeCreation` completes that snapshot with the Workspace and provider/model; captured Configure and `Requests.sendCaptured` use the existing request ledger.
 No Message or Turn receipt is synthesized. Only sending text from the chat admits a Message.
-The single pure list projection in `overview_view.visible` omits a listed row whose `first_message` is null, except when it names the currently open Session.
-The shared `overview_view.title` names that current empty row `New Session`, using the pinned control’s words rather than its raw reference; first Message admission restores the normal Label/first-line/reference naming precedence.
+The single pure list projection in `overview_view.visible` omits a listed row whose `first_message` is null, except when it names the currently open Session or has a current pin.
+The shared `overview_view.title` names an empty row `New Session`, using the pinned control’s words rather than its raw reference; first Message admission restores the normal Label/first-line/reference naming precedence.
 The shared row rendering and selected-line projection derive selection from the current conversation, otherwise the overview selection; canonical list membership is still required before a row is drawn.
-Changing model or effort without admitting a Message does not make that row visible after leaving the chat.
+Changing model or effort without admitting a Message does not make an unpinned row visible after leaving the chat.
 This is presentation only: Configure-created Sessions and their observed metadata stay stored and remain available through CLI list, inspect and resume; leaving does not delete, archive or reconfigure them.
 While that creation is pending, Enter and clicks cannot duplicate it; pending state is derived from the ledger entry.
 One creation settlement handles accepted, rejected and uncertain Configure outcomes: acceptance retains the known reference before opening, rejection reports the failure, and uncertainty retains the capture key for recovery without creating a new intent.
@@ -2980,6 +3017,9 @@ The queued strip keeps its row when space runs short and leaves in the same fram
 A stop finds excluded Messages by walking Admission-only pages backward from itself, then renders them in admission order; no previous read's queue or drawing state decides placement.
 Every page carries `queued`: the field came with wire version 3, and a frontend and Host on different wire versions refuse each other as incompatible.
 Wire version 10 makes the refused-send target required and nullable under the [public activity contract](#public-session-activity); non-null peers keep their canonical ID grammar.
+
+Wire version 18 adds the desired-state Session pin command, its keyed observation, and required nullable `pin_order` on Session list rows.
+Session list pagination remains creation-ordered; pinning changes only the shared presentation order.
 
 Wire version 14 requires the `chatgpt` provider key, and supports the `chatgpt_plan` route, in `host_info`'s `capabilities.providers`; ordinary clients and Hosts on different wire versions refuse each other.
 Until format 74 the Store saved its wire label, so each wire bump also appended a Store format step (format 72 moved the saved label from 15 to 16); format 74 deletes the label, and a wire bump now needs only the historical Host-info profile below.
