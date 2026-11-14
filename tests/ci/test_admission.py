@@ -1,5 +1,7 @@
 """Execute candidate planning and fail-closed PR admission without native builds."""
 from functools import cache
+import ast
+import copy
 import json
 import os
 from pathlib import Path
@@ -826,6 +828,199 @@ class ReleaseFlowTest(unittest.TestCase):
                 self.assertNotRegex(path.read_text(), r'(?:contents|actions|issues): write')
         cache = job(CHECK.read_text(), 'cache_execution')
         self.assertIn("""runner: ${{ fromJSON(inputs.promotion && '["ubuntu-24.04", "macos-15"]' || '["ubuntu-24.04"]') }}""", cache)
+
+
+class HostedDefaultContractTest(unittest.TestCase):
+    """Source contracts only. These tests do not qualify canonical DEFAULT."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.workflow = (ROOT / '.github/workflows/qualify-macos.yml').read_text()
+        cls.body = job(cls.workflow, 'canonical_default')
+        cls.source = cls.inline_function('Record canonical source', 'validate_source')
+        cls.receipt = cls.inline_function('Retain and validate canonical evidence', 'validate_evidence')
+
+    @classmethod
+    def inline_function(cls, step, name):
+        script = step_script(cls.body, step)
+        python = script.split("python3 - <<'PY'\n", 1)[1].split('\nPY', 1)[0]
+        tree = ast.parse(python)
+        function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == name)
+        namespace = {'re': re}
+        exec(compile(ast.Module(body=[function], type_ignores=[]), '<workflow boundary>', 'exec'), namespace)
+        return staticmethod(namespace[name])
+
+    def source_values(self):
+        return dict(requested='a' * 40, base='b' * 40, workflow='a' * 40, requested_platform='macos',
+                    head='a' * 40, tree='c' * 40, merge_base='b' * 40,
+                    origin_main='d' * 40, dirty='', system='Darwin', machine='arm64', uid=501)
+
+    def evidence_values(self):
+        source = self.source_values()
+        checks = [{'name': 'policy', 'command': ['python3', '-m', 'unittest', 'discover']},
+                  {'name': 'unit compile', 'command': ['zig', 'build', 'ci-build']}]
+        sample = dict(ok=True, time='2026-01-01T00:00:00+00:00', images={'node': dict(path='/tools/node', pids=[]),
+                                      'bash': dict(path='/bin/bash', pids=[10])}, observer=10)
+        return dict(source=source, after=dict(head=source['head'], tree=source['tree'], dirty=''),
+                    plan=dict(base=source['base'], checks=checks), plan_status='0\n', status='0\n',
+                    receipt=dict(mode='default', tree=source['tree'], base=source['base'],
+                                 results=[dict(row, exit=0) for row in checks]),
+                    hashes=dict(source='e' * 64, copy='e' * 64),
+                    baseline=sample, final=copy.deepcopy(sample), baseline_status='0\n', final_status='0\n')
+
+    def test_source_boundary_accepts_only_exact_clean_public_mac_candidate(self):
+        self.source(self.source_values())
+        changes = dict(requested='main', base='b' * 39, workflow='f' * 40, head='f' * 40,
+                       tree=None, merge_base='f' * 40, origin_main='', dirty='?? surprise\n',
+                       requested_platform='linux', system='Linux', machine='x86_64', uid=0)
+        for key, value in changes.items():
+            with self.subTest(field=key), self.assertRaisesRegex(ValueError, 'source identity'):
+                self.source(dict(self.source_values(), **{key: value}))
+
+    def test_receipt_boundary_accepts_complete_matching_original_evidence(self):
+        self.receipt(**self.evidence_values())
+
+    def test_receipt_boundary_rejects_wrong_mode_base_tree_null_or_missing(self):
+        for field, value in (('mode', 'quick'), ('mode', 'full'), ('base', 'f' * 40),
+                             ('tree', 'f' * 40), ('tree', None), ('results', [])):
+            values = self.evidence_values()
+            values['receipt'][field] = value
+            with self.subTest(field=field, value=value), self.assertRaisesRegex(ValueError, 'receipt'):
+                self.receipt(**values)
+        for receipt in (None, {}, [], 'malformed'):
+            values = dict(self.evidence_values(), receipt=receipt)
+            with self.subTest(receipt=receipt), self.assertRaisesRegex(ValueError, 'receipt'):
+                self.receipt(**values)
+
+    def test_receipt_boundary_rejects_changed_plan_and_nonzero_or_missing_exits(self):
+        for mutation in ('missing', 'command', 'name', 'exit', 'absent_exit', 'extra', 'plan_base', 'empty'):
+            values = self.evidence_values()
+            results = values['receipt']['results']
+            if mutation == 'missing':
+                results.pop()
+            elif mutation == 'command':
+                results[0]['command'] = ['true']
+            elif mutation == 'name':
+                results[0]['name'] = 'replacement'
+            elif mutation == 'exit':
+                results[0]['exit'] = 1
+            elif mutation == 'absent_exit':
+                del results[0]['exit']
+            elif mutation == 'extra':
+                results.append(dict(results[0]))
+            elif mutation == 'plan_base':
+                values['plan']['base'] = 'f' * 40
+            else:
+                values['plan']['checks'] = []
+            with self.subTest(mutation=mutation), self.assertRaisesRegex(ValueError, 'receipt|plan'):
+                self.receipt(**values)
+
+    def test_missing_status_dirty_checkout_hash_loss_and_unknown_cleanup_fail(self):
+        for key, value in (('status', None), ('status', ''), ('status', '1\n'),
+                           ('plan_status', None), ('plan_status', '1\n'), ('hashes', None),
+                           ('baseline_status', None), ('final_status', '1\n'),
+                           ('baseline', None), ('final', None)):
+            with self.subTest(key=key, value=value), self.assertRaises(ValueError):
+                self.receipt(**dict(self.evidence_values(), **{key: value}))
+        for mutation in ('dirty', 'head', 'tree', 'hash', 'observer', 'survivor', 'query_error', 'path'):
+            values = self.evidence_values()
+            if mutation in ('dirty', 'head', 'tree'):
+                values['after'][mutation] = 'changed'
+            elif mutation == 'hash':
+                values['hashes']['copy'] = 'f' * 64
+            elif mutation == 'observer':
+                values['final'].pop('observer')
+            elif mutation == 'survivor':
+                values['final']['images']['node']['pids'] = [999]
+            elif mutation == 'query_error':
+                values['final']['ok'] = False
+            else:
+                values['final']['images']['node']['path'] = '/other/node'
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                self.receipt(**values)
+
+    def test_skips_are_retained_but_cannot_replace_executed_commands(self):
+        values = self.evidence_values()
+        skipped = {'name': 'live', 'skipped': 'not selected'}
+        values['plan']['checks'].append(skipped)
+        values['receipt']['results'].append(dict(skipped))
+        self.receipt(**values)
+        values['plan']['checks'] = [skipped]
+        values['receipt']['results'] = [skipped]
+        with self.assertRaisesRegex(ValueError, 'executed'):
+            self.receipt(**values)
+
+    def assert_workflow_contract(self, text):
+        body = job(text, 'canonical_default')
+        self.assertIn("if: ${{ !github.event.repository.private && inputs.suite == 'canonical-default' }}", body)
+        self.assertNotRegex(body, r'(?m)^    needs:')
+        self.assertIn("inputs.suite != 'canonical-default'", job(text, 'plan'))
+        self.assertIn('runs-on: macos-15', body)
+        self.assertIn("REQUESTED_PLATFORM: ${{ inputs.platform || 'macos' }}", body)
+        self.assertIn('fetch-depth: 0', body)
+        self.assertIn('persist-credentials: false', body)
+        self.assertIn("publish-caches: 'false'", body)
+        self.assertIn('package-manager-cache: false', body)
+        self.assertIn("targets: '[\"test\"]'", body)
+        self.assertIn('node-version: \'22\'', body)
+        self.assertNotIn('continue-on-error', body)
+        self.assertNotIn('actions/cache@', body)
+        for step in ('Observe canonical after images', 'Retain and validate canonical evidence', 'Upload canonical evidence', 'Record canonical artifact'):
+            block = body.split(f'      - name: {step}\n', 1)[1].split('\n      - ', 1)[0]
+            self.assertIn('if: ${{ always() }}', block)
+        upload = body.split('      - name: Upload canonical evidence\n', 1)[1]
+        self.assertIn('actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9', upload)
+        self.assertIn('if-no-files-found: error', upload)
+        self.assertIn('github.run_id', upload)
+        self.assertIn('github.run_attempt', upload)
+        self.assertIn('inputs.ref', upload)
+        run = step_script(body, 'Execute unchanged canonical DEFAULT')
+        self.assertIn('python3 tests/ci/prepush.py --base "$BASE" > "$EVIDENCE/default.log" 2>&1\nstatus=$?', run)
+        self.assertIn('exit "$status"', run)
+        self.assertLess(run.index('set +e'), run.index('python3 tests/ci/prepush.py'))
+        self.assertIn('status=$?\nset -e', run)
+        self.assertNotRegex(run, r'--quick|--full|--test-force-exit|\|\s*tee|\|\|\s*true')
+        retain = step_script(body, 'Retain and validate canonical evidence')
+        self.assertLess(retain.index('shutil.copyfile('), retain.index('validate_evidence(**'))
+        self.assertLess(retain.index("hashes['copy']"), retain.index('validate_evidence(**'))
+        self.assertIn("'--git-path', 'rui-prepush-receipt.json'", retain)
+        self.assertNotIn('import prepush', body)
+        self.assertIn('$RUNNER_TEMP/canonical-default-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}', body)
+
+    def test_actual_workflow_has_fail_closed_route_execution_and_retention(self):
+        self.assert_workflow_contract(self.workflow)
+        for interface in ('workflow_call', 'workflow_dispatch'):
+            inputs = self.workflow.split(f'  {interface}:\n', 1)[1].split('\n  workflow_', 1)[0].split('\npermissions:', 1)[0]
+            self.assertIn('      base:\n', inputs)
+        self.assertIn('canonical-default]', self.workflow)
+        self.assertIn('run-name:', self.workflow)
+
+    def test_source_mutations_fail_at_semantic_contract_assertions(self):
+        mutations = (("publish-caches: 'false'", "publish-caches: 'true'"),
+                     ('package-manager-cache: false', 'package-manager-cache: true'),
+                     ('    runs-on: macos-15\n', '    needs: plan\n    runs-on: macos-15\n'),
+                     ("inputs.suite != 'canonical-default'", 'true'),
+                     ('if-no-files-found: error', 'if-no-files-found: warn'),
+                     ('          exit "$status"\n      - name: Observe canonical after images',
+                      '          exit 0\n      - name: Observe canonical after images'))
+        for old, new in mutations:
+            prefix, canonical = self.workflow.split('  canonical_default:\n', 1)
+            if old in canonical:
+                changed = prefix + '  canonical_default:\n' + canonical.replace(old, new, 1)
+            else:
+                changed = self.workflow.replace(old, new, 1)
+            self.assertNotEqual(changed, self.workflow)
+            with self.subTest(old=old), self.assertRaises(AssertionError) as caught:
+                self.assert_workflow_contract(changed)
+            self.assertNotIn('missing job', str(caught.exception))
+            self.assertNotIn('missing step', str(caught.exception))
+        prefix, canonical = self.workflow.split('  canonical_default:\n', 1)
+        upload = canonical.split('      - name: Upload canonical evidence\n', 1)[1].split('\n      - ', 1)[0]
+        changed = prefix + '  canonical_default:\n' + canonical.replace(upload, upload.replace(
+            'if: ${{ always() }}', 'if: ${{ success() }}'), 1)
+        with self.assertRaises(AssertionError) as caught:
+            self.assert_workflow_contract(changed)
+        self.assertNotIn('missing', str(caught.exception))
 
 
 if __name__ == '__main__':

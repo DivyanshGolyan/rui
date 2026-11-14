@@ -1,4 +1,5 @@
 name: On-demand macOS qualification
+run-name: Qualify ${{ inputs.suite }} head ${{ inputs.ref }} base ${{ inputs.base }}
 on:
   workflow_call:
     inputs:
@@ -8,6 +9,9 @@ on:
       suite:
         type: string
         default: native
+      base:
+        type: string
+        default: ""
       platform:
         type: string
         default: macos
@@ -23,7 +27,11 @@ on:
         required: true
         default: footprint
         type: choice
-        options: [footprint, resources, native, all]
+        options: [footprint, resources, native, all, canonical-default]
+      base:
+        description: Exact merge-base commit for canonical DEFAULT
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -39,7 +47,7 @@ concurrency:
 
 jobs:
   plan:
-    if: ${{ !github.event.repository.private }}
+    if: ${{ !github.event.repository.private && inputs.suite != 'canonical-default' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
@@ -279,4 +287,280 @@ jobs:
               artifact = os.environ['ARTIFACT']
               print(f'\n[Evidence (expires after three days)]({artifact})' if artifact else '\nArtifact unavailable.', file=output)
               print('\nInspect the failed step and retained diagnostics before rerunning. A skipped gate or missing measurement is not acceptance; hosted measurements describe this VM only.', file=output)
+          PY
+  canonical_default:
+    if: ${{ !github.event.repository.private && inputs.suite == 'canonical-default' }}
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      BASE: ${{ inputs.base }}
+      REQUESTED_PLATFORM: ${{ inputs.platform || 'macos' }}
+      REQUESTED_REF: ${{ inputs.ref }}
+      WORKFLOW_SHA: ${{ github.workflow_sha }}
+      WORKFLOW_REF: ${{ github.workflow_ref }}
+      DISPATCH_REF: ${{ github.ref }}
+    steps:
+      - name: Select canonical evidence directory
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/canonical-default-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}"
+          mkdir -p "$evidence"
+          echo "EVIDENCE=$evidence" >> "$GITHUB_ENV"
+          echo "RUI_FAILURE_ARTIFACTS=$evidence/failures" >> "$GITHUB_ENV"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Record canonical source
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, platform, re, subprocess
+          def validate_source(source):
+              if (any(not isinstance(source.get(key), str) or not re.fullmatch(r'[0-9a-f]{40}', source[key])
+                      for key in ('requested', 'base', 'workflow', 'head', 'tree', 'merge_base', 'origin_main'))
+                      or source['requested'] != source['head'] or source['workflow'] != source['head']
+                      or source['merge_base'] != source['base'] or source['dirty']
+                      or source.get('requested_platform') != 'macos'
+                      or source['system'] != 'Darwin' or source['machine'] != 'arm64' or source['uid'] == 0):
+                  raise ValueError('source identity must be exact, clean, non-root Darwin/arm64')
+          def git(*args):
+              return subprocess.check_output(['git', *args], text=True).strip()
+          if any(not re.fullmatch(r'[0-9a-f]{40}', os.environ[key])
+                 for key in ('REQUESTED_REF', 'BASE', 'WORKFLOW_SHA')):
+              raise ValueError('requested ref, base and workflow must be exact commit SHAs')
+          source = dict(requested=os.environ['REQUESTED_REF'], base=os.environ['BASE'],
+                        requested_platform=os.environ['REQUESTED_PLATFORM'],
+                        workflow=os.environ['WORKFLOW_SHA'], head=git('rev-parse', 'HEAD'),
+                        tree=git('rev-parse', 'HEAD^{tree}'), merge_base=git('merge-base', 'HEAD', os.environ['BASE']),
+                        origin_main=git('rev-parse', 'origin/main'),
+                        dirty=git('status', '--porcelain', '--untracked-files=all'),
+                        system=platform.system(), machine=platform.machine(), uid=os.getuid())
+          evidence = pathlib.Path(os.environ['EVIDENCE'])
+          (evidence / 'source.json').write_text(json.dumps(source, indent=2) + '\n')
+          metadata = {key: os.environ.get(key) for key in ('GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT', 'GITHUB_JOB',
+                      'WORKFLOW_REF', 'WORKFLOW_SHA', 'DISPATCH_REF', 'ImageOS', 'ImageVersion')}
+          (evidence / 'run.json').write_text(json.dumps(metadata, indent=2) + '\n')
+          validate_source(source)
+          if git('rev-parse', '--verify', source['base'] + '^{commit}') != source['base']:
+              raise ValueError('base must name a commit')
+          PY
+          { uname -a; sw_vers; xcodebuild -version; xcrun --sdk macosx --show-sdk-version; } > "$EVIDENCE/platform.txt"
+      - uses: ./.github/actions/setup
+        with:
+          targets: '["test"]'
+          publish-caches: 'false'
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: Install existing policy requirements in the fixture environment
+        run: python3 -m pip install --disable-pip-version-check -r tests/ci/requirements.txt
+      - name: Record canonical tools and baseline
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' > "$EVIDENCE/python.txt"
+          import os, pathlib, sys
+          print(sys.executable, sys.version)
+          if sys.version_info < (3, 11) or pathlib.Path(sys.executable).resolve() == pathlib.Path('/usr/bin/python3').resolve():
+              raise ValueError('fixture Python must be at least 3.11 and not the macOS system Python')
+          if os.environ.get('RUI_PREPUSH_PUSHED') or os.environ.get('NODE_OPTIONS') or os.environ.get('NODE_PATH'):
+              raise ValueError('hook shortcut and Node injection environment must be absent')
+          PY
+          { command -v node; node --version; command -v bash; bash --version; command -v zig; zig version; } > "$EVIDENCE/tools.txt"
+          test -z "$(git status --porcelain --untracked-files=all)"
+          receipt=$(git rev-parse --path-format=absolute --git-path rui-prepush-receipt.json)
+          test ! -e "$receipt"
+          set +e
+          python3 - <<'PY'
+          import datetime, json, os, pathlib, shutil, sys
+          sys.path.insert(0, 'tests/integration')
+          import os_semantics
+          sample = dict(time=datetime.datetime.now(datetime.timezone.utc).isoformat(), observer=os.getppid(),
+                        claim='sampled executable-image absence only; not exact child retirement', ok=False, images={})
+          try:
+              for name in ('node', 'bash'):
+                  path = str(pathlib.Path(shutil.which(name)).resolve())
+                  sample['images'][name] = dict(path=path, pids=sorted(os_semantics.processes_executing(path)))
+              sample['ok'] = True
+          finally:
+              pathlib.Path(os.environ['EVIDENCE'], 'baseline.json').write_text(json.dumps(sample, indent=2) + '\n')
+          if sample['images']['node']['pids']:
+              raise ValueError('baseline Node image is not idle')
+          PY
+          status=$?
+          set -e
+          if ! printf '%s\n' "$status" > "$EVIDENCE/baseline.status"; then
+            if [ "$status" -eq 0 ]; then exit 1; fi
+          fi
+          exit "$status"
+      - name: Record actual canonical plan
+        run: |
+          set -euo pipefail
+          set +e
+          python3 tests/ci/prepush.py --base "$BASE" --plan > "$EVIDENCE/plan.json" 2> "$EVIDENCE/plan.stderr"
+          status=$?
+          set -e
+          if ! printf '%s\n' "$status" > "$EVIDENCE/plan.status"; then
+            if [ "$status" -eq 0 ]; then exit 1; fi
+          fi
+          exit "$status"
+      - name: Execute unchanged canonical DEFAULT
+        run: |
+          set -euo pipefail
+          set +e
+          python3 tests/ci/prepush.py --base "$BASE" > "$EVIDENCE/default.log" 2>&1
+          status=$?
+          set -e
+          if ! printf '%s\n' "$status" > "$EVIDENCE/default.status"; then
+            if [ "$status" -eq 0 ]; then exit 1; fi
+          fi
+          exit "$status"
+      - name: Observe canonical after images
+        if: ${{ always() }}
+        run: |
+          set -euo pipefail
+          set +e
+          python3 - <<'PY'
+          import datetime, json, os, pathlib, shutil, sys
+          sys.path.insert(0, 'tests/integration')
+          import os_semantics
+          sample = dict(time=datetime.datetime.now(datetime.timezone.utc).isoformat(), observer=os.getppid(),
+                        claim='sampled executable-image absence only; not exact child retirement', ok=False, images={})
+          try:
+              for name in ('node', 'bash'):
+                  path = str(pathlib.Path(shutil.which(name)).resolve())
+                  sample['images'][name] = dict(path=path, pids=sorted(os_semantics.processes_executing(path)))
+              sample['ok'] = True
+          finally:
+              pathlib.Path(os.environ['EVIDENCE'], 'after.json').write_text(json.dumps(sample, indent=2) + '\n')
+          PY
+          status=$?
+          set -e
+          if ! printf '%s\n' "$status" > "$EVIDENCE/after.status"; then
+            if [ "$status" -eq 0 ]; then exit 1; fi
+          fi
+          exit "$status"
+      - name: Retain and validate canonical evidence
+        if: ${{ always() }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, shutil, subprocess
+          def validate_evidence(source, after, plan, plan_status, status, receipt, hashes, baseline, final, baseline_status, final_status):
+              if not isinstance(receipt, dict) or any(receipt.get(key) != value for key, value in
+                      (('mode', 'default'), ('tree', source['tree']), ('base', source['base']))) or receipt.get('tree') is None:
+                  raise ValueError('receipt mode, tree or base mismatch')
+              if any(value != '0\n' for value in (status, plan_status, baseline_status, final_status)):
+                  raise ValueError('missing or nonzero canonical status')
+              if after != dict(head=source['head'], tree=source['tree'], dirty='') or source['dirty']:
+                  raise ValueError('checkout changed during canonical DEFAULT')
+              if not isinstance(hashes, dict) or not hashes.get('source') or hashes['source'] != hashes.get('copy'):
+                  raise ValueError('original receipt copy hash mismatch')
+              if not isinstance(plan, dict) or plan.get('base') != source['base'] or not plan.get('checks'):
+                  raise ValueError('missing or mismatched plan')
+              results = receipt.get('results')
+              if not isinstance(results, list) or len(results) != len(plan['checks']):
+                  raise ValueError('receipt results do not cover the plan')
+              executed = 0
+              for expected, actual in zip(plan['checks'], results):
+                  if not isinstance(expected, dict) or not isinstance(actual, dict):
+                      raise ValueError('receipt result is not an object')
+                  if 'skipped' in expected:
+                      if actual != expected:
+                          raise ValueError('receipt skipped result mismatch')
+                  else:
+                      if (not expected.get('command') or actual != dict(expected, exit=0)
+                              or type(actual.get('exit')) is not int):
+                          raise ValueError('receipt command or exit mismatch')
+                      executed += 1
+              if not executed:
+                  raise ValueError('receipt has no executed commands')
+              for sample in (baseline, final):
+                  if (not isinstance(sample, dict) or sample.get('ok') is not True
+                          or not sample.get('time') or type(sample.get('observer')) is not int or set(sample.get('images', {})) != {'node', 'bash'}):
+                      raise ValueError('cleanup observation missing or failed')
+              for name in ('node', 'bash'):
+                  before, after_image = baseline['images'][name], final['images'][name]
+                  if (not before.get('path') or before['path'] != after_image.get('path')
+                          or not isinstance(before.get('pids'), list) or not isinstance(after_image.get('pids'), list)
+                          or (name == 'node' and before['pids'])
+                          or set(after_image['pids']) - {final['observer']} - (set(before['pids']) - {baseline['observer']})):
+                      raise ValueError('cleanup sampled new executable-image survivors or identity mismatch')
+          evidence = pathlib.Path(os.environ['EVIDENCE'])
+          evidence.mkdir(parents=True, exist_ok=True)
+          errors = []
+          def git(*args):
+              return subprocess.check_output(['git', *args], text=True).strip()
+          def load(name, raw=False):
+              try:
+                  text = (evidence / name).read_text()
+                  return text if raw else json.loads(text)
+              except (OSError, ValueError) as error:
+                  errors.append(f'{name}: {error}')
+                  return None
+          hashes = {}
+          try:
+              original = pathlib.Path(git('rev-parse', '--path-format=absolute', '--git-path', 'rui-prepush-receipt.json'))
+              (evidence / 'receipt-path.txt').write_text(str(original) + '\n')
+              copied = evidence / 'receipt.original.json'
+              shutil.copyfile(original, copied)
+              hashes['source'] = hashlib.sha256(original.read_bytes()).hexdigest()
+              hashes['copy'] = hashlib.sha256(copied.read_bytes()).hexdigest()
+          except OSError as error:
+              errors.append(f'receipt copy: {error}')
+          except subprocess.CalledProcessError as error:
+              errors.append(f'receipt path: exit {error.returncode}')
+          (evidence / 'receipt-hashes.json').write_text(json.dumps(hashes, indent=2) + '\n')
+          tools = pathlib.Path(os.environ['RUNNER_TEMP'], 'rui-native-tools.txt')
+          if tools.is_file():
+              shutil.copyfile(tools, evidence / 'native-tools.txt')
+          else:
+              errors.append('setup native-tool identity missing')
+          after = None
+          try:
+              after = dict(head=git('rev-parse', 'HEAD'), tree=git('rev-parse', 'HEAD^{tree}'),
+                           dirty=git('status', '--porcelain', '--untracked-files=all'))
+          except subprocess.CalledProcessError as error:
+              errors.append(f'after source snapshot: exit {error.returncode}')
+          (evidence / 'source-after.json').write_text(json.dumps(after, indent=2) + '\n')
+          values = dict(source=load('source.json'), after=after, plan=load('plan.json'), plan_status=load('plan.status', True),
+                        status=load('default.status', True), receipt=load('receipt.original.json'), hashes=hashes,
+                        baseline=load('baseline.json'), final=load('after.json'),
+                        baseline_status=load('baseline.status', True), final_status=load('after.status', True))
+          try:
+              validate_evidence(**values)
+          except (ValueError, TypeError, KeyError) as error:
+              errors.append(f'canonical validation: {error}')
+          (evidence / 'validation.json').write_text(json.dumps(dict(errors=errors,
+              cleanup_claim='sampled executable-image absence only', exact_child_reap='unavailable'), indent=2) + '\n')
+          if errors:
+              raise SystemExit('\n'.join(errors))
+          PY
+      - name: Upload canonical evidence
+        id: canonical_artifact
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: canonical-default-macos-arm64-${{ inputs.ref }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
+          path: ${{ env.EVIDENCE }}
+          retention-days: 3
+          if-no-files-found: error
+      - name: Record canonical artifact
+        if: ${{ always() }}
+        env:
+          ARTIFACT_ID: ${{ steps.canonical_artifact.outputs.artifact-id }}
+          ARTIFACT_URL: ${{ steps.canonical_artifact.outputs.artifact-url }}
+          ARTIFACT_DIGEST: ${{ steps.canonical_artifact.outputs.artifact-digest }}
+        run: |
+          python3 - <<'PY'
+          import os
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as output:
+              for name in ('ARTIFACT_ID', 'ARTIFACT_URL', 'ARTIFACT_DIGEST'):
+                  print(f'{name}={os.environ[name]}', file=output)
+              print('Canonical acceptance requires the original receipt, true exit, source and sampled cleanup evidence. '
+                    'Cancellation, missing evidence or unknown cleanup stays red. Exact Node/Bash reap and VM destruction '
+                    'are not proved. Retain this exact run attempt and numeric job log including post-job sections. '
+                    'No automatic rerun.', file=output)
+          if not all(os.environ[name] for name in ('ARTIFACT_ID', 'ARTIFACT_URL', 'ARTIFACT_DIGEST')):
+              raise SystemExit('canonical artifact identity missing')
           PY
