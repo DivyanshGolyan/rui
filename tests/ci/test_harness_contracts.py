@@ -817,20 +817,49 @@ class ProcessCensusTest(unittest.TestCase):
         self.semantics = os_semantics
 
     def test_ownership_is_the_executed_image_whatever_the_process_is_called(self):
+        original = Path(sys.executable).resolve(strict=True)
+        marker = b"ready\n"
+        program = "import os; os.write(1, b'ready\\n'); os.read(0, 1)"
         with tempfile.TemporaryDirectory() as directory:
-            copy = Path(directory) / "owned-sleep"
-            copy.write_bytes(Path("/bin/sleep").read_bytes())
+            copy = Path(directory) / "owned-python"
+            copy.write_bytes(original.read_bytes())
             copy.chmod(0o755)
-            owned = subprocess.Popen(["renamed", "30"], executable=copy)
-            named = subprocess.Popen([str(copy), "30"], executable="/bin/sleep")
+            self.assertEqual(copy.read_bytes(), original.read_bytes())
+            self.assertFalse(copy.samefile(original), "the owned image must have a distinct inode")
+            children = []
             try:
+                for executable, name in ((copy, "renamed"), (original, str(copy))):
+                    process = subprocess.Popen([name, "-S", "-B", "-c", program], executable=executable,
+                                               env={"PYTHONHOME": sys.base_prefix}, stdin=subprocess.PIPE,
+                                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    children.append(process)
+                    os.set_blocking(process.stdout.fileno(), False)
+                    received = bytearray()
+
+                    def ready():
+                        self.assertIsNone(process.poll(), "actor exited before readiness")
+                        try:
+                            chunk = os.read(process.stdout.fileno(), len(marker) - len(received))
+                        except BlockingIOError:
+                            return False
+                        self.assertTrue(chunk, "actor closed stdout before readiness")
+                        received.extend(chunk)
+                        self.assertEqual(received, marker[:len(received)])
+                        return received == marker
+
+                    HOST.wait_for(ready, f"readiness from {name}")
+                owned, named = children
+                for process in children:
+                    self.assertIsNone(process.poll(), "actor exited before census")
                 found = self.semantics.processes_executing(copy)
+                for process in children:
+                    self.assertIsNone(process.poll(), "actor exited during census")
                 self.assertIn(owned.pid, found)
                 self.assertNotIn(named.pid, found)
             finally:
-                for process in (owned, named):
-                    process.kill()
-                    process.wait()
+                HOST.dispose_all(
+                    *(lambda process=process: HOST.close_stdin(process) for process in reversed(children)),
+                    *(lambda process=process: HOST.stop_process(process) for process in reversed(children)))
 
     def test_darwin_census_fails_loudly_when_lsof_fails(self):
         def lsof(returncode, stdout="", stderr=""):
