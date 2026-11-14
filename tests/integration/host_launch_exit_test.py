@@ -383,3 +383,88 @@ os.read(release, 1)
             raise AssertionError("collector renewed its deadline")
         waited.assert_called_once_with([456, 123], [], [], 2)
     print("action-ready credit: exact final transcript, one notification and original deadline passed")
+
+
+def check_provider_disposal(dispose_case, dispose_endpoint):
+    owner = sys.modules[dispose_case.__module__]
+    for body_failed in (True, False):
+        for failing in ("wait20", "stdout", "forced", "proxy-shutdown", "proxy-close", "proxy-join"):
+            body_error = AssertionError("original provider policy failure")
+            cleanup_error = (subprocess.TimeoutExpired("synthetic policy Host", 20) if failing == "wait20"
+                             else OSError("injected " + failing))
+            attempted = []
+            injected = False
+
+            def effect(name):
+                nonlocal injected
+                attempted.append(name)
+                if name == failing and not injected:
+                    injected = True
+                    raise cleanup_error
+
+            class Process:
+                stdin = SimpleNamespace(close=lambda: effect("stdin"))
+                stdout = SimpleNamespace(close=lambda: effect("stdout"))
+                stderr = SimpleNamespace(close=lambda: effect("stderr"))
+                exited = False
+
+                def poll(self):
+                    return 0 if self.exited else None
+
+                def kill(self):
+                    effect("kill")
+                    self.exited = True
+
+                def wait(self, timeout):
+                    effect("wait20" if timeout == 20 else "wait5")
+                    self.exited = True
+                    return 0
+
+            class Endpoint:
+                closed = False
+
+                def shutdown(self):
+                    effect("proxy-shutdown")
+
+                def server_close(self):
+                    self.closed = True
+                    effect("proxy-close")
+
+                def fileno(self):
+                    return -1 if self.closed else 3
+
+            class Thread:
+                ident = 1
+                alive = True
+
+                def join(self, timeout):
+                    assert timeout == 5, timeout
+                    self.alive = False
+                    effect("proxy-join")
+
+                def is_alive(self):
+                    return self.alive
+
+            process, endpoint, thread = Process(), Endpoint(), Thread()
+            endpoints = {endpoint: thread}
+            with patch.object(owner, "forced_crash_cleanup", side_effect=lambda store: effect("forced")), \
+                    redirect_stderr(io.StringIO()):
+                try:
+                    try:
+                        try:
+                            if body_failed:
+                                raise body_error
+                        finally:
+                            dispose_case(process, "synthetic-policy-store")
+                    finally:
+                        dispose_endpoint(endpoint, endpoints)
+                except BaseException as error:
+                    assert error is (body_error if body_failed else cleanup_error), (
+                        "provider cleanup replaced the primary failure", failing, error)
+                    assert {"stdin", "wait20", "wait5", "stdout", "stderr", "forced",
+                            "proxy-shutdown", "proxy-close", "proxy-join"} <= set(attempted), attempted
+                    assert process.poll() == 0 and not thread.is_alive() and endpoint.fileno() == -1
+                    assert error.__notes__, "cleanup failure was not reported"
+                else:
+                    raise AssertionError("successful provider body suppressed cleanup failure")
+    print("Provider disposal: body/cleanup fault pairs and successful-body cleanup failures preserve primary, reap Host and retire proxy")

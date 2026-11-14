@@ -29,9 +29,10 @@ from host_process import (canonical_fixture_root, start_ready_process, stop_proc
                           dispose_all, preserve_failure_metadata, _failure_destination,
                           copy_failure_diagnostics, wait_for, STORE_SCHEMA)
 import codex_fixture
+from model_fixture import stop_endpoint
 from product_defaults import DEFAULTS
 import os_semantics
-from host_launch_fixture import COMMAND_TIMEOUT, RUI, forced_crash_cleanup, matching_processes, run_start
+from host_launch_fixture import COMMAND_TIMEOUT, RUI, dispose_provider_case, forced_crash_cleanup, matching_processes, run_start
 
 
 # The format this build supports; older formats are refused, never migrated.
@@ -619,6 +620,7 @@ def new_host_provider_policy(root, env):
     proxy.requests = 0
     proxy.authorized = False
     proxy_thread = threading.Thread(target=proxy.serve_forever)
+    proxy_threads = {proxy: proxy_thread}
     proxy_url = f"http://127.0.0.1:{proxy.server_port}"
 
     private = root / "provider-policy"
@@ -728,26 +730,13 @@ def new_host_provider_policy(root, env):
                             intercepted_cases += 1
                         checked += 1
                     finally:
-                        if process is not None:
-                            host_process.close_stdin(process)
-                            try:
-                                process.wait(timeout=20)
-                            finally:
-                                if process.poll() is None:
-                                    process.kill()
-                                    process.wait(timeout=5)
-                                process.stdout.close()
-                                process.stderr.close()
-                        forced_crash_cleanup(store)
+                        dispose_provider_case(process, store)
         assert checked == 60 and intercepted_cases == 25, (checked, intercepted_cases)
         with proxy.receipt_lock:
             assert proxy.targets == {"api.openai.com:443"}, proxy.targets
             assert not proxy.authorized, "provider authorization escaped a refused CONNECT"
     finally:
-        proxy.shutdown()
-        proxy.server_close()
-        proxy_thread.join(timeout=5)
-        assert not proxy_thread.is_alive(), "loopback proxy did not stop"
+        stop_endpoint(proxy, proxy_threads)
     print(f"new Host provider policy: {checked} Host cases passed across serve/start/file/framed stdin/saved settings; "
           f"{intercepted_cases} usable-credential cases observed loopback CONNECT refusal to api.openai.com:443; "
           "no authorization headers or forwarding", flush=True)
@@ -1068,13 +1057,14 @@ def launch_fixture_root():
 
 def main():
     assert len(sys.argv) in (2, 3), "usage: host_launch_integration.py /absolute/path/to/rui [startup-limits|store-identity|provider-policy]"
-    from host_launch_exit_test import check_exit_reader, check_process_discovery, check_failure_retention
+    from host_launch_exit_test import check_exit_reader, check_process_discovery, check_failure_retention, check_provider_disposal
     with launch_fixture_root() as root_text:
         root = canonical_fixture_root(pathlib.Path(root_text))
         home = root / "home"
         home.mkdir(mode=0o700)
         credential = root / "credentials" / "missing.json"
         env = environment(home, credential)
+        check_provider_disposal(dispose_provider_case, stop_endpoint)
         if len(sys.argv) == 3 and sys.argv[2] == "provider-policy":
             new_host_provider_policy(root, env)
             return
