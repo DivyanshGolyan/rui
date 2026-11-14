@@ -6965,6 +6965,8 @@ const key_encodings = std.enums.EnumArray(keymap.Key, []const []const u8).init(.
     .ctrl_r = &.{ "\x12", "\x1b[114;5u", "\x1b[27;5;114~" },
     .ctrl_x = &.{ "\x18", "\x1b[120;5u", "\x1b[27;5;120~" },
     .alt_a = &.{ "\x1ba", "\x1b[97;3u", "\x1b[27;3;97~" },
+    .alt_up = &.{ "\x1b[1;3A", "\x1b[1;3:1A" },
+    .alt_down = &.{ "\x1b[1;3B", "\x1b[1;3:1B" },
     .up = &.{ "\x1b[A", "\x1bOA", "\x1b[1;1A" },
     .down = &.{ "\x1b[B", "\x1bOB", "\x1b[1;1B" },
     .left = &.{ "\x1b[D", "\x1bOD", "\x1b[1;1D" },
@@ -7978,4 +7980,69 @@ test "App settings live memory follows Overview readings while chat info stays c
     // Neither the per-Session facts nor its frontend bridge carries app memory.
     try std.testing.expect(!@hasField(@import("chat_info.zig").Backend, "memory"));
     try std.testing.expect(!@hasField(SessionFrontend.Lender, "memory"));
+}
+
+test "Option session navigation switches immediately and restores each sessions draft and input focus" {
+    const Files = struct {
+        var dir: std.Io.Dir = undefined;
+        var count: u8 = 0;
+        fn scratch(init: std.process.Init) !std.Io.File {
+            count += 1;
+            return dir.createFile(init.io, &.{'a' + count}, .{ .read = true });
+        }
+    };
+    for ([_]u16{ 46, 140 }) |width| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        Files.dir = tmp.dir;
+        Files.count = 0;
+        var cancellation: client.Cancellation = .{};
+        const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
+        defer rig.close();
+        const overview = rig.overview;
+        Seen.now.listed = 2;
+        _ = try overview.event(.{ .tick = test_now_s * 1000 });
+        _ = try rig.settle();
+        overview.ops.open = openSession;
+        overview.hooks.scratch = Files.scratch;
+        const first = overview.state.rows.items[overview.state.order.items[0]].reference;
+        const second = overview.state.rows.items[overview.state.order.items[1]].reference;
+        _ = try rig.next(.{ .open = first });
+        defer {
+            if (overview.app_session) |left| {
+                left.frontend.?.stop();
+                overview.disposeSession(left);
+                overview.app_session = null;
+            }
+            for (overview.retired.items) |retired| overview.disposeSession(retired.left);
+            overview.retired.deinit(std.testing.allocator);
+        }
+        overview.root.size = .{ .width = width, .height = 30 };
+        var ctx = rig.context();
+        defer ctx.cmds.deinit(std.testing.allocator);
+        for ([_]struct { text: []const u8, chord: []const u8, destination: view.Reference, restored: []const u8, cursor: usize }{
+            .{ .text = "first α\x1b[D", .chord = "\x1b[1;3B", .destination = second, .restored = "", .cursor = 0 },
+            .{ .text = "second\x1b[D", .chord = "\x1b[1;3A", .destination = first, .restored = "first α", .cursor = 6 },
+            .{ .text = "", .chord = "\x1b[1;3B", .destination = second, .restored = "second", .cursor = 5 },
+        }) |case| {
+            const frontend = overview.app_session.?.frontend.?;
+            frontend.reading.opening = false;
+            frontend.poll_at = std.math.maxInt(i96);
+            try app_events.send(&ctx, case.text, overview.root.widget(), frontend.widget());
+            ctx.cmds.clearRetainingCapacity();
+            try app_events.send(&ctx, case.chord, overview.root.widget(), frontend.widget());
+            const destination = overview.app_session.?.frontend.?;
+            try std.testing.expectEqualStrings(&case.destination, destination.session);
+            try std.testing.expectEqualStrings(case.restored, destination.input.composition().bytes);
+            try std.testing.expectEqual(case.cursor, destination.input.composition().cursor);
+            try std.testing.expect(!overview.root.input.list_focused);
+            var focused = false;
+            for (ctx.cmds.items) |command| if (command == .request_focus and command.request_focus.eql(destination.widget())) {
+                focused = true;
+            };
+            try std.testing.expect(focused);
+            try std.testing.expect(!ctx.quit);
+            try std.testing.expectEqual(@as(usize, 0), Seen.now.creates);
+        }
+    }
 }

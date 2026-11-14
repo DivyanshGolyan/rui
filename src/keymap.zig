@@ -20,6 +20,8 @@ pub const Key = enum {
     ctrl_r,
     ctrl_x,
     alt_a,
+    alt_up,
+    alt_down,
     up,
     down,
     /// The bare arrows; the draft moves its caret with them, and a choice
@@ -176,6 +178,7 @@ pub const list = [_]Reference{
     .{ .key = "ctrl+p", .meaning = "earlier message", .keys = &.{.ctrl_p}, .aliases = &.{.ctrl_n} },
     .{ .key = "ctrl+r", .meaning = "retry", .keys = &.{.ctrl_r} },
     .{ .key = "/", .meaning = "skills" },
+    .{ .key = "alt+↑↓", .meaning = "switch chat", .keys = &.{ .alt_up, .alt_down } },
     .{ .key = "alt+a", .meaning = "archive", .keys = &.{.alt_a} },
     .{ .key = "ctrl+c", .meaning = "leave", .keys = &.{.ctrl_c}, .aliases = &.{.ctrl_d} },
 };
@@ -230,7 +233,7 @@ test "keys reference gives Enter both its list and chat meanings" {
 }
 
 test "keys reference aliases are explicit under their listed rows" {
-    try std.testing.expectEqual(@as(usize, 14), list.len);
+    try std.testing.expectEqual(@as(usize, 15), list.len);
     for ([_]struct { key: Key, row: []const u8 }{
         .{ .key = .ctrl_g, .row = "esc" },
         .{ .key = .ctrl_d, .row = "ctrl+c" },
