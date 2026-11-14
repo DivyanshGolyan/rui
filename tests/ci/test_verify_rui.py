@@ -87,9 +87,11 @@ class VerifyRuiTest(unittest.TestCase):
         new = module["cmd_new"]
         run_type = module["Run"]
         sent_to = []
+        started = []
 
         def rui_cmd(_run, *args, **_kwargs):
             if args[:2] == ("session", "start"):
+                started.append(args)
                 return types.SimpleNamespace(returncode=0, stdout=json.dumps({
                     "context": {"store": "/tmp/store", "session": "fybw8c", "kind": "message"},
                     "configuration": {"provider": "codex", "model": "gpt-5.5"},
@@ -100,24 +102,112 @@ class VerifyRuiTest(unittest.TestCase):
             return types.SimpleNamespace(returncode=0, stderr="request: fixture-request\n")
 
         def fixture(_args, **kwargs):
-            (Path(kwargs["env"]["TMPDIR"]).parent / "fixture.port").write_text("1234")
             kwargs["stdout"].close()
+            saved = json.loads(Path(_args[-1], "run.json").read_text())
+            self.assertIs(saved.get("no_sessions"), args.no_sessions)
+            (Path(kwargs["env"]["TMPDIR"]).parent / "fixture.port").write_text("1234")
             return types.SimpleNamespace(pid=123)
 
+        for no_sessions in (False, True):
+            sent_to.clear()
+            started.clear()
+            with self.subTest(no_sessions=no_sessions), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                build = {"tree": "tree", "binary": "/unused/rui", "files_sha256": {"rui": "hash"}, "source": temp}
+                args = types.SimpleNamespace(sha="a" * 40, label="test", active_capacity=2, host_setenv=[], no_sessions=no_sessions, seed=0 if no_sessions else 1)
+                replacements = {"CACHE": root / "cache", "SCRATCH_PARENT": root, "load_build": lambda _sha: build,
+                                "launch_host": lambda _run: types.SimpleNamespace(stdout='{"instance":"host"}'),
+                                "wait_request": lambda *_args: None}
+                with patch.dict(new.__globals__, replacements), patch.object(run_type, "rui_cmd", rui_cmd), \
+                        patch.object(run_type, "own"), patch("subprocess.Popen", fixture), \
+                        patch.dict(sys.modules, {"codex_integration": types.SimpleNamespace(credentials=lambda _path: None)}), \
+                        patch.object(sys, "argv", sys.argv[:]), patch.object(sys, "path", sys.path[:]), \
+                        contextlib.redirect_stdout(io.StringIO()):
+                    new(args)
+                self.assertEqual(sent_to, [] if no_sessions else ["fybw8c"])
+                self.assertEqual(len(started), 0 if no_sessions else 2)
+                saved = json.loads(next((root / "cache/runs").glob("*/run.json")).read_text())
+                self.assertIs(saved["no_sessions"], no_sessions)
+                if no_sessions:
+                    self.assertEqual(saved["sessions"], {})
+
+    def test_doctor_validates_registered_session_references(self):
+        module = runpy.run_path(str(SCRIPT))
+        doctor = module["cmd_doctor"]
+        normal = {"demo": "demo-id", "approve": "approve-id"}
+        listed = {"sessions": [{"reference": sid} for sid in normal.values()]}
+        cases = [
+            ("normal", {"sessions": normal, "no_sessions": False}, listed, 0, True),
+            ("legacy normal", {"sessions": normal}, listed, 0, True),
+            ("intentional empty", {"sessions": {}, "no_sessions": True}, {"sessions": []}, 0, True),
+            ("unmarked empty", {"sessions": {}}, {"sessions": []}, 0, False),
+            ("unexpected row", {"sessions": {}, "no_sessions": True}, listed, 0, False),
+            ("scenario", {"sessions": {"Agent": "agent-id"}, "no_sessions": True},
+             {"sessions": [{"reference": "agent-id"}]}, 0, True),
+            ("extra row", {"sessions": normal},
+             {"sessions": listed["sessions"] + [{"reference": "extra-id"}]}, 0, True),
+            ("ID only in label", {"sessions": normal},
+             {"sessions": [{"reference": "other-id", "label": "demo-id"},
+                           {"reference": "approve-id"}]}, 0, False),
+            ("missing scenario ID", {"sessions": {**normal, "Agent": "agent-id"}}, listed, 0, False),
+        ]
+        for name in normal:
+            cases.append(("missing mapping " + name,
+                          {"sessions": {key: sid for key, sid in normal.items() if key != name}}, listed, 0, False))
+            cases.append(("missing row " + name, {"sessions": normal},
+                          {"sessions": [{"reference": sid} for key, sid in normal.items() if key != name]}, 0, False))
+        for registry in (None, [], "bad", {"": "id"}, {"Agent": ""}, {"Agent": None},
+                         {"Agent": 1}, {"demo": "same", "approve": "same"}):
+            cases.append(("invalid registry", {"sessions": registry, "no_sessions": True}, listed, 0, False))
+        cases.append(("missing registry", {"no_sessions": True}, {"sessions": []}, 0, False))
+        for flag in (None, 0, 1, "true", [], {}):
+            cases.append(("invalid flag", {"sessions": normal, "no_sessions": flag}, listed, 0, False))
+        for payload in (None, [], {}, {"sessions": None}, {"sessions": {}}, {"sessions": "bad"},
+                        {"sessions": [None]}, {"sessions": [{}]}, {"sessions": [{"reference": ""}]},
+                        {"sessions": [{"reference": 1}]}, {"sessions": [{"reference": None}]},
+                        {"sessions": listed["sessions"] * 2}):
+            cases.append(("invalid listing", {"sessions": normal}, payload, 0, False))
+        cases.extend([
+            ("failed listing", {"sessions": normal}, listed, 1, False),
+            ("failed empty listing", {"sessions": {}, "no_sessions": True}, {"sessions": []}, 1, False),
+            ("malformed JSON", {"sessions": normal}, "not JSON", 0, False),
+        ])
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            build = {"tree": "tree", "binary": "/unused/rui", "files_sha256": {"rui": "hash"}, "source": temp}
-            args = types.SimpleNamespace(sha="a" * 40, label="test", active_capacity=2, host_setenv=[], no_sessions=False, seed=1)
-            replacements = {"CACHE": root / "cache", "SCRATCH_PARENT": root, "load_build": lambda _sha: build,
-                            "launch_host": lambda _run: types.SimpleNamespace(stdout='{"instance":"host"}'),
-                            "wait_request": lambda *_args: None}
-            with patch.dict(new.__globals__, replacements), patch.object(run_type, "rui_cmd", rui_cmd), \
-                    patch.object(run_type, "own"), patch("subprocess.Popen", fixture), \
-                    patch.dict(sys.modules, {"codex_integration": types.SimpleNamespace(credentials=lambda _path: None)}), \
-                    patch.object(sys, "argv", sys.argv[:]), patch.object(sys, "path", sys.path[:]), \
-                    contextlib.redirect_stdout(io.StringIO()):
-                new(args)
-            self.assertEqual(sent_to, ["fybw8c"])
+            binary = root / "rui"
+            binary.touch()
+            for name, metadata, payload, rc, expected in cases:
+                with self.subTest(name=name, metadata=metadata, payload=payload):
+                    reports = []
+                    run = types.SimpleNamespace(root=root, scratch=root, home=root / "home", store=root / "store",
+                        evidence=root, rui=binary, sock=root / "absent-socket",
+                        meta={"sha": "sha", "binary_sha256": "hash", "source": temp,
+                              "fixture_url": "http://fixture/responses", "id": "run", "host_instance": "host", **metadata},
+                        owned=lambda: [{"kind": "host", "pid": 123, "lstart": "start"}])
+                    run.sid = types.MethodType(module["Run"].sid, run)
+                    def command(*args, **kwargs):
+                        if args[:2] == ("session", "list"):
+                            return types.SimpleNamespace(returncode=rc, stdout=payload if isinstance(payload, str)
+                                                         else json.dumps(payload), stderr="")
+                        return types.SimpleNamespace(returncode=0, stdout='{"instance":"host"}', stderr="")
+                    run.rui_cmd = unittest.mock.Mock(side_effect=command)
+                    replacements = {"Run": lambda _path: run, "sha256": lambda _path: "hash",
+                        "load_build": lambda _sha: {"files_sha256": {"rui": "hash"}},
+                        "process_start": lambda _pid: ("start",), "accessibility": lambda: "unused",
+                        "append_jsonl": lambda _path, report: reports.append(report)}
+                    with patch.dict(doctor.__globals__, replacements), \
+                            patch("subprocess.run", side_effect=lambda argv, **_kwargs: types.SimpleNamespace(
+                                stdout="sha" if argv[0] == "git" else "n" + str(run.store))), \
+                            patch("urllib.request.urlopen", return_value=io.BytesIO(b'{"verify_rui_fixture":"run"}')), \
+                            contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as result:
+                        doctor(types.SimpleNamespace(run=root, expect_sha=None))
+                    session_check = next(check for check in reports[0]["checks"]
+                                         if check["check"] == "configured Sessions present")
+                    self.assertEqual(session_check["ok"], expected)
+                    self.assertEqual(result.exception.code, 0 if expected else 1)
+                    self.assertEqual(reports[0]["verdict"], "PASS" if expected else "ISSUES")
+                    self.assertEqual(sum(call.args[:2] == ("session", "list")
+                                         for call in run.rui_cmd.call_args_list), 1)
 
     def test_scratch_root_follows_host_platform(self):
         for platform, expected in (("darwin", "/private/tmp"), ("linux", "/tmp")):
