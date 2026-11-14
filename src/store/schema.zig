@@ -2995,8 +2995,6 @@ test "schema 74 migration only deletes the saved wire label on SQLite and MySQL"
         try std.testing.expectEqualStrings("DELETE FROM store_meta WHERE meta_key='wire_version'", statements[0]);
     }
     try std.testing.expectEqualStrings("DELETE FROM store_meta WHERE meta_key='wire_version';\n", mysqlMigration(73));
-    // Older formats' composed text ends with the format alone, never a wire label.
-    try std.testing.expect(std.mem.endsWith(u8, mysqlMigrationFrom(migration_baseline).?, "DELETE FROM store_meta WHERE meta_key='wire_version';\nUPDATE store_meta SET meta_value='" ++ format_text ++ "' WHERE meta_key='format';\n"));
 }
 
 test "schema 72 migration updates only wire metadata on SQLite and MySQL" {

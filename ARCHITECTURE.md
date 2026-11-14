@@ -1552,7 +1552,9 @@ Each format PR appends its own version and step; even unreleased steps and diges
 The schema writes each closed value set as fixed literals, so the Store format never silently follows a code enum, and changing a set is a format change that needs a new version.
 Provider labels and codec names are open by design (Divyansh, 2026-10-31 provider-plugin design): the schema checks their syntax, and a Host refuses a label or codec it does not serve.
 Sessions store a Label and creation time.
-A Session's codec and codec options are part of its immutable binding; a read for a Session whose pinned codec or options this Host cannot build requests with fences rather than re-encoding under another grammar.
+A Session's codec and codec options are its immutable baseline for new Operation admission.
+Historical settings use the Operation's frozen codec and options, not the Session baseline.
+An unsupported frozen binding fences rather than re-encoding under another grammar.
 The Store records the Host Unix second at which each state-bearing fact committed: a Turn outcome; a model Operation's Attempt admission, retry scheduling and resolution, exactly one of which is set, matching its state; an Action's authorization, first launch and resolution; and a Session stop, a refused send and a Conversation entry.
 CHECKs tie each time's nullness to its row's state, so no writer can leave a stale or missing time.
 A Turn's state is `outcome_code`, so `outcome_at` is tied to it rather than to `outcome_position`: Session work reads the time of a Turn whose code is set, and the position is a separate claim that activity revalidation requires exactly when the code is set, so a valid Store has all three together.
@@ -1777,7 +1779,7 @@ Only private report-scratch writes may occur under their owning read transaction
 
 Core invokes private provider/Bash/Edit interfaces through closed effect-specific inputs and evidence.
 No public provider module or generic dispatch registry is required.
-A provider's wire format is a codec, pinned per Session by name and version, behind one value contract (`src/codec_abi.zig`): plain values, with no calls back into the Host, no file access and no state the Host does not store, so the same contract can later run a codec outside the Host's address space; the built-in codecs are linked in natively.
+A provider's wire format is a codec, frozen per Operation by name and version, behind one value contract (`src/codec_abi.zig`): plain values, with no calls back into the Host, no file access and no state the Host does not store, so the same contract can later run a codec outside the Host's address space; the built-in codecs are linked in natively.
 To encode a request the shell gives the codec one neutral item at a time, with Rui's text named by handle, and writes the literal and content pieces the codec answers with through its own request cursors under the preparation allowance before it asks for the next item.
 The codec's encoder state is a small value of the codec's own type that the shell stores, and it holds the codec's carry.
 Before each history element and `history_end` the shell resumes the codec from its carry, also a value of the codec's type, which the shell kept after the previous element or took from a history memo, so a memo copy and a rebuild continue identically.

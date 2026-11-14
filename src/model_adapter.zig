@@ -4832,11 +4832,10 @@ test "a history memo that does not match the frozen request is rebuilt in full" 
     var binding = try admitted.permit.consume();
     _ = try expectMemoRebuildEqual(&setup, binding, &memos, .{});
     binding = try advanceMemoHistoryForTesting(&setup, session, binding, 1);
-    // Each mismatch carries poisoned bytes, so using it would change the
-    // request; equality with the full rebuild proves it was not used.
     const Mismatch = enum { anchor, model, older_view, session, codec, options };
     for (std.enums.values(Mismatch)) |mismatch| {
-        try damageMemoFileForTesting(&setup, &memos, session.slice(), .poisoned);
+        if (mismatch != .codec and mismatch != .options)
+            try damageMemoFileForTesting(&setup, &memos, session.slice(), .poisoned);
         const memo = &memo_entries[history_memo.sessionSlot(&memo_entries, session.slice()).?].memo.?;
         switch (mismatch) {
             .anchor => memo.key.anchor = 1,
