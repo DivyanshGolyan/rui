@@ -846,10 +846,62 @@ class ProcessCensusTest(unittest.TestCase):
                         return {"unavailable": type(error).__name__, "detail": str(error)}
 
                 def bounded(value, limit=8192):
-                    encoded = json.dumps(value, ensure_ascii=True)
-                    return value if len(encoded) <= limit else {
-                        "omitted": "whole field exceeds serialized ASCII byte cap",
-                        "serialized_bytes": len(encoded), "limit": limit}
+                    remaining = limit
+                    reason = "whole field exceeds serialized ASCII byte cap"
+
+                    def consume(count):
+                        nonlocal remaining
+                        if count > remaining:
+                            return False
+                        remaining -= count
+                        return True
+
+                    def fits(item, depth=0):
+                        nonlocal reason
+                        if depth > 64:
+                            reason = "whole field exceeds nesting cap"
+                            return False
+                        if isinstance(item, str):
+                            if not consume(2) or len(item) > remaining:
+                                return False
+                            for character in item:
+                                code = ord(character)
+                                width = (2 if character in '\\"\b\f\n\r\t' else
+                                         12 if code > 0xffff else
+                                         6 if code < 0x20 or code > 0x7e else 1)
+                                if not consume(width):
+                                    return False
+                            return True
+                        if item is None or isinstance(item, bool):
+                            return consume(4 if item is None or item is True else 5)
+                        if isinstance(item, int):
+                            if item.bit_length() > 4 * remaining:
+                                return False
+                            return consume(len(str(item)))
+                        if isinstance(item, (list, tuple, dict)):
+                            if not consume(2):
+                                return False
+                            first = True
+                            for entry in item:
+                                if not first and not consume(2):
+                                    return False
+                                first = False
+                                if isinstance(item, dict):
+                                    if not isinstance(entry, str):
+                                        raise TypeError("diagnostic JSON key is not text")
+                                    if not fits(entry, depth + 1) or not consume(2):
+                                        return False
+                                    entry = item[entry]
+                                if not fits(entry, depth + 1):
+                                    return False
+                            return True
+                        raise TypeError("unsupported diagnostic JSON value")
+
+                    if fits(value):
+                        return value
+                    return {"omitted": reason, "limit": limit, **(
+                        {"max_depth": 64} if reason == "whole field exceeds nesting cap" else
+                        {"serialized_bytes_at_least": limit + 1})}
 
                 def image(path):
                     def snapshot():
