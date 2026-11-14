@@ -163,10 +163,11 @@ func StartHost(
 func hostArguments(store, endpoint string, capacity int, extra []string) []string {
 	arguments := []string{
 		"host", "serve", "--store", store,
-		"--active-capacity", strconv.Itoa(capacity),
+		"--set", "execution.activeCapacity=" + strconv.Itoa(capacity),
+		"--set", "providers={}",
 	}
 	if endpoint != "" {
-		arguments = append(arguments, "--provider-endpoint", endpoint)
+		arguments = append(arguments, "--set", "providers.codex.endpoint="+endpoint, "--set", "providers.codex.unauthenticated=true")
 	}
 	return append(arguments, extra...)
 }

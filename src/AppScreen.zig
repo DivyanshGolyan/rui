@@ -257,7 +257,7 @@ const Marker = struct {
 
 test "App screens compose content input facts status and an overlay without owning the draft" {
     var bytes = "kept draft".*;
-    const editor: @import("TerminalEditor.zig") = .{ .buffer = &bytes, .length = bytes.len, .cursor = 4 };
+    var editor: @import("DraftEditor.zig") = .initText(&bytes, &bytes, 4);
     var input: InputArea = .{ .composer = .{ .editor = &editor } };
     var list: @import("GroupedList.zig") = .{};
     const document = try std.testing.allocator.create(@import("ConversationViewport.zig").Document);
@@ -293,8 +293,8 @@ test "App screens compose content input facts status and an overlay without owni
             const tiny = try screen.draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = size.height }));
             try std.testing.expect(tiny.size.width <= size.width and tiny.size.height <= size.height);
         }
-        try std.testing.expectEqualStrings("kept draft", editor.buffer[0..editor.length]);
-        try std.testing.expectEqual(@as(usize, 4), editor.cursor);
+        try std.testing.expectEqualStrings("kept draft", editor.text());
+        try std.testing.expectEqual(@as(usize, 4), editor.cursor());
     }
     try std.testing.expectEqual(@as(usize, 2), events);
     const header: vxfw.Text = .{ .text = "Counts" };
@@ -347,7 +347,7 @@ test "App screens render the original composition with painted marker rows" {
         fn event(_: *anyopaque, _: *vxfw.EventContext, _: vxfw.Event) !void {}
     };
     var bytes = "draft".*;
-    const editor: @import("TerminalEditor.zig") = .{ .buffer = &bytes, .length = bytes.len, .cursor = 2 };
+    var editor: @import("DraftEditor.zig") = .initText(&bytes, &bytes, 2);
     var input: InputArea = .{ .composer = .{ .editor = &editor } };
     var content: TestContent = .{};
     var screen: Screen(TestContent) = .{ .content = &content, .input = input.widget(), .userdata = &content, .on_event = TestContent.event, .style = .{ .bg = .{ .index = 4 } } };
@@ -415,7 +415,7 @@ test "App screens update layout state through exhausted resizes for every option
         fn event(_: *anyopaque, _: *vxfw.EventContext, _: vxfw.Event) !void {}
     };
     var bytes = "draft".*;
-    const editor: @import("TerminalEditor.zig") = .{ .buffer = &bytes, .length = bytes.len, .cursor = 2 };
+    var editor: @import("DraftEditor.zig") = .initText(&bytes, &bytes, 2);
     var input: InputArea = .{ .composer = .{ .editor = &editor } };
     const document = try std.testing.allocator.create(@import("ConversationViewport.zig").Document);
     defer std.testing.allocator.destroy(document);
@@ -475,8 +475,8 @@ test "App screens update layout state through exhausted resizes for every option
                     try std.testing.expectEqual(@as(u32, @intCast(@min(count, content_height))), list.shown.end);
                     try std.testing.expectEqual(@min(count, content_height), list.shown_at.len);
                 }
-                try std.testing.expectEqualStrings("draft", editor.buffer[0..editor.length]);
-                try std.testing.expectEqual(@as(usize, 2), editor.cursor);
+                try std.testing.expectEqualStrings("draft", editor.text());
+                try std.testing.expectEqual(@as(usize, 2), editor.cursor());
             }
         }
     };
@@ -510,7 +510,7 @@ test "App screens reserve one measured natural panel before feed without shrinki
         }
     };
     var bytes = "kept\ndraft".*;
-    const editor: @import("TerminalEditor.zig") = .{ .buffer = &bytes, .length = bytes.len, .cursor = 4 };
+    var editor: @import("DraftEditor.zig") = .initText(&bytes, &bytes, 4);
     var input: InputArea = .{ .composer = .{ .editor = &editor }, .status = null };
     var body: Body = .{};
     var panel: Panel = .{};
@@ -545,8 +545,8 @@ test "App screens reserve one measured natural panel before feed without shrinki
             try std.testing.expectEqual(slot.surface.size.height, above.surface.size.height);
             try std.testing.expectEqual(composer.origin.row, above.origin.row + above.surface.size.height);
             try std.testing.expect(above.surface.children[0].surface.widget.eql(panel.widget()));
-            try std.testing.expectEqualStrings("kept\ndraft", editor.buffer[0..editor.length]);
-            try std.testing.expectEqual(@as(usize, 4), editor.cursor);
+            try std.testing.expectEqualStrings("kept\ndraft", editor.text());
+            try std.testing.expectEqual(@as(usize, 4), editor.cursor());
         }
     };
 }
@@ -570,7 +570,7 @@ test "App screens allocate cells once for a covered pane and its gutter" {
         }
     };
     var bytes = "draft".*;
-    const editor: @import("TerminalEditor.zig") = .{ .buffer = &bytes, .length = bytes.len };
+    var editor: @import("DraftEditor.zig") = .initText(&bytes, &bytes, 0);
     var input: InputArea = .{ .composer = .{ .editor = &editor } };
     var body: Body = .{};
     var screen: Screen(Body) = .{ .content = &body, .input = input.widget(), .content_gutter = true, .userdata = &body, .on_event = Body.event, .style = .{ .bg = .{ .index = 4 } } };

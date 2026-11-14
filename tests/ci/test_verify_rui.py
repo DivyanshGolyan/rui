@@ -27,6 +27,32 @@ def committed(text, columns=100, lines=20):
 
 
 class VerifyRuiTest(unittest.TestCase):
+    def test_host_launcher_uses_exact_credential_free_generic_settings(self):
+        launch = runpy.run_path(str(SCRIPT))["launch_host"]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run = types.SimpleNamespace(
+                rui=Path("/candidate/rui"), store=root / "store", project=root, evidence=root,
+                meta={"host_options": {"active_capacity": 8, "host_setenv": ["HOST_ONLY=secret"]},
+                      "fixture_url": "http://127.0.0.1:1234/responses"},
+                env=lambda: {"HOME": str(root)}, own=lambda *_args, **_kwargs: None,
+                rui_cmd=lambda *_args, **_kwargs: types.SimpleNamespace(returncode=0, stdout='{"status":"ready"}', stderr=""))
+            captured = {}
+
+            def start(argv, **kwargs):
+                captured.update(argv=argv, env=kwargs["env"])
+                kwargs["stdout"].close()
+                kwargs["stderr"].close()
+                return types.SimpleNamespace(pid=123)
+
+            with patch("subprocess.Popen", start):
+                launch(run)
+            self.assertEqual(captured["argv"], ["/candidate/rui", "host", "serve", "--store", str(run.store),
+                "--set", "execution.activeCapacity=8", "--set", "providers={}",
+                "--set", "providers.codex.endpoint=http://127.0.0.1:1234/responses",
+                "--set", "providers.codex.unauthenticated=true", "--test-retry-waits-ms", "50,100,150"])
+            self.assertEqual(captured["env"]["HOST_ONLY"], "secret")
+
     def test_child_imports_user_site_with_synthetic_home(self):
         run_type = runpy.run_path(str(SCRIPT))["Run"]
         with tempfile.TemporaryDirectory() as temp:

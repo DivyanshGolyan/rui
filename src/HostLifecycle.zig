@@ -9,9 +9,8 @@ const process = @import("upgrade_process.zig");
 const Installation = @import("Installation.zig");
 const candidate = @import("release_candidate.zig");
 const cli_args = @import("cli_args.zig");
-const hs = @import("host_settings.zig");
+const serve_grammar = @import("serve_grammar.zig");
 const host_start = @import("host_start.zig");
-const start_report = @import("start_report.zig");
 const product_defaults = @import("product_defaults.zig");
 
 pub const Stage = enum { stopping, awaiting_retirement, starting, verifying };
@@ -35,9 +34,12 @@ pub const Limitation = enum {
 pub const LaunchOption = struct { name: []const u8, value: ?[]const u8 };
 pub const LaunchSpecification = struct {
     options: []LaunchOption,
+    /// The option values: a translated retired flag's are not argv bytes.
+    values: []u8 = &.{},
 
     fn deinit(self: *const LaunchSpecification, allocator: std.mem.Allocator) void {
         allocator.free(self.options);
+        allocator.free(self.values);
     }
 };
 
@@ -46,6 +48,9 @@ pub const Plan = struct {
     snapshot: identity.Snapshot,
     launch: LaunchSpecification,
     version: candidate.Version,
+    /// Its build's `host serve` takes no --set: a release from before the
+    /// retired flags, whose unset `providers` meant something else.
+    previous_release: bool,
 };
 
 pub const Observation = union(enum) {
@@ -114,6 +119,13 @@ pub fn observe(allocator: std.mem.Allocator, io: std.Io, home: []const u8, store
         snapshot.deinit(allocator);
         return .{ .unsupported = .configuration_unavailable };
     }
+    const serve_help = process.output(allocator, io, &.{ snapshot.executable, "host", "serve", "--help" }, cancellation, 32768) catch |err| {
+        if (err == error.Cancelled) return err;
+        snapshot.deinit(allocator);
+        return .{ .unsupported = .configuration_unavailable };
+    };
+    defer allocator.free(serve_help);
+    const previous_release = std.mem.indexOf(u8, serve_help[0 .. std.mem.indexOfScalar(u8, serve_help, '\n') orelse serve_help.len], "[--set ") == null;
     var launch = deriveLaunch(allocator, snapshot.argv) catch {
         snapshot.deinit(allocator);
         return .{ .unsupported = .configuration_unavailable };
@@ -129,7 +141,7 @@ pub fn observe(allocator: std.mem.Allocator, io: std.Io, home: []const u8, store
         snapshot.deinit(allocator);
         return .{ .unsupported = .ownership_unconfirmed };
     }
-    return .{ .managed = .{ .observed = observed, .snapshot = snapshot, .launch = launch, .version = version } };
+    return .{ .managed = .{ .observed = observed, .snapshot = snapshot, .launch = launch, .version = version, .previous_release = previous_release } };
 }
 
 fn sameHost(a: client.HostControlObservation, b: client.HostControlObservation) bool {
@@ -189,84 +201,82 @@ fn deriveLaunch(allocator: std.mem.Allocator, argv: []const []const u8) !LaunchS
     defer scratch.deinit();
     const grammar = comptime cli_args.Command.host_serve.definition();
     var problem: cli_args.Refusal = undefined;
-    const parsed = try grammar.parseSyntax(argv[3..], scratch.allocator(), &problem);
+    // A Host a previous release started names retired flags; serve_grammar
+    // reads them as the assignments that replace them.
+    const arguments = serve_grammar.currentArguments(scratch.allocator(), argv[3..]) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.InvalidArguments => return error.UnsupportedHostConfiguration,
+    };
+    const parsed = try grammar.parseSyntax(arguments, scratch.allocator(), &problem);
     try parsed.validateValues(&problem);
-    if (parsed.help or parsed.missing() != null or std.mem.eql(u8, parsed.get("settings") orelse "", "-")) return error.UnsupportedHostConfiguration;
-    if (parsed.get("settings")) |source| if (!std.fs.path.isAbsolute(source)) return error.UnsupportedHostConfiguration;
-    inline for (.{ "bash-path", "provider-ca-file" }) |name| {
-        if (parsed.get(name)) |value| if (!std.fs.path.isAbsolute(value)) return error.UnsupportedHostConfiguration;
-    }
+    // Whether the settings reproduce in `/` is host_start.replayable's, at activation.
+    if (parsed.help or parsed.missing() != null) return error.UnsupportedHostConfiguration;
+    // Relaunch appends one authoritative capacity assignment. Refuse before
+    // disruption when the target parser would have no repeat slot for it.
+    if (parsed.repeat_count == parsed.repeats.len) return error.UnsupportedHostConfiguration;
     var options: std.ArrayList(LaunchOption) = .empty;
     errdefer options.deinit(allocator);
     for (grammar.options) |option| {
+        if (std.mem.eql(u8, option.hex_of orelse option.name, "store")) continue;
         if (option.hidden and parsed.hasNamed(option.name)) return error.UnsupportedHostConfiguration;
-        if (std.mem.eql(u8, option.hex_of orelse option.name, "store") or std.mem.eql(u8, option.name, "active-capacity")) continue;
         if (option.repeated) {
             for (parsed.allNamed(option.name)) |value| try options.append(allocator, .{ .name = option.name, .value = value });
         } else if (parsed.hasNamed(option.name)) {
             try options.append(allocator, .{ .name = option.name, .value = parsed.getNamed(option.name) });
         }
     }
-    return .{ .options = try options.toOwnedSlice(allocator) };
+    var size: usize = 0;
+    for (options.items) |option| size += if (option.value) |value| value.len else 0;
+    const values = try allocator.alloc(u8, size);
+    var at: usize = 0;
+    for (options.items) |*option| if (option.value) |value| {
+        @memcpy(values[at..][0..value.len], value);
+        option.value = values[at..][0..value.len];
+        at += value.len;
+    };
+    errdefer allocator.free(values);
+    return .{ .options = try options.toOwnedSlice(allocator), .values = values };
 }
 
-// host_launch starts the replacement in `/` with stdin closed. Read the
-// document through its owner before any retirement and admit only what that
-// launch reproduces: no cwd-relative path and no stdin lifetime. Do not anchor
-// here: that would disguise relative paths without preserving them. The Store
-// is exempt because replay pins the observed canonical --store.
-fn admitReplay(init: std.process.Init, launch: *const LaunchSpecification) !void {
-    for (launch.options) |option| {
-        if (!std.mem.eql(u8, option.name, "settings")) continue;
-        const source = option.value orelse return error.UnsupportedHostConfiguration;
-        if (!std.fs.path.isAbsolute(source)) return error.UnsupportedHostConfiguration;
-        const settings = try init.gpa.create(hs.Settings);
-        defer init.gpa.destroy(settings);
-        settings.* = .{};
-        defer settings.deinit();
-        var failure: start_report.Failure = undefined;
-        host_start.readDocument(init, source, settings, &failure) catch |err| {
-            if (err == error.OutOfMemory) return err;
-            return error.UnsupportedHostConfiguration;
-        };
-        if (settings.interface.lifetime.value == .stdin) return error.UnsupportedHostConfiguration;
-        inline for (@typeInfo(hs.Settings).@"struct".field_names, @typeInfo(hs.Settings).@"struct".field_types) |name, Field| {
-            if (comptime !std.mem.eql(u8, name, "store")) {
-                if (!replayPaths(Field, &@field(settings, name))) return error.UnsupportedHostConfiguration;
-            }
-        }
+// host_launch starts the replacement in `/` with stdin closed; host_start
+// decides before any retirement whether this launch reproduces there.
+fn admitReplay(init: std.process.Init, options: []const LaunchOption, store: []const u8) !void {
+    var assignments: std.ArrayList([]const u8) = .empty;
+    defer assignments.deinit(init.gpa);
+    var request: host_start.Spawn = .{ .dir = store };
+    for (options) |option| {
+        const value = option.value orelse return error.UnsupportedHostConfiguration;
+        if (std.mem.eql(u8, option.name, "settings")) request.settings_file = value;
+        if (std.mem.eql(u8, option.name, "set")) try assignments.append(init.gpa, value);
     }
+    request.assignments = assignments.items;
+    if (!try host_start.replayable(init, request)) return error.UnsupportedHostConfiguration;
 }
 
-fn replayPaths(comptime T: type, value: *const T) bool {
-    if (@typeInfo(T) == .optional) {
-        return if (value.*) |*present| replayPaths(@typeInfo(T).optional.child, present) else true;
-    }
-    if (@hasDecl(T, "kind")) {
-        return switch (T.kind) {
-            .path => value.anchored or (value.slice().len == 0 and T.allow_empty) or std.fs.path.isAbsolute(value.slice()),
-            .secret => switch (value.source) {
-                .file => |*file| replayPaths(@TypeOf(file.*), file),
-                else => true,
-            },
-            .named => blk: {
-                for (value.values[0..value.len]) |*entry| if (!replayPaths(T.Child, entry)) break :blk false;
-                break :blk true;
-            },
-            .providers => replayPaths(T.Table, &value.entries),
-            else => true,
+/// The replacement's options, owned by `allocator`. A Host a previous release
+/// started first gets the provider set that release served when none of its
+/// layers named one (serve_grammar.previousProviders), so an upgrade never
+/// changes what it serves. Call after admitReplay, which refuses a relative
+/// --settings before its document is read here.
+fn replayOptions(init: std.process.Init, allocator: std.mem.Allocator, plan: *const Plan) ![]LaunchOption {
+    const base: ?[]const u8 = if (plan.previous_release) base: {
+        var document: ?[]const u8 = null;
+        for (plan.launch.options) |option| if (std.mem.eql(u8, option.name, "settings")) {
+            document = option.value;
         };
-    }
-    switch (@typeInfo(T)) {
-        .@"struct" => |info| inline for (info.field_names, info.field_types) |name, Field| {
-            if (!replayPaths(Field, &@field(value, name))) return false;
-        },
-        .@"union" => return switch (value.*) {
-            inline else => |*payload| replayPaths(@TypeOf(payload.*), payload),
-        },
-        else => @compileError("not a Host settings kind"),
-    }
-    return true;
+        const names = if (document) |file| host_start.documentNamesProviders(init, file) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.UnsupportedHostConfiguration,
+        } else false;
+        break :base serve_grammar.previousProviders(document != null, names);
+    } else null;
+    const options = try allocator.alloc(LaunchOption, plan.launch.options.len + @intFromBool(base != null));
+    const rest = if (base) |set| rest: {
+        options[0] = .{ .name = "set", .value = set };
+        break :rest options[1..];
+    } else options;
+    @memcpy(rest, plan.launch.options);
+    return options;
 }
 
 fn supportedByHelp(specification: *const LaunchSpecification, help: []const u8) bool {
@@ -276,7 +286,7 @@ fn supportedByHelp(specification: *const LaunchSpecification, help: []const u8) 
         const named = std.fmt.bufPrint(&needle, "[--{s}{s}", .{ option.name, if (option.value != null) " " else "]" }) catch return false;
         if (std.mem.indexOf(u8, first, named) == null) return false;
     }
-    return std.mem.indexOf(u8, first, "[--store ") != null and std.mem.indexOf(u8, first, "[--active-capacity ") != null;
+    return std.mem.indexOf(u8, first, "[--store ") != null and std.mem.indexOf(u8, first, "[--set ") != null;
 }
 
 pub fn releaseVersion(reported: []const u8) ?candidate.Version {
@@ -357,7 +367,9 @@ const PreparedActivation = struct {
     buffers: ?PrivateLaunch,
 
     fn init(process_init: std.process.Init, allocator: std.mem.Allocator, plan: *const Plan, target: []const u8, cancellation: ?*const client.Cancellation) !PreparedActivation {
-        try admitReplay(process_init, &plan.launch);
+        try admitReplay(process_init, plan.launch.options, plan.observed.facts.store.slice());
+        const options = try replayOptions(process_init, allocator, plan);
+        defer allocator.free(options);
         if (plan.observed.profile.historical()) {
             const stop_help = try process.output(allocator, process_init.io, &.{ plan.snapshot.executable, "host", "pause", "--help" }, cancellation, 32768);
             defer allocator.free(stop_help);
@@ -375,7 +387,7 @@ const PreparedActivation = struct {
         if (!supportedByHelp(&plan.launch, help)) return error.UnsupportedHostConfiguration;
         const helper = try std.process.executablePathAlloc(process_init.io, allocator);
         errdefer allocator.free(helper);
-        const buffers = try PrivateLaunch.init(allocator, executable, plan.launch.options, plan.observed.facts.store.slice(), plan.observed.facts.active_capacity, plan.snapshot.environment);
+        const buffers = try PrivateLaunch.init(allocator, executable, options, plan.observed.facts.store.slice(), plan.observed.facts.active_capacity, plan.snapshot.environment);
         return .{ .executable = executable, .helper = helper, .buffers = buffers };
     }
 
@@ -400,9 +412,10 @@ const PrivateLaunch = struct {
     envp: [:null]?[*:0]const u8,
 
     fn init(allocator: std.mem.Allocator, executable: []const u8, options: []const LaunchOption, store: []const u8, active_capacity: usize, environment: []const []const u8) !PrivateLaunch {
-        var capacity_buffer: [std.fmt.count("{d}", .{std.math.maxInt(usize)})]u8 = undefined;
-        const capacity = std.fmt.bufPrint(&capacity_buffer, "{d}", .{active_capacity}) catch unreachable;
-        const arguments = [_][]const u8{ executable, "host", "serve", "--store", store, "--active-capacity", capacity };
+        var capacity_buffer: [128]u8 = undefined;
+        const capacity = try host_start.capacityAssignment(active_capacity, &capacity_buffer);
+        // Replay overrides first; the observed capacity is authoritative last.
+        const arguments = [_][]const u8{ executable, "host", "serve", "--store", store, "--set", capacity };
         var argc: usize = arguments.len;
         var byte_count: usize = 0;
         for (arguments) |argument| {
@@ -574,13 +587,15 @@ test "upgrade private launch buffers wipe argv environment and sentinels on ever
         fn exercise(gpa: std.mem.Allocator, environment: []const []const u8, fail_after_construction: bool) !void {
             const endpoint = "https://example.test/v1?token=synthetic-launch-only";
             const options = [_]LaunchOption{
-                .{ .name = "provider-endpoint", .value = endpoint },
+                .{ .name = "set", .value = endpoint },
                 .{ .name = "synthetic-flag", .value = null },
                 .{ .name = "synthetic-empty", .value = "" },
             };
             var buffers = try PrivateLaunch.init(gpa, "/synthetic/bin/rui", &options, "/synthetic/private-store", 17, environment);
             defer buffers.deinit(gpa);
-            const expected = [_][]const u8{ "/synthetic/bin/rui", "host", "serve", "--provider-endpoint", endpoint, "--synthetic-flag", "--synthetic-empty", "", "--store", "/synthetic/private-store", "--active-capacity", "17" };
+            var capacity_buffer: [128]u8 = undefined;
+            const capacity = try host_start.capacityAssignment(17, &capacity_buffer);
+            const expected = [_][]const u8{ "/synthetic/bin/rui", "host", "serve", "--set", endpoint, "--synthetic-flag", "--synthetic-empty", "", "--store", "/synthetic/private-store", "--set", capacity };
             try std.testing.expectEqual(expected.len, buffers.argv.len);
             try std.testing.expectEqual(environment.len, buffers.envp.len);
             for (expected, buffers.argv) |argument, pointer| {
@@ -675,12 +690,9 @@ test "relaunch activation reading requires the pinned launch for either wire" {
 
 test "upgrade lifecycle derives launch semantics before disruption" {
     const allocator = std.testing.allocator;
-    try std.testing.expectError(error.UnsupportedHostConfiguration, deriveLaunch(allocator, &.{ "rui", "host", "serve", "--settings", "-" }));
     for ([_][]const []const u8{
         &.{ "rui", "session", "start" },
         &.{ "rui", "host", "serve", "--test-observation-fd", "8" },
-        &.{ "rui", "host", "serve", "--bash-path", "relative/bash" },
-        &.{ "rui", "host", "serve", "--provider-ca-file", "relative.pem", "--provider-endpoint", "https://example.test" },
         &.{ "rui", "host", "serve", "--unknown-new-option", "value" },
     }) |args| {
         if (deriveLaunch(allocator, args)) |*result| {
@@ -688,26 +700,54 @@ test "upgrade lifecycle derives launch semantics before disruption" {
             return error.TestUnexpectedResult;
         } else |_| {}
     }
+    var first_buffer: [128]u8 = undefined;
+    var last_buffer: [128]u8 = undefined;
+    const first = try host_start.capacityAssignment(3, &first_buffer);
+    const last = try host_start.capacityAssignment(5, &last_buffer);
     for ([_][]const u8{ "--store", "--store-hex" }, [_][]const u8{ "/some/store", "2f736f6d652f73746f7265" }) |spelling, value| {
-        var launch = try deriveLaunch(allocator, &.{ "rui", "host", "serve", spelling, value, "--active-capacity", "3", "--provider-endpoint", "--store" });
+        var launch = try deriveLaunch(allocator, &.{ "rui", "host", "serve", spelling, value, "--set", first, "--set", last });
         defer launch.deinit(allocator);
-        try std.testing.expectEqual(@as(usize, 1), launch.options.len);
-        try std.testing.expectEqualStrings("provider-endpoint", launch.options[0].name);
-        try std.testing.expectEqualStrings("--store", launch.options[0].value.?);
-        try std.testing.expect(supportedByHelp(&launch, "rui host serve [--store PATH] [--active-capacity N] [--provider-endpoint URL]\n"));
-        try std.testing.expect(!supportedByHelp(&launch, "rui host serve [--store PATH] [--active-capacity N]\n"));
+        try std.testing.expectEqual(@as(usize, 2), launch.options.len);
+        try std.testing.expectEqualStrings("set", launch.options[0].name);
+        try std.testing.expectEqualStrings(first, launch.options[0].value.?);
+        try std.testing.expectEqualStrings("set", launch.options[1].name);
+        try std.testing.expectEqualStrings(last, launch.options[1].value.?);
+        try std.testing.expect(supportedByHelp(&launch, "rui host serve [--store PATH] [--set PATH=VALUE]\n"));
+        try std.testing.expect(!supportedByHelp(&launch, "rui host serve [--store PATH]\n"));
     }
-    // File-backed documents, unlike an exhausted stdin document, retain
-    // the same argv replay and help-admission behavior as ordinary flags.
-    try std.testing.expectError(error.UnsupportedHostConfiguration, deriveLaunch(allocator, &.{ "rui", "host", "serve", "--settings", "relative/host.json" }));
+    // A Host a previous release's starter launched replays as assignments.
+    {
+        var launch = try deriveLaunch(allocator, &.{ "rui", "host", "serve", "--store", "/some/store", "--provider", "codex", "--provider", "openai", "--active-capacity", "4" });
+        defer launch.deinit(allocator);
+        const expected = [_][]const u8{ "providers.codex={}", "providers.openai={}", "execution.activeCapacity=4" };
+        try std.testing.expectEqual(expected.len, launch.options.len);
+        for (expected, launch.options) |value, option| {
+            try std.testing.expectEqualStrings("set", option.name);
+            try std.testing.expectEqualStrings(value, option.value.?);
+        }
+        try std.testing.expect(supportedByHelp(&launch, "rui host serve [--store PATH] [--set PATH=VALUE]\n"));
+    }
+    const repeat_limit = @as(cli_args.Parsed, undefined).repeats.len;
+    var full: [3 + 2 * repeat_limit][]const u8 = undefined;
+    @memcpy(full[0..3], &[_][]const u8{ "rui", "host", "serve" });
+    for (0..repeat_limit) |index| {
+        full[3 + 2 * index] = "--set";
+        full[4 + 2 * index] = first;
+    }
+    try std.testing.expectError(error.UnsupportedHostConfiguration, deriveLaunch(allocator, &full));
+    var almost_full = try deriveLaunch(allocator, full[0 .. full.len - 2]);
+    defer almost_full.deinit(allocator);
+    try std.testing.expectEqual(repeat_limit - 1, almost_full.options.len);
+    // File-backed documents retain the same argv replay and help-admission
+    // behavior as ordinary flags; host_start.replayable decides the rest.
     for ([_][]const u8{"/private/host.json"}) |file| {
         var launch = try deriveLaunch(allocator, &.{ "rui", "host", "serve", "--settings", file });
         defer launch.deinit(allocator);
         try std.testing.expectEqual(@as(usize, 1), launch.options.len);
         try std.testing.expectEqualStrings("settings", launch.options[0].name);
         try std.testing.expectEqualStrings(file, launch.options[0].value.?);
-        try std.testing.expect(supportedByHelp(&launch, "rui host serve [--store PATH] [--active-capacity N] [--settings FILE|-]\n"));
-        try std.testing.expect(!supportedByHelp(&launch, "rui host serve [--store PATH] [--active-capacity N]\n"));
+        try std.testing.expect(supportedByHelp(&launch, "rui host serve [--store PATH] [--set PATH=VALUE] [--settings FILE|-]\n"));
+        try std.testing.expect(!supportedByHelp(&launch, "rui host serve [--store PATH] [--set PATH=VALUE]\n"));
     }
     try std.testing.expect(!restartableEnvironment(&.{"SSL_CERT_FILE=relative.pem"}));
     try std.testing.expect(!restartableEnvironment(&.{"SSL_CERT_DIR=/absolute:relative"}));
@@ -760,23 +800,39 @@ test "upgrade activation refuses cwd-dependent or stdin-bound settings before an
     // No release is installed under target: an admitted plan proceeds past
     // admission and stops only at resolving the target executable.
     const target = try std.fmt.allocPrint(arena.allocator(), "{s}/no-release", .{directory});
-    const Case = struct { argv: []const []const u8, document: []const u8, admitted: bool };
+    var host = try tmp.dir.createDirPathOpen(init.io, "host", .{ .permissions = .fromMode(0o700) });
+    defer host.close(init.io);
+    var host_root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const host_dir = host_root[0..try host.realPath(init.io, &host_root)];
+    const Case = struct { argv: []const []const u8, document: []const u8, admitted: bool, saved: []const u8 = "{}" };
     for ([_]Case{
-        // A relative document path names another file once the launch is in `/`.
+        // A relative document path names another file once the launch is in `/`,
+        // and the replacement has no stdin to read a document from.
         .{ .argv = &.{ "rui", "host", "serve", "--settings", "relative/host.json" }, .document = "{}", .admitted = false },
+        .{ .argv = &.{ "rui", "host", "serve", "--settings", "-" }, .document = "{}", .admitted = false },
+        .{ .argv = &.{ "rui", "host", "serve", "--set", "missing-equals" }, .document = "{}", .admitted = false },
         // An absolute document must not hide a cwd-relative trust root.
         .{ .argv = &.{ "rui", "host", "serve", "--settings", path }, .document = "{\"network\":{\"caFile\":\"relative.pem\"}}", .admitted = false },
         .{ .argv = &.{ "rui", "host", "serve", "--settings", path }, .document = "{\"tools\":{\"bash\":{\"path\":\"relative/bash\"}}}", .admitted = false },
         .{ .argv = &.{ "rui", "host", "serve", "--settings", path }, .document = "{\"interface\":{\"lifetime\":\"stdin\"}}", .admitted = false },
         // Unreadable or refused documents cannot be replayed either.
         .{ .argv = &.{ "rui", "host", "serve", "--settings", path }, .document = "{\"unknown\":true}", .admitted = false },
-        // Fully absolute configurations replay; replay pins --store itself.
+        // Fully absolute configurations replay. A relative Store directory would
+        // override the pinned --store with a path under `/`.
         .{ .argv = &.{ "rui", "host", "serve", "--settings", path }, .document = "{\"network\":{\"caFile\":\"/private/ca.pem\"},\"tools\":{\"bash\":{\"path\":\"/bin/bash\"}}}", .admitted = true },
-        .{ .argv = &.{ "rui", "host", "serve", "--settings", path }, .document = "{\"store\":{\"sqlite\":{\"dir\":\"relative/store\"}}}", .admitted = true },
-        .{ .argv = &.{ "rui", "host", "serve", "--settings", path, "--provider-ca-file", "/private/ca.pem" }, .document = "{}", .admitted = true },
+        .{ .argv = &.{ "rui", "host", "serve", "--settings", path }, .document = "{\"store\":{\"sqlite\":{\"dir\":\"relative/store\"}}}", .admitted = false },
+        .{ .argv = &.{ "rui", "host", "serve", "--settings", path, "--set", "network.caFile=/private/ca.pem" }, .document = "{}", .admitted = true },
+        // --set layers replay from `/` too.
+        .{ .argv = &.{ "rui", "host", "serve", "--set", "network.caFile=relative.pem" }, .document = "{}", .admitted = false },
+        .{ .argv = &.{ "rui", "host", "serve", "--set", "presets.review=@relative.json" }, .document = "{}", .admitted = false },
+        // So does the Host directory's saved host.json, which a later layer can override.
+        .{ .argv = &.{ "rui", "host", "serve" }, .document = "{}", .saved = "{\"tools\":{\"bash\":{\"path\":\"relative/bash\"}}}", .admitted = false },
+        .{ .argv = &.{ "rui", "host", "serve", "--set", "tools.bash.path=/bin/bash" }, .document = "{}", .saved = "{\"tools\":{\"bash\":{\"path\":\"relative/bash\"}}}", .admitted = true },
     }) |case| {
         try private.writeFile(init.io, .{ .sub_path = "host.json", .data = case.document });
         try private.setFilePermissions(init.io, "host.json", .fromMode(0o600), .{});
+        try host.writeFile(init.io, .{ .sub_path = "host.json", .data = case.saved });
+        try host.setFilePermissions(init.io, "host.json", .fromMode(0o600), .{});
         const launch = deriveLaunch(gpa, case.argv) catch |err| {
             // Argument admission is the first half of the same decision.
             try std.testing.expect(!case.admitted);
@@ -787,11 +843,82 @@ test "upgrade activation refuses cwd-dependent or stdin-bound settings before an
         plan.launch = launch;
         defer plan.launch.deinit(gpa);
         plan.observed.profile = .current;
+        plan.previous_release = false;
+        plan.observed.facts.store = .{};
+        try plan.observed.facts.store.set(host_dir);
         const prepared = PreparedActivation.init(init, gpa, &plan, target, null);
         if (prepared) |*value| {
             var owned = value.*;
             owned.deinit(gpa);
             return error.TestUnexpectedResult;
         } else |err| try std.testing.expectEqual(if (case.admitted) error.FileNotFound else error.UnsupportedHostConfiguration, err);
+    }
+}
+
+test "upgrade replay keeps the provider set a previous release's Host served" {
+    const gpa = std.testing.allocator;
+    var environment: std.process.Environ.Map = .init(gpa);
+    defer environment.deinit();
+    // Signed out with no key: the current automatic set is codex alone.
+    try environment.put("HOME", "/nonexistent-upgrade-provider-test-home");
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const init: std.process.Init = .{ .minimal = .{ .args = .{ .vector = &.{} }, .environ = .empty }, .arena = &arena, .gpa = gpa, .io = std.testing.io, .environ_map = &environment, .preopens = .empty };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var host = try tmp.dir.createDirPathOpen(init.io, "host", .{ .permissions = .fromMode(0o700) });
+    defer host.close(init.io);
+    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const dir = root[0..try host.realPath(init.io, &root)];
+    const without = try std.fmt.allocPrint(arena.allocator(), "{s}/without.json", .{dir});
+    const with = try std.fmt.allocPrint(arena.allocator(), "{s}/with.json", .{dir});
+    try host.writeFile(init.io, .{ .sub_path = "without.json", .data = "{\"execution\":{\"activeCapacity\":2}}" });
+    try host.writeFile(init.io, .{ .sub_path = "with.json", .data = "{\"providers\":{\"openai\":{}}}" });
+    for ([_][]const u8{ "without.json", "with.json" }) |name| try host.setFilePermissions(init.io, name, .fromMode(0o600), .{});
+    const Served = struct { codex: bool = false, openai: bool = false, chatgpt: bool = false };
+    // Each `served` is what the old Host served: a flag-only fill started
+    // from no providers, and a document without `providers` served every
+    // built-in entry; named providers added to either.
+    const Case = struct { argv: []const []const u8, previous: bool, served: Served };
+    for ([_]Case{
+        .{ .argv = &.{ "rui", "host", "serve", "--store", dir }, .previous = true, .served = .{} },
+        .{ .argv = &.{ "rui", "host", "serve", "--store", dir, "--active-capacity", "3" }, .previous = true, .served = .{} },
+        .{ .argv = &.{ "rui", "host", "serve", "--store", dir, "--provider", "codex", "--provider", "chatgpt", "--active-capacity", "3" }, .previous = true, .served = .{ .codex = true, .chatgpt = true } },
+        .{ .argv = &.{ "rui", "host", "serve", "--store", dir, "--provider-endpoint", "http://127.0.0.1:9/responses" }, .previous = true, .served = .{ .codex = true } },
+        .{ .argv = &.{ "rui", "host", "serve", "--store", dir, "--settings", without }, .previous = true, .served = .{ .codex = true, .openai = true, .chatgpt = true } },
+        .{ .argv = &.{ "rui", "host", "serve", "--store", dir, "--settings", without, "--provider", "codex" }, .previous = true, .served = .{ .codex = true, .openai = true, .chatgpt = true } },
+        .{ .argv = &.{ "rui", "host", "serve", "--store", dir, "--settings", with }, .previous = true, .served = .{ .openai = true } },
+        .{ .argv = &.{ "rui", "host", "serve", "--store", dir, "--settings", with, "--provider", "chatgpt" }, .previous = true, .served = .{ .openai = true, .chatgpt = true } },
+        // This release's Host with unset providers keeps the current default.
+        .{ .argv = &.{ "rui", "host", "serve", "--store", dir }, .previous = false, .served = .{ .codex = true } },
+        .{ .argv = &.{ "rui", "host", "serve", "--store", dir, "--settings", without }, .previous = false, .served = .{ .codex = true } },
+        .{ .argv = &.{ "rui", "host", "serve", "--store", dir, "--set", "providers.chatgpt={}" }, .previous = false, .served = .{ .chatgpt = true } },
+    }) |case| {
+        var plan: Plan = undefined;
+        plan.launch = try deriveLaunch(gpa, case.argv);
+        defer plan.launch.deinit(gpa);
+        plan.previous_release = case.previous;
+        try admitReplay(init, plan.launch.options, dir);
+        const options = try replayOptions(init, gpa, &plan);
+        defer gpa.free(options);
+        // The replacement's argv, as PrivateLaunch orders it.
+        var args: std.ArrayList([]const u8) = .empty;
+        defer args.deinit(gpa);
+        try args.appendSlice(gpa, &.{ "--store", dir });
+        for (options) |option| {
+            try args.append(gpa, try std.fmt.allocPrint(arena.allocator(), "--{s}", .{option.name}));
+            if (option.value) |value| try args.append(gpa, value);
+        }
+        var problem: cli_args.Refusal = undefined;
+        const parsed = try cli_args.Command.host_serve.definition().parse(args.items, arena.allocator(), &problem);
+        const settings = try gpa.create(@import("host_settings.zig").Settings);
+        defer gpa.destroy(settings);
+        settings.* = .{};
+        defer settings.deinit();
+        var fixtures: @import("providers.zig").Fixtures = .{};
+        var failure: @import("start_report.zig").Failure = undefined;
+        try host_start.fillAt(init, &parsed, dir, settings, &fixtures, &failure);
+        const entries = settings.providers.entries;
+        try std.testing.expectEqual(case.served, Served{ .codex = entries.codex != null, .openai = entries.openai != null, .chatgpt = entries.chatgpt != null });
     }
 }

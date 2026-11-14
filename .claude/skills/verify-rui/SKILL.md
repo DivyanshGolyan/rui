@@ -27,7 +27,7 @@ The helper is `scripts/verify-rui`. Set `V=.claude/skills/verify-rui/scripts/ver
    ```
 
    This prints the evidence root `~/.cache/verify-rui/runs/ID`. Scratch lives under a short temp root (`/private/tmp` on macOS, `/tmp` on Linux) for Unix socket paths, and contains `home/` (with synthetic Codex credentials), `store/`, `project/` and `tmux.sock`. The run then:
-   - starts the fixture provider and `rui host serve --store STORE --provider-endpoint FIXTURE`;
+   - starts the fixture provider and `rui host serve --store STORE --set 'providers={}' --set providers.codex.endpoint=FIXTURE --set providers.codex.unauthenticated=true`;
    - waits for `host status` to report `ready`;
    - starts Session `demo` (bypass) and Session `approve` (ask), each labelled with its name, and records their IDs in `run.json` under `sessions`;
    - seeds N answered messages into `demo`. Use `--seed 3` or more when you need PgUp history.
@@ -36,7 +36,9 @@ The helper is `scripts/verify-rui`. Set `V=.claude/skills/verify-rui/scripts/ver
 
    `--answers echo|realistic` selects the fixture prose and is saved in `run.json`; `echo` is the default and preserves journey handles. `realistic` uses believable fallback answers and tool summaries from the same fixture.
 
-   `--no-sessions` skips `demo` and `approve` for an empty Store. `--active-capacity N` sets the Host's Active Capacity; it defaults to 2.
+   `--no-sessions` skips `demo` and `approve` for an empty Store. The helper's `new --active-capacity N` sets the Host's Active Capacity; it defaults to 2.
+
+   For a bare-`rui` saved-settings startup proof, `new` has already started a Host: pause it with `$V rui "$RUN" host pause --store STORE`, save settings with `$V rui "$RUN" host set --store STORE PATH VALUE`, then open `--session overview` below. This exercises bare Rui's starter instead of attaching to the prestarted fixture Host. Record the replacement Host's status and settings; `doctor`'s original-instance check intentionally no longer applies to this replacement.
 
    Ready means `host status` reports `"status":"ready"` and both Sessions exist. Teardown is `cleanup` (see below). `$V restart-host "$RUN"` stops the Host (when it is running) and starts a fresh one on the same Store, fixture and `--host-setenv` options.
 

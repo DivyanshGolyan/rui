@@ -1406,10 +1406,28 @@ def _start_error(reason, process, stdout, stderr_tail):
     )
 
 
-def start_ready_process(args, *, timeout=10, required_fields=None, env=None, stderr_pipe=None, observations=None):
+def isolated_host_arguments(args):
+    """Preserve provider-free fixtures without overriding a settings source."""
+    args = list(map(str, args))
+    # These fixtures historically launched provider-free Hosts. Production now
+    # selects automatic providers when the document omits the providers key.
+    # Respect explicit settings, saved settings and hidden endpoint fixtures.
+    if "--settings" not in args:
+        provider_settings = any(value.startswith(("providers=", "providers.")) for value in args)
+        fixture_endpoint = any(value.startswith("--test-") and "fixture-endpoint" in value for value in args)
+        saved = ("--store" in args and
+                 (pathlib.Path(args[args.index("--store") + 1]) / "host.json").exists())
+        if not provider_settings and not fixture_endpoint and not saved:
+            args += ["--set", "providers={}"]
+    return args
+
+
+def start_ready_process(args, *, timeout=10, required_fields=None, env=None, stderr_pipe=None, observations=None, isolate_providers=True):
     """Start a Host and transfer ownership only after one valid ready line."""
     # The caller retains the write descriptor; startup and reap own the reader.
     args = list(map(str, args))
+    if isolate_providers:
+        args = isolated_host_arguments(args)
     if "--test-retry-recovery-gate-path" in args:
         observations = observations or "dispatch"
         assert observations == "dispatch", "retry recovery gate requires a selecting native plan"

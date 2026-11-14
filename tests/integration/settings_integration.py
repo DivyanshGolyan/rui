@@ -3,7 +3,6 @@
 refusals on stdout and stderr, and a clean exit when
 stdin closes (D5, D112, D118, D130, D136)."""
 
-import http.server
 import json
 import pathlib
 import os
@@ -13,12 +12,11 @@ import socket
 import subprocess
 import sys
 import tempfile
-import threading
 import time
 
 import host_process
 import os_semantics
-from settings_fixture import WIRE, frame, host_info, output, post, refusal, wait_for_host
+from settings_fixture import WIRE, frame, host_info, mcp_server, output, post, refusal, wait_for_host
 
 
 RUI = pathlib.Path(sys.argv[1]).resolve()
@@ -33,31 +31,6 @@ def launch(raw):
 def host_stop(path, store, instance):
     return post(path, "control/host-stop", {"version": WIRE, "kind": "host_stop", "store": store},
                 b"X-Rui-Host-Instance: " + instance.encode() + b"\r\n")
-
-
-def mcp_server(names):
-    """A loopback MCP server whose tools/list names `names`."""
-    tools = [{"name": name, "inputSchema": {"type": "object"}} for name in names]
-
-    class Handler(http.server.BaseHTTPRequestHandler):
-        protocol_version = "HTTP/1.1"
-
-        def do_POST(self):
-            self.rfile.read(int(self.headers["Content-Length"]))
-            body = json.dumps({"jsonrpc": "2.0", "id": 1, "result": {"tools": tools}}).encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.send_header("Connection", "close")
-            self.end_headers()
-            self.wfile.write(body)
-
-        def log_message(self, *args):
-            pass
-
-    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    return server
 
 
 def mcp_entry(name, server):
@@ -170,7 +143,7 @@ def source_modes(root, good):
                     "interface": {"dir": str(runtime)}, "execution": {"activeCapacity": 1}}
         if source == "file":
             document["interface"]["lifetime"] = "stdin"
-            process = file_host(document, "--active-capacity", "3")
+            process = file_host(document, "--set", 'execution.activeCapacity=3')
         else:
             process = launch(frame(document))
             host_process.close_stdin(process)
@@ -210,32 +183,53 @@ def flag_start_failures(root):
     endpoint = "http://127.0.0.1:9/responses"
     credential = {"RUI_CODEX_CREDENTIAL_FILE": str(root / "c.json"), "RUI_CHATGPT_CREDENTIAL_FILE": str(root / "c.json")}
     absent = {"RUI_OPENAI_KEY_FILE": str(root / "absent")}
+    openai = ["--set", 'providers={"openai":{}}']
     # (flags, environment changes, exit, caller code, diagnostic before it)
+    # Rows that used a retired flag spell it with --set, the replacement its
+    # refusal names, and keep the outcome main pinned for the flag.
     unchanged = [
         (["--test-openai-fixture-endpoint", endpoint], {}, 1, "internal_unexpected", ""),
         (["--test-openai-fixture-endpoint", endpoint], absent, 6, "sign_in_required", NO_KEY),
         (["--test-openai-fixture-endpoint", endpoint], {"RUI_OPENAI_KEY_FILE": str(key)}, 1, "internal_unexpected", ""),
         (["--test-openai-fixture-endpoint", endpoint], {"RUI_OPENAI_KEY_FILE": str(bad_key)}, 1, "internal_unexpected", ""),
-        (["--test-openai-fixture-endpoint", endpoint, "--provider", "openai"], absent, 1, "internal_unexpected", ""),
-        (["--provider", "openai"], {}, 6, "sign_in_required", NO_KEY),
-        (["--provider", "openai"], {"HOME": None}, 6, "home_unavailable", ""),
-        (["--provider", "codex"], {"HOME": None}, 6, "home_unavailable", ""),
-        (["--provider", "chatgpt"], {"HOME": None}, 6, "home_unavailable", ""),
-        (["--provider", "bogus"], {}, 2, "choice_unsupported", ""),
-        (["--provider", "codex", "--provider", "codex"], {}, 1, "internal_unexpected", ""),
+        # main reported internal_unexpected for --provider openai here; the
+        # document spelling reaches the same missing-key refusal as the row
+        # without it.
+        (["--test-openai-fixture-endpoint", endpoint, *openai], absent, 6, "sign_in_required", NO_KEY),
+        (openai, {}, 6, "sign_in_required", NO_KEY),
+        (openai, {"HOME": None}, 6, "home_unavailable", ""),
+        (["--set", 'providers={"codex":{}}'], {"HOME": None}, 6, "home_unavailable", ""),
+        (["--set", 'providers={"chatgpt":{}}'], {"HOME": None}, 6, "home_unavailable", ""),
         (["--test-codex-fixture-endpoint", endpoint], {}, 1, "internal_unexpected", ""),
         (["--test-chatgpt-fixture-endpoint", endpoint], {}, 1, "internal_unexpected", ""),
         (["--test-chatgpt-fixture-endpoint", "http://127.0.0.1:9/other"], credential, 2, "invocation_invalid", ""),
-        (["--bash-timeout-ms", "0"], {}, 2, "count_malformed", ""),
         # The proxy has no caller code: its own sentence is the whole report.
-        (["--provider-endpoint", endpoint], {"HTTPS_PROXY": "https://proxy.example:1"}, 6, None, PROXY),
+        (["--set", f"providers.openai.endpoint={endpoint}", "--set", "providers.openai.unauthenticated=true"],
+         {"HTTPS_PROXY": "https://proxy.example:1"}, 6, None, PROXY),
     ]
-    # Listed change: a flag value refused as its settings leaf. main reported
-    # these as internal_unexpected with exit 1 and no stdout.
+    # Each retired flag is refused before any start, naming its --set
+    # replacement; pr7 removes the migration table and these rows.
+    retired = [
+        ["--active-capacity", "2"],
+        ["--provider", "codex"],
+        ["--provider", "bogus"],
+        ["--provider", "codex", "--provider", "codex"],
+        ["--provider-endpoint", endpoint],
+        ["--provider-ca-file", "/ca.pem"],
+        ["--bash-path", "/bin/bash"],
+        ["--bash-timeout-ms", "0"],
+    ]
+    for flags in retired:
+        unchanged.append((flags, {}, 2, "host_option_retired", ""))
+    # Listed change: a value refused as its settings leaf. main reported
+    # these as internal_unexpected with exit 1 and no stdout, or, for the
+    # retired flags, a flag-level choice or count refusal.
     leaf = [
-        (["--provider-endpoint", "ftp://127.0.0.1/responses"], {}, "providers.codex.endpoint: invalid provider endpoint"),
+        (["--set", "providers.codex.endpoint=ftp://127.0.0.1/responses"], {}, "providers.codex.endpoint: must be a valid HTTPS or loopback HTTP endpoint"),
         (["--test-codex-fixture-endpoint", "ftp://x/responses"], credential, "providers.codex.endpoint: must be a valid HTTPS or loopback HTTP endpoint"),
-        (["--bash-path", ""], {}, "tools.bash.path: must be an absolute path"),
+        (["--set", "tools.bash.path="], {}, "tools.bash.path: must be an absolute path"),
+        (["--set", 'providers={"bogus":{}}'], {}, "providers.bogus: unknown provider"),
+        (["--set", "tools.bash.timeoutMs=0"], {}, "tools.bash.timeoutMs: integer is outside its bounds"),
     ]
 
     def start(index, flags, changes):

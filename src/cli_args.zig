@@ -52,6 +52,9 @@ pub const Command = enum {
     host_status,
     host_restart,
     host_serve,
+    host_set,
+    host_unset,
+    host_settings,
     defaults_inspect,
     defaults_configure,
     auth_login,
@@ -89,7 +92,10 @@ pub const Command = enum {
             .action_deny => .{ .resource = .action, .name = "deny", .description = "Admit denial of this exact inspected Action.", .options = destination ++ session ++ action ++ capture, .mutation = true, .requires = need_action },
             .action_read_call_id => .{ .resource = .action, .name = "read-call-id", .description = "Stream the exact saved Action call ID bytes.", .options = destination ++ session ++ action, .requires = need_action },
             .action_read_arguments => .{ .resource = .action, .name = "read-arguments", .description = "Stream the exact saved Action argument bytes.", .options = destination ++ session ++ action, .requires = need_action },
-            .host_start => .{ .resource = .host, .name = "start", .description = std.fmt.comptimePrint("Explicitly start or connect to a managed Host. A new Host gets --active-capacity N, default {d}; an already-running Host keeps its original settings, including capacity, as rui host status reports, and stderr says so when --active-capacity differs.", .{product_defaults.active_capacity}), .options = destination ++ &[_]Option{value("active-capacity", "N")} },
+            .host_start => .{ .resource = .host, .name = "start", .description = "Start or connect to a managed Host. An already-running Host keeps its original settings.", .options = serve_grammar.settings_options, .retired_options = serve_grammar.retired_options },
+            .host_set => .{ .resource = .host, .name = "set", .description = "Save one Host setting. @FILE reads a JSON value from a file.", .options = serve_grammar.host_destination, .positional = "PATH", .positional_tail = "VALUE", .requires = &.{ &.{""}, &.{"#2"} } },
+            .host_unset => .{ .resource = .host, .name = "unset", .description = "Remove one saved Host setting, restoring its default.", .options = serve_grammar.host_destination, .positional = "PATH", .requires = &.{&.{""}} },
+            .host_settings => .{ .resource = .host, .name = "settings", .description = "Show saved Host settings with defaults, list --paths, or --check the effective settings without starting.", .options = serve_grammar.settings_options ++ &[_]Option{ flag("paths"), flag("check") }, .conflicts = &.{.{ .code = .host_settings_modes_conflict, .a = "paths", .b = "check" }} },
             .host_pause => .{ .resource = .host, .name = "pause", .description = std.fmt.comptimePrint("Shut down the Host, interrupting all work in this Store. Saved work resumes when a Host starts again, including on the next rui; to end a Session's work for good, use rui session stop. Waits up to {d} seconds for the Host to release the Store and reports retirement confirmed or unconfirmed. Retry lost acknowledgment with the original --instance only.", .{product_defaults.host_shutdown_seconds}), .options = destination ++ &[_]Option{value("instance", "HEX")} },
             .host_status => .{ .resource = .host, .name = "status", .description = "Read protected Host readiness and capabilities without starting it.", .options = destination },
             .host_restart => .{ .resource = .host, .name = "restart", .description = "Restart every eligible running Host of this user on the selected installed build, one at a time. Saved work resumes; unsupported Hosts are left running with a reason. Requires --all.", .options = &.{flag("all")}, .requires = &.{&.{"all"}} },
@@ -336,7 +342,7 @@ test "grammar rejects ambiguous invocations before any effect" {
     try expectValidation(.session_resume, &.{ "--session", "a", "REF" }, error.ConflictingArguments);
     // Resume is exact; there is no newest-Session guess.
     try expectValidation(.session_resume, &.{ "--store", "/s", "--last" }, error.UnknownArgument);
-    try expectValidation(.host_serve, &.{ "--test-phase-trace", "--fault", "before-commit", "--provider", "codex" }, false);
+    try expectValidation(.host_serve, &.{ "--test-phase-trace", "--fault", "before-commit", "--set", "example=value" }, false);
     try expectValidation(.session_list, &.{"--test-drop-reply"}, error.UnknownArgument);
 }
 
@@ -391,9 +397,9 @@ test "hidden test options belong to their operation and stay out of help" {
     try std.testing.expectEqualStrings("content-read", serve.all("fault")[1]);
     // Two repeatable options keep their own values, in order.
     var mixed_storage: [1024]u8 = undefined;
-    const mixed = try testParse(Command.host_serve.definition(), &.{ "--fault", "a", "--provider", "codex", "--fault", "b", "--provider", "openai" }, &mixed_storage);
+    const mixed = try testParse(Command.host_serve.definition(), &.{ "--fault", "a", "--set", "a=1", "--fault", "b", "--set", "a=2" }, &mixed_storage);
     try std.testing.expectEqualSlices([]const u8, &.{ "a", "b" }, mixed.all("fault"));
-    try std.testing.expectEqualSlices([]const u8, &.{ "codex", "openai" }, mixed.all("provider"));
+    try std.testing.expectEqualSlices([]const u8, &.{ "a=1", "a=2" }, mixed.all("set"));
     try std.testing.expectEqual(@as(usize, 0), mixed.all("store").len);
     try std.testing.expect(serve.has("test-phase-trace") and serve.get("test-phase-trace") == null);
     try std.testing.expectEqualStrings("1,1,1", serve.get("test-retry-waits-ms").?);
@@ -456,22 +462,6 @@ test "complete syntax still names the first missing requirement" {
     try std.testing.expect(retired("session stop") == null and find(.host, "stop") == null);
 }
 
-test "Host start help states the product default capacity and existing-Host precedence" {
-    const capacity = std.fmt.comptimePrint("{d}", .{product_defaults.active_capacity});
-    inline for (.{ Command.host_start, Command.host_serve }) |command| {
-        var bytes: [2048]u8 = undefined;
-        var writer = std.Io.Writer.fixed(&bytes);
-        try command.definition().help(&writer);
-        const text = writer.buffered();
-        try std.testing.expect(std.mem.indexOf(u8, text, capacity ++ ".") != null or std.mem.indexOf(u8, text, capacity ++ ";") != null);
-        try std.testing.expect(std.mem.indexOf(u8, text, "capacity-8") == null and std.mem.indexOf(u8, text, "1000") == null);
-    }
-    var bytes: [2048]u8 = undefined;
-    var writer = std.Io.Writer.fixed(&bytes);
-    try Command.host_start.definition().help(&writer);
-    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "already-running Host keeps its original settings, including capacity") != null);
-}
-
 test "store schema requires an explicit mysql engine" {
     const definition = Command.store_schema.definition();
     var storage: [1024]u8 = undefined;
@@ -530,10 +520,10 @@ test "parser refusals identify each invocation cause and its witness" {
     _ = try expectRefusal(.session_inspect, &.{ "--store", "s", "--store-hex", "73" }, .identity_spelling_repeated, "store");
     var repeated: [34][]const u8 = undefined;
     for (0..17) |i| {
-        repeated[2 * i] = "--provider";
+        repeated[2 * i] = "--set";
         repeated[2 * i + 1] = "codex";
     }
-    _ = try expectRefusal(.host_serve, &repeated, .option_repeat_limit, "provider");
+    _ = try expectRefusal(.host_serve, &repeated, .option_repeat_limit, "set");
     var nothing: [0]u8 = .{};
     var fixed = std.heap.FixedBufferAllocator.init(&nothing);
     var refusal: Refusal = undefined;
@@ -584,7 +574,6 @@ test "typed choices share enum names with help and refuse unknown values" {
         .{ .command = .request_recover, .name = "kind", .choices = &.{ "configure", "message", "session-stop", "session-archive", "model-interruption", "permission-decision" } },
         .{ .command = .session_inspect, .name = "profile", .choices = &.{ "current", "full" } },
         .{ .command = .session_inspect, .name = "failed-response", .choices = &.{ "body", "metadata" } },
-        .{ .command = .host_serve, .name = "provider", .choices = &.{ "codex", "openai", "chatgpt" } },
     };
     for (cases) |case| {
         var spelling: [64]u8 = undefined;
@@ -618,9 +607,7 @@ test "numeric options reject malformed decimals and state their accepted range" 
         .{ .command = .session_inspect, .name = "attempt", .code = .count_malformed, .low = "1", .high = "9223372036854775807" },
         .{ .command = .request_wait, .name = "timeout-seconds", .code = .count_malformed, .low = "1", .high = "86400" },
         .{ .command = .store_schema, .name = "from", .code = .count_malformed, .low = "0", .high = std.fmt.comptimePrint("{d}", .{std.math.maxInt(u64)}) },
-        .{ .command = .host_start, .name = "active-capacity", .code = .count_malformed, .low = "0", .high = std.fmt.comptimePrint("{d}", .{std.math.maxInt(usize)}) },
         .{ .command = .host_serve, .name = "test-retention-entry-capacity", .code = .count_malformed, .low = "2", .high = std.fmt.comptimePrint("{d}", .{retention_capacity.entries}) },
-        .{ .command = .host_serve, .name = "bash-timeout-ms", .code = .count_malformed, .low = "1", .high = "9223372036854775807" },
     };
     for (cases) |case| {
         var spelling: [64]u8 = undefined;
@@ -682,11 +669,6 @@ test "conflict golden lines name every incompatible spelling and complete repair
         .{ .command = .session_stop, .args = &.{ "--all", "--key", "x" }, .code = .all_excludes_key, .token = "all", .expected = "rui session stop: --all with --key: Stopping all Sessions creates a separate key for each Session. Accepted: --all without --key or --key-hex, or --session ID with an explicit capture. Next: Remove the explicit key or stop a single Session. Nothing was captured or sent. [all_excludes_key]\n" },
         .{ .command = .session_stop, .args = &.{ "--all", "--key-hex", "x" }, .code = .all_excludes_key, .token = "all", .expected = "rui session stop: --all with --key-hex: Stopping all Sessions creates a separate key for each Session. Accepted: --all without --key or --key-hex, or --session ID with an explicit capture. Next: Remove the explicit key or stop a single Session. Nothing was captured or sent. [all_excludes_key]\n" },
         .{ .command = .defaults_configure, .args = &.{ "--model", "x", "--clear-model" }, .code = .model_excludes_clear_model, .token = "model", .expected = "rui defaults configure: --model with --clear-model: Setting and clearing the saved model conflict. Accepted: --model MODEL or --clear-model, not both. Next: Keep the desired model change only. Nothing was captured or sent. [model_excludes_clear_model]\n" },
-        .{ .command = .host_serve, .args = &.{ "--provider", "x", "--provider-endpoint", "x" }, .code = .provider_excludes_endpoint, .token = "provider", .expected = "rui host serve: --provider with --provider-endpoint: A managed provider and a development endpoint are alternative provider sources. Accepted: --provider LABEL or --provider-endpoint URL, not both. Next: Keep the managed provider or the development source, not both. Nothing was captured or sent. [provider_excludes_endpoint]\n" },
-        .{ .command = .host_serve, .args = &.{ "--provider", "x", "--provider-ca-file", "x" }, .code = .provider_excludes_ca_file, .token = "provider", .expected = "rui host serve: --provider with --provider-ca-file: A managed provider cannot use a development endpoint CA file. Accepted: --provider LABEL, or --provider-endpoint URL with --provider-ca-file PATH. Next: Keep the managed provider or the development endpoint and its CA file. Nothing was captured or sent. [provider_excludes_ca_file]\n" },
-        .{ .command = .host_serve, .args = &.{ "--provider", "x", "--test-codex-fixture-endpoint", "x" }, .code = .provider_excludes_codex_fixture, .token = "provider", .expected = "rui host serve: --provider with --test-codex-fixture-endpoint: A managed provider and a Codex fixture are alternative provider sources. Accepted: --provider LABEL or --test-codex-fixture-endpoint URL, not both. Next: Keep the managed provider or the development source, not both. Nothing was captured or sent. [provider_excludes_codex_fixture]\n" },
-        .{ .command = .host_serve, .args = &.{ "--test-codex-fixture-endpoint", "x", "--provider-endpoint", "x" }, .code = .codex_fixture_excludes_endpoint, .token = "test-codex-fixture-endpoint", .expected = "rui host serve: --test-codex-fixture-endpoint with --provider-endpoint: A Codex fixture and a development endpoint are alternative provider sources. Accepted: --test-codex-fixture-endpoint URL or --provider-endpoint URL, not both. Next: Keep one endpoint source. Nothing was captured or sent. [codex_fixture_excludes_endpoint]\n" },
-        .{ .command = .host_serve, .args = &.{ "--test-openai-fixture-endpoint", "x", "--provider-endpoint", "x" }, .code = .openai_fixture_excludes_endpoint, .token = "test-openai-fixture-endpoint", .expected = "rui host serve: --test-openai-fixture-endpoint with --provider-endpoint: An OpenAI fixture and a development endpoint are alternative provider sources. Accepted: --test-openai-fixture-endpoint URL or --provider-endpoint URL, not both. Next: Keep one endpoint source. Nothing was captured or sent. [openai_fixture_excludes_endpoint]\n" },
         .{ .command = .request_inspect, .args = &.{ "request-handle", "--store", "P" }, .code = .handle_names_store_and_key, .token = "store", .expected = "rui request inspect: --store with HANDLE: A saved HANDLE already names its Store and key. Accepted: HANDLE alone, or (--store PATH or --store-hex HEX) with (--key KEY or --key-hex HEX). Next: Keep one of the two. Nothing was captured or sent. [handle_names_store_and_key]\n" },
         .{ .command = .request_inspect, .args = &.{ "request-handle", "--store-hex", "P" }, .code = .handle_names_store_and_key, .token = "store-hex", .expected = "rui request inspect: --store-hex with HANDLE: A saved HANDLE already names its Store and key. Accepted: HANDLE alone, or (--store PATH or --store-hex HEX) with (--key KEY or --key-hex HEX). Next: Keep one of the two. Nothing was captured or sent. [handle_names_store_and_key]\n" },
         .{ .command = .request_inspect, .args = &.{ "request-handle", "--key", "P" }, .code = .handle_names_store_and_key, .token = "key", .expected = "rui request inspect: --key with HANDLE: A saved HANDLE already names its Store and key. Accepted: HANDLE alone, or (--store PATH or --store-hex HEX) with (--key KEY or --key-hex HEX). Next: Keep one of the two. Nothing was captured or sent. [handle_names_store_and_key]\n" },
@@ -785,4 +767,86 @@ test "Host restart requires all and refuses Store selection" {
     try expectValidation(.host_restart, &.{ "--all", "--store-hex", "2f73" }, error.UnknownArgument);
     try std.testing.expectEqualStrings("all", (try expectMissing(.host_restart, &.{})).?);
     try std.testing.expect(try expectMissing(.host_restart, &.{"--all"}) == null);
+}
+
+test "Host set and unset declare required positional operands without changing other commands" {
+    try std.testing.expectEqualStrings("", (try expectMissing(.host_set, &.{})).?);
+    try std.testing.expectEqualStrings("#2", (try expectMissing(.host_set, &.{"example.path"})).?);
+    try std.testing.expectEqualStrings("", (try expectMissing(.host_unset, &.{})).?);
+    var storage: [1024]u8 = undefined;
+    for ([_][]const []const u8{
+        &.{ "example.path", "value" },
+        &.{ "--store", "directory", "example.path", "value" },
+        &.{ "example.path", "--store", "directory", "value" },
+    }) |args| {
+        const parsed = try testParse(Command.host_set.definition(), args, &storage);
+        try std.testing.expectEqualStrings("example.path", parsed.positional.?);
+        try std.testing.expectEqualStrings("value", parsed.positional_tail.?);
+        try std.testing.expect(parsed.missing() == null);
+    }
+    const literal = try testParse(Command.host_set.definition(), &.{ "example.path", "--", "--literal-value" }, &storage);
+    try std.testing.expectEqualStrings("--literal-value", literal.positional_tail.?);
+    const dash = try testParse(Command.host_set.definition(), &.{ "example.path", "-" }, &storage);
+    try std.testing.expectEqualStrings("-", dash.positional_tail.?);
+    const unset = try testParse(Command.host_unset.definition(), &.{ "example.path", "--store", "directory" }, &storage);
+    try std.testing.expect(unset.missing() == null and unset.positional_tail == null);
+    try expectValidation(.host_set, &.{ "example.path", "value", "extra" }, error.InvalidArguments);
+    try expectValidation(.host_unset, &.{ "example.path", "extra" }, error.InvalidArguments);
+    try expectValidation(.session_resume, &.{ "a", "b" }, error.InvalidArguments);
+    var bytes: [2048]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&bytes);
+    try Command.host_set.definition().help(&writer);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Requires: PATH; VALUE.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "#2") == null);
+}
+
+test "Host settings modes and generic overrides share the start grammar" {
+    inline for (.{ Command.host_start, Command.host_serve, Command.host_settings }) |command| {
+        var storage: [1024]u8 = undefined;
+        const parsed = try testParse(command.definition(), &.{ "--settings", "-", "--set", "example.path=first", "--set", "example.path=last" }, &storage);
+        try std.testing.expectEqualStrings("-", parsed.get("settings").?);
+        try std.testing.expectEqualSlices([]const u8, &.{ "example.path=first", "example.path=last" }, parsed.all("set"));
+        var bytes: [2048]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&bytes);
+        try command.definition().help(&writer);
+        try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "--store-hex") == null);
+    }
+    try expectValidation(.host_settings, &.{"--paths"}, false);
+    try expectValidation(.host_settings, &.{ "--check", "--set", "example.path=value" }, false);
+    _ = try expectRefusal(.host_settings, &.{ "--paths", "--check" }, .host_settings_modes_conflict, "paths");
+}
+
+test "every retired Host flag rejects and renders its generated replacement" {
+    inline for (.{ Command.host_start, Command.host_serve }) |command| {
+        const definition = command.definition();
+        for (serve_grammar.retired_options) |old| {
+            try std.testing.expect(definition.optionNamed(old.name) == null);
+            var spelling: [128]u8 = undefined;
+            const token = try std.fmt.bufPrint(&spelling, "--{s}", .{old.name});
+            for ([_]?[]const u8{ null, "1000", "bad\nvalue" }) |value_text| {
+                var storage: [1024]u8 = undefined;
+                var fixed = std.heap.FixedBufferAllocator.init(&storage);
+                var refusal: Refusal = undefined;
+                const args: []const []const u8 = if (value_text) |text| &.{ token, text } else &.{token};
+                try std.testing.expectError(error.UnknownArgument, definition.parse(args, fixed.allocator(), &refusal));
+                try std.testing.expectEqual(.host_option_retired, refusal.code);
+                try std.testing.expectEqualStrings(old.replacement, refusal.accepted.?.grammar);
+                var bytes: [4096]u8 = undefined;
+                var writer = std.Io.Writer.fixed(&bytes);
+                try caller_error.writeLine(&writer, refusal.code, refusal.held("host", definition.name));
+                const text = writer.buffered();
+                try std.testing.expect(std.mem.indexOf(u8, text, "Accepted: --set ") != null);
+                try std.testing.expect(std.mem.indexOf(u8, text, "[host_option_retired]") != null);
+                try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, "\n"));
+                if (value_text) |value_bytes| {
+                    if (std.mem.indexOf(u8, value_bytes, "\n") == null) {
+                        var substituted: [256]u8 = undefined;
+                        const at = std.mem.indexOf(u8, old.replacement, "VALUE").?;
+                        const expected = try std.fmt.bufPrint(&substituted, "{s}1000{s}", .{ old.replacement[0..at], old.replacement[at + "VALUE".len ..] });
+                        try std.testing.expect(std.mem.indexOf(u8, text, expected) != null);
+                    }
+                } else try std.testing.expect(std.mem.indexOf(u8, text, old.replacement) != null);
+            }
+        }
+    }
 }

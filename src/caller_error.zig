@@ -9,6 +9,8 @@ const utf8_validation = @import("utf8_validation.zig");
 
 pub const Code = enum {
     option_unknown,
+    host_option_retired,
+    host_settings_modes_conflict,
     option_repeated,
     option_repeat_limit,
     option_value_missing,
@@ -31,11 +33,6 @@ pub const Code = enum {
     all_excludes_record,
     all_excludes_key,
     model_excludes_clear_model,
-    provider_excludes_endpoint,
-    provider_excludes_ca_file,
-    provider_excludes_codex_fixture,
-    codex_fixture_excludes_endpoint,
-    openai_fixture_excludes_endpoint,
     identity_spelling_repeated,
     stdin_sources_conflict,
     memory_exhausted,
@@ -227,7 +224,6 @@ pub const pending = .{
     "UnixConnectFailed",
     "UnknownArgument",
     "UnknownReportProfile",
-    "UnsupportedProvider",
     "ValueTooLong",
     "WouldBlock",
     "WriteFailed",
@@ -239,7 +235,9 @@ fn mapped(err: anyerror) ?Code {
         error.OutOfMemory => .memory_exhausted,
         error.SavedRequestWireVersionMismatch => .request_wire_incompatible,
         error.HostNotServing => .host_not_serving,
-        error.HostRestartFailed => .host_restart_failed,
+        // Replay preflight normally becomes a per-Host unsupported outcome.
+        // If it escapes, keep the same operational restart repair.
+        error.HostRestartFailed, error.UnsupportedHostConfiguration => .host_restart_failed,
         error.IncompatibleHost => .host_incompatible,
         error.InvalidHostInfo, error.HostPeerNotServing, error.HostServeArgumentsUnreadable, error.HostServeStoreMissing, error.HostServeStoreRelative, error.HostSocketStoreMismatch, error.HostPeerPidMismatch, error.HostPeerIdentityUnavailable, error.HostProcessSnapshotUnavailable, error.InvalidHostProcessSnapshot => .host_identity_unconfirmed,
         error.IneligibleInstallation, error.UpgradeIneligible, error.InvalidInstallationHome => .upgrade_ineligible,
@@ -430,6 +428,8 @@ pub fn facts(code: Code) Facts {
         .home_unavailable => .{ .act = .operate, .input = null, .accepted = .none, .says = "HOME is missing or is not an absolute directory.", .next = "Set HOME to your absolute home directory, or supply --store PATH when only a Store is needed." },
         .session_id_needs_to => .{ .act = .fix, .input = .session, .accepted = .{ .grammar = "--to ID, with Message text on stdin" }, .says = "A positional Session ID is not a destination selector.", .next = "Move the Session ID to --to ID and pipe or redirect the Message into stdin." },
         .session_id_needs_session => .{ .act = .fix, .input = .session, .accepted = .{ .grammar = "--session ID" }, .says = "A positional Session ID is not a Session selector for this command.", .next = "Move the Session ID to --session ID." },
+        .host_option_retired => .{ .act = .fix, .input = .option, .accepted = .{ .read = .command_help }, .says = "That Host flag was removed; use the replacement shown below.", .next = "Use --set with the replacement path and value instead." },
+        .host_settings_modes_conflict => .{ .act = .fix, .input = .option, .accepted = .{ .grammar = "--paths or --check, not both" }, .says = "Listing paths and checking settings are different operations.", .next = "Keep one mode." },
         .option_unknown => .{ .act = .fix, .input = .option, .accepted = .{ .read = .command_help }, .says = "That option is not supported by this command.", .next = "Use an option listed by this command's help." },
         .option_repeated => .{ .act = .fix, .input = .option, .accepted = .{ .grammar = "one occurrence of this option" }, .says = "That option was given more than once.", .next = "Keep one occurrence." },
         .option_repeat_limit => .{ .act = .fix, .input = .option, .accepted = .{ .grammar = "at most 16 repeated option values in total" }, .says = "The invocation exceeds the repeat limit.", .next = "Remove repeated values until the invocation fits the limit." },
@@ -452,11 +452,6 @@ pub fn facts(code: Code) Facts {
         .all_excludes_record => .{ .act = .fix, .input = .identity, .accepted = .{ .grammar = "--all without --record, or --session ID with an explicit capture" }, .says = "Stopping all Sessions creates a separate capture for each Session.", .next = "Remove --record or stop a single Session." },
         .all_excludes_key => .{ .act = .fix, .input = .identity, .accepted = .{ .grammar = "--all without --key or --key-hex, or --session ID with an explicit capture" }, .says = "Stopping all Sessions creates a separate key for each Session.", .next = "Remove the explicit key or stop a single Session." },
         .model_excludes_clear_model => .{ .act = .fix, .input = .option, .accepted = .{ .grammar = "--model MODEL or --clear-model, not both" }, .says = "Setting and clearing the saved model conflict.", .next = "Keep the desired model change only." },
-        .provider_excludes_endpoint => endpointConflict("--provider-endpoint", "A managed provider and a development endpoint are alternative provider sources."),
-        .provider_excludes_ca_file => .{ .act = .fix, .input = .option, .accepted = .{ .grammar = "--provider LABEL, or --provider-endpoint URL with --provider-ca-file PATH" }, .says = "A managed provider cannot use a development endpoint CA file.", .next = "Keep the managed provider or the development endpoint and its CA file." },
-        .provider_excludes_codex_fixture => endpointConflict("--test-codex-fixture-endpoint", "A managed provider and a Codex fixture are alternative provider sources."),
-        .codex_fixture_excludes_endpoint => .{ .act = .fix, .input = .option, .accepted = .{ .grammar = "--test-codex-fixture-endpoint URL or --provider-endpoint URL, not both" }, .says = "A Codex fixture and a development endpoint are alternative provider sources.", .next = "Keep one endpoint source." },
-        .openai_fixture_excludes_endpoint => .{ .act = .fix, .input = .option, .accepted = .{ .grammar = "--test-openai-fixture-endpoint URL or --provider-endpoint URL, not both" }, .says = "An OpenAI fixture and a development endpoint are alternative provider sources.", .next = "Keep one endpoint source." },
         .identity_spelling_repeated => .{ .act = .fix, .input = .identity, .accepted = .{ .grammar = "one spelling of the identity, plain or hex" }, .says = "Both spellings name the same identity.", .next = "Keep the plain flag or its hex spelling, not both." },
         .stdin_sources_conflict => .{ .act = .fix, .input = .stdin, .accepted = .{ .grammar = "--instructions - with --output-schema FILE, or --output-schema - without --instructions" }, .says = "Instructions and the output schema cannot both read stdin.", .next = "Read the schema from a file or supply instructions in a separate command." },
         .invalid_session_reference => .{ .act = .fix, .input = .session, .accepted = .{ .grammar = "six lowercase Crockford characters, for example k7m2qx" }, .says = "That Session reference is malformed.", .next = "Copy the Session ID from rui session list." },
@@ -467,7 +462,7 @@ pub fn facts(code: Code) Facts {
         .unsupported_permission_mode => .{ .act = .fix, .input = .permission_mode, .accepted = .{ .closed = names(cli_value.PermissionMode) }, .says = "Rui has no such permission mode.", .next = "Use one of the accepted values." },
         .unsupported_provider => .{ .act = .fix, .input = .provider, .accepted = .{ .closed = names(provider_name.Provider) }, .says = "Rui has no such provider.", .next = "Use one of the accepted providers." },
         .invalid_model => .{ .act = .fix, .input = .model, .accepted = .{ .grammar = "a nonempty model ID; see rui session configure --help for syntax and suggested IDs" }, .says = "The model ID is empty.", .next = "Supply a nonempty --model; unlisted IDs are allowed and use default limits." },
-        .model_capability_unavailable => .{ .act = .fix, .input = .provider, .accepted = .{ .grammar = "a provider served by this Host; see rui host status" }, .says = "This Host does not serve the Session's required provider.", .next = "Use a Host serving --provider, or create a Session with a provider listed by rui host status." },
+        .model_capability_unavailable => .{ .act = .fix, .input = .provider, .accepted = .{ .grammar = "a provider served by this Host; see rui host status" }, .says = "This Host does not serve the Session's required provider.", .next = "Use a Host serving the required provider, or create a Session with a provider listed by rui host status." },
         .invalid_output_schema => .{ .act = .fix, .input = .output_schema, .accepted = .{ .grammar = "a file containing valid JSON for the provider's output schema" }, .says = "The output schema is not valid JSON.", .next = "Fix the JSON in --output-schema FILE, or omit the schema." },
         .invalid_compaction_trigger => .{ .act = .fix, .input = .compaction_trigger, .accepted = .{ .grammar = "default or a decimal from 1 to " ++ std.fmt.comptimePrint("{d}", .{std.math.maxInt(i64)}) }, .says = "The compaction trigger is not a positive token count.", .next = "Use --compaction-trigger default or a positive decimal in the accepted range." },
         .compact_at_too_large => .{ .act = .fix, .input = .compaction_trigger, .accepted = .{ .grammar = "a token count no larger than the model's context window" }, .says = "The compaction trigger is larger than the model's context window.", .next = "Use --compaction-trigger default, or a smaller token count." },
@@ -520,10 +515,6 @@ pub fn facts(code: Code) Facts {
         .memory_exhausted => .{ .act = .operate, .input = null, .accepted = .none, .says = "Memory was exhausted while reading the arguments.", .next = "Free memory and try the same invocation again." },
         .rejection_unrecognized => .{ .act = .report, .input = null, .accepted = .none, .says = "Rui saved a rejection whose code this rui build does not know; the code is in the JSON answer on stdout.", .next = "Use a rui build that matches the Host, then recover the same saved request to read it." },
     };
-}
-
-fn endpointConflict(comptime flag: []const u8, comptime says: []const u8) Facts {
-    return .{ .act = .fix, .input = .option, .accepted = .{ .grammar = "--provider LABEL or " ++ flag ++ " URL, not both" }, .says = says, .next = "Keep the managed provider or the development source, not both." };
 }
 
 pub fn names(comptime E: type) []const []const u8 {
@@ -632,7 +623,17 @@ fn renderLine(out: *std.Io.Writer, code: Code, held: Held, saved: bool) error{Wr
     try out.writeAll(f.says);
     switch (held.accepted orelse f.accepted) {
         .none => {},
-        .grammar => |grammar| try out.print(" Accepted: {s}.", .{grammar}),
+        .grammar => |grammar| {
+            try out.writeAll(" Accepted: ");
+            // Migration templates are trusted; the rejected argv value is not.
+            if (code == .host_option_retired and held.value != null and std.mem.indexOf(u8, grammar, "VALUE") != null) {
+                const at = std.mem.indexOf(u8, grammar, "VALUE").?;
+                try out.writeAll(grammar[0..at]);
+                try writeHeld(out, held.value.?);
+                try out.writeAll(grammar[at + "VALUE".len ..]);
+            } else try out.writeAll(grammar);
+            try out.writeByte('.');
+        },
         .closed => |set| {
             try out.writeAll(" Accepted: ");
             for (set, 0..) |value, i| {
@@ -826,4 +827,8 @@ test "release download failures have their own caller code" {
 
 test "settings admission has a caller refusal fallback outside startup reporting" {
     try std.testing.expectEqual(Code.invocation_invalid, of(error.SettingsInvalid));
+}
+
+test "an escaped replay preflight failure keeps the restart repair" {
+    try std.testing.expectEqual(Code.host_restart_failed, of(error.UnsupportedHostConfiguration));
 }

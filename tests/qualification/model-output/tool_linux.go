@@ -757,7 +757,7 @@ func measureTools(binary, output string, sessions int, workload, trace, expectat
 		return result, err
 	}
 	defer measurement.JoinCleanup(&resultError, fixture.Close)
-	host, err := measurement.StartHost(binary, store, fixture.ProviderURL(), 100, filepath.Join(directory, "host-stderr.log"), deadline, "--provider-ca-file", fixture.providerCA)
+	host, err := measurement.StartHost(binary, store, fixture.ProviderURL(), 100, filepath.Join(directory, "host-stderr.log"), deadline, "--set", "network.caFile="+fixture.providerCA)
 	if err != nil {
 		return result, err
 	}

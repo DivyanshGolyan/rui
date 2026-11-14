@@ -1,22 +1,22 @@
 //! The shared plain-text input surface. The screen routes keys through the
-//! editor and owns submission; this widget owns only the visible draft rows.
+//! editor and owns submission; this widget draws the editor's TextArea
+//! between two rules, with the prompt, the hidden-line label and the
+//! placeholder around it.
 const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
-const Editor = @import("TerminalEditor.zig");
+const Editor = @import("DraftEditor.zig");
 const layout = @import("draft_layout.zig");
-const viewport = @import("ConversationViewport.zig");
 const Self = @This();
 const view = @import("overview_view.zig");
 const widget_style = @import("widget_style.zig");
 
-editor: *const Editor,
+editor: *Editor,
 method: vaxis.gwidth.Method = .unicode,
 style: vaxis.Style = .{},
 quiet: vaxis.Style = .{ .dim = true },
 rule_style: vaxis.Style = .{ .dim = true },
 placeholder: []const u8 = "",
-anchor: usize = 0,
 /// Draw rules, marks and the prompt in ASCII, for a terminal without
 /// Unicode.
 ascii: bool = false,
@@ -46,17 +46,19 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const rule: u16 = if (height >= 3) 1 else 0;
     // One column of margin, as every line of the screen has, then the mark.
     const prefix: u16 = if (width >= 4) 3 else 0;
-    const draft = try ctx.arena.dupe(u8, self.editor.buffer[0..self.editor.length]);
-    for (draft) |*byte| if (byte.* == '\t') {
-        byte.* = ' ';
-    };
-    const pieces: viewport.DraftPieces = .{ .bytes = draft, .method = self.method };
-    const shape = layout.shape(pieces, width - prefix, self.editor.cursor, self.anchor);
-    var lines: [layout.max_rows]layout.Line = undefined;
-    const shown = layout.fit(pieces, width - prefix, self.editor.cursor, shape, height - 2 * rule, &lines);
-    self.anchor = lines[0].start;
-    var surface = try vxfw.Surface.init(ctx.cell_arena, self.widget(), .{ .width = width, .height = shown.rows + 2 * rule });
+    const area = &self.editor.area;
+    area.style = self.style;
+    area.show_cursor = true;
+    area.width_method = self.method;
+    const text = try area.draw(ctx.withConstraints(.{}, .{ .width = width - prefix, .height = height - 2 * rule }));
+    const shown = area.viewport();
+    var surface = try vxfw.Surface.init(ctx.cell_arena, self.widget(), .{ .width = width, .height = text.size.height + 2 * rule });
     @memset(surface.buffer, .{ .style = self.style });
+    // One surface for the whole input: the screen grounds rows, not columns
+    // beside a child. The text's cells are borrowed glyphs, copied in place.
+    for (0..text.size.height) |row| for (0..text.size.width) |col| {
+        surface.writeCell(@intCast(col + prefix), @intCast(row + rule), text.readCell(col, row));
+    };
     var screen: vaxis.Screen = .{
         .width = surface.size.width,
         .height = surface.size.height,
@@ -78,28 +80,26 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         surface.writeCell(@intCast(column), surface.size.height - 1, cell);
     };
     const label_storage = try ctx.arena.create([64]u8);
-    const label = layout.label(label_storage, shown, if (self.ascii) .{ .up = "^", .down = "v", .dot = "-" } else .{ .up = "↑", .down = "↓", .dot = "·" });
+    const label = layout.label(label_storage, shown.hidden_above, shown.hidden_below, if (self.ascii) .{ .up = "^", .down = "v", .dot = "-" } else .{ .up = "↑", .down = "↓", .dot = "·" });
     if (rule != 0) if (layout.labelColumn(vaxis.gwidth.gwidth(label, self.method), width)) |column| {
         _ = window.child(.{ .x_off = @intCast(column), .height = 1 }).printSegment(.{ .text = label, .style = self.rule_style }, .{ .wrap = .none });
     };
-    for (lines[0..shown.rows], 0..) |line, index| {
+    for (0..shown.visible) |index| {
         const row: u16 = @intCast(index + rule);
         if (prefix != 0) _ = window.child(.{ .y_off = row, .height = 1, .width = prefix }).printSegment(.{
             .text = if (shown.first + index != 0) "   " else if (self.ascii) " > " else " › ",
             .style = if (self.caret) self.style else self.quiet,
         }, .{ .wrap = .none });
-        _ = window.child(.{ .x_off = prefix, .y_off = row, .height = 1 }).printSegment(.{
-            .text = if (draft.len == 0) self.placeholder else draft[line.start..line.end],
-            .style = if (draft.len == 0) self.quiet else self.style,
-        }, .{ .wrap = .none });
     }
-    if (self.caret) surface.cursor = .{ .row = @intCast(shape.caret_line - shown.first + rule), .col = shape.caret_column + prefix };
+    // An empty draft shows the screen's placeholder where its text goes.
+    if (self.editor.text().len == 0) _ = window.child(.{ .x_off = prefix, .y_off = rule, .height = 1 }).printSegment(.{ .text = self.placeholder, .style = self.quiet }, .{ .wrap = .none });
+    if (self.caret) surface.cursor = .{ .row = text.cursor.?.row + rule, .col = text.cursor.?.col + prefix };
     return surface;
 }
 
 test "Composer keeps the caret visible between rules without changing draft bytes" {
     var bytes = "one\ntwo\nthree\nfour\nfive\nsix".*;
-    var editor: Editor = .{ .buffer = &bytes, .length = bytes.len, .cursor = bytes.len };
+    var editor: Editor = .initText(&bytes, &bytes, bytes.len);
     var composer: Self = .{ .editor = &editor };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -112,13 +112,45 @@ test "Composer keeps the caret visible between rules without changing draft byte
     try std.testing.expectEqual(@as(u16, 6), tail.cursor.?.col);
     try std.testing.expectEqualStrings("─", tail.readCell(0, 0).char.grapheme);
     try std.testing.expectEqualStrings("─", tail.readCell(0, 4).char.grapheme);
-    editor.cursor = 0;
+    editor.setCursor(0);
     const head = try composer.widget().draw(ctx.withConstraints(.{}, .{ .width = 8, .height = 5 }));
     try std.testing.expectEqualStrings("›", head.readCell(1, 1).char.grapheme);
     try std.testing.expectEqualStrings(" ", head.readCell(0, 1).char.grapheme);
     try std.testing.expectEqualStrings("o", head.readCell(3, 1).char.grapheme);
     try std.testing.expectEqual(@as(u16, 1), head.cursor.?.row);
     try std.testing.expectEqualStrings("one\ntwo\nthree\nfour\nfive\nsix", &bytes);
+}
+
+test "Composer wraps and places the caret by its caps' width, whatever the frame's" {
+    const draft = "a👩‍💻b";
+    const methods = [_]vaxis.gwidth.Method{ .wcwidth, .unicode, .no_zwj };
+    // The frame's method is process-wide; leave it at its default after.
+    defer vxfw.DrawContext.init(.unicode);
+    for (methods) |method| for (methods) |frame| {
+        if (frame == method) continue;
+        vxfw.DrawContext.init(frame);
+        var bytes: [32]u8 = undefined;
+        var editor: Editor = .initText(&bytes, draft, draft.len);
+        var composer: Self = .{ .editor = &editor };
+        composer.setCaps(.{ .width = method });
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const emoji: u16 = @intCast(vaxis.gwidth.gwidth("👩‍💻", method));
+        const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 6 }, .cell_size = .{} };
+        errdefer std.debug.print("method={t} frame={t}\n", .{ method, frame });
+        const wide = try composer.widget().draw(ctx);
+        try std.testing.expectEqual(@as(u16, 3), wide.size.height);
+        try std.testing.expectEqual(emoji, wide.readCell(4, 1).char.width);
+        try std.testing.expectEqualStrings("b", wide.readCell(4 + emoji, 1).char.grapheme);
+        try std.testing.expectEqual(@as(u16, 1), wide.cursor.?.row);
+        try std.testing.expectEqual(4 + emoji + 1, wide.cursor.?.col);
+        // Exactly as wide as the prompt, "a" and the emoji: "b" wraps.
+        const narrow = try composer.widget().draw(ctx.withConstraints(.{}, .{ .width = 4 + emoji, .height = 6 }));
+        try std.testing.expectEqual(@as(u16, 4), narrow.size.height);
+        try std.testing.expectEqualStrings("b", narrow.readCell(3, 2).char.grapheme);
+        try std.testing.expectEqual(@as(u16, 2), narrow.cursor.?.row);
+        try std.testing.expectEqual(@as(u16, 4), narrow.cursor.?.col);
+    };
 }
 
 test "Composer draws between paste fragments that join the original suffix" {
@@ -128,8 +160,7 @@ test "Composer draws between paste fragments that join the original suffix" {
         .{ .initial = "L🇧TAIL", .first = "🇦", .second = "🇨", .expected = "L🇦🇨🇧TAIL" },
     }) |case| {
         var bytes: [64]u8 = undefined;
-        @memcpy(bytes[0..case.initial.len], case.initial);
-        var editor: Editor = .{ .buffer = &bytes, .length = case.initial.len, .cursor = 1 };
+        var editor: Editor = .initText(&bytes, case.initial, 1);
         var composer: Self = .{ .editor = &editor };
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
@@ -140,18 +171,18 @@ test "Composer draws between paste fragments that join the original suffix" {
         try std.testing.expectEqual(@as(u16, 6), joined.cursor.?.col);
         _ = editor.appEvent(keys, .{ .key_press = .{ .codepoint = 0, .text = case.second } }, true);
         const continued = try composer.widget().draw(ctx);
-        try std.testing.expectEqualStrings(case.expected, bytes[0..editor.length]);
+        try std.testing.expectEqualStrings(case.expected, editor.text());
         try std.testing.expectEqual(@as(u16, 6), continued.cursor.?.col);
         _ = editor.appEvent(keys, .paste_end, false);
         const ended = try composer.widget().draw(ctx);
         try std.testing.expectEqualDeep(continued.cursor, ended.cursor);
-        try std.testing.expectEqualStrings(case.expected, bytes[0..editor.length]);
+        try std.testing.expectEqualStrings(case.expected, editor.text());
     }
 }
 
 test "Composer empty draft shows the screen's placeholder and an input cursor" {
     var bytes: [32]u8 = undefined;
-    const editor: Editor = .{ .buffer = &bytes };
+    var editor: Editor = .init(&bytes);
     var composer: Self = .{ .editor = &editor, .placeholder = "Type a task", .style = .{ .bg = .{ .index = 19 } }, .quiet = .{ .dim = true, .bg = .{ .index = 19 } } };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -160,16 +191,16 @@ test "Composer empty draft shows the screen's placeholder and an input cursor" {
     try std.testing.expectEqualStrings("T", surface.readCell(3, 1).char.grapheme);
     try std.testing.expect(surface.readCell(3, 1).style.dim);
     try std.testing.expectEqual(@as(u16, 3), surface.cursor.?.col);
-    try std.testing.expectEqual(@as(usize, 0), editor.length);
+    try std.testing.expectEqual(@as(usize, 0), editor.text().len);
     for (0..surface.size.width) |col| try std.testing.expectEqual(vaxis.Color{ .index = 19 }, surface.readCell(col, 1).style.bg);
 }
 
 test "Composer clips wide text at every small size without moving its logical caret" {
     var bytes = "中e\u{0301}\n👩‍💻end".*;
-    var editor: Editor = .{ .buffer = &bytes, .length = bytes.len };
+    var editor: Editor = .initText(&bytes, &bytes, 0);
     var composer: Self = .{ .editor = &editor };
     for ([_]usize{ 0, "中".len, "中e\u{0301}\n".len, bytes.len }) |cursor| {
-        editor.cursor = cursor;
+        editor.setCursor(cursor);
         for (0..6) |width| for (0..6) |height| {
             var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
             defer arena.deinit();
@@ -187,15 +218,15 @@ test "Composer clips wide text at every small size without moving its logical ca
             } else {
                 try std.testing.expect(surface.cursor.?.col < width and surface.cursor.?.row < height);
             }
-            try std.testing.expectEqual(cursor, editor.cursor);
-            try std.testing.expectEqualStrings("中e\u{0301}\n👩‍💻end", editor.buffer[0..editor.length]);
+            try std.testing.expectEqual(cursor, editor.cursor());
+            try std.testing.expectEqualStrings("中e\u{0301}\n👩‍💻end", editor.text());
         };
     }
 }
 
 test "Composer empty chat shows only its prompt and rules" {
     var bytes: [16]u8 = undefined;
-    const editor: Editor = .{ .buffer = &bytes };
+    var editor: Editor = .init(&bytes);
     var composer: Self = .{ .editor = &editor };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -209,8 +240,8 @@ test "Composer empty chat shows only its prompt and rules" {
 }
 
 test "Composer inactive prompt uses quiet style and no caret without dimming draft text" {
-    var bytes = "draft".*;
-    const editor: Editor = .{ .buffer = &bytes, .length = bytes.len, .cursor = 0 };
+    var bytes: [5]u8 = undefined;
+    var editor: Editor = .initText(&bytes, "draft", 0);
     var composer: Self = .{ .editor = &editor, .style = .{}, .quiet = .{ .dim = true } };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -226,8 +257,9 @@ test "Composer inactive prompt uses quiet style and no caret without dimming dra
 }
 
 test "Composer surface role covers New Session and chat drafts in both themes and widths" {
-    var bytes = "first\nsecond\nthird".*;
-    var editor: Editor = .{ .buffer = &bytes };
+    const draft = "first\nsecond\nthird";
+    var bytes: [draft.len]u8 = undefined;
+    var editor: Editor = .init(&bytes);
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     for ([_]?view.Rgb{ null, .{ 255, 255, 255 } }) |background| {
@@ -237,8 +269,8 @@ test "Composer surface role covers New Session and chat drafts in both themes an
             const ground = widget_style.of(caps, .{ .colour = .quiet });
             for ([_]u16{ 140, 46 }) |width| for ([_][]const u8{ "Type a task", "" }) |placeholder| {
                 for ([_]bool{ false, true }) |has_draft| for ([_]bool{ false, true }) |caret| {
-                    editor.length = if (has_draft) bytes.len else 0;
-                    editor.cursor = editor.length;
+                    const text = if (has_draft) draft else "";
+                    std.debug.assert(editor.set(text, text.len) == null);
                     var composer: Self = .{ .editor = &editor, .placeholder = placeholder, .caret = caret };
                     composer.setCaps(caps);
                     const surface = try composer.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 10 }, .cell_size = .{} });

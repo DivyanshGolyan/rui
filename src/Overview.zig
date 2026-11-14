@@ -48,9 +48,9 @@ const SessionInput = @import("SessionInput.zig");
 const SessionScreen = @import("SessionScreen.zig");
 const session_id = @import("session_id.zig");
 const Follow = @import("session_follow.zig").Follow;
-const TerminalEditor = @import("TerminalEditor.zig");
 const TerminalText = @import("TerminalText.zig");
 const keymap = @import("keymap.zig");
+const keypress = @import("keypress.zig");
 const session_view = @import("session_view.zig");
 const model_capability = @import("model_capability.zig");
 const new_session_selection = @import("new_session_selection.zig");
@@ -664,7 +664,7 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
 /// Root captures the covered screen and paste state before routing list keys.
 fn appKey(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event, delivery: @import("app_input.zig").Effects.Delivery) anyerror!void {
     const self: *Self = @ptrCast(@alignCast(raw));
-    const selected = TerminalEditor.selectEvent(view.keys, input, delivery.pasted);
+    const selected = keypress.selectEvent(view.keys, input, delivery.pasted);
     const semantic: view.Input = switch (selected) {
         .action => |action| .{ .action = action },
         .enter => .enter,
@@ -7326,7 +7326,7 @@ const EmptySessionOwner = struct {
         try std.testing.expect(self.frontend().app_info.model_choice.active);
         try std.testing.expect(try self.rig.press("gpt-5.5") == null);
         const choice = &self.frontend().app_info.model_choice;
-        try std.testing.expectEqualStrings("gpt-5.5", choice.editor.buffer[0..choice.editor.length]);
+        try std.testing.expectEqualStrings("gpt-5.5", choice.editor.text());
         var shown = try self.rig.shown(140, 40);
         defer shown.deinit();
         try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "gpt-5.5") != null);

@@ -54,7 +54,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
 
 test "InputArea keeps facts below the composer when a notice replaces the status" {
     var bytes: [128]u8 = undefined;
-    var editor: @import("TerminalEditor.zig") = .{ .buffer = &bytes };
+    var editor: @import("DraftEditor.zig") = .init(&bytes);
     const facts: vxfw.RichText = .{ .text = &.{.{ .text = "new Session · gpt-6.1-sol · high · ~/rui" }}, .softwrap = false, .width_basis = .parent };
     var status: vxfw.RichText = .{ .text = &.{.{ .text = "enter sends" }}, .softwrap = false, .width_basis = .parent };
     var input: Self = .{
@@ -85,9 +85,7 @@ test "InputArea keeps facts below the composer when a notice replaces the status
         try std.testing.expect(notice.children[2].surface.readCell(0, 0).style.bold);
     }
     const draft = "one\ntwo\nthree\nfour\nfive\nsix";
-    @memcpy(bytes[0..draft.len], draft);
-    editor.length = draft.len;
-    editor.cursor = draft.len;
+    std.debug.assert(editor.set(draft, draft.len) == null);
     const small = try input.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 5 }, .cell_size = .{} });
     try std.testing.expectEqual(@as(u16, 5), small.size.height);
     try std.testing.expectEqualStrings("s", small.children[0].surface.readCell(3, 1).char.grapheme);
@@ -97,7 +95,7 @@ test "InputArea keeps facts below the composer when a notice replaces the status
 
 test "InputArea survives one-cell and empty resizes without changing the draft or caret" {
     var bytes = "left\nrightTAIL".*;
-    const editor: @import("TerminalEditor.zig") = .{ .buffer = &bytes, .length = bytes.len, .cursor = 10 };
+    var editor: @import("DraftEditor.zig") = .initText(&bytes, &bytes, 10);
     var input: Self = .{ .composer = .{ .editor = &editor } };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -113,8 +111,8 @@ test "InputArea survives one-cell and empty resizes without changing the draft o
             try std.testing.expect(composer.cursor.?.col < composer.size.width);
             try std.testing.expect(composer.cursor.?.row < composer.size.height);
         }
-        try std.testing.expectEqualStrings("left\nrightTAIL", editor.buffer[0..editor.length]);
-        try std.testing.expectEqual(@as(usize, 10), editor.cursor);
+        try std.testing.expectEqualStrings("left\nrightTAIL", editor.text());
+        try std.testing.expectEqual(@as(usize, 10), editor.cursor());
     }
     const restored = try input.widget().draw(ctx);
     try std.testing.expectEqualDeep(before.children[0].surface.buffer, restored.children[0].surface.buffer);
@@ -132,7 +130,7 @@ test "InputArea permission hides and restores the draft and its caret after deci
     };
     var owner: Owner = .{};
     var bytes = "only the retry tests".*;
-    const editor: @import("TerminalEditor.zig") = .{ .buffer = &bytes, .length = bytes.len, .cursor = 9 };
+    var editor: @import("DraftEditor.zig") = .initText(&bytes, &bytes, 9);
     var consent: Consent = .{};
     const command: vxfw.Text = .{ .text = "$ zig build test-store" };
     var card: PermissionCard = .{ .consent = &consent, .body = command.widget(), .userdata = &owner, .on_decision = Owner.decide };
@@ -149,8 +147,8 @@ test "InputArea permission hides and restores the draft and its caret after deci
         try std.testing.expect(shown.children[0].surface.widget.eql(card.widget()));
         try std.testing.expectEqual(null, shown.children[0].surface.cursor);
         try card.take(&events, .other, false);
-        try std.testing.expectEqualStrings("only the retry tests", editor.buffer[0..editor.length]);
-        try std.testing.expectEqual(@as(usize, 9), editor.cursor);
+        try std.testing.expectEqualStrings("only the retry tests", editor.text());
+        try std.testing.expectEqual(@as(usize, 9), editor.cursor());
     }
     try card.take(&events, .enter, false);
     try std.testing.expectEqual(@as(u64, 37), owner.decision.?.action);
@@ -163,8 +161,7 @@ test "InputArea permission hides and restores the draft and its caret after deci
 test "a draft grows to a third of the screen at most, and the content keeps the rest" {
     var bytes: [128]u8 = undefined;
     const draft = "1\n2\n3\n4\n5\n6\n7\n8\n9";
-    @memcpy(bytes[0..draft.len], draft);
-    var editor: @import("TerminalEditor.zig") = .{ .buffer = &bytes, .length = draft.len, .cursor = draft.len };
+    var editor: @import("DraftEditor.zig") = .initText(&bytes, draft, draft.len);
     var input: Self = .{ .composer = .{ .editor = &editor } };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -184,7 +181,7 @@ test "InputArea approval has one document title above a choice between composer 
     };
     var owner: u8 = 0;
     var bytes = "kept draft".*;
-    const editor: @import("TerminalEditor.zig") = .{ .buffer = &bytes, .length = bytes.len, .cursor = 4 };
+    var editor: @import("DraftEditor.zig") = .initText(&bytes, &bytes, 4);
     var consent: @import("ActionConsent.zig") = .{};
     const document: vxfw.Text = .{ .text = "? Record thirty progress steps\n$ set -eu\n│ printf 'step 01'" };
     var card: PermissionCard = .{ .consent = &consent, .body = document.widget(), .userdata = &owner, .on_decision = Owner.decide };
@@ -221,7 +218,7 @@ test "InputArea approval has one document title above a choice between composer 
         try std.testing.expect(composed.surface.widget.eql(input.composer.widget()));
         try std.testing.expectEqual(@as(u16, 7), composed.surface.cursor.?.col);
         try std.testing.expect(composed.origin.row > 0); // The request stays above the draft.
-        try std.testing.expectEqualStrings("kept draft", editor.buffer[0..editor.length]);
+        try std.testing.expectEqualStrings("kept draft", editor.text());
         _ = consent.route(.escape);
         _ = try input.widget().draw(ctx);
         try std.testing.expectEqual(choice, card.choice_row.?);
@@ -230,7 +227,7 @@ test "InputArea approval has one document title above a choice between composer 
 
 test "InputArea has no empty status row below the footer" {
     var bytes: [16]u8 = undefined;
-    const editor: @import("TerminalEditor.zig") = .{ .buffer = &bytes };
+    var editor: @import("DraftEditor.zig") = .init(&bytes);
     const footer: @import("widgets/Footer.zig") = .{ .left = "Chat · model", .right = "ctrl+x stop" };
     var notice: vxfw.Text = .{ .text = "" };
     var input: Self = .{ .composer = .{ .editor = &editor }, .facts = footer.widget(), .status = notice.widget() };
@@ -257,7 +254,7 @@ test "InputArea has no empty status row below the footer" {
 
 test "InputArea puts the facts row last, under the status's rows, when asked" {
     var bytes: [16]u8 = undefined;
-    var editor: @import("TerminalEditor.zig") = .{ .buffer = &bytes };
+    var editor: @import("DraftEditor.zig") = .init(&bytes);
     const facts: vxfw.RichText = .{ .text = &.{.{ .text = "facts" }}, .softwrap = false, .width_basis = .parent };
     const status: vxfw.RichText = .{ .text = &.{.{ .text = "Configured.\n! warning" }}, .softwrap = false, .width_basis = .parent };
     var input: Self = .{ .composer = .{ .editor = &editor }, .facts = facts.widget(), .status = status.widget(), .facts_at = .bottom };
@@ -272,7 +269,7 @@ test "InputArea puts the facts row last, under the status's rows, when asked" {
 
 test "InputArea a modal footer replaces status without retaining an extra bottom row" {
     var bytes = "kept draft".*;
-    const editor: @import("TerminalEditor.zig") = .{ .buffer = &bytes, .length = bytes.len, .cursor = bytes.len };
+    var editor: @import("DraftEditor.zig") = .initText(&bytes, &bytes, bytes.len);
     const footer: vxfw.Text = .{ .text = "Fix retry deadline · info    esc close", .softwrap = false, .width_basis = .parent };
     var input: Self = .{ .composer = .{ .editor = &editor }, .facts = footer.widget(), .status = null };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);

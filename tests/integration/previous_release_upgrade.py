@@ -20,6 +20,7 @@ import time
 import model_fixture as fixture
 import host_process
 import os_semantics
+from host_serve_dialect import HostServeDialect, help_text
 from host_process import canonical_fixture_root, dispose_all, start_ready_process, stop_process, wait_for, wait_for_execution_release
 
 
@@ -150,19 +151,13 @@ def supported_range(checkout):
     return (int(baseline[1]) if baseline else current), current
 
 
-def help_text(binary, *command):
-    """Probe without a Host or Store; older CLIs refuse unknown help with 1/2."""
-    result = subprocess.run([binary, *command, "--help"], input="",
-                            capture_output=True, text=True, timeout=5)
-    assert result.returncode in (0, 1, 2), result
-    return result.stdout if result.returncode == 0 else ""
 
 
-class Dialect:
+class Dialect(HostServeDialect):
     """One installed build's command grammar; the previous build keeps its own."""
 
     def __init__(self, binary):
-        self.resource_first = bool(help_text(binary, "request", "inspect"))
+        super().__init__(binary)
         send_help = (help_text(binary, "session", "send") if self.resource_first
                      else help_text(binary))
         assert send_help, f"No command help from {binary}"
@@ -170,14 +165,6 @@ class Dialect:
         self.short_ids = "--to ID" in send_help
         self.stdin_message = bool(help_text(binary, "session", "start"))
         self.pause = ("host", "pause") if help_text(binary, "host", "pause") else ("host", "stop")
-
-    def serve(self):
-        return ("host", "serve") if self.resource_first else ("serve",)
-
-    def host_arguments(self, store, endpoint, *, retry_waits=True):
-        return [str(fixture.RUI), *self.serve(), "--store", str(store), "--active-capacity", "1",
-                "--provider-endpoint", endpoint,
-                *(["--test-retry-waits-ms", "50,100,150"] if retry_waits else [])]
 
     def host_status(self, binary, store, timeout):
         status = subprocess.run([binary, "host", "status", "--store", store],
@@ -328,7 +315,7 @@ def main():
             seed, ready = start_ready_process(
                 dialect.host_arguments(store, f"http://127.0.0.1:{endpoint.server_port}/responses",
                                        retry_waits=not args.running_host),
-                required_fields={"execution": "enabled"},
+                required_fields={"execution": "enabled"}, isolate_providers=False,
             )
             session = dialect.configure(root, store, "upgrade-configure", "upgrade/session", "gpt-6-sol")
             dialect.message(root, store, "upgrade-message", session, "Save this real work.")
@@ -422,7 +409,7 @@ def main():
                 dialect = previous_cli
                 seed, _ = start_ready_process(
                     dialect.host_arguments(store, f"http://127.0.0.1:{endpoint.server_port}/responses"),
-                    required_fields={"execution": "enabled"},
+                    required_fields={"execution": "enabled"}, isolate_providers=False,
                 )
             recovered = dialect.observe(store, "upgrade-message")
             assert recovered["result"]["status"] == "completed", recovered

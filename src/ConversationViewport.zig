@@ -7,7 +7,6 @@ const vaxis = @import("vaxis");
 const gwidth = @import("terminal_width");
 const unicode = @import("terminal_unicode");
 const state_marks = @import("marks.zig");
-const draft_layout = @import("draft_layout.zig");
 const TerminalText = @import("TerminalText.zig");
 const tool_fold = @import("tool_fold.zig");
 const display_text = @import("display_text.zig");
@@ -53,24 +52,6 @@ pub var measured_lines: if (@import("builtin").is_test) usize else void = if (@i
 fn rowsUsed(result: vaxis.Window.PrintResult) u16 {
     return if (result.col == 0 and result.row != 0 and !result.overflow) result.row else result.row +| 1;
 }
-
-/// The draft as the input draws it, for `draft_layout`: whole clusters
-/// measured as the terminal measures them. The screen has already shown
-/// tabs as one space and refused clusters the terminal cannot draw.
-pub const DraftPieces = struct {
-    bytes: []const u8,
-    method: gwidth.Method,
-    at: usize = 0,
-
-    pub fn next(self: *DraftPieces) ?draft_layout.Piece {
-        if (self.at == self.bytes.len) return null;
-        var clusters = unicode.graphemeIterator(self.bytes[self.at..]);
-        const cluster = clusters.next().?.bytes(self.bytes[self.at..]);
-        self.at += cluster.len;
-        const kind = draft_layout.kindOf(cluster);
-        return .{ .len = cluster.len, .cells = if (kind == .newline) 0 else gwidth.gwidth(cluster, self.method), .kind = kind };
-    }
-};
 
 /// Leading spaces and a list or role marker stay in the first row;
 /// continuation rows start under the text after them, up to half the width.
@@ -942,10 +923,6 @@ test "vaxis wraps reading text at words with hanging indentation" {
     var wide: Sized(64, false) = .{};
     try wide.append("abc中");
     try std.testing.expectEqual(@as(u16, 2), wide.lineRows(.{ .width = 4, .method = .unicode }, 0));
-    // A draft's wide cluster moves whole to the next row.
-    const whole = draft_layout.shape(DraftPieces{ .bytes = "abcd中", .method = .unicode }, 5, 7, 0);
-    try std.testing.expectEqual(@as(usize, 2), whole.lines);
-    try std.testing.expectEqual(@as(u16, 2), whole.caret_column);
 }
 
 test "a clipped final wrapped line leaves an unread row in plain and styled documents" {

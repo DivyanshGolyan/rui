@@ -349,15 +349,9 @@ fn configureHostLaunch(b: *std.Build, compile: *std.Build.Step.Compile) void {
 }
 
 pub fn configureTerminalEditor(b: *std.Build, compile: *std.Build.Step.Compile) void {
-    const utf8proc = b.dependency("utf8proc", .{});
     configurePosix(b, compile.root_module);
     configureVaxis(b, compile.root_module);
     compile.root_module.link_libc = true;
-    compile.root_module.addIncludePath(utf8proc.path("."));
-    compile.root_module.addCSourceFile(.{
-        .file = utf8proc.path("utf8proc.c"),
-        .flags = &.{ "-std=c99", "-O2" },
-    });
 }
 
 fn configureVaxis(b: *std.Build, module: *std.Build.Module) void {
