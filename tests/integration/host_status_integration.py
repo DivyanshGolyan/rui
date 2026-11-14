@@ -93,7 +93,7 @@ def prove_fragmented_request():
 
 def start(store, capacity, *options):
     return start_ready_process(
-        [RUI, "host", "serve", "--store", store, "--active-capacity", str(capacity), *options],
+        [RUI, "host", "serve", "--store", store, "--set", "execution.activeCapacity=" + str(capacity), *options],
         required_fields={"active_capacity": str(capacity)},
         observations="status" if "--test-phase-trace" in options else None,
     )
@@ -664,7 +664,7 @@ def main():
         old = os.environ.get("RUI_CODEX_CREDENTIAL_FILE")
         os.environ["RUI_CODEX_CREDENTIAL_FILE"] = str(credential)
         try:
-            first, fields = start(store, 3, "--provider", "codex", "--test-phase-trace")
+            first, fields = start(store, 3, "--set", 'providers={"codex":{}}', "--test-phase-trace")
             assert fields["execution"] == "enabled"
             diagnostics = HostDiagnostics(first)
             if os_semantics.PROC_FS:

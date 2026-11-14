@@ -497,7 +497,7 @@
 +            if mode == "after-progress":
 +                extra += ["--test-response-capture-gate-min-written-bytes", "10000"]
 +        host = dispatch.start_host(store, f"https://localhost:{endpoint.server_address[1]}/responses",
-+                                   "--provider-ca-file", str(root / "cert.pem"),
++                                   "--set", "network.caFile=" + str(root / "cert.pem"),
 +                                   *(["--test-phase-trace"] if mode == "timed" else []), *extra, active_capacity=100)
 +        diagnostics = HostDiagnostics(host)
 +        try:

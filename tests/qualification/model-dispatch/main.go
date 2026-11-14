@@ -352,7 +352,7 @@ func overlap(binary, root string, fixture *endpoint) (map[string]any, error) {
 		return nil, err
 	}
 	deadline := measurement.NewDeadline(90 * time.Second)
-	host, err := measurement.StartHost(binary, directory, fixture.URL(), 8, filepath.Join(directory, "host-stderr.log"), deadline, "--provider-ca-file", fixture.caFile)
+	host, err := measurement.StartHost(binary, directory, fixture.URL(), 8, filepath.Join(directory, "host-stderr.log"), deadline, "--set", "network.caFile="+fixture.caFile)
 	if err != nil {
 		return nil, err
 	}

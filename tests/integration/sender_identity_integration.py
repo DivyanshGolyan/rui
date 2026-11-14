@@ -71,8 +71,10 @@ def main():
         endpoint.senders = []
         endpoint.requests = []
         threading.Thread(target=endpoint.serve_forever, daemon=True).start()
-        host_args = [installed, "host", "serve", "--store", store, "--provider-endpoint",
-                     f"http://127.0.0.1:{endpoint.server_address[1]}/responses"]
+        host_args = [installed, "host", "serve", "--store", store,
+            "--set", "providers={}",
+            "--set", "providers.codex.endpoint=" + str(f"http://127.0.0.1:{endpoint.server_address[1]}/responses"),
+            "--set", "providers.codex.unauthenticated=true"]
 
         def run(*args, env=None, accepted=True, input=None):
             result = subprocess.run([str(installed), *map(str, args)], env=environment if env is None else env,

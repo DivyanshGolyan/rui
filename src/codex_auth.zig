@@ -264,7 +264,7 @@ pub fn post(io: std.Io, request: wire.Request, response: *Response, cancelled: ?
         .fields = &fields,
         .body = request.body,
         .response = &response.bytes,
-        // The issuer is verified by the system's trust; --provider-ca-file
+        // The issuer is verified by the system's trust; network.caFile
         // is the model provider's alone.
         .trust = .system,
         .proxy = h2.proxyFromEnvironment(),

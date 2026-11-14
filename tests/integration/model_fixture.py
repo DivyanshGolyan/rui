@@ -441,8 +441,7 @@ def finish_command(process, expect=0):
 
 
 def host_arguments(store, endpoint, *extra, accelerated_retries=True, active_capacity=1):
-    # Host serve rejects repeated options, so a caller's explicit option
-    # replaces the fixture default instead of following it.
+    # Settings apply in order: caller assignments override these fixture defaults.
     explicit = {str(argument) for argument in extra}
     args = [
         str(RUI),
@@ -450,10 +449,11 @@ def host_arguments(store, endpoint, *extra, accelerated_retries=True, active_cap
         "--store",
         str(store),
     ]
-    if "--active-capacity" not in explicit:
-        args += ["--active-capacity", str(active_capacity)]
+    args += ["--set", f"execution.activeCapacity={active_capacity}"]
+    if endpoint is None and "--settings" not in explicit:
+        args += ["--set", "providers={}"]
     if endpoint is not None:
-        args += ["--provider-endpoint", endpoint]
+        args += ["--set", "providers={}", "--set", "providers.codex.endpoint=" + str(endpoint), "--set", "providers.codex.unauthenticated=true"]
         if accelerated_retries and "--test-retry-waits-ms" not in explicit:
             args += ["--test-retry-waits-ms", "50,100,150"]
     args += extra
