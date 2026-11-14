@@ -156,8 +156,9 @@ class VerifyRuiTest(unittest.TestCase):
                           {"sessions": {key: sid for key, sid in normal.items() if key != name}}, listed, 0, False))
             cases.append(("missing row " + name, {"sessions": normal},
                           {"sessions": [{"reference": sid} for key, sid in normal.items() if key != name]}, 0, False))
-        for registry in (None, [], "bad", {"": "id"}, {"Agent": ""}, {"Agent": None},
-                         {"Agent": 1}, {"demo": "same", "approve": "same"}):
+        for registry in (None, [], "bad", {"": "id"}, {" ": "id"}, {1: "id"}, {"Agent": ""},
+                         {"Agent": " "}, {"Agent": None}, {"Agent": 1}, {"Agent": []}, {"Agent": {}},
+                         {"demo": "same", "approve": "same"}):
             cases.append(("invalid registry", {"sessions": registry, "no_sessions": True}, listed, 0, False))
         cases.append(("missing registry", {"no_sessions": True}, {"sessions": []}, 0, False))
         for flag in (None, 0, 1, "true", [], {}):
@@ -167,6 +168,10 @@ class VerifyRuiTest(unittest.TestCase):
                         {"sessions": [{"reference": 1}]}, {"sessions": [{"reference": None}]},
                         {"sessions": listed["sessions"] * 2}):
             cases.append(("invalid listing", {"sessions": normal}, payload, 0, False))
+        for row in (None, [], {}, {"reference": ""}, {"reference": " "},
+                    {"reference": 1}, {"reference": []}, {"reference": {}}):
+            cases.append(("invalid extra row", {"sessions": normal},
+                          {"sessions": listed["sessions"] + [row]}, 0, False))
         cases.extend([
             ("failed listing", {"sessions": normal}, listed, 1, False),
             ("failed empty listing", {"sessions": {}, "no_sessions": True}, {"sessions": []}, 1, False),
