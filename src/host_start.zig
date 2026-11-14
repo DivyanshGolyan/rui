@@ -973,9 +973,9 @@ test "Host start explicit providers replace automatic defaults and MySQL keeps i
         inline for (std.enums.values(protocol.Provider)) |provider| {
             const served = @field(settings.providers.entries, @tagName(provider)) != null;
             const wanted = switch (index) {
-                0 => provider.facts().credential == .sign_in and provider.facts().model_list == .catalog,
+                0 => provider == .codex,
                 1 => false,
-                2 => provider.facts().credential == .api_key,
+                2 => provider == .openai,
                 else => provider == .codex or provider == .openai,
             };
             try std.testing.expectEqual(wanted, served);
