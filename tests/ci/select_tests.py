@@ -397,7 +397,7 @@ UPGRADE_PATHS = (UPGRADE, "src/installation_path.zig", "src/TerminalEditor.zig",
 # Keep this standalone even beside check, which does not run the installer driver.
 INSTALLER_PATHS = ("tests/integration/installer_integration.py", "tests/ci/fake_rui.py",
                    "tests/ci/test_install.py", "tests/ci/test_installer_boundary.py", "tests/ci/test_release.py",
-                   "tests/ci/release.py", "tests/ci/release_publication.py", "tests/ci/test_release_publication.py", "tests/ci/release_numbers.py", "tests/ci/qualification.py",
+                   "tests/ci/release.py", "tests/ci/release_publication.py", "tests/ci/git_command.py", "tests/ci/test_release_publication.py", "tests/ci/release_numbers.py", "tests/ci/qualification.py",
                    "src/Installation.zig", "src/installation_path.zig", "src/release_candidate.zig",
                    "src/cli.zig", "src/cli_args.zig", *CLI_GRAMMAR, "src/store/schema.zig",
                    "src/fetch_dependencies.sh", "release/*", "install.sh", "build.zig", "build.zig.zon")

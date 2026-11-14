@@ -13,6 +13,8 @@ import tarfile
 import tempfile
 import zipfile
 
+import git_command
+
 
 class Mismatch(ValueError):
     """The verified producer differs from this worker; rebuild, never execute it."""
@@ -24,7 +26,7 @@ def digest(path):
 
 
 def git(*args):
-    return subprocess.check_output(["git", *args], text=True).strip()
+    return git_command.git(*args, stderr=None)
 
 
 def api(path):

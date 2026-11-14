@@ -361,6 +361,11 @@ pub const Positive = enum(u64) {
     pub fn get(self: Positive) u64 {
         return @backingInt(self);
     }
+
+    /// A nullable column's value, null when the row holds none.
+    pub fn optional(value: ?Positive) ?u64 {
+        return if (value) |positive| positive.get() else null;
+    }
 };
 
 /// A Session as a round loaded it: its reference, its Workspace's key and

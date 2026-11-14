@@ -517,7 +517,7 @@ test "authorization exchange percent-encodes code and verifier independently" {
 }
 
 fn raises(comptime function: anytype, comptime name: []const u8) bool {
-    const Error = @typeInfo(@typeInfo(@TypeOf(function)).@"fn".return_type.?).error_union.error_set;
+    const Error = @import("error_set.zig").Of(function);
     for (@typeInfo(Error).error_set.error_names.?) |member| {
         if (std.mem.eql(u8, member, name)) return true;
     }

@@ -34,8 +34,13 @@ pub const Attempt = struct {
     }
 
     pub fn elapsedMs(self: *const Attempt, now: std.Io.Timestamp) ?u64 {
-        const sent = self.sent_at_ms.load(.acquire);
-        return if (sent < 0) null else @intCast(@max(0, now.toMilliseconds() - sent));
+        return latencyMs(self.sent_at_ms.load(.acquire), now.toMilliseconds());
+    }
+
+    /// Milliseconds from `sent` to `cutoff_ms`, never negative; null when
+    /// the request was not sent. Callers load `sent` in their own order.
+    fn latencyMs(sent: i64, cutoff_ms: i64) ?u64 {
+        return if (sent < 0) null else @intCast(@max(0, cutoff_ms - sent));
     }
 
     /// Read the published boundaries before sampling their cutoff. The event's
@@ -46,7 +51,7 @@ pub const Attempt = struct {
         const sent = self.sent_at_ms.load(.acquire);
         const cutoff = std.Io.Clock.awake.now(io).toMilliseconds();
         return .{
-            .latency_ms = if (sent < 0) null else @intCast(@max(0, cutoff - sent)),
+            .latency_ms = latencyMs(sent, cutoff),
             .first_event_ms = first_event_ms,
         };
     }

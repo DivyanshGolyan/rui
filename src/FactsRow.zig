@@ -4,6 +4,7 @@ const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 const Chip = @import("Chip.zig");
+const Hover = @import("widgets/Hover.zig");
 const Self = @This();
 
 /// The column the facts start at: one cell of margin, `‹`, then a space.
@@ -28,8 +29,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     if (surface.size.width < 2 or surface.size.height == 0) return surface;
     self.back.label = "‹";
     self.back.style = self.style;
-    self.back.hover = self.style;
-    self.back.hover.ul_style = .single;
+    self.back.hover = Hover.underlined(self.style);
     self.back.method = self.method;
     const children = try ctx.arena.alloc(vxfw.SubSurface, 1);
     // One cell of margin, as the mocks set it; the chip is the `‹` alone.

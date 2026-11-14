@@ -36,6 +36,12 @@ pub fn defaultStore(home: []const u8, buffer: []u8) ![]const u8 {
 }
 
 fn validateHome(home: []const u8) !void {
-    if (!std.fs.path.isAbsolute(home) or !std.unicode.utf8ValidateSlice(home)) return error.InvalidHome;
-    for (home) |byte| if (byte < 0x20 or byte == 0x7f) return error.InvalidHome;
+    if (!validAbsoluteText(home)) return error.InvalidHome;
+}
+
+/// A saved path's shape: absolute, UTF-8 and free of control bytes.
+pub fn validAbsoluteText(path: []const u8) bool {
+    if (!std.fs.path.isAbsolute(path) or !std.unicode.utf8ValidateSlice(path)) return false;
+    for (path) |byte| if (byte < 0x20 or byte == 0x7f) return false;
+    return true;
 }

@@ -587,6 +587,172 @@ def host_ok(env, *arguments):
     return completed
 
 
+def new_host_provider_policy(root, env):
+    """New-Host omission is automatic at every settings intake, never on replay.
+
+    Expected route maps are the accepted policy, not derived from provider facts.
+    A route advertised while signed out is not proof of a usable credential or
+    a successful model call. No case here submits a model request.
+    """
+    import http.client
+    import http.server
+    import threading
+    from settings_fixture import frame
+
+    class RejectProxy(http.server.BaseHTTPRequestHandler):
+        def do_CONNECT(self):
+            with self.server.receipt_lock:
+                self.server.targets.add(self.path)
+                self.server.authorized |= any(name in self.headers for name in ("Authorization", "Proxy-Authorization"))
+                self.server.requests += 1
+            self.send_response(403)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            self.close_connection = True
+
+        def log_message(self, *args):
+            pass
+
+    proxy = host_process.TestHTTPServer(("127.0.0.1", 0), RejectProxy)
+    proxy.receipt_lock = threading.Lock()
+    proxy.targets = set()
+    proxy.requests = 0
+    proxy.authorized = False
+    proxy_thread = threading.Thread(target=proxy.serve_forever)
+    proxy_url = f"http://127.0.0.1:{proxy.server_port}"
+
+    private = root / "provider-policy"
+    private.mkdir(mode=0o700)
+    browser = private / "chatgpt.json"
+    key = private / "openai.key"
+    missing = private / "missing.json"
+    policy_env = {**env, "RUI_CODEX_CREDENTIAL_FILE": str(missing),
+                  "RUI_CHATGPT_CREDENTIAL_FILE": str(browser), "RUI_OPENAI_KEY_FILE": str(key),
+                  "https_proxy": proxy_url, "HTTPS_PROXY": proxy_url, "no_proxy": "", "NO_PROXY": ""}
+    none = {"codex": "unserved", "chatgpt": "unserved", "openai": "unserved"}
+    exact = {"codex": "unserved", "chatgpt": "chatgpt_plan", "openai": "unserved"}
+    checked = 0
+    intercepted_cases = 0
+    proxy_thread.start()
+    try:
+        with closing(http.client.HTTPConnection("127.0.0.1", proxy.server_port, timeout=5)) as probe:
+            probe.request("CONNECT", "api.openai.com:443")
+            assert probe.getresponse().status == 403
+        for state, automatic in (
+                ("missing", {"codex": "chatgpt_device", "chatgpt": "unserved", "openai": "unserved"}),
+                ("invalid", {"codex": "chatgpt_device", "chatgpt": "unserved", "openai": "unserved"}),
+                ("browser", {"codex": "chatgpt_device", "chatgpt": "chatgpt_plan", "openai": "unserved"}),
+                ("key", {"codex": "chatgpt_device", "chatgpt": "unserved", "openai": "key_file"}),
+                ("both", {"codex": "chatgpt_device", "chatgpt": "chatgpt_plan", "openai": "key_file"})):
+            browser.unlink(missing_ok=True)
+            key.unlink(missing_ok=True)
+            if state == "invalid":
+                browser.write_text("not a credential record\n")
+                key.write_text("two words\n")
+            if state in ("browser", "both"):
+                browser.write_text(
+                    "version=3\ngeneration=1\naccount_id=policy-subject\nclient_id=policy-client\n"
+                    "fedramp=0\nid_token=e30.eyJzdWIiOiJwb2xpY3ktc3ViamVjdCJ9.c2ln\n"
+                    "access_token=" + codex_fixture.ACCESS + "\nrefresh_token=synthetic-not-real\n"
+                    "expires_at=4102444800\nrefreshed_at=1750000000\nstate=ready\n")
+            if state in ("key", "both"):
+                key.write_text("sk-synthetic-provider-policy\n")
+            for credential in (browser, key):
+                if credential.exists():
+                    credential.chmod(0o600)
+            for selection, providers, expected in (("omitted", None, automatic),
+                                                    ("empty", {}, none),
+                                                    ("exact", {"chatgpt": {}}, exact)):
+                # Exact selection uses a usable local sign-in. Missing or invalid
+                # explicit credentials belong to the credential-owner tests.
+                if selection == "exact" and state not in ("browser", "both"):
+                    continue
+                for door in ("serve", "start", "file", "stdin", "saved"):
+                    store = private / f"{state}-{selection}-{door}"
+                    document = {"store": {"sqlite": {"dir": str(store)}},
+                                "interface": {"lifetime": "stdin"}}
+                    if providers is not None:
+                        document["providers"] = providers
+                    process = None
+                    with proxy.receipt_lock:
+                        previous_requests = proxy.requests
+                    try:
+                        if door in ("start", "saved"):
+                            if door == "saved":
+                                store.mkdir(mode=0o700)
+                                saved = store / "host.json"
+                                saved.write_text(json.dumps({} if providers is None else {"providers": providers}))
+                                saved.chmod(0o600)
+                                shown = host_ok(policy_env, "settings", "--store", store)
+                                assert set(json.loads(shown.stdout)["providers"]) == {
+                                    name for name, route in expected.items() if route != "unserved"}, (state, selection, shown)
+                                arguments = ()
+                            else:
+                                arguments = () if providers is None else ("--set", "providers=" + json.dumps(providers))
+                            started = run_start(store, policy_env, *arguments)
+                            assert started.returncode == 0, (state, selection, door, started)
+                        else:
+                            arguments = [RUI, "host", "serve", "--store", store]
+                            if door == "file":
+                                source = private / "input.json"
+                                source.write_text(json.dumps(document))
+                                source.chmod(0o600)
+                                arguments += ["--settings", source]
+                            elif door == "stdin":
+                                arguments += ["--settings", "-"]
+                            else:
+                                arguments += ["--set", "interface.lifetime=stdin"]
+                                if providers is not None:
+                                    arguments += ["--set", "providers=" + json.dumps(providers)]
+                            process = subprocess.Popen(arguments, env=policy_env, stdin=subprocess.PIPE,
+                                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                            if door == "stdin":
+                                process.stdin.write(frame(document))
+                                process.stdin.flush()
+                        def ready():
+                            if process is not None:
+                                assert process.poll() is None, (state, selection, door, process.communicate())
+                            observed = host_command(policy_env, "status", "--store", store)
+                            if observed.returncode != 0:
+                                return None
+                            info = json.loads(observed.stdout)
+                            return info if info["status"] == "ready" else None
+                        info = wait_for(ready, f"{state} {selection} {door} Host readiness", timeout=20)
+                        assert info["capabilities"]["providers"] == expected, (state, selection, door, info)
+                        assert not missing.exists(), "signed-out startup created credentials"
+                        if expected["chatgpt"] != "unserved" or expected["openai"] != "unserved":
+                            def intercepted():
+                                with proxy.receipt_lock:
+                                    return proxy.requests > previous_requests
+                            wait_for(intercepted, f"{state} {selection} {door} loopback CONNECT refusal", timeout=10)
+                            intercepted_cases += 1
+                        checked += 1
+                    finally:
+                        if process is not None:
+                            host_process.close_stdin(process)
+                            try:
+                                process.wait(timeout=20)
+                            finally:
+                                if process.poll() is None:
+                                    process.kill()
+                                    process.wait(timeout=5)
+                                process.stdout.close()
+                                process.stderr.close()
+                        forced_crash_cleanup(store)
+        assert checked == 60 and intercepted_cases == 25, (checked, intercepted_cases)
+        with proxy.receipt_lock:
+            assert proxy.targets == {"api.openai.com:443"}, proxy.targets
+            assert not proxy.authorized, "provider authorization escaped a refused CONNECT"
+    finally:
+        proxy.shutdown()
+        proxy.server_close()
+        proxy_thread.join(timeout=5)
+        assert not proxy_thread.is_alive(), "loopback proxy did not stop"
+    print(f"new Host provider policy: {checked} Host cases passed across serve/start/file/framed stdin/saved settings; "
+          f"{intercepted_cases} usable-credential cases observed loopback CONNECT refusal to api.openai.com:443; "
+          "no authorization headers or forwarding", flush=True)
+
+
 def saved_settings(root, env):
     """DIR/host.json reaches the Host that the shared starter (bare rui and host start) launches."""
     store = root / "saved-settings"
@@ -901,17 +1067,20 @@ def launch_fixture_root():
 
 
 def main():
-    assert len(sys.argv) in (2, 3), "usage: host_launch_integration.py /absolute/path/to/rui [startup-limits|store-identity]"
+    assert len(sys.argv) in (2, 3), "usage: host_launch_integration.py /absolute/path/to/rui [startup-limits|store-identity|provider-policy]"
     from host_launch_exit_test import check_exit_reader, check_process_discovery, check_failure_retention
-    check_process_discovery(forced_crash_cleanup)
-    check_exit_reader(wait_for_terminal_exit)
-    check_failure_retention(launch_fixture_root, status)
     with launch_fixture_root() as root_text:
         root = canonical_fixture_root(pathlib.Path(root_text))
         home = root / "home"
         home.mkdir(mode=0o700)
         credential = root / "credentials" / "missing.json"
         env = environment(home, credential)
+        if len(sys.argv) == 3 and sys.argv[2] == "provider-policy":
+            new_host_provider_policy(root, env)
+            return
+        check_process_discovery(forced_crash_cleanup)
+        check_exit_reader(wait_for_terminal_exit)
+        check_failure_retention(launch_fixture_root, status)
         if len(sys.argv) == 3 and sys.argv[2] == "store-identity":
             moved_store_identity(root, env)
             moved_store_identity(root, env, terminal=True)
@@ -959,6 +1128,7 @@ def main():
         finally:
             stop_process(held)
 
+        new_host_provider_policy(root, env)
         saved_settings(root, env)
         saved_settings_served(root, env)
 
@@ -1181,6 +1351,8 @@ def main():
             assert "Bash commands can run without asking you" not in screen.completed, screen.completed
             assert not list((bare_home / ".config/rui/requests").glob("*.json")), "the overview captured a request"
             assert len(wait_for_processes(bare_store, 1)) == 1
+            assert status(bare_store, bare_env)["capabilities"]["providers"] == {
+                "codex": "chatgpt_device", "chatgpt": "unserved", "openai": "unserved"}
             # Transfer this thread's reader from prompt to exit without
             # withholding output credit or discarding any transcript bytes.
             os.set_blocking(master, False)

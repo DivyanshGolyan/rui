@@ -5,6 +5,7 @@
 const std = @import("std");
 const protocol = @import("protocol.zig");
 const wire_request = @import("wire_request.zig");
+const utf8_validation = @import("utf8_validation.zig");
 
 pub const Preset = @import("preset_value.zig").Preset;
 pub const max_presets = @import("preset_value.zig").max_presets;
@@ -280,9 +281,7 @@ fn refused(comptime text: []const u8) StartAgentCheck {
 
 /// A bounded diagnostic, never a selector: keep a complete UTF-8 prefix.
 pub fn diagnosticName(name: []const u8) []const u8 {
-    var length = @min(name.len, max_preset_name_bytes);
-    while (!std.unicode.utf8ValidateSlice(name[0..length])) length -= 1;
-    return name[0..length];
+    return utf8_validation.validPrefix(name[0..@min(name.len, max_preset_name_bytes)]);
 }
 
 fn refusedField(arena: std.mem.Allocator, name: []const u8, comptime what: []const u8) error{OutOfMemory}!StartAgentCheck {

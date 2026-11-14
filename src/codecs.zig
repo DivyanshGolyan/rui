@@ -38,6 +38,14 @@ fn Responses(comptime version: responses.Version) type {
         pub fn initial(starting_effort: ?codec_abi.Effort) responses.Carry {
             return responses.initial(version, starting_effort);
         }
+
+        pub fn declaresTools() bool {
+            return version.declaresTools();
+        }
+
+        pub fn effortChangeRefused(scratch: *const responses.ClassifyScratch, status: u16, body: []const u8) bool {
+            return version.carriesEffort() and responses.effortChangeRefused(scratch, status, body);
+        }
     };
 }
 
@@ -45,9 +53,7 @@ fn Responses(comptime version: responses.Version) type {
 /// Operation boundary, instead of in the tools stage.
 pub fn declaresTools(codec: protocol.Codec) bool {
     return switch (codec) {
-        .@"openai-responses/1" => responses.Version.one.declaresTools(),
-        .@"openai-responses/2" => responses.Version.two.declaresTools(),
-        .@"openai-responses/3" => responses.Version.three.declaresTools(),
+        inline else => |tag| module(tag).declaresTools(),
     };
 }
 
@@ -78,30 +84,32 @@ pub const Encoder = PerCodec("Encoder");
 /// A pinned codec's encoder state at a history-element boundary.
 pub const Carry = PerCodec("Carry");
 
-/// The union over every codec of the type each declares as `name`.
-fn PerCodec(comptime name: []const u8) type {
-    const codecs = @typeInfo(protocol.Codec).@"enum".field_names;
-    var names: [codecs.len][]const u8 = undefined;
-    var types: [codecs.len]type = undefined;
-    for (codecs, &names, &types) |codec, *field, *T| {
+const codec_names = @typeInfo(protocol.Codec).@"enum".field_names;
+
+const CodecFields = struct { names: [codec_names.len][]const u8, types: [codec_names.len]type };
+
+/// Each codec's name and the type its module declares as `name`.
+fn codecFields(comptime name: []const u8) CodecFields {
+    var fields: CodecFields = undefined;
+    for (codec_names, &fields.names, &fields.types) |codec, *field, *T| {
         field.* = codec;
         T.* = @field(module(@field(protocol.Codec, codec)), name);
     }
-    return @Union(.auto, protocol.Codec, &names, &types, &@splat(.{}));
+    return fields;
+}
+
+/// The union over every codec of the type each declares as `name`.
+fn PerCodec(comptime name: []const u8) type {
+    const fields = codecFields(name);
+    return @Union(.auto, protocol.Codec, &fields.names, &fields.types, &@splat(.{}));
 }
 
 /// Every codec's `name` type side by side, for scratch a caller lends: each
 /// call writes its own codec's field before it reads it, so no tag says
 /// which one was last used.
 fn EachCodec(comptime name: []const u8) type {
-    const codecs = @typeInfo(protocol.Codec).@"enum".field_names;
-    var names: [codecs.len][]const u8 = undefined;
-    var types: [codecs.len]type = undefined;
-    for (codecs, &names, &types) |codec, *field, *T| {
-        field.* = codec;
-        T.* = @field(module(@field(protocol.Codec, codec)), name);
-    }
-    return @Struct(.auto, null, &names, &types, &@splat(.{}));
+    const fields = codecFields(name);
+    return @Struct(.auto, null, &fields.names, &fields.types, &@splat(.{}));
 }
 
 /// The carry before a request's first history element, for a Session
@@ -162,8 +170,7 @@ pub fn classify(codec: protocol.Codec, scratch: *ClassifyScratch, body: []const 
 /// The pinned codec owns whether status and error body refused an effort update.
 pub fn effortChangeRefused(codec: protocol.Codec, scratch: *const ClassifyScratch, status: u16, body: []const u8) bool {
     return switch (codec) {
-        .@"openai-responses/1", .@"openai-responses/3" => false,
-        .@"openai-responses/2" => responses.effortChangeRefused(&@field(scratch, "openai-responses/2"), status, body),
+        inline else => |tag| module(tag).effortChangeRefused(&@field(scratch, @tagName(tag)), status, body),
     };
 }
 

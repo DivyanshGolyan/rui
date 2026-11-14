@@ -31,6 +31,7 @@ const upgrade_status = @import("upgrade_status.zig");
 const submission = @import("submission_state.zig");
 const TerminalText = @import("TerminalText.zig");
 const work_line = @import("work_line.zig");
+const utf8_validation = @import("utf8_validation.zig");
 const unicode = @import("terminal_unicode");
 const gwidth = @import("terminal_width");
 
@@ -1049,8 +1050,7 @@ pub const State = struct {
         held.status = status;
         // A long failure, such as a refused environment, keeps its start,
         // cut between characters.
-        var end = @min(text.len, held.text.bytes.len);
-        while (end < text.len and end > 0 and text[end] & 0xc0 == 0x80) end -= 1;
+        const end = utf8_validation.scalarStart(text, @min(text.len, held.text.bytes.len));
         held.text.set(text[0..end]) catch unreachable;
     }
 
@@ -1715,10 +1715,8 @@ fn readListing(state: *State) error{OutOfMemory}!void {
 }
 
 fn labelOf(text: []const u8) Bounded(max_label_bytes) {
-    var value: Bounded(max_label_bytes) = .{};
     // The list decoder validated the Label; this bound is its own.
-    value.set(text) catch unreachable;
-    return value;
+    return Bounded(max_label_bytes).from(text) catch unreachable;
 }
 
 /// Applies a completed listing: `changed` replaces rows by reference, `full`
@@ -3034,9 +3032,7 @@ fn testToken(generation: u64) Token {
 }
 
 fn bounded(comptime capacity: usize, text: []const u8) Bounded(capacity) {
-    var value: Bounded(capacity) = .{};
-    value.set(text) catch unreachable;
-    return value;
+    return Bounded(capacity).from(text) catch unreachable;
 }
 
 const TestSession = struct {

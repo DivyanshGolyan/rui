@@ -1,4 +1,5 @@
 const std = @import("std");
+const utf8_validation = @import("utf8_validation.zig");
 const model_catalog = @import("model_catalog.zig");
 const TerminalEditor = @import("TerminalEditor.zig");
 const TerminalText = @import("TerminalText.zig");
@@ -4328,8 +4329,7 @@ fn writeJsonFileAt(io: std.Io, file: std.Io.File, start: u64, length: u64, escap
         const available = carry + n;
         var complete = available;
         if (escape_unicode and offset < length) {
-            var lead = available - 1;
-            while (lead != 0 and chunk[lead] & 0xc0 == 0x80) lead -= 1;
+            const lead = utf8_validation.scalarStart(chunk[0..available], available - 1);
             const width = try std.unicode.utf8ByteSequenceLength(chunk[lead]);
             if (lead + width > available) complete = lead;
         }

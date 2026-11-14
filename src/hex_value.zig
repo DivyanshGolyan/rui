@@ -3,10 +3,16 @@
 const std = @import("std");
 
 pub const Case = enum { either, lower };
+
+/// Whether `byte` is a hex digit as the lowercase form writes it.
+pub fn isLowerDigit(byte: u8) bool {
+    return std.ascii.isDigit(byte) or (byte >= 'a' and byte <= 'f');
+}
+
 pub fn decodeInto(buffer: []u8, encoded: []const u8, letter_case: Case) error{InvalidHexIdentity}![]u8 {
     if (encoded.len % 2 != 0 or encoded.len / 2 > buffer.len) return error.InvalidHexIdentity;
     if (letter_case == .lower) for (encoded) |byte| {
-        if (!std.ascii.isDigit(byte) and !(byte >= 'a' and byte <= 'f')) return error.InvalidHexIdentity;
+        if (!isLowerDigit(byte)) return error.InvalidHexIdentity;
     };
     return std.fmt.hexToBytes(buffer[0 .. encoded.len / 2], encoded) catch error.InvalidHexIdentity;
 }
