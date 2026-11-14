@@ -47,6 +47,109 @@ def covered(target, targets):
             or target == "stack-frames" and "check" in targets)
 
 
+class BinarySourceSelectionTest(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        source = Path(__file__).resolve().parents[2]
+        shutil.copytree(source / "tests/ci", self.root / "tests/ci",
+                        ignore=shutil.ignore_patterns("__pycache__"))
+        self.write("build.zig", "\n".join(f'b.step("{target}", "");' for target in AVAILABLE))
+        self.write("src/logic_tests.zig", 'const cores = .{\n    .{ "owner.zig", @import("owner.zig") },\n};\n')
+        self.write("src/tests.zig", 'const owner = @import("owner.zig");\ntest "owner" { _ = owner; }\n')
+        self.write("src/cli.zig", "")
+        self.write("src/owner.zig", 'const message = "A fixture waits for this message";\n')
+        self.write("tests/integration/overview_integration.py", 'expected = "A fixture waits for this message"\n')
+        self.git("init", "-q")
+        self.git("config", "user.name", "Selector test")
+        self.git("config", "user.email", "selector@example.invalid")
+        self.git("config", "core.autocrlf", "false")
+
+    def write(self, name, content):
+        path = self.root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content if isinstance(content, bytes) else content.encode())
+
+    def git(self, *args):
+        return subprocess.check_output(["git", "-C", str(self.root), *args], stderr=subprocess.PIPE).decode().strip()
+
+    def commit(self):
+        self.git("add", ".")
+        self.git("-c", "core.hooksPath=/dev/null", "commit", "-qm", "Selector fixture")
+        return self.git("rev-parse", "HEAD")
+
+    def selection(self, base, head="HEAD"):
+        result = subprocess.run([sys.executable, "tests/ci/select_tests.py", "--base", base, "--head", head],
+                                cwd=self.root, capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def test_revision_blob_decoding_preserves_octets_and_text_newlines(self):
+        data = bytes(range(256)) + '\r\n"A fixture waits for this message" café\n'.encode()
+        self.write("src/data.bin", data)
+        head = self.commit()
+        script = ("from select_tests import revision_text; "
+                  f"text = revision_text('{head}', 'src/data.bin'); "
+                  "assert text.encode('utf-8', 'surrogateescape') == bytes.fromhex('"
+                  + data.replace(b"\r\n", b"\n").replace(b"\r", b"\n").hex() + "'); "
+                  f"assert revision_text('{head}', 'src/absent.bin') is None")
+        result = subprocess.run([sys.executable, "-c", script], cwd=self.root / "tests/ci",
+                                capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_binary_changes_keep_graph_fallback_native_and_old_text_targets(self):
+        for reached in (True, False):
+            for change in ("added", "modified", "deleted"):
+                with self.subTest(reached=reached, change=change):
+                    path = "src/data.bin"
+                    if reached:
+                        self.write("src/tests.zig", 'const data = @embedFile("data.bin");\n')
+                    else:
+                        self.write("src/tests.zig", "")
+                    if change != "added":
+                        self.write(path, b"\x00\x80\xffold\r\n")
+                    elif (self.root / path).exists():
+                        (self.root / path).unlink()
+                    self.write("src/owner.zig", 'const message = "A fixture waits for this message";\n')
+                    base = self.commit()
+                    if change == "deleted":
+                        (self.root / path).unlink()
+                    else:
+                        self.write(path, b"\x00\x80\xffnew\r\n")
+                    self.write("src/owner.zig", 'const message = "A different screen message";\n')
+                    self.commit()
+                    result = self.selection(base)
+                    for family in ("targets", "native_targets"):
+                        self.assertEqual(set(result[family]),
+                                         {"test-native", "test-logic", "overview-integration"} if reached else {"check"})
+                    self.assertIn("Asserted text: a fixture waits for text this file draws", result["reasons"])
+                    self.assertIn("Import graph: the unit roots and fixtures that reach the changed file"
+                                  if reached else "Source no import or rule reaches: full fallback", result["reasons"])
+                    self.assertTrue(result["native_required"])
+
+    def test_binary_retains_intact_ascii_prose_ownership(self):
+        self.write("src/tests.zig", 'const data = @embedFile("data.bin");\n')
+        self.write("src/owner.zig", "")
+        base = self.commit()
+        self.write("src/data.bin", b'\x00\x80"A fixture waits for this message"\xff')
+        self.commit()
+        result = self.selection(base)
+        self.assertEqual(result["targets"], ["overview-integration", "test-native"])
+        self.assertEqual(result["native_targets"], result["targets"])
+        self.assertIn("Asserted text: a fixture waits for text this file draws", result["reasons"])
+
+    def test_unchanged_binary_does_not_break_source_text_prevalence(self):
+        self.write("src/data.png", b"\x89PNG\r\n\x1a\n\x80\xff")
+        base = self.commit()
+        self.write("src/owner.zig", 'const message = "A different screen message";\n')
+        self.commit()
+        result = self.selection(base)
+        self.assertIn("overview-integration", result["targets"])
+        self.assertIn("overview-integration", result["native_targets"])
+        self.assertIn("Asserted text: a fixture waits for text this file draws", result["reasons"])
+
+
 class AssertedTextSelectionTest(unittest.TestCase):
     def test_fixture_reader_collects_python_fstring_and_shell_literals(self):
         from select_tests import tree_fixture_literals
