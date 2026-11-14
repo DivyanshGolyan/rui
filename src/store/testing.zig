@@ -944,3 +944,38 @@ pub fn settleModelFailureWithTimings(storage: *Store, binding: AttemptBinding, f
     defer storage.modelTimingSource().* = original;
     return storage.settleModelAttemptFailure(binding, failure, disposition, faults);
 }
+
+/// Restore the predecessor Operation shape so the next production open owns
+/// migration of real admitted, failed or in-flight requests.
+pub fn stageRequestCodecUpgrade(storage: *Store) !void {
+    const schema = @import("schema.zig");
+    const forward = schema.migrations[74 - schema.migration_baseline];
+    const create = comptime blk: {
+        @setEvalBranchQuota(10000);
+        const current = forward.sqlite[1];
+        const start = std.mem.indexOf(u8, current, "\n request_codec TEXT").?;
+        const end = std.mem.indexOfPos(u8, current, start, "\n UNIQUE(operation_id,session_ref)").?;
+        break :blk current[0..start] ++ current[end..];
+    };
+    const columns = comptime blk: {
+        var result: []const u8 = "";
+        for (schema.tables) |table| {
+            if (!std.mem.eql(u8, table.name, "model_operation")) continue;
+            for (table.columns) |column| {
+                if (std.mem.startsWith(u8, column.name, "request_codec")) continue;
+                result = result ++ (if (result.len == 0) "" else ",") ++ column.name;
+            }
+        }
+        break :blk result;
+    };
+    const database = storage.sqliteDatabase();
+    try sqlite.exec(database, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON;BEGIN EXCLUSIVE");
+    errdefer sqlite.rollback(database);
+    defer sqlite.exec(database, "PRAGMA foreign_keys=ON;PRAGMA legacy_alter_table=OFF") catch unreachable;
+    try sqlite.exec(database, "ALTER TABLE model_operation RENAME TO staged_codec_operation");
+    try sqlite.exec(database, create);
+    try sqlite.exec(database, "INSERT INTO model_operation(" ++ columns ++ ") SELECT " ++ columns ++ " FROM staged_codec_operation");
+    try sqlite.exec(database, "DROP TABLE staged_codec_operation");
+    for (forward.sqlite[4..]) |index| try sqlite.exec(database, index);
+    try sqlite.exec(database, "PRAGMA user_version=74;UPDATE store_meta SET meta_value='74' WHERE meta_key='format';COMMIT");
+}

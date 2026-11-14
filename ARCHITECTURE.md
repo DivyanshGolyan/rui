@@ -614,10 +614,14 @@ An **Operation** is one model request or Action, owning its exact descriptor, ca
 Its optional **Resolution** is its immutable final result; the Operation ID also identifies that result.
 A retry is another [Attempt](#admitting-an-attempt) of the same Operation; a model request admitted against new context or settings is a new Operation.
 
-Each model Operation owns one immutable **Model Request Manifest** binding its protocol operation, provider and exact requested model through its frozen Session settings revision, historical input view, reasoning/output limits, effective context window and output contract.
+Each model Operation owns one immutable **Model Request Manifest** binding its protocol operation, provider and exact requested model through its frozen Session settings revision, historical input view, frozen request codec and options, reasoning/output limits, effective context window and output contract.
 References/digests identify canonical content; runtime facts retain their original rendering references.
 Session facts and Operation admission share one committed per-Session order on their owning records, without a duplicate payload log.
 The Operation's admission position fixes its historical boundary.
+`model_operation.request_codec` and nullable `request_codec_options` own its encoding binding for every Attempt.
+Admission copies the Session's immutable baseline codec and options into the Operation; historical settings never fall back to Session pins.
+Codec names are bounded to 40 bytes and options to 512 bytes; the currently served codecs accept only NULL options.
+An unknown frozen codec or unsupported saved options remain canonical corruption, not permission to encode with current defaults.
 Accepted model output, call rejection and Action Resolution become available at their acceptance positions, not a producing Operation's earlier admission position.
 Historical visibility does not bypass pending-input applicability, expose an incomplete Tool Result group or change Conversation/tool-call order.
 
@@ -865,7 +869,7 @@ Core supplies an Operation-bound read-only view for request preparation.
 Only the Storage Owner accesses SQLite; adapters receive no connection or caller-chosen cutoff predicates.
 The view provides:
 
-- historical settings, applicable host inputs and accepted model results;
+- historical settings including the Operation's frozen request encoding, applicable host inputs and accepted model results;
 - complete model output in provider order, including private objects with no Conversation projection;
 - each Tool Call's sole rejection or Action Resolution, complete terminal coverage at the manifest boundary, and derived Tool Results streamed in call order;
 - a compaction anchor identifying its producing Operation and item ordinal, with traversal from that item through the end of the same output.
@@ -990,20 +994,20 @@ The [adapter-view experiments](research/README.md#provider-wire-contract) suppor
 
 #### History memo
 
-The history in a request's `input` array is one contiguous span, a pure function of the Session's history below the Operation's admission position, the selected compaction anchor and the requested model; history below an admission position never changes.
+The history in a request's `input` array is one contiguous span, a pure function of the Session's history below the Operation's admission position, the selected compaction anchor, the requested model and the frozen codec and options; history below an admission position never changes.
 When a request seals, the execution owner copies that span's exact bytes from the sealed request into the Session's memo file and records their 64-bit Wyhash digest, appending only the bytes after a span the memo itself supplied.
 That copy is part of preparation: it yields in chunks under the preparation byte allowance, so a large history never blocks controls, Bash, provider completions or cleanup, and preparation hands the request on only after the copy ends.
 A preparation stopped or failed during the copy keeps no memo and removes its file like an eviction.
-Process memory keeps only a fixed-size index entry: Session, requested model and anchor, with the producing admission position, the last covered history position, the codec's carry (its encoder state where the span ends, a value of the codec's own type; for `openai-responses/1`, whether the next input item takes a comma; `openai-responses/2` adds the effort in force, and `openai-responses/3` holds only the comma, as `/1` does), the tool-group scan position, the keys the producing view read its history by (its floor, the Session's first Message, the selected base's Operation and the frozen tool set), the span length and the digest.
-When the next request of that Session selects the same model and anchor and its frozen view contains the producing admission position, preparation opens the file, requires exactly the recorded length, and reads it into the request through the request writer in bounded chunks, hashing as it goes, in place of re-reading and re-encoding the covered entries; it then closes the file and encodes only later entries.
+Process memory keeps only a fixed-size index entry: Session, requested model, anchor, frozen codec and nullable SHA-256 options digest, with the producing admission position, the last covered history position, the codec's carry (its encoder state where the span ends, a value of the codec's own type; for `openai-responses/1`, whether the next input item takes a comma; `openai-responses/2` adds the effort in force, and `openai-responses/3` holds only the comma, as `/1` does), the tool-group scan position, the keys the producing view read its history by (its floor, the Session's first Message, the selected base's Operation and the frozen tool set), the span length and the digest.
+When the next request of that Session selects the same model, anchor and frozen encoding and its frozen view contains the producing admission position, preparation opens the file, requires exactly the recorded length, and reads it into the request through the request writer in bounded chunks, hashing as it goes, in place of re-reading and re-encoding the covered entries; it then closes the file and encodes only later entries.
 The copied bytes count only once the whole span matches the recorded digest.
 The copy consumes the byte allowance and scratch charge like any other emitted bytes and the request stays byte-identical to a full rebuild.
 
-The span is append-only by construction: request N+1 of a Session begins with request N's span.
+Under the same model, anchor and encoding, the span is append-only by construction: request N+1 of a Session begins with request N's span.
 The span is everything the codec writes for the history items, up to the `history_end` item; whatever depends on being last, such as closing the `input` array, comes at or after it.
 A codec's state at each history-element boundary is exactly its carry: before every history element and before `history_end` the shell resumes the codec's whole state from the last carry, whether the previous element ended in it or a memo supplied it, so a memo copy continues exactly as a rebuild does.
 
-Any other case rebuilds the span from the Store, which remains the only authority: no memo, another anchor or model, an older frozen view such as a retry of an earlier Operation, a Host restart, eviction, a memo file that is missing, unreadable, not exactly its recorded length or whose content does not match its digest, or a read failure while copying.
+Any other case rebuilds the span from the Store, which remains the only authority: no memo, another anchor, model or encoding, an older frozen view such as a retry of an earlier Operation, a Host restart, eviction, a memo file that is missing, unreadable, not exactly its recorded length or whose content does not match its digest, or a read failure while copying.
 The rebuild then writes from the span start over the partial copy, which is truncated and uncharged when truncation succeeds and otherwise stays charged until the request closes.
 A failure writing the request itself fails the preparation as for any other emitted byte.
 A failure while keeping a memo drops it and leaves the sealed request untouched.
@@ -1022,18 +1026,19 @@ Sessions are durable and have no end event, so an idle Session's memo lasts unti
 
 The provider caches requests by their prefix, so a Host that encodes the same history differently, after an upgrade or through a bug, would lose a Session's cache without any sign.
 Each Session therefore stores one 56-byte prefix seal: the anchor and admission position of the view whose fully rebuilt span it records, that span's length and its SHA-256.
-Every full rebuild of a span, under the same model and anchor and with a view containing the sealing view, must begin with exactly the sealed bytes.
-Derive the seal's model from the existing Operation at its admission position; a different model's seal does not bind or change the 56-byte encoding.
+Every full rebuild of a span, under the same model, frozen codec, options and anchor and with a view containing the sealing view, must begin with exactly the sealed bytes.
+Derive the seal's model, codec and nullable options from the existing producing Operation at its admission position; a different binding is a cold rebuild, not encoding drift, and does not change the 56-byte encoding.
 After the request seals, preparation hashes the span from the sealed request in chunks under the preparation byte allowance, handing each chunk on to the memo being written, so the span is read once; a mismatch, or a span shorter than the seal, fails the Attempt `encoding_drift` before anything is sent, keeps no memo, and leaves the seal in place.
 A memo copy is this Host's own earlier encoding and is not hashed again.
 The seal is replaced by the whole span once a rebuilt span is at least twice the sealed length, so a Session writes its seal a logarithmic number of times per anchor and the seal always covers at least half of a rebuilt span; between replacements a rebuild hashes only the sealed bytes.
 A seal of another anchor does not bind and is replaced; one of a later view, as when an earlier Operation is retried, neither binds nor is replaced.
+Preparation owns the later-view replacement check before invoking the Store write.
 The write is its own transaction, checked against the current Attempt; it records a deterministic encoding, so a request that is never sent still leaves a valid seal.
 The seal covers the history span, not the request's settings and instructions before it: those follow the Session's current revision, and a legitimate settings change must not read as drift.
 
 #### Effort inside the history
 
-A Session pins its codec at creation, and new Sessions pin `openai-responses/2`; a Session on `openai-responses/1` keeps it and its exact bytes, since requests use the codec the Session pinned.
+A Session pins its codec at creation, and new Sessions pin `openai-responses/2`; a Session on `openai-responses/1` keeps its baseline and exact bytes. Each Operation freezes its request codec independently, initially copying that baseline.
 Under `openai-responses/1` each request's top-level `reasoning.effort` is its Operation's frozen effort, so an effort change costs the provider cache.
 Under `openai-responses/2` the top-level effort is the effort the Session's first Operation for the requested model froze.
 `openai-responses/3` is `/2` for an endpoint that refuses the `configuration_update` input item: as under `/1`, each request's top-level effort is its Operation's frozen effort and no request writes an effort update, so an effort change costs the provider cache and no provider error is an effort-change refusal.
@@ -1541,6 +1546,8 @@ This pins legacy escalation policy; the old rows did not retain their admission-
 Existing floors, levels, counts, resolutions and references are preserved.
 The step to 74 deletes the saved wire label from `store_meta` on both engines (Divyansh, 2026-11-13), whatever it reads; a new Store writes none and opening compares none.
 `store_meta`'s key CHECK still names `wire_version`, because narrowing it would rebuild the table on SQLite.
+The step to 75 freezes each Operation's request codec and nullable options, backfilling every row from its Session's immutable baseline without changing that baseline, request bytes, settings revisions or prefix-seal width.
+MySQL applies this backfill through the external schema procedure, never Host-open DDL.
 Each format PR appends its own version and step; even unreleased steps and digests already on main are immutable (D226).
 The schema writes each closed value set as fixed literals, so the Store format never silently follows a code enum, and changing a set is a format change that needs a new version.
 Provider labels and codec names are open by design (Divyansh, 2026-10-31 provider-plugin design): the schema checks their syntax, and a Host refuses a label or codec it does not serve.

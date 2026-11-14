@@ -103,10 +103,9 @@ pub const Facts = struct {
     pub const ModelList = enum { catalog, live };
 };
 
-/// A provider grammar and its version, as a Session pins it. A version's
-/// requests never change shape, so a pinned Session's prompt cache holds.
-/// New Sessions pin the provider's current codec; a Session pinned to an
-/// older one keeps it.
+/// A provider grammar and its version. Sessions retain their baseline pin;
+/// each Operation freezes the codec its Attempts use. A version's requests
+/// never change shape.
 pub const Codec = enum { @"openai-responses/1", @"openai-responses/2", @"openai-responses/3" };
 
 test "every OpenAI provider runs web_search, and none runs bash" {

@@ -728,9 +728,9 @@ test "model admission work excludes failed historical Operation population" {
             const insert = try sqlite.prepare(storage.sqliteDatabase(), "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL " ++
                 "SELECT value+1 FROM sequence WHERE value<?1) " ++
                 "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,purpose," ++
-                "output_reservation,attempt_ordinal,resolution_code,resolved_at,tool_set_id,context_window) " ++
+                "output_reservation,attempt_ordinal,resolution_code,resolved_at,tool_set_id,context_window,request_codec,request_codec_options) " ++
                 "SELECT 100+value,current.turn_id,current.session_ref,current.settings_revision,current.input_cutoff,100+value,value%2," ++
-                "0,1,'failed',1,current.tool_set_id,current.context_window FROM sequence CROSS JOIN model_operation current WHERE current.operation_id=?2");
+                "0,1,'failed',1,current.tool_set_id,current.context_window,current.request_codec,current.request_codec_options FROM sequence CROSS JOIN model_operation current WHERE current.operation_id=?2");
             defer _ = c.sqlite3_finalize(insert);
             try sqlite.bindU64(insert, 1, population);
             try sqlite.bindU64(insert, 2, current.operation_id);

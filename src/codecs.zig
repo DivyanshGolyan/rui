@@ -1,4 +1,4 @@
-//! The codecs this Host serves, by the codec name a Session pins. A codec is
+//! The codecs this Host serves, by the codec name an Operation freezes. A codec is
 //! plain functions over values its caller stores, dispatched at comptime.
 const std = @import("std");
 const codec_abi = @import("codec_abi.zig");
@@ -43,6 +43,10 @@ fn Responses(comptime version: responses.Version) type {
             return version.declaresTools();
         }
 
+        pub fn carriesEffort() bool {
+            return version.carriesEffort();
+        }
+
         pub fn effortChangeRefused(scratch: *const responses.ClassifyScratch, status: u16, body: []const u8) bool {
             return version.carriesEffort() and responses.effortChangeRefused(scratch, status, body);
         }
@@ -54,6 +58,13 @@ fn Responses(comptime version: responses.Version) type {
 pub fn declaresTools(codec: protocol.Codec) bool {
     return switch (codec) {
         inline else => |tag| module(tag).declaresTools(),
+    };
+}
+
+/// Whether an Operation emits its effort boundary inside history.
+pub fn carriesEffort(codec: protocol.Codec) bool {
+    return switch (codec) {
+        inline else => |tag| module(tag).carriesEffort(),
     };
 }
 

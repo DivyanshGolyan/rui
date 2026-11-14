@@ -173,11 +173,11 @@ test "persisted settings survive reopen and corrupt canonical provider fences cu
     try std.testing.expectError(error.CorruptStore, storage.inspectSessionForTesting(created_session_0.slice()));
 }
 
-test "a Session pinned to a codec this Host cannot build fences its settings" {
+test "an Operation frozen to a codec this Host cannot build fences its settings" {
     for ([_]?[:0]const u8{
         null,
-        "UPDATE session SET codec='unknown-codec/1' WHERE session_ref=?1",
-        "UPDATE session SET codec_options=x'00' WHERE session_ref=?1",
+        "UPDATE model_operation SET request_codec='unknown-codec/1' WHERE session_ref=?1",
+        "UPDATE model_operation SET request_codec_options=x'00' WHERE session_ref=?1",
     }) |fault| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();

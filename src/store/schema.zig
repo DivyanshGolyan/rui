@@ -20,7 +20,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 74;
+pub const schema_version: u32 = 75;
 
 pub const IdentityMismatch = struct {
     saved_selector: Bounded(store_path.max_bytes) = .{},
@@ -61,6 +61,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 72, .digest = 0x93ee71c21e7438ab },
     .{ .schema_version = 73, .digest = 0x515b60c7f5df332d },
     .{ .schema_version = 74, .digest = 0xda8e267adbfcef45 },
+    .{ .schema_version = 75, .digest = 0x3bca830b0b79469d },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -696,6 +697,28 @@ pub const migrations = [_]Migration{
         },
         .mysql = &.{
             "DELETE FROM store_meta WHERE meta_key='wire_version'",
+        },
+    },
+    .{
+        .from = 74,
+        .sqlite = &.{
+            "ALTER TABLE model_operation RENAME TO model_operation_74",
+            "CREATE TABLE model_operation(\n operation_id INTEGER PRIMARY KEY NOT NULL CHECK(operation_id>0),\n turn_id INTEGER NOT NULL REFERENCES turn(turn_id),\n session_ref TEXT NOT NULL,\n settings_revision INTEGER NOT NULL CHECK(settings_revision>0),\n input_cutoff INTEGER NOT NULL CHECK(input_cutoff>0),\n admission_position INTEGER NOT NULL CHECK(admission_position>0),\n purpose INTEGER NOT NULL DEFAULT 0 CHECK(purpose IN (0,1)),\n compaction_trigger INTEGER CHECK(compaction_trigger IS NULL OR compaction_trigger>0),\n output_reservation INTEGER NOT NULL CHECK(output_reservation>=0),\n reasoning_effort TEXT CHECK(reasoning_effort IS NULL OR (reasoning_effort='none' OR reasoning_effort='low' OR reasoning_effort='medium' OR reasoning_effort='high' OR reasoning_effort='xhigh' OR reasoning_effort='max')),\n output_item_count INTEGER CHECK(output_item_count IS NULL OR output_item_count>=0),\n attempt_ordinal INTEGER NOT NULL CHECK(attempt_ordinal BETWEEN 1 AND 4),\n auth_refresh_claimed INTEGER NOT NULL DEFAULT 0 CHECK(auth_refresh_claimed IN (0,1)),\n retry_due_at_ms INTEGER CHECK(retry_due_at_ms IS NULL OR retry_due_at_ms>=0),\n last_failure_code TEXT CHECK(last_failure_code IS NULL OR length(CAST(last_failure_code AS BLOB)) BETWEEN 1 AND 96),\n resolution_code TEXT CHECK(resolution_code IS NULL OR length(CAST(resolution_code AS BLOB)) BETWEEN 1 AND 96),\n resolution_content_id INTEGER REFERENCES content(content_id),\n response_id TEXT CHECK(response_id IS NULL OR length(CAST(response_id AS BLOB))<=256),\n model_evidence BLOB CHECK(model_evidence IS NULL OR length(model_evidence) BETWEEN 7 AND 775),\n request_id TEXT CHECK(request_id IS NULL OR length(CAST(request_id AS BLOB))<=256),\n usage_uncached_tokens INTEGER CHECK(usage_uncached_tokens IS NULL OR usage_uncached_tokens>=0),\n usage_cache_read_tokens INTEGER CHECK(usage_cache_read_tokens IS NULL OR usage_cache_read_tokens>=0),\n usage_cache_write_tokens INTEGER CHECK(usage_cache_write_tokens IS NULL OR usage_cache_write_tokens>=0),\n usage_output_tokens INTEGER CHECK(usage_output_tokens IS NULL OR usage_output_tokens>=0),\n interrupted_by_command_key TEXT REFERENCES core_command(command_key),\n attempt_at INTEGER CHECK(attempt_at IS NULL OR attempt_at>0),\n retry_scheduled_at INTEGER CHECK(retry_scheduled_at IS NULL OR retry_scheduled_at>0),\n resolved_at INTEGER CHECK(resolved_at IS NULL OR resolved_at>0),\n history_floor INTEGER CHECK(history_floor IS NULL OR history_floor>0),\n history_level INTEGER CHECK(history_level IS NULL OR history_level BETWEEN 1 AND 3),\n history_dropped INTEGER CHECK(history_dropped IS NULL OR history_dropped>=0),\n tool_set_id INTEGER NOT NULL REFERENCES tool_set(tool_set_id) CHECK(tool_set_id>0),\n effort_source_revision INTEGER NOT NULL DEFAULT 1 CHECK(effort_source_revision>0 AND effort_source_revision<=settings_revision),\n previous_reasoning_effort TEXT CHECK(previous_reasoning_effort IS NULL OR (previous_reasoning_effort='none' OR previous_reasoning_effort='low' OR previous_reasoning_effort='medium' OR previous_reasoning_effort='high' OR previous_reasoning_effort='xhigh' OR previous_reasoning_effort='max')),\n effort_update INTEGER NOT NULL DEFAULT 0 CHECK(effort_update IN (0,1) AND (effort_update=0 OR reasoning_effort IS NOT NULL)),\n previous_effort_override TEXT CHECK(previous_effort_override IS NULL OR (previous_effort_override='none' OR previous_effort_override='low' OR previous_effort_override='medium' OR previous_effort_override='high' OR previous_effort_override='xhigh' OR previous_effort_override='max')), latency_ms INTEGER CHECK(latency_ms IS NULL OR latency_ms>=0), first_event_ms INTEGER CHECK(first_event_ms IS NULL OR first_event_ms>=0),\n context_window INTEGER NOT NULL CHECK(context_window BETWEEN 0 AND 4294967295),\n request_codec TEXT NOT NULL CHECK(length(CAST(request_codec AS BLOB)) BETWEEN 3 AND 40),\n request_codec_options BLOB CHECK(request_codec_options IS NULL OR length(request_codec_options) BETWEEN 1 AND 512),\n UNIQUE(operation_id,session_ref),\n FOREIGN KEY(session_ref,settings_revision) REFERENCES session_revision(session_ref,revision),\n CHECK((usage_uncached_tokens IS NULL AND usage_cache_read_tokens IS NULL AND usage_cache_write_tokens IS NULL AND usage_output_tokens IS NULL) OR (usage_uncached_tokens IS NOT NULL AND usage_cache_read_tokens IS NOT NULL AND usage_cache_write_tokens IS NOT NULL AND usage_output_tokens IS NOT NULL)),\n CHECK((resolution_code IS NULL AND retry_due_at_ms IS NOT NULL) OR (resolution_code IS NOT NULL AND retry_due_at_ms IS NULL)),\n CHECK((resolution_code IS NULL AND retry_due_at_ms=0 AND attempt_at IS NOT NULL AND retry_scheduled_at IS NULL AND resolved_at IS NULL) OR (resolution_code IS NULL AND retry_due_at_ms>0 AND attempt_at IS NULL AND retry_scheduled_at IS NOT NULL AND resolved_at IS NULL) OR (resolution_code IS NOT NULL AND attempt_at IS NULL AND retry_scheduled_at IS NULL AND resolved_at IS NOT NULL)),\n CHECK(((resolution_code IS 'interrupted') AND interrupted_by_command_key IS NOT NULL) OR (coalesce(resolution_code,'')!='interrupted' AND interrupted_by_command_key IS NULL)),\n CHECK((history_floor IS NULL AND history_level IS NULL AND history_dropped IS NULL) OR (history_floor IS NOT NULL AND purpose=1 AND ((history_level IS NULL AND history_dropped IS NULL) OR (history_level IS NOT NULL AND history_dropped IS NOT NULL))))\n) STRICT",
+            "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,purpose,compaction_trigger,output_reservation,reasoning_effort,output_item_count,attempt_ordinal,auth_refresh_claimed,retry_due_at_ms,last_failure_code,resolution_code,resolution_content_id,response_id,model_evidence,request_id,usage_uncached_tokens,usage_cache_read_tokens,usage_cache_write_tokens,usage_output_tokens,interrupted_by_command_key,attempt_at,retry_scheduled_at,resolved_at,history_floor,history_level,history_dropped,tool_set_id,effort_source_revision,previous_reasoning_effort,effort_update,previous_effort_override,latency_ms,first_event_ms,context_window,request_codec,request_codec_options) SELECT operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,purpose,compaction_trigger,output_reservation,reasoning_effort,output_item_count,attempt_ordinal,auth_refresh_claimed,retry_due_at_ms,last_failure_code,resolution_code,resolution_content_id,response_id,model_evidence,request_id,usage_uncached_tokens,usage_cache_read_tokens,usage_cache_write_tokens,usage_output_tokens,interrupted_by_command_key,attempt_at,retry_scheduled_at,resolved_at,history_floor,history_level,history_dropped,tool_set_id,effort_source_revision,previous_reasoning_effort,effort_update,previous_effort_override,latency_ms,first_event_ms,context_window,(SELECT s.codec FROM session s WHERE s.session_ref=model_operation_74.session_ref),(SELECT s.codec_options FROM session s WHERE s.session_ref=model_operation_74.session_ref) FROM model_operation_74",
+            "DROP TABLE model_operation_74",
+            "CREATE INDEX model_operation_retry_due ON model_operation(retry_due_at_ms,operation_id) WHERE resolution_code IS NULL AND attempt_ordinal<4",
+            "CREATE INDEX model_operation_retry_exhausted ON model_operation(operation_id) WHERE resolution_code IS NULL AND retry_due_at_ms=0 AND attempt_ordinal=4",
+            "CREATE INDEX model_operation_session_history ON model_operation(session_ref,operation_id)",
+            "CREATE INDEX model_operation_turn_history ON model_operation(turn_id,operation_id)",
+            "CREATE INDEX model_operation_admission ON model_operation(session_ref,admission_position)",
+            "CREATE INDEX model_operation_context_history ON model_operation(session_ref,admission_position) WHERE (resolution_code='answer' OR resolution_code='compacted' OR resolution_code='tool_proposals')",
+            "CREATE INDEX model_operation_compaction_bases ON model_operation(session_ref,admission_position) WHERE purpose=1 AND resolution_code='compacted'",
+            "CREATE UNIQUE INDEX model_operation_effort_source ON model_operation(operation_id,session_ref,effort_source_revision)",
+        },
+        .mysql = &.{
+            "ALTER TABLE model_operation ADD COLUMN request_codec TEXT, ADD COLUMN request_codec_options BLOB, ADD CHECK(OCTET_LENGTH(request_codec) BETWEEN 3 AND 40), ADD CHECK(request_codec_options IS NULL OR length(request_codec_options) BETWEEN 1 AND 512)",
+            "UPDATE model_operation o JOIN session s ON s.session_ref=o.session_ref SET o.request_codec=s.codec,o.request_codec_options=s.codec_options",
+            "ALTER TABLE model_operation MODIFY COLUMN request_codec TEXT NOT NULL",
         },
     },
 };
@@ -1486,6 +1509,8 @@ pub const tables = [_]Table{
             .{ .name = "first_event_ms", .type = .int, .nullable = true, .sqlite_added = true, .check = "first_event_ms IS NULL OR first_event_ms>=0" },
             // Admission-time capacity, including the effective unknown-model fallback.
             .{ .name = "context_window", .type = .int, .check = "context_window BETWEEN 0 AND 4294967295" },
+            .{ .name = "request_codec", .type = .{ .text = .{ .min = 3, .max = 40 } } },
+            .{ .name = "request_codec_options", .type = .{ .bytes = .{ .min = 1, .max = 512 } }, .nullable = true },
         },
         .primary_key = &.{"operation_id"},
         .uniques = &.{&.{ "operation_id", "session_ref" }},
@@ -3385,4 +3410,53 @@ test "model call timing format 68 migration preserves format 67 resolutions with
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT operation_id,attempt_ordinal,resolution_code,resolved_at FROM model_operation EXCEPT SELECT * FROM old_model_resolutions)"));
     try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, "UPDATE model_operation SET latency_ms=-1"));
     try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, "UPDATE model_operation SET first_event_ms=-1"));
+}
+
+test "frozen request codec schema 75 migration backfills every state and rolls back interrupted backfill" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [store_path.max_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var path_buffer: [store_path.max_bytes + 32]u8 = undefined;
+    const path = try std.fmt.bufPrintSentinel(&path_buffer, "{s}/store.sqlite3", .{root}, 0);
+    var raw: ?*c.sqlite3 = null;
+    defer _ = c.sqlite3_close(raw);
+    try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_open(path, &raw));
+    var database = raw.?;
+    try sqlite.exec(database, @embedFile("migration_baseline.sqlite.sql"));
+    try sqlite.exec(database, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
+    try sqlite.exec(database, @embedFile("migration_baseline_rows.sql"));
+    for (migrations[0 .. 74 - migration_baseline]) |step| for (step.sqlite) |statement| try sqlite.exec(database, statement);
+    try sqlite.exec(database, @embedFile("migration_codec_rows.sql"));
+    try sqlite.exec(database, "PRAGMA user_version=74;INSERT INTO store_meta(meta_key,meta_value) VALUES('format','74')");
+    try sqlite.exec(database, identity_sql);
+    {
+        const meta = try sqlite.prepare(database, "INSERT INTO store_meta(meta_key,meta_value) VALUES('store_selector',?1)");
+        defer _ = c.sqlite3_finalize(meta);
+        try sqlite.bindText(meta, 1, root);
+        try sqlite.expectDone(meta);
+    }
+    try sqlite.exec(database, "CREATE TEMP TABLE old_operations AS SELECT * FROM model_operation;CREATE TEMP TABLE old_sessions AS SELECT * FROM session");
+    const forward = migrations[74 - migration_baseline];
+    const interrupted: Migration = .{ .from = 74, .sqlite = &.{ forward.sqlite[0], forward.sqlite[1], forward.sqlite[2], "UPDATE interrupted_migration SET missing=1" }, .mysql = &.{} };
+    try std.testing.expectError(error.SqliteExecFailed, migrate(std.testing.io, database, root, 74, &.{interrupted}, null));
+    try std.testing.expectEqual(@as(u32, 74), try sqlite.pragmaInt(database, "PRAGMA user_version"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM old_operations EXCEPT SELECT * FROM model_operation)"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM pragma_table_info('model_operation') WHERE name='request_codec'"));
+    try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_close(raw));
+    raw = null;
+    try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_open(path, &raw));
+    database = raw.?;
+    try sqlite.exec(database, "CREATE TEMP TABLE old_operations AS SELECT * FROM model_operation;CREATE TEMP TABLE old_sessions AS SELECT * FROM session");
+    try openExisting(std.testing.io, database, root, null, null);
+    try std.testing.expectEqual(@as(u32, 8), try sqlite.pragmaInt(database, "SELECT count(*) FROM model_operation o JOIN session s ON s.session_ref=o.session_ref WHERE o.request_codec=s.codec AND o.request_codec_options IS s.codec_options"));
+    try sqlite.exec(database, "CREATE TEMP TABLE migrated_operations AS SELECT * FROM model_operation;ALTER TABLE migrated_operations DROP COLUMN request_codec;ALTER TABLE migrated_operations DROP COLUMN request_codec_options");
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM old_operations EXCEPT SELECT * FROM migrated_operations)"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM migrated_operations EXCEPT SELECT * FROM old_operations)"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM old_sessions EXCEPT SELECT * FROM session)"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM pragma_foreign_key_check"));
+    try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, "UPDATE model_operation SET request_codec=NULL"));
+    try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, "UPDATE model_operation SET request_codec_options=zeroblob(513)"));
+    try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, "UPDATE model_operation SET request_codec_options=x''"));
+    try openExisting(std.testing.io, database, root, null, null);
 }

@@ -2,6 +2,7 @@
 //! facts, context estimates and retries.
 
 const std = @import("std");
+const codecs = @import("../../codecs.zig");
 const replay_recipe = @import("../../replay_recipe.zig");
 const attempt = @import("../../attempt.zig");
 const outcome_code = @import("../../outcome_code.zig");
@@ -463,7 +464,7 @@ fn pendingInstructionsSql(comptime session: []const u8, comptime revision: []con
 /// names, read with its selection under the same Entry lock: the columns
 /// after the Session head, then the joins on `session s`.
 fn factsColumnsSql(comptime session: []const u8) []const u8 {
-    return "s.revision,s.provider,s.model,s.compaction_trigger,s.output_reservation," ++ configuration_domain.reasoningEffortOverrideSql("s") ++ " AS reasoning_effort," ++
+    return "s.revision,s.provider,s.model,s.codec,s.codec_options,s.compaction_trigger,s.output_reservation," ++ configuration_domain.reasoningEffortOverrideSql("s") ++ " AS reasoning_effort," ++
         configuration_domain.previousReasoningEffortSql("s") ++ " AS previous_reasoning_effort," ++
         "s.tool_set_id,s.loaded_tool_set_id," ++ tool_offer.stale_sql ++ " AS offer_stale," ++
         "latest.turn_id AS latest_turn,latest.outcome_code IS NULL AS latest_active,latest.first_admission_id AS latest_first," ++
@@ -531,6 +532,8 @@ const SelectedRow = struct {
     revision: rsql.Positive,
     provider: provider_name.Provider,
     model: Bounded(model_capability.max_model_bytes),
+    codec: Bounded(40),
+    codec_options: ?rsql.Blob(512),
     compaction_trigger: ?rsql.Positive,
     output_reservation: ?u64,
     reasoning_effort: ?model_capability.ReasoningEffort,
@@ -676,12 +679,12 @@ const project_instructions = rsql.Write(.{
 
 const insert_operation = rsql.Write(.{
     .sql = "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
-        "admission_position,purpose,compaction_trigger,output_reservation,reasoning_effort,history_floor,history_level,history_dropped,attempt_ordinal,retry_due_at_ms,attempt_at,tool_set_id,context_window,effort_source_revision,previous_reasoning_effort,effort_update,previous_effort_override) " ++
+        "admission_position,purpose,compaction_trigger,output_reservation,reasoning_effort,history_floor,history_level,history_dropped,attempt_ordinal,retry_due_at_ms,attempt_at,tool_set_id,context_window,effort_source_revision,previous_reasoning_effort,effort_update,previous_effort_override,request_codec,request_codec_options) " ++
         "SELECT ?1,?2,selected_revision.session_ref,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,1,0,@now,?17," ++
         model_facts_domain.contextWindowSql("?14", "?15", "?16") ++ "," ++
         configuration_domain.effortChoiceRevisionSql("selected_revision") ++ "," ++ operation_effort.previousSql("selected_revision.session_ref", "?6", "selected_revision.model") ++ "," ++
-        "selected_session.codec='openai-responses/2' AND ?10 IS NOT NULL AND NOT @same(?10," ++ historical_domain.effortBeforeSql("selected_revision.session_ref", "?6", "selected_revision.model", "?11", "?10") ++ ")," ++ operation_effort.previousOverrideSql("selected_revision.session_ref", "?6", "selected_revision.model") ++ " " ++
-        "FROM session_revision selected_revision JOIN session selected_session ON selected_session.session_ref=selected_revision.session_ref WHERE selected_revision.session_ref=@session(?3) AND selected_revision.revision=?4",
+        "?20 AND ?10 IS NOT NULL AND NOT @same(?10," ++ historical_domain.effortBeforeSql("selected_revision.session_ref", "?6", "selected_revision.model", "?11", "?10") ++ ")," ++ operation_effort.previousOverrideSql("selected_revision.session_ref", "?6", "selected_revision.model") ++ ",?18,?19 " ++
+        "FROM session_revision selected_revision WHERE selected_revision.session_ref=@session(?3) AND selected_revision.revision=?4",
     .Args = struct {
         operation_id: u64,
         turn_id: u64,
@@ -700,6 +703,9 @@ const insert_operation = rsql.Write(.{
         shipped_context_window: u64,
         unlisted_context_window: u64,
         tool_set_id: u64,
+        request_codec: []const u8,
+        request_codec_options: ?rsql.Bytes,
+        effort_in_history: bool,
     },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
@@ -848,6 +854,8 @@ pub const AdmitModel = struct {
     /// floor walk, the inherited floor or the offer, one at a time.
     pub const Scratch = struct {
         model: @FieldType(SelectedRow, "model"),
+        codec: Bounded(40),
+        codec_options: ?rsql.Blob(512),
         request: historical_domain.SettingsRead,
         read: union(enum) {
             facts: SelectedRow,
@@ -980,6 +988,8 @@ pub const AdmitModel = struct {
         else
             false;
         const latest: u64 = if (deepens) (facts.latest_operation orelse return error.CorruptStore).get() else 0;
+        t.input.scratch.codec = facts.codec;
+        t.input.scratch.codec_options = facts.codec_options;
         t.admitting = .{
             .session = facts.session,
             .revision = facts.revision.get(),
@@ -1076,6 +1086,9 @@ pub const AdmitModel = struct {
             .shipped_context_window = admitting.shipped_context_window,
             .unlisted_context_window = @import("../../product_defaults.zig").unlisted_context_window,
             .tool_set_id = t.offer,
+            .request_codec = t.input.scratch.codec.slice(),
+            .request_codec_options = if (t.input.scratch.codec_options) |*options| .{ .bytes = options.slice() } else null,
+            .effort_in_history = codecs.carriesEffort(std.meta.stringToEnum(provider_name.Codec, t.input.scratch.codec.slice()) orelse return error.CorruptStore),
         });
         // The writes are queued, not run, as in every converted entry point.
         if (t.input.faults.attempt_before_commit) return error.InjectedAttemptCommitFailure;

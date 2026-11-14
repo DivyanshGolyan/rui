@@ -454,11 +454,11 @@ test "retry due index excludes future population and preserves age ordering" {
         const insert = try std.testing.allocator.printSentinel(
             "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
                 "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
-                "admission_position,attempt_ordinal,retry_due_at_ms,output_reservation,retry_scheduled_at,tool_set_id,context_window) " ++
-                "SELECT value,value,printf('%06d',value),1,1,1,1,9223372036854775807,0,1,(SELECT coalesce(loaded_tool_set_id,tool_set_id) FROM session LIMIT 1),0 FROM sequence; " ++
+                "admission_position,attempt_ordinal,retry_due_at_ms,output_reservation,retry_scheduled_at,tool_set_id,context_window,request_codec,request_codec_options) " ++
+                "SELECT value,value,printf('%06d',value),1,1,1,1,9223372036854775807,0,1,(SELECT coalesce(loaded_tool_set_id,tool_set_id) FROM session LIMIT 1),0,(SELECT codec FROM session LIMIT 1),(SELECT codec_options FROM session LIMIT 1) FROM sequence; " ++
                 "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
-                "admission_position,attempt_ordinal,retry_due_at_ms,output_reservation,retry_scheduled_at,tool_set_id,context_window) VALUES" ++
-                "({1},{1},'0der00',1,1,1,1,99,0,1,(SELECT coalesce(loaded_tool_set_id,tool_set_id) FROM session LIMIT 1),0),({2},{2},'ear1er',1,1,1,1,1,0,1,(SELECT coalesce(loaded_tool_set_id,tool_set_id) FROM session LIMIT 1),0)",
+                "admission_position,attempt_ordinal,retry_due_at_ms,output_reservation,retry_scheduled_at,tool_set_id,context_window,request_codec,request_codec_options) VALUES" ++
+                "({1},{1},'0der00',1,1,1,1,99,0,1,(SELECT coalesce(loaded_tool_set_id,tool_set_id) FROM session LIMIT 1),0,(SELECT codec FROM session LIMIT 1),(SELECT codec_options FROM session LIMIT 1)),({2},{2},'ear1er',1,1,1,1,1,0,1,(SELECT coalesce(loaded_tool_set_id,tool_set_id) FROM session LIMIT 1),0,(SELECT codec FROM session LIMIT 1),(SELECT codec_options FROM session LIMIT 1))",
             .{ future_count, future_count + 1, future_count + 2 },
             0,
         );
@@ -478,8 +478,8 @@ test "retry due index excludes future population and preserves age ordering" {
         const insert = try std.testing.allocator.printSentinel(
             "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{d}) " ++
                 "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
-                "admission_position,attempt_ordinal,retry_due_at_ms,output_reservation,retry_scheduled_at,tool_set_id,context_window) " ++
-                "SELECT value,value,printf('%06d',value),1,1,1,1,1,0,1,(SELECT coalesce(loaded_tool_set_id,tool_set_id) FROM session LIMIT 1),0 FROM sequence",
+                "admission_position,attempt_ordinal,retry_due_at_ms,output_reservation,retry_scheduled_at,tool_set_id,context_window,request_codec,request_codec_options) " ++
+                "SELECT value,value,printf('%06d',value),1,1,1,1,1,0,1,(SELECT coalesce(loaded_tool_set_id,tool_set_id) FROM session LIMIT 1),0,(SELECT codec FROM session LIMIT 1),(SELECT codec_options FROM session LIMIT 1) FROM sequence",
             .{due_count},
             0,
         );
@@ -492,10 +492,10 @@ test "retry due index excludes future population and preserves age ordering" {
 
     try store_testing.sqlite_only.exec(&storage, "DELETE FROM model_operation", .{});
     try store_testing.sqlite_only.exec(&storage, "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
-        "admission_position,attempt_ordinal,retry_due_at_ms,output_reservation,retry_scheduled_at,tool_set_id,context_window) VALUES" ++
-        "(1,1,'000001',1,1,1,1,99,0,1,(SELECT coalesce(loaded_tool_set_id,tool_set_id) FROM session LIMIT 1),0)," ++
-        "(2,2,'000002',1,1,1,1,50,0,1,(SELECT coalesce(loaded_tool_set_id,tool_set_id) FROM session LIMIT 1),0)," ++
-        "(3,3,'000003',1,1,1,1,1,0,1,(SELECT coalesce(loaded_tool_set_id,tool_set_id) FROM session LIMIT 1),0)", .{});
+        "admission_position,attempt_ordinal,retry_due_at_ms,output_reservation,retry_scheduled_at,tool_set_id,context_window,request_codec,request_codec_options) VALUES" ++
+        "(1,1,'000001',1,1,1,1,99,0,1,(SELECT coalesce(loaded_tool_set_id,tool_set_id) FROM session LIMIT 1),0,(SELECT codec FROM session LIMIT 1),(SELECT codec_options FROM session LIMIT 1))," ++
+        "(2,2,'000002',1,1,1,1,50,0,1,(SELECT coalesce(loaded_tool_set_id,tool_set_id) FROM session LIMIT 1),0,(SELECT codec FROM session LIMIT 1),(SELECT codec_options FROM session LIMIT 1))," ++
+        "(3,3,'000003',1,1,1,1,1,0,1,(SELECT coalesce(loaded_tool_set_id,tool_set_id) FROM session LIMIT 1),0,(SELECT codec FROM session LIMIT 1),(SELECT codec_options FROM session LIMIT 1))", .{});
     try insertTestingSessionsForOperations(storage.sqliteDatabase());
     const Active = struct {
         fn contains(_: *const anyopaque, operation_id: u64) bool {
@@ -595,8 +595,8 @@ test "retry admission reads past a full page of active Operations" {
     const insert = try std.testing.allocator.printSentinel(
         "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{d}) " ++
             "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
-            "admission_position,attempt_ordinal,retry_due_at_ms,output_reservation,retry_scheduled_at,tool_set_id,context_window) " ++
-            "SELECT value,value,printf('%06d',value),1,1,1,1,1,0,1,(SELECT coalesce(loaded_tool_set_id,tool_set_id) FROM session LIMIT 1),0 FROM sequence",
+            "admission_position,attempt_ordinal,retry_due_at_ms,output_reservation,retry_scheduled_at,tool_set_id,context_window,request_codec,request_codec_options) " ++
+            "SELECT value,value,printf('%06d',value),1,1,1,1,1,0,1,(SELECT coalesce(loaded_tool_set_id,tool_set_id) FROM session LIMIT 1),0,(SELECT codec FROM session LIMIT 1),(SELECT codec_options FROM session LIMIT 1) FROM sequence",
         .{retry_admission_page_rows + 1},
         0,
     );
@@ -628,9 +628,9 @@ test "retry transitions preserve age and settle one exhausted outcome per call" 
     try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=OFF");
     try store_testing.sqlite_only.exec(&storage, "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<201) " ++
         "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
-        "admission_position,attempt_ordinal,retry_due_at_ms,output_reservation,retry_scheduled_at,tool_set_id,context_window) " ++
+        "admission_position,attempt_ordinal,retry_due_at_ms,output_reservation,retry_scheduled_at,tool_set_id,context_window,request_codec,request_codec_options) " ++
         "SELECT value,value,printf('%06d',value),1,1,1,1," ++
-        "CASE WHEN value<=100 THEN 9223372036854775807 ELSE 1 END,0,1,(SELECT coalesce(loaded_tool_set_id,tool_set_id) FROM session LIMIT 1),0 FROM sequence", .{});
+        "CASE WHEN value<=100 THEN 9223372036854775807 ELSE 1 END,0,1,(SELECT coalesce(loaded_tool_set_id,tool_set_id) FROM session LIMIT 1),0,(SELECT codec FROM session LIMIT 1),(SELECT codec_options FROM session LIMIT 1) FROM sequence", .{});
     try insertTestingSessionsForOperations(storage.sqliteDatabase());
 
     const Active = struct {
@@ -689,8 +689,8 @@ test "retry transitions preserve age and settle one exhausted outcome per call" 
         try sqlite.bindText(insert_turn, 2, session.slice());
         try sqlite.expectDone(insert_turn);
         const insert_operation = try sqlite.prepare(storage.sqliteDatabase(), "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
-            "admission_position,attempt_ordinal,retry_due_at_ms,output_reservation,attempt_at,tool_set_id,context_window) " ++
-            "VALUES(?1,?1,?2,1,1,1,4,0,0,1,(SELECT coalesce(loaded_tool_set_id,tool_set_id) FROM session WHERE session_ref=?2),0)");
+            "admission_position,attempt_ordinal,retry_due_at_ms,output_reservation,attempt_at,tool_set_id,context_window,request_codec,request_codec_options) " ++
+            "VALUES(?1,?1,?2,1,1,1,4,0,0,1,(SELECT coalesce(loaded_tool_set_id,tool_set_id) FROM session WHERE session_ref=?2),0,(SELECT codec FROM session WHERE session_ref=?2),(SELECT codec_options FROM session WHERE session_ref=?2))");
         defer _ = c.sqlite3_finalize(insert_operation);
         try sqlite.bindU64(insert_operation, 1, value);
         try sqlite.bindText(insert_operation, 2, session.slice());

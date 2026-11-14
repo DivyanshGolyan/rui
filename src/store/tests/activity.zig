@@ -684,9 +684,9 @@ test "an Activity page costs the same steps after 10 or 10,000 earlier rows, in 
             try store_testing.withoutForeignKeys(&storage, "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at) " ++
                 sequence_to_first_argument ++
                 "SELECT value,?2,value+1000000,?4,?3+4*(value-1),value,1 FROM sequence", .{ history, session.slice(), start, content });
-            try store_testing.withoutForeignKeys(&storage, "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,attempt_ordinal,resolution_code,resolved_at,tool_set_id,context_window) " ++
+            try store_testing.withoutForeignKeys(&storage, "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,attempt_ordinal,resolution_code,resolved_at,tool_set_id,context_window,request_codec,request_codec_options) " ++
                 sequence_to_first_argument ++
-                "SELECT value,value,?2,1,value,?3+4*(value-1),0,1,'tool_proposals',1,(SELECT coalesce(loaded_tool_set_id,tool_set_id) FROM session WHERE session_ref=?2),?4 FROM sequence", .{ history, session.slice(), start, @import("../../product_defaults.zig").unlisted_context_window });
+                "SELECT value,value,?2,1,value,?3+4*(value-1),0,1,'tool_proposals',1,(SELECT coalesce(loaded_tool_set_id,tool_set_id) FROM session WHERE session_ref=?2),?4,(SELECT codec FROM session WHERE session_ref=?2),(SELECT codec_options FROM session WHERE session_ref=?2) FROM sequence", .{ history, session.slice(), start, @import("../../product_defaults.zig").unlisted_context_window });
             try store_testing.withoutForeignKeys(&storage, "INSERT INTO model_output_item(operation_id,item_ordinal,session_ref,session_position,item_kind,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,extras_content_id,part_count) " ++
                 sequence_to_first_argument ++
                 "SELECT value,0,?2,?3+4*(value-1)+1,3,1,zeroblob(32),0,?4,0 FROM sequence", .{ history, session.slice(), start, content });
@@ -784,9 +784,9 @@ test "a forward one-row page of a person's Messages costs the same steps past 10
             const content = try store_testing.queryU64(&storage, "SELECT instructions_content_id FROM session WHERE session_ref=?1", .{session.slice()});
             // Each tool group names its Turn before the Turn row exists. A
             // cancelled Turn needs no answer content.
-            try store_testing.withoutForeignKeys(&storage, "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,attempt_ordinal,resolution_code,resolved_at,tool_set_id,context_window) " ++
+            try store_testing.withoutForeignKeys(&storage, "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,attempt_ordinal,resolution_code,resolved_at,tool_set_id,context_window,request_codec,request_codec_options) " ++
                 sequence_to_first_argument ++
-                "SELECT 1000+value,1000+value,?2,1,1000+value,?3+3*(value-1),0,1,'tool_proposals',1,(SELECT coalesce(loaded_tool_set_id,tool_set_id) FROM session WHERE session_ref=?2),?4 FROM sequence", .{ history, session.slice(), start, @import("../../product_defaults.zig").unlisted_context_window });
+                "SELECT 1000+value,1000+value,?2,1,1000+value,?3+3*(value-1),0,1,'tool_proposals',1,(SELECT coalesce(loaded_tool_set_id,tool_set_id) FROM session WHERE session_ref=?2),?4,(SELECT codec FROM session WHERE session_ref=?2),(SELECT codec_options FROM session WHERE session_ref=?2) FROM sequence", .{ history, session.slice(), start, @import("../../product_defaults.zig").unlisted_context_window });
             try store_testing.withoutForeignKeys(&storage, "INSERT INTO model_output_item(operation_id,item_ordinal,session_ref,session_position,item_kind,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,extras_content_id,part_count) " ++
                 sequence_to_first_argument ++
                 "SELECT 1000+value,0,?2,?3+3*(value-1),3,1,zeroblob(32),0,?4,0 FROM sequence", .{ history, session.slice(), start, content });

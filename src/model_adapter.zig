@@ -45,11 +45,6 @@ test {
     _ = history_memo;
 }
 
-// The model adapter prepares requests through the Session's codec and
-// interprets answers. Credentials and the fields they write belong to the
-// sign-in sources (`providers.zig`). The Host owns only effect scheduling and
-// the provider transport owns only the HTTP/2 Client and sealed byte lifetimes.
-
 /// Schema support is checked before acquiring validation metadata, preserving
 /// the original failure precedence when metadata acquisition would also fail.
 pub fn outputSchemaRejection(structured: bool, source_length: u64) ?output_decode.Rejected {
@@ -590,7 +585,7 @@ pub const Preparation = struct {
     reader: store.HistoricalReader = undefined,
     /// The window each memo chunk is copied through.
     memo_window: [history_memo.chunk_bytes]u8 = undefined,
-    /// The Session's codec state, begun at the settings stage.
+    /// The Operation's codec state, begun at the settings stage.
     encoder: codecs.Encoder = undefined,
     /// The codec's state at the last history-element boundary: the initial
     /// carry, then each element's own, or a history memo's.
@@ -808,7 +803,7 @@ pub const Preparation = struct {
     }
 
     /// Write the request one item at a time: take the next item from the
-    /// view, have the Session's codec encode it, and write its pieces under
+    /// view, have the Operation's codec encode it, and write its pieces under
     /// the allowance before the next item.
     pub fn advance(self: *Preparation, byte_allowance: usize, item_allowance: usize) PreparationProgress {
         std.debug.assert(self.state.active and byte_allowance != 0 and item_allowance != 0);
@@ -1149,6 +1144,8 @@ pub const Preparation = struct {
             .session = self.settings.session,
             .model = self.settings.model,
             .anchor = (try self.view.coverage()).anchor,
+            .codec = self.settings.codec,
+            .codec_options_digest = if (self.settings.codec_options) |*options| protocol.contentDigest(options.slice()) else null,
         };
     }
 
@@ -4818,7 +4815,6 @@ test "a codec that declines fails provider_codec_failed before any request exist
         try std.testing.expect(retained == null);
     }
     try std.testing.expectEqualStrings("provider_codec_failed", preparationFailureCode(error.CodecDeclined));
-    // The same Session encodes through its pinned codec.
     const request = try prepareMemoForTesting(&setup, binding, null, .{});
     std.testing.allocator.free(request.bytes);
 }
@@ -4838,7 +4834,7 @@ test "a history memo that does not match the frozen request is rebuilt in full" 
     binding = try advanceMemoHistoryForTesting(&setup, session, binding, 1);
     // Each mismatch carries poisoned bytes, so using it would change the
     // request; equality with the full rebuild proves it was not used.
-    const Mismatch = enum { anchor, model, older_view, session };
+    const Mismatch = enum { anchor, model, older_view, session, codec, options };
     for (std.enums.values(Mismatch)) |mismatch| {
         try damageMemoFileForTesting(&setup, &memos, session.slice(), .poisoned);
         const memo = &memo_entries[history_memo.sessionSlot(&memo_entries, session.slice()).?].memo.?;
@@ -4848,6 +4844,11 @@ test "a history memo that does not match the frozen request is rebuilt in full" 
             // A retry of an earlier Operation has an older frozen view.
             .older_view => memo.admission_position = std.math.maxInt(u64),
             .session => try memo.key.session.set("zzzzzz"),
+            .codec => {
+                memo.key.codec = .@"openai-responses/3";
+                memo.carry = codecs.initialCarry(.@"openai-responses/3", null);
+            },
+            .options => memo.key.codec_options_digest = protocol.contentDigest("wrong options"),
         }
         try std.testing.expectEqual(@as(usize, 0), try expectMemoRebuildEqual(&setup, binding, &memos, .{}));
         if (mismatch == .session) memos.forget(std.testing.io, &memos.held("zzzzzz").?);
@@ -5509,4 +5510,83 @@ test "MCP projected offers preserve request prefixes and memo rebuilds" {
         try std.testing.expect(std.mem.indexOf(u8, request.bytes, "original page") != null);
         try testing.settleItemsForTesting(&setup.storage, &setup.tmp, binding, &.{"{\"type\":\"message\",\"id\":\"done\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}"}, "done");
     }
+}
+
+test "frozen request codec preserves each text golden through failure retry and reopen" {
+    inline for (std.enums.values(protocol.Codec)) |codec| {
+        var setup: PreparationTestSetup = undefined;
+        try setup.init();
+        defer setup.close();
+        const session = try setup.configure("codec-config");
+        try store.testing.exec(&setup.storage, "UPDATE session SET codec=?1 WHERE session_ref=?2", .{ @tagName(codec), session.slice() });
+        var tool_change: wire_request.ConfigureCommand = .{};
+        try tool_change.key.set("codec-tools");
+        tool_change.session = session;
+        tool_change.configuration.tools = try .of(&.{});
+        try std.testing.expect(try setup.storage.configure(&tool_change, .{}) == .accepted);
+        try setup.submit("codec-input", "codec-message", session.slice(), "hi");
+        const original = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+        const expected = try requestGolden(setup.workspace, session.slice(), "{\"model\":\"model-a\",\"parallel_tool_calls\":true,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"\",\"input\":[{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hi\"}]}],\"tools\":[],\"text\":{\"verbosity\":\"low\"}}");
+        defer std.testing.allocator.free(expected);
+        const first = try prepareMemoForTesting(&setup, original, null, .{});
+        defer std.testing.allocator.free(first.bytes);
+        try std.testing.expectEqualStrings(expected, first.bytes);
+        try setup.storage.settleModelAttemptFailure(original, .{ .uncorrelated = "provider_failure" }, .{ .retryable = .{ .waits_ms = .{ 1, 1, 1 } } }, .{});
+        try store.testing.exec(&setup.storage, "UPDATE model_operation SET retry_due_at_ms=1 WHERE operation_id=?1", .{original.operation_id});
+        try store.testing.stageRequestCodecUpgrade(&setup.storage);
+        try setup.storage.close();
+        var path_buffer: [protocol.max_store_bytes + 32]u8 = undefined;
+        const path = try std.fmt.bufPrint(&path_buffer, "{s}/store.sqlite3", .{setup.root});
+        try setup.storage.open(std.testing.io, path, setup.root);
+        const retry = (try setup.storage.tryAdmitNextModelRetry(.empty(), .{}, null)).?.permit.binding;
+        try std.testing.expectEqual(original.operation_id, retry.operation_id);
+        try std.testing.expect(retry.attempt_ordinal > original.attempt_ordinal);
+        const retried = try prepareMemoForTesting(&setup, retry, null, .{});
+        defer std.testing.allocator.free(retried.bytes);
+        try std.testing.expectEqualStrings(expected, retried.bytes);
+        try std.testing.expectEqual(@as(u64, 1), try store.testing.queryU64(&setup.storage, "SELECT request_codec=?1 AND request_codec_options IS NULL FROM model_operation WHERE operation_id=?2", .{ @tagName(codec), original.operation_id }));
+        try std.testing.expectEqual(@as(u64, 1), try store.testing.queryU64(&setup.storage, "SELECT codec=?1 AND codec_options IS NULL FROM session WHERE session_ref=?2", .{ @tagName(codec), session.slice() }));
+    }
+}
+
+test "frozen request codec cold misses foreign memo carry and seal but preserves a later seal on old retry" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    const session = try configureMemoSessionForTesting(&setup);
+    try setup.submit("codec-first", "codec-first", session.slice(), "hi");
+    const first = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+    var entries: [2]history_memo.Table.Entry = @splat(.{});
+    var memos: history_memo.Table = .{ .entries = &entries, .scratch_path = setup.root };
+    defer memos.deinit(std.testing.io);
+    try std.testing.expectEqual(@as(usize, 0), try expectMemoRebuildEqual(&setup, first, &memos, .{}));
+    const original_request = try prepareMemoForTesting(&setup, first, null, .{});
+    defer std.testing.allocator.free(original_request.bytes);
+    const saved = memos.held(session.slice()).?;
+    const first_seal = (try setup.storage.prefixSealForTesting(first)).?;
+    try store.testing.exec(&setup.storage, "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,purpose,output_reservation,reasoning_effort,attempt_ordinal,retry_due_at_ms,attempt_at,tool_set_id,context_window,request_codec,request_codec_options) SELECT 999,turn_id,session_ref,settings_revision,input_cutoff,admission_position+1,purpose,output_reservation,reasoning_effort,1,0,1,tool_set_id,context_window,'openai-responses/3',NULL FROM model_operation WHERE operation_id=?1", .{first.operation_id});
+    const later: store.AttemptBinding = .{ .turn_id = first.turn_id, .operation_id = 999, .attempt_ordinal = 1 };
+    try std.testing.expect(try setup.storage.prefixSealForTesting(later) == null);
+    const rebuilt = try prepareMemoForTesting(&setup, later, &memos, .{});
+    defer std.testing.allocator.free(rebuilt.bytes);
+    try std.testing.expectEqual(@as(usize, 0), rebuilt.copied);
+    const later_seal = (try setup.storage.prefixSealForTesting(later)).?;
+    try std.testing.expect(later_seal.admission_position > first_seal.admission_position);
+    try std.testing.expectEqual(@as(usize, 0), try expectMemoRebuildEqual(&setup, first, &memos, .{}));
+    try std.testing.expectEqualDeep(later_seal, (try setup.storage.prefixSealForTesting(first)).?);
+    try std.testing.expect(saved.length != 0);
+    try std.testing.expectEqual(@as(usize, @intCast(saved.length)), try expectMemoRebuildEqual(&setup, first, &memos, .{}));
+    try setup.storage.settleModelAttemptFailure(first, .{ .uncorrelated = "provider_failure" }, .{ .retryable = .{ .waits_ms = .{ 1, 1, 1 } } }, .{});
+    try store.testing.exec(&setup.storage, "UPDATE model_operation SET retry_due_at_ms=1 WHERE operation_id=?1", .{first.operation_id});
+    try setup.storage.close();
+    var path_buffer: [protocol.max_store_bytes + 32]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "{s}/store.sqlite3", .{setup.root});
+    try setup.storage.open(std.testing.io, path, setup.root);
+    const retry = (try setup.storage.tryAdmitNextModelRetry(.empty(), .{}, null)).?.permit.binding;
+    try std.testing.expectEqual(first.operation_id, retry.operation_id);
+    const old = try prepareMemoForTesting(&setup, retry, null, .{});
+    defer std.testing.allocator.free(old.bytes);
+    try std.testing.expectEqualStrings(original_request.bytes, old.bytes);
+    try std.testing.expectEqualDeep(later_seal, (try setup.storage.prefixSealForTesting(retry)).?);
+    try std.testing.expectEqual(@as(u64, 1), try store.testing.queryU64(&setup.storage, "SELECT codec='openai-responses/2' AND codec_options IS NULL FROM session WHERE session_ref=?1", .{session.slice()}));
 }

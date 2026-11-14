@@ -78,8 +78,9 @@ pub const HistoricalSettings = struct {
     effort_update: bool = false,
     /// The effort the Session's first Operation for this model froze.
     starting_effort: ?model_capability.ReasoningEffort = null,
-    /// The codec the Session pinned at creation.
+    /// The request encoding frozen by this Operation.
     codec: provider_name.Codec,
+    codec_options: ?rsql.Blob(512) = null,
     provider: provider_name.Provider,
     model: Bounded(model_capability.max_model_bytes),
     workspace: Bounded(workspace_path.max_bytes),
@@ -799,7 +800,7 @@ const historical_settings = rsql.Read(.{
     .sql = "SELECT r.model,baseline.instructions_content_id,r.output_schema_content_id,o.tool_set_id AS tool_set_id,tool_set.member_count," ++
         "(SELECT count(*) FROM tool_set_member member JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id " ++
         "WHERE member.tool_set_id=o.tool_set_id AND tool.owner='provider') AS provider_count,r.provider,o.session_ref,s.parent_ref,r.workspace,o.compaction_trigger,o.output_reservation," ++
-        operation_effort.effectiveSql("o") ++ " AS reasoning_effort,(" ++ operation_effort.emittedSql("o") ++ ") AS effort_update,s.codec,s.codec_options IS NULL AS plain_codec,o.purpose," ++
+        operation_effort.effectiveSql("o") ++ " AS reasoning_effort,(" ++ operation_effort.emittedSql("o") ++ ") AS effort_update,o.request_codec AS codec,o.request_codec_options AS codec_options,o.purpose," ++
         "(SELECT first.reasoning_effort FROM model_operation first JOIN session_revision first_revision ON first_revision.session_ref=first.session_ref AND first_revision.revision=first.settings_revision " ++
         "WHERE first.session_ref=o.session_ref AND first_revision.model=r.model ORDER BY first.admission_position LIMIT 1) AS starting_effort," ++ skills_domain.sourcesConsistentSql("o.session_ref", "catalog_required.position<o.admission_position") ++ " AS catalogs_consistent," ++
         "instructions.byte_length AS instructions_length,instructions.digest AS instructions_digest,instructions.private AS instructions_private," ++
@@ -826,7 +827,7 @@ const historical_settings = rsql.Read(.{
         reasoning_effort: ?model_capability.ReasoningEffort,
         effort_update: bool,
         codec: Bounded(40),
-        plain_codec: bool,
+        codec_options: ?rsql.Blob(512),
         purpose: u8,
         starting_effort: ?model_capability.ReasoningEffort,
         catalogs_consistent: bool,
@@ -1043,10 +1044,9 @@ pub const SettingsRead = struct {
         out.effort_update = row.effort_update;
         out.starting_effort = row.starting_effort;
         out.provider = row.provider;
-        // Requests are built by the codec the Session pinned, which takes no
-        // options; a Session pinned to one this Host does not serve cannot be.
         out.codec = std.meta.stringToEnum(provider_name.Codec, row.codec.slice()) orelse return error.CorruptStore;
-        if (!row.plain_codec) return error.CorruptStore;
+        out.codec_options = row.codec_options;
+        if (out.codec_options != null) return error.CorruptStore;
         out.session_affinity = hash.finalResult()[0..16].*;
     }
 
@@ -1106,20 +1106,18 @@ const session_prefix_seal = rsql.Read(.{
     .cardinality = .one,
 });
 
-/// Model identity for a seal is derived from its existing Operation
-/// admission position, so neither the seal nor the Store format grows.
-const seal_model = rsql.Read(.{
-    .sql = "SELECT sealed_revision.model=current_revision.model AS same_model " ++
+const seal_binding = rsql.Read(.{
+    .sql = "SELECT sealed_revision.model=current_revision.model AND sealed.request_codec=current.request_codec AND @same(sealed.request_codec_options,current.request_codec_options) AS same_binding " ++
         "FROM model_operation current JOIN session_revision current_revision ON current_revision.session_ref=current.session_ref AND current_revision.revision=current.settings_revision " ++
         "JOIN model_operation sealed ON sealed.session_ref=current.session_ref AND sealed.admission_position=?2 " ++
         "JOIN session_revision sealed_revision ON sealed_revision.session_ref=sealed.session_ref AND sealed_revision.revision=sealed.settings_revision " ++
         "WHERE current.operation_id=?1",
     .Args = struct { operation: u64, admission: u64 },
-    .Row = struct { same_model: bool },
+    .Row = struct { same_binding: bool },
     .cardinality = .one,
 });
 
-/// A recorded span binds only requests for its model. A failed read or
+/// A recorded span binds only requests for its model and frozen encoding. A failed read or
 /// a seal whose producing Operation is missing is canonical corruption.
 pub fn prefixSealOf(a: *ReadAccess, binding: AttemptBinding) !?PrefixSeal {
     var row: session_prefix_seal.Row = undefined;
@@ -1129,10 +1127,10 @@ pub fn prefixSealOf(a: *ReadAccess, binding: AttemptBinding) !?PrefixSeal {
     const seal = try PrefixSeal.decode(&bytes);
     // A later view neither binds nor is replaced; its model is irrelevant.
     if (seal.admission_position > row.admission_position.get()) return seal;
-    var identity: seal_model.Row = undefined;
-    a.read(seal_model, .{ .operation = binding.operation_id, .admission = seal.admission_position }, &identity);
+    var identity: seal_binding.Row = undefined;
+    a.read(seal_binding, .{ .operation = binding.operation_id, .admission = seal.admission_position }, &identity);
     try store_access.runAs(a, error.CorruptStore);
-    return if (identity.same_model) seal else null;
+    return if (identity.same_binding) seal else null;
 }
 
 /// Records an Operation's Session's prefix seal.

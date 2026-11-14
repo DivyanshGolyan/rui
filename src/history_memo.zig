@@ -3,9 +3,9 @@
 //!
 //! A sealed request's `"input":[ … ]` history is a pure function of the
 //! Session's history below its Operation's admission position, the selected
-//! compaction anchor and the requested model. History below an admission
+//! compaction anchor, requested model and frozen encoding. History below an admission
 //! position never changes, so a later Operation of the same Session with the
-//! same anchor and model encodes the same bytes for that prefix. When a
+//! same anchor, model and encoding encodes the same bytes for that prefix. When a
 //! request seals, the span is copied from the request into the Session's
 //! memo file with its digest, in chunks under the preparation's allowance;
 //! the next request reads it back, checks the digest, and skips re-reading
@@ -47,11 +47,15 @@ pub const Key = struct {
     session: protocol.Bounded(protocol.max_session_bytes),
     model: protocol.Bounded(protocol.max_model_bytes),
     anchor: ?u64,
+    codec: protocol.Codec,
+    codec_options_digest: ?[32]u8,
 
     pub fn eql(self: *const Key, other: *const Key) bool {
         return self.session.eql(other.session.slice()) and
             self.model.eql(other.model.slice()) and
-            self.anchor == other.anchor;
+            self.anchor == other.anchor and
+            self.codec == other.codec and
+            std.meta.eql(self.codec_options_digest, other.codec_options_digest);
     }
 };
 
@@ -85,7 +89,7 @@ pub const Memo = struct {
     digest: u64,
 
     /// The memo reproduces the prefix of a request with this key whose view
-    /// ends at `admission`: same Session, model and anchor, and a view that
+    /// ends at `admission`: same Session, model, anchor and encoding, and a view that
     /// contains the whole producing view.
     pub fn serves(self: *const Memo, key: *const Key, admission: u64) bool {
         return self.key.eql(key) and self.admission_position <= admission;
@@ -379,7 +383,7 @@ pub const Table = struct {
 };
 
 fn testMemo(session: []const u8, model: []const u8, anchor: ?u64, admission_position: u64, length: u64) !Memo {
-    var key: Key = .{ .session = .{}, .model = .{}, .anchor = anchor };
+    var key: Key = .{ .session = .{}, .model = .{}, .anchor = anchor, .codec = .@"openai-responses/2", .codec_options_digest = null };
     try key.session.set(session);
     try key.model.set(model);
     return .{
@@ -394,7 +398,7 @@ fn testMemo(session: []const u8, model: []const u8, anchor: ?u64, admission_posi
     };
 }
 
-test "a memo serves only the same Session, model and anchor with a containing view" {
+test "a memo serves only the same Session model anchor and encoding with a containing view" {
     const memo = try testMemo("abc123", "model-a", 7, 20, 1);
     var key = memo.key;
     try std.testing.expect(memo.serves(&key, 20));
@@ -408,6 +412,17 @@ test "a memo serves only the same Session, model and anchor with a containing vi
     key = memo.key;
     try key.model.set("model-b");
     try std.testing.expect(!memo.serves(&key, 30));
+    key = memo.key;
+    key.codec = .@"openai-responses/3";
+    try std.testing.expect(!memo.serves(&key, 30));
+    key = memo.key;
+    key.codec_options_digest = protocol.contentDigest("options");
+    try std.testing.expect(!memo.serves(&key, 30));
+    var option_memo = memo;
+    option_memo.key = key;
+    try std.testing.expect(option_memo.serves(&key, 30));
+    key.codec_options_digest = protocol.contentDigest("other options");
+    try std.testing.expect(!option_memo.serves(&key, 30));
     key = memo.key;
     try key.session.set("abc124");
     try std.testing.expect(!memo.serves(&key, 30));

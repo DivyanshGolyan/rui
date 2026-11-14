@@ -1060,3 +1060,34 @@ test "schema 66 MySQL migration freezes actual effort emission and prior admitte
         writeRecord();
     };
 }
+
+test "frozen request codec schema 75 MySQL external migration backfills every state" {
+    const io = std.testing.io;
+    mutex.lockUncancelable(io);
+    defer mutex.unlock(io);
+    _ = connection() orelse return if (state == .absent) error.SkipZigTest else error.MysqlUnavailable;
+    defer restore("USE " ++ database);
+    try setup("DROP DATABASE IF EXISTS " ++ migrated_database ++ ";CREATE DATABASE " ++ migrated_database);
+    try load(migrated_database, store_testing.baseline_mysql_ddl, false);
+    try load(migrated_database, store_testing.baseline_rows, true);
+    inline for (schema.migrations) |step| {
+        if (step.from < 74) try load(migrated_database, schema.mysqlMigration(step.from), false);
+    }
+    try load(migrated_database, @embedFile("migration_codec_rows.sql"), false);
+    try load(migrated_database, "INSERT INTO store_meta(meta_key,meta_value) VALUES('format','74')", false);
+    try load(migrated_database, schema.mysqlMigrationFrom(74).?, false);
+    try expectSameResults(&.{
+        "SELECT operation_id,request_codec,hex(request_codec_options) FROM model_operation ORDER BY operation_id",
+        "SELECT operation_id,attempt_ordinal,resolution_code,retry_due_at_ms FROM model_operation ORDER BY operation_id",
+        "SELECT codec,hex(codec_options) FROM session WHERE session_ref='brhkcj'",
+        "SELECT IS_NULLABLE,COLUMN_DEFAULT FROM information_schema.columns WHERE table_schema='" ++ migrated_database ++ "' AND table_name='model_operation' AND column_name='request_codec'",
+    }, &.{
+        "SELECT 1,'openai-responses/1',NULL UNION ALL SELECT 2,'openai-responses/3','00' UNION ALL SELECT 3,'openai-responses/1',NULL UNION ALL SELECT 4,'openai-responses/3','00' UNION ALL SELECT 5,'openai-responses/1',NULL UNION ALL SELECT 6,'openai-responses/3','00' UNION ALL SELECT 7,'openai-responses/1',NULL UNION ALL SELECT 8,'openai-responses/2',NULL",
+        "SELECT 1,1,'answer',NULL UNION ALL SELECT 2,1,'tool_proposals',NULL UNION ALL SELECT 3,2,NULL,0 UNION ALL SELECT 4,2,NULL,100 UNION ALL SELECT 5,1,'interrupted',NULL UNION ALL SELECT 6,4,'provider_failure',NULL UNION ALL SELECT 7,1,'compacted',NULL UNION ALL SELECT 8,1,'answer',NULL",
+        "SELECT 'openai-responses/3','00'",
+        "SELECT 'NO',NULL",
+    });
+    try expectCatalog(migrated_database);
+    done.migrations += 1;
+    writeRecord();
+}

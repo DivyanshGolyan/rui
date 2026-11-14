@@ -263,8 +263,8 @@ test "an Activity page costs the same steps after 32 or 10,000 earlier rows" {
                 "SELECT value,next_position+4*(value-1) AS position,instructions_content_id AS content FROM sequence,session; " ++
                 "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at) " ++
                 "SELECT value,'{1s}',printf('history-%d',value),content,position,value,1 FROM history; " ++
-                "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,attempt_ordinal,resolution_code,resolved_at,tool_set_id,context_window) " ++
-                "SELECT value,value,'{1s}',1,value,position,0,1,'tool_proposals',1,(SELECT coalesce(loaded_tool_set_id,tool_set_id) FROM session WHERE session_ref='{1s}'),0 FROM history; " ++
+                "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,attempt_ordinal,resolution_code,resolved_at,tool_set_id,context_window,request_codec,request_codec_options) " ++
+                "SELECT value,value,'{1s}',1,value,position,0,1,'tool_proposals',1,(SELECT coalesce(loaded_tool_set_id,tool_set_id) FROM session WHERE session_ref='{1s}'),0,(SELECT codec FROM session WHERE session_ref='{1s}'),(SELECT codec_options FROM session WHERE session_ref='{1s}') FROM history; " ++
                 "INSERT INTO model_output_item(operation_id,item_ordinal,session_ref,session_position,item_kind,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,extras_content_id,part_count) " ++
                 "SELECT value,0,'{1s}',position+1,3,1,zeroblob(32),0,content,0 FROM history; " ++
                 "INSERT INTO model_tool_call(operation_id,session_ref,call_ordinal,item_ordinal,name_content_id,call_id_content_id,arguments_content_id,field_metadata,rejection_code,rejection_content_id,acceptance_position) " ++
@@ -365,8 +365,8 @@ test "a forward one-row page of a person's Messages costs the same steps past 10
         const insert = try std.testing.allocator.printSentinel(
             "CREATE TEMP TABLE history AS WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
                 "SELECT 1000+value AS value,next_position+3*(value-1) AS position,instructions_content_id AS content FROM sequence,session WHERE session_ref='{1s}'; " ++
-                "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,attempt_ordinal,resolution_code,resolved_at,tool_set_id,context_window) " ++
-                "SELECT value,value,'{1s}',1,value,position,0,1,'tool_proposals',1,(SELECT coalesce(loaded_tool_set_id,tool_set_id) FROM session WHERE session_ref='{1s}'),0 FROM history; " ++
+                "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,attempt_ordinal,resolution_code,resolved_at,tool_set_id,context_window,request_codec,request_codec_options) " ++
+                "SELECT value,value,'{1s}',1,value,position,0,1,'tool_proposals',1,(SELECT coalesce(loaded_tool_set_id,tool_set_id) FROM session WHERE session_ref='{1s}'),0,(SELECT codec FROM session WHERE session_ref='{1s}'),(SELECT codec_options FROM session WHERE session_ref='{1s}') FROM history; " ++
                 "INSERT INTO model_output_item(operation_id,item_ordinal,session_ref,session_position,item_kind,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,extras_content_id,part_count) " ++
                 "SELECT value,0,'{1s}',position,3,1,zeroblob(32),0,content,0 FROM history; " ++
                 "INSERT INTO model_tool_call(operation_id,session_ref,call_ordinal,item_ordinal,name_content_id,call_id_content_id,arguments_content_id,field_metadata,rejection_code,rejection_content_id,acceptance_position) " ++

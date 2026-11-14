@@ -207,8 +207,8 @@ test "K4 forwarded approval hydration steps exclude prior forward history" {
             // permission revision but assigning distinct operation identities
             // and child positions. Every forward has a genuine ask Action.
             try store_testing.sqlite_only.exec(&storage, sequence ++
-                "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,attempt_ordinal,resolution_code,resolved_at,output_item_count,tool_set_id,context_window) " ++
-                "SELECT value+1000000,turn_id,session_ref,settings_revision,input_cutoff,?3+3*(value-1),output_reservation,attempt_ordinal,resolution_code,resolved_at,1,tool_set_id,context_window FROM model_operation CROSS JOIN sequence WHERE operation_id=?2", .{ history, model.operation_id, child_start });
+                "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,attempt_ordinal,resolution_code,resolved_at,output_item_count,tool_set_id,context_window,request_codec,request_codec_options) " ++
+                "SELECT value+1000000,turn_id,session_ref,settings_revision,input_cutoff,?3+3*(value-1),output_reservation,attempt_ordinal,resolution_code,resolved_at,1,tool_set_id,context_window,request_codec,request_codec_options FROM model_operation CROSS JOIN sequence WHERE operation_id=?2", .{ history, model.operation_id, child_start });
             try store_testing.sqlite_only.exec(&storage, sequence ++
                 "INSERT INTO model_output_item(operation_id,item_ordinal,session_ref,session_position,item_kind,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,extras_content_id,part_count) " ++
                 "SELECT value+1000000,0,session_ref,?3+3*(value-1)+1,item_kind,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,extras_content_id,part_count FROM model_output_item CROSS JOIN sequence WHERE operation_id=?2 AND item_ordinal=0", .{ history, model.operation_id, child_start });

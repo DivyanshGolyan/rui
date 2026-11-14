@@ -894,10 +894,10 @@ test "complete historical tool-result traversal scales with groups and calls, in
 /// A bound fixture statement that adds `?1` failed Operations after
 /// Operation `?2`, in its Turn.
 const failed_operations_sql = "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position," ++
-    "attempt_ordinal,output_reservation,resolution_code,resolved_at,tool_set_id,context_window) " ++
+    "attempt_ordinal,output_reservation,resolution_code,resolved_at,tool_set_id,context_window,request_codec,request_codec_options) " ++
     "WITH RECURSIVE sequence(value) AS (SELECT 1 UNION ALL SELECT value+1 FROM sequence WHERE value<?1) " ++
     "SELECT 100+value,current.turn_id,current.session_ref,current.settings_revision,current.input_cutoff,100+value," ++
-    "1,0,'failed',1,current.tool_set_id,current.context_window FROM sequence CROSS JOIN model_operation current WHERE current.operation_id=?2";
+    "1,0,'failed',1,current.tool_set_id,current.context_window,current.request_codec,current.request_codec_options FROM sequence CROSS JOIN model_operation current WHERE current.operation_id=?2";
 
 test "historical accepted output selection work excludes failed Operation population, in rounds" {
     try store_testing.forEachEngine(struct {
@@ -959,6 +959,61 @@ test "historical context selection work excludes nonmatching Operation populatio
             const taken = counter.taken();
             try std.testing.expectEqual(with_base, (try view.coverage()).anchor != null);
             return taken;
+        }
+    }.run);
+}
+
+test "frozen request codec admission settings and seal binding stay Operation owned" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            inline for (std.enums.values(protocol.Codec)) |codec| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                const session = try configureTestSession(&storage, "codec-config");
+                try store_testing.exec(&storage, "UPDATE session SET codec=?1 WHERE session_ref=?2", .{ @tagName(codec), session.slice() });
+                var effort: @import("../../wire_request.zig").ConfigureCommand = .{};
+                try effort.key.set("codec-low");
+                effort.session = session;
+                effort.configuration.reasoning_effort.state = .value;
+                try effort.configuration.reasoning_effort.value.set("low");
+                try std.testing.expect(try storage.configure(&effort, .{}) == .accepted);
+                try submitTestMessage(&storage, &tmp, "codec-input-a", "codec-message-a", session.slice(), "first");
+                const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                try storage.settleModelAttemptFailure(first, .{ .uncorrelated = "provider_failure" }, .ordinary, .{});
+                try effort.key.set("codec-high");
+                try effort.configuration.reasoning_effort.value.set("high");
+                try std.testing.expect(try storage.configure(&effort, .{}) == .accepted);
+                try submitTestMessage(&storage, &tmp, "codec-input-b", "codec-message-b", session.slice(), "second");
+                const second = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                try std.testing.expectEqual(@as(u64, @intFromBool(codec == .@"openai-responses/2")), try store_testing.queryU64(&storage, "SELECT effort_update FROM model_operation WHERE operation_id=?1", .{second.operation_id}));
+                try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_operation WHERE session_ref=?1 AND request_codec=?2 AND request_codec_options IS NULL", .{ session.slice(), @tagName(codec) }));
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT codec=?1 AND codec_options IS NULL FROM session WHERE session_ref=?2", .{ @tagName(codec), session.slice() }));
+                var seal = TestingAttempt.seal;
+                seal.admission_position = try store_testing.queryU64(&storage, "SELECT admission_position FROM model_operation WHERE operation_id=?1", .{first.operation_id});
+                try storage.setPrefixSealForTesting(second, &seal);
+                try std.testing.expect(try storage.prefixSealForTesting(second) != null);
+                const different: protocol.Codec = if (codec == .@"openai-responses/3") .@"openai-responses/2" else .@"openai-responses/3";
+                try store_testing.exec(&storage, "UPDATE model_operation SET request_codec=?1 WHERE operation_id=?2", .{ @tagName(different), first.operation_id });
+                try std.testing.expect(try storage.prefixSealForTesting(second) == null);
+                try store_testing.exec(&storage, "UPDATE model_operation SET request_codec=?1,request_codec_options=X'00ff' WHERE operation_id=?2", .{ @tagName(codec), first.operation_id });
+                try std.testing.expect(try storage.prefixSealForTesting(second) == null);
+                try store_testing.exec(&storage, "UPDATE model_operation SET request_codec_options=X'00ff' WHERE operation_id=?1", .{second.operation_id});
+                try std.testing.expect(try storage.prefixSealForTesting(second) != null);
+                try store_testing.exec(&storage, "UPDATE model_operation SET request_codec_options=X'00fe' WHERE operation_id=?1", .{second.operation_id});
+                try std.testing.expect(try storage.prefixSealForTesting(second) == null);
+                try store_testing.exec(&storage, "UPDATE model_operation SET request_codec_options=NULL WHERE operation_id=?1", .{second.operation_id});
+                try store_testing.exec(&storage, "UPDATE session SET codec='unknown-codec/1',codec_options=X'00' WHERE session_ref=?1", .{session.slice()});
+                var view: HistoricalView = undefined;
+                storage.openHistoricalView(second, &view);
+                var settings: HistoricalSettings = undefined;
+                try view.settings(&settings);
+                try std.testing.expectEqual(codec, settings.codec);
+                try std.testing.expect(settings.codec_options == null);
+                view.close();
+            }
         }
     }.run);
 }
