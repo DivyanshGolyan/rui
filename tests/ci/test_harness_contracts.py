@@ -826,18 +826,115 @@ class ProcessCensusTest(unittest.TestCase):
             copy.chmod(0o755)
             self.assertEqual(copy.read_bytes(), original.read_bytes())
             self.assertFalse(copy.samefile(original), "the owned image must have a distinct inode")
-            children = []
+            children, actors = [], []
+            census_result = None
+            real_run = self.semantics.subprocess.run
+
+            def observe_census(*args, **kwargs):
+                nonlocal census_result
+                census_result = real_run(*args, **kwargs)
+                return census_result
+
+            def retain_probe():
+                import hashlib
+                import sysconfig
+
+                def observe(action):
+                    try:
+                        return action()
+                    except Exception as error:
+                        return {"unavailable": type(error).__name__, "detail": str(error)}
+
+                def bounded(value, limit=8192):
+                    encoded = json.dumps(value, ensure_ascii=True)
+                    return value if len(encoded) <= limit else {
+                        "omitted": "whole field exceeds serialized ASCII byte cap",
+                        "serialized_bytes": len(encoded), "limit": limit}
+
+                def image(path):
+                    def snapshot():
+                        status = Path(path).stat()
+                        return {key: getattr(status, "st_" + key) for key in
+                                ("dev", "ino", "size", "mode", "mtime_ns", "ctime_ns")}
+
+                    before = observe(snapshot)
+
+                    def digest():
+                        limit = 64 * 1024 * 1024
+                        if "unavailable" in before:
+                            return {"unavailable": "initial stat failed"}
+                        if before["size"] > limit:
+                            return {"omitted": "whole SHA-256 exceeds image byte cap", "limit": limit}
+                        hashed, count = hashlib.sha256(), 0
+                        with Path(path).open("rb") as stream:
+                            while chunk := stream.read(min(1024 * 1024, limit + 1 - count)):
+                                count += len(chunk)
+                                if count > limit:
+                                    return {"omitted": "whole SHA-256 exceeds image byte cap", "limit": limit}
+                                hashed.update(chunk)
+                        return {"sha256": hashed.hexdigest(), "bytes_read": count}
+
+                    hashed = observe(digest)
+                    after = observe(snapshot)
+                    return {"path": str(path), "stat_before": before, "content": hashed,
+                            "stat_after": after, "stat_changed": (before != after if
+                                "unavailable" not in before and "unavailable" not in after else "unavailable")}
+
+                samples = []
+                for process, actor in zip(children, actors):
+                    sample = {**actor, "readiness_hex": actor["readiness"].hex()}
+                    del sample["readiness"]
+                    sample["diagnostic_poll_before"] = observe(process.poll)
+                    if sample["diagnostic_poll_before"] is None:
+                        path = observe(lambda: self.semantics.process_executable(process.pid))
+                        sample["kernel_image"] = (path if isinstance(path, dict) else observe(lambda: image(path)))
+                        sample["diagnostic_poll_after"] = observe(process.poll)
+                        sample["exit_race"] = ("unavailable" if isinstance(sample["diagnostic_poll_after"], dict)
+                                               else sample["diagnostic_poll_after"] is not None)
+                    else:
+                        sample["kernel_image"] = {"unavailable": "direct handle not observed live"}
+                    samples.append({key: bounded(value) for key, value in sample.items()})
+                census = ({"unavailable": "original subprocess.run did not return"} if census_result is None else {
+                    "args": bounded(census_result.args), "returncode": census_result.returncode,
+                    "stdout_text": bounded(census_result.stdout), "stderr_text": bounded(census_result.stderr)})
+                python = {"executable": sys.executable, "resolved_executable": str(original),
+                          "base_executable": getattr(sys, "_base_executable", None),
+                          "prefix": sys.prefix, "base_prefix": sys.base_prefix,
+                          "exec_prefix": sys.exec_prefix, "base_exec_prefix": sys.base_exec_prefix,
+                          "version": sys.version, "platform": sys.platform,
+                          "framework": observe(lambda: {key: sysconfig.get_config_var(key) for key in
+                              ("PYTHONFRAMEWORK", "PYTHONFRAMEWORKPREFIX", "PYTHONFRAMEWORKINSTALLDIR")}),
+                          "launcher_environment": {key: os.environ.get(key) for key in
+                              ("PYTHONHOME", "PYTHONPATH", "PYTHONEXECUTABLE", "__PYVENV_LAUNCHER__", "VIRTUAL_ENV")}}
+                record = {"schema": "process-census-failure-v1", "actors": samples,
+                          "observation_time": "after original failure, before cleanup; not historical census identity",
+                          "census": census, "python": bounded(python),
+                          "original": bounded(observe(lambda: image(original))),
+                          "copy": bounded(observe(lambda: image(copy)))}
+                encoded = json.dumps(bounded(record, 65535), ensure_ascii=True) + "\n"
+                (Path(directory) / "probe.log").write_text(encoded, encoding="ascii")
+                HOST.retain_failure_state("process-census", directory)
+
             try:
-                for executable, name in ((copy, "renamed"), (original, str(copy))):
-                    process = subprocess.Popen([name, "-S", "-B", "-c", program], executable=executable,
-                                               env={"PYTHONHOME": sys.base_prefix}, stdin=subprocess.PIPE,
+                for role, executable, name in (("owned", copy, "renamed"), ("named", original, str(copy))):
+                    argv = [name, "-S", "-B", "-c", program]
+                    child_env = {"PYTHONHOME": sys.base_prefix}
+                    process = subprocess.Popen(argv, executable=executable,
+                                               env=child_env, stdin=subprocess.PIPE,
                                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                     children.append(process)
-                    os.set_blocking(process.stdout.fileno(), False)
                     received = bytearray()
+                    actor = {"role": role, "pid": process.pid, "executable": str(executable),
+                             "argv": argv, "env": child_env, "readiness": received,
+                             "readiness_polls": [], "pre_census_poll": "not observed",
+                             "post_census_poll": "not observed"}
+                    actors.append(actor)
+                    os.set_blocking(process.stdout.fileno(), False)
 
                     def ready():
-                        self.assertIsNone(process.poll(), "actor exited before readiness")
+                        polled = process.poll()
+                        actor["readiness_polls"].append(polled)
+                        self.assertIsNone(polled, "actor exited before readiness")
                         try:
                             chunk = os.read(process.stdout.fileno(), len(marker) - len(received))
                         except BlockingIOError:
@@ -849,15 +946,19 @@ class ProcessCensusTest(unittest.TestCase):
 
                     HOST.wait_for(ready, f"readiness from {name}")
                 owned, named = children
-                for process in children:
-                    self.assertIsNone(process.poll(), "actor exited before census")
-                found = self.semantics.processes_executing(copy)
-                for process in children:
-                    self.assertIsNone(process.poll(), "actor exited during census")
+                for process, actor in zip(children, actors):
+                    actor["pre_census_poll"] = process.poll()
+                    self.assertIsNone(actor["pre_census_poll"], "actor exited before census")
+                with patch.object(self.semantics.subprocess, "run", observe_census):
+                    found = self.semantics.processes_executing(copy)
+                for process, actor in zip(children, actors):
+                    actor["post_census_poll"] = process.poll()
+                    self.assertIsNone(actor["post_census_poll"], "actor exited during census")
                 self.assertIn(owned.pid, found)
                 self.assertNotIn(named.pid, found)
             finally:
                 HOST.dispose_all(
+                    *((retain_probe,) if sys.exception() is not None else ()),
                     *(lambda process=process: HOST.close_stdin(process) for process in reversed(children)),
                     *(lambda process=process: HOST.stop_process(process) for process in reversed(children)))
 
