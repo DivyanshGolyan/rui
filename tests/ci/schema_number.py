@@ -13,6 +13,7 @@ from pathlib import Path
 import subprocess
 import sys
 
+import git_command
 from release_numbers import SCHEMA, schema_version
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -37,7 +38,7 @@ def advice(branch, base, main):
 
 
 def git(*args):
-    return subprocess.run(["git", *args], cwd=ROOT, check=True, capture_output=True, text=True).stdout
+    return git_command.git(*args, cwd=ROOT, strip=False)
 
 
 def main():

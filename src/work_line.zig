@@ -207,9 +207,7 @@ var test_words: [max_words_bytes]u8 = undefined;
 const test_now_s = 1_792_937_000;
 
 fn bounded(comptime capacity: usize, text: []const u8) @import("bounded.zig").Bounded(capacity) {
-    var value: @import("bounded.zig").Bounded(capacity) = .{};
-    value.set(text) catch unreachable;
-    return value;
+    return @import("bounded.zig").Bounded(capacity).from(text) catch unreachable;
 }
 
 fn conversation(state: WorkState, now_ms: u64) ![]const u8 {

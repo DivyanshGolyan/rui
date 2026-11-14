@@ -168,8 +168,8 @@ export async function readContent(link: Link, session: string, entry: { position
 	return (await readContentBytes(link, session, entry)).toString("utf8");
 }
 
-/** Waits `ms`, or less when `signal` aborts. */
-function pause(ms: number, signal: AbortSignal | undefined): Promise<void> {
+/** Waits `ms`, or less when `signal` aborts; with no `ms`, waits only for the abort. */
+function pause(ms: number | undefined, signal: AbortSignal | undefined): Promise<void> {
 	return new Promise((resolve) => {
 		if (signal?.aborted) return resolve();
 		const done = () => {
@@ -177,7 +177,7 @@ function pause(ms: number, signal: AbortSignal | undefined): Promise<void> {
 			signal?.removeEventListener("abort", done);
 			resolve();
 		};
-		const timer = setTimeout(done, ms);
+		const timer = ms === undefined ? undefined : setTimeout(done, ms);
 		signal?.addEventListener("abort", done, { once: true });
 	});
 }
@@ -246,7 +246,8 @@ export async function* listActivity(link: Link, session: string, options: ListAc
 			}
 			if (receivedItems) wait = FIRST_POLL_MS;
 			else if (idle) {
-				await (watcher ? watcher.wait(revision, signal) : untilAbort(signal));
+				// A bare internal Link has no local writes to observe; cancellation still ends its idle wait.
+				await (watcher ? watcher.wait(revision, signal) : pause(undefined, signal));
 				wait = FIRST_POLL_MS;
 			} else {
 				await pause(wait, signal);
@@ -260,14 +261,6 @@ export async function* listActivity(link: Link, session: string, options: ListAc
 
 function dormant(kind: Schemas["WorkStateJson"]["kind"]): boolean {
 	return kind === "idle" || kind === "finished" || kind === "failed" || kind === "stopped";
-}
-
-/** A bare internal Link has no local writes to observe; cancellation still ends its idle wait. */
-function untilAbort(signal: AbortSignal | undefined): Promise<void> {
-	return new Promise((resolve) => {
-		if (signal?.aborted) resolve();
-		else signal?.addEventListener("abort", () => resolve(), { once: true });
-	});
 }
 
 export interface SearchActivityOptions {

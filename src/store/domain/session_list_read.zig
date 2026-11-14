@@ -3,6 +3,7 @@
 //! read steps, then the page's tail. The Host writes the reply.
 
 const std = @import("std");
+const utf8_validation = @import("../../utf8_validation.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
 const change_ring = @import("../../change_ring.zig");
 const model_capability = @import("../../model_capability.zig");
@@ -375,9 +376,7 @@ fn RowsRead(comptime Visitor: type) type {
     };
 }
 
-fn ErrorOf(comptime function: anytype) type {
-    return @typeInfo(@typeInfo(@TypeOf(function)).@"fn".return_type.?).error_union.error_set;
-}
+const ErrorOf = @import("../../error_set.zig").Of;
 
 /// The plain values of the shown row `index`, checked in main's order.
 /// They borrow `row`, `sorted` and `last_text`.
@@ -422,13 +421,7 @@ fn lastLine(row: anytype, text: *Bounded(session_list.max_last_line_bytes)) ?ses
     if (row.last_answer) |*prefix| {
         // The bounded byte prefix can end inside a UTF-8 code point. Drop
         // only that incomplete suffix before choosing a non-blank line.
-        var bytes = prefix.slice();
-        if (bytes.len != 0) {
-            var start = bytes.len - 1;
-            while (start > 0 and bytes[start] & 0xc0 == 0x80) start -= 1;
-            const width = std.unicode.utf8ByteSequenceLength(bytes[start]) catch 1;
-            if (start + width > bytes.len) bytes = bytes[0..start];
-        }
+        const bytes = utf8_validation.completePrefix(prefix.slice());
         var lines = std.mem.splitAny(u8, bytes, "\r\n");
         while (lines.next()) |line| {
             const trimmed = session_line.firstLine(line);

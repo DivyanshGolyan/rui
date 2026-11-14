@@ -715,6 +715,26 @@ test "Sign-in paste stays masked and its newline cannot submit or choose" {
     try std.testing.expectEqual(core.Stage.saving, page.state.stage);
 }
 
+/// The sign-in worker tests' activation: OpenAI, the recommended model and
+/// the Store at HOME.
+fn testingActivation(init: std.process.Init) !Activation {
+    var answer: Activation = .{ .binding = .{}, .store = .{} };
+    try answer.binding.provider.set("openai");
+    try answer.binding.model.set(@import("product_defaults.zig").recommended_model);
+    try answer.store.set(init.environ_map.get("HOME").?);
+    return answer;
+}
+
+fn testingCompleted(page: *Self) bool {
+    return page.task.completed();
+}
+
+fn testingCodeShown(page: *Self) bool {
+    page.task.mutex.lockUncancelable(page.init.?.io);
+    defer page.task.mutex.unlock(page.init.?.io);
+    return page.code.len != 0;
+}
+
 test "Sign-in worker reports installation default activation and cancellation outcomes" {
     const poll = @import("test_poll");
     const Fixture = struct {
@@ -723,24 +743,12 @@ test "Sign-in worker reports installation default activation and cancellation ou
         launch: ?host_launch.Result = null,
         fn activate(init: std.process.Init, _: selection.Intent) !Activation {
             if (init.environ_map.get("FAIL_HOST") != null) return error.HostReadinessUnconfirmed;
-            var answer: Activation = .{ .binding = .{}, .store = .{} };
-            try answer.binding.provider.set("openai");
-            try answer.binding.model.set(@import("product_defaults.zig").recommended_model);
-            try answer.store.set(init.environ_map.get("HOME").?);
-            return answer;
+            return testingActivation(init);
         }
         fn complete(raw: *anyopaque, _: *vxfw.EventContext, answer: Activation) !void {
             const self: *@This() = @ptrCast(@alignCast(raw));
             self.done = true;
             self.default_failed = answer.default_failed;
-        }
-        fn completed(page: *Self) bool {
-            return page.task.completed();
-        }
-        fn codeReady(page: *Self) bool {
-            page.task.mutex.lockUncancelable(page.init.?.io);
-            defer page.task.mutex.unlock(page.init.?.io);
-            return page.code.len != 0;
         }
     };
     const Case = enum { success, key_failure, default_failure, host_failure, both_failure, cancel };
@@ -778,10 +786,10 @@ test "Sign-in worker reports installation default activation and cancellation ou
         var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
         page.begin(&ctx, if (case == .cancel) .codex else .key);
         if (case == .cancel) {
-            try poll.waitUntil(init.io, poll.after(init.io, .fromSeconds(5)), &page, Fixture.codeReady);
+            try poll.waitUntil(init.io, poll.after(init.io, .fromSeconds(5)), &page, testingCodeShown);
             try page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.escape } });
         }
-        try poll.waitUntil(init.io, poll.after(init.io, .fromSeconds(5)), &page, Fixture.completed);
+        try poll.waitUntil(init.io, poll.after(init.io, .fromSeconds(5)), &page, testingCompleted);
         try page.widget().handleEvent(&ctx, .tick);
         try std.testing.expect(page.task.thread == null);
         try std.testing.expectEqual(@as(usize, 0), page.key.len);
@@ -836,19 +844,7 @@ test "Sign-in departure settles cancellation and every published default and act
     const Fixture = struct {
         fn activate(init: std.process.Init, _: selection.Intent) !Activation {
             if (init.environ_map.get("FAIL_HOST") != null) return error.HostReadinessUnconfirmed;
-            var answer: Activation = .{ .binding = .{}, .store = .{} };
-            try answer.binding.provider.set("openai");
-            try answer.binding.model.set(@import("product_defaults.zig").recommended_model);
-            try answer.store.set(init.environ_map.get("HOME").?);
-            return answer;
-        }
-        fn completed(page: *Self) bool {
-            return page.task.completed();
-        }
-        fn codeReady(page: *Self) bool {
-            page.task.mutex.lockUncancelable(page.init.?.io);
-            defer page.task.mutex.unlock(page.init.?.io);
-            return page.code.len != 0;
+            return testingActivation(init);
         }
     };
     for ([_]bool{ false, true }) |cancel_before_publication| {
@@ -884,9 +880,9 @@ test "Sign-in departure settles cancellation and every published default and act
                 var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
                 page.begin(&ctx, if (cancel_before_publication) .codex else .key);
                 if (cancel_before_publication) {
-                    try poll.waitUntil(init.io, poll.after(init.io, .fromSeconds(5)), &page, Fixture.codeReady);
+                    try poll.waitUntil(init.io, poll.after(init.io, .fromSeconds(5)), &page, testingCodeShown);
                 } else {
-                    try poll.waitUntil(init.io, poll.after(init.io, .fromSeconds(5)), &page, Fixture.completed);
+                    try poll.waitUntil(init.io, poll.after(init.io, .fromSeconds(5)), &page, testingCompleted);
                     try std.testing.expectEqual(core.Stage.saving, page.state.stage);
                     try std.testing.expect(page.outcome != null); // No advance consumed it.
                 }
@@ -932,10 +928,7 @@ test "Sign-in launch reporting settles structured outcomes on screen and departu
         default_failed: bool = false,
         fn activate(init: std.process.Init, _: selection.Intent) !Activation {
             const case = std.meta.stringToEnum(Case, init.environ_map.get("CASE").?).?;
-            var answer: Activation = .{ .binding = .{}, .store = .{} };
-            try answer.binding.provider.set("openai");
-            try answer.binding.model.set(@import("product_defaults.zig").recommended_model);
-            try answer.store.set(init.environ_map.get("HOME").?);
+            var answer = try testingActivation(init);
             answer.launch = switch (case) {
                 .refusal => .failed(.store_format, error.HostStartupFailed),
                 .timeout => .failed(.readiness_timeout, error.HostReadinessUnconfirmed),
@@ -954,9 +947,6 @@ test "Sign-in launch reporting settles structured outcomes on screen and departu
             const self: *@This() = @ptrCast(@alignCast(raw));
             self.warned = answer.launch.?.warning == .invalid_openai_base_url;
             self.default_failed = answer.default_failed;
-        }
-        fn completed(page: *Self) bool {
-            return page.task.completed();
         }
     };
     for (std.enums.values(Case)) |case| for ([_]bool{ false, true }) |leave| for ([_]bool{ false, true }) |default_failed| {
@@ -987,7 +977,7 @@ test "Sign-in launch reporting settles structured outcomes on screen and departu
         var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
         page.begin(&ctx, .existing);
         const poll = @import("test_poll");
-        try poll.waitUntil(init.io, poll.after(init.io, .fromSeconds(5)), &page, Fixture.completed);
+        try poll.waitUntil(init.io, poll.after(init.io, .fromSeconds(5)), &page, testingCompleted);
         var report: std.Io.Writer.Allocating = .init(arena.allocator());
         if (leave) {
             const ended = page.stopTo(&report.writer);
@@ -1204,16 +1194,6 @@ const BrowserRig = struct {
         return browserField(page, "stray");
     }
 
-    fn completed(page: *Self) bool {
-        return page.task.completed();
-    }
-
-    fn codeShown(page: *Self) bool {
-        page.task.mutex.lockUncancelable(page.init.?.io);
-        defer page.task.mutex.unlock(page.init.?.io);
-        return page.code.len != 0;
-    }
-
     /// The redirect port the shown link names.
     fn port(self: *BrowserRig) ![]const u8 {
         const link = self.page.browser.?.value.link.slice();
@@ -1246,10 +1226,10 @@ test "Sign-in browser attempt shows its link, a stray paste and a long pasted an
     try address.writer.print("\x1b[200~http://127.0.0.1:{s}/auth/callback?code={s}&state=AAAA&client_id=oaiapp_x\r\x1b[201~", .{ port, &@as([1800]u8, @splat('c')) });
     try rig.send(address.written());
     // The paste alone confirms nothing; Enter does.
-    try std.testing.expect(!BrowserRig.completed(page));
+    try std.testing.expect(!testingCompleted(page));
     try std.testing.expect(!BrowserRig.browserField(page, "checking"));
     try rig.send("\r");
-    try rig.wait(BrowserRig.completed);
+    try rig.wait(testingCompleted);
     try page.widget().handleEvent(&rig.ctx, .tick);
     try std.testing.expectEqual(core.Stage.failed, page.state.stage);
     try std.testing.expectEqual(core.Failure.answer, page.state.failure);
@@ -1259,9 +1239,9 @@ test "Sign-in browser attempt shows its link, a stray paste and a long pasted an
     try rig.send("\t");
     try std.testing.expectEqual(core.Stage.codex_waiting, page.state.stage);
     try std.testing.expectEqual(core.Attempt.codex, page.attempt);
-    try rig.wait(BrowserRig.codeShown);
+    try rig.wait(testingCodeShown);
     try rig.send("\x1b");
-    try rig.wait(BrowserRig.completed);
+    try rig.wait(testingCompleted);
     try page.widget().handleEvent(&rig.ctx, .tick);
     try std.testing.expectEqual(core.Stage.choice, page.state.stage);
     try std.testing.expectEqual(core.Provider.chatgpt, page.state.selected);
@@ -1290,12 +1270,12 @@ test "Sign-in Tab while the browser waits cancels it, wipes the entry, and begin
     // Keys wait for the switch; a second Tab changes nothing.
     try rig.send("\t");
     try std.testing.expectEqual(core.Stage.switching, page.state.stage);
-    try rig.wait(BrowserRig.completed);
+    try rig.wait(testingCompleted);
     try page.widget().handleEvent(&rig.ctx, .tick);
     try std.testing.expectEqual(core.Stage.codex_waiting, page.state.stage);
     try std.testing.expectEqual(core.Attempt.codex, page.attempt);
     try std.testing.expect(page.browser == null and page.task.thread != null);
-    try rig.wait(BrowserRig.codeShown);
+    try rig.wait(testingCodeShown);
     try rig.send("\x1b");
 }
 
@@ -1309,7 +1289,7 @@ test "Sign-in Escape while the browser waits cancels it and returns to the choic
     try rig.send("partial\x1b");
     try std.testing.expectEqual(.cancelled, page.gate.load(.acquire));
     try std.testing.expectEqual(core.Stage.choice, page.state.stage);
-    try rig.wait(BrowserRig.completed);
+    try rig.wait(testingCompleted);
     try page.widget().handleEvent(&rig.ctx, .tick);
     try std.testing.expectEqual(core.Stage.choice, page.state.stage);
     try std.testing.expect(page.task.thread == null and page.browser == null);

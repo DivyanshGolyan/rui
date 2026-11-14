@@ -5,6 +5,7 @@ const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 const Self = @This();
 const Hover = @import("Hover.zig");
+const cell_line = @import("cell_line.zig");
 
 /// Aligned field values start here; callers may fit bounded values to it.
 pub const value_column: u16 = 19;
@@ -428,23 +429,10 @@ pub fn displayText(arena: std.mem.Allocator, text: []const u8, unicode: bool) st
 
 /// Single-line, terminal-cell clipping, including labels and quiet tails.
 fn paint(ctx: vxfw.DrawContext, surface: vxfw.Surface, text: []const u8, start: u16, row: u16, style: vaxis.Style) u16 {
-    return paintTo(ctx, surface, text, start, row, style, surface.size.width);
+    return cell_line.paint(ctx, surface, text, start, row, style, surface.size.width);
 }
 
-fn paintTo(ctx: vxfw.DrawContext, surface: vxfw.Surface, text: []const u8, start: u16, row: u16, style: vaxis.Style, limit: u16) u16 {
-    var col = @min(start, limit);
-    var iter = ctx.graphemeIterator(text);
-    while (iter.next()) |part| {
-        const grapheme = part.bytes(text);
-        if (std.mem.indexOfAny(u8, grapheme, "\r\n") != null) break;
-        const width = ctx.stringWidth(grapheme);
-        if (width > limit - col) break;
-        if (width == 0) continue;
-        surface.writeCell(col, row, .{ .char = .{ .grapheme = grapheme, .width = @intCast(width) }, .style = style });
-        col += @intCast(width);
-    }
-    return col;
-}
+const paintTo = cell_line.paint;
 
 const Fixture = struct {
     activated: ?usize = null,

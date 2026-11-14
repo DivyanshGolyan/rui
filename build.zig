@@ -328,7 +328,7 @@ pub fn build(b: *std.Build) void {
 
     const upgrade_release = product.addRuiWithIdentity(b, target, .ReleaseSafe, "rui-upgrade-release-fixture", pinned_transport, .{
         .version = b.fmt("0.{d}.10000", .{@import("src/store/schema.zig").schema_version}),
-        .revision = product.buildRevision(b),
+        .revision = product.buildIdentity(b).revision,
     });
     const upgrade_fixture_step = b.step("upgrade-fixture", "Build the same-source native actor with synthetic release identity for upgrade evidence");
     upgrade_fixture_step.dependOn(&b.addInstallArtifact(upgrade_release, .{}).step);

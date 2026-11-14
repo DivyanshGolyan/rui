@@ -38,6 +38,13 @@ pub const Version = enum {
     pub fn declaresTools(self: Version) bool {
         return self != .one;
     }
+
+    /// Whether the effort in force travels in the history, where an
+    /// Operation boundary changes it and a provider can refuse the change.
+    /// The other versions send each Operation's effort at the top.
+    pub fn carriesEffort(self: Version) bool {
+        return self == .two;
+    }
 };
 
 /// How version three asks for compaction, at the end of a compaction
@@ -190,12 +197,12 @@ pub const Encoder = struct {
             // unchanged effort writes nothing. Versions one and three wrote
             // this Operation's effort at the top. Effort is null for a whole
             // Session or for none of it, so a boundary never returns to it.
-            .operation => |effort| if (self.carry.version == .two and !std.meta.eql(effort, self.carry.effort)) {
+            .operation => |effort| if (self.carry.version.carriesEffort() and !std.meta.eql(effort, self.carry.effort)) {
                 self.changeEffort(effort orelse return error.Declined, out);
             },
             // The original current boundary is an admission fact. Replay and
             // refused retries above may restore an already admitted value.
-            .effort_update => |effort| if (self.carry.version == .two) self.changeEffort(effort, out),
+            .effort_update => |effort| if (self.carry.version.carriesEffort()) self.changeEffort(effort, out),
             .declare_open => {
                 if (!self.carry.version.declaresTools()) return error.Declined;
                 self.separateInput(out);

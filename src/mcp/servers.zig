@@ -1,6 +1,7 @@
 //! MCP settings kept at one Host-owned address until shutdown.
 const std = @import("std");
 const hs = @import("../host_settings.zig");
+const secret_value = @import("../secret_value.zig");
 const Connection = @import("../server_mcp_settings.zig").Server;
 const http = @import("../http1/request.zig");
 
@@ -45,10 +46,8 @@ pub const Servers = struct {
     }
 
     fn wipeToken(allocator: std.mem.Allocator, token: []u8) void {
-        std.crypto.secureZero(u8, token);
-        // Keep the wipe intact; Allocator.free would write debug poison over
-        // these bytes before handing them back to the underlying allocator.
-        if (token.len != 0) allocator.rawFree(token, .of(u8), @returnAddress());
+        // An empty token was never allocated.
+        if (token.len != 0) secret_value.wipeAndFree(allocator, token, .of(u8), @returnAddress());
     }
 
     fn freeServer(allocator: std.mem.Allocator, entry: Server) void {

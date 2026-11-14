@@ -21,6 +21,7 @@ import os
 import re
 import subprocess
 
+import git_command
 from report_issue import LABEL, gh, run_jobs
 
 WORKFLOW = "main-build.yml"
@@ -38,7 +39,7 @@ class Commit:
 
 
 def git(*args, cwd=None):
-    return subprocess.run(["git", *args], check=True, capture_output=True, text=True, cwd=cwd).stdout
+    return git_command.git(*args, cwd=cwd, strip=False)
 
 
 def crossing(green, head, cwd=None):
