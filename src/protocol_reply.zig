@@ -18,6 +18,7 @@ comptime {
 }
 pub const JsonString = wire_field.JsonString;
 pub const JsonEnum = wire_field.JsonEnum;
+const JsonArray = wire_field.JsonArray;
 pub const OmittableJson = wire_field.OmittableJson;
 pub const decimalId = wire_field.decimalId;
 
@@ -62,21 +63,7 @@ pub const ConversationPage = struct {
             admitted_at: ?JsonString(20) = null,
             sender: ?JsonNamedPeer = null, // User items only.
         };
-        const Rows = struct {
-            values: [protocol.public_conversation_page_items]Row = undefined,
-            count: usize = 0,
-            pub fn jsonParse(a: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
-                if (try source.next() != .array_begin) return error.UnexpectedToken;
-                var rows: @This() = .{};
-                while (try source.peekNextTokenType() != .array_end) {
-                    if (rows.count == rows.values.len) return error.LengthMismatch;
-                    rows.values[rows.count] = try std.json.innerParse(Row, a, source, options);
-                    rows.count += 1;
-                }
-                _ = try source.next();
-                return rows;
-            }
-        };
+        const Rows = JsonArray(Row, protocol.public_conversation_page_items);
         const Wire = struct {
             version: JsonString(8),
             type: JsonString(32),
@@ -168,37 +155,9 @@ pub const ActivityPage = struct {
         const ModelCall = struct { model: JsonString(protocol.max_model_bytes), served_model: ?JsonString(protocol.max_model_bytes), input_tokens: ?JsonString(20), output_tokens: ?JsonString(20), cached_tokens: ?JsonString(20), latency_ms: ?JsonString(20), first_event_ms: ?JsonString(20), status: JsonString(protocol.max_code_bytes), attempts: JsonString(20) };
         const Stop = struct { key: JsonString(protocol.max_key_bytes), turn: ?JsonString(20), cutoff: JsonString(20), completion: JsonEnum(@FieldType(Fact.Stop, "completion")) };
         const Item = struct { position: JsonString(20), ordinal: JsonString(20), at: JsonString(20), value: union(enum) { admission: Message, user: Message, assistant: struct { content: Ref, final: bool }, call: Call, tool_result: struct { content: Ref, presentation: JsonToolPresentation }, hosted_call: struct { presentation: JsonToolPresentation }, turn_ended: TurnEnded, stop: Stop, sent: Sent, send_failed: SendFailed, received: Message, approval_requested: ApprovalRequested, session_changed: SessionChanged, compacted: Compacted, model_call: ModelCall } };
-        const Items = struct {
-            values: [16]Item = undefined,
-            count: usize = 0,
-            pub fn jsonParse(a: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
-                if (try source.next() != .array_begin) return error.UnexpectedToken;
-                var result: @This() = .{};
-                while (try source.peekNextTokenType() != .array_end) {
-                    if (result.count == result.values.len) return error.LengthMismatch;
-                    result.values[result.count] = try std.json.innerParse(Item, a, source, options);
-                    result.count += 1;
-                }
-                _ = try source.next();
-                return result;
-            }
-        };
+        const Items = JsonArray(Item, 16);
         const CallEntry = struct { operation: JsonString(20), ordinal: JsonString(20), presentation: JsonToolPresentation };
-        const Calls = struct {
-            values: [3]CallEntry = undefined,
-            count: usize = 0,
-            pub fn jsonParse(a: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
-                if (try source.next() != .array_begin) return error.UnexpectedToken;
-                var result: @This() = .{};
-                while (try source.peekNextTokenType() != .array_end) {
-                    if (result.count == result.values.len) return error.LengthMismatch;
-                    result.values[result.count] = try std.json.innerParse(CallEntry, a, source, options);
-                    result.count += 1;
-                }
-                _ = try source.next();
-                return result;
-            }
-        };
+        const Calls = JsonArray(CallEntry, 3);
         const Work = struct { read_version: JsonString(protocol.SinceToken.max_bytes), state: JsonWorkState, turn: ?JsonString(20), operation: ?JsonString(20), first_action: ?JsonString(20), last_line: ?struct { position: JsonString(20), text: ?JsonString(session_list.max_last_line_bytes) } = null, revision: JsonString(20), workspace: JsonString(protocol.max_workspace_bytes) };
         const Queued = struct { count: JsonString(20), oldest_position: JsonString(20), newest_admission: JsonString(20), newest_position: JsonString(20) };
         const Wire = struct { version: JsonString(8), type: JsonString(32), delta: JsonEnum(enum { full }), since: ?JsonString(SessionToken.max_bytes), end: JsonString(20), direction: JsonEnum(@FieldType(ActivityCursor, "direction")), items: Items, more: bool, call_activity: struct { total: JsonString(20), entries: Calls }, queued: Queued, work: Work };
@@ -1529,22 +1488,7 @@ pub const SessionListPage = struct {
     pub fn read(io: std.Io, file: std.Io.File, bytes: u64, workspace: ?[]const u8, cursor: SessionListCursor) !SessionListPage {
         if (bytes == 0 or bytes > protocol.session_list_reply.max_bytes) return error.InvalidSessionPage;
         cursor.validate() catch return error.InvalidSessionPage;
-        const Rows = struct {
-            rows: [protocol.session_list_page_size]Row = undefined,
-            count: usize = 0,
-
-            pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
-                if (try source.next() != .array_begin) return error.UnexpectedToken;
-                var result: @This() = .{};
-                while (try source.peekNextTokenType() != .array_end) {
-                    if (result.count == result.rows.len) return error.LengthMismatch;
-                    result.rows[result.count] = (try std.json.innerParse(JsonRow, allocator, source, options)).value;
-                    result.count += 1;
-                }
-                _ = try source.next();
-                return result;
-            }
-        };
+        const Rows = JsonArray(JsonRow, protocol.session_list_page_size);
         const Wire = struct {
             version: JsonString(8),
             type: JsonString(32),
@@ -1572,11 +1516,11 @@ pub const SessionListPage = struct {
         if (body.remaining != .nothing) return error.InvalidSessionPage;
         if (!wire.version.eql(protocol.wire_version) or !wire.type.eql("session_list")) return error.InvalidSessionPage;
         var result: SessionListPage = .{
-            .rows = wire.sessions.rows,
             .count = wire.sessions.count,
             .delta = wire.delta.value,
             .since = protocol.SinceToken.parse(wire.since.slice()) catch return error.InvalidSessionPage,
         };
+        for (result.rows[0..result.count], wire.sessions.slice()) |*row, json| row.* = json.value;
         for (result.rows[0..result.count], 0..) |*row, index| {
             if (workspace) |scope| if (!row.workspace.eql(scope)) return error.InvalidSessionPage;
             for (result.rows[0..index]) |*previous| if (previous.reference.eql(row.reference.slice())) return error.InvalidSessionPage;
@@ -1788,22 +1732,8 @@ pub const CommandObservation = struct {
         if (reply.status != 200) return error.ObservationFailed;
         if (reply.body.len > protocol.command_observation_reply.max_bytes) return error.ResponseTooLarge;
         const Ref = struct { type: JsonEnum(enum { text }), bytes: JsonString(20), sha256: JsonString(64) };
-        const Outcomes = struct {
-            const Row = struct { action: JsonString(20), operation: JsonString(20), call: JsonString(20), description: ?JsonString(protocol.max_tool_description_bytes), at: JsonString(20) };
-            rows: [protocol.message_recovery_limit]Row = undefined,
-            count: usize = 0,
-            pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
-                if (try source.next() != .array_begin) return error.UnexpectedToken;
-                var result: @This() = .{};
-                while (try source.peekNextTokenType() != .array_end) {
-                    if (result.count == result.rows.len) return error.LengthMismatch;
-                    result.rows[result.count] = try std.json.innerParse(Row, allocator, source, options);
-                    result.count += 1;
-                }
-                _ = try source.next();
-                return result;
-            }
-        };
+        const Outcome = struct { action: JsonString(20), operation: JsonString(20), call: JsonString(20), description: ?JsonString(protocol.max_tool_description_bytes), at: JsonString(20) };
+        const Outcomes = JsonArray(Outcome, protocol.message_recovery_limit);
         const Facts = struct {
             status: JsonEnum(@FieldType(CommandObservation, "status")),
             kind: OmittableJson(JsonEnum(protocol.CommandKind)) = .{},
@@ -1859,7 +1789,7 @@ pub const CommandObservation = struct {
         if (facts.work.value) |value| observed.work = .{ .state = value.state.value, .first_action = if (value.first_action) |action| try decimalId(action, false) else null };
         if (facts.recovery.value) |value| {
             var recovery: Recovery = .{ .more = value.more };
-            for (value.unknown_outcomes.rows[0..value.unknown_outcomes.count]) |row| {
+            for (value.unknown_outcomes.slice()) |row| {
                 if (row.description) |description| if (!protocol.ToolPresentation.validDescription(description.slice())) return error.InvalidObservation;
                 recovery.unknown_outcomes[recovery.count] = .{
                     .action_id = try decimalId(row.action, false),

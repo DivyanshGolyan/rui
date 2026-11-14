@@ -19,11 +19,8 @@ from pathlib import Path
 import subprocess
 import sys
 
+from git_command import git
 import steps
-
-
-def git(*args):
-    return subprocess.run(["git", *args], check=True, capture_output=True, text=True).stdout.strip()
 
 
 def fetch(base, head):

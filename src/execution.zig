@@ -399,24 +399,31 @@ pub const CustodyPool = struct {
     }
 
     pub fn detach(self: *CustodyPool, token: CustodyToken) !void {
-        const record = try self.current(token);
-        if (record.state.cmpxchgStrong(.attached, .detached, .acq_rel, .acquire) != null) {
-            return error.InvalidCustodyTransition;
-        }
+        return self.transition(token, .attached, .detached);
     }
 
     pub fn releaseUnused(self: *CustodyPool, token: CustodyToken) !void {
+        return self.transition(token, .reserved, .free);
+    }
+
+    pub fn cleanupComplete(self: *CustodyPool, token: CustodyToken) !void {
+        return self.transition(token, .detached, .free);
+    }
+
+    /// Moves the token's current record from `from` to `to` in one atomic
+    /// step, or refuses when it is in any other state.
+    fn transition(self: *CustodyPool, token: CustodyToken, from: State, to: State) !void {
         const record = try self.current(token);
-        if (record.state.cmpxchgStrong(.reserved, .free, .acq_rel, .acquire) != null) {
+        if (record.state.cmpxchgStrong(from, to, .acq_rel, .acquire) != null) {
             return error.InvalidCustodyTransition;
         }
     }
 
-    pub fn cleanupComplete(self: *CustodyPool, token: CustodyToken) !void {
+    /// The token's current record, when it is in `state`.
+    fn expectState(self: *CustodyPool, token: CustodyToken, state: State) !*CustodyRecord {
         const record = try self.current(token);
-        if (record.state.cmpxchgStrong(.detached, .free, .acq_rel, .acquire) != null) {
-            return error.InvalidCustodyTransition;
-        }
+        if (record.state.load(.acquire) != state) return error.InvalidCustodyTransition;
+        return record;
     }
 
     /// Custody-local structural checks. Each inspects the current
@@ -426,21 +433,17 @@ pub const CustodyPool = struct {
     /// retain historical binding fields; only the checked state,
     /// generation, kind, and identity must agree.
     pub fn checkReserved(self: *CustodyPool, token: CustodyToken) !void {
-        const record = try self.current(token);
-        if (record.state.load(.acquire) != .reserved) return error.InvalidCustodyTransition;
+        _ = try self.expectState(token, .reserved);
     }
 
     pub fn checkAttached(self: *CustodyPool, token: CustodyToken, expected: CustodyBinding) !void {
-        const record = try self.current(token);
-        if (record.state.load(.acquire) != .attached) return error.InvalidCustodyTransition;
-        try checkBinding(record, expected);
+        try checkBinding(try self.expectState(token, .attached), expected);
     }
 
     /// A null `expected` checks only that the token's record is detached,
     /// for retained owners that keep no Attempt identity.
     pub fn checkDetached(self: *CustodyPool, token: CustodyToken, expected: ?CustodyBinding) !void {
-        const record = try self.current(token);
-        if (record.state.load(.acquire) != .detached) return error.InvalidCustodyTransition;
+        const record = try self.expectState(token, .detached);
         if (expected) |value| try checkBinding(record, value);
     }
 
@@ -450,8 +453,7 @@ pub const CustodyPool = struct {
     }
 
     pub fn checkFree(self: *CustodyPool, token: CustodyToken) !void {
-        const record = try self.current(token);
-        if (record.state.load(.acquire) != .free) return error.InvalidCustodyTransition;
+        _ = try self.expectState(token, .free);
     }
 
     pub fn canClaimTerminalDelivery(self: *CustodyPool, token: CustodyToken) bool {

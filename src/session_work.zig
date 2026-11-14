@@ -294,9 +294,7 @@ pub fn quotaResetsAt(code: []const u8, diagnostic: ?[]const u8) ?u64 {
 }
 
 fn bounded(comptime capacity: usize, text: []const u8) error{CorruptStore}!Bounded(capacity) {
-    var value: Bounded(capacity) = .{};
-    value.set(text) catch return error.CorruptStore;
-    return value;
+    return Bounded(capacity).from(text) catch error.CorruptStore;
 }
 
 fn activeTurn(op: Inputs.Op, actions: Inputs.Actions) Inputs.Turn {

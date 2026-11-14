@@ -1,5 +1,6 @@
 //! The model-facing excerpt and full rendering of one borrowed MCP answer.
 const std = @import("std");
+const utf8_validation = @import("../utf8_validation.zig");
 const reply = @import("reply.zig");
 const document = @import("document.zig");
 
@@ -89,8 +90,7 @@ const Prefix = struct {
     fn finish(self: *Prefix) std.Io.Writer.Error!void {
         var take = self.tail_len;
         if (self.total > excerpt_bytes) {
-            take = 4;
-            while (take > 0 and self.tail[take] & 0xc0 == 0x80) take -= 1;
+            take = utf8_validation.scalarStart(&self.tail, 4);
         }
         try self.out.writeAll(self.tail[0..take]);
         self.shown += take;

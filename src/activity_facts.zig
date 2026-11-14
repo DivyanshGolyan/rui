@@ -70,9 +70,9 @@ pub const Item = struct {
         action: u64,
         operation: u64,
         call_ordinal: u64,
-        description: ?Bounded(tool_presentation.max_description_bytes) = null,
-        tool: ?Bounded(@import("tool_name.zig").max_bytes) = null,
-        server: ?Bounded(@import("tool_record.zig").max_server_bytes) = null,
+        description: ?activity_read.CallText.Description = null,
+        tool: ?activity_read.CallText.Tool = null,
+        server: ?activity_read.CallText.Server = null,
     };
     /// A setting a revision changed, or its later effort refusal. Ordinary
     /// rows share the revision's position; a refusal has its settlement

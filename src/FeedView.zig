@@ -412,23 +412,21 @@ fn drawHover(self: *Self, ctx: vxfw.DrawContext, surface: vxfw.Surface) !void {
             try targets.append(arena, rect);
             const open = self.colour and self.window.document.toolIsOpen(position.offset);
             if (!open and self.hover.contains(rect)) for (cells) |*cell| {
-                cell.style.bg = self.hover_style.bg;
-                cell.style.reverse = self.hover_style.reverse;
-                cell.style.ul_style = self.hover_style.ul_style;
+                cell.style = Hover.look(cell.style, self.hover_style);
             };
         }
         if (retry) |columns| {
             const rect: Hover.Rect = .{ .row = @intCast(row), .col = columns.start, .width = columns.end - columns.start };
             try targets.append(arena, rect);
             if (self.hover.contains(rect)) for (cells[columns.start..columns.end]) |*cell| {
-                cell.style.ul_style = .single;
+                cell.style = Hover.underlined(cell.style);
             };
         }
         if (handler.on_open != null) for (try selecting.peers(&self.window.document, cells, arena)) |span| {
             const rect: Hover.Rect = .{ .row = @intCast(row), .col = span.start, .width = span.end - span.start };
             try targets.append(arena, rect);
             if (self.hover.contains(rect)) for (cells[span.start..span.end]) |*cell| {
-                cell.style.ul_style = .single;
+                cell.style = Hover.underlined(cell.style);
             };
         };
     }

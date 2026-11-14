@@ -64,6 +64,49 @@ pub const ReadActivityContent = struct {
 };
 
 pub const ProposalFieldReference = struct { length: u64, digest: [32]u8 };
+/// The certificate admission saves for a call's fields: for each, in
+/// ProposalField order, its length (u64, little-endian) then its SHA-256.
+pub const FieldCertificate = struct {
+    const entry_bytes = 8 + 32;
+    pub const Bytes = [3 * entry_bytes]u8;
+
+    pub fn write(certificate: *Bytes, index: usize, field: ProposalFieldReference) void {
+        const entry = certificate[index * entry_bytes ..][0..entry_bytes];
+        std.mem.writeInt(u64, entry[0..8], field.length, .little);
+        entry[8..].* = field.digest;
+    }
+
+    pub fn read(certificate: *const Bytes, index: usize) ProposalFieldReference {
+        const entry = certificate[index * entry_bytes ..][0..entry_bytes];
+        return .{ .length = std.mem.readInt(u64, entry[0..8], .little), .digest = entry[8..].* };
+    }
+};
+
+test "a field certificate reads back what was written, in its saved layout" {
+    var certificate: FieldCertificate.Bytes = undefined;
+    for (0..3) |index| FieldCertificate.write(&certificate, index, .{ .length = 0x0102 + index, .digest = @splat(@intCast(index + 1)) });
+    for (0..3) |index| {
+        const field = FieldCertificate.read(&certificate, index);
+        try std.testing.expectEqual(@as(u64, 0x0102 + index), field.length);
+        try std.testing.expectEqual(@as([32]u8, @splat(@intCast(index + 1))), field.digest);
+        // Independent of the helpers: 8 little-endian length bytes, then the digest.
+        try std.testing.expectEqual(@as(u8, @intCast(0x02 + index)), certificate[index * 40]);
+        try std.testing.expectEqual(@as(u8, 0x01), certificate[index * 40 + 1]);
+        try std.testing.expectEqual(@as(u8, @intCast(index + 1)), certificate[index * 40 + 8]);
+    }
+}
+/// The text a call's proposal and its approval carry beside their fields,
+/// and the one place their bounds are named.
+pub const CallText = struct {
+    pub const max_description_bytes = @import("tool_presentation.zig").max_description_bytes;
+    pub const max_tool_bytes = @import("tool_name.zig").max_bytes;
+    /// tool_record.max_server_bytes names the same bound; importing it here
+    /// would cycle, so both take it from tool_name.
+    pub const max_server_bytes = @import("tool_name.zig").max_bytes;
+    pub const Description = Bounded(max_description_bytes);
+    pub const Tool = Bounded(max_tool_bytes);
+    pub const Server = Bounded(max_server_bytes);
+};
 pub const ProposalMetadata = struct {
     position: u64,
     operation: u64,
@@ -72,7 +115,7 @@ pub const ProposalMetadata = struct {
     action: ?u64,
     rejection: ?tool_proposal.Rejection,
     fields: [3]ProposalFieldReference, // ProposalField order.
-    description: ?@import("bounded.zig").Bounded(@import("tool_presentation.zig").max_description_bytes) = null,
-    tool: ?@import("bounded.zig").Bounded(@import("tool_name.zig").max_bytes) = null,
-    server: ?@import("bounded.zig").Bounded(@import("tool_name.zig").max_bytes) = null,
+    description: ?CallText.Description = null,
+    tool: ?CallText.Tool = null,
+    server: ?CallText.Server = null,
 };

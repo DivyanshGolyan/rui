@@ -124,13 +124,10 @@ const Excerpt = struct {
 
     fn read(self: *Excerpt, bytes: []const u8) void {
         const raw = bytes[0..@min(bytes.len, WebSearchCall.excerpt_bytes)];
-        const length = raw.len;
         // A cut scalar at the end is dropped; anything else invalid means
         // the source was not what it claimed, and shows nothing.
-        var valid = length;
-        while (valid > 0 and !std.unicode.utf8ValidateSlice(raw[0..valid])) valid -= 1;
-        if (length - valid > 3) return;
-        var scalars = std.unicode.Utf8View.initUnchecked(raw[0..valid]).iterator();
+        const valid = utf8_validation.wholePrefix(raw) orelse return;
+        var scalars = std.unicode.Utf8View.initUnchecked(valid).iterator();
         var space = false;
         while (scalars.nextCodepointSlice()) |encoded| {
             const scalar = std.unicode.utf8Decode(encoded) catch unreachable;
@@ -189,8 +186,7 @@ fn compose(out: *Description, comptime literals: []const []const u8, values: []c
 fn writeCut(writer: *std.Io.Writer, text: []const u8, width: usize) void {
     if (text.len <= width) return writer.writeAll(text) catch unreachable;
     const ellipsis = "…";
-    var end = width -| ellipsis.len;
-    while (end > 0 and (text[end] & 0xc0) == 0x80) end -= 1;
+    var end = utf8_validation.scalarStart(text, width -| ellipsis.len);
     // A cut after a word reads as the word's end, not a blank before "…".
     while (end > 0 and text[end - 1] == ' ') end -= 1;
     writer.writeAll(text[0..end]) catch unreachable;
@@ -446,7 +442,7 @@ pub fn rejectionResult(code: tool_proposal.Rejection, facts: *const CallFacts, n
                 prefix[prefix_length] = (try name.next()) orelse break;
                 prefix_length += 1;
             }
-            while (!std.unicode.utf8ValidateSlice(prefix[0..prefix_length])) prefix_length -= 1;
+            prefix_length = utf8_validation.validPrefix(prefix[0..prefix_length]).len;
             if (name_length <= prefix.len) return std.fmt.bufPrint(buffer, "Unknown tool: {s}.", .{prefix[0..prefix_length]});
             const digest_hex = std.fmt.bytesToHex(name_digest, .lower);
             return std.fmt.bufPrint(buffer, "Unknown tool: {s}… (name continues; Rui content digest {s}).", .{ prefix[0..prefix_length], &digest_hex });

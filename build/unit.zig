@@ -149,6 +149,7 @@ pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, pin
             .filters = test_filters,
             .test_runner = runner,
         });
+        parser_fuzz.root_module.addImport("url", product.addUrl(b));
         const run = ci.run(parser_fuzz);
         run.has_side_effects = true;
         step.dependOn(&run.step);
