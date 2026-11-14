@@ -266,7 +266,7 @@ test "Session pin alternate gestures never activate New Session or Settings" {
     _ = try new_session.widget().draw(draw_ctx);
     _ = try settings.widget().draw(draw_ctx);
     var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
-    defer events.cmds.deinit(std.testing.allocator);
+    defer events.cmds.deinit(events.alloc);
     for ([_]vaxis.Mouse{
         .{ .col = 3, .row = 0, .button = .right, .type = .press, .mods = .{} },
         .{ .col = 3, .row = 0, .button = .left, .type = .press, .mods = .{ .alt = true } },
@@ -277,5 +277,8 @@ test "Session pin alternate gestures never activate New Session or Settings" {
         try settings.widget().handleEvent(&events, .{ .mouse = second });
         try std.testing.expectEqual(null, clicks.got);
     }
-    try std.testing.expectEqual(@as(usize, 0), events.cmds.items.len);
+    for (events.cmds.items) |cmd| switch (cmd) {
+        .set_mouse_shape => {},
+        else => return error.TestUnexpectedCommand,
+    };
 }

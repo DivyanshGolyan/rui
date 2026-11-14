@@ -4069,7 +4069,7 @@ test "Session pin list ranks round trip as positive decimal strings" {
     const file = try tmp.dir.createFile(io, "pin-rank", .{ .read = true });
     defer file.close(io);
     var input: [2048]u8 = undefined;
-    const unpinned = try testingListPage(&input, &.{"k7m2qx"}, testing_list_facts, "null");
+    const unpinned = try testingListPage(&input, &.{"k7m2qx"}, testing_list_facts ++ "null}");
     const pinned = try std.mem.replaceOwned(u8, std.testing.allocator, unpinned, "\"pin_order\":null", "\"pin_order\":\"9223372036854775807\"");
     defer std.testing.allocator.free(pinned);
     try file.writePositionalAll(io, pinned, 0);

@@ -8181,3 +8181,113 @@ test "Session pin worker retains captured target and settles organization withou
     try std.testing.expectEqual(@as(usize, 0), Seen.now.creates);
     try std.testing.expectEqual(@as(usize, 0), Seen.now.archives);
 }
+
+test "Session pin drawn Root gestures preserve composer focus draft and caret across session and controls" {
+    const Find = struct {
+        fn origin(surface: vxfw.Surface, target: vxfw.Widget, at: vxfw.RelativePoint) ?vxfw.RelativePoint {
+            if (surface.widget.eql(target)) return at;
+            for (surface.children) |child| {
+                if (origin(child.surface, target, .{ .row = at.row + child.origin.row, .col = at.col + child.origin.col })) |found| return found;
+            }
+            return null;
+        }
+    };
+    for ([_]bool{ false, true }) |alt| {
+        const fixture = try EmptySessionOwner.create();
+        defer fixture.destroy();
+        const reference = try fixture.openNew();
+        try fixture.chooseModel();
+        const rig = fixture.rig;
+        const overview = rig.overview;
+        const frontend = fixture.frontend();
+        try std.testing.expect(try rig.press("Unsent café\x1b[D\x1b[D") == null);
+        const cursor = frontend.input.composition().cursor;
+        const composer = frontend.app_input.composer.widget();
+        try std.testing.expect(rig.last_focus.?.eql(composer));
+        const selection = overview.state.selected;
+        const conversations = Seen.now.conversations;
+        const creations = Seen.now.creates;
+        const Target = enum { settings, session };
+        for ([_]Target{ .settings, .session }) |target| {
+            var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer arena.deinit();
+            const frame = try overview.root.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 140, .height = 40 }, .cell_size = .{} });
+            var point = Find.origin(frame, switch (target) {
+                .settings => overview.app_settings_line.widget(),
+                .session => overview.app_sessions.widget(),
+            }, .{ .row = 0, .col = 0 }) orelse return error.TestExpectedDrawnTarget;
+            point.col += 4;
+            switch (target) {
+                .settings => point.row += 1,
+                .session => {
+                    point.row += for (overview.app_sessions.shown_at) |span| {
+                        if (span.target) |meaning| {
+                            if (meaning == .open and std.mem.eql(u8, &meaning.open, &reference)) break span.row;
+                        }
+                    } else return error.TestExpectedDrawnSession;
+                },
+            }
+            var ctx = rig.context();
+            defer ctx.cmds.deinit(ctx.alloc);
+            const pins = Seen.now.pins;
+            var mouse: vaxis.Mouse = .{ .col = @intCast(point.col), .row = @intCast(point.row), .button = if (alt) .left else .right, .type = .press, .mods = .{ .alt = alt } };
+            try app_events.mouse(&ctx, frame, mouse);
+            mouse.type = .release;
+            try app_events.mouse(&ctx, frame, mouse);
+            for (ctx.cmds.items) |cmd| switch (cmd) {
+                .set_mouse_shape => {},
+                else => return error.TestUnexpectedCommand,
+            };
+            try std.testing.expect(!ctx.quit);
+            try std.testing.expect(!overview.root.input.list_focused);
+            try std.testing.expect(!overview.root.input.layer.settingsOpen());
+            try std.testing.expect(overview.root.session.?.eql(frontend.widget()));
+            try std.testing.expectEqual(selection, overview.state.selected);
+            try std.testing.expectEqualStrings("Unsent café", frontend.input.composition().bytes);
+            try std.testing.expectEqual(cursor, frontend.input.composition().cursor);
+            try std.testing.expect(frontend.submission.intent == null);
+            try std.testing.expect(try rig.settle() == null);
+            try std.testing.expect(rig.last_focus.?.eql(composer));
+            try std.testing.expectEqual(conversations, Seen.now.conversations);
+            try std.testing.expectEqual(creations, Seen.now.creates);
+            try std.testing.expectEqual(pins + @as(usize, @intFromBool(target == .session)), Seen.now.pins);
+            if (target == .session) {
+                try std.testing.expectEqualStrings(&reference, &Seen.now.pin_session);
+                try std.testing.expect(Seen.now.pin_requested);
+            }
+            try std.testing.expectEqualStrings("Unsent café", frontend.input.composition().bytes);
+            try std.testing.expectEqual(cursor, frontend.input.composition().cursor);
+            try std.testing.expect(!overview.root.input.list_focused);
+            try std.testing.expectEqual(reference, overview.state.conversing.?);
+        }
+    }
+
+    for ([_]bool{ false, true }) |alt| {
+        const rig = try openListed();
+        defer rig.close();
+        const overview = rig.overview;
+        const selection = overview.state.selected;
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const frame = try overview.root.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 140, .height = 40 }, .cell_size = .{} });
+        const point = Find.origin(frame, overview.app_new_session.widget(), .{ .row = 0, .col = 0 }) orelse return error.TestExpectedDrawnNewSession;
+        var ctx = rig.context();
+        defer ctx.cmds.deinit(ctx.alloc);
+        var mouse: vaxis.Mouse = .{ .col = @intCast(point.col + 4), .row = @intCast(point.row), .button = if (alt) .left else .right, .type = .press, .mods = .{ .alt = alt } };
+        try app_events.mouse(&ctx, frame, mouse);
+        mouse.type = .release;
+        try app_events.mouse(&ctx, frame, mouse);
+        for (ctx.cmds.items) |cmd| switch (cmd) {
+            .set_mouse_shape => {},
+            else => return error.TestUnexpectedCommand,
+        };
+        try std.testing.expect(try rig.settle() == null);
+        try std.testing.expectEqual(selection, overview.state.selected);
+        try std.testing.expect(overview.root.session == null);
+        try std.testing.expect(!overview.root.input.layer.settingsOpen());
+        try std.testing.expectEqual(@as(usize, 0), Seen.now.pins);
+        try std.testing.expectEqual(@as(usize, 0), Seen.now.creates);
+        try std.testing.expectEqual(@as(usize, 0), Seen.now.conversations);
+        try std.testing.expect(!ctx.quit);
+    }
+}

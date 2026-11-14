@@ -461,10 +461,10 @@ test "Session pin gestures retain the drawn target and desired value without nor
     const first: Target = .{ .pin = .{ .reference = "k7m2qx".*, .pinned = true } };
     const second: Target = .{ .pin = .{ .reference = "rhvzwc".*, .pinned = false } };
     var rows = [_]Row{
-        .{ .segments = &.{.{ .text = "header" }}, .heading = true },
-        .{ .segments = &.{.{ .text = "Session" }}, .target = .{ .open = "k7m2qx".* }, .alternate_target = first },
-        .{ .segments = &.{.{ .text = "New Session" }}, .target = .new_session },
-        .{ .segments = &.{.{ .text = "Settings" }}, .target = .settings },
+        .{ .segments = &.{.{ .text = "header", .style = .{} }}, .heading = true },
+        .{ .segments = &.{.{ .text = "Session", .style = .{} }}, .target = .{ .open = "k7m2qx".* }, .alternate_target = first },
+        .{ .segments = &.{.{ .text = "New Session", .style = .{} }}, .target = .new_session },
+        .{ .segments = &.{.{ .text = "Settings", .style = .{} }}, .target = .settings },
     };
     const source: []const Row = &rows;
     var pressed: Pressed = .{};
@@ -475,7 +475,7 @@ test "Session pin gestures retain the drawn target and desired value without nor
     rows[1].target = .{ .open = "rhvzwc".* };
     rows[1].alternate_target = second;
     var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
-    defer events.cmds.deinit(std.testing.allocator);
+    defer events.cmds.deinit(events.alloc);
     for ([_]vaxis.Mouse{
         .{ .col = 3, .row = 1, .button = .right, .type = .press, .mods = .{} },
         .{ .col = 3, .row = 1, .button = .left, .type = .press, .mods = .{ .alt = true } },
@@ -496,5 +496,8 @@ test "Session pin gestures retain the drawn target and desired value without nor
     };
     try list.widget().handleEvent(&events, leftPress(3, 1));
     try std.testing.expectEqualDeep(Target{ .open = "k7m2qx".* }, pressed.targets[2]);
-    try std.testing.expectEqual(@as(usize, 0), events.cmds.items.len);
+    for (events.cmds.items) |cmd| switch (cmd) {
+        .set_mouse_shape => {},
+        else => return error.TestUnexpectedCommand,
+    };
 }

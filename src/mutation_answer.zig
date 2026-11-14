@@ -51,9 +51,9 @@ pub const Target = union(CommandKind) {
     message: struct { bytes: u64, digest: [32]u8, creates_session: bool = false },
     session_stop,
     session_archive: struct { archived: bool },
-    session_pin: struct { pinned: bool },
     model_interruption: struct { turn: u64, operation: u64 },
     permission_decision: struct { action: u64, decision: PermissionDecision },
+    session_pin: struct { pinned: bool },
 };
 
 pub const Answer = struct {
@@ -512,7 +512,7 @@ test "a reply carrying another mutation's fields, or the wrong version, confirms
 }
 
 test "Session pin replies bind desired value and reject unrelated mutation authority" {
-    const version = @import("wire_version.zig").wire_version;
+    const version = current;
     const accepted = "{\"version\":\"" ++ version ++ "\",\"type\":\"session_pin_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":true,\"session\":\"k7m2qx\",\"pinned\":false}}";
     const target: Target = .{ .session_pin = .{ .pinned = false } };
     const answer = try decodeForTest(200, accepted, "k7m2qx", target).answer;
