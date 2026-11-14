@@ -817,7 +817,7 @@ class ProcessCensusTest(unittest.TestCase):
         self.semantics = os_semantics
 
     def test_ownership_is_the_executed_image_whatever_the_process_is_called(self):
-        original = Path(sys.executable).resolve(strict=True)
+        original = self.semantics.process_executable(os.getpid()).resolve(strict=True)
         marker = b"ready\n"
         program = "import os; os.write(1, b'ready\\n'); os.read(0, 1)"
         with tempfile.TemporaryDirectory() as directory:
@@ -949,7 +949,8 @@ class ProcessCensusTest(unittest.TestCase):
                 census = ({"unavailable": "original subprocess.run did not return"} if census_result is None else {
                     "args": bounded(census_result.args), "returncode": census_result.returncode,
                     "stdout_text": bounded(census_result.stdout), "stderr_text": bounded(census_result.stderr)})
-                python = {"executable": sys.executable, "resolved_executable": str(original),
+                python = {"executable": sys.executable,
+                          "resolved_executable": observe(lambda: str(Path(sys.executable).resolve(strict=True))),
                           "base_executable": getattr(sys, "_base_executable", None),
                           "prefix": sys.prefix, "base_prefix": sys.base_prefix,
                           "exec_prefix": sys.exec_prefix, "base_exec_prefix": sys.base_exec_prefix,
