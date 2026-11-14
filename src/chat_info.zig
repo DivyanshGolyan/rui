@@ -44,7 +44,7 @@ pub const Backend = struct {
     context: *anyopaque,
     read: *const fn (*anyopaque, *status.Session) anyerror!void,
     configure: *const fn (*anyopaque, Edit) anyerror!void,
-    archive: *const fn (*anyopaque) anyerror!view.ArchiveAdmission,
+    archive: *const fn (*anyopaque) anyerror!view.IntentAdmission,
     copy_last_answer: *const fn (*anyopaque, *vxfw.EventContext) anyerror!void,
     state: *const fn (*anyopaque) SaveState,
     models: *const fn (*anyopaque) ModelChoice.Snapshot,
@@ -659,7 +659,7 @@ const Fixture = struct {
         };
         self.state_value = .pending;
     }
-    fn archive(raw: *anyopaque) !view.ArchiveAdmission {
+    fn archive(raw: *anyopaque) !view.IntentAdmission {
         const self: *Fixture = @ptrCast(@alignCast(raw));
         if (self.fail_submit) return .refused;
         self.archives += 1;

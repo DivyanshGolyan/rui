@@ -75,6 +75,7 @@ pub const CommandObservation = struct {
         message: ?MessageObservation,
         session_stop: ?SessionStopObservation,
         session_archive: ?mutation_answer.SessionArchiveObservation,
+        session_pin: ?mutation_answer.SessionPinObservation,
         model_interruption: ModelInterruptionTarget,
         permission_decision: struct { action_id: u64, decision: mutation_answer.PermissionDecision },
     } = .{ .configure = .{} },
@@ -141,6 +142,13 @@ pub const SessionArchiveReply = union(enum) {
         interrupted_operation_id: ?u64 = null,
     },
     rejected: struct { replayed: bool, code: mutation_answer.SessionArchiveRejection },
+    conflict,
+    infrastructure_failure,
+};
+
+pub const SessionPinReply = union(enum) {
+    accepted: struct { replayed: bool, pinned: bool },
+    rejected: struct { replayed: bool, code: mutation_answer.SessionPinRejection },
     conflict,
     infrastructure_failure,
 };

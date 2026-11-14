@@ -485,6 +485,12 @@ pub const SessionStopInput = struct {
     session: []const u8,
 };
 
+pub const SessionPinInput = struct {
+    store: []const u8,
+    session: []const u8,
+    pinned: bool,
+};
+
 pub const SessionArchiveInput = struct {
     store: []const u8,
     session: []const u8,
@@ -1234,6 +1240,15 @@ pub fn captureSessionArchive(io: std.Io, input: SessionArchiveInput, target: Cap
     return runCapture(io, paths.store.slice(), &location, input.session, .session_archive, null, Capture.writeRequest, .{ protocol.session_archive_request.all, .{ paths.store.slice(), location.key, input.session, input.archived } });
 }
 
+pub fn captureSessionPin(io: std.Io, input: SessionPinInput, target: CaptureTarget) !CapturedRecord {
+    const paths = try platform.resolveClientPaths(io, input.store);
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var key_buffer: [36]u8 = undefined;
+    const location = try target.resolve(io, &path_buffer, &key_buffer);
+    try protocol_reply.validateIdentityInputs(location.key, input.session);
+    return runCapture(io, paths.store.slice(), &location, input.session, .session_pin, null, Capture.writeRequest, .{ protocol.session_pin_request.all, .{ paths.store.slice(), location.key, input.session, input.pinned } });
+}
+
 pub fn captureModelInterruption(io: std.Io, input: ModelInterruptionInput, target: CaptureTarget) !CapturedRecord {
     const paths = try platform.resolveClientPaths(io, input.store);
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -1681,6 +1696,7 @@ fn readCapturedBinding(io: std.Io, file: *std.Io.File) !struct { saved: protocol
         configuration: ?CapturedConfiguration = null,
         require_model: ?bool = null,
         archived: bool = true,
+        pinned: ?bool = null,
         reload_skills: ?bool = null,
         sender: ?protocol_reply.JsonAddress = null,
         sender_handle: ?protocol_reply.JsonString(32) = null,
@@ -1720,6 +1736,7 @@ fn readCapturedBinding(io: std.Io, file: *std.Io.File) !struct { saved: protocol
         },
         .session_stop => .session_stop,
         .session_archive => .{ .session_archive = .{ .archived = fields.archived } },
+        .session_pin => .{ .session_pin = .{ .pinned = fields.pinned orelse return error.InvalidRequestRecord } },
         .model_interruption => .{ .model_interruption = .{
             .turn = protocol_reply.decimalId(fields.target.?.turn, true) catch return error.InvalidRequestRecord,
             .operation = protocol_reply.decimalId(fields.target.?.operation, true) catch return error.InvalidRequestRecord,
@@ -1734,6 +1751,7 @@ fn readCapturedBinding(io: std.Io, file: *std.Io.File) !struct { saved: protocol
     if ((kind != .configure and kind != .message and fields.configuration != null) or
         (fields.require_model != null and !(kind == .configure or kind == .message and fields.configuration != null)) or
         (kind != .configure and fields.reload_skills != null) or
+        (kind != .session_pin and fields.pinned != null) or
         (kind != .message and (fields.text != null or fields.sender != null or fields.sender_handle != null)) or (kind != .model_interruption and fields.target != null) or
         (kind != .permission_decision and (fields.action != null or fields.decision != null))) return error.InvalidRequestRecord;
     return .{ .saved = saved, .target = target };
@@ -3234,6 +3252,7 @@ test "client capture rejects noncanonical Session references before publication"
                 .message => captureMessage(io, .{ .store = root, .session = session, .text_path = "", .text = "input\x00雪" }, target).get(),
                 .session_stop => captureSessionStop(io, .{ .store = root, .session = session }, target),
                 .session_archive => captureSessionArchive(io, .{ .store = root, .session = session }, target),
+                .session_pin => captureSessionPin(io, .{ .store = root, .session = session, .pinned = true }, target),
                 .model_interruption => captureModelInterruption(io, .{ .store = root, .session = session, .turn_id = 1, .operation_id = 1 }, target),
                 .permission_decision => capturePermissionDecision(io, .{ .store = root, .session = session, .action_id = 1 }, target),
             };
@@ -3273,6 +3292,7 @@ test "client recovery rejects noncanonical Session references without retransmis
                     .message => ",\"text\":{\"state\":\"value\",\"value\":\"input\\u0000雪\"}}",
                     .session_stop => "}",
                     .session_archive => ",\"archived\":true}",
+                    .session_pin => ",\"pinned\":true}",
                     .model_interruption => ",\"turn\":\"1\",\"operation\":\"1\"}}",
                     .permission_decision => ",\"action\":\"1\",\"decision\":\"deny\"}",
                 });
@@ -4245,6 +4265,7 @@ test "every request renders its exact worst-case bound from the shape it writes"
     const cases = .{
         .{ protocol.session_stop_request, .{ &store, &key, &session }, protocol.max_session_stop_request_bytes },
         .{ protocol.session_archive_request.all, .{ &store, &key, &session, false }, protocol.max_session_archive_request_bytes },
+        .{ protocol.session_pin_request.all, .{ &store, &key, &session, false }, protocol.max_session_pin_request_bytes },
         .{ protocol.model_interruption_request, .{ &store, &key, &session, id, id }, protocol.max_model_interruption_request_bytes },
         .{ protocol.permission_decision_request, .{ &store, &key, &session, id, protocol.PermissionDecision.allow_once }, protocol.max_permission_decision_request_bytes },
         .{ protocol.observe_command_request.all, .{ &store, &key, @as(?[]const u8, &observation_token) }, protocol.max_observe_command_request_bytes },
@@ -5488,4 +5509,35 @@ test "socket upgrade discovery distinguishes stale free Store from refused held 
     try std.testing.expect(std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds - stale_at < refused_connect_retry_ns);
     // Discovery is read-only: a later lease holder, not discovery, reclaims it.
     _ = try std.Io.Dir.cwd().statFile(io, socket.slice(), .{ .follow_symlinks = false });
+}
+
+test "pin captures preserve pin and unpin intent through generated and explicit recovery" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.setPermissions(io, .fromMode(0o700));
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    for ([_]bool{ true, false }) |pinned| {
+        var captured = try captureSessionPin(io, .{ .store = root, .session = "k7m2qx", .pinned = pinned }, .{ .generated = root });
+        const identity = captured.saved;
+        var original: [2048]u8 = undefined;
+        const count = try captured.file.readPositionalAll(io, &original, 0);
+        try std.testing.expectEqual(protocol.CommandKind.session_pin, identity.kind);
+        try std.testing.expectEqual(pinned, captured.target.session_pin.pinned);
+        captured.close(io);
+        var recovered = try openCaptured(io, .{ .generated = .{ .directory = root, .handle = identity.key.slice() } });
+        try std.testing.expectEqual(pinned, recovered.target.session_pin.pinned);
+        var replayed: [2048]u8 = undefined;
+        const replayed_count = try recovered.file.readPositionalAll(io, &replayed, 0);
+        try std.testing.expectEqualSlices(u8, original[0..count], replayed[0..replayed_count]);
+        recovered.close(io);
+        var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const path = try requestPath(root, identity.key.slice(), &path_buffer);
+        var explicit = try openCaptured(io, .{ .explicit = .{ .store = root, .record = path, .kind = .session_pin } });
+        try std.testing.expectEqual(pinned, explicit.target.session_pin.pinned);
+        explicit.close(io);
+        try std.testing.expectEqual(protocol.CommandKind.session_pin, (try inspectCaptured(io, root, identity.key.slice())).kind);
+        try std.testing.expectError(error.RequestBindingMismatch, openCaptured(io, .{ .explicit = .{ .store = root, .record = path, .kind = .session_stop } }));
+    }
 }

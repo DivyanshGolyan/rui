@@ -142,7 +142,7 @@ A rejected creation shows its failure; an unconfirmed creation retains its origi
 A stop works like `rui session stop`: if its reply is lost, the overview says it is not sure the Session stopped, and prints the `rui request recover` command when you leave.
 To stop every Session that Ctrl-X could stop at once, run `rui session stop --all`.
 A stop still waiting to be sent when you leave is reported as not sent.
-The overview holds at most eight creation and stop requests awaiting answers, and refuses more until one is answered.
+The overview holds at most eight creation, stop, archive, restore, pin, and unpin requests awaiting answers, and refuses more until one is answered.
 Sessions the stopped Session messaged keep running.
 
 The overview paints its own colours, in khadi: an indigo ground with cotton text on a dark terminal, a cotton ground with indigo ink on a light one.
@@ -165,6 +165,33 @@ rui session list --all             # Sessions from every project
 ```
 
 Existing Sessions keep their saved settings, including approval mode and model.
+
+### Pin Sessions
+
+Enter `/pin` in a chat to keep it below **+ New Session**, above unpinned Sessions.
+Enter `/unpin` to return it to the ordinary order.
+The newest pin comes first.
+Repeating `/pin` preserves its place; unpinning and pinning again moves it above earlier pins.
+Work and new Messages do not reshuffle pinned Sessions.
+
+Right-click or Option/Alt-click a Session row to toggle its pin without opening it.
+The gesture keeps your current chat, focus, and draft intact.
+It opens no menu and adds no marker.
+New Session and Settings do not respond to that gesture.
+
+Pins are shared by clients using the same Store and survive Host restart.
+A pinned empty Session stays in the list after you leave it.
+Archiving clears its pin immediately, even while the stop is pending.
+Restoring or sending a new Message does not pin it again.
+Ordinary stop leaves pins unchanged, and parent and child pins are independent.
+You cannot pin an archiving or archived Session.
+
+From a script, use these commands.
+
+```sh
+rui session pin --session SESSION_REF
+rui session unpin --session SESSION_REF
+```
 
 ### Archive Sessions
 

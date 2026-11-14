@@ -18,6 +18,8 @@ pub const max_session_bytes = 128;
 pub const PermissionDecision = enum { allow_once, deny };
 pub const SkillsReloadStatus = enum { reloaded, unchanged };
 pub const SessionStopCompletion = enum { pending, completed };
+pub const SessionPinObservation = struct { pinned: bool };
+pub const SessionPinRejection = enum { invalid_session_reference, unknown_session, session_archiving, session_archived };
 pub const SessionArchiveObservation = struct { archived: bool, completion: SessionStopCompletion };
 
 // Why the Host refuses each mutation. The Store saves the code and the Host
@@ -49,6 +51,7 @@ pub const Target = union(CommandKind) {
     message: struct { bytes: u64, digest: [32]u8, creates_session: bool = false },
     session_stop,
     session_archive: struct { archived: bool },
+    session_pin: struct { pinned: bool },
     model_interruption: struct { turn: u64, operation: u64 },
     permission_decision: struct { action: u64, decision: PermissionDecision },
 };
@@ -62,6 +65,7 @@ pub const Answer = struct {
             message: struct { admission: u64 },
             session_stop: struct { turn: ?u64, admission_cutoff: u64, completion: SessionStopCompletion },
             session_archive: SessionArchiveObservation,
+            session_pin: SessionPinObservation,
             model_interruption,
             permission_decision,
         },
@@ -96,6 +100,7 @@ pub const Wire = struct {
         action: OmittableJson(JsonString(20)) = .{},
         decision: OmittableJson(JsonString(16)) = .{},
         archived: OmittableJson(bool) = .{},
+        pinned: OmittableJson(bool) = .{},
         selection: OmittableJson(struct { turn: ?JsonString(20), admission_cutoff: JsonString(20) }) = .{},
         target: OmittableJson(struct { session: JsonString(max_session_bytes), turn: JsonString(20), operation: JsonString(20) }) = .{},
     }) = .{},
@@ -125,6 +130,7 @@ pub fn decide(current_version: []const u8, wire: Wire, status: u16, session: []c
         .message => "message_reply",
         .session_stop => "session_stop_reply",
         .session_archive => "session_archive_reply",
+        .session_pin => "session_pin_reply",
         .model_interruption => "model_interruption_reply",
         .permission_decision => "permission_decision_reply",
     };
@@ -211,6 +217,13 @@ pub fn decide(current_version: []const u8, wire: Wire, status: u16, session: []c
                 } };
             } else if (!completion.status.eql("unavailable")) return error.InvalidResponse;
         },
+        .session_pin => |expected| {
+            if (accepted) {
+                const pinned = answer.pinned.value orelse return error.InvalidResponse;
+                if (pinned != expected.pinned) return error.RequestBindingMismatch;
+                value = .{ .session_pin = .{ .pinned = pinned } };
+            }
+        },
         .model_interruption => if (accepted) {
             value = .model_interruption;
         },
@@ -223,6 +236,7 @@ pub fn decide(current_version: []const u8, wire: Wire, status: u16, session: []c
         (target != .configure and target != .message and wire.execution.value != null) or
         (target != .session_stop and answer.selection.value != null) or
         (target != .session_archive and answer.archived.value != null) or
+        (target != .session_pin and answer.pinned.value != null) or
         (target != .session_stop and target != .session_archive and wire.completion.value != null)) return error.InvalidResponse;
     return .{
         .input = confirmed_input,
@@ -495,4 +509,17 @@ test "a reply carrying another mutation's fields, or the wrong version, confirms
     const tail = ",\"session\":\"k7m2qx\",\"code\":\"idempotency_key_conflict\"},\"completion\":{\"status\":\"unavailable\"}}";
     try std.testing.expect((try decodeForTest(409, conflict ++ "false" ++ tail, "k7m2qx", .session_stop).answer).result == .conflict);
     try std.testing.expectError(error.InvalidResponse, decodeForTest(409, conflict ++ "true" ++ tail, "k7m2qx", .session_stop).answer);
+}
+
+test "Session pin replies bind desired value and reject unrelated mutation authority" {
+    const version = @import("wire_version.zig").wire_version;
+    const accepted = "{\"version\":\"" ++ version ++ "\",\"type\":\"session_pin_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":true,\"session\":\"k7m2qx\",\"pinned\":false}}";
+    const target: Target = .{ .session_pin = .{ .pinned = false } };
+    const answer = try decodeForTest(200, accepted, "k7m2qx", target).answer;
+    try std.testing.expect(answer.replayed);
+    try std.testing.expect(!answer.result.accepted.session_pin.pinned);
+    try std.testing.expectError(error.RequestBindingMismatch, decodeForTest(200, accepted, "k7m2qx", .{ .session_pin = .{ .pinned = true } }).answer);
+    try std.testing.expectError(error.RequestBindingMismatch, decodeForTest(200, accepted, "rhvzwc", target).answer);
+    const stopped = "{\"version\":\"" ++ version ++ "\",\"type\":\"session_pin_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"pinned\":false},\"completion\":{\"status\":\"completed\"}}";
+    try std.testing.expectError(error.InvalidResponse, decodeForTest(200, stopped, "k7m2qx", target).answer);
 }
