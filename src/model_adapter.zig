@@ -745,6 +745,7 @@ pub const Preparation = struct {
         fixed: struct { bytes: []const u8, cursor: request_encoding.FixedCursor = .{} },
         json: JsonEmission,
         raw: request_encoding.RawCursor,
+        base64: request_encoding.Base64Cursor,
         history_memo,
 
         /// Whether the emission reads the preparation's content reader.
@@ -752,7 +753,7 @@ pub const Preparation = struct {
             return switch (self.*) {
                 .none, .fixed, .history_memo => false,
                 .json => |*json| json.bytes == null,
-                .raw => true,
+                .raw, .base64 => true,
             };
         }
     };
@@ -1272,6 +1273,16 @@ pub const Preparation = struct {
                     self.state.emission = .{ .fixed = .{ .bytes = bytes } };
                     return true;
                 },
+                .base64 => |handle| {
+                    std.debug.assert(self.item.has(handle));
+                    const content = switch (self.handles[handle]) {
+                        .content => |content| content,
+                        else => unreachable,
+                    };
+                    try self.view.openContent(content, &self.reader);
+                    self.state.emission = .{ .base64 = .{ .offset = 0, .carry_length = 0, .encoded_length = 0, .encoded_offset = 0 } };
+                    return true;
+                },
                 .content => |content| {
                     std.debug.assert(self.item.has(content.handle));
                     self.state.content = .{ .handle = content.handle, .escape = content.escape };
@@ -1337,6 +1348,11 @@ pub const Preparation = struct {
                 if (json.bytes == null) self.reader.close();
             },
             .raw => |*cursor| {
+                const source = HistoricalSource{ .reader = &self.reader };
+                if (!try cursor.advance(source, &self.writer, bytes_left)) return false;
+                self.reader.close();
+            },
+            .base64 => |*cursor| {
                 const source = HistoricalSource{ .reader = &self.reader };
                 if (!try cursor.advance(source, &self.writer, bytes_left)) return false;
                 self.reader.close();
@@ -5509,4 +5525,211 @@ test "MCP projected offers preserve request prefixes and memo rebuilds" {
         try std.testing.expect(std.mem.indexOf(u8, request.bytes, "original page") != null);
         try testing.settleItemsForTesting(&setup.storage, &setup.tmp, binding, &.{"{\"type\":\"message\",\"id\":\"done\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}"}, "done");
     }
+}
+
+// The durable typed-part cursor belongs to the storage slice. These fixtures
+// supply neutral items directly to the production piece/reader/writer path.
+const image_test_png = @embedFile("codecs/fixtures/image-input/pixel.png");
+const image_test_base64 = @embedFile("codecs/fixtures/image-input/pixel.base64");
+const image_test_part = "{\"type\":\"input_image\",\"image_url\":\"data:image/png;base64," ++ image_test_base64 ++ "\",\"detail\":\"auto\"}";
+
+fn openRawImagePreparation(
+    setup: *PreparationTestSetup,
+    binding: store.AttemptBinding,
+    preparation: *Preparation,
+    used: *std.atomic.Value(u64),
+    limit: u64,
+) !store.HistoricalContent {
+    setup.storage.openHistoricalView(binding, &preparation.view);
+    var retained: ?named_scratch.Owner = null;
+    try preparation.init(std.testing.io, setup.root, .{ .used = used, .limit = limit }, protocol.routesAll(.endpoint), null, .{}, &retained);
+    errdefer preparation.cancel();
+    try std.testing.expect(retained == null);
+    try preparation.view.settings(&preparation.settings);
+    var position: u64 = 0;
+    while (try preparation.view.nextEntry(position)) |entry| {
+        position = entry.position;
+        if (entry.kind != .user) continue;
+        var content = entry.content.?;
+        // Exercise ordered digest verification even when the initial page
+        // already verified and retained this small fixture's bytes.
+        content.verified = false;
+        return content;
+    }
+    return error.MissingImageFixture;
+}
+
+fn loadRawImageItem(preparation: *Preparation, item: codec_abi.Item, handles: []const Handle) !void {
+    var mask: u8 = 0;
+    for (handles, 0..) |handle, index| {
+        preparation.handles[index] = handle;
+        mask |= @as(u8, 1) << @intCast(index);
+    }
+    _ = preparation.loadItemHeader(item, mask);
+    try preparation.encodeItem();
+}
+
+fn drainRawImageItem(preparation: *Preparation, allowance: usize) !void {
+    var steps: usize = 0;
+    while (true) {
+        var left = allowance;
+        var items: usize = 64;
+        while (left != 0) {
+            if (preparation.state.emission != .none) {
+                if (!try preparation.advanceEmission(&left, &items)) break;
+            } else if (!try preparation.nextPiece()) {
+                try preparation.writer.flush();
+                return;
+            }
+        }
+        try std.testing.expect(left <= allowance);
+        try preparation.writer.flush();
+        steps += 1;
+        try std.testing.expect(steps < 4096);
+    }
+}
+
+test "raw image preparation streams canonical PNG into user and tool arrays" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    const session = try setup.configure("image-codec-config");
+    try setup.submit("raw-png", "raw-png", session.slice(), image_test_png);
+    var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
+    const binding = try admitted.permit.consume();
+    const expected = "[{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"before\"}," ++ image_test_part ++
+        ",{\"type\":\"input_text\",\"text\":\"\"},{\"type\":\"input_text\",\"text\":\"after\"}]}," ++
+        "{\"type\":\"function_call_output\",\"call_id\":\"shot\\\"\",\"output\":[" ++ image_test_part ++
+        ",{\"type\":\"input_text\",\"text\":\"observed\"}]}," ++
+        "{\"type\":\"function_call_output\",\"call_id\":\"text-only\",\"output\":\"still a string\"}]";
+    for ([_]protocol.Codec{ .@"openai-responses/1", .@"openai-responses/2", .@"openai-responses/3" }) |codec| {
+        for ([_]usize{ 1, 2, 3, 5, 17, preparation_byte_allowance }) |allowance| {
+            var used: std.atomic.Value(u64) = .init(0);
+            var preparation: Preparation = undefined;
+            const content = try openRawImagePreparation(&setup, binding, &preparation, &used, expected.len);
+            defer if (preparation.state.active) preparation.cancel();
+            preparation.settings.codec = codec;
+            preparation.carry = codecs.initialCarry(codec, null);
+            preparation.encoder = codecs.resumeFrom(preparation.carry);
+            try preparation.writer.write("[");
+            const Item = struct { item: codec_abi.Item, handles: []const Handle = &.{} };
+            for ([_]Item{
+                .{ .item = .{ .image_message_open = .user } },
+                .{ .item = .input_text, .handles = &.{.{ .text = "before" }} },
+                .{ .item = .{ .input_image = .png }, .handles = &.{.{ .content = content }} },
+                .{ .item = .input_text, .handles = &.{.{ .text = "" }} },
+                .{ .item = .input_text, .handles = &.{.{ .text = "after" }} },
+                .{ .item = .image_message_close },
+                .{ .item = .image_tool_open, .handles = &.{.{ .text = "shot\"" }} },
+                .{ .item = .{ .input_image = .png }, .handles = &.{.{ .content = content }} },
+                .{ .item = .input_text, .handles = &.{.{ .text = "observed" }} },
+                .{ .item = .image_tool_close },
+                .{ .item = .tool_result, .handles = &.{ .{ .text = "text-only" }, .{ .text = "still a string" } } },
+            }) |item| {
+                try loadRawImageItem(&preparation, item.item, item.handles);
+                try drainRawImageItem(&preparation, allowance);
+                try std.testing.expectEqual(@as(usize, 0), preparation.view.outstandingReaders());
+            }
+            try preparation.writer.write("]");
+            preparation.state.stage = .end;
+            const request = try drainLivePreparation(&preparation, allowance, 1, 64);
+            defer request.deinit(std.testing.io, preparation.writer.budget);
+            var bytes: [expected.len]u8 = undefined;
+            try std.testing.expectEqual(bytes.len, try request.file.readPositionalAll(std.testing.io, &bytes, 0));
+            try std.testing.expectEqualStrings(expected, &bytes);
+            try std.testing.expectEqual(@as(u64, expected.len), used.load(.monotonic));
+        }
+    }
+}
+
+test "raw image preparation cancels every read and base64 output boundary" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    const session = try setup.configure("image-cancel-config");
+    try setup.submit("raw-png", "raw-png", session.slice(), image_test_png);
+    var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
+    const binding = try admitted.permit.consume();
+    const work = image_test_png.len + image_test_part.len;
+    for (0..work + 1) |cut| {
+        var used: std.atomic.Value(u64) = .init(0);
+        var preparation: Preparation = undefined;
+        const content = try openRawImagePreparation(&setup, binding, &preparation, &used, image_test_part.len);
+        defer if (preparation.state.active) preparation.cancel();
+        preparation.carry = codecs.initialCarry(.@"openai-responses/1", null);
+        preparation.encoder = codecs.resumeFrom(preparation.carry);
+        try loadRawImageItem(&preparation, .{ .input_image = .png }, &.{.{ .content = content }});
+        preparation.state.stage = .end;
+        for (0..cut) |_| {
+            switch (preparation.advance(1, 64)) {
+                .pending => {},
+                .failed => |err| return err,
+                .prepared => |request| {
+                    request.deinit(std.testing.io, preparation.writer.budget);
+                    return error.ImageSealedBeforeCancellation;
+                },
+            }
+            const stats = preparation.advanceStats();
+            try std.testing.expectEqual(@as(usize, 1), stats.work_bytes);
+            try std.testing.expect(stats.work_items <= 64);
+        }
+        preparation.cancel();
+        try std.testing.expect(!preparation.view.isActive());
+        try std.testing.expectEqual(@as(usize, 0), preparation.view.outstandingReaders());
+        try std.testing.expectEqual(@as(u64, 0), used.load(.monotonic));
+    }
+}
+
+test "raw image preparation releases capacity and write failures without sealing" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    const session = try setup.configure("image-failure-config");
+    try setup.submit("raw-png", "raw-png", session.slice(), image_test_png);
+    var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
+    const binding = try admitted.permit.consume();
+    for ([_]enum { capacity, write }{ .capacity, .write }) |fault| {
+        var used: std.atomic.Value(u64) = .init(0);
+        var preparation: Preparation = undefined;
+        const content = try openRawImagePreparation(&setup, binding, &preparation, &used, if (fault == .capacity) image_test_part.len - 1 else image_test_part.len);
+        defer if (preparation.state.active) preparation.cancel();
+        preparation.carry = codecs.initialCarry(.@"openai-responses/1", null);
+        preparation.encoder = codecs.resumeFrom(preparation.carry);
+        try loadRawImageItem(&preparation, .{ .input_image = .png }, &.{.{ .content = content }});
+        preparation.state.stage = .end;
+        if (fault == .write) {
+            const prefix = "{\"type\":\"input_image\",\"image_url\":\"data:image/png;base64,";
+            try stepPreparationToOffset(&preparation, prefix.len + 1, 4096);
+            try std.testing.expect(preparation.state.emission == .base64);
+            try std.testing.expectEqual(@as(usize, 1), preparation.view.outstandingReaders());
+            preparation.writer.fail_write = true;
+        }
+        try std.testing.expectError(if (fault == .capacity) error.RequestScratchExhausted else error.InjectedRequestWriteFailure, drainLivePreparation(&preparation, 1, 1, 4096));
+        preparation.cancel();
+        try std.testing.expectEqual(@as(usize, 0), preparation.view.outstandingReaders());
+        try std.testing.expectEqual(@as(u64, 0), used.load(.monotonic));
+    }
+}
+
+test "raw image preparation rejects a wrong canonical digest before sealing" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    const session = try setup.configure("image-digest-config");
+    try setup.submit("raw-png", "raw-png", session.slice(), image_test_png);
+    var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
+    const binding = try admitted.permit.consume();
+    var used: std.atomic.Value(u64) = .init(0);
+    var preparation: Preparation = undefined;
+    var content = try openRawImagePreparation(&setup, binding, &preparation, &used, image_test_part.len);
+    defer if (preparation.state.active) preparation.cancel();
+    content.digest[0] ^= 1;
+    preparation.carry = codecs.initialCarry(.@"openai-responses/1", null);
+    preparation.encoder = codecs.resumeFrom(preparation.carry);
+    try loadRawImageItem(&preparation, .{ .input_image = .png }, &.{.{ .content = content }});
+    preparation.state.stage = .end;
+    try std.testing.expectError(error.CorruptStore, drainLivePreparation(&preparation, 1, 1, 4096));
+    preparation.cancel();
+    try std.testing.expectEqual(@as(usize, 0), preparation.view.outstandingReaders());
+    try std.testing.expectEqual(@as(u64, 0), used.load(.monotonic));
 }

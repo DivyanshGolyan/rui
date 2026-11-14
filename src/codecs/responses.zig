@@ -86,6 +86,8 @@ pub const Encoder = struct {
     /// the request's end.
     compact: bool = false,
 
+    input_part_comma: bool = false,
+
     pub fn encodeItem(self: *Encoder, header: *const ItemHeader, out: *Pieces) error{Declined}!void {
         out.len = 0;
         switch (header.item) {
@@ -193,6 +195,39 @@ pub const Encoder = struct {
                 out.content(1, .json_string_v1);
                 out.literal("\"}");
             },
+            .image_message_open => |author| {
+                self.separateInput(out);
+                self.input_part_comma = false;
+                out.literal(switch (author) {
+                    .user => "{\"role\":\"user\",\"content\":[",
+                    .instruction => "{\"role\":\"developer\",\"content\":[",
+                });
+            },
+            .image_tool_open => {
+                self.separateInput(out);
+                self.input_part_comma = false;
+                out.literal("{\"type\":\"function_call_output\",\"call_id\":\"");
+                out.content(0, .json_string_v1);
+                out.literal("\",\"output\":[");
+            },
+            .input_text => {
+                if (self.input_part_comma) out.literal(",");
+                self.input_part_comma = true;
+                out.literal("{\"type\":\"input_text\",\"text\":\"");
+                out.content(0, .json_string_v1);
+                out.literal("\"}");
+            },
+            .input_image => |mime| {
+                if (self.input_part_comma) out.literal(",");
+                self.input_part_comma = true;
+                out.literal(switch (mime) {
+                    .png => "{\"type\":\"input_image\",\"image_url\":\"data:image/png;base64,",
+                    .jpeg => "{\"type\":\"input_image\",\"image_url\":\"data:image/jpeg;base64,",
+                });
+                out.base64(0);
+                out.literal("\",\"detail\":\"auto\"}");
+            },
+            .image_message_close, .image_tool_close => out.literal("]}"),
             // Version two changes effort where an Operation changed it; an
             // unchanged effort writes nothing. Versions one and three wrote
             // this Operation's effort at the top. Effort is null for a whole
@@ -2086,6 +2121,7 @@ test "every item at its longest fits max_pieces and names only handles it has" {
             for (pieces.slice()) |piece| switch (piece) {
                 .literal => |bytes| try std.testing.expect(bytes.len != 0),
                 .content => |content| try std.testing.expect(header.has(content.handle)),
+                .base64 => |handle| try std.testing.expect(header.has(handle)),
             };
         };
     };
