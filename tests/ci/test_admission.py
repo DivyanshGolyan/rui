@@ -952,6 +952,13 @@ class HostedDefaultContractTest(unittest.TestCase):
 
     def assert_workflow_contract(self, text):
         body = job(text, 'canonical_default')
+        source = step_script(body, 'Record canonical source')
+        python = source.split("python3 - <<'PY'\n", 1)[1].split('\nPY', 1)[0]
+        tree = ast.parse(python)
+        invocation = ast.dump(ast.parse('validate_source(source)').body[0])
+        self.assertTrue(
+            any(ast.dump(node) == invocation for node in tree.body),
+            'Record canonical source must invoke validate_source(source) at top level')
         self.assertIn("if: ${{ !github.event.repository.private && inputs.suite == 'canonical-default' }}", body)
         self.assertNotRegex(body, r'(?m)^    needs:')
         self.assertIn("inputs.suite != 'canonical-default'", job(text, 'plan'))
@@ -1021,6 +1028,15 @@ class HostedDefaultContractTest(unittest.TestCase):
         with self.assertRaises(AssertionError) as caught:
             self.assert_workflow_contract(changed)
         self.assertNotIn('missing', str(caught.exception))
+
+        call = '          validate_source(source)\n'
+        for replacement in ('', '          def disconnected_validation():\n' +
+                            '              validate_source(source)\n'):
+            changed = self.workflow.replace(call, replacement, 1)
+            self.assertNotEqual(changed, self.workflow)
+            with self.subTest(replacement=replacement), self.assertRaisesRegex(
+                    AssertionError, r'Record canonical source must invoke validate_source\(source\) at top level'):
+                self.assert_workflow_contract(changed)
 
 
 if __name__ == '__main__':
