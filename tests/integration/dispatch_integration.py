@@ -1346,13 +1346,15 @@ def builtin_instruction_cases(state, processes, endpoints, releases):
         {"role": "developer", "content": [{"type": "input_text", "text": text}]}
         for text in ("rules B", "rules C")
     ], updates
-    with sqlite3.connect(store / "rui.sqlite3") as database:
-        before = database.execute("SELECT count(*) FROM model_operation").fetchone()[0]
+    before = command("session", "inspect", "--store", store, "--session", session,
+                     "--profile", "full")["full"]["model_operations"]
+    assert len(before) == 2, before
     replay = message(state, store, "builtin-retry-b", session, "input B")
     assert replay["answer"]["replayed"] is True, replay
     assert read_result(store, "builtin-retry-b") == b"answer B"
-    with sqlite3.connect(store / "rui.sqlite3") as database:
-        assert database.execute("SELECT count(*) FROM model_operation").fetchone()[0] == before
+    after = command("session", "inspect", "--store", store, "--session", session,
+                    "--profile", "full")["full"]["model_operations"]
+    assert after == before, (before, after)
     assert len(endpoint.requests) == 3, endpoint.requests
     stop_host(host)
     processes.remove(host)
