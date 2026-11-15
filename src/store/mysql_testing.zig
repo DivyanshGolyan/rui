@@ -2322,7 +2322,7 @@ test "store.mysql touch oracle observes and clears uncommitted entry writes with
     const session = try testing.configureTestSession(&storage, "oracle-uncommitted");
     const entry = try store_core.enter(&storage, .none);
     defer entry.release();
-    try storage.begin();
+    try store_core.begin(&storage);
     defer if (storage.engine.inTransaction()) store_core.rollbackAfterError(&storage, .{}) catch @panic("oracle fixture rollback failed");
     // The restricted application connection changes canonical rows, deliberately
     // without a typed touch, while the root oracle observes another connection.
@@ -2331,13 +2331,13 @@ test "store.mysql touch oracle observes and clears uncommitted entry writes with
     try connection_state.query(try std.fmt.bufPrint(&sql, "UPDATE session SET label='oracle uncommitted' WHERE session_ref='{s}'", .{session.slice()}));
     try drain(connection_state, null);
     try std.testing.expect(storage.engine.inTransaction());
-    const missing = storage.untouchedForTesting();
+    const missing = store_core.untouchedForTesting(&storage);
     try std.testing.expectEqual(true, missing != null);
     try std.testing.expectEqualStrings(session.slice(), &missing.?);
     // This is the next queued entry's clear, before the batch's COMMIT.
     clearTouchOracleForTesting(&storage);
     try std.testing.expect(storage.engine.inTransaction());
-    try std.testing.expect(storage.untouchedForTesting() == null);
+    try std.testing.expect(store_core.untouchedForTesting(&storage) == null);
     try store_core.rollbackAfterError(&storage, .{});
     try std.testing.expectEqual(@as(u64, 0), try queryU64(&storage, "SELECT count(*) FROM session WHERE label='oracle uncommitted'", .{}));
 }
