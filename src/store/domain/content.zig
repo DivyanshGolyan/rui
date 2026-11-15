@@ -412,16 +412,41 @@ pub fn importSealed(a: anytype, io: std.Io, field: *const content_custody.Conten
     } else if (field.length != 0 or !std.mem.eql(u8, &content_string.digest(""), &field.digest)) {
         return error.MissingContentCustody;
     }
-    const slot = try importSlot(a, value);
+    if (field.file) |file| return importRangeSlot(a, io, .{
+        .file = file,
+        .offset = 0,
+        .length = field.length,
+        .digest = field.digest,
+        .sealed_length = field.length,
+    }, try importSlot(a, value), faults);
+    return @intCast((try importSlot(a, value)).id);
+}
+
+/// Imports a borrowed range of one sealed input spool through the same raw
+/// Content sink. Its lookup must have run after the previous part's insert,
+/// so population-sized imports need no population-sized deduplication array.
+/// The range never closes or refunds the capture's custody.
+pub fn importRange(a: anytype, io: std.Io, range: content_custody.Range, value: *Import, faults: Faults) !u64 {
+    std.debug.assert(!value.private and value.length == range.length and std.mem.eql(u8, &value.digest, &range.digest));
+    const slot: ContentSlot = if (value.found) |row|
+        .{ .id = @intCast(row.content_id.get()), .existing = true }
+    else
+        .{ .id = @intCast(try insertRow(a, value)), .existing = false };
+    value.found = .{ .content_id = .of(@intCast(slot.id)) };
+    return importRangeSlot(a, io, range, slot, faults);
+}
+
+fn importRangeSlot(a: anytype, io: std.Io, range: content_custody.Range, slot: ContentSlot, faults: Faults) !u64 {
+    const end = std.math.add(u64, range.offset, range.length) catch return error.ContentChanged;
+    if (end > range.sealed_length or try range.file.length(io) != range.sealed_length) return error.ContentChanged;
     const id: u64 = @intCast(slot.id);
-    if (slot.existing or field.length == 0) {
-        if (field.file) |source| try verifyExternalContent(io, source, field.length, &field.digest, null, faults);
+    if (slot.existing or range.length == 0) {
+        try verifyExternalContent(io, range, null, faults);
         return id;
     }
-    const file = field.file orelse return error.MissingContentCustody;
-    const sink = try a.contentSink(id, field.length);
+    const sink = try a.contentSink(id, range.length);
     defer sink.close();
-    try verifyExternalContent(io, file, field.length, &field.digest, sink, faults);
+    try verifyExternalContent(io, range, sink, faults);
     return id;
 }
 
@@ -460,17 +485,15 @@ pub fn HashedWindow(comptime window_bytes: usize) type {
 
 fn verifyExternalContent(
     io: std.Io,
-    file: std.Io.File,
-    expected_length: u64,
-    expected_digest: *const [32]u8,
+    range: content_custody.Range,
     destination: ?store_access.ContentSink,
     faults: Faults,
 ) !void {
     var copy: HashedWindow(conversation_read.content_window_bytes) = .{ .hash = content_string.hasher() };
     var offset: u64 = 0;
-    while (offset < expected_length) {
-        const wanted: usize = @intCast(@min(expected_length - offset, copy.window.len));
-        const count = try file.readPositionalAll(io, copy.window[0..wanted], offset);
+    while (offset < range.length) {
+        const wanted: usize = @intCast(@min(range.length - offset, copy.window.len));
+        const count = try range.file.readPositionalAll(io, copy.window[0..wanted], range.offset + offset);
         if (count != wanted) return error.ContentReadFailed;
         if (faults.content_read) return error.InjectedContentReadFailure;
         copy.hash.update(copy.window[0..count]);
@@ -480,8 +503,8 @@ fn verifyExternalContent(
         }
         offset += count;
     }
-    if (try file.length(io) != expected_length) return error.ContentChanged;
-    if (!std.mem.eql(u8, &copy.hash.finalResult(), expected_digest)) return error.ContentChanged;
+    if (try range.file.length(io) != range.sealed_length) return error.ContentChanged;
+    if (!std.mem.eql(u8, &copy.hash.finalResult(), &range.digest)) return error.ContentChanged;
 }
 
 // Large streaming readers own one bounded heap window, never an inline

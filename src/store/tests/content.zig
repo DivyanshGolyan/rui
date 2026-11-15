@@ -333,3 +333,146 @@ test "content readers hold no decode window" {
     try std.testing.expect(@sizeOf(ContentReader) <= 512);
     try std.testing.expect(@sizeOf(HistoricalReader) <= 1024);
 }
+
+/// Tests use the production transaction runner and raw Content sink. The
+/// range borrows its descriptor; importing never assumes its cleanup.
+const ImportRange = struct {
+    const transition = @import("../transition.zig");
+    const custody = @import("../../content_custody.zig");
+    pub const rounds = transition.rounds(.{ .lookup = .{.always} });
+    pub const round_budget = 2;
+    pub const commit: transition.Commit = .transaction;
+    pub const begin: ?rounds.At = .lookup;
+    pub const Input = struct { range: custody.Range, faults: store_core.Faults = .{} };
+    pub const Result = u64;
+    pub const Ordinary = error{};
+    pub const Declined = error{};
+    pub const Guards = error{};
+
+    input: Input,
+    value: content_domain.Import = undefined,
+    id: u64 = 0,
+
+    pub fn step(self: *ImportRange, r: *transition.Round(ImportRange), ran: ?rounds.At) !transition.Next(ImportRange) {
+        if (ran == null) {
+            self.value = .{ .length = self.input.range.length, .digest = self.input.range.digest, .private = false };
+            content_domain.lookup(r, &self.value);
+            return .{ .round = .lookup };
+        }
+        self.id = try content_domain.importRange(r, std.testing.io, self.input.range, &self.value, self.input.faults);
+        return .commit;
+    }
+
+    pub fn committed(self: *const ImportRange) Result {
+        return self.id;
+    }
+};
+
+test "sealed Content ranges import original binary bytes once without taking capture custody" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            const Capture = @import("../../InputCapture.zig");
+            const jpeg = @embedFile("../../testing/fixtures/input-baseline.jpg");
+            const transition = @import("../transition.zig");
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            var open = true;
+            defer if (open) storage.close() catch unreachable;
+            var used = std.atomic.Value(u64).init(29);
+            var capture: Capture = undefined;
+            {
+                const spool = try tmp.dir.createFile(std.testing.io, "range-spool", .{ .read = true });
+                errdefer spool.close(std.testing.io);
+                try tmp.dir.deleteFile(std.testing.io, "range-spool");
+                const index = try tmp.dir.createFile(std.testing.io, "range-index", .{ .read = true });
+                errdefer index.close(std.testing.io);
+                try tmp.dir.deleteFile(std.testing.io, "range-index");
+                capture.init(std.testing.io, spool, index, .{ .used = &used, .limit = 8192 });
+            }
+            defer capture.close();
+            for ([_][]const u8{ "prefix\x00", jpeg, jpeg, "suffix" }) |bytes| {
+                const image = bytes[0] == 0xff;
+                try capture.begin(if (image) .{ .image = .{ .assertion = .jpeg } } else .text, bytes.len);
+                var allowance: usize = bytes.len;
+                try std.testing.expectEqual(bytes.len, try capture.append(bytes, &allowance, false));
+                try capture.end();
+            }
+            var cursor = (try capture.seal()).cursor();
+            _ = try cursor.next();
+            const first = (try cursor.next()).?;
+            const second = (try cursor.next()).?;
+            try std.testing.expect(first.range.offset != 0 and first.range.offset != second.range.offset);
+            const before = try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{});
+            const charged = used.load(.acquire);
+            const id = try transition.apply(&storage, ImportRange, .{ .range = first.range }, .{});
+            try std.testing.expectEqual(id, try transition.apply(&storage, ImportRange, .{ .range = second.range }, .{}));
+            try std.testing.expectEqual(before + 1, try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
+            try std.testing.expectEqual(charged, used.load(.acquire));
+            _ = try cursor.next();
+            try std.testing.expect((try cursor.next()) == null);
+            capture.close();
+            try std.testing.expectEqual(@as(u64, 29), used.load(.acquire));
+            open = false;
+            try storage.close();
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            open = true;
+            var reader: ContentReader = undefined;
+            reader.open(try storage.openContent(.{ .length = jpeg.len, .digest = protocol.contentDigest(jpeg) }));
+            defer reader.close();
+            var actual: [jpeg.len]u8 = undefined;
+            try std.testing.expectEqual(jpeg.len, try reader.read(0, &actual));
+            try std.testing.expectEqualSlices(u8, jpeg, &actual);
+        }
+    }.run);
+}
+
+test "sealed Content range failures roll back raw rows and leave descriptor custody with the caller" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            const custody = @import("../../content_custody.zig");
+            const transition = @import("../transition.zig");
+            const Damage = enum { offset, overflow, sealed_length, changed_bytes, read_failure, write_failure };
+            for ([_]bool{ false, true }) |existing| {
+                for (std.enums.values(Damage)) |damage| {
+                    // Deduplication verifies the input but writes no payload.
+                    if (existing and damage == .write_failure) continue;
+                    var tmp = std.testing.tmpDir(.{});
+                    defer tmp.cleanup();
+                    var storage: Store = undefined;
+                    try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                    defer storage.close() catch unreachable;
+                    const original = "prefix\x00raw\xffbytes!suffix";
+                    const selected = original[7..17];
+                    const file = try tmp.dir.createFile(std.testing.io, "range", .{ .read = true });
+                    defer file.close(std.testing.io);
+                    try tmp.dir.deleteFile(std.testing.io, "range");
+                    try file.writePositionalAll(std.testing.io, original, 0);
+                    var range: custody.Range = .{ .file = file, .offset = 7, .length = selected.len, .digest = protocol.contentDigest(selected), .sealed_length = original.len };
+                    if (existing) _ = try transition.apply(&storage, ImportRange, .{ .range = range }, .{});
+                    var faults: store_core.Faults = .{};
+                    switch (damage) {
+                        .offset => range.offset += 1,
+                        .overflow => range.offset = std.math.maxInt(u64),
+                        .sealed_length => range.sealed_length -= 1,
+                        .changed_bytes => try file.writePositionalAll(std.testing.io, "?", range.offset),
+                        .read_failure => faults.content_read = true,
+                        .write_failure => faults.content_import = true,
+                    }
+                    const before = try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{});
+                    const expected = switch (damage) {
+                        .read_failure => error.InjectedContentReadFailure,
+                        .write_failure => error.InjectedContentImportFailure,
+                        else => error.ContentChanged,
+                    };
+                    try std.testing.expectError(expected, transition.apply(&storage, ImportRange, .{ .range = range, .faults = faults }, .{}));
+                    try std.testing.expectEqual(before, try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
+                    try std.testing.expect(storage.isFenced());
+                    // The same live borrowed descriptor still belongs to this scope.
+                    try std.testing.expectEqual(@as(u64, original.len), try file.length(std.testing.io));
+                }
+            }
+        }
+    }.run);
+}
