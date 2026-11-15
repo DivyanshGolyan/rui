@@ -77,6 +77,7 @@ test "every function that enters the Store has a round budget" {
         @embedFile("../engine/mysql_open.zig"),
         @embedFile("../engine/mysql_refusal.zig"),
         @embedFile("../domain/action.zig"),
+        @embedFile("../domain/action_control.zig"),
         @embedFile("../domain/action_read.zig"),
         @embedFile("../domain/forward.zig"),
         @embedFile("../domain/command.zig"),
@@ -97,6 +98,7 @@ test "every function that enters the Store has a round budget" {
         @embedFile("../domain/session_report_read.zig"),
         @embedFile("../domain/skills.zig"),
         @embedFile("../domain/sourced_input.zig"),
+        @embedFile("../domain/tool_fulfillment.zig"),
         @embedFile("../domain/tool_offer.zig"),
         @embedFile("../domain/tool_set.zig"),
         @embedFile("../domain/turn.zig"),
@@ -608,6 +610,18 @@ test "each Store entry point takes its round budget on its common path" {
             meter.start();
             _ = try storage.settleActionAttempt(action, .succeeded, "Bash succeeded.", .{});
             meter.stop(.settleActionAttempt);
+            var background: @import("../../command_input.zig").ActionBackgroundCommand = .{ .session = session, .action_id = allowed };
+            try background.key.set("budget-background");
+            const credit: usize = 2;
+            const capacity: @import("../domain/action_control.zig").CapacityView = .{ .total = 2, .context = &credit, .freeFn = struct {
+                fn read(context: *const anyopaque) usize {
+                    return @as(*const usize, @ptrCast(@alignCast(context))).*;
+                }
+            }.read };
+            meter.start();
+            const selected_final = storage.backgroundAction(&background, capacity, .{});
+            try std.testing.expect(selected_final == .accepted and selected_final.accepted.selection.kind == .final);
+            meter.stop(.backgroundAction);
             var deny: protocol.PermissionDecisionCommand = .{ .action_id = denied, .decision = .deny };
             try deny.key.set("budget-deny");
             try deny.session.set(session.slice());

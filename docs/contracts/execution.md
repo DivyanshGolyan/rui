@@ -51,6 +51,22 @@ Actions run and settle independently, including within one Workspace.
 
 `action read --session ID --action ID [--offset BYTES]` reads an existing Action's permission, queue, attempted or resolved state without waiting, granting permission or consuming output. A resolved Action returns its sole saved Resolution and one bounded UTF-8 output window; the returned byte cursor continues that immutable output. The Session must own the Action. `action inspect` continues to read the exact proposal for permission review.
 
+`action background --session ID --action ID --key KEY` promotes that Session's existing Action to background execution.
+The accepted command selects one immutable receipt for the original Tool Call; its exact replay keeps that receipt after the Action resolves.
+The next model Operation can consume it once every sibling call has a fulfillment.
+Promotion preserves the same Action, Attempt, arguments, authorization, executor and deadline; it grants no permission and launches no replacement invocation.
+The Session owns the promoted Action beyond its original Turn, including approval discovery and Stop propagation through attached descendants.
+
+An already attempted Action can be promoted only with at least one genuinely free custody record.
+Dispatching a pending background Action requires at least two free records, enforced by the existing reservation owner before any Attempt or effect.
+Detached cleanup still occupies custody.
+Capacity one refuses promotion; a pending accepted Action may wait for capacity.
+A saved refusal remains the result of its key, and a fresh refusal leaves the original call and executor unchanged.
+
+Native users poll `action read` for the sole terminal Resolution.
+Completion does not append a new input or wake the model in this delivery.
+A Session Stop keeps the existing runner-aware cancellation and uncertainty rules; Host recovery records uncertainty without replaying an invocation.
+
 Bash arguments require `cmd` and `description`; `stdin` and `timeout_ms` are optional.
 Function tools are offered with `"strict": false`, explicitly, since an omitted field lets the provider make the schema strict: the provider does not check a call against its schema, Rui does.
 A call whose arguments fail that check is settled as an `invalid_arguments` rejection whose result tells the model what was wrong (for example "Invalid arguments for tool 'bash': cmd is required."), so the model corrects the call within the Turn; the Turn does not fail.

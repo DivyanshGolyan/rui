@@ -306,8 +306,7 @@ pub const ActivityPage = struct {
         inline for (.{ &work.turn, &work.operation, &work.first_action }, .{ wire.work.turn, wire.work.operation, wire.work.first_action }) |fact, value| {
             fact.* = if (value) |text| try id(text, false) else null;
         }
-        // An operation belongs to its Turn; an Action to the active one.
-        if ((work.turn == null) != (work.operation == null) or (work.first_action != null and work.turn == null)) return error.InvalidActivityPage;
+        if ((work.turn == null) != (work.operation == null)) return error.InvalidActivityPage;
         if (wire.work.last_line) |line| facts.last_line = .{ .position = try id(line.position, false), .text = if (line.text) |text| text.value else null };
         facts.read_version = protocol.SinceToken.parse(wire.work.read_version.slice()) catch return error.InvalidActivityPage;
         facts.revision = try id(wire.work.revision, false);
@@ -1209,8 +1208,7 @@ pub const Current = struct {
             execution.custody_occupied.value == null or execution.scratch_used_bytes.value == null or execution.unavailable.value == null) return error.InvalidObservation;
         const work = wire.work.value orelse return error.InvalidObservation;
         const peers = wire.peers.value orelse return error.InvalidObservation;
-        if ((work.turn == null) != (work.operation == null) or (work.latest_outcome != null and work.turn == null) or
-            (work.first_action != null and work.turn == null)) return error.InvalidObservation;
+        if ((work.turn == null) != (work.operation == null) or (work.latest_outcome != null and work.turn == null)) return error.InvalidObservation;
         if (work.latest_outcome) |outcome| {
             if (outcome.code.slice().len == 0 or (if (outcome.content) |content| content.type.value != null else false)) return error.InvalidObservation;
         }
@@ -1490,7 +1488,7 @@ pub const SessionListPage = struct {
                 if (row.last_line.?.position > row.end) return error.InvalidCharacter;
             }
             const work = row.work;
-            if ((work.turn == null) != (work.operation == null) or (work.first_action != null and work.turn == null)) return error.InvalidCharacter;
+            if ((work.turn == null) != (work.operation == null)) return error.InvalidCharacter;
             // A person's Message is a Message, and the first one is either a
             // person's or a peer's.
             if (row.first_message) |first| {

@@ -174,6 +174,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/control/action-background": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Promotes the same Action to Session-owned background work and returns its immutable call receipt selection. Completion is read explicitly with read-action; no final input or model wake is delivered. Retried by its key. */
+        post: operations["actionBackground"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/read-action": {
         parameters: {
             query?: never;
@@ -416,6 +433,64 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        ActionBackgroundConflictReply: {
+            /** @constant */
+            version: "19";
+            /** @constant */
+            type: "action_background_reply";
+            answer: {
+                /** @constant */
+                status: "conflict";
+                /** @constant */
+                replayed: false;
+                session: string;
+                action: components["schemas"]["Decimal"];
+                /** @constant */
+                code: "idempotency_key_conflict";
+            };
+        };
+        ActionBackgroundReply: {
+            /** @constant */
+            version: "19";
+            /** @constant */
+            type: "action_background_reply";
+            answer: {
+                /** @constant */
+                status: "accepted";
+                replayed: boolean;
+                session: string;
+                action: components["schemas"]["Decimal"];
+                action_selection: {
+                    /** @enum {string} */
+                    kind: "background" | "final";
+                    position: components["schemas"]["Decimal"];
+                };
+            };
+        } | {
+            /** @constant */
+            version: "19";
+            /** @constant */
+            type: "action_background_reply";
+            answer: {
+                /** @constant */
+                status: "rejected";
+                replayed: boolean;
+                session: string;
+                action: components["schemas"]["Decimal"];
+                /** @enum {string} */
+                code: "invalid_session_reference" | "invalid_target" | "unknown_session" | "unknown_action" | "target_mismatch" | "source_stopped" | "background_unavailable";
+            };
+        };
+        ActionBackgroundRequest: {
+            /** @constant */
+            version: "19";
+            /** @constant */
+            kind: "action_background";
+            store: string;
+            key: string;
+            session: string;
+            action: components["schemas"]["Decimal"];
+        };
         ActivityContentRequest: {
             /** @constant */
             version: "19";
@@ -2715,6 +2790,64 @@ export interface components {
             type: "command_observation";
             key: string;
             /** @constant */
+            delta: "full";
+            since: string | null;
+            observation: {
+                /** @enum {string} */
+                status: "absent" | "accepted" | "rejected";
+                /** @constant */
+                kind: "action_background";
+                target: string;
+                action_target: {
+                    action: components["schemas"]["Decimal"];
+                };
+            } | {
+                /** @enum {string} */
+                status: "absent" | "accepted" | "rejected";
+                /** @constant */
+                kind: "action_background";
+                target: string;
+                code: string;
+                action_target: {
+                    action: components["schemas"]["Decimal"];
+                };
+            } | {
+                /** @enum {string} */
+                status: "absent" | "accepted" | "rejected";
+                /** @constant */
+                kind: "action_background";
+                target: string;
+                action_target: {
+                    action: components["schemas"]["Decimal"];
+                };
+                action_selection: {
+                    /** @enum {string} */
+                    kind: "background" | "final";
+                    position: components["schemas"]["Decimal"];
+                };
+            } | {
+                /** @enum {string} */
+                status: "absent" | "accepted" | "rejected";
+                /** @constant */
+                kind: "action_background";
+                target: string;
+                code: string;
+                action_target: {
+                    action: components["schemas"]["Decimal"];
+                };
+                action_selection: {
+                    /** @enum {string} */
+                    kind: "background" | "final";
+                    position: components["schemas"]["Decimal"];
+                };
+            };
+        } | {
+            /** @constant */
+            version: "19";
+            /** @constant */
+            type: "command_observation";
+            key: string;
+            /** @constant */
             delta: "not_modified";
             since: string;
         };
@@ -3128,7 +3261,7 @@ export interface components {
         ToolPresentation: {
             description: string | null;
             /** @enum {string} */
-            code: "unresolved" | "pending_permission" | "succeeded" | "failed" | "timed_out" | "indeterminate" | "storage_failed" | "spawn_failed" | "cancelled" | "infrastructure_shutdown" | "denied" | "unknown_tool" | "invalid_arguments";
+            code: "unresolved" | "pending_permission" | "background" | "succeeded" | "failed" | "timed_out" | "indeterminate" | "storage_failed" | "spawn_failed" | "cancelled" | "infrastructure_shutdown" | "denied" | "unknown_tool" | "invalid_arguments";
             publication_position: components["schemas"]["Decimal"] | null;
         };
         WorkStateJson: {
@@ -3904,6 +4037,53 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["PermissionDecisionConflictReply"] | components["schemas"]["ErrorReply"];
+                };
+            };
+            /** @description A refusal or failure. */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorReply"];
+                };
+            };
+        };
+    };
+    actionBackground: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description The wire version this document describes. Any other version is refused. */
+                "X-Rui-Wire-Version": components["parameters"]["WireVersion"];
+                /** @description The Host instance (from host-info) the request is meant for; a different instance refuses it. */
+                "X-Rui-Host-Instance"?: components["parameters"]["HostInstance"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ActionBackgroundRequest"];
+            };
+        };
+        responses: {
+            /** @description The reply. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ActionBackgroundReply"];
+                };
+            };
+            /** @description The key was used before with different input (the conflict reply), or the request names another Store or Host instance (a refusal). */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ActionBackgroundConflictReply"] | components["schemas"]["ErrorReply"];
                 };
             };
             /** @description A refusal or failure. */

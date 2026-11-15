@@ -789,11 +789,156 @@ def walkthrough():
             retain_failure_state("Bash walkthrough failure state", state)
 
 
+def prove_native_background(state):
+    from bash_fixture import dispose_owner_case
+
+    outcomes = []
+    for name, capacity in (("approval", 2), ("running", 2), ("stopped", 2), ("capacity-one", 1)):
+        case = state / f"native-background-{name}"
+        case.mkdir()
+        workspace = case / "workspace"
+        workspace.mkdir()
+        gate = ReleaseGate(workspace / "producer-gate")
+        producer = (
+            "import os,pathlib,secrets; "
+            "f=open('launches','a'); f.write(str(os.getpid())+'\\n'); f.flush(); os.fsync(f.fileno()); f.close(); "
+            "pathlib.Path('ready.tmp').write_text(str(os.getpid())); os.replace('ready.tmp','ready'); "
+            "g=open('producer-gate','rb'); g.read(); g.close(); "
+            "value='native-final-'+secrets.token_hex(16)+'\\n'+'é😀'*2200+'\\n'; "
+            "f=open('expected-final','w'); f.write(value); f.flush(); os.fsync(f.fileno()); f.close(); "
+            "print(value,end='')"
+        )
+        arguments = json.dumps({
+            "cmd": "exec " + shlex.join([sys.executable, "-c", producer]),
+            "description": "Wait for native release", "timeout_ms": 30000,
+        }, ensure_ascii=False, separators=(",", ":"))
+        responses = [
+            fixture.sse_tool_calls(f"{name}-calls", [("bash", f"{name}-call", arguments)]),
+            fixture.sse_answer(f"{name}-answer", f"{name}-reason", f"{name}-message", "original answer")[0],
+        ]
+        endpoint = fixture.SuccessEndpoint(responses)
+        thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+        host = None
+        evidence = {"case": name, "capacity": capacity}
+        try:
+            thread.start()
+            host = fixture.start_host(case / "store", f"http://127.0.0.1:{endpoint.server_port}/responses", active_capacity=capacity)
+            store = case / "store"
+            session = configure(case, store, "configure", workspace=workspace)
+            fixture.message(case, store, "message", session, "run ordinary Bash")
+            action = fixture.wait_for(lambda: action_for(store, session), "ordinary foreground Action")
+            identity = action["action"]
+            assert fixture.read_action(store, session, identity, "arguments") == arguments.encode(), action
+            pending = fixture.command("action", "read", "--store", store, "--session", session, "--action", identity)
+            assert pending["state"] == "waiting_approval" and pending["final"] is None, pending
+            if name != "approval":
+                allow(case, store, "allow", session, identity)
+                fixture.wait_for(lambda: (workspace / "ready").exists(), "fsynced producer launch")
+                pid = int((workspace / "launches").read_text())
+                assert process_exists(pid)
+            gate.assert_held()
+            assert len(endpoint.requests) == 1, endpoint.requests
+            assert fixture.completed_observation(store, "message") is None
+            promoted = fixture.command(
+                "action", "background", "--store", store, "--session", session,
+                "--action", identity, "--key", "promote", "--record", case / "promote.json",
+                expect=3 if capacity == 1 else 0,
+            )
+            evidence["promotion"] = promoted
+            if capacity == 1:
+                assert promoted["answer"]["status"] == "rejected" and promoted["answer"]["code"] == "background_unavailable", promoted
+                assert fixture.completed_observation(store, "message") is None
+                assert len(endpoint.requests) == 1 and process_exists(pid)
+            else:
+                answer = promoted["answer"]
+                assert answer["status"] == "accepted" and answer["replayed"] is False, promoted
+                assert answer["action_selection"]["kind"] == "background" and int(answer["action_selection"]["position"]) > 0, promoted
+                fixture.wait_for(lambda: fixture.completed_observation(store, "message"), "immutable original receipt continuation")
+                assert fixture.read_result(store, "message") == b"original answer"
+                assert len(endpoint.requests) == 2, endpoint.requests
+                continuation = json.loads(endpoint.requests[1])
+                outputs = [item for item in continuation["input"] if item.get("type") == "function_call_output"]
+                assert len(outputs) == 1 and outputs[0]["call_id"] == f"{name}-call", outputs
+                receipt = outputs[0]["output"]
+                assert json.loads(receipt) == {"action": identity, "execution": "background", "accepted": True}, outputs
+                assert "native-final-" not in receipt
+                if name == "approval":
+                    assert not (workspace / "launches").exists()
+                    current = fixture.command("session", "inspect", "--store", store, "--session", session)
+                    assert current["work"]["turn"] is None and current["work"]["first_action"] == identity, current
+                    assert [item["action"] for item in current["actionable_permissions"]] == [identity], current
+                    allow(case, store, "allow", session, identity)
+                    fixture.wait_for(lambda: (workspace / "ready").exists(), "approval after original Turn closed")
+                    pid = int((workspace / "launches").read_text())
+                assert process_exists(pid)
+                assert (workspace / "launches").read_text() == f"{pid}\n"
+                replay = fixture.command("request", "recover", "--store", store, "--record", case / "promote.json", "--kind", "action-background")
+                assert replay["answer"]["replayed"] is True and replay["answer"]["action_selection"] == answer["action_selection"], replay
+                foreign = configure(case, store, "foreign-configure", workspace=workspace)
+                refused = fixture.command("action", "background", "--store", store, "--session", foreign, "--action", identity, "--key", "foreign", "--record", case / "foreign.json", expect=3)
+                assert refused["answer"]["status"] == "rejected" and refused["answer"]["code"] == "target_mismatch", refused
+            gate.assert_held()
+            assert (workspace / "launches").read_text() == f"{pid}\n" and process_exists(pid)
+            if name == "stopped":
+                stopped = fixture.command("session", "stop", "--store", store, "--session", session, "--key", "stop", "--record", case / "stop.json")
+                assert stopped["answer"]["status"] == "accepted", stopped
+            else:
+                gate.release()
+            first = fixture.wait_for(
+                lambda: (value if (value := fixture.command("action", "read", "--store", store, "--session", session, "--action", identity))["state"] == "resolved" else None),
+                "explicit sole final Resolution",
+            )
+            fixture.wait_for(lambda: not process_exists(pid), "exact producer PID retired")
+            assert (workspace / "launches").read_text() == f"{pid}\n"
+            assert fixture.read_action(store, session, identity, "arguments") == arguments.encode()
+            metadata = {key: first["final"][key] for key in ("position", "code", "content")}
+            assert metadata["code"] == ("cancelled" if name == "stopped" else "succeeded"), metadata
+            page, assembled = first, bytearray()
+            while True:
+                assert {key: page["final"][key] for key in metadata} == metadata
+                window = page["final"]["window"]
+                chunk = window["text"].encode()
+                assert int(window["offset"]) == len(assembled) and int(window["next"]) == len(assembled) + len(chunk), window
+                assert len(chunk) <= 4096 and (chunk or not window["more"]), window
+                assembled.extend(chunk)
+                if not window["more"]:
+                    break
+                page = fixture.command("action", "read", "--store", store, "--session", session, "--action", identity, "--offset", window["next"])
+            domain = b"rui/content/v1"
+            digest = hashlib.sha256(len(domain).to_bytes(8, "big") + domain + assembled).hexdigest()
+            assert metadata["content"] == {"bytes": str(len(assembled)), "sha256": digest}, metadata
+            if name != "stopped":
+                assert (workspace / "expected-final").read_bytes() in assembled
+            assert fixture.command("action", "read", "--store", store, "--session", session, "--action", identity) == first
+            replay = fixture.command("request", "recover", "--store", store, "--record", case / "promote.json", "--kind", "action-background")
+            assert replay["answer"]["replayed"] is True
+            if capacity == 1:
+                assert replay["answer"]["code"] == "background_unavailable", replay
+                fixture.wait_for(lambda: fixture.completed_observation(store, "message"), "unmodified foreground continuation")
+                outputs = [item for item in json.loads(endpoint.requests[1])["input"] if item.get("type") == "function_call_output"]
+                assert len(outputs) == 1 and outputs[0]["output"].encode() == assembled, outputs
+            else:
+                assert replay["answer"]["action_selection"] == promoted["answer"]["action_selection"], replay
+                assert outputs[0]["output"] == receipt
+            fixture.wait_for(lambda: execution_custody_idle(store, session), "producer cleanup before reuse")
+            assert len(endpoint.requests) == 2 and fixture.read_result(store, "message") == b"original answer"
+            evidence.update(action=identity, pid=pid, launches=1, final=metadata, requests=len(endpoint.requests))
+            outcomes.append(evidence)
+        finally:
+            dispose_all(
+                gate.release,
+                lambda: dispose_owner_case(host, endpoint, thread),
+                lambda: (case / "witness.json").write_text(json.dumps(evidence, ensure_ascii=False, indent=2) + "\n"),
+            )
+    return outcomes
+
+
 def main():
     state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-bash."))
     fixture_home = state / "home"
     fixture_home.mkdir()
     os.environ["HOME"] = str(fixture_home)
+    prove_native_background(state)
     prove_stdin(state)
     prove_reused_session(state)
     responses = []

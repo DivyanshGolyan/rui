@@ -3484,3 +3484,26 @@ test "Action read request preserves canonical identity and optional cursor" {
         try std.testing.expectError(error.InvalidIdentity, parseForTest(&parser));
     }
 }
+
+test "Action promotion parses one owned target and binds semantic replay" {
+    const head = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"action_background\",\"store\":\"s\",\"key\":\"promote\",\"session\":\"k7m2qx\",\"action\":";
+    var source: MetadataSource = .{ .input = head ++ "\"42\"}" };
+    var parser = Tested.Parser{ .source = &source };
+    var command = (try parseForTest(&parser)).action_background;
+    try std.testing.expectEqual(@as(u64, 42), command.action_id);
+    try std.testing.expectEqualStrings("k7m2qx", command.session.slice());
+    const digest = command.semanticDigest();
+    try command.key.set("another-key");
+    try command.store.set("another-store");
+    try std.testing.expectEqualSlices(u8, &digest, &command.semanticDigest());
+    command.action_id = 43;
+    try std.testing.expect(!std.mem.eql(u8, &digest, &command.semanticDigest()));
+    command.action_id = 42;
+    try command.session.set("rhvzwc");
+    try std.testing.expect(!std.mem.eql(u8, &digest, &command.semanticDigest()));
+    inline for (.{ "\"01\"}", "\"-1\"}", "\"18446744073709551616\"}" }) |tail| {
+        var invalid: MetadataSource = .{ .input = head ++ tail };
+        var invalid_parser = Tested.Parser{ .source = &invalid };
+        try std.testing.expectError(error.InvalidIdentity, parseForTest(&invalid_parser));
+    }
+}

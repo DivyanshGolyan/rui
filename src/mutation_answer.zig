@@ -535,3 +535,15 @@ test "Session pin replies bind desired value and reject unrelated mutation autho
     const stopped = "{\"version\":\"" ++ version ++ "\",\"type\":\"session_pin_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"pinned\":false},\"completion\":{\"status\":\"completed\"}}";
     try std.testing.expectError(error.InvalidResponse, decodeForTest(200, stopped, "k7m2qx", target).answer);
 }
+
+test "Action promotion replies bind the target and immutable receipt or final selection" {
+    inline for (.{ "background", "final" }) |kind| {
+        const accepted = "{\"version\":\"" ++ current ++ "\",\"type\":\"action_background_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":true,\"session\":\"k7m2qx\",\"action\":\"42\",\"action_selection\":{\"kind\":\"" ++ kind ++ "\",\"position\":\"9007199254740993\"}}}";
+        const answer = try decodeForTest(200, accepted, "k7m2qx", .{ .action_background = 42 }).answer;
+        try std.testing.expect(answer.replayed);
+        try std.testing.expectEqualStrings(kind, @tagName(answer.result.accepted.action_background.kind));
+        try std.testing.expectEqual(@as(u64, 9007199254740993), answer.result.accepted.action_background.position);
+        try std.testing.expectError(error.RequestBindingMismatch, decodeForTest(200, accepted, "rhvzwc", .{ .action_background = 42 }).answer);
+        try std.testing.expectError(error.RequestBindingMismatch, decodeForTest(200, accepted, "k7m2qx", .{ .action_background = 43 }).answer);
+    }
+}

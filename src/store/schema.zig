@@ -62,7 +62,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 73, .digest = 0x515b60c7f5df332d },
     .{ .schema_version = 74, .digest = 0xda8e267adbfcef45 },
     .{ .schema_version = 75, .digest = 0xcea5bf4db0d3978d },
-    .{ .schema_version = 76, .digest = 0x0000000000000000 },
+    .{ .schema_version = 76, .digest = 0x615843e237481307 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -737,8 +737,15 @@ pub const migrations = [_]Migration{
             "CREATE INDEX action_operation_session_results ON action_operation(session_ref,parent_operation_id,acceptance_position) WHERE acceptance_position IS NOT NULL AND background_position IS NULL",
             "CREATE INDEX action_operation_background ON action_operation(session_ref,background_position)",
             "CREATE INDEX action_operation_background_results ON action_operation(session_ref,parent_operation_id,background_position) WHERE background_position IS NOT NULL",
-            "ALTER TABLE session_stop ADD COLUMN action_cutoff INTEGER NOT NULL DEFAULT 0 CHECK(action_cutoff>=0)",
-            "CREATE TABLE action_control_command(\n command_key TEXT PRIMARY KEY NOT NULL REFERENCES core_command(command_key),\n action_id TEXT NOT NULL CHECK(length(CAST(action_id AS BLOB)) BETWEEN 1 AND 20 AND (action_id NOT GLOB '*[^0-9]*' AND length(action_id)=length(CAST(action_id AS BLOB)))),\n selected_action_id INTEGER REFERENCES action_operation(action_id),\n selection TEXT CHECK(selection IS NULL OR (selection='background' OR selection='final')),\n selection_position INTEGER CHECK(selection_position>0),\n CHECK((selected_action_id IS NULL AND selection IS NULL AND selection_position IS NULL) OR (selected_action_id IS NOT NULL AND selection IS NOT NULL AND selection_position IS NOT NULL))\n) STRICT, WITHOUT ROWID",
+            "ALTER TABLE session_stop RENAME TO session_stop_before_76",
+            "CREATE TABLE session_stop(\n command_key TEXT PRIMARY KEY NOT NULL REFERENCES core_command(command_key),\n session_ref TEXT NOT NULL REFERENCES session(session_ref),\n selected_turn_id INTEGER REFERENCES turn(turn_id),\n position INTEGER CHECK(position>0),\n admission_cutoff INTEGER NOT NULL CHECK(admission_cutoff>=0),\n stopped_at INTEGER NOT NULL CHECK(stopped_at>0),\n parent_caused INTEGER NOT NULL DEFAULT 0 CHECK(parent_caused IN (0,1)), action_cutoff INTEGER NOT NULL DEFAULT 0 CHECK(action_cutoff>=0)\n) STRICT, WITHOUT ROWID",
+            "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,position,admission_cutoff,stopped_at,parent_caused,action_cutoff) SELECT command_key,session_ref,selected_turn_id,position,admission_cutoff,stopped_at,parent_caused,0 FROM session_stop_before_76",
+            "DROP TABLE session_stop_before_76",
+            "CREATE INDEX session_stop_exclusion ON session_stop(session_ref,admission_cutoff,position)",
+            "CREATE INDEX session_stop_unpositioned ON session_stop(session_ref) WHERE position IS NULL",
+            "CREATE INDEX session_stop_position ON session_stop(session_ref,position)",
+            "CREATE INDEX session_stop_turn ON session_stop(selected_turn_id)",
+            "CREATE TABLE action_control_command(\n command_key TEXT PRIMARY KEY NOT NULL REFERENCES core_command(command_key),\n action_id TEXT NOT NULL CHECK(length(CAST(action_id AS BLOB)) BETWEEN 1 AND 20 AND (action_id NOT GLOB '*[^0-9]*' AND length(action_id)=length(CAST(action_id AS BLOB)))),\n selected_action_id INTEGER REFERENCES action_operation(action_id),\n selection TEXT CHECK(selection IS NULL OR selection IN ('background','final')),\n selection_position INTEGER CHECK(selection_position>0),\n CHECK((selected_action_id IS NULL AND selection IS NULL AND selection_position IS NULL) OR (selected_action_id IS NOT NULL AND selection IS NOT NULL AND selection_position IS NOT NULL))\n) STRICT, WITHOUT ROWID",
         },
         .mysql = &.{
             "SET @rui_background_kind_ddl=NULL",
@@ -747,12 +754,12 @@ pub const migrations = [_]Migration{
             "EXECUTE rui_background_kind",
             "DEALLOCATE PREPARE rui_background_kind",
             "SET @rui_background_kind_ddl=NULL",
-            "ALTER TABLE action_operation ADD COLUMN background_content_id BIGINT AFTER approval_position, ADD COLUMN background_position BIGINT CHECK((background_content_id IS NULL AND background_position IS NULL) OR (background_content_id IS NOT NULL AND background_position IS NOT NULL AND background_position>0 AND (acceptance_position IS NULL OR background_position<acceptance_position))) AFTER background_content_id, ADD COLUMN background_at BIGINT CHECK((background_position IS NULL AND background_at IS NULL) OR (background_position IS NOT NULL AND background_at IS NOT NULL AND background_at>0)) AFTER background_position, ADD FOREIGN KEY(background_content_id) REFERENCES content(content_id)",
+            "ALTER TABLE action_operation ADD COLUMN background_content_id BIGINT AFTER approval_position, ADD COLUMN background_position BIGINT AFTER background_content_id, ADD COLUMN background_at BIGINT AFTER background_position, ADD FOREIGN KEY(background_content_id) REFERENCES content(content_id), ADD CHECK((background_content_id IS NULL AND background_position IS NULL) OR (background_content_id IS NOT NULL AND background_position IS NOT NULL AND background_position>0 AND (acceptance_position IS NULL OR background_position<acceptance_position))), ADD CHECK((background_position IS NULL AND background_at IS NULL) OR (background_position IS NOT NULL AND background_at IS NOT NULL AND background_at>0))",
             "ALTER TABLE action_operation DROP INDEX action_operation_session_results, MODIFY action_operation_session_results_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN acceptance_position IS NOT NULL AND background_position IS NULL THEN session_ref END) STORED, ADD INDEX action_operation_session_results(action_operation_session_results_lead,parent_operation_id,acceptance_position)",
             "CREATE INDEX action_operation_background ON action_operation(session_ref,background_position)",
             "ALTER TABLE action_operation ADD COLUMN action_operation_background_results_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN background_position IS NOT NULL THEN session_ref END) STORED, ADD INDEX action_operation_background_results(action_operation_background_results_lead,parent_operation_id,background_position)",
             "ALTER TABLE session_stop ADD COLUMN action_cutoff BIGINT NOT NULL DEFAULT 0 CHECK(action_cutoff>=0) AFTER parent_caused",
-            "CREATE TABLE action_control_command(\n command_key VARCHAR(128) NOT NULL,\n action_id TEXT NOT NULL,\n selected_action_id BIGINT,\n selection VARCHAR(10),\n selection_position BIGINT,\n PRIMARY KEY(command_key),\n FOREIGN KEY(command_key) REFERENCES core_command(command_key),\n FOREIGN KEY(selected_action_id) REFERENCES action_operation(action_id),\n CHECK(OCTET_LENGTH(action_id) BETWEEN 1 AND 20 AND (NOT REGEXP_LIKE(action_id,'[^0-9]','c'))),\n CHECK(selection IS NULL OR (selection='background' OR selection='final')),\n CHECK(selection_position>0),\n CHECK((selected_action_id IS NULL AND selection IS NULL AND selection_position IS NULL) OR (selected_action_id IS NOT NULL AND selection IS NOT NULL AND selection_position IS NOT NULL))\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
+            "CREATE TABLE action_control_command(\n command_key VARCHAR(128) NOT NULL,\n action_id TEXT NOT NULL,\n selected_action_id BIGINT,\n selection VARCHAR(10),\n selection_position BIGINT,\n PRIMARY KEY(command_key),\n FOREIGN KEY(command_key) REFERENCES core_command(command_key),\n FOREIGN KEY(selected_action_id) REFERENCES action_operation(action_id),\n CHECK(OCTET_LENGTH(action_id) BETWEEN 1 AND 20 AND (NOT REGEXP_LIKE(action_id,'[^0-9]','c'))),\n CHECK(selection IS NULL OR selection IN ('background','final')),\n CHECK(selection_position>0),\n CHECK((selected_action_id IS NULL AND selection IS NULL AND selection_position IS NULL) OR (selected_action_id IS NOT NULL AND selection IS NOT NULL AND selection_position IS NOT NULL))\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
         },
     },
 };
@@ -1396,7 +1403,7 @@ pub const tables = [_]Table{
             .{ .name = "stopped_at", .type = .int, .check = "stopped_at>0" },
             // Causal provenance, independent of which Command recorded the stop.
             .{ .name = "parent_caused", .type = .flag, .default = "0" },
-            .{ .name = "action_cutoff", .type = .int, .default = "0", .check = "action_cutoff>=0" },
+            .{ .name = "action_cutoff", .type = .int, .default = "0", .check = "action_cutoff>=0", .sqlite_added = true },
         },
         .primary_key = &.{"command_key"},
         .foreign_keys = &.{
@@ -1791,9 +1798,9 @@ pub const tables = [_]Table{
             // insert under an `ask` revision and never changed. Stored
             // because the feed seeks it and no index can see the revision.
             .{ .name = "approval_position", .type = .int, .nullable = true, .check = "approval_position IS NULL OR approval_position>0" },
-            .{ .name = "background_content_id", .type = .int, .nullable = true },
-            .{ .name = "background_position", .type = .int, .nullable = true, .check = "(background_content_id IS NULL AND background_position IS NULL) OR (background_content_id IS NOT NULL AND background_position IS NOT NULL AND background_position>0 AND (acceptance_position IS NULL OR background_position<acceptance_position))" },
-            .{ .name = "background_at", .type = .int, .nullable = true, .check = "(background_position IS NULL AND background_at IS NULL) OR (background_position IS NOT NULL AND background_at IS NOT NULL AND background_at>0)" },
+            .{ .name = "background_content_id", .type = .int, .nullable = true, .sqlite_added = true },
+            .{ .name = "background_position", .type = .int, .nullable = true, .check = "(background_content_id IS NULL AND background_position IS NULL) OR (background_content_id IS NOT NULL AND background_position IS NOT NULL AND background_position>0 AND (acceptance_position IS NULL OR background_position<acceptance_position))", .sqlite_added = true },
+            .{ .name = "background_at", .type = .int, .nullable = true, .check = "(background_position IS NULL AND background_at IS NULL) OR (background_position IS NOT NULL AND background_at IS NOT NULL AND background_at>0)", .sqlite_added = true },
         },
         .primary_key = &.{"action_id"},
         .uniques = &.{&.{ "parent_operation_id", "call_ordinal" }},
@@ -2847,7 +2854,10 @@ fn validateCurrent(database: *c.sqlite3, selector: []const u8, identity_mismatch
             const name = try columnText(statement, 1);
             for (expected) |object| {
                 if (!std.mem.eql(u8, object.name, name)) continue;
-                if (!std.mem.eql(u8, @tagName(object.kind), kind) or !std.mem.eql(u8, object.sql, try columnText(statement, 3))) return error.WrongStoreSchema;
+                if (!std.mem.eql(u8, @tagName(object.kind), kind) or !std.mem.eql(u8, object.sql, try columnText(statement, 3))) {
+                    if (@import("builtin").is_test) std.debug.print("SQLite canonical object mismatch {s}\nexpected: {s}\nfound: {s}\n", .{ name, object.sql, try columnText(statement, 3) });
+                    return error.WrongStoreSchema;
+                }
                 matched += 1;
                 continue :rows;
             }
@@ -3066,6 +3076,32 @@ test "MySQL sessions read literals as rsql copies them, and strictly" {
     }
 }
 
+test "schema 76 migration creates canonical promotion objects on SQLite and MySQL" {
+    const step = migrations[75 - migration_baseline];
+    try std.testing.expectEqual(@as(u32, 75), step.from);
+    inline for (.{ rsql.Dialect.sqlite, rsql.Dialect.mysql }) |dialect| {
+        const expected = comptime objects(dialect);
+        const statements = if (dialect == .sqlite) step.sqlite else step.mysql;
+        var matched: usize = 0;
+        for (statements) |statement| {
+            if (!std.mem.startsWith(u8, statement, "CREATE ")) continue;
+            for (expected) |object| {
+                if (std.mem.eql(u8, object.sql, statement)) {
+                    matched += 1;
+                    break;
+                }
+            } else {
+                std.debug.print("schema 76 noncanonical {s}: {s}\n", .{ @tagName(dialect), statement });
+                for (expected) |object| if (std.mem.indexOf(u8, statement, object.name) != null) {
+                    std.debug.print("canonical {s}: {s}\n", .{ object.name, object.sql });
+                };
+                return error.NoncanonicalMigrationObject;
+            }
+        }
+        try std.testing.expectEqual(@as(usize, if (dialect == .sqlite) 11 else 2), matched);
+    }
+}
+
 test "schema 75 migration creates canonical pin objects on SQLite and MySQL" {
     const step = migrations[74 - migration_baseline];
     inline for (.{ rsql.Dialect.sqlite, rsql.Dialect.mysql }) |dialect| {
@@ -3075,7 +3111,12 @@ test "schema 75 migration creates canonical pin objects on SQLite and MySQL" {
         for (statements) |statement| {
             if (!std.mem.startsWith(u8, statement, "CREATE ")) continue;
             for (expected) |object| {
-                if (std.mem.eql(u8, object.sql, statement)) {
+                const historical = if (dialect == .sqlite and std.mem.eql(u8, object.name, "core_command"))
+                    try std.mem.replaceOwned(u8, std.testing.allocator, object.sql, "kind BETWEEN 1 AND 8", "kind BETWEEN 1 AND 7")
+                else
+                    null;
+                defer if (historical) |text| std.testing.allocator.free(text);
+                if (std.mem.eql(u8, historical orelse object.sql, statement)) {
                     matched += 1;
                     break;
                 }
@@ -3115,7 +3156,7 @@ test "schema 75 preserves Commands and references while adding empty pin organiz
     try std.testing.expectEqual(schema_version, try sqlite.pragmaInt(database, "PRAGMA user_version"));
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM original_commands EXCEPT SELECT * FROM core_command)"));
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM core_command EXCEPT SELECT * FROM original_commands)"));
-    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM original_stops EXCEPT SELECT * FROM session_stop)"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM original_stops EXCEPT SELECT command_key,session_ref,selected_turn_id,position,admission_cutoff,stopped_at,parent_caused FROM session_stop)"));
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM session_pin"));
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM session_pin_command"));
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM pragma_foreign_key_check"));
@@ -3340,7 +3381,7 @@ test "schema 57 preserves Commands and stop references while adding nullable arc
         "UPDATE session_forward SET suppress_message=2 WHERE source_id=1",
         "UPDATE session_forward SET suppress_message=NULL WHERE source_id=1",
         "UPDATE core_command SET kind=0 WHERE command_key='archive-request'",
-        "UPDATE core_command SET kind=8 WHERE command_key='archive-request'",
+        "UPDATE core_command SET kind=9 WHERE command_key='archive-request'",
         "UPDATE core_command SET command_key='fixture-stop' WHERE command_key='archive-request'",
         "INSERT INTO session_archive(session_ref,command_key) VALUES('k7m2qx','fixture-stop')",
         // A Command without a durable stop cannot become archive intent.

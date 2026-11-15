@@ -679,7 +679,6 @@ const superseding_stop = rsql.Read(.{
     .Args = struct { action_id: u64, parent_operation_id: u64 },
     .Row = struct { command_key: Bounded(idempotency_key.max_bytes) },
     .cardinality = .optional,
-    .compound = true,
 });
 
 pub fn actionSupersededByStop(a: anytype, binding: ActionAttemptBinding) !?SupersedingControl {

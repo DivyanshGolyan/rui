@@ -53,7 +53,6 @@ const facts = rsql.Read(.{
         }
     },
     .cardinality = .optional,
-    .compound = true,
 });
 const save_selection = rsql.Write(.{
     .sql = "INSERT INTO action_control_command(command_key,action_id,selected_action_id,selection,selection_position) VALUES(?1,?2,?3,?4,?5)",
