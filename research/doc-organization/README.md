@@ -15,6 +15,7 @@ git diff --check
 ```
 
 The [move map](../../tests/ci/doc_move_map.json) assigns every original line to one destination and records every original heading's destination. The [audit](../../tests/ci/doc_moves.py) checks the source hashes, exact content after heading and link migration, anchor destinations, and new broken links. Its explicit index edits change navigation only.
+The link result covers baseline Markdown and mapped destinations, not newly added auxiliary documents or literal code comments. Those require separate inspection. Exact-span matching checks preservation but does not exclude extra prose outside the spans.
 
 The retired-workflow check now reads both the root and the moved references. Three temporary mutations were rejected at their intended assertions: deleting a composer requirement, adding a retired workflow name to the Session UI reference, and restoring a stale root anchor. Each mutation was restored before the passing run.
 
@@ -34,7 +35,9 @@ The audit found these pre-existing local link defects. This move adds none:
 
 The [remaining decisions](../../ARCHITECTURE.md#remaining-decisions) still exclude dynamic tools and MCP, while the accepted [skills and parent-creation evidence](../../docs/contracts/conversation.md#skills-1) includes MCP behavior. That ambiguity predates this organization change. Both texts are preserved for a separate contract decision.
 
-The complete selector unittest module exceeded local 20-second and 120-second budgets without a verdict. The focused owner subset passed instead. No local native build or runtime qualification is claimed. Hosted admission and review still govern landing.
+The first complete selector runs exceeded local 20-second and 120-second budgets without a verdict. The focused owner subset passed. Normal cheap prepush feedback then exposed missing local Zig and Node executables; using existing Zig 0.17.1 and Node 22.16.0 installations completed it successfully, including all 131 selector tests. The normal formatter and generated-file checks ran. No broad local native build or runtime qualification is claimed. Hosted admission and review still govern landing.
+
+An independent GPT-6.1 Terra review returned PASS+NOTES for the structural commit. It ran the preservation audit, the 18-test focused subset, and diff hygiene, and separately inspected the added research note and source-comment consumers. Its notes concern the audit limits stated above, not an observed contract or link regression.
 
 ## Concurrent documentation
 
