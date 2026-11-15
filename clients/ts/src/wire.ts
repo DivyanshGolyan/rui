@@ -174,6 +174,57 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/control/action-background": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Changes waiting for the same Session-owned Action to background. Retried by key; capacity refusal leaves its invocation unchanged. */
+        post: operations["actionBackground"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/control/action-stop": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Selects a stop of one Session-owned Action. Retried by key. Acceptance does not prove that an attempted remote effect did not run. */
+        post: operations["actionStop"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/read-action": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Reads one Session-owned Action's status and one bounded final-result window without waiting or consuming it. */
+        post: operations["readAction"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/observe-command": {
         parameters: {
             query?: never;
@@ -399,6 +450,134 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        ActionBackgroundConflictReply: {
+            /** @constant */
+            version: "18";
+            /** @constant */
+            type: "action_control_reply";
+            answer: {
+                /** @constant */
+                status: "conflict";
+                /** @constant */
+                replayed: false;
+                session: string;
+                action: components["schemas"]["Decimal"];
+                /** @enum {string} */
+                operation: "background" | "stop";
+                /** @constant */
+                code: "idempotency_key_conflict";
+            };
+        };
+        ActionBackgroundReply: {
+            /** @constant */
+            version: "18";
+            /** @constant */
+            type: "action_control_reply";
+            answer: {
+                /** @constant */
+                status: "accepted";
+                replayed: boolean;
+                session: string;
+                action: components["schemas"]["Decimal"];
+                /** @enum {string} */
+                operation: "background" | "stop";
+                action_selection: {
+                    /** @enum {string} */
+                    kind: "background" | "final" | "stop";
+                    position: components["schemas"]["Decimal"];
+                };
+            };
+        } | {
+            /** @constant */
+            version: "18";
+            /** @constant */
+            type: "action_control_reply";
+            answer: {
+                /** @constant */
+                status: "rejected";
+                replayed: boolean;
+                session: string;
+                action: components["schemas"]["Decimal"];
+                /** @enum {string} */
+                operation: "background" | "stop";
+                /** @enum {string} */
+                code: "invalid_session_reference" | "invalid_target" | "unknown_session" | "unknown_action" | "target_mismatch" | "source_stopped" | "background_unavailable";
+            };
+        };
+        ActionBackgroundRequest: {
+            /** @constant */
+            version: "18";
+            /** @constant */
+            kind: "action_background";
+            store: string;
+            key: string;
+            session: string;
+            action: components["schemas"]["Decimal"];
+        };
+        ActionStopConflictReply: {
+            /** @constant */
+            version: "18";
+            /** @constant */
+            type: "action_control_reply";
+            answer: {
+                /** @constant */
+                status: "conflict";
+                /** @constant */
+                replayed: false;
+                session: string;
+                action: components["schemas"]["Decimal"];
+                /** @enum {string} */
+                operation: "background" | "stop";
+                /** @constant */
+                code: "idempotency_key_conflict";
+            };
+        };
+        ActionStopReply: {
+            /** @constant */
+            version: "18";
+            /** @constant */
+            type: "action_control_reply";
+            answer: {
+                /** @constant */
+                status: "accepted";
+                replayed: boolean;
+                session: string;
+                action: components["schemas"]["Decimal"];
+                /** @enum {string} */
+                operation: "background" | "stop";
+                action_selection: {
+                    /** @enum {string} */
+                    kind: "background" | "final" | "stop";
+                    position: components["schemas"]["Decimal"];
+                };
+            };
+        } | {
+            /** @constant */
+            version: "18";
+            /** @constant */
+            type: "action_control_reply";
+            answer: {
+                /** @constant */
+                status: "rejected";
+                replayed: boolean;
+                session: string;
+                action: components["schemas"]["Decimal"];
+                /** @enum {string} */
+                operation: "background" | "stop";
+                /** @enum {string} */
+                code: "invalid_session_reference" | "invalid_target" | "unknown_session" | "unknown_action" | "target_mismatch" | "source_stopped" | "background_unavailable";
+            };
+        };
+        ActionStopRequest: {
+            /** @constant */
+            version: "18";
+            /** @constant */
+            kind: "action_stop";
+            store: string;
+            key: string;
+            session: string;
+            action: components["schemas"]["Decimal"];
+        };
         ActivityContentRequest: {
             /** @constant */
             version: "18";
@@ -416,12 +595,13 @@ export interface components {
             value: {
                 admission: {
                     admission: components["schemas"]["Decimal"];
-                    key: string;
+                    key: string | null;
                     turn: components["schemas"]["Decimal"] | null;
                     /** @enum {string} */
                     state: "queued" | "applied" | "excluded";
                     admitted_at: components["schemas"]["Decimal"];
                     sender: components["schemas"]["NamedPeer"] | null;
+                    source_action: components["schemas"]["Decimal"] | null;
                     content: components["schemas"]["ActivityItemContent"];
                 };
             };
@@ -432,12 +612,13 @@ export interface components {
             value: {
                 user: {
                     admission: components["schemas"]["Decimal"];
-                    key: string;
+                    key: string | null;
                     turn: components["schemas"]["Decimal"] | null;
                     /** @enum {string} */
                     state: "queued" | "applied" | "excluded";
                     admitted_at: components["schemas"]["Decimal"];
                     sender: components["schemas"]["NamedPeer"] | null;
+                    source_action: components["schemas"]["Decimal"] | null;
                     content: components["schemas"]["ActivityItemContent"];
                 };
             };
@@ -550,12 +731,13 @@ export interface components {
             value: {
                 received: {
                     admission: components["schemas"]["Decimal"];
-                    key: string;
+                    key: string | null;
                     turn: components["schemas"]["Decimal"] | null;
                     /** @enum {string} */
                     state: "queued" | "applied" | "excluded";
                     admitted_at: components["schemas"]["Decimal"];
                     sender: components["schemas"]["NamedPeer"] | null;
+                    source_action: components["schemas"]["Decimal"] | null;
                     content: components["schemas"]["ActivityItemContent"];
                 };
             };
@@ -888,6 +1070,7 @@ export interface components {
                 };
                 admitted_at: components["schemas"]["Decimal"];
                 sender: components["schemas"]["NamedPeer"] | null;
+                source_action: components["schemas"]["Decimal"] | null;
             } | {
                 position: components["schemas"]["Decimal"];
                 ordinal: components["schemas"]["Decimal"];
@@ -968,6 +1151,7 @@ export interface components {
                 };
                 admitted_at: components["schemas"]["Decimal"];
                 sender: components["schemas"]["NamedPeer"] | null;
+                source_action: components["schemas"]["Decimal"] | null;
             } | {
                 position: components["schemas"]["Decimal"];
                 ordinal: components["schemas"]["Decimal"];
@@ -1257,6 +1441,7 @@ export interface components {
             peers: components["schemas"]["PeerFacts"];
             first_message: components["schemas"]["FirstMessage"] | null;
             selected_message: string | null;
+            selected_source_action: components["schemas"]["Decimal"] | null;
             recent_messages: components["schemas"]["domainreportCurrentJsonRecent"][];
             actions: components["schemas"]["domainreportCurrentJsonActions"];
             rejected_calls: components["schemas"]["domainreportCurrentJsonRejectedCalls"];
@@ -1277,6 +1462,7 @@ export interface components {
             peers: components["schemas"]["PeerFacts"];
             first_message: components["schemas"]["FirstMessage"] | null;
             selected_message: string | null;
+            selected_source_action: components["schemas"]["Decimal"] | null;
             recent_messages: components["schemas"]["domainreportCurrentJsonRecent"][];
             actions: components["schemas"]["domainreportCurrentJsonActions"];
             rejected_calls: components["schemas"]["domainreportCurrentJsonRejectedCalls"];
@@ -2494,6 +2680,7 @@ export interface components {
                 selection: {
                     turn: components["schemas"]["Decimal"] | null;
                     admission_cutoff: components["schemas"]["Decimal"];
+                    action_cutoff: components["schemas"]["Decimal"];
                 };
                 completion: {
                     /** @enum {string} */
@@ -2509,6 +2696,7 @@ export interface components {
                 selection: {
                     turn: components["schemas"]["Decimal"] | null;
                     admission_cutoff: components["schemas"]["Decimal"];
+                    action_cutoff: components["schemas"]["Decimal"];
                 };
                 completion: {
                     /** @enum {string} */
@@ -2690,6 +2878,122 @@ export interface components {
                 target: string;
                 code: string;
                 pinned: boolean;
+            };
+        } | {
+            /** @constant */
+            version: "18";
+            /** @constant */
+            type: "command_observation";
+            key: string;
+            /** @constant */
+            delta: "full";
+            since: string | null;
+            observation: {
+                /** @enum {string} */
+                status: "absent" | "accepted" | "rejected";
+                /** @constant */
+                kind: "action_background";
+                target: string;
+                action_target: {
+                    action: components["schemas"]["Decimal"];
+                };
+            } | {
+                /** @enum {string} */
+                status: "absent" | "accepted" | "rejected";
+                /** @constant */
+                kind: "action_background";
+                target: string;
+                code: string;
+                action_target: {
+                    action: components["schemas"]["Decimal"];
+                };
+            } | {
+                /** @enum {string} */
+                status: "absent" | "accepted" | "rejected";
+                /** @constant */
+                kind: "action_background";
+                target: string;
+                action_target: {
+                    action: components["schemas"]["Decimal"];
+                };
+                action_selection: {
+                    /** @enum {string} */
+                    kind: "background" | "final" | "stop";
+                    position: components["schemas"]["Decimal"];
+                };
+            } | {
+                /** @enum {string} */
+                status: "absent" | "accepted" | "rejected";
+                /** @constant */
+                kind: "action_background";
+                target: string;
+                code: string;
+                action_target: {
+                    action: components["schemas"]["Decimal"];
+                };
+                action_selection: {
+                    /** @enum {string} */
+                    kind: "background" | "final" | "stop";
+                    position: components["schemas"]["Decimal"];
+                };
+            };
+        } | {
+            /** @constant */
+            version: "18";
+            /** @constant */
+            type: "command_observation";
+            key: string;
+            /** @constant */
+            delta: "full";
+            since: string | null;
+            observation: {
+                /** @enum {string} */
+                status: "absent" | "accepted" | "rejected";
+                /** @constant */
+                kind: "action_stop";
+                target: string;
+                action_target: {
+                    action: components["schemas"]["Decimal"];
+                };
+            } | {
+                /** @enum {string} */
+                status: "absent" | "accepted" | "rejected";
+                /** @constant */
+                kind: "action_stop";
+                target: string;
+                code: string;
+                action_target: {
+                    action: components["schemas"]["Decimal"];
+                };
+            } | {
+                /** @enum {string} */
+                status: "absent" | "accepted" | "rejected";
+                /** @constant */
+                kind: "action_stop";
+                target: string;
+                action_target: {
+                    action: components["schemas"]["Decimal"];
+                };
+                action_selection: {
+                    /** @enum {string} */
+                    kind: "background" | "final" | "stop";
+                    position: components["schemas"]["Decimal"];
+                };
+            } | {
+                /** @enum {string} */
+                status: "absent" | "accepted" | "rejected";
+                /** @constant */
+                kind: "action_stop";
+                target: string;
+                code: string;
+                action_target: {
+                    action: components["schemas"]["Decimal"];
+                };
+                action_selection: {
+                    /** @enum {string} */
+                    kind: "background" | "final" | "stop";
+                    position: components["schemas"]["Decimal"];
+                };
             };
         } | {
             /** @constant */
@@ -2810,6 +3114,54 @@ export interface components {
             store: string;
             session: string;
             action: components["schemas"]["Decimal"];
+        };
+        ReadActionReply: {
+            /** @constant */
+            version: "18";
+            /** @constant */
+            type: "action_read";
+            session: string;
+            action: components["schemas"]["Decimal"];
+            /** @enum {string} */
+            state: "waiting_approval" | "queued" | "attempted" | "resolved";
+            background_position: components["schemas"]["Decimal"] | null;
+            stop_selected: boolean;
+            final: null;
+        } | {
+            /** @constant */
+            version: "18";
+            /** @constant */
+            type: "action_read";
+            session: string;
+            action: components["schemas"]["Decimal"];
+            /** @enum {string} */
+            state: "waiting_approval" | "queued" | "attempted" | "resolved";
+            background_position: components["schemas"]["Decimal"] | null;
+            stop_selected: boolean;
+            final: {
+                position: components["schemas"]["Decimal"];
+                code: string;
+                content: {
+                    bytes: components["schemas"]["Decimal"];
+                    sha256: string;
+                };
+                window: {
+                    offset: components["schemas"]["Decimal"];
+                    next: components["schemas"]["Decimal"];
+                    more: boolean;
+                    text: string;
+                };
+            };
+        };
+        ReadActionRequest: {
+            /** @constant */
+            version: "18";
+            /** @constant */
+            kind: "read_action";
+            store: string;
+            session: string;
+            action: components["schemas"]["Decimal"];
+            offset: components["schemas"]["Decimal"];
         };
         ReadResultRequest: {
             /** @constant */
@@ -2989,6 +3341,7 @@ export interface components {
                 selection: {
                     turn: components["schemas"]["Decimal"] | null;
                     admission_cutoff: components["schemas"]["Decimal"];
+                    action_cutoff: components["schemas"]["Decimal"];
                 };
             };
             completion: {
@@ -3067,7 +3420,7 @@ export interface components {
         ToolPresentation: {
             description: string | null;
             /** @enum {string} */
-            code: "unresolved" | "pending_permission" | "succeeded" | "failed" | "timed_out" | "indeterminate" | "storage_failed" | "spawn_failed" | "cancelled" | "infrastructure_shutdown" | "denied" | "unknown_tool" | "invalid_arguments";
+            code: "unresolved" | "pending_permission" | "background" | "succeeded" | "failed" | "timed_out" | "indeterminate" | "storage_failed" | "spawn_failed" | "cancelled" | "infrastructure_shutdown" | "denied" | "unknown_tool" | "invalid_arguments";
             publication_position: components["schemas"]["Decimal"] | null;
         };
         WorkStateJson: {
@@ -3124,7 +3477,8 @@ export interface components {
         };
         domainreportCurrentJsonRecent: {
             turn: components["schemas"]["Decimal"];
-            message: string;
+            message: string | null;
+            source_action: components["schemas"]["Decimal"] | null;
             outcome: string;
         };
         domainreportCurrentJsonRejected: {
@@ -3190,7 +3544,7 @@ export interface components {
             parent_operation: components["schemas"]["Decimal"];
             call_ordinal: components["schemas"]["Decimal"];
             /** @enum {string} */
-            tool: "bash" | "find_tools" | "message_agent" | "read_transcript" | "skill" | "start_agent" | "web_search";
+            tool: "bash" | "find_tools" | "message_agent" | "read_action" | "read_transcript" | "skill" | "start_agent" | "stop_action" | "web_search";
             permission_revision: components["schemas"]["Decimal"];
             /** @enum {string} */
             authorization: "core" | "pending" | "bypass" | "allow_once";
@@ -3307,7 +3661,8 @@ export interface components {
         };
         domainreport_full_shapeFullMessage: {
             admission: components["schemas"]["Decimal"];
-            command_key: string;
+            command_key: string | null;
+            source_action: components["schemas"]["Decimal"] | null;
             content: components["schemas"]["domainreport_full_shapeFullInline"];
             turn: components["schemas"]["Decimal"] | null;
             /** @enum {string} */
@@ -3843,6 +4198,138 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["PermissionDecisionConflictReply"] | components["schemas"]["ErrorReply"];
+                };
+            };
+            /** @description A refusal or failure. */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorReply"];
+                };
+            };
+        };
+    };
+    actionBackground: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description The wire version this document describes. Any other version is refused. */
+                "X-Rui-Wire-Version": components["parameters"]["WireVersion"];
+                /** @description The Host instance (from host-info) the request is meant for; a different instance refuses it. */
+                "X-Rui-Host-Instance"?: components["parameters"]["HostInstance"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ActionBackgroundRequest"];
+            };
+        };
+        responses: {
+            /** @description The reply. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ActionBackgroundReply"];
+                };
+            };
+            /** @description The key was used before with different input (the conflict reply), or the request names another Store or Host instance (a refusal). */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ActionBackgroundConflictReply"] | components["schemas"]["ErrorReply"];
+                };
+            };
+            /** @description A refusal or failure. */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorReply"];
+                };
+            };
+        };
+    };
+    actionStop: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description The wire version this document describes. Any other version is refused. */
+                "X-Rui-Wire-Version": components["parameters"]["WireVersion"];
+                /** @description The Host instance (from host-info) the request is meant for; a different instance refuses it. */
+                "X-Rui-Host-Instance"?: components["parameters"]["HostInstance"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ActionStopRequest"];
+            };
+        };
+        responses: {
+            /** @description The reply. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ActionStopReply"];
+                };
+            };
+            /** @description The key was used before with different input (the conflict reply), or the request names another Store or Host instance (a refusal). */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ActionStopConflictReply"] | components["schemas"]["ErrorReply"];
+                };
+            };
+            /** @description A refusal or failure. */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorReply"];
+                };
+            };
+        };
+    };
+    readAction: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description The wire version this document describes. Any other version is refused. */
+                "X-Rui-Wire-Version": components["parameters"]["WireVersion"];
+                /** @description The Host instance (from host-info) the request is meant for; a different instance refuses it. */
+                "X-Rui-Host-Instance"?: components["parameters"]["HostInstance"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReadActionRequest"];
+            };
+        };
+        responses: {
+            /** @description The reply. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReadActionReply"];
                 };
             };
             /** @description A refusal or failure. */

@@ -53,9 +53,9 @@ pub const Target = union(CommandKind) {
     session_archive: struct { archived: bool },
     model_interruption: struct { turn: u64, operation: u64 },
     permission_decision: struct { action: u64, decision: PermissionDecision },
+    session_pin: struct { pinned: bool },
     action_background: u64,
     action_stop: u64,
-    session_pin: struct { pinned: bool },
 };
 
 pub const Answer = struct {

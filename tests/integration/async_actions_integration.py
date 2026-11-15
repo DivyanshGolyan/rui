@@ -11,6 +11,7 @@ import json
 import os
 import pathlib
 import shlex
+import sys
 import tempfile
 import threading
 
@@ -76,6 +77,24 @@ def collected_final(store, session, action):
             return status, "".join(chunks)
         assert int(window["next"]) > int(offset), status
         offset = window["next"]
+
+
+def _dispose_case(state, host, endpoint, thread, release, final_reply=None):
+    try:
+        host_process.dispose_all(
+            release.touch,
+            lambda: final_reply.set() if final_reply is not None else None,
+            lambda: bash_fixture.dispose_owner_case(host, endpoint, thread),
+        )
+    finally:
+        if (primary := sys.exception()) is not None:
+            host_process.dispose_all(
+                lambda: (state / "primary-failure.txt").write_text(
+                    host_process.cleanup_failure(primary) + "\n" +
+                    "\n".join(getattr(primary, "__notes__", ()))),
+                lambda: (state / "requests.json").write_text(
+                    json.dumps([json.loads(value) for value in endpoint.requests], indent=2)),
+            )
 
 
 def prove_promotion(root, mode):
@@ -156,21 +175,8 @@ def prove_promotion(root, mode):
                     "selection": selection, "receipt": receipt, "final": status,
                     "requests": [json.loads(value) for value in endpoint.requests]}
         (state / "witness.json").write_text(json.dumps(evidence, ensure_ascii=False, indent=2))
-    except BaseException as primary:
-        (state / "primary-failure.txt").write_text(repr(primary))
-        (state / "requests.json").write_text(json.dumps([json.loads(value) for value in endpoint.requests], indent=2))
-        release.touch()
-        final_reply.set()
-        try:
-            bash_fixture.dispose_owner_case(host, endpoint, thread)
-        except BaseException as cleanup:
-            (state / "cleanup-failure.txt").write_text(repr(cleanup))
-            raise primary from cleanup
-        raise
-    else:
-        release.touch()
-        final_reply.set()
-        bash_fixture.dispose_owner_case(host, endpoint, thread)
+    finally:
+        _dispose_case(state, host, endpoint, thread, release, final_reply)
 
 
 def prove_waiting_permission(root):
@@ -205,21 +211,8 @@ def prove_waiting_permission(root):
         fixture.wait_for(lambda: final_of(store, session, action), "authorized final")
         assert len(launches(launch)) == 1, launches(launch)
         final_reply.set()
-    except BaseException as primary:
-        (state / "primary-failure.txt").write_text(repr(primary))
-        (state / "requests.json").write_text(json.dumps([json.loads(value) for value in endpoint.requests], indent=2))
-        release.touch()
-        final_reply.set()
-        try:
-            bash_fixture.dispose_owner_case(host, endpoint, thread)
-        except BaseException as cleanup:
-            (state / "cleanup-failure.txt").write_text(repr(cleanup))
-            raise primary from cleanup
-        raise
-    else:
-        release.touch()
-        final_reply.set()
-        bash_fixture.dispose_owner_case(host, endpoint, thread)
+    finally:
+        _dispose_case(state, host, endpoint, thread, release, final_reply)
 
 
 
@@ -268,19 +261,8 @@ def prove_capacity_one(root, background):
             final = action_read(store, session, action)
             assert final["state"] == "resolved" and final["background_position"] is None, final
         (state / "requests.json").write_text(json.dumps([json.loads(value) for value in endpoint.requests], indent=2))
-    except BaseException as primary:
-        (state / "primary-failure.txt").write_text(repr(primary))
-        (state / "requests.json").write_text(json.dumps([json.loads(value) for value in endpoint.requests], indent=2))
-        release.touch()
-        try:
-            bash_fixture.dispose_owner_case(host, endpoint, thread)
-        except BaseException as cleanup:
-            (state / "cleanup-failure.txt").write_text(repr(cleanup))
-            raise primary from cleanup
-        raise
-    else:
-        release.touch()
-        bash_fixture.dispose_owner_case(host, endpoint, thread)
+    finally:
+        _dispose_case(state, host, endpoint, thread, release)
 
 def prove_model_controls(root):
     state = root / "model-controls"
@@ -331,19 +313,8 @@ def prove_model_controls(root):
         assert fixture.read_action(store, session, selected["action"], "arguments") == arguments.encode()
         assert len(endpoint.requests) == 4, endpoint.requests
         (state / "requests.json").write_text(json.dumps([json.loads(value) for value in endpoint.requests], indent=2))
-    except BaseException as primary:
-        (state / "primary-failure.txt").write_text(repr(primary))
-        (state / "requests.json").write_text(json.dumps([json.loads(value) for value in endpoint.requests], indent=2))
-        release.touch()
-        try:
-            bash_fixture.dispose_owner_case(host, endpoint, thread)
-        except BaseException as cleanup:
-            (state / "cleanup-failure.txt").write_text(repr(cleanup))
-            raise primary from cleanup
-        raise
-    else:
-        release.touch()
-        bash_fixture.dispose_owner_case(host, endpoint, thread)
+    finally:
+        _dispose_case(state, host, endpoint, thread, release)
 
 
 def main():

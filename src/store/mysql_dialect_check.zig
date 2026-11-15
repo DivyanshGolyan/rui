@@ -1089,7 +1089,10 @@ test "schema 75 MySQL pin migration handles fresh and historically upgraded kind
             }
             try load(migrated_database, store_testing.expected_mysql_rows, true);
         }
-        try load(migrated_database, "CREATE TEMPORARY TABLE original_pin_commands AS SELECT * FROM core_command;CREATE TEMPORARY TABLE original_pin_stops AS SELECT * FROM session_stop", false);
+        try load(migrated_database, "CREATE TEMPORARY TABLE original_pin_commands AS SELECT * FROM core_command", false);
+        defer restore("DROP TEMPORARY TABLE " ++ migrated_database ++ ".original_pin_commands");
+        try load(migrated_database, "CREATE TEMPORARY TABLE original_pin_stops AS SELECT * FROM session_stop", false);
+        defer restore("DROP TEMPORARY TABLE " ++ migrated_database ++ ".original_pin_stops");
         try load(migrated_database, schema.mysqlMigration(74), false);
         try expectSameResults(&comptime shapeQueries(migrated_database), &comptime shapeQueries(parent_database));
         try expectSameResults(&.{
@@ -1108,7 +1111,12 @@ test "schema 75 MySQL pin migration handles fresh and historically upgraded kind
             "SELECT count(*) FROM session_pin WHERE command_key IS NULL",
             "SELECT pinned FROM session_pin_command WHERE command_key='pin-upgrade'",
         }, &.{ "SELECT 1", "SELECT 1" });
-        try load(migrated_database, "CREATE TEMPORARY TABLE original_populated_pin_commands AS SELECT * FROM core_command;CREATE TEMPORARY TABLE original_populated_pin AS SELECT * FROM session_pin;CREATE TEMPORARY TABLE original_populated_pin_requests AS SELECT * FROM session_pin_command", false);
+        try load(migrated_database, "CREATE TEMPORARY TABLE original_populated_pin_commands AS SELECT * FROM core_command", false);
+        defer restore("DROP TEMPORARY TABLE " ++ migrated_database ++ ".original_populated_pin_commands");
+        try load(migrated_database, "CREATE TEMPORARY TABLE original_populated_pin AS SELECT * FROM session_pin", false);
+        defer restore("DROP TEMPORARY TABLE " ++ migrated_database ++ ".original_populated_pin");
+        try load(migrated_database, "CREATE TEMPORARY TABLE original_populated_pin_requests AS SELECT * FROM session_pin_command", false);
+        defer restore("DROP TEMPORARY TABLE " ++ migrated_database ++ ".original_populated_pin_requests");
         try load(migrated_database, schema.mysqlMigrationFrom(75).?, false);
         try expectCatalog(migrated_database);
         try expectSameResults(&.{
