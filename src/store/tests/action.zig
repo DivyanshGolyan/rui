@@ -976,11 +976,25 @@ test "native promotion reports stopped Actions until settlement while suppressin
                             try std.testing.expect(storage.stopOwedSession(&child_stop, .{}) == .accepted);
                         }
                         try NativePromotion.expectReported(&storage, &tmp, session.slice(), action, attempted, false);
+                        if (terminal and attempted) {
+                            const bytes = try testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024);
+                            defer std.testing.allocator.free(bytes);
+                            const report = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
+                            defer report.deinit();
+                            try std.testing.expectEqualStrings("1", report.value.object.get("actions").?.object.get("count").?.string);
+                        }
                         if (binding) |held| {
                             try std.testing.expect((try storage.actionSupersededByStop(held)) != null);
                             _ = try storage.settleActionAttempt(held, .succeeded, "Terminal evidence after stop", .{});
                         }
                         try NativePromotion.expectReported(&storage, &tmp, session.slice(), action, false, false);
+                        if (terminal) {
+                            const bytes = try testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024);
+                            defer std.testing.allocator.free(bytes);
+                            const report = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
+                            defer report.deinit();
+                            try std.testing.expectEqualStrings("0", report.value.object.get("actions").?.object.get("count").?.string);
+                        }
                     }
                 }
             }
