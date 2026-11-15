@@ -40,7 +40,7 @@ The helper is `scripts/verify-rui`. Set `V=.claude/skills/verify-rui/scripts/ver
 
    For a bare-`rui` saved-settings startup proof, `new` has already started a Host: pause it with `$V rui "$RUN" host pause --store STORE`, save settings with `$V rui "$RUN" host set --store STORE PATH VALUE`, then open `--session overview` below. This exercises bare Rui's starter instead of attaching to the prestarted fixture Host. Record the replacement Host's status and settings; `doctor`'s original-instance check intentionally no longer applies to this replacement.
 
-   Ready means `host status` reports `"status":"ready"` and both Sessions exist. Teardown is `cleanup` (see below). `$V restart-host "$RUN"` stops the Host (when it is running) and starts a fresh one on the same Store, fixture and `--host-setenv` options.
+   Ready means `host status` reports `"status":"ready"` and the configured fixture Sessions exist. A new `--no-sessions` run has no Sessions. Teardown is `cleanup` (see below). `$V restart-host "$RUN"` stops the Host (when it is running) and starts a fresh one on the same Store, fixture and `--host-setenv` options.
 
 3. **Open a terminal: one Rui client per name.**
 
@@ -84,8 +84,10 @@ Doctor is read-only. It checks:
 - that the owned fixture and Host PIDs are alive with unchanged start times;
 - that the fixture answers with this run's ID;
 - that the Host is `ready` with the instance ID recorded at launch, and holds this Store open (`lsof`);
-- that both Sessions are present;
+- that every registered fixture Session is present by its exact reference, including `demo` and `approve` for normal runs; an empty registry requires explicit `--no-sessions` intent and an empty Session list;
 - that the tmux server is on the private socket.
+
+Empty runs created before the helper recorded `--no-sessions` intent must be recreated with `new --no-sessions`. Doctor treats a missing intent flag as a normal fixture, not permission to skip Session checks.
 
 It also prints macOS Accessibility and Screen Recording status for information only. Any `BAD` line means you must not drive this run.
 
