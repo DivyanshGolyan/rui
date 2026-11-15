@@ -955,7 +955,7 @@ test "native promotion reports stopped Actions until settlement while suppressin
                             break :child (try storage.configure(&child, .{})).accepted.session;
                         } else root;
                         const action = try NativePromotion.promoted(&storage, &tmp, session.slice());
-                        const binding: ?store_core.ActionAttemptBinding = if (attempted) held: {
+                        const binding: ?action_domain.ActionAttemptBinding = if (attempted) held: {
                             var allow: protocol.PermissionDecisionCommand = .{ .session = session, .action_id = action, .decision = .allow_once };
                             try allow.key.set("allow-held");
                             try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
