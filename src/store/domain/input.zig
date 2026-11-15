@@ -9,7 +9,7 @@ const custody = @import("../../content_custody.zig");
 const content = @import("content.zig");
 const store_core = @import("../Store.zig");
 const rsql = @import("../rsql.zig");
-const store_access = @import("../Access.zig");
+const store_access = @import("../access.zig");
 
 /// Text already has three current internal custody forms: a sealed person
 /// request, borrowed tool bytes, or a child ending's saved model answer.
