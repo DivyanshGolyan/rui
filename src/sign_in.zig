@@ -7,7 +7,7 @@ pub const Account = enum { chatgpt, api_key };
 pub const Method = enum { browser, device };
 pub const Field = enum { base, key, model };
 pub const Control = enum { chatgpt, api_key, browser, device, reuse, base, key, model, connect, link, callback, copy_code, open_page, switch_method, back, retry, recheck, pause_command, start_command, close };
-pub const Attempt = enum { chatgpt, codex, key, existing, recheck };
+pub const Attempt = enum { browser, device, key, existing, recheck };
 pub const Failure = enum {
     expired,
     denied,
@@ -98,12 +98,12 @@ pub const State = struct {
     fn start(self: *State, attempt: Attempt) Effect {
         self.attempt +%= 1;
         self.show(switch (attempt) {
-            .chatgpt => .browser,
-            .codex => .device,
+            .browser => .browser,
+            .device => .device,
             else => .{ .saving = attempt },
         }, switch (attempt) {
-            .chatgpt => .callback,
-            .codex => .copy_code,
+            .browser => .callback,
+            .device => .copy_code,
             else => .back,
         });
         return .{ .start = attempt };
@@ -131,8 +131,8 @@ pub const State = struct {
                 if (self.page == .stopping and !failure.saved()) return self.step(.cancelled);
                 const retry: Attempt = if (failure.saved()) .existing else if (failure == .superseded) .key else switch (self.page) {
                     .api => .key,
-                    .browser => .chatgpt,
-                    .device => .codex,
+                    .browser => .browser,
+                    .device => .device,
                     .saving => |attempt| attempt,
                     else => .existing,
                 };
@@ -151,7 +151,7 @@ pub const State = struct {
                     .choose => |account| if (self.page == .account) {
                         self.show(if (account == .chatgpt) .method else .api, if (account == .chatgpt) .browser else .key);
                     },
-                    .method => |method| if (self.page == .method) return self.start(if (method == .browser) .chatgpt else .codex),
+                    .method => |method| if (self.page == .method) return self.start(if (method == .browser) .browser else .device),
                     .reuse => if (self.page == .method) return self.start(.existing),
                     .field => |field| if (self.page == .api) {
                         self.focus = switch (field) {
@@ -199,7 +199,7 @@ fn act(state: *State, action: Action) Effect {
 test "Sign-in guided account method cancellation publication and stale actions" {
     var state: State = .{};
     try std.testing.expectEqual(Effect.none, act(&state, .{ .choose = .chatgpt }));
-    try std.testing.expectEqual(@as(Attempt, .chatgpt), act(&state, .{ .method = .browser }).start);
+    try std.testing.expectEqual(@as(Attempt, .browser), act(&state, .{ .method = .browser }).start);
     const attempt = state.attempt;
     try std.testing.expectEqual(Effect.cancel, act(&state, .switch_method));
     try std.testing.expectEqual(Effect.none, state.step(.{ .failed = .expired }));
@@ -215,7 +215,7 @@ test "Sign-in guided account method cancellation publication and stale actions" 
 }
 
 test "Sign-in every page has reachable controls and stale input never starts work" {
-    const pages_ = [_]Page{ .account, .method, .api, .browser, .device, .{ .stopping = .method }, .{ .saving = .key }, .{ .failed = .{ .failure = .login, .retry = .chatgpt } }, .pending, .connected };
+    const pages_ = [_]Page{ .account, .method, .api, .browser, .device, .{ .stopping = .method }, .{ .saving = .key }, .{ .failed = .{ .failure = .login, .retry = .browser } }, .pending, .connected };
     for (pages_) |page| {
         var state: State = .{ .page = page };
         state.focus = state.controls()[0];
@@ -253,7 +253,7 @@ test "Sign-in published failures retry existing credentials before either OAuth 
         const expected: Attempt = switch (failure) {
             .defaults, .host, .defaults_and_host, .uncertain => .existing,
             .superseded => .key,
-            .expired, .denied, .unreachable_service, .answer, .plan, .host_id, .login, .settings => if (page == .browser) .chatgpt else .codex,
+            .expired, .denied, .unreachable_service, .answer, .plan, .host_id, .login, .settings => if (page == .browser) .browser else .device,
         };
         try std.testing.expect(state.page == .failed);
         try std.testing.expectEqual(expected, state.page.failed.retry);
