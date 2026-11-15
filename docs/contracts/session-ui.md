@@ -55,7 +55,7 @@ The overview refreshes about once a second with `session list` `since`, keeping 
 The overview has no slash-command parser or view command surface; the former `/sessions` archive-view commands and counts-line view-name click are removed.
 The pinned `+ New Session` action has its own row above the `Sessions` and `Archived` tabs wherever the list is visible, including sidebars and empty lists.
 `OverviewLines.SessionControls` composes both rows with the existing `GroupedList` press regions. No generic tab widget or second focus manager owns them.
-The active tab is bold. Keyboard selection has a separate selection background, so moving between tabs does not imply a filter change.
+The active tab is bold. Keyboard selection has a separate selection background, so moving between tabs does not imply a filter change. The tabs omit whole-row hover so a resting pointer cannot cover the focused tab.
 Down from New Session selects the current view's tab. Up from the first Session returns to that tab, and Up again selects New Session.
 Left and Right move between the two tab targets. Enter or a click selects that explicit destination. Activating the current tab does not reload or toggle the filter.
 Tab and Shift-Tab follow the same list selection order as Down and Up. Escape in the archived view keeps its existing return to Sessions.

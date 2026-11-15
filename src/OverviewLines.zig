@@ -42,6 +42,8 @@ pub const SessionControls = struct {
         const self: *SessionControls = @ptrCast(@alignCast(raw));
         if (value == .mouse and (value.mouse.button == .wheel_up or value.mouse.button == .wheel_down)) return;
         try self.row.widget().handleEvent(ctx, value);
+        // Tabs own per-label focus; whole-row hover would cover that background.
+        if (value == .mouse and value.mouse.row == 1) try self.row.inner.hover.handleEvent(ctx, .mouse_leave);
     }
 
     fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
@@ -300,5 +302,32 @@ test "Session pin alternate gestures never activate New Session or Settings" {
     for (events.cmds.items) |cmd| switch (cmd) {
         .set_mouse_shape => {},
         else => return error.TestUnexpectedCommand,
+    };
+}
+
+test "session tab focus survives pointer hover without changing active filter" {
+    var state: overview_view.State = undefined;
+    try state.init(std.testing.allocator, .{ .cwd = "/w", .home = "/h" });
+    defer state.deinit();
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var clicks: Clicks = .{};
+    var controls: SessionControls = .{ .state = &state, .userdata = &clicks, .on_click = Clicks.take };
+    const draw: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 2 }, .cell_size = .{} };
+    var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    for ([_]overview_view.ArchiveFilter{ .active, .archived }) |filter| for ([_]overview_view.Selection{ .sessions, .archived }) |focus| for ([_]i16{ 3, 13, 30 }) |pointer| {
+        state.archive = filter;
+        state.selected = focus;
+        _ = try controls.widget().draw(draw);
+        try controls.widget().handleEvent(&events, .{ .mouse = .{ .col = pointer, .row = 1, .button = .none, .type = .motion, .mods = .{} } });
+        const shown = try controls.widget().draw(draw);
+        var screen: vaxis.Screen = try .init(arena.allocator(), .{ .cols = 46, .rows = 2, .x_pixel = 0, .y_pixel = 0 });
+        const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 46, .height = 2, .screen = &screen };
+        try shown.render(window, controls.widget());
+        try std.testing.expectEqual(widget_style.of(.{}, .{ .background = .selection }).bg, screen.readCell(if (focus == .sessions) 2 else 12, 1).?.style.bg);
+        try std.testing.expectEqual(filter == .active, screen.readCell(2, 1).?.style.bold);
+        try std.testing.expectEqual(filter == .archived, screen.readCell(12, 1).?.style.bold);
+        try std.testing.expectEqual(focus, state.selected);
+        try std.testing.expectEqual(filter, state.archive);
     };
 }
