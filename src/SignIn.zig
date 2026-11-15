@@ -1703,7 +1703,13 @@ test "Sign-in choices subtitle footer and action buttons keep separate drawn key
                 const at = std.mem.indexOfScalar(core.Control, controls, control).?;
                 try page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.tab } });
                 try std.testing.expectEqual(controls[(at + 1) % controls.len], page.state.focus);
-                try std.testing.expect(page.focusedAction() == null);
+                if (page.state.focus != control) {
+                    try std.testing.expect(page.focusedAction() == null);
+                } else switch (control) {
+                    .close => try std.testing.expect(page.focusedAction().? == .close),
+                    .back => try std.testing.expect(page.focusedAction().? == .back),
+                    else => return error.UnexpectedSingleControl,
+                }
             }
         }
         for ([_]core.Page{ .method, .api, .browser, .device, .{ .failed = .{ .failure = .expired, .retry = .device } }, .pending }) |from| {
