@@ -35,6 +35,11 @@ const oracle_database = "rui_dialect_check_oracle";
 
 const State = enum { unopened, absent, open, broken };
 
+// The root observer must see and clear each entry's trigger evidence before
+// a queued batch commits. Only this disposable oracle is nontransactional;
+// canonical tables and the application login's grants stay unchanged.
+pub const touch_oracle_definition = "(session_ref VARCHAR(6)) ENGINE=MEMORY";
+
 /// Guards everything below: some Store tests call the Store from threads.
 var mutex: std.Io.Mutex = .init;
 var state: State = .unopened;
@@ -156,7 +161,7 @@ fn bootstrap() !void {
     for (schema.mysql_session) |text| try setup(text);
     const objects = comptime schema.objects(.mysql);
     for (objects) |object| try ddl(object.name, object.sql);
-    try ddl("touch oracle", "CREATE TABLE " ++ oracle_database ++ ".touched_oracle(session_ref TEXT)");
+    try ddl("touch oracle", "CREATE TABLE " ++ oracle_database ++ ".touched_oracle" ++ touch_oracle_definition);
     const triggers = comptime sqlite.touchOracleTriggers(.mysql, oracle_database ++ ".touched_oracle");
     for (triggers) |text| try ddl("touch oracle", text);
 }
@@ -975,7 +980,7 @@ test "schema 70 MySQL migration updates the saved wire label and preserves ordin
         try load(migrated_database, schema.mysqlMigrationFrom(69).?, false);
         try expectCatalog(migrated_database);
         // Native Store readback uses the same touch oracle as other live Stores.
-        try setup("DROP DATABASE IF EXISTS " ++ migrated_database ++ "_oracle;CREATE DATABASE " ++ migrated_database ++ "_oracle;CREATE TABLE " ++ migrated_database ++ "_oracle.touched_oracle(session_ref TEXT)");
+        try setup("DROP DATABASE IF EXISTS " ++ migrated_database ++ "_oracle;CREATE DATABASE " ++ migrated_database ++ "_oracle;CREATE TABLE " ++ migrated_database ++ "_oracle.touched_oracle" ++ touch_oracle_definition);
         for (comptime sqlite.touchOracleTriggers(.mysql, migrated_database ++ "_oracle.touched_oracle")) |text| try setup(text);
         done.migrations += 1;
         writeRecord();
