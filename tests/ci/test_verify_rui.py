@@ -1536,6 +1536,30 @@ while True:
                                  ("initial-frame", screens[count - 1], False))
                 self.assertTrue(records[0]["ok"])
 
+    def test_initial_readiness_requires_complete_guided_account_controls(self):
+        # Nonblank rows from the actual4be first-run140x40 committed capture.
+        modal = (
+            '                                  ────────────────────────────────────────────────────────────────────────\n'
+            '                                   Sign in to Rui\n'
+            '                                     Choose account  Credentials stay out of conversations.\n'
+            '                                     ChatGPT         Use your subscription\n'
+            '                                     API key         OpenAI or a custom Responses API\n'
+            '                                     Close           Esc returns\n'
+            '                                     Navigation      Tab / Shift-Tab move. Enter chooses. Esc back.\n'
+        )
+        cases = [("", False), ("Sign in to Rui", False), (modal, True),
+                 (modal + "Opening…", False),
+                 ("  + New Session\n  Settings\nenter open", True), (" › Type a task", True)]
+        cases.extend((modal.replace(label, ""), False) for label in
+                     ("Sign in to Rui", "ChatGPT", "API key", "Close", "Navigation", "Tab / Shift-Tab"))
+
+        def check(predicate, _description, **_kwargs):
+            for text, expected in cases:
+                with self.subTest(text=text):
+                    self.assertEqual(bool(predicate(types.SimpleNamespace(completed=text))), expected)
+
+        self.helper["frame_initial_ready"](types.SimpleNamespace(wait=check))
+
     def test_frame_terminal_receives_initial_size_and_theme(self):
         scenario = {"sizes": ["100x30"], "states": [{"name": "empty", "open": "overview", "steps": [], "theme": "day"}]}
         calls, _records = self.run_frames_scenario(scenario)

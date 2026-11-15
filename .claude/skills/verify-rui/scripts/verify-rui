@@ -2562,15 +2562,17 @@ def frame_steps(run, terminal, steps, exiting=False):
 
 
 def frame_initial_ready(terminal, first_wait=None, allow_exit=False):
-    # Chat/sign-in and old baseline images have a prompt. The editorless
-    # overview instead commits its pinned actions and bottom footer. Keep
-    # both paths so current recipes can still capture the unfixed baseline.
-    # The opening read resets the scroll anchor before input is released.
-    terminal.wait(lambda c: ("›" in c.completed or all(text in c.completed for text in
-                              ("+ New Session", "Settings", "enter open")))
-                  and "Opening…" not in c.completed
-                  and (not first_wait or first_wait in c.completed),
-                  "initial screen ready" + (f" with {first_wait!r}" if first_wait else ""),
+    def ready(capture):
+        text = capture.completed
+        guided = (re.search(r"^ *Sign in to Rui *$", text, re.M) is not None
+                  and all(re.search(r"^ *" + re.escape(label) + r" {2,}\S", text, re.M)
+                          for label in ("ChatGPT", "API key", "Close"))
+                  and re.search(r"^ *Navigation {2,}Tab / Shift-Tab", text, re.M) is not None)
+        return (("›" in text or all(marker in text for marker in
+                 ("+ New Session", "Settings", "enter open")) or guided)
+                and "Opening…" not in text and (not first_wait or first_wait in text))
+
+    terminal.wait(ready, "initial screen ready" + (f" with {first_wait!r}" if first_wait else ""),
                   allow_exit=allow_exit)
 
 
