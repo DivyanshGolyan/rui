@@ -1918,7 +1918,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
         },
         .action_background => |*command| {
             var timing = ControlTiming.init(host, command.key, "action_background", accepted_at_ns);
-            const result = host.store.backgroundAction(command, host.actionCapacity(), host.hooks.storeFaults(.{ .control = timing.storeTrace() }));
+            const result = host.store.backgroundAction(command, host.dispatchCapacity(), host.hooks.storeFaults(.{ .control = timing.storeTrace() }));
             if (result == .infrastructure_failure) fenceDispatch(host, "Action background save", error.CanonicalStoreFailure);
             if (result == .accepted) publishControlHint(host, command.key.slice());
             if (header.drop == .after_commit and result != .infrastructure_failure) return;

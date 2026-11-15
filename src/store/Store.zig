@@ -1358,7 +1358,7 @@ pub const Store = struct {
         self.identities().survey.asked = asked;
         self.identities().survey.capacity = capacity;
         // Nothing committed since the survey ran, right after its COMMIT.
-        if (survey.kept == .ready and survey.asked == asked and std.meta.eql(survey.capacity, capacity) and !self.isFenced())
+        if (survey.kept == .ready and survey.asked == asked and std.meta.eql(survey.capacity.workInput(), capacity.workInput()) and !self.isFenced())
             return .{ .core = survey.core, .mcp = survey.mcp, .bash = survey.bash, .message = survey.message, .tool_continuation = survey.tool_continuation, .retry = survey.retry };
         const entry = try enter(self, .none);
         defer entry.release();
@@ -2414,7 +2414,7 @@ const Survey = packed struct(u16) {
     message: bool = false,
     tool_continuation: bool = false,
     retry: bool = false,
-    capacity: action_domain.Capacity = .{ .credit = .none, .mcp = false },
+    capacity: action_domain.Capacity = .{ .free_credit = .none, .mcp_open = false },
     _: u3 = 0,
 };
 

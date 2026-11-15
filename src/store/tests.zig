@@ -1121,7 +1121,7 @@ pub fn costCycleForTesting(storage: *Store, tmp: *std.testing.TmpDir, session: [
     try allow.session.set(session);
     try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
     try denyForTesting(storage, session, try std.fmt.bufPrint(&key, "cycle-{d}-deny", .{index}), first_action + 1);
-    const action = (try storage.admitNextActionAttempt(.{ .credit = .foreground, .mcp = true }, 300_000, .{})).?.permit.binding;
+    const action = (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
     _ = try storage.settleActionAttempt(action, .succeeded, "total 8\ndrwxr-xr-x 2 user user 4096 a\n-rw-r--r-- 1 user user 120 b\n", .{});
     const continued = (try storage.admitModelAttempt(.tool_continuation, .{})).?.permit.binding;
     const items = [_][]const u8{"{\"type\":\"message\",\"id\":\"answer\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Two files; the removal was denied.\"}]}"};
@@ -1477,7 +1477,7 @@ test {
 pub fn recoverPairForTesting(storage: *Store, tmp: *std.testing.TmpDir, binding: AttemptBinding, prefix: []const u8) ![2]u64 {
     try settleTwoActionsForTesting(storage, tmp, binding, prefix);
     var ids: [2]u64 = undefined;
-    for (&ids) |*id| id.* = (try storage.admitNextActionAttempt(.{ .credit = .foreground, .mcp = true }, 300_000, .{})).?.permit.binding.action_id;
+    for (&ids) |*id| id.* = (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding.action_id;
     for (ids) |_| try std.testing.expect(try storage.recoverOneUncertainAction(ActiveOperationFilter.empty()));
     return ids;
 }

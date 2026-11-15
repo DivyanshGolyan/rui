@@ -1550,42 +1550,54 @@ test "store.mysql live a lone write's message carries the dispatch survey the Ho
     var before = queries.*;
     try storage.queue().write(insertHeld, .{ &storage, 9000800 });
     try std.testing.expectEqual(before + 1, queries.*);
-    const asked = try storage.dispatchWork(false, .{ .credit = .foreground, .mcp = true });
+    const asked = try storage.dispatchWork(false, .{ .free_credit = .one, .mcp_open = true });
     try std.testing.expectEqual(before + 2, queries.*);
     // Then a commit's one message carries the survey, and the next ask
     // sends nothing and answers as a survey of its own does.
     before = queries.*;
     try storage.queue().write(insertHeld, .{ &storage, 9000801 });
     try std.testing.expectEqual(before + 1, queries.*);
-    const carried = try storage.dispatchWork(false, .{ .credit = .foreground, .mcp = true });
+    const carried = try storage.dispatchWork(false, .{ .free_credit = .one, .mcp_open = true });
     try std.testing.expectEqual(before + 1, queries.*);
     try std.testing.expectEqual(asked, carried);
     // It answers one ask.
-    try std.testing.expectEqual(carried, try storage.dispatchWork(false, .{ .credit = .foreground, .mcp = true }));
+    try std.testing.expectEqual(carried, try storage.dispatchWork(false, .{ .free_credit = .one, .mcp_open = true }));
     try std.testing.expectEqual(before + 2, queries.*);
     before = queries.*;
     try storage.queue().write(insertHeld, .{ &storage, 9000890 });
-    _ = try storage.dispatchWork(false, .{ .credit = .foreground, .mcp = false });
+    _ = try storage.dispatchWork(false, .{ .free_credit = .one, .mcp_open = false });
     try std.testing.expectEqual(before + 2, queries.*);
     before = queries.*;
     try storage.queue().write(insertHeld, .{ &storage, 9000891 });
-    _ = try storage.dispatchWork(false, .{ .credit = .foreground, .mcp = true });
+    _ = try storage.dispatchWork(false, .{ .free_credit = .one, .mcp_open = true });
+    try std.testing.expectEqual(before + 2, queries.*);
+    before = queries.*;
+    try storage.queue().write(insertHeld, .{ &storage, 9000892 });
+    _ = try storage.dispatchWork(false, .{ .free_credit = .none, .mcp_open = true });
+    try std.testing.expectEqual(before + 2, queries.*);
+    before = queries.*;
+    try storage.queue().write(insertHeld, .{ &storage, 9000893 });
+    _ = try storage.dispatchWork(false, .{ .free_credit = .none, .mcp_open = false });
+    try std.testing.expectEqual(before + 1, queries.*);
+    before = queries.*;
+    try storage.queue().write(insertHeld, .{ &storage, 9000894 });
+    _ = try storage.dispatchWork(false, .{ .free_credit = .one, .mcp_open = true });
     try std.testing.expectEqual(before + 2, queries.*);
     // An ask with Turns held is another survey.
     before = queries.*;
     try storage.queue().write(insertHeld, .{ &storage, 9000802 });
-    _ = try storage.dispatchWork(true, .{ .credit = .foreground, .mcp = true });
+    _ = try storage.dispatchWork(true, .{ .free_credit = .one, .mcp_open = true });
     try std.testing.expectEqual(before + 2, queries.*);
     // A write that saved nothing leaves no survey: the message, ROLLBACK,
     // then the Host's own.
     before = queries.*;
     try std.testing.expectError(error.LiveGuard, storage.queue().write(insertTouching, .{ &storage, 9000803, 9000899 }));
-    _ = try storage.dispatchWork(true, .{ .credit = .foreground, .mcp = true });
+    _ = try storage.dispatchWork(true, .{ .free_credit = .one, .mcp_open = true });
     try std.testing.expectEqual(before + 3, queries.*);
     try std.testing.expect(!storage.isFenced());
     // A carried survey is dropped by a later commit that carries none:
     // two writes sharing a batch.
-    _ = try storage.dispatchWork(false, .{ .credit = .foreground, .mcp = true });
+    _ = try storage.dispatchWork(false, .{ .free_credit = .one, .mcp_open = true });
     try storage.queue().write(insertHeld, .{ &storage, 9000804 });
     const Writer = struct {
         result: anyerror!void = {},
@@ -1605,7 +1617,7 @@ test "store.mysql live a lone write's message carries the dispatch survey the Ho
     for (threads) |thread| thread.join();
     for (writers) |writer| try writer.result;
     before = queries.*;
-    _ = try storage.dispatchWork(false, .{ .credit = .foreground, .mcp = true });
+    _ = try storage.dispatchWork(false, .{ .free_credit = .one, .mcp_open = true });
     try std.testing.expectEqual(before + 1, queries.*);
 }
 
@@ -1625,7 +1637,7 @@ test "store.mysql live a write saves in its one message whether or not the batch
     try openLive(&storage, &tmp);
     defer storage.close() catch unreachable;
     const queries = &storage.engine.mysql.state.connection.queries;
-    _ = try storage.dispatchWork(false, .{ .credit = .foreground, .mcp = true });
+    _ = try storage.dispatchWork(false, .{ .free_credit = .one, .mcp_open = true });
     // From room for COMMIT and none of the survey, through part of it, to
     // all of it: the write is one message and saves, and the Host's ask
     // is free only when the whole survey rode.
@@ -1637,7 +1649,7 @@ test "store.mysql live a write saves in its one message whether or not the batch
         try storage.queue().write(insertWithRoom, .{ &storage, id, room });
         try std.testing.expectEqual(before + 1, queries.*);
         try std.testing.expect(!storage.isFenced());
-        _ = try storage.dispatchWork(false, .{ .credit = .foreground, .mcp = true });
+        _ = try storage.dispatchWork(false, .{ .free_credit = .one, .mcp_open = true });
         const asked = queries.* - before - 1;
         try std.testing.expect(asked <= 1);
         carried[@intFromBool(asked == 0)] = true;
@@ -1657,7 +1669,7 @@ test "store.mysql live a carried survey whose read fails fences as the Host's ow
     defer storage.close() catch |err| {
         std.testing.expectEqual(error.StoreCloseFailed, err) catch unreachable;
     };
-    _ = try storage.dispatchWork(false, .{ .credit = .foreground, .mcp = true });
+    _ = try storage.dispatchWork(false, .{ .free_credit = .one, .mcp_open = true });
     const generation = storage.commitGeneration();
     // A table the survey reads is gone: its SELECT fails after COMMIT ran.
     try rawExec(&storage, "RENAME TABLE session_stop_owed TO session_stop_owed_gone");

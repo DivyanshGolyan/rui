@@ -42,7 +42,7 @@ test "allow once survives mode changes and reopen without granting another Attem
             try submitTestMessage(&storage, &tmp, "allow-input", "allow-message", session.slice(), "propose");
             const model_binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             try settleTwoActionsForTesting(&storage, &tmp, model_binding, "allow-metadata");
-            try std.testing.expect((try storage.admitNextActionAttempt(.{ .credit = .foreground, .mcp = true }, 300_000, .{})) == null);
+            try std.testing.expect((try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})) == null);
             const action_id = try store_testing.queryU64(&storage, "SELECT min(action_id) FROM action_operation", .{});
             const sibling_id = try store_testing.queryU64(&storage, "SELECT max(action_id) FROM action_operation", .{});
             var allow: protocol.PermissionDecisionCommand = .{ .action_id = action_id, .decision = .allow_once };
@@ -86,11 +86,11 @@ test "allow once survives mode changes and reopen without granting another Attem
                 try std.testing.expectEqualStrings("allow_once", report.value.actions.unresolved[0].authorization);
                 for (report.value.actions.unresolved) |action| try std.testing.expectEqualStrings("1", action.permission_revision);
             }
-            const action = (try storage.admitNextActionAttempt(.{ .credit = .foreground, .mcp = true }, 300_000, .{})).?.permit.binding;
+            const action = (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
             try std.testing.expectEqual(action_id, action.action_id);
             try std.testing.expect(storage.decidePermission(&allow, .{}).accepted.replayed);
             // The admitted Action cannot be reissued; its unapproved sibling remains pending.
-            try std.testing.expect((try storage.admitNextActionAttempt(.{ .credit = .foreground, .mcp = true }, 300_000, .{})) == null);
+            try std.testing.expect((try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})) == null);
         }
     }.run);
 }
@@ -128,7 +128,7 @@ test "earlier Action settlement remains authoritative after Session stop" {
             try allow.key.set("settlement-first-allow");
             try allow.session.set(allocated_session_0.slice());
             try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
-            const action_binding = (try storage.admitNextActionAttempt(.{ .credit = .foreground, .mcp = true }, 300_000, .{})).?.permit.binding;
+            const action_binding = (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
 
             try std.testing.expectEqual(
                 ActionSettlement.effect,
@@ -231,8 +231,8 @@ test "core tool table routes every built-in to its sole action selector" {
                     .decoded_arguments = arguments,
                 }};
                 try settleCallsForTesting(&storage, &tmp, binding, "table-calls", &calls);
-                const core = try storage.nextCoreWork(.{ .credit = .foreground, .mcp = true });
-                const bash = try storage.admitNextActionAttempt(.{ .credit = .foreground, .mcp = true }, 300_000, .{});
+                const core = try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true });
+                const bash = try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{});
                 try std.testing.expectEqual(expected == .core, core != null);
                 try std.testing.expectEqual(expected == .bash, bash != null);
                 if (core) |work| {
@@ -242,12 +242,12 @@ test "core tool table routes every built-in to its sole action selector" {
                     try std.testing.expectEqual(binding.turn_id, call.binding.turn_id);
                     try std.testing.expectEqualStrings(session.slice(), call.session.slice());
                     // Selection is a read, not an Attempt or a resolution.
-                    try std.testing.expectEqual(call.binding.action_id, (try storage.nextCoreWork(.{ .credit = .foreground, .mcp = true })).?.action.binding.action_id);
+                    try std.testing.expectEqual(call.binding.action_id, (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action.binding.action_id);
                 }
                 if (bash) |attempted| {
                     try std.testing.expectEqual(binding.operation_id, attempted.permit.binding.parent_operation_id);
-                    try std.testing.expect((try storage.nextCoreWork(.{ .credit = .foreground, .mcp = true })) == null);
-                    try std.testing.expect((try storage.admitNextActionAttempt(.{ .credit = .foreground, .mcp = true }, 300_000, .{})) == null);
+                    try std.testing.expect((try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })) == null);
+                    try std.testing.expect((try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})) == null);
                 }
             }
         }
@@ -441,7 +441,7 @@ test "Action admission never visits an Action waiting for permission, in rounds"
                 var metadata_buffer: [32]u8 = undefined;
                 try settleTwoActionsForTesting(&storage, &tmp, binding, try std.fmt.bufPrint(&metadata_buffer, "waiting-metadata-{d}", .{pass}));
                 const counter = TwinRounds.start(&storage);
-                try std.testing.expect((try storage.admitNextActionAttempt(.{ .credit = .foreground, .mcp = true }, 300_000, .{})) == null);
+                try std.testing.expect((try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})) == null);
                 cost.* = counter.taken();
             }
             try std.testing.expectEqual(@as(u64, 4), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE authorized=0 AND resolution_code IS NULL", .{}));
@@ -492,7 +492,7 @@ test "runner action seam covers selection admission input settlement stop and re
                         .{ .item_id = "seam-item", .name = tool, .encoded_call_id = "seam-call", .decoded_call_id = "seam-call", .encoded_arguments = encoded[1 .. encoded.len - 1], .decoded_arguments = arguments },
                     });
                     const selection_rounds = storage.testing_content_work.rounds;
-                    const selected = (try storage.nextAction(runner, .{ .credit = .foreground, .mcp = true })).?;
+                    const selected = (try storage.nextAction(runner, .{ .free_credit = .one, .mcp_open = true })).?;
                     if (runner == .bash) try std.testing.expectEqual(selection_rounds + 1, storage.testing_content_work.rounds);
                     var wrong = selected;
                     wrong.runner = if (runner == .bash) .mcp else .bash;
@@ -500,7 +500,7 @@ test "runner action seam covers selection admission input settlement stop and re
                     try storage.resolveAction(wrong, .spawn_failed, "Wrong runner must not resolve.", .{});
                     try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE action_id=?1 AND attempt_ordinal=0 AND resolution_code IS NULL", .{selected.action_id}));
                     try std.testing.expectEqual(runner, selected.runner);
-                    try std.testing.expectEqual(selected.action_id, (try storage.nextAction(runner, .{ .credit = .foreground, .mcp = true })).?.action_id);
+                    try std.testing.expectEqual(selected.action_id, (try storage.nextAction(runner, .{ .free_credit = .one, .mcp_open = true })).?.action_id);
                     if (runner == .mcp) try std.testing.expectEqualStrings("docs", selected.server.slice());
                     const expected_code: []const u8 = switch (scenario) {
                         0 => "succeeded",
@@ -552,7 +552,7 @@ test "runner action seam covers selection admission input settlement stop and re
                         }
                     }
                     try storage.resolveAction(selected, .spawn_failed, "Repeated resolution must not replace the result.", .{});
-                    try std.testing.expect((try storage.nextAction(runner, .{ .credit = .foreground, .mcp = true })) == null);
+                    try std.testing.expect((try storage.nextAction(runner, .{ .free_credit = .one, .mcp_open = true })) == null);
                     try std.testing.expect((try storage.admitActionAttempt(selected, 1234, .{})) == null);
                     try std.testing.expect(!try storage.recoverOneUncertainAction(ActiveOperationFilter.empty()));
                     try std.testing.expectEqual(@as(u64, if (scenario == 0 or scenario == 2) 1 else 0), try store_testing.queryU64(&storage, "SELECT attempt_ordinal FROM action_operation WHERE action_id=?1", .{selected.action_id}));
@@ -609,7 +609,7 @@ test "Action read covers permission queue attempt and immutable final paging" {
                 try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
                 try storage.readAction(&request, &result);
                 try std.testing.expect(result.status == .pending and result.status.pending == .queued);
-                const binding = (try storage.admitNextActionAttempt(.{ .credit = .foreground, .mcp = true }, 30_000, .{})).?.permit.binding;
+                const binding = (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 30_000, .{})).?.permit.binding;
                 try storage.readAction(&request, &result);
                 try std.testing.expect(result.status == .pending and result.status.pending == .attempted);
                 try std.testing.expectError(error.InvalidActionResult, storage.settleActionAttempt(binding, .succeeded, "", .{}));
@@ -635,7 +635,7 @@ test "Action read covers permission queue attempt and immutable final paging" {
                 try std.testing.expectError(error.InvalidCursor, storage.readAction(&.{ .session = session, .action_id = action, .offset = bytes.len + 1 }, &result));
                 try storage.readAction(&request, &result);
                 try std.testing.expectEqualDeep(first, result.status.resolved);
-                try std.testing.expect((try storage.admitNextActionAttempt(.{ .credit = .foreground, .mcp = true }, 30_000, .{})) == null);
+                try std.testing.expect((try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 30_000, .{})) == null);
             }
         }
     }.run);

@@ -1,7 +1,7 @@
 //! Action Attempts: admitting, dispatching, settling and recovering tool actions.
 
 const std = @import("std");
-pub const Capacity = @import("../../action_control.zig").DispatchCapacity;
+pub const Capacity = @import("../../execution.zig").DispatchCapacity;
 const attempt = @import("../../attempt.zig");
 const turn_ending = @import("../../turn_ending.zig");
 const tool_proposal = @import("../../tool_proposal.zig");
@@ -307,7 +307,7 @@ const CoreSelection = struct {
     fn queue(selection: *CoreSelection, a: anytype, capacity: Capacity) void {
         const names: CoreNames = .of();
         a.read(owed_stop, .{}, &selection.stop);
-        if (capacity.mcp) a.read(next_mcp_action, .{ .foreground = capacity.foreground(), .background = capacity.background() }, &selection.mcp);
+        if (capacity.includesMcp()) a.read(next_mcp_action, .{ .foreground = capacity.hasCredit(), .background = capacity.hasHeadroom() }, &selection.mcp);
         a.read(owed_ending, .{}, &selection.ending);
         a.read(forward_domain.next, .{}, &selection.forward);
         a.read(next_core_action, names.args(.{}), &selection.action);
@@ -318,7 +318,7 @@ const CoreSelection = struct {
 /// `admitNextActionAttempt` selects, and the work read's Bash answer.
 fn queueNextActionAttempt(a: anytype, capacity: Capacity, next: *next_action_attempt.Result) void {
     const names: CoreNames = .of();
-    a.read(next_action_attempt, names.args(.{ .foreground = capacity.foreground(), .background = capacity.background() }), next);
+    a.read(next_action_attempt, names.args(.{ .foreground = capacity.hasCredit(), .background = capacity.hasHeadroom() }), next);
 }
 
 /// Whether `nextCoreWork` and `admitNextActionAttempt` would find work:
@@ -968,8 +968,8 @@ pub fn nextAction(a: anytype, comptime runner: tool_defs.Runner, capacity: Capac
     }
     if (runner != .mcp) @compileError("only Action runners can select Actions");
     var row: next_mcp_action.Result = undefined;
-    if (!capacity.mcp) return null;
-    a.read(next_mcp_action, .{ .foreground = capacity.foreground(), .background = capacity.background() }, &row);
+    if (!capacity.includesMcp()) return null;
+    a.read(next_mcp_action, .{ .foreground = capacity.hasCredit(), .background = capacity.hasHeadroom() }, &row);
     try a.run();
     const found = row orelse return null;
     return .{ .action_id = found.action_id.get(), .runner = .mcp, .background = found.background, .server = found.server };

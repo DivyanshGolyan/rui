@@ -1,22 +1,5 @@
 const std = @import("std");
 
-pub const DispatchCapacity = packed struct(u3) {
-    credit: enum(u2) { none, foreground, background },
-    mcp: bool,
-
-    pub fn fromFree(free: usize, mcp_available: bool) DispatchCapacity {
-        return .{ .credit = if (free == 0) .none else if (free == 1) .foreground else .background, .mcp = mcp_available };
-    }
-
-    pub fn foreground(self: DispatchCapacity) bool {
-        return self.credit != .none;
-    }
-
-    pub fn background(self: DispatchCapacity) bool {
-        return self.credit == .background;
-    }
-};
-
 pub const Rejection = enum {
     invalid_session_reference,
     invalid_target,

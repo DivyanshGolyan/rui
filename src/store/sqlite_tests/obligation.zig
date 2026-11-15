@@ -205,7 +205,7 @@ test "Session work dates a tool group by its last acceptance, even when the cloc
     try std.testing.expect(try storage.configure(&update, .{}) == .accepted);
     try submitTestMessage(&storage, &tmp, "stepped-bypass-input", "stepped-bypass-input", bypass.slice(), "propose");
     try settleTwoActionsForTesting(&storage, &tmp, (try storage.admitNextModelAttempt(.{})).?.permit.binding, "stepped-bypass-calls");
-    const action = (try storage.admitNextActionAttempt(.{ .credit = .foreground, .mcp = true }, 300_000, .{})).?.permit.binding;
+    const action = (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
     _ = try storage.settleActionAttempt(action, .succeeded, "Bash succeeded.", .{});
     var sql: [256]u8 = undefined;
     try sqlite.exec(storage.sqliteDatabase(), try std.fmt.bufPrintSentinel(&sql, "UPDATE model_operation SET resolved_at=300 WHERE session_ref='{0s}';" ++

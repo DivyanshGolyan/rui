@@ -347,7 +347,7 @@ pub fn attemptBashForTesting(storage: *Store, tmp: *std.testing.TmpDir, session:
     try std.testing.expect(try storage.configure(&tools, .{}) == .accepted);
     try submitTestMessage(storage, tmp, "bash-seed", "bash-seed", session, "run two");
     try settleTwoActionsForTesting(storage, tmp, (try storage.admitNextModelAttempt(.{})).?.permit.binding, "bash-calls");
-    return (try storage.admitNextActionAttempt(.{ .credit = .foreground, .mcp = true }, 300_000, .{})).?.permit.binding;
+    return (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
 }
 
 /// Counts the statements the Store starts from `begin` to `end`: not a
@@ -494,7 +494,7 @@ const mcp_digests = blk: {
 pub const mcp_tool_set: tool_defs.HostToolSet = .{ .records = &mcp_records, .digests = &mcp_digests };
 
 pub fn expectOnlyForwardsThenIdle(storage: *Store) !void {
-    while (try storage.nextCoreWork(.{ .credit = .foreground, .mcp = true })) |work| {
+    while (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })) |work| {
         try std.testing.expect(work == .forward);
         try std.testing.expect(try storage.deliverSessionForward(work.forward, .{}));
     }

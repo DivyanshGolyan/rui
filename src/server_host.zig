@@ -459,7 +459,7 @@ pub const Host = struct {
     test_observation: ?*TestObservation = null,
     last_unprocessed_completions: ?u64 = null,
 
-    pub fn actionCapacity(host: *const Host) store_module.ActionCapacityView {
+    pub fn dispatchCapacity(host: *const Host) store_module.ActionCapacityView {
         return .{ .total = host.custody.records.len, .context = &host.custody, .freeFn = struct {
             fn free(context: *const anyopaque) usize {
                 const pool: *const execution.CustodyPool = @ptrCast(@alignCast(context));

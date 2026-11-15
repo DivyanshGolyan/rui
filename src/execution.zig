@@ -302,6 +302,31 @@ pub const CustodyRecord = struct {
     timing: model_timing.Attempt = .{},
 };
 
+pub const DispatchCapacity = packed struct(u3) {
+    free_credit: enum(u2) { none, one, multiple },
+    mcp_open: bool,
+
+    pub fn fromFree(free: usize, mcp_open: bool) DispatchCapacity {
+        return .{ .free_credit = if (free == 0) .none else if (free == 1) .one else .multiple, .mcp_open = mcp_open };
+    }
+
+    pub fn hasCredit(self: DispatchCapacity) bool {
+        return self.free_credit != .none;
+    }
+
+    pub fn hasHeadroom(self: DispatchCapacity) bool {
+        return self.free_credit == .multiple;
+    }
+
+    pub fn includesMcp(self: DispatchCapacity) bool {
+        return self.hasCredit() and self.mcp_open;
+    }
+
+    pub fn workInput(self: DispatchCapacity) DispatchCapacity {
+        return .{ .free_credit = self.free_credit, .mcp_open = self.includesMcp() };
+    }
+};
+
 pub const CustodyPool = struct {
     records: []CustodyRecord,
 
@@ -487,6 +512,10 @@ pub const CustodyPool = struct {
             }
         }
         return count;
+    }
+
+    pub fn dispatchCapacity(self: *const CustodyPool, mcp_open: bool) DispatchCapacity {
+        return .fromFree(self.records.len - self.occupied(), mcp_open);
     }
 
     pub fn occupied(self: *const CustodyPool) usize {
@@ -1130,4 +1159,36 @@ test "background custody capacity one refuses without consuming launch authority
     try std.testing.expectError(error.DispatchPermitConsumed, pool.consumeLaunchAuthority(finite, .{ .action = binding }));
     try pool.detach(finite);
     try pool.cleanupComplete(finite);
+}
+
+test "dispatch capacity reflects shared custody through detached cleanup" {
+    var records: [1]CustodyRecord = @splat(.{});
+    var pool = CustodyPool.initialize(&records);
+    const open = pool.dispatchCapacity(true);
+    try std.testing.expect(open.hasCredit() and open.includesMcp());
+    const locally_full = pool.dispatchCapacity(false);
+    try std.testing.expect(locally_full.hasCredit() and !locally_full.includesMcp());
+    const token = pool.reserve().?;
+    try std.testing.expect(!pool.dispatchCapacity(true).hasCredit());
+    try std.testing.expect(!pool.dispatchCapacity(true).includesMcp());
+    var permit = attempt.DispatchPermit{ .binding = .{ .turn_id = 1, .operation_id = 2, .attempt_ordinal = 1 } };
+    _ = try pool.attach(token, &permit);
+    try pool.detach(token);
+    try std.testing.expect(!pool.dispatchCapacity(true).hasCredit());
+    try pool.cleanupComplete(token);
+    try std.testing.expect(pool.dispatchCapacity(true).includesMcp());
+    try std.testing.expect(open.hasCredit() and open.includesMcp());
+}
+
+test "dispatch capacity keeps physical headroom and effective work inputs distinct" {
+    for ([_]usize{ 0, 1, 2, 16 }) |free| {
+        for ([_]bool{ false, true }) |mcp_open| {
+            const capacity: DispatchCapacity = .fromFree(free, mcp_open);
+            try std.testing.expectEqual(free > 0, capacity.hasCredit());
+            try std.testing.expectEqual(free > 1, capacity.hasHeadroom());
+            try std.testing.expectEqual(free > 0 and mcp_open, capacity.includesMcp());
+        }
+    }
+    try std.testing.expectEqual(DispatchCapacity.fromFree(0, false).workInput(), DispatchCapacity.fromFree(0, true).workInput());
+    try std.testing.expect(!std.meta.eql(DispatchCapacity.fromFree(1, false).workInput(), DispatchCapacity.fromFree(2, false).workInput()));
 }

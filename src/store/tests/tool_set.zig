@@ -446,7 +446,7 @@ test "MCP missing tools refuse create update creating Message and start_agent wi
                 const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
                 const call: TestingCall = .{ .item_id = "missing-child", .name = "start_agent", .encoded_call_id = "missing-child", .decoded_call_id = "missing-child", .encoded_arguments = "{}", .decoded_arguments = "{}" };
                 try settleCallsForTesting(&storage, &tmp, model, "mcp-child-calls", &.{call});
-                const action = (try storage.nextCoreWork(.{ .credit = .foreground, .mcp = true })).?.action;
+                const action = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
                 var spec = try testingAgentSpec(if (mode == 3) &.{"kept"} else &.{"lookup"}, "ask");
                 const result = try storage.startAgent(action.binding, parent.slice(), "read", true, &spec, null, .{});
                 if (mode == 3) {

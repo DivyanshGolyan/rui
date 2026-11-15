@@ -267,7 +267,7 @@ test "public completed Action sibling corruption fences first Conversation read"
                 try allow.key.set(key);
                 try allow.session.set(session.slice());
                 try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
-                const action_binding = (try storage.admitNextActionAttempt(.{ .credit = .foreground, .mcp = true }, 300_000, .{})).?.permit.binding;
+                const action_binding = (try storage.admitNextActionAttempt(.{ .free_credit = .one, .mcp_open = true }, 300_000, .{})).?.permit.binding;
                 _ = try storage.settleActionAttempt(action_binding, .succeeded, key, .{});
             }
             // Obtain only the immutable identity, not a traversal on another
