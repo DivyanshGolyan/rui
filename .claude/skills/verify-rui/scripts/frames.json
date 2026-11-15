@@ -699,7 +699,7 @@
         "/setup          defaults for new chats",
         "/unarchive      restore this chat",
         "/review",
-        "Verify the project and review",
+        "Verify the project and",
         "more \u00b7 type to narrow"
       ],
       "absent": [
