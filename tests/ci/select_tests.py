@@ -81,7 +81,7 @@ FIXTURES = {
     "dispatch-integration": ((I + "dispatch_integration.py",), (), ("src/model_adapter.zig", *MODEL)),
     "dispatch-debug-integration": ((I + "dispatch_integration.py",), (), ()),
     "async-actions-integration": ((I + "async_actions_integration.py",), (),
-                                  (*BASH, "src/tool_execution.zig", "src/action_tools.zig", "src/execution_turn.zig",
+                                  (*BASH, "src/tool_execution.zig", "src/execution_turn.zig",
                                    "src/store/domain/action.zig", "src/store/domain/action_control.zig",
                                    "src/store/domain/sourced_input.zig", "src/store/domain/model_settlement.zig")),
     "bash-integration": ((I + "bash_integration.py",), (), BASH),

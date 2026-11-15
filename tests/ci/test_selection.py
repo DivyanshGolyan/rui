@@ -1153,7 +1153,7 @@ class SelectionTest(unittest.TestCase):
     def test_bash_lifecycle_values_keep_portable_and_native_owner_checks(self):
         for path in ("src/BashLifecycle.zig", "src/deadline.zig"):
             result = select([path], "review", AVAILABLE)
-            native = sorted(["bash-integration", "bash-lifecycle-integration", "bash-owner-integration",
+            native = sorted(["async-actions-integration", "bash-integration", "bash-lifecycle-integration", "bash-owner-integration",
                              "bash-recovery-integration", "test-native", "test-logic"])
             self.assertEqual(result["native_targets"], native, path)
             self.assertEqual(result["targets"], sorted(native + ["stack-frames"]), path)

@@ -188,9 +188,12 @@ fn outline(store: *storage.Store, arena: std.mem.Allocator, session: []const u8,
     try out.print("{d}.{d} {s}", .{ item.position, item.ordinal, @tagName(item.value) });
     var note: ?protocol.Bounded(protocol.max_tool_description_bytes) = null;
     switch (item.value) {
-        .admission, .user => try out.writeAll(" person"),
-        // A Label is display text, never model input: only the sender's ID.
-        .received => |message| if (message.sender) |sender| try out.print(" {s}", .{sender.session.slice()}),
+        .admission, .user, .received => |message| switch (message.source) {
+            .tool_final => |id| try out.print(" tool-final Action {d}", .{id}),
+            .person => try out.writeAll(" person"),
+            // A Label is display text, never model input: only the sender's ID.
+            .peer => |peer| try out.print(" {s}", .{peer.sender.session.slice()}),
+        },
         .sent => |sent| try out.print(" {s}", .{sent.target.session.slice()}),
         .send_failed => |sent| if (sent.target) |target|
             try out.print(" {s}", .{target.session.slice()})
@@ -353,14 +356,14 @@ test "read_transcript core runner reads other Session outlines before full windo
     try settleCallsForTesting(&database, &tmp, model, "transcript-metadata", &calls);
     // Even malformed runtime arguments settle as core calls under ask.
     try std.testing.expectEqual(@as(u64, args.len), try storage.testing.sqlite_only.queryU64(&database, "SELECT count(*) FROM action_operation WHERE authorized=1 AND approval_position IS NULL", .{}));
-    try std.testing.expect(try database.admitNextActionAttempt(300_000, .{}) == null);
+    try std.testing.expect(try database.admitNextActionAttempt(.{ .credit = .background, .mcp = true }, 300_000, .{}) == null);
     const note = try std.fmt.allocPrint(arena, "Read {s}'s transcript", .{other.slice()});
     try std.testing.expectEqual(@as(u64, 8), try storage.testing.sqlite_only.queryU64(&database, "SELECT count(*) FROM model_tool_call WHERE description=?1", .{note}));
     try std.testing.expectEqual(@as(u64, 2), try storage.testing.sqlite_only.queryU64(&database, "SELECT count(*) FROM model_tool_call WHERE description='Read own transcript'", .{}));
     try std.testing.expectEqual(@as(u64, 1), try storage.testing.sqlite_only.queryU64(&database, "SELECT count(*) FROM model_tool_call WHERE description='Read zzzzzz''s transcript'", .{}));
 
     for (args, 0..) |_, index| {
-        const work = (try database.nextCoreWork()).?.action;
+        const work = (try database.nextCoreWork(.{ .credit = .background, .mcp = true })).?.action;
         try std.testing.expect(work.tool == .read_transcript);
         try run(&database, arena, &work, .{});
         const result_id = try storage.testing.sqlite_only.queryU64(&database, "SELECT resolution_content_id FROM action_operation WHERE action_id=?1", .{work.binding.action_id});
@@ -423,7 +426,7 @@ test "read_transcript core runner reads other Session outlines before full windo
             else => unreachable,
         }
     }
-    try std.testing.expect(try database.nextCoreWork() == null);
+    try std.testing.expect(try database.nextCoreWork(.{ .credit = .background, .mcp = true }) == null);
 }
 
 test "read_transcript opens public calls and no-content rows and identifies nonzero result ordinals" {
@@ -466,9 +469,9 @@ test "read_transcript opens public calls and no-content rows and identifies nonz
         .{ .item_id = "sender", .name = "bash", .encoded_call_id = "sender", .decoded_call_id = "sender", .encoded_arguments = quoted_sender[1 .. quoted_sender.len - 1], .decoded_arguments = sender_arguments },
     };
     try settleCallsForTesting(&database, &tmp, source_model, "transcript-source-calls", &source_calls);
-    const work = (try database.nextCoreWork()).?.action;
+    const work = (try database.nextCoreWork(.{ .credit = .background, .mcp = true })).?.action;
     try std.testing.expect(try database.deliverAgentMessage(work.binding, "zzzzzz", "hello", .{}) == .failed);
-    const sender_action = (try database.admitNextActionAttempt(300_000, .{})).?.permit.binding;
+    const sender_action = (try database.admitNextActionAttempt(.{ .credit = .background, .mcp = true }, 300_000, .{})).?.permit.binding;
     var sender_input: ActionExecutionInput = undefined;
     try database.readActionExecutionInput(.bash, sender_action, &sender_input);
     var rename: wire_request.ConfigureCommand = .{};
@@ -564,7 +567,7 @@ test "read_transcript opens public calls and no-content rows and identifies nonz
     }
     try settleCallsForTesting(&database, &tmp, model, "transcript-reader-calls", &calls);
     for (arguments, 0..) |_, index| {
-        const input = (try database.nextCoreWork()).?.action;
+        const input = (try database.nextCoreWork(.{ .credit = .background, .mcp = true })).?.action;
         try run(&database, arena, &input, .{});
         const result_id = try storage.testing.sqlite_only.queryU64(&database, "SELECT resolution_content_id FROM action_operation WHERE action_id=?1", .{input.binding.action_id});
         const reference = try testingContentReference(&database, result_id);
@@ -664,10 +667,10 @@ test "searchActivity finds start_agent call names and stored JSON arguments not 
     try std.testing.expectEqual(@as(usize, 0), result.count);
     // Settle the earlier invalid start call at its owner boundary, then run
     // read_transcript against the same public call inventory (D163).
-    const start = (try database.nextCoreWork()).?.action;
+    const start = (try database.nextCoreWork(.{ .credit = .background, .mcp = true })).?.action;
     try std.testing.expect(start.tool == .start_agent);
     _ = try database.failCoreCall(start.binding, "invalid start arguments", .{});
-    const read = (try database.nextCoreWork()).?.action;
+    const read = (try database.nextCoreWork(.{ .credit = .background, .mcp = true })).?.action;
     try run(&database, arena, &read, .{});
     const id = try storage.testing.sqlite_only.queryU64(&database, "SELECT resolution_content_id FROM action_operation WHERE action_id=?1", .{read.binding.action_id});
     const reference = try testingContentReference(&database, id);
@@ -712,4 +715,70 @@ test "read_transcript hosted call uses its recorded provider presentation" {
             try std.testing.expectEqualStrings(expected, output.written());
         }
     }.check);
+}
+
+test "read_transcript attributes queued and applied tool finals to their Action" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var database: storage.Store = undefined;
+    try storage.testing.testingSqliteStore(&database, &tmp, std.testing.io);
+    defer database.close() catch unreachable;
+    var memory: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer memory.deinit();
+    const arena = memory.allocator();
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try storage.testingCanonicalCwd(std.testing.io, &workspace_buffer);
+    var configuration = try storage.testingCompleteConfiguration("final-transcript", "", workspace, "model-a");
+    configuration.configuration.tools = try .of(&.{"bash"});
+    configuration.configuration.permission_mode.state = .value;
+    try configuration.configuration.permission_mode.value.set("bypass");
+    const session = (try database.configure(&configuration, .{})).accepted.session;
+    try storage.testingSubmitMessage(&database, &tmp, "input", "input", session.slice(), "Run the tool.");
+    const model = (try database.admitNextModelAttempt(.{})).?.permit.binding;
+    const arguments = "{\"description\":\"Held tool\",\"cmd\":\"true\"}";
+    const encoded = try std.json.Stringify.valueAlloc(arena, arguments, .{});
+    try storage.settleCallsForTesting(&database, &tmp, model, "call", &.{.{
+        .item_id = "call",
+        .name = "bash",
+        .encoded_call_id = "call",
+        .decoded_call_id = "call",
+        .encoded_arguments = encoded[1 .. encoded.len - 1],
+        .decoded_arguments = arguments,
+    }});
+    const action = try storage.testing.queryU64(&database, "SELECT action_id FROM action_operation WHERE parent_operation_id=?1", .{model.operation_id});
+    var command: @import("command_input.zig").ActionControlCommand = .{ .action_id = action };
+    command.session = session;
+    try command.key.set("promote-transcript");
+    const free: usize = 2;
+    const promotion = try database.controlAction(.background, &command, .{
+        .total = 2,
+        .context = &free,
+        .freeFn = struct {
+            fn read(context: *const anyopaque) usize {
+                return @as(*const usize, @ptrCast(@alignCast(context))).*;
+            }
+        }.read,
+    }, .{});
+    try std.testing.expect(promotion == .accepted);
+    const continuation_binding = (try database.admitNextModelAttempt(.{})).?.permit.binding;
+    try storage.settleAnswerItemsForTesting(&database, &tmp, continuation_binding, &.{"{\"type\":\"message\",\"id\":\"answer\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"Done.\"}]}"}, "Done.");
+    const selected = (try database.nextAction(.bash, .{ .credit = .background, .mcp = true })).?;
+    const binding = (try database.admitActionAttempt(selected, 30_000, .{})).?.permit.binding;
+    _ = try database.settleActionAttempt(binding, .succeeded, "Final tool data.", .{});
+    const expected = try std.fmt.allocPrint(arena, " tool-final Action {d} {d} bytes: \"Final tool data.\"\n", .{ action, "Final tool data.".len });
+    for ([_]protocol.ActivityItem.Kind{ .admission, .user }) |kind| {
+        const page = try arena.create(protocol.ActivityFacts);
+        try database.activityPage(&.{ .session = session, .kinds = .initOne(kind) }, page);
+        var finals: usize = 0;
+        for (page.items[0..page.count]) |*item| {
+            const message = if (kind == .admission) item.value.admission else item.value.user;
+            if (message.source != .tool_final) continue;
+            var output: std.Io.Writer.Allocating = .init(arena);
+            try outline(&database, arena, session.slice(), item, &output.writer);
+            try std.testing.expect(std.mem.endsWith(u8, output.written(), expected));
+            finals += 1;
+        }
+        try std.testing.expectEqual(@as(usize, 1), finals);
+        if (kind == .admission) _ = (try database.admitNextModelAttempt(.{})).?;
+    }
 }
