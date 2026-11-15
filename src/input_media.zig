@@ -428,6 +428,7 @@ const Jpeg = struct {
                 if (spectral[0] > spectral[1] or spectral[1] > 63 or spectral[2] >> 4 > 13 or spectral[2] & 15 > 13) return error.MalformedImage;
                 if (!self.progressive and !std.mem.eql(u8, spectral, &.{ 0, 63, 0 })) return error.MalformedImage;
                 if (self.progressive and ((spectral[0] == 0 and spectral[1] != 0) or (spectral[0] != 0 and self.prefix[0] != 1))) return error.MalformedImage;
+                if (self.progressive and spectral[2] >> 4 != 0 and spectral[2] & 15 != (spectral[2] >> 4) - 1) return error.MalformedImage;
                 if (self.scan_quant & ~self.quant_tables != 0) return error.MalformedImage;
                 if ((!self.progressive or (spectral[0] == 0 and spectral[2] >> 4 == 0)) and self.scan_dc & ~self.dc_tables != 0) return error.MalformedImage;
                 if ((!self.progressive or spectral[0] != 0) and self.scan_ac & ~self.ac_tables != 0) return error.MalformedImage;
@@ -589,4 +590,20 @@ test "real JPEG admission rejects missing tables malformed scans and incomplete 
     try std.testing.expectError(error.MalformedImage, scan(&bytes, .jpeg, .{}, 1));
     const without_tables = baseline[0..table] ++ baseline[frame..];
     try std.testing.expectError(error.MalformedImage, scan(without_tables, .jpeg, .{}, 1));
+}
+
+test "progressive JPEG refinement requires adjacent approximation levels" {
+    const original = @embedFile("testing/fixtures/input-progressive.jpg");
+    const approximation = 0x23d;
+    try std.testing.expectEqual(@as(u8, 0x10), original[approximation]);
+    var malformed = original.*;
+    malformed[approximation] = 0x11;
+    try std.testing.expectError(error.MalformedImage, scan(&malformed, .jpeg, .{}, 1));
+    for (1..14) |high| {
+        for (0..14) |low| {
+            if (low == high - 1) continue;
+            malformed[approximation] = @as(u8, @intCast(high)) << 4 | @as(u8, @intCast(low));
+            try std.testing.expectError(error.MalformedImage, scan(&malformed, .jpeg, .{}, 1));
+        }
+    }
 }
