@@ -696,8 +696,12 @@ fn failureText(failure: core.Failure) []const u8 {
     };
 }
 
+fn formEditable(self: *const Self) bool {
+    return self.state.page == .api and self.task.thread == null and self.drawn.page == .api and self.drawn.attempt == self.state.attempt;
+}
+
 fn activeField(self: *const Self) ?core.Field {
-    if (self.drawn.page != .api or self.drawn.focused == null or self.drawn.focused.? != .field) return null;
+    if (!self.formEditable() or self.drawn.focused == null or self.drawn.focused.? != .field) return null;
     return self.drawn.focused.?.field;
 }
 
@@ -841,6 +845,7 @@ fn editAddress(self: *Self, change: Edit) void {
     mapped.value.edit(change);
 }
 fn formEvent(self: *Self, field: core.Field, input: vxfw.Event, pasting: bool) !void {
+    if (!self.formEditable()) return;
     const form = try self.ensureForm();
     const editor = form.editor(field);
     const edited = @import("panel_editor.zig").event(editor, input, pasting, &self.issue);
@@ -1353,6 +1358,88 @@ test "Sign-in guided fields keep edits focus caret masking and paste authority" 
     }
 }
 
+test "Sign-in queued edits cannot change frozen fields before redraw or worker join" {
+    const Gate = struct {
+        page: *Self,
+        entered: std.Io.Event = .unset,
+        released: std.Io.Event = .unset,
+        key: core.Code = .{},
+        base: core.Code = .{},
+        model: core.Code = .{},
+
+        fn ready(gate: *@This()) bool {
+            return gate.entered.isSet();
+        }
+        fn run(raw: *anyopaque, task: *ClientTask) !void {
+            const gate: *@This() = @ptrCast(@alignCast(raw));
+            gate.entered.set(task.io);
+            gate.released.waitUncancelable(task.io);
+            const frozen = gate.page.frozen.?;
+            try gate.key.set(frozen.key.provided);
+            try gate.base.set(frozen.endpoint.base);
+            try gate.model.set(frozen.model);
+        }
+    };
+    for (std.enums.values(core.Field)) |field| for ([_][]const u8{ "changed", "\x1b[200~changed\x1b[201~" }) |bytes| {
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        var page: Self = .{ .state = .{ .page = .api, .focus = switch (field) {
+            .base => .base,
+            .key => .key,
+            .model => .model,
+        } } };
+        defer page.closeForm();
+        const form = try page.ensureForm();
+        _ = form.key.set("sk-before", "sk-before".len);
+        _ = form.base.set("https://before.example/v1", "https://before.example/v1".len);
+        _ = form.model.set("model-before", "model-before".len);
+        _ = try testingDraw(&page, ctx.alloc, 90, 28);
+        var clicked = false;
+        for (page.drawn.hits) |hit| if (hit.action == .connect) {
+            try page.widget().handleEvent(&ctx, .{ .mouse = .{ .row = @intCast(hit.row), .col = @intCast(hit.start), .button = .left, .type = .press, .mods = .{} } });
+            clicked = true;
+            break;
+        };
+        try std.testing.expect(clicked and page.state.page == .saving and page.frozen != null);
+        // With no process init, Connect freezes without starting real persistence.
+        // This borrower observes those same slices only after queued input.
+        var gate: Gate = .{ .page = &page };
+        try page.task.start(std.testing.io, &gate, Gate.run);
+        defer {
+            gate.released.set(std.testing.io);
+            page.task.join() catch @panic("frozen form borrower failed");
+        }
+        const poll = @import("test_poll");
+        try poll.waitUntil(std.testing.io, poll.after(std.testing.io, .fromSeconds(10)), &gate, Gate.ready);
+        var events: @import("testing/app_events.zig").Events = .init(bytes);
+        while (events.next()) |input| try page.widget().handleEvent(&ctx, input);
+        try std.testing.expectEqualStrings("sk-before", form.key.text());
+        try std.testing.expectEqualStrings("https://before.example/v1", form.base.text());
+        try std.testing.expectEqualStrings("model-before", form.model.text());
+        gate.released.set(std.testing.io);
+        try page.task.join();
+        try std.testing.expectEqualStrings("sk-before", gate.key.slice());
+        try std.testing.expectEqualStrings("https://before.example/v1", gate.base.slice());
+        try std.testing.expectEqualStrings("model-before", gate.model.slice());
+        // A returned API page still cannot reuse the previous attempt's frame.
+        page.state.page = .api;
+        page.state.focus = switch (field) {
+            .base => .base,
+            .key => .key,
+            .model => .model,
+        };
+        events = .init(bytes);
+        while (events.next()) |input| try page.widget().handleEvent(&ctx, input);
+        try std.testing.expectEqualStrings("sk-before", form.key.text());
+        try std.testing.expectEqualStrings("https://before.example/v1", form.base.text());
+        try std.testing.expectEqualStrings("model-before", form.model.text());
+        _ = try testingDraw(&page, ctx.alloc, 90, 28);
+        try page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = 'x', .text = "x" } });
+        try std.testing.expect(std.mem.endsWith(u8, form.editor(field).text(), "x"));
+    };
+}
+
 test "Sign-in refuses every refused field after tab reverse tab and click until in-field acknowledgement" {
     const Fault = enum { invalid_utf8, invalid_scalar, overflow, paste_invalid, paste_overflow };
     for (std.enums.values(core.Field)) |field| for (std.enums.values(Fault)) |fault| {
@@ -1364,6 +1451,12 @@ test "Sign-in refuses every refused field after tab reverse tab and click until 
         const form = try page.ensureForm();
         _ = form.key.set("sk-valid", 8);
         _ = form.model.set("service-model", 13);
+        page.state.focus = switch (field) {
+            .base => .base,
+            .key => .key,
+            .model => .model,
+        };
+        _ = try testingDraw(&page, ctx.alloc, 90, 28);
         const editor = form.editor(field);
         const valid = try arena.allocator().dupe(u8, editor.text());
         if (fault == .paste_invalid or fault == .paste_overflow) try page.formEvent(field, .paste_start, true);
@@ -1480,6 +1573,37 @@ test "Sign-in browser shows URL rejects stray long callback and switches only af
     const reported = report.written().len;
     try rig.page.stopTo(&report.writer);
     try std.testing.expectEqual(reported, report.written().len);
+}
+
+test "Sign-in both OAuth methods retry published Host failures without authenticating again" {
+    for ([_]core.Method{ .browser, .device }) |method| for ([_]bool{ false, true }) |activation_error| for ([_]bool{ false, true }) |defaults_failed| {
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        var activation: Activation = .{ .binding = .{}, .store = .{}, .launch = host_launch.Result.failed(.child_refused, error.HostStartupFailed) };
+        try activation.store.set("/synthetic-store");
+        activation.launch.?.outcome.failed.store = activation.store;
+        var page: Self = .{
+            .state = .{ .page = if (method == .browser) .browser else .device, .attempt = 1 },
+            .attempt = if (method == .browser) .chatgpt else .codex,
+            .outcome = .{ .published = .{
+                .defaults = if (defaults_failed) error.UnsupportedPreferencesVersion else {},
+                .activation = if (activation_error) error.HostReadinessUnconfirmed else activation,
+            } },
+        };
+        try page.settle(.{ .screen = &ctx });
+        try std.testing.expect(page.state.page == .failed);
+        try std.testing.expectEqual(if (defaults_failed) core.Failure.defaults_and_host else .host, page.state.page.failed.failure);
+        const retry = page.state.step(.{ .activate = .{ .attempt = page.state.attempt, .page = .failed, .action = .retry } });
+        try std.testing.expectEqual(core.Attempt.existing, retry.start);
+        try std.testing.expect(page.state.page == .saving);
+        var report: std.Io.Writer.Allocating = .init(arena.allocator());
+        const original: anyerror = if (defaults_failed) error.UnsupportedPreferencesVersion else if (activation_error) error.HostReadinessUnconfirmed else error.HostStartupFailed;
+        try std.testing.expectError(original, page.stopTo(&report.writer));
+        const count = report.written().len;
+        try page.stopTo(&report.writer);
+        try std.testing.expectEqual(count, report.written().len);
+    };
 }
 
 test "Sign-in whole joined receipt survives screen settlement and departure reports exactly once" {
