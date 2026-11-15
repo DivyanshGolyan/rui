@@ -54,6 +54,19 @@ pub fn install(file: []const u8, key: []const u8) !void {
     try codex_credentials.publishPrivate(file, buffer[0 .. key.len + 1]);
 }
 
+/// Publishes a new immutable key only when this path does not exist.
+/// Existing files, including user-authored keys, are never replaced.
+pub fn create(file: []const u8, key: []const u8, published: *bool, fault: ?codex_credentials.PrivateFault) !bool {
+    if (!valid(key)) return error.InvalidApiKey;
+    var bytes: [max_key_bytes + 1]u8 = undefined;
+    var previous: [max_key_bytes + 2]u8 = undefined;
+    defer std.crypto.secureZero(u8, &bytes);
+    defer std.crypto.secureZero(u8, &previous);
+    @memcpy(bytes[0..key.len], key);
+    bytes[key.len] = '\n';
+    return codex_credentials.createPrivateObserved(file, bytes[0 .. key.len + 1], &previous, published, fault);
+}
+
 /// One trailing "\n" or "\r\n" is how a pasted line ends, not key bytes.
 pub fn trimNewline(bytes: []const u8) []const u8 {
     const without_lf = if (std.mem.endsWith(u8, bytes, "\n")) bytes[0 .. bytes.len - 1] else bytes;

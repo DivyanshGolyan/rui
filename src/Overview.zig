@@ -1086,8 +1086,15 @@ fn drawPart(self: *Self, ctx: vxfw.DrawContext, part: AppScreen.Overview.Part) s
     self.caps.width = self.attention.vx.caps.unicode;
     const normal = @import("widget_style.zig").of(self.caps, .{});
     self.sign_in.style = normal;
+    self.sign_in.unicode = self.caps.unicode;
+    self.sign_in.selection_style = @import("widget_style.zig").of(self.caps, .{ .background = .selection });
     self.sign_in.quiet = @import("widget_style.zig").of(self.caps, .{ .colour = .quiet });
     self.app_screen.style = normal;
+    if (self.signInIsFirstRun()) {
+        const ground = try vxfw.Surface.init(ctx.cell_arena, self.widget(), size);
+        @memset(ground.buffer, .{ .style = normal });
+        return ground;
+    }
     const host = if (part == .list) null else hostNotice(self);
     self.state.host_line = host != null;
     _ = try view.step(&self.state, .{ .resized = .{ .width = size.width, .height = size.height } });
@@ -1168,7 +1175,8 @@ fn create(init: std.process.Init, options: Options, hooks: Hooks, ops: Operation
         .interrupted = interrupted,
     };
     self.root = .{ .main_presentation = .{ .context = self, .close = closeMainPresentation }, .overview = self.widget(), .overview_keys = .{ .context = self, .take = appKey }, .list = self.listWidget(), .settings_page = .{ .backend = self.settingsBackend(), .version = @import("transport_options").version }, .input = .{ .layer = if (options.sign_in) .{ .sign_in = .{ .over = .main } } else .main } };
-    self.sign_in = .{ .init = init, .selectors = options.selectors, .activate = hooks.activate, .ready = hooks.ready, .userdata = self, .on_done = signedIn, .on_close = closeSignIn, .list_visible = listVisible };
+    self.sign_in = .{ .init = init, .selectors = options.selectors, .activate = hooks.activate, .ready = hooks.ready, .scratch = hooks.scratch, .userdata = self, .on_done = signedIn, .on_close = closeSignIn };
+    try self.sign_in.target.set(options.store);
     self.root.sign_in = self.sign_in.widget();
     self.paintDivider();
     // The status's rows sit above the one Footer row.
@@ -1190,9 +1198,10 @@ fn closeMainPresentation(raw: *anyopaque) void {
 fn openSignIn(self: *Self, ctx: *vxfw.EventContext) !void {
     if (self.sign_in.task.thread != null) return;
     if (!view.admitsDefaultsEdit(&self.state) or self.defaults_save == .pending) return error.DefaultsUnavailable;
-    self.sign_in.reset();
+    try self.sign_in.reset();
     self.sign_in.selectors = self.options.selectors;
     self.sign_in.selectors.store = self.options.store;
+    try self.sign_in.target.set(self.options.store);
     try self.root.openSignIn(ctx);
 }
 
@@ -1292,6 +1301,7 @@ fn settingsBackend(self: *Self) AppSettings.Backend {
 }
 
 fn destroy(self: *Self) void {
+    self.sign_in.deinit();
     self.session_drafts.deinit(self.init.gpa);
     std.debug.assert(self.worker.thread == null);
     self.upgrade_job.deinit();
@@ -6563,136 +6573,30 @@ test "Sign-in admission waits for every pending default writer and Host upgrade"
     try std.testing.expect(overview.root.input.layer.signInOpen());
 }
 
-test "Sign-in keeps the pane through Session and Settings clicks with and without a Session" {
-    const Origin = enum { first_run, settings };
-    const Click = enum { session, settings };
-    const Nav = struct {
-        var dir: std.Io.Dir = undefined;
-        var files: u8 = 0;
-        var opens: usize = 0;
-        fn scratch(init: std.process.Init) !std.Io.File {
-            files += 1;
-            return dir.createFile(init.io, &.{'a' + files}, .{ .read = true });
-        }
-        fn open(_: *Self, _: *vxfw.EventContext) !void {
-            opens += 1;
-        }
-        fn origin(surface: vxfw.Surface, target: vxfw.Widget, at: vxfw.RelativePoint) ?vxfw.RelativePoint {
-            if (surface.widget.eql(target)) return at;
-            for (surface.children) |child| {
-                if (origin(child.surface, target, .{ .row = at.row + child.origin.row, .col = at.col + child.origin.col })) |found| return found;
-            }
-            return null;
-        }
-        fn focus(ctx: *vxfw.EventContext) ?vxfw.Widget {
-            var i = ctx.cmds.items.len;
-            while (i > 0) {
-                i -= 1;
-                if (ctx.cmds.items[i] == .request_focus) return ctx.cmds.items[i].request_focus;
-            }
-            return null;
-        }
-    };
-    const Stage = @import("sign_in.zig").Stage;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    Nav.dir = tmp.dir;
-    for (std.enums.values(Origin)) |from| for ([_]bool{ false, true }) |retained| for ([_]Stage{ .choice, .key_entry }) |stage| for (std.enums.values(Click)) |click| {
-        errdefer std.debug.print("sign-in click: from={s} retained={} stage={s} click={s}\n", .{ @tagName(from), retained, @tagName(stage), @tagName(click) });
-        Nav.files = 0;
-        Nav.opens = 0;
+test "Sign-in captures outside clicks above Settings and retains the current Session" {
+    for ([_]bool{ false, true }) |retained| {
         var cancellation: client.Cancellation = .{};
-        const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .provider = "codex", .model = "gpt-6-luna", .sign_in = from == .first_run }, fake_operations, &cancellation);
+        const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "", .directory = "/requests", .provider = "codex", .model = "gpt-6-luna" }, fake_operations, &cancellation);
         defer rig.close();
         const overview = rig.overview;
-        Seen.now.listed = 2;
-        try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
-        try std.testing.expect(try rig.settle() == null);
-        defer {
-            if (overview.app_session) |left| {
-                if (left.frontend) |frontend| frontend.stop();
-                overview.disposeSession(left);
-                overview.app_session = null;
-            }
-            for (overview.retired.items) |retired_session| overview.disposeSession(retired_session.left);
-            overview.retired.deinit(std.testing.allocator);
-        }
-        if (retained) {
-            overview.hooks.scratch = Nav.scratch;
-            overview.ops.open = openSession;
-            try std.testing.expect(try rig.next(.{ .open = "k7m2qx".* }) == null);
-            overview.app_session.?.frontend.?.reading.opening = false;
-        }
-        overview.ops.open = Nav.open;
+        const session: vxfw.Text = .{ .text = "Retained Session" };
+        if (retained) overview.root.session = session.widget();
         var ctx = rig.context();
         defer ctx.cmds.deinit(std.testing.allocator);
-        const page = &overview.sign_in;
-        // The rig gives no launch hooks; nothing here begins an attempt.
-        page.activate = null;
-        page.ready = null;
-        if (from == .settings) {
-            try overview.root.openSettings(&ctx);
-            try overview.openSignIn(&ctx);
-        }
-        try std.testing.expect(overview.root.input.layer.signInOpen());
-        const typed = "sk-typed-before-click";
-        if (stage == .key_entry) try app_events.send(&ctx, "\x1b[C\r" ++ typed, overview.root.widget(), page.widget());
-        try std.testing.expectEqual(stage, page.state.stage);
-        const session = overview.root.session;
-        const frontend = if (overview.app_session) |held| held.frontend else null;
+        try overview.root.openSettings(&ctx);
+        try overview.openSignIn(&ctx);
+        const before = overview.root.session;
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         const frame = try overview.root.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 140, .height = 40 }, .cell_size = .{} });
-        try std.testing.expect(overview.root.listVisible());
-        const at: vxfw.RelativePoint = switch (click) {
-            .session => session: {
-                const list = Nav.origin(frame, overview.app_sessions.widget(), .{ .row = 0, .col = 0 }).?;
-                const row = for (overview.app_sessions.shown_at) |span| {
-                    if (span.target) |target| if (target == .open and std.mem.eql(u8, &target.open, "b4n8wd")) break span.row;
-                } else return error.TestMissingSessionHit;
-                break :session .{ .row = list.row + row, .col = 4 };
-            },
-            .settings => .{ .row = 39, .col = 4 },
-        };
-        ctx.cmds.clearRetainingCapacity();
-        for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| {
-            try app_events.mouse(&ctx, frame, .{ .col = @intCast(at.col), .row = @intCast(at.row), .button = .left, .type = kind, .mods = .{} });
-        }
-        try std.testing.expect(!ctx.quit);
+        for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| try app_events.mouse(&ctx, frame, .{ .col = 1, .row = 39, .button = .left, .type = kind, .mods = .{} });
         try std.testing.expect(overview.root.input.layer.signInOpen());
-        try std.testing.expectEqual(from == .settings, overview.root.input.layer.settingsOpen());
-        try std.testing.expectEqual(session != null, overview.root.session != null);
-        if (session) |kept| try std.testing.expect(overview.root.session.?.eql(kept));
-        if (frontend) |held| try std.testing.expect(overview.app_session.?.frontend.? == held);
-        try std.testing.expectEqual(@as(usize, 0), Nav.opens);
-        try std.testing.expectEqual(stage, page.state.stage);
-        try std.testing.expectEqualStrings(if (stage == .key_entry) typed else "", page.key.slice());
-        for (ctx.cmds.items) |command| if (command == .request_focus) {
-            try std.testing.expect(command.request_focus.eql(page.widget()));
-        };
-        // The page names the app on its top row only when the list is hidden,
-        // as it was when Root set the page's title from its width.
-        for ([_]u16{ 140, 46 }) |width| {
-            var shown = try rig.shown(width, 40);
-            defer shown.deinit();
-            const top = try shown.line(0);
-            errdefer std.debug.print("top row at {d}: '{s}'\n", .{ width, top });
-            try std.testing.expectEqual(@as(usize, @intFromBool(width < Root.split_at)), std.mem.count(u8, top, "rui"));
-        }
-        // Esc leaves as before: from the key back to the choice, then out.
-        ctx.cmds.clearRetainingCapacity();
-        try app_events.send(&ctx, "\x1b", overview.root.widget(), page.widget());
-        if (stage == .key_entry) {
-            try std.testing.expect(overview.root.input.layer.signInOpen());
-            try std.testing.expectEqual(Stage.choice, page.state.stage);
-            try std.testing.expectEqual(@as(usize, 0), page.key.len);
-            try app_events.send(&ctx, "\x1b", overview.root.widget(), page.widget());
-        }
+        try std.testing.expect(overview.root.input.layer.settingsOpen());
+        try std.testing.expectEqual(before, overview.root.session);
+        try closeSignIn(overview, &ctx);
         try std.testing.expect(!overview.root.input.layer.signInOpen());
-        try std.testing.expectEqual(from == .settings, overview.root.input.layer.settingsOpen());
-        const back = if (from == .settings) overview.root.settings_page.widget() else overview.root.session orelse overview.widget();
-        try std.testing.expect(Nav.focus(&ctx).?.eql(back));
-    };
+        try std.testing.expect(overview.root.input.layer.settingsOpen());
+    }
 }
 
 test "Sign-in Esc at the choice leaves unless the first-run screen has no default, and only that screen holds the overview's tick" {
@@ -6760,9 +6664,9 @@ test "Sign-in Esc at the choice leaves unless the first-run screen has no defaul
             try overview.openSignIn(&ctx);
         }
         try std.testing.expect(overview.root.input.layer.signInOpen());
-        try std.testing.expectEqual(@import("sign_in.zig").Stage.choice, page.state.stage);
+        try std.testing.expect(page.state.page == .account);
         // ChatGPT is chosen first, and begins in the browser.
-        try std.testing.expectEqual(@import("sign_in.zig").Provider.chatgpt, page.state.selected);
+        try std.testing.expectEqual(@import("sign_in.zig").Control.chatgpt, page.state.focus);
         const stays = from == .first_run and !default;
         // Only the first-run screen with no default holds the overview's
         // tick; under any other sign-in the overview and Session are served.

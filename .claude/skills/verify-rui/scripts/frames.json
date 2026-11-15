@@ -885,18 +885,19 @@
     },
     {
       "name": "first-run",
-      "note": "No credentials: sign-in choice occupies the input row, ChatGPT selected",
+      "note": "Centered guided account chooser; no Session or chat composer is created",
       "open": "overview",
       "first_run": true,
       "steps": [
         {
-          "wait": "\u203a ChatGPT    API key"
+          "wait": "Sign in to Rui"
         }
       ],
       "expect": [
-        "\u203a ChatGPT    API key",
+        "Sign in to Rui",
+        "ChatGPT",
         "API key",
-        "Sign in"
+        "Tab / Shift-Tab"
       ],
       "absent": [
         "Provider: [c]",
@@ -909,7 +910,7 @@
     },
     {
       "name": "first-run-browser",
-      "note": "Browser sign-in on the loopback fixture issuer: short link, masked address entry, Tab offered; no browser opens",
+      "note": "Guided browser method on the loopback fixture, masked callback and explicit reopen controls",
       "open": "overview",
       "first_run": true,
       "env": {
@@ -917,7 +918,7 @@
       },
       "steps": [
         {
-          "wait": "\u203a ChatGPT    API key"
+          "wait": "Sign in to Rui"
         },
         {
           "keys": [
@@ -925,25 +926,32 @@
           ]
         },
         {
-          "wait": "Sign in at 127.0.0.1:1"
+          "wait": "ChatGPT account"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "127.0.0.1:1"
         }
       ],
       "expect": [
-        "Sign in at 127.0.0.1:1",
-        "Or paste the address your browser ended on",
-        "tab device code · esc back"
+        "Continue in your browser",
+        "127.0.0.1:1",
+        "Paste callback",
+        "Open browser",
+        "Change method"
       ],
       "absent": [
         "Provider: [c]",
-        "[ChatGPT]",
-        "[API key]",
-        "Codex",
-        "oauth/authorize"
+        "Codex"
       ]
     },
     {
       "name": "first-run-codex",
-      "note": "Tab from the browser sign-in to the fake device login: clickable link and code, no network",
+      "note": "Explicit device method; visible linked URL and code, no automatic clipboard or network",
       "open": "overview",
       "first_run": true,
       "env": {
@@ -951,7 +959,7 @@
       },
       "steps": [
         {
-          "wait": "› ChatGPT    API key"
+          "wait": "Sign in to Rui"
         },
         {
           "keys": [
@@ -959,11 +967,12 @@
           ]
         },
         {
-          "wait": "Sign in at 127.0.0.1:1"
+          "wait": "ChatGPT account"
         },
         {
           "keys": [
-            "Tab"
+            "Tab",
+            "Enter"
           ]
         },
         {
@@ -971,26 +980,25 @@
         }
       ],
       "expect": [
-        "auth.openai.com/codex/device \u00b7 BDL9-KI88H",
-        "Waiting for ChatGPT"
+        "Use a device code",
+        "auth.openai.com/codex/device",
+        "BDL9-KI88H",
+        "Copy code (C)",
+        "Open browser"
       ],
       "absent": [
         "Provider: [c]",
-        "[ChatGPT]",
-        "[API key]",
-        "Sign in at",
-        "Open auth.openai.com",
-        "and enter"
+        "Paste callback"
       ]
     },
     {
       "name": "first-run-key",
-      "note": "API key entry is masked before publication",
+      "note": "Focusable masked key, editable base URL and model, no publication",
       "open": "overview",
       "first_run": true,
       "steps": [
         {
-          "wait": "\u203a ChatGPT    API key"
+          "wait": "Sign in to Rui"
         },
         {
           "keys": [
@@ -999,24 +1007,26 @@
           ]
         },
         {
-          "wait": "API key"
+          "wait": "Connect with an API key"
         },
         {
           "text": "sk-secret"
         },
         {
-          "wait": "\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022"
+          "wait": "*********"
         }
       ],
       "expect": [
-        "\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022",
-        "esc back"
+        "Connect with an API key",
+        "Base URL",
+        "API key",
+        "Model ID",
+        "*********",
+        "Connect"
       ],
       "absent": [
         "sk-secret",
-        "Provider: [c]",
-        "[ChatGPT]",
-        "[API key]"
+        "Provider: [c]"
       ]
     },
     {
