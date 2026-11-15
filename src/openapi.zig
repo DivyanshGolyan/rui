@@ -173,6 +173,13 @@ pub const routes = [_]Route{
         .conflict = jsonReply(.{protocol.permission_decision_reply.conflict}),
     },
     .{
+        .path = "/v1/read-action",
+        .kind = .read_action,
+        .summary = "Reads one Session-owned Action's status and one bounded final-result window without waiting or consuming it.",
+        .variants = &.{variant(protocol.read_action_request.head ++ .{Optional(protocol.read_action_request.offset)} ++ protocol.read_action_request.tail, .{})},
+        .reply = jsonReply(.{ protocol.action_read_reply.head ++ protocol.action_read_reply.pending, protocol.action_read_reply.head ++ protocol.action_read_reply.final }),
+    },
+    .{
         .path = "/v1/observe-command",
         .kind = .observe_command,
         .summary = "What became of the command sent with this key.",
@@ -1708,6 +1715,24 @@ test "replies the Host renders conform to their schemas" {
     // Render the real request refusal, including its advisory server names.
     const reply = @import("command_reply.zig");
     const host_reply = @import("host_reply.zig");
+    const action_read = @import("action_read.zig");
+    const action = try a.create(action_read.Read);
+    action.* = .{ .session = .{}, .action_id = 1, .status = .{ .pending = .queued } };
+    try action.session.set("k7m2qx");
+    for (std.enums.values(action_read.PendingState)) |state| {
+        action.status = .{ .pending = state };
+        try host_reply.renderActionRead(.{ .writer = &out.writer }, action);
+        try Case.check(schemas, "ReadActionReply", out.written(), a);
+        out.clearRetainingCapacity();
+    }
+    action.status = .{ .resolved = .{
+        .resolution = .{ .position = 2, .code = .{}, .content = .{ .length = 0, .digest = protocol.contentDigest("") } },
+        .window = .{ .offset = 0, .next = 0, .more = false, .text = .{} },
+    } };
+    try action.status.resolved.resolution.code.set("succeeded");
+    try host_reply.renderActionRead(.{ .writer = &out.writer }, action);
+    try Case.check(schemas, "ReadActionReply", out.written(), a);
+    out.clearRetainingCapacity();
     var configured: reply.ConfigureReply = .{ .rejected = .{ .replayed = false, .code = .mcp_server_unavailable } };
     var host_tool_set = @import("tools.zig").built_in_tool_set;
     host_tool_set.configured_servers = &.{"notes"};

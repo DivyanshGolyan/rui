@@ -16,6 +16,7 @@ export interface Link {
 }
 
 type Schemas = components["schemas"];
+export type ActionStatus = Schemas["ReadActionReply"];
 
 /** The Session settings the Host takes today. */
 export interface AgentSpec {
@@ -330,6 +331,13 @@ export class Session {
 		const answer = accepted(reply.answer);
 		this.#link.activity?.notify(this.id);
 		return { pinned: answer.pinned };
+	}
+
+	/** Reads an owned Action. Acceptance and attempted state do not assert a running process. */
+	async readAction(action: string, offset = "0"): Promise<ActionStatus> {
+		return parse<ActionStatus>(await this.#link.exchange("/v1/read-action", (store) => JSON.stringify({
+			version: WIRE_VERSION, kind: "read_action", store, session: this.id, action, offset,
+		} satisfies Schemas["ReadActionRequest"])));
 	}
 
 	/**

@@ -50,6 +50,7 @@ test "Store entry points queue and fence only through canonical access" {
         @embedFile("../engine/mysql_open.zig"),
         @embedFile("../engine/mysql_refusal.zig"),
         @embedFile("../domain/action.zig"),
+        @embedFile("../domain/action_read.zig"),
         @embedFile("../domain/forward.zig"),
         @embedFile("../domain/command.zig"),
         @embedFile("../domain/configuration.zig"),
