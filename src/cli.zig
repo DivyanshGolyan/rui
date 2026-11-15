@@ -5327,6 +5327,7 @@ test "Host launch activation preserves refusal timeout warnings and an unserved 
     const Case = struct {
         scenario: LaunchFixture.Scenario,
         provider: protocol.Provider = .openai,
+        openai: bool = true,
         kind: ?HostLaunchResult.Cause.Kind = null,
         terminal: []const u8,
         words: []const u8,
@@ -5337,7 +5338,7 @@ test "Host launch activation preserves refusal timeout warnings and an unserved 
         .{ .scenario = .refusal, .kind = .store_format, .terminal = LaunchFixture.refusal, .words = "Host needs a compatible Rui", .retry = false },
         .{ .scenario = .timeout, .kind = .readiness_timeout, .terminal = "do not kill or reclaim an uncertain owner", .words = "Host start timed out" },
         .{ .scenario = .invalid_url, .provider = .codex, .terminal = invalid_base_url, .words = "OpenAI URL invalid", .retry = false, .warning = true },
-        .{ .scenario = .already_ready, .kind = .provider_unserved, .terminal = "does not serve the selected provider", .words = "Host does not serve this provider", .retry = false },
+        .{ .scenario = .already_ready, .openai = false, .kind = .provider_unserved, .terminal = "does not serve the selected provider", .words = "Host does not serve this provider", .retry = false },
         .{ .scenario = .incompatible, .kind = .incompatible, .terminal = "does not speak this rui's protocol", .words = "Host different Rui version", .retry = false },
     };
     const io = std.testing.io;
@@ -5372,7 +5373,7 @@ test "Host launch activation preserves refusal timeout warnings and an unserved 
         try record.refresh_token.set("fixture-refresh");
         var scratch: codex_credentials.Scratch = undefined;
         try codex_credentials.install(path, &record, null, &scratch);
-        var fixture: LaunchFixture = .{ .scenario = case.scenario };
+        var fixture: LaunchFixture = .{ .scenario = case.scenario, .openai = case.openai };
         const activation = try activateOverviewUsing(init, .{ .store = store, .provider = @tagName(case.provider), .model = product_defaults.recommended_model }, fixture.ops());
         try std.testing.expectEqual(true, activation.launch != null);
         const launch = &activation.launch.?;

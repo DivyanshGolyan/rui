@@ -1138,10 +1138,10 @@
           "wait": "ChatGPT account"
         },
         {
-          "keys": [
-            "Tab",
-            "Enter"
-          ]
+          "mouse": {
+            "at": "Device code",
+            "do": "click"
+          }
         },
         {
           "wait": "BDL9-KI88H"
@@ -1169,10 +1169,10 @@
           "wait": "Sign in to Rui"
         },
         {
-          "keys": [
-            "Right",
-            "Enter"
-          ]
+          "mouse": {
+            "at": "API key",
+            "do": "click"
+          }
         },
         {
           "wait": "Connect with an API key"

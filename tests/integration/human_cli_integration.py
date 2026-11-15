@@ -934,9 +934,34 @@ def chatgpt_method(master):
     return await_screen(master, "ChatGPT account")
 
 
+def sign_in_focus(master, keys, previous, target):
+    """Commit the target's selected styling before choosing its drawn action."""
+    capture = terminal_capture(master)
+    rows = [row for row in capture.completed.splitlines() if row.lstrip().startswith(previous + " ")]
+    assert len(rows) == 1, (previous, capture.completed)
+    column = len(rows[0]) - len(rows[0].lstrip())
+
+    def style(label):
+        return drawn_style(master, " " * column + label + " ", column)
+
+    selected = style(previous)
+    assert selected is not None, (previous, capture.completed)
+    selection = selected.bg, selected.reverse
+    before = style(target)
+    assert before is not None and (before.bg, before.reverse) != selection, (
+        "focus must move", previous, target, capture.completed)
+
+    def focused(_screen, _x, _y):
+        cell = style(target)
+        return cell is not None and (cell.bg, cell.reverse) == selection
+
+    return keyed_frame(master, keys, focused)
+
+
 def reuse_chatgpt(master):
     chatgpt_method(master)
-    os.write(master, b"\t\t\r")
+    sign_in_focus(master, b"\t\t", "Browser", "Use saved login")
+    os.write(master, b"\r")
 
 
 def terminal_bulk(master, command, marker="› ", *, submit=True, draft=None, caret=None, timeout=15):
@@ -1892,11 +1917,13 @@ def provider_line_cases():
                     key_file = config / "openai.key"
                     key_before = key_file.read_bytes(), key_file.stat().st_mtime_ns
                     if choice == "ready-key":
-                        os.write(master, b"\x1b[C\r")
+                        sign_in_focus(master, b"\x1b[C", "ChatGPT", "API key")
+                        os.write(master, b"\r")
                         await_screen(master, "Connect with an API key")
                         # Blank key reuses its admitted source, but still stages
                         # an immutable selected-Host pair and proves fresh activation.
-                        os.write(master, b"\t\t\r")
+                        sign_in_focus(master, b"\t\t", "API key", "Connect")
+                        os.write(master, b"\r")
                     else:
                         reuse_chatgpt(master)
                     overview_frame(master, overview_title)
@@ -1911,14 +1938,17 @@ def provider_line_cases():
                     offered = provider_prompt(master)
                     assert "API key" in offered and "Provider: [c]" not in offered, offered
                     if choice == "key":
-                        os.write(master, b"\x1b[C\r")
+                        sign_in_focus(master, b"\x1b[C", "ChatGPT", "API key")
+                        os.write(master, b"\r")
                         await_screen(master, "Connect with an API key")
-                        os.write(master, b"\t\t\r")
+                        sign_in_focus(master, b"\t\t", "API key", "Connect")
+                        os.write(master, b"\r")
                         read_terminal(master, "Enter one API key")
                         os.write(master, b"sk-screen-secret")
                         masked = read_terminal(master, "****************")
                         assert "sk-screen-secret" not in masked, masked
-                        os.write(master, b"\t\t\r")
+                        sign_in_focus(master, b"\t\t", "API key", "Connect")
+                        os.write(master, b"\r")
                         overview_frame(master, overview_title)
                         entry = json.loads((selected_store / "host.json").read_text())["providers"]["openai"]
                         key_path = pathlib.Path(entry["key"].removeprefix("file:"))
@@ -1940,14 +1970,17 @@ def provider_line_cases():
                         read_terminal(master, "ChatGPT account", fresh=True)
                     elif choice == "device":
                         chatgpt_method(master)
-                        os.write(master, b"\t\r")
+                        sign_in_focus(master, b"\t", "Browser", "Device code")
+                        os.write(master, b"\r")
                         waiting = read_terminal(master, "BDL9-KI88H")
                         assert "auth.openai.com/codex/device" in waiting, waiting
                         assert "Copy code (C)" in waiting, waiting
                         os.write(master, b"\x1b")
                         read_terminal(master, "ChatGPT account", fresh=True)
                     else:
-                        os.write(master, b"hello\x1b[C\r")
+                        os.write(master, b"hello")
+                        sign_in_focus(master, b"\x1b[C", "ChatGPT", "API key")
+                        os.write(master, b"\r")
                         read_terminal(master, "Connect with an API key")
                         os.write(master, b"\x1b")
                         read_terminal(master, "Sign in to Rui", fresh=True)
