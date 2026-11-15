@@ -36,6 +36,7 @@ const tool_record = @import("../tool_record.zig");
 const historical_domain = @import("domain/historical.zig");
 const model_admission_domain = @import("domain/model_admission.zig");
 const model_settlement_domain = @import("domain/model_settlement.zig");
+const action_read_domain = @import("domain/action_read.zig");
 const reads_domain = @import("domain/reads.zig");
 const report_domain = @import("domain/report.zig");
 const session_list_read = @import("domain/session_list_read.zig");
@@ -1093,6 +1094,18 @@ pub const Store = struct {
         };
     }
 
+    pub fn readAction(self: *Store, request: *const @import("../action_read.zig").Request, out: *@import("../action_read.zig").Read) !void {
+        return self.queue().run(readActionHeld, .{ self, request, out });
+    }
+
+    fn readActionHeld(self: *Store, request: *const @import("../action_read.zig").Request, out: *@import("../action_read.zig").Read) !void {
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: ReadAccess = .open(&entry);
+        defer access.deinit();
+        return entry.finish(Ordinary.action_read, action_read_domain.actionRead(&access, request, out));
+    }
+
     pub fn actionArguments(self: *Store, session_ref: []const u8, action_id: u64) !ContentReference {
         return self.actionContent(session_ref, action_id, .arguments);
     }
@@ -1848,6 +1861,7 @@ pub const Ordinary = struct {
     const content = error{ContentNotFound};
     const public_content = error{ ContentNotFound, RangeOutOfBounds };
     pub const action = error{ActionNotFound};
+    pub const action_read = action || error{InvalidCursor};
     const result = error{ ResultNotFound, ResultNotReady, ResultFailed };
     pub const attempt_binding = error{ StaleAttemptBinding, SupersededByControl };
     pub const historical_entry = error{HistoricalPending};

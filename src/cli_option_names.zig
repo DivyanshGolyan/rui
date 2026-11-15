@@ -26,6 +26,7 @@ pub const names = [_][]const u8{
     "loaded-tools",
     "model",
     "notifications",
+    "offset",
     "operation",
     "ordinal",
     "output-reservation",
