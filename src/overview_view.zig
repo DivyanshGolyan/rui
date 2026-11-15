@@ -3268,7 +3268,10 @@ fn expectEffects(expected: []const Effect, actual: Effects) !void {
             },
             .open => |ref| try std.testing.expectEqualStrings(&ref, &got.open),
             .stop => |ref| try std.testing.expectEqualStrings(&ref, &got.stop),
-            .pin => |request| try std.testing.expectEqualDeep(request, got.pin),
+            .pin => |request| {
+                try std.testing.expectEqualStrings(&request.reference, &got.pin.reference);
+                try std.testing.expectEqual(request.pinned, got.pin.pinned);
+            },
             .archive => |request| {
                 try std.testing.expectEqualStrings(&request.reference, &got.archive.reference);
                 try std.testing.expectEqual(request.archived, got.archive.archived);

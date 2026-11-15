@@ -237,7 +237,7 @@ test "Palette hover is transient and clicks activate only visible command rows" 
 
 test "Palette renders every chat command and description in the same normal style" {
     const cases = .{
-        .{ commands.conversation, &[_][]const u8{ "/archive", "/clear", "/copy", "/effort", "/model", "/new", "/reload-skills", "/rename", "/requests", "/result", "/setup", "/unarchive" } },
+        .{ commands.conversation, &[_][]const u8{ "/archive", "/clear", "/copy", "/effort", "/model", "/new", "/pin", "/reload-skills", "/rename", "/requests", "/result", "/setup", "/unarchive", "/unpin" } },
     };
     inline for (cases) |case| {
         var shown = commands.Shown.next(null, 1, case[0].suggest("/", .{})).?;
