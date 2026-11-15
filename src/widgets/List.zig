@@ -6,7 +6,13 @@ const Self = @This();
 const Hover = @import("Hover.zig");
 
 pub const Line = []const vaxis.Segment;
-pub const Region = struct { start: u16, end: u16, target: u32 };
+pub const Region = struct {
+    start: u16,
+    end: u16,
+    target: u32,
+    /// Frame-derived keyboard location; selected spans keep selection over hover.
+    selected: bool = false,
+};
 pub const Row = struct {
     /// At least one line. Borrowed until rowFn returns; copied into the frame arena.
     lines: []const Line,
@@ -62,7 +68,7 @@ selection_style: vaxis.Style = .{ .reverse = true },
 indicator_style: ?vaxis.Style = null,
 indicator_align: @FieldType(vxfw.RichText, "text_align") = .left,
 aboveFn: ?*const fn (count: u32, arena: std.mem.Allocator) std.mem.Allocator.Error!Line = null,
-/// The pointer's row, quieter than the selection; only background, reverse and underline apply.
+/// The pointer's target, a whole row or one region; only background, reverse and underline apply.
 /// A row that is both selected and hovered keeps the selection.
 hover_style: vaxis.Style = .{ .ul_style = .single },
 belowFn: ?*const fn (count: u32, arena: std.mem.Allocator) std.mem.Allocator.Error!Line = null,
@@ -109,7 +115,8 @@ const Lazy = struct {
     index: u32,
     row: ?Row = null,
     base_style: vaxis.Style = .{},
-    hovered: bool = false,
+    hovered: ?struct { start: u16, end: u16 } = null,
+    selection_style: vaxis.Style = .{},
     /// Snapshot of the owner's hover look; null while this row is selected, since selection wins.
     hover_style: ?vaxis.Style = null,
 
@@ -123,6 +130,7 @@ const Lazy = struct {
             std.debug.assert(row.lines.len > 0 and row.lines.len <= std.math.maxInt(u16));
             const selected = self.owner.selected == self.index;
             self.hover_style = if (selected) null else self.owner.hover_style;
+            self.selection_style = self.owner.selection_style;
             self.base_style = self.owner.base_style;
             if (selected) self.base_style = selection(self.base_style, self.owner.selection_style);
             const lines = try arena.alloc(Line, row.lines.len);
@@ -150,8 +158,22 @@ const Lazy = struct {
             // RichText's widget is stack-local; only its cells escape.
             if (drawn.size.height != 0) @memcpy(surface.buffer[y * surface.size.width ..][0..surface.size.width], drawn.buffer[0..surface.size.width]);
         }
-        if (self.hovered) if (self.hover_style) |hover| for (surface.buffer) |*cell| {
-            cell.style = hovering(cell.style, hover);
+        if (self.hovered) |range| if (self.hover_style) |hover| for (0..surface.size.height) |y| {
+            for (range.start..range.end) |x| {
+                const focused = for (row.regions) |region| {
+                    if (region.selected and x >= region.start and x < region.end) break true;
+                } else false;
+                if (!focused) {
+                    const cell = &surface.buffer[y * surface.size.width + x];
+                    cell.style = hovering(cell.style, hover);
+                }
+            }
+        };
+        for (row.regions) |region| if (region.selected and region.start < surface.size.width) {
+            for (0..surface.size.height) |y| for (region.start..@min(region.end, surface.size.width)) |x| {
+                const cell = &surface.buffer[y * surface.size.width + x];
+                cell.style = selection(cell.style, self.selection_style);
+            };
         };
         return surface;
     }
@@ -304,12 +326,12 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         if ((target != null or regions.len != 0) and self.on_press != null) {
             if (target != null) {
                 try hover_targets.append(ctx.arena, rect);
-                row.hovered = self.hover.contains(rect);
+                row.hovered = if (self.hover.contains(rect)) .{ .start = 0, .end = size.width } else null;
             } else for (regions) |region| {
                 if (region.start >= size.width) continue;
                 const region_rect: Hover.Rect = .{ .row = rect.row, .col = region.start, .width = @min(region.end, size.width) - region.start, .height = rect.height };
                 try hover_targets.append(ctx.arena, region_rect);
-                row.hovered = row.hovered or self.hover.contains(region_rect);
+                if (self.hover.contains(region_rect)) row.hovered = .{ .start = region.start, .end = @min(region.end, size.width) };
             }
         }
         const drawn = try row.widget().draw(ctx);
@@ -1046,8 +1068,9 @@ test "List column actions override row targets and region-only rows clip hover a
     var mouse: vaxis.Mouse = .{ .row = 1, .col = 5, .button = .none, .mods = .{}, .type = .motion };
     try list.widget().handleEvent(&ctx, .{ .mouse = mouse });
     const hovered = try list.widget().draw(Testing.context(arena.allocator(), 3));
-    // Without colour the pointer's row underlines; reverse stays the selection's mark.
-    try std.testing.expectEqual(vaxis.Style.Underline.single, hovered.children[1].surface.readCell(0, 0).style.ul_style);
+    // Region-only actions hover only their clipped columns.
+    try std.testing.expectEqual(vaxis.Style.Underline.off, hovered.children[1].surface.readCell(0, 0).style.ul_style);
+    try std.testing.expectEqual(vaxis.Style.Underline.single, hovered.children[1].surface.readCell(4, 0).style.ul_style);
     try std.testing.expect(!hovered.children[1].surface.readCell(0, 0).style.reverse);
     try std.testing.expect(list.selected == null and pressed.target == null);
     try std.testing.expectEqual(vaxis.Mouse.Shape.pointer, ctx.cmds.items[ctx.cmds.items.len - 1].set_mouse_shape);
@@ -1117,4 +1140,45 @@ test "List markers never acquire whole-row hover or press targets" {
         try list.widget().handleEvent(&events, Testing.left(y));
         try std.testing.expectEqual(if (content) @as(?u32, 11) else null, pressed.target);
     }
+}
+
+test "List selected regions retain focus while other regions hover and whitespace stays inert" {
+    const ranges = [_]Region{ .{ .start = 1, .end = 4, .target = 11 }, .{ .start = 7, .end = 10, .target = 22 } };
+    for ([_]u16{ 0, 1, 2, 4, 7, 9, 10, 20 }) |width| for ([_]?usize{ null, 0, 1 }) |focus| for ([_]i16{ -1, 0, 1, 3, 4, 6, 7, 9, 10, 19, 20 }) |pointer| {
+        var regions = ranges;
+        for (&regions, 0..) |*region, index| region.selected = focus == index;
+        const rows: []const Row = &.{.{ .lines = &.{&.{.{ .text = " one   two", .style = .{ .fg = .{ .index = 3 } } }}}, .regions = &regions }};
+        var pressed: Testing.Pressed = .{};
+        var list: Self = .{ .rows = .of(&rows), .selection_style = .{ .bg = .{ .index = 2 } }, .hover_style = .{ .bg = .{ .index = 5 } }, .on_press = .{ .userdata = &pressed, .pressed = Testing.Pressed.pressed } };
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const draw_ctx = Testing.context(arena.allocator(), 1).withConstraints(.{}, .{ .width = width, .height = 1 });
+        _ = try list.widget().draw(draw_ctx);
+        var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        try list.widget().handleEvent(&events, .mouse_enter);
+        const mouse: vaxis.Mouse = .{ .row = 0, .col = pointer, .button = .none, .type = .motion, .mods = .{} };
+        try list.widget().handleEvent(&events, .{ .mouse = mouse });
+        const hovered: ?usize = for (ranges, 0..) |range, index| {
+            if (pointer >= range.start and pointer < @min(range.end, width)) break index;
+        } else null;
+        try std.testing.expectEqual(hovered != null, list.hover.pointing);
+        if (hovered != null) try std.testing.expectEqual(vaxis.Mouse.Shape.pointer, events.cmds.items[events.cmds.items.len - 1].set_mouse_shape);
+        const shown = try list.widget().draw(draw_ctx);
+        if (width != 0) for (0..width) |x| {
+            const selected = if (focus) |index| x >= ranges[index].start and x < ranges[index].end else false;
+            const under = if (hovered) |index| x >= ranges[index].start and x < ranges[index].end else false;
+            try std.testing.expectEqual(if (selected) list.selection_style.bg else if (under) list.hover_style.bg else list.base_style.bg, shown.children[0].surface.readCell(@intCast(x), 0).style.bg);
+        };
+        // Identical reports keep native pointer custody without synthetic leave/enter churn.
+        events.redraw = false;
+        events.cmds.clearRetainingCapacity();
+        try list.widget().handleEvent(&events, .{ .mouse = mouse });
+        try std.testing.expect(!events.redraw);
+        try std.testing.expectEqual(@as(usize, 0), events.cmds.items.len);
+        try list.widget().handleEvent(&events, .{ .mouse = .{ .row = 0, .col = pointer, .button = .left, .type = .press, .mods = .{} } });
+        try std.testing.expectEqual(if (hovered) |index| @as(?u32, ranges[index].target) else null, pressed.target);
+        try list.widget().handleEvent(&events, .mouse_leave);
+        try std.testing.expect(!list.hover.pointing and list.hover.point == null);
+        if (hovered != null) try std.testing.expectEqual(vaxis.Mouse.Shape.default, events.cmds.items[events.cmds.items.len - 1].set_mouse_shape);
+    };
 }
