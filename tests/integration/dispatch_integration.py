@@ -1349,7 +1349,7 @@ def builtin_instruction_cases(state, processes, endpoints, releases):
     before = command("session", "inspect", "--store", store, "--session", session,
                      "--profile", "full")["full"]["model_operations"]
     assert len(before) == 2, before
-    replay = message(state, store, "builtin-retry-b", session, "input B")
+    replay = retry_message(state, store, "builtin-retry-b")
     assert replay["answer"]["replayed"] is True, replay
     assert read_result(store, "builtin-retry-b") == b"answer B"
     after = command("session", "inspect", "--store", store, "--session", session,
