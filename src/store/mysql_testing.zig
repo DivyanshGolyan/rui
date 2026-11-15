@@ -2322,15 +2322,28 @@ test "store.mysql touch oracle observes and clears uncommitted entry writes with
     const session = try testing.configureTestSession(&storage, "oracle-uncommitted");
     const entry = try store_core.enter(&storage, .none);
     defer entry.release();
+    const Head = @import("tests.zig").TestingRound.head;
+    var head: Head.Row = undefined;
+    const mysql = &storage.engine.mysql;
+    try mysql.bind(Head, &.{ .session_ref = session.slice() }, 0);
+    try mysql.startPass();
+    try std.testing.expect(try mysql.nextRow());
+    try mysql.decodeRow(Head.Row, &head);
+    try std.testing.expect(!try mysql.nextRow());
+    mysql.endStatement();
+    try mysql.finishPass();
     try store_core.begin(&storage);
     defer if (storage.engine.inTransaction()) store_core.rollbackAfterError(&storage, .{}) catch @panic("oracle fixture rollback failed");
     // The restricted application connection changes canonical rows, deliberately
     // without a typed touch, while the root oracle observes another connection.
-    var sql: [128]u8 = undefined;
-    const connection_state = &storage.engine.mysql.state.connection;
-    try connection_state.query(try std.fmt.bufPrint(&sql, "UPDATE session SET label='oracle uncommitted' WHERE session_ref='{s}'", .{session.slice()}));
-    try drain(connection_state, null);
-    try std.testing.expect(storage.engine.inTransaction());
+    const forgotten_touch = rsql.Write(.{
+        .sql = "UPDATE session SET label='oracle uncommitted' WHERE session_ref=@session(?1)",
+        .Args = struct { session: rsql.SessionHead },
+        .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
+    });
+    try std.testing.expectEqual(@as(u64, 1), try liveWrite(&storage, forgotten_touch, .{ .session = head.head }));
+    // A pending BEGIN is not enough: this pass must have sent it to MySQL.
+    try std.testing.expect(storage.engine.mysql.state.begin == .sent);
     const missing = store_core.untouchedForTesting(&storage);
     try std.testing.expectEqual(true, missing != null);
     try std.testing.expectEqualStrings(session.slice(), &missing.?);
