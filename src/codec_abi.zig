@@ -87,10 +87,21 @@ pub const ItemKind = enum(u8) {
     text_format,
     request_end,
 
+    /// An image-bearing Message opens. Parts stay within this history element.
+    image_message_open,
+    /// Handle 0: one Text part, including empty or adjacent Text.
+    input_text,
+    /// Handle 0: canonical raw image bytes. Media validation precedes encoding.
+    input_image,
+    image_message_close,
+    /// Handle 0: call_id. Only image-bearing observations use this array.
+    image_tool_open,
+    image_tool_close,
+
     /// The items the Host resumes the codec from its carry before.
     pub fn resumes(self: ItemKind) bool {
         return switch (self) {
-            .message, .output_open, .tool_result, .operation, .effort_update, .declare_open, .history_end => true,
+            .image_message_open, .image_tool_open, .message, .output_open, .tool_result, .operation, .effort_update, .declare_open, .history_end => true,
             else => false,
         };
     }
@@ -99,7 +110,7 @@ pub const ItemKind = enum(u8) {
     /// the codec's carry.
     pub fn endsElement(self: ItemKind) bool {
         return switch (self) {
-            .message, .output_close, .tool_result, .operation, .effort_update, .declare_close => true,
+            .image_message_close, .image_tool_close, .message, .output_close, .tool_result, .operation, .effort_update, .declare_close => true,
             else => false,
         };
     }
@@ -139,7 +150,15 @@ pub const Item = union(ItemKind) {
     web_search,
     text_format,
     request_end,
+    image_message_open: Author,
+    input_text,
+    input_image: ImageMime,
+    image_message_close,
+    image_tool_open,
+    image_tool_close,
 };
+
+pub const ImageMime = enum(u8) { png, jpeg };
 
 pub const max_handles = 3;
 pub const max_model_bytes = 256;
@@ -192,6 +211,9 @@ pub const Piece = union(enum) {
     literal: []const u8,
     /// One of the item's handles, whole, escaped.
     content: struct { handle: u8, escape: Escape },
+    /// One canonical raw Content handle, read in verified windows and encoded
+    /// with RFC 4648 standard base64 and padding. Framing belongs to the codec.
+    base64: u8,
 };
 
 /// The most pieces one item takes, across every codec this contract
@@ -210,6 +232,10 @@ pub const Pieces = struct {
 
     pub fn content(self: *Pieces, handle: u8, escape: Escape) void {
         self.push(.{ .content = .{ .handle = handle, .escape = escape } });
+    }
+
+    pub fn base64(self: *Pieces, handle: u8) void {
+        self.push(.{ .base64 = handle });
     }
 
     fn push(self: *Pieces, piece: Piece) void {
