@@ -688,6 +688,34 @@ def plan(selection, *, event_name, draft, promotion, change_kind, compile_only):
             self.assertNotEqual(self.aggregate(workflow, 'linux', linux, output,
                 dict(results, linux_suites='success')).returncode, 0)
 
+    def test_linux_suite_scheduling_uses_execution_not_compile_selection(self):
+        from ci_plan import plan
+        from docs_only import ChangeKind
+        from types import SimpleNamespace
+        expression = re.search(r"(?m)^    if: \$\{\{ (.*) \}\}$", job(CHECK.read_text(), 'linux_suites'))[1]
+        expression = expression.replace('&&', 'and').replace('||', 'or').replace('!cancelled()', 'not cancelled()')
+        for targets in ([], ['test-native']):
+            for required in (False, True):
+                source = dict(select([], 'review', set(build_files.steps())), targets=targets,
+                              unit_compile_required=required)
+                output = plan(source, event_name='pull_request', draft=False,
+                              promotion=False, change_kind=ChangeKind.NORMAL).outputs
+                encoded = {key: json.dumps(value) if not isinstance(value, str) else value
+                           for key, value in output.items()}
+                for build in ('success', 'skipped', 'failure'):
+                    for unit in ('success', 'skipped', 'failure'):
+                        for cancelled in (False, True):
+                            with self.subTest(targets=targets, required=required, build=build,
+                                              unit=unit, cancelled=cancelled):
+                                needs = SimpleNamespace(plan=SimpleNamespace(outputs=SimpleNamespace(**encoded)),
+                                    linux_build=SimpleNamespace(result=build),
+                                    linux_build_unit=SimpleNamespace(result=unit))
+                                scheduled = eval(expression, {'__builtins__': {}, 'needs': needs,
+                                    'cancelled': lambda: cancelled, 'contains': lambda values, value: value in values,
+                                    'fromJSON': json.loads})
+                                self.assertEqual(scheduled, bool(targets) and not cancelled
+                                                 and build == 'success' and unit in ('success', 'skipped'))
+
     def test_linux_producer_and_restore_share_compile_identity_not_execution_targets(self):
         workflow = CHECK.read_text()
         for name in ('linux_build', 'linux_build_unit'):

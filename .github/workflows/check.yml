@@ -371,7 +371,7 @@ jobs:
     needs: [plan, linux_build, linux_build_unit]
     # The unit producer is skipped when no selected target compiles it. A
     # compile-only build stops at its producers.
-    if: ${{ !cancelled() && needs.plan.outputs.compile_only == 'false' && needs.linux_build.result == 'success' && contains(fromJSON('["success", "skipped"]'), needs.linux_build_unit.result) }}
+    if: ${{ !cancelled() && needs.plan.outputs.compile_only == 'false' && needs.plan.outputs.targets != '' && needs.plan.outputs.targets != '[]' && needs.linux_build.result == 'success' && contains(fromJSON('["success", "skipped"]'), needs.linux_build_unit.result) }}
     runs-on: ubuntu-24.04
     # Ordinary shards take under ten minutes; a local rebuild after a rejected
     # handoff compiles without the producer's cache. A failed promotion shard
