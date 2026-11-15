@@ -2076,15 +2076,25 @@ fn prepareOverviewUsing(init: std.process.Init, options: NewSessionOptions, entr
     const destination = try snapshot.destination(home, &fallback);
     try preflightNewSession(init.io, destination.path, destination.saved);
     const usable: provider_selection.Readinesses = .initFill(.configured);
-    _ = try snapshot.resolve(&usable);
+    const selected = try snapshot.resolve(&usable);
     var readiness = localReadiness(init);
-    const connection_info = try host_start.inspectConnection(init, destination.path);
-    readiness.set(.openai, connection_info.readiness);
     entry.binding = try snapshot.resolve(&readiness);
-    if (connection_info.custom() and intent.model == null) {
-        if (entry.binding) |*binding| if (std.mem.eql(u8, binding.provider.slice(), "openai")) {
-            entry.binding = null;
-        };
+    if (selected != null and entry.binding != null) {
+        // Already chosen and locally usable: the starter owns ready-first
+        // attachment and any absent-Host settings refusal. Do not make its
+        // running Host depend on rereading startup-only source documents.
+        // Host facts name routes, not endpoints. Without an invocation model,
+        // even a standard API connection conservatively needs the form.
+        if (intent.model == null and std.mem.eql(u8, entry.binding.?.provider.slice(), "openai")) entry.binding = null;
+    } else {
+        const connection_info = try host_start.inspectConnection(init, destination.path);
+        readiness.set(.openai, connection_info.readiness);
+        entry.binding = try snapshot.resolve(&readiness);
+        if (connection_info.custom() and intent.model == null) {
+            if (entry.binding) |*binding| if (std.mem.eql(u8, binding.provider.slice(), "openai")) {
+                entry.binding = null;
+            };
+        }
     }
     entry.login_at = null;
     try entry.store.set(destination.path);
@@ -4499,11 +4509,13 @@ const LaunchFixture = struct {
     const Scenario = enum { success, os_error, refusal, timeout, invalid_url, missing_key, already_ready, closed, full, identity, competitor, incompatible, access, interrupted, migration_success, migration_timeout, migration_both, migration_eof, migration_final };
     scenario: Scenario,
     launches: usize = 0,
+    observations: usize = 0,
     reads: usize = 0,
     pauses: usize = 0,
     clock: i96 = 0,
     startup_fd: c_int = -1,
     openai: bool = true,
+    chatgpt: bool = false,
     assignments: usize = 0,
     expected_assignment: ?[]const u8 = null,
     assignments_match: bool = true,
@@ -4533,6 +4545,7 @@ const LaunchFixture = struct {
     }
     fn observe(raw: ?*anyopaque, _: std.Io, paths: *const platform.Paths, until: ?i128) protocol_reply.HostStatus {
         const self = cast(raw);
+        self.observations += 1;
         if (until) |deadline| {
             const expected = self.migrated_deadline orelse if (self.migration_announced) self.clock - std.time.ns_per_s + HostStartupWait.readiness_ns else HostStartupWait.readiness_ns;
             self.deadline_valid = self.deadline_valid and deadline == expected;
@@ -4546,7 +4559,7 @@ const LaunchFixture = struct {
             else => false,
         });
         if (!ready) return .unavailable;
-        return .{ .ready = .{ .store = paths.store, .instance = @splat(1), .active_capacity = 4, .started_at = 1, .custody_occupied = 0, .paused = false, .capabilities = .{ .bash = true, .providers = .{ .codex = .chatgpt_device, .openai = if (self.openai and (self.launches != 0 or self.scenario == .already_ready)) .key_file else .unserved, .chatgpt = .unserved } } } };
+        return .{ .ready = .{ .store = paths.store, .instance = @splat(1), .active_capacity = 4, .started_at = 1, .custody_occupied = 0, .paused = false, .capabilities = .{ .bash = true, .providers = .{ .codex = .chatgpt_device, .openai = if (self.openai and (self.launches != 0 or self.scenario == .already_ready)) .key_file else .unserved, .chatgpt = if (self.chatgpt) .chatgpt_plan else .unserved } } } };
     }
     fn verify(raw: ?*anyopaque, _: std.Io, _: *const platform.Paths, pid: c_int, started: u64, _: []const u8, _: ?i128, _: *protocol_reply.HostInfoFacts) bool {
         return cast(raw).exact_identity and cast(raw).scenario != .competitor and pid == 42 and started == 12;
@@ -5462,5 +5475,128 @@ test "Host launch guided activation requires frozen pair and exact fresh identit
         var key_path: [std.Io.Dir.max_path_bytes]u8 = undefined;
         try std.testing.expect(!try api_key.present(try api_key.path(&environment, &key_path)));
         try std.testing.expectError(error.FileNotFound, tmp.dir.access(init.io, ".config/rui/preferences", .{}));
+    }
+}
+
+test "Host launch chosen usable bindings attach before startup document admission" {
+    const Document = enum { missing, standard, custom, malformed, insecure, unreadable };
+    const io = std.testing.io;
+    const usable: provider_selection.Readinesses = .initFill(.configured);
+    inline for ([_]protocol.Provider{ .codex, .chatgpt, .openai }) |provider| for ([_]bool{ false, true }) |saved_selector| for ([_]bool{ false, true }) |ready| for (std.enums.values(Document)) |document| {
+        errdefer std.debug.print("chosen provider={s} saved={} ready={} document={s}\n", .{ @tagName(provider), saved_selector, ready, @tagName(document) });
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const home = home_buffer[0..try tmp.dir.realPath(io, &home_buffer)];
+        var directory = try tmp.dir.createDirPathOpen(io, "store", .{ .permissions = .fromMode(0o700) });
+        defer directory.close(io);
+        var store_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const store = store_buffer[0..try directory.realPath(io, &store_buffer)];
+        var environment: std.process.Environ.Map = .init(std.testing.allocator);
+        defer environment.deinit();
+        try environment.put("HOME", home);
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const init: std.process.Init = .{ .minimal = .{ .args = .{ .vector = &.{} }, .environ = .empty }, .arena = &arena, .gpa = std.testing.allocator, .io = io, .environ_map = &environment, .preopens = .empty };
+        if (provider == .openai) {
+            try provider_login.key(init, "fixture-global-key");
+        } else {
+            var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+            const path = try provider_login.credentialPath(init, provider, &path_buffer, true);
+            const record = try init.gpa.create(codex_credentials.Record);
+            defer init.gpa.destroy(record);
+            record.* = .{ .generation = 0, .account_id = .{}, .id_token = .{}, .access_token = .{}, .refresh_token = .{}, .expires_at = 4_102_444_800, .refreshed_at = 1 };
+            defer std.crypto.secureZero(u8, std.mem.asBytes(record));
+            try record.account_id.set(codex_auth.fixture_account_id);
+            try record.id_token.set(codex_auth.fixture_id_token);
+            try record.access_token.set(codex_auth.fixture_access_token);
+            try record.refresh_token.set("fixture-refresh");
+            const scratch = try init.gpa.create(codex_credentials.Scratch);
+            defer init.gpa.destroy(scratch);
+            try codex_credentials.install(path, record, null, scratch);
+        }
+        if (saved_selector) _ = try preferences.update(home, .{ .provider = .{ .set = @tagName(provider) }, .model = .{ .set = "saved-model" } }, &usable);
+        switch (document) {
+            .missing => {},
+            // A directory cannot be read as a private document on either OS,
+            // including privileged test runners that bypass read mode bits.
+            .unreadable => try directory.createDir(io, "host.json", .fromMode(0o700)),
+            else => {
+                const file = try directory.createFile(io, "host.json", .{ .permissions = .fromMode(if (document == .insecure) 0o644 else 0o600) });
+                defer file.close(io);
+                try file.writeStreamingAll(io, switch (document) {
+                    .custom => "{\"providers\":{\"openai\":{\"endpoint\":\"https://custom.example/responses\"},\"codex\":{},\"chatgpt\":{}}}",
+                    .malformed => "{",
+                    else => "{}",
+                });
+            },
+        }
+        var fixture: LaunchFixture = .{ .scenario = if (ready) .already_ready else .success, .chatgpt = true };
+        const entry = try init.gpa.create(OverviewEntry);
+        defer init.gpa.destroy(entry);
+        try prepareOverviewUsing(init, .{ .store = store, .provider = if (saved_selector) null else @tagName(provider), .model = "explicit-model" }, entry, fixture.ops(), null);
+        try std.testing.expectEqualStrings(@tagName(provider), entry.binding.?.provider.slice());
+        try std.testing.expectEqualStrings("explicit-model", entry.binding.?.model.slice());
+        const invalid = document == .malformed or document == .insecure or document == .unreadable;
+        const launch = &entry.launch.?;
+        if (!ready and invalid) {
+            try std.testing.expect(launch.outcome == .failed);
+            try std.testing.expectEqual(HostLaunchResult.Cause.Kind.child_refused, launch.outcome.failed.cause.kind);
+            try std.testing.expectEqual(error.HostStartupFailed, launch.outcome.failed.cause.err);
+            try std.testing.expectEqual(start_report.StartError.settings_invalid, launch.outcome.failed.refusal.?.code);
+            try std.testing.expectEqualStrings(store, launch.outcome.failed.store.slice());
+            try std.testing.expectEqual(@as(usize, 0), fixture.launches);
+        } else {
+            try std.testing.expect(launch.outcome == .ready);
+            try std.testing.expectEqual(ready, launch.outcome.ready.adopted);
+            try std.testing.expectEqual(@as(usize, if (ready) 0 else 1), fixture.launches);
+        }
+        if (ready) try std.testing.expectEqual(@as(usize, 1), fixture.observations);
+        if (provider != .openai) {
+            fixture = .{ .scenario = if (ready) .already_ready else .success, .chatgpt = true };
+            try prepareOverviewUsing(init, .{ .store = store, .provider = if (saved_selector) null else @tagName(provider) }, entry, fixture.ops(), null);
+            try std.testing.expectEqualStrings(if (saved_selector) "saved-model" else product_defaults.recommended_model, entry.binding.?.model.slice());
+            try std.testing.expectEqual(ready or !invalid, entry.launch.?.outcome == .ready);
+        } else {
+            // Host facts do not say which endpoint a default model would use.
+            // This applies equally to valid standard/custom and unknown input.
+            fixture = .{ .scenario = if (ready) .already_ready else .success };
+            try prepareOverviewUsing(init, .{ .store = store, .provider = if (saved_selector) null else "openai" }, entry, fixture.ops(), null);
+            try std.testing.expect(entry.binding == null and entry.launch == null);
+            try std.testing.expectEqual(@as(usize, 0), fixture.launches);
+        }
+    };
+}
+
+test "Host launch scoped readiness still discovers selected private keys and requires custom models" {
+    const Gate = struct {
+        fn yes() bool {
+            return true;
+        }
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const home = home_buffer[0..try tmp.dir.realPath(std.testing.io, &home_buffer)];
+    var environment: std.process.Environ.Map = .init(std.testing.allocator);
+    defer environment.deinit();
+    try environment.put("HOME", home);
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const init: std.process.Init = .{ .minimal = .{ .args = .{ .vector = &.{} }, .environ = .empty }, .arena = &arena, .gpa = std.testing.allocator, .io = std.testing.io, .environ_map = &environment, .preopens = .empty };
+    const store = try std.fs.path.join(arena.allocator(), &.{ home, "store" });
+    _ = try host_start.saveConnection(init, store, .{ .base = "https://custom.example/v1" }, .{ .provided = "only-scoped-key" }, "custom-model", Gate.yes);
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    try std.testing.expect(!try api_key.present(try api_key.path(&environment, &path_buffer)));
+    const entry = try init.gpa.create(OverviewEntry);
+    defer init.gpa.destroy(entry);
+    var fixture: LaunchFixture = .{ .scenario = .already_ready };
+    for ([_]?[]const u8{ null, "openai" }) |provider| {
+        try prepareOverviewUsing(init, .{ .store = store, .provider = provider }, entry, fixture.ops(), null);
+        try std.testing.expect(entry.binding == null and entry.launch == null);
+        try prepareOverviewUsing(init, .{ .store = store, .provider = provider, .model = "custom-model" }, entry, fixture.ops(), null);
+        try std.testing.expectEqualStrings("custom-model", entry.binding.?.model.slice());
+        try std.testing.expect(entry.launch.?.outcome == .ready);
+        try std.testing.expectEqual(@as(usize, 0), fixture.launches);
     }
 }

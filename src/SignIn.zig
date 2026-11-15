@@ -478,19 +478,23 @@ fn runAttempt(self: *Self) !Published {
         },
         .key => {
             connection = try host_start.saveConnection(init_, self.target.slice(), frozen.endpoint, frozen.key, frozen.model, publish);
-            switch (connection.?) {
-                .uncertain, .failed => return .{ .defaults = {}, .activation = error.ConnectionNotActive, .connection = connection },
-                .saved => {},
-            }
         },
         .existing => if (!publish()) return error.LoginInterrupted,
         .recheck => {
             if (!publish()) return error.LoginInterrupted;
             const saved_ = self.savedConnection() orelse return error.ConnectionNotActive;
-            if (!try host_start.confirmConnection(init_, self.target.slice(), saved_)) return error.ConnectionSuperseded;
-            connection = .{ .saved = saved_.* };
+            connection = try host_start.confirmConnection(init_, self.target.slice(), saved_);
         },
     }
+    return self.activatePublished(connection);
+}
+fn activatePublished(self: *Self, connection: ?host_start.ConnectionSave) Published {
+    const init_ = self.init.?;
+    const frozen = self.frozen.?;
+    if (connection) |saved_| switch (saved_) {
+        .uncertain, .failed => return .{ .defaults = {}, .activation = error.ConnectionNotActive, .connection = connection },
+        .saved => {},
+    };
     // API model/provider binding is terminal-local, not a global custom default.
     const defaults: anyerror!void = if (frozen.provider == .openai) {} else preferences.saveProviderAfterLogin(init_.environ_map.get("HOME") orelse "", frozen.provider);
     const intended = if (connection) |*value| &value.saved else if (frozen.provider == .openai) self.savedConnection() else null;
@@ -2640,4 +2644,83 @@ test "Sign-in required receipt context retains original I/O causes without chang
     try std.testing.expectEqual(error.SignInReceiptPartlyReported, internal.retainFailure(.{ .internal = error.SignInReceiptPartlyReported }));
     try std.testing.expect(internal.retention_failure.? == .internal);
     try std.testing.expectEqual(error.SignInReceiptPartlyReported, internal.retention_failure.?.cause());
+}
+
+test "Sign-in matching recheck keeps original uncertainty authority and never activates before confirmed durability" {
+    const Hooks = struct {
+        var activations: usize = 0;
+        fn activate(init_: std.process.Init, _: selection.Intent, _: ?*const host_start.Connection) !Activation {
+            activations += 1;
+            return testingActivation(init_);
+        }
+    };
+    for ([_]bool{ false, true }) |renamed| {
+        var rig: BrowserRig = undefined;
+        try rig.open();
+        defer rig.close();
+        const page = &rig.page;
+        Hooks.activations = 0;
+        page.activate = Hooks.activate;
+        var connection: host_start.Connection = .{};
+        try connection.endpoint.set("https://custom.example/responses");
+        try connection.key_file.set("/synthetic retained/.private.key");
+        const form = try page.ensureForm();
+        _ = form.model.set("custom-model", "custom-model".len);
+        page.frozen = .{ .intent = .{ .store = "/selected-store", .provider = "openai", .model = form.model.text() }, .provider = .openai, .model = form.model.text(), .key = .{ .provided = "" }, .endpoint = .{ .unchanged = connection.endpoint.slice() } };
+        page.state.page = .{ .saving = .key };
+        page.outcome = .{ .published = page.activatePublished(.{ .uncertain = .{ .connection = connection, .cause = error.DirectorySyncFailed } }) };
+        try page.settle(.{ .screen = &rig.ctx });
+        try std.testing.expect(page.state.page == .pending);
+        try page.stageReceipt(null);
+        try std.testing.expect(try page.freeze(.recheck, .recheck));
+        page.attempt = .recheck;
+        page.state.page = .{ .saving = .recheck };
+        const cause = if (renamed) error.InjectedCredentialDirectorySyncFailure else error.InjectedCredentialRenameFailure;
+        page.outcome = if (renamed)
+            .{ .published = page.activatePublished(.{ .uncertain = .{ .connection = connection, .cause = cause } }) }
+        else
+            .{ .failed = .{ .cause = cause } };
+        try page.settle(.{ .screen = &rig.ctx });
+        try std.testing.expectEqual(@as(usize, 0), Hooks.activations);
+        try std.testing.expect(page.form.?.value == form and page.savedConnection() != null);
+        try std.testing.expectEqualStrings(connection.key_file.slice(), page.savedConnection().?.key_file.slice());
+        try std.testing.expectEqualStrings("custom-model", page.frozen.?.model);
+        if (renamed) {
+            try std.testing.expect(page.state.page == .pending);
+            try std.testing.expectEqual(cause, page.saved.?.uncertain.cause);
+        } else {
+            try std.testing.expect(page.state.page == .failed);
+            try std.testing.expectEqual(core.Attempt.recheck, page.state.page.failed.retry);
+        }
+        try std.testing.expect(try page.freeze(.recheck, .retry));
+        var report: std.Io.Writer.Allocating = .init(rig.arena.allocator());
+        try std.testing.expectError(error.DirectorySyncFailed, page.stopTo(&report.writer));
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, report.written(), "(DirectorySyncFailed)"));
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, report.written(), @errorName(cause)));
+        try std.testing.expectEqual(@as(usize, if (renamed) 2 else 1), std.mem.count(u8, report.written(), connection.key_file.slice()));
+        const count = report.written().len;
+        try page.stopTo(&report.writer);
+        try std.testing.expectEqual(count, report.written().len);
+    }
+}
+
+test "Sign-in unknown API settings reach typed form failure instead of a guessed binding" {
+    var rig: BrowserRig = undefined;
+    try rig.open();
+    defer rig.close();
+    const page = &rig.page;
+    const store = try std.fs.path.join(rig.arena.allocator(), &.{ rig.env.get("HOME").?, "store" });
+    var directory = try std.Io.Dir.cwd().createDirPathOpen(page.init.?.io, store, .{ .permissions = .fromMode(0o700) });
+    defer directory.close(page.init.?.io);
+    const file = try directory.createFile(page.init.?.io, "host.json", .{ .permissions = .fromMode(0o600) });
+    defer file.close(page.init.?.io);
+    try file.writeStreamingAll(page.init.?.io, "{");
+    try page.target.set(store);
+    try rig.send("\t\r");
+    try std.testing.expect(page.state.page == .failed and page.state.page.failed.retry == .key);
+    try std.testing.expect(page.outcome.?.failed.cause == error.SettingsInvalid);
+    try std.testing.expect(page.form == null and page.task.thread == null);
+    var report: std.Io.Writer.Allocating = .init(rig.arena.allocator());
+    try std.testing.expectError(error.SettingsInvalid, page.stopTo(&report.writer));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, report.written(), "SettingsInvalid"));
 }

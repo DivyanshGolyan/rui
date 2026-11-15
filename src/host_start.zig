@@ -397,7 +397,11 @@ pub fn connectionAssignment(init: std.process.Init, gpa: std.mem.Allocator, conn
 /// Confirms the retained pair through the same saved-document owner. A later
 /// writer wins: recheck never overwrites a different connection. Re-publication
 /// confirms durability after an uncertain rename without another key install.
-pub fn confirmConnection(init: std.process.Init, dir: []const u8, connection: *const Connection) !bool {
+pub fn confirmConnection(init: std.process.Init, dir: []const u8, connection: *const Connection) !ConnectionSave {
+    return confirmConnectionWithFault(init, dir, connection, null);
+}
+
+fn confirmConnectionWithFault(init: std.process.Init, dir: []const u8, connection: *const Connection, fault: ?credentials.PrivateFault) !ConnectionSave {
     var wiping: secret_value.WipingAllocator = .{ .backing = init.gpa };
     var memory: std.heap.ArenaAllocator = .init(wiping.allocator());
     defer memory.deinit();
@@ -422,8 +426,12 @@ pub fn confirmConnection(init: std.process.Init, dir: []const u8, connection: *c
         }
     };
     var check: Check = .{ .init = init, .connection = connection };
-    const result = try credentials.editPrivate(try savedPath(init, gpa, dir), try gpa.alloc(u8, hs.max_document_bytes + 1), &check, Check.apply, null);
-    return check.matches and result == .committed;
+    const result = try credentials.editPrivate(try savedPath(init, gpa, dir), try gpa.alloc(u8, hs.max_document_bytes + 1), &check, Check.apply, fault);
+    if (!check.matches) return error.ConnectionSuperseded;
+    return switch (result) {
+        .committed => .{ .saved = connection.* },
+        .unconfirmed => |cause| .{ .uncertain = .{ .connection = connection.*, .cause = cause } },
+    };
 }
 
 pub const ConnectionInfo = struct {
@@ -2165,11 +2173,11 @@ test "Host start guided connection isolates two Stores preserves providers and f
     try std.testing.expectEqual(@as(usize, 7), settings.execution.active_capacity.value);
     try std.testing.expect(!settings.providers.entries.openai.?.unauthenticated.value);
     try std.testing.expectEqualStrings(first.saved.key_file.slice(), settings.providers.entries.openai.?.key.source.file.slice());
-    try std.testing.expect(try confirmConnection(init, first_dir, &first.saved));
+    try std.testing.expect((try confirmConnection(init, first_dir, &first.saved)) == .saved);
     const second = try saveConnection(init, first_dir, .{ .base = "https://two.example/api" }, .{ .provided = "second-private-key" }, "other-chat", Gate.yes);
     try std.testing.expect(second == .saved);
     try std.testing.expect(!std.mem.eql(u8, first.saved.key_file.slice(), second.saved.key_file.slice()));
-    try std.testing.expect(!try confirmConnection(init, first_dir, &first.saved));
+    try std.testing.expectError(error.ConnectionSuperseded, confirmConnection(init, first_dir, &first.saved));
     try std.testing.expect(try api_key.read(first.saved.key_file.slice(), &key));
     try std.testing.expectEqualStrings("first-private-key", key.slice());
     const assignment = try connectionAssignment(init, a, &first.saved);
@@ -2181,10 +2189,10 @@ test "Host start guided connection isolates two Stores preserves providers and f
     try std.testing.expectEqualStrings(first.saved.endpoint.slice(), settings.providers.entries.openai.?.endpoint.?.slice());
     try std.testing.expectEqualStrings(first.saved.key_file.slice(), settings.providers.entries.openai.?.key.source.file.slice());
     try std.testing.expectError(error.LoginInterrupted, saveConnection(init, first_dir, .{ .base = "https://cancelled.example" }, .{ .provided = "cancelled-key" }, "valid-chat", Gate.no));
-    try std.testing.expect(try confirmConnection(init, first_dir, &second.saved));
+    try std.testing.expect((try confirmConnection(init, first_dir, &second.saved)) == .saved);
     for ([_][]const u8{ "", "two words", "bad\nkey" }) |invalid_key| try std.testing.expectError(error.InvalidApiKey, saveConnection(init, first_dir, .{ .base = "https://unused.example" }, .{ .provided = invalid_key }, "valid-chat", Gate.yes));
     for ([_][]const u8{ "http://host", "https://user@host", "https://host?q=1", "https://host#fragment" }) |base| try std.testing.expectError(error.InvalidBaseUrl, saveConnection(init, first_dir, .{ .base = base }, .{ .provided = "valid-key" }, "valid-chat", Gate.yes));
-    try std.testing.expect(try confirmConnection(init, first_dir, &second.saved));
+    try std.testing.expect((try confirmConnection(init, first_dir, &second.saved)) == .saved);
     try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, ".config/rui/preferences", .{}));
 }
 
@@ -2304,7 +2312,7 @@ test "Host start guided connection distinguishes key sync settings sync and reta
             try std.testing.expectEqual(error.InjectedCredentialDirectorySyncFailure, result.uncertain.cause);
             try std.testing.expect(try api_key.present(result.uncertain.connection.key_file.slice()));
             try std.testing.expect(std.mem.indexOf(u8, document, result.uncertain.connection.key_file.slice()) != null);
-            try std.testing.expect(try confirmConnection(init, dir, &result.uncertain.connection));
+            try std.testing.expect((try confirmConnection(init, dir, &result.uncertain.connection)) == .saved);
         } else {
             try std.testing.expect(result == .failed);
             try std.testing.expectEqualStrings(old, document);
@@ -2512,4 +2520,61 @@ test "Host start guided reuse admits equivalent automatic omitted endpoint env b
         try std.testing.expect(try api_key.read(saved_connection.saved.key_file.slice(), &key));
         try std.testing.expectEqualStrings("global-source-key", key.slice());
     }
+}
+
+test "Host start guided recheck separates supersession from publication durability at every fault phase" {
+    const Gate = struct {
+        fn yes() bool {
+            return true;
+        }
+    };
+    const State = enum { matching, missing, superseding };
+    for (std.enums.values(State)) |state| for ([_]?credentials.PrivateFault{ null, .write, .file_sync, .rename, .directory_sync }) |fault| {
+        errdefer std.debug.print("recheck state={s} fault={s}\n", .{ @tagName(state), if (fault) |value| @tagName(value) else "none" });
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const home = home_buffer[0..try tmp.dir.realPath(std.testing.io, &home_buffer)];
+        var environment: std.process.Environ.Map = .init(std.testing.allocator);
+        defer environment.deinit();
+        try environment.put("HOME", home);
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const init = initForTest(&arena, &environment);
+        const dir = try std.fs.path.join(arena.allocator(), &.{ home, "host" });
+        const first = try saveConnection(init, dir, .{ .base = "https://first.example/v1" }, .{ .provided = "private-first-key" }, "custom-model", Gate.yes);
+        const path = try savedPath(init, arena.allocator(), dir);
+        switch (state) {
+            .matching => {},
+            .missing => try std.Io.Dir.cwd().deleteFile(init.io, path),
+            .superseding => _ = try saveConnection(init, dir, .{ .base = "https://other.example/v2" }, .{ .provided = "private-second-key" }, "custom-model", Gate.yes),
+        }
+        var before: [hs.max_document_bytes + 1]u8 = undefined;
+        const old = if (try credentials.readPrivate(path, &before)) |bytes| try arena.allocator().dupe(u8, bytes) else null;
+        const result = confirmConnectionWithFault(init, dir, &first.saved, fault);
+        if (state != .matching) {
+            try std.testing.expectError(error.ConnectionSuperseded, result);
+        } else if (fault != null and fault != .directory_sync) {
+            try std.testing.expectError(switch (fault.?) {
+                .write => error.InjectedCredentialWriteFailure,
+                .file_sync => error.InjectedCredentialFileSyncFailure,
+                .rename => error.InjectedCredentialRenameFailure,
+                .directory_sync => unreachable,
+            }, result);
+        } else {
+            const confirmed = try result;
+            if (fault == .directory_sync) {
+                try std.testing.expect(confirmed == .uncertain);
+                try std.testing.expectEqual(error.InjectedCredentialDirectorySyncFailure, confirmed.uncertain.cause);
+                try std.testing.expectEqualStrings(first.saved.endpoint.slice(), confirmed.uncertain.connection.endpoint.slice());
+                try std.testing.expectEqualStrings(first.saved.key_file.slice(), confirmed.uncertain.connection.key_file.slice());
+            } else try std.testing.expect(confirmed == .saved);
+        }
+        var after: [hs.max_document_bytes + 1]u8 = undefined;
+        const current = try credentials.readPrivate(path, &after);
+        try std.testing.expectEqual(old == null, current == null);
+        if (old) |bytes| try std.testing.expectEqualStrings(bytes, current.?);
+        try std.testing.expect(try api_key.present(first.saved.key_file.slice()));
+        if (state == .matching) try std.testing.expect((try confirmConnection(init, dir, &first.saved)) == .saved);
+    };
 }
