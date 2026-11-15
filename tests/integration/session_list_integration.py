@@ -161,13 +161,16 @@ def main():
             # Preserve the pre-archive 4 KiB budget plus added wire fields per row.
             # The independent archive-state contract's longest value is archiving.
             archive_field_bytes = len(', "archive_state": "archiving"'.encode())
+            # These never-pinned rows carry one pin_order field in its null form.
+            assert all(row["pin_order"] is None for row in after_growth[1]["sessions"])
+            pin_field_bytes = len(', "pin_order": null'.encode())
             # Each dormant row carries one last_line field in its null form.
             last_line_field_bytes = len(', "last_line": null'.encode())
             # Retain the same facts budget, adding only the actual bounded
             # read-version field each row now carries (not unrelated slack).
             read_version_bytes = sum(len(', "read_version": ' + json.dumps(row["read_version"]))
                                      for row in after_growth[1]["sessions"])
-            assert len(json.dumps(after_growth[1]).encode()) < 4096 + 8 * (archive_field_bytes + last_line_field_bytes) + read_version_bytes
+            assert len(json.dumps(after_growth[1]).encode()) < 4096 + 8 * (archive_field_bytes + pin_field_bytes + last_line_field_bytes) + read_version_bytes
             safe = subprocess.run([binary, "session", "list", "--store", store, "--all"],
                 cwd=root, capture_output=True, text=True, timeout=10)
             assert safe.returncode == 0 and "\\u0000" in safe.stdout and "\x00" not in safe.stdout, safe

@@ -238,6 +238,7 @@ pub fn stageEndingMessageUpgrade(storage: *Store, keep_pending_forward: bool) !v
     };
     // K10 is the 66 -> 67 transition, even after later formats append steps.
     const from: u32 = 66;
+    try dropPinOrganization(storage);
     try dropObligationFrontier(storage);
     // Reconstruct the historical row width from its owning CREATE, not a
     // hand-maintained list of every column later formats append. Both engines
@@ -303,6 +304,35 @@ pub fn stageEndingMessageUpgrade(storage: *Store, keep_pending_forward: bool) !v
     }
 }
 
+/// Rewind pin-free upgrade fixtures before replaying the format-75 step.
+fn dropPinOrganization(storage: *Store) !void {
+    const schema = @import("schema.zig");
+    const Native = struct {
+        fn exec(store: *Store, sql: [:0]const u8) !void {
+            if (store.engine == .mysql) return mysql_testing.rawExec(store, sql);
+            return sqlite.exec(store.sqliteDatabase(), sql);
+        }
+    };
+    try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM session_pin_command", .{}));
+    try Native.exec(storage, "DROP TABLE session_pin");
+    try Native.exec(storage, "DROP TABLE session_pin_command");
+    if (storage.engine == .mysql) {
+        try Native.exec(storage, "SET @rui_pin_kind_ddl=NULL");
+        try Native.exec(storage, "SET @rui_pin_kind_ddl=(SELECT CONCAT('ALTER TABLE core_command DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`, ADD CHECK(kind BETWEEN 1 AND 6)') FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.TABLE_NAME='core_command' AND tc.CONSTRAINT_TYPE='CHECK' AND LOWER(TRIM(REPLACE(REPLACE(REPLACE(cc.CHECK_CLAUSE,'`',''),'(',''),')','')))='kind between 1 and 7')");
+        try Native.exec(storage, "PREPARE rui_pin_kind FROM @rui_pin_kind_ddl");
+        try Native.exec(storage, "EXECUTE rui_pin_kind");
+        try Native.exec(storage, "DEALLOCATE PREPARE rui_pin_kind");
+        try Native.exec(storage, "SET @rui_pin_kind_ddl=NULL");
+    } else {
+        try Native.exec(storage, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
+        defer Native.exec(storage, "PRAGMA foreign_keys=ON;PRAGMA legacy_alter_table=OFF") catch unreachable;
+        const step = schema.migrations[74 - schema.migration_baseline];
+        try Native.exec(storage, step.sqlite[0]);
+        try Native.exec(storage, schema.migrations[56 - schema.migration_baseline].sqlite[1]);
+        for (step.sqlite[2..5]) |sql| try Native.exec(storage, sql);
+    }
+}
+
 /// Remove only format 73's derived representation; keep canonical input and
 /// forwarding facts so the production migration must reconstruct the frontier.
 fn dropObligationFrontier(storage: *Store) !void {
@@ -327,6 +357,7 @@ fn dropObligationFrontier(storage: *Store) !void {
 /// current format, before the runtime opens its SELECT/INSERT/UPDATE Store.
 pub fn stageObligationUpgrade(storage: *Store) !void {
     const schema = @import("schema.zig");
+    try dropPinOrganization(storage);
     try dropObligationFrontier(storage);
     if (storage.engine == .mysql) {
         try mysql_testing.rawExec(storage, "UPDATE store_meta SET meta_value='72' WHERE meta_key='format'");

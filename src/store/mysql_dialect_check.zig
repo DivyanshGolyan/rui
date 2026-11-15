@@ -35,6 +35,11 @@ const oracle_database = "rui_dialect_check_oracle";
 
 const State = enum { unopened, absent, open, broken };
 
+// The root observer must see and clear each entry's trigger evidence before
+// a queued batch commits. Only this disposable oracle is nontransactional;
+// canonical tables and the application login's grants stay unchanged.
+pub const touch_oracle_definition = "(session_ref VARCHAR(6)) ENGINE=MEMORY";
+
 /// Guards everything below: some Store tests call the Store from threads.
 var mutex: std.Io.Mutex = .init;
 var state: State = .unopened;
@@ -156,7 +161,7 @@ fn bootstrap() !void {
     for (schema.mysql_session) |text| try setup(text);
     const objects = comptime schema.objects(.mysql);
     for (objects) |object| try ddl(object.name, object.sql);
-    try ddl("touch oracle", "CREATE TABLE " ++ oracle_database ++ ".touched_oracle(session_ref TEXT)");
+    try ddl("touch oracle", "CREATE TABLE " ++ oracle_database ++ ".touched_oracle" ++ touch_oracle_definition);
     const triggers = comptime sqlite.touchOracleTriggers(.mysql, oracle_database ++ ".touched_oracle");
     for (triggers) |text| try ddl("touch oracle", text);
 }
@@ -975,7 +980,7 @@ test "schema 70 MySQL migration updates the saved wire label and preserves ordin
         try load(migrated_database, schema.mysqlMigrationFrom(69).?, false);
         try expectCatalog(migrated_database);
         // Native Store readback uses the same touch oracle as other live Stores.
-        try setup("DROP DATABASE IF EXISTS " ++ migrated_database ++ "_oracle;CREATE DATABASE " ++ migrated_database ++ "_oracle;CREATE TABLE " ++ migrated_database ++ "_oracle.touched_oracle(session_ref TEXT)");
+        try setup("DROP DATABASE IF EXISTS " ++ migrated_database ++ "_oracle;CREATE DATABASE " ++ migrated_database ++ "_oracle;CREATE TABLE " ++ migrated_database ++ "_oracle.touched_oracle" ++ touch_oracle_definition);
         for (comptime sqlite.touchOracleTriggers(.mysql, migrated_database ++ "_oracle.touched_oracle")) |text| try setup(text);
         done.migrations += 1;
         writeRecord();
@@ -1059,4 +1064,82 @@ test "schema 66 MySQL migration freezes actual effort emission and prior admitte
         done.migrations += 1;
         writeRecord();
     };
+}
+
+test "schema 75 MySQL pin migration handles fresh and historically upgraded kind checks" {
+    const io = std.testing.io;
+    mutex.lockUncancelable(io);
+    defer mutex.unlock(io);
+    _ = connection() orelse return if (state == .absent) error.SkipZigTest else error.MysqlUnavailable;
+    defer restore("USE " ++ database);
+    inline for (.{ false, true }) |historical| {
+        try setup("DROP DATABASE IF EXISTS " ++ migrated_database ++ ";CREATE DATABASE " ++ migrated_database);
+        if (historical) {
+            try load(migrated_database, store_testing.baseline_mysql_ddl, false);
+            try load(migrated_database, store_testing.baseline_rows, true);
+            inline for (schema.migrations) |step| {
+                if (step.from < 74) try load(migrated_database, schema.mysqlMigration(step.from), false);
+            }
+        } else {
+            const objects = comptime schema.objects(.mysql);
+            for (objects) |object| {
+                if (std.mem.eql(u8, object.name, "session_pin") or std.mem.eql(u8, object.name, "session_pin_command")) continue;
+                const text = try std.mem.replaceOwned(u8, std.testing.allocator, object.sql, "kind BETWEEN 1 AND 7", "kind BETWEEN 1 AND 6");
+                defer std.testing.allocator.free(text);
+                try load(migrated_database, text, false);
+            }
+            try load(migrated_database, store_testing.expected_mysql_rows, true);
+        }
+        try load(migrated_database, "CREATE TEMPORARY TABLE original_pin_commands AS SELECT * FROM core_command", false);
+        defer restore("DROP TEMPORARY TABLE " ++ migrated_database ++ ".original_pin_commands");
+        try load(migrated_database, "CREATE TEMPORARY TABLE original_pin_stops AS SELECT * FROM session_stop", false);
+        defer restore("DROP TEMPORARY TABLE " ++ migrated_database ++ ".original_pin_stops");
+        try load(migrated_database, schema.mysqlMigration(74), false);
+        try expectCatalog(migrated_database);
+        try expectSameResults(&.{
+            "SELECT * FROM core_command ORDER BY command_seq",
+            "SELECT * FROM session_stop ORDER BY command_key",
+            "SELECT count(*) FROM session_pin",
+            "SELECT count(*) FROM session_pin_command",
+        }, &.{
+            "SELECT * FROM original_pin_commands ORDER BY command_seq",
+            "SELECT * FROM original_pin_stops ORDER BY command_key",
+            "SELECT 0",
+            "SELECT 0",
+        });
+        try load(migrated_database, "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) VALUES('pin-upgrade',7,'d8mv7p',UNHEX(REPEAT('00',32)),1,'',0,0,100);INSERT INTO session_pin_command(command_key,pinned) VALUES('pin-upgrade',1);INSERT INTO session_pin(session_ref,command_key) VALUES('d8mv7p','pin-upgrade');UPDATE session_pin SET command_key=NULL WHERE session_ref='d8mv7p'", false);
+        try expectSameResults(&.{
+            "SELECT count(*) FROM session_pin WHERE command_key IS NULL",
+            "SELECT pinned FROM session_pin_command WHERE command_key='pin-upgrade'",
+        }, &.{ "SELECT 1", "SELECT 1" });
+        done.migrations += 1;
+        writeRecord();
+    }
+}
+
+test "schema 75 MySQL pin migration refuses absent and ambiguous kind checks before DDL" {
+    const io = std.testing.io;
+    mutex.lockUncancelable(io);
+    defer mutex.unlock(io);
+    _ = connection() orelse return if (state == .absent) error.SkipZigTest else error.MysqlUnavailable;
+    defer restore("USE " ++ database);
+    inline for (.{ false, true }) |ambiguous| {
+        try setup("DROP DATABASE IF EXISTS " ++ migrated_database ++ ";CREATE DATABASE " ++ migrated_database ++ ";USE " ++ migrated_database);
+        try setup("CREATE TABLE core_command(kind BIGINT CHECK(kind BETWEEN 1 AND 7))");
+        if (ambiguous) try setup("ALTER TABLE core_command ADD CHECK(kind BETWEEN 1 AND 6), ADD CHECK(kind BETWEEN 1 AND 6)");
+        const step = schema.migrations[74 - schema.migration_baseline];
+        try setup("SET @rui_pin_kind_ddl='stale DDL must not survive refusal'");
+        try setup(step.mysql[0]);
+        if (ambiguous) {
+            try std.testing.expect(try run(step.mysql[1]) != null);
+        } else {
+            try setup(step.mysql[1]);
+            try std.testing.expect(try run(step.mysql[2]) != null);
+        }
+        try expectSameResults(&.{"SELECT @rui_pin_kind_ddl IS NULL"}, &.{"SELECT 1"});
+        try expectSameResults(&.{
+            "SELECT count(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA='" ++ migrated_database ++ "' AND TABLE_NAME IN ('session_pin','session_pin_command')",
+            "SELECT count(*) FROM information_schema.TABLE_CONSTRAINTS WHERE TABLE_SCHEMA='" ++ migrated_database ++ "' AND TABLE_NAME='core_command' AND CONSTRAINT_TYPE='CHECK'",
+        }, &.{ "SELECT 0", if (ambiguous) "SELECT 3" else "SELECT 1" });
+    }
 }

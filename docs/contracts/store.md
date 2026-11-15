@@ -62,6 +62,12 @@ This pins legacy escalation policy; the old rows did not retain their admission-
 Existing floors, levels, counts, resolutions and references are preserved.
 The step to 74 deletes the saved wire label from `store_meta` on both engines (Divyansh, 2026-11-13), whatever it reads; a new Store writes none and opening compares none.
 `store_meta`'s key CHECK still names `wire_version`, because narrowing it would rebuild the table on SQLite.
+The step to 75 adds retained current pin pointers and immutable requested pin values, and extends the Command kind set to include pinning.
+A nullable unique `session_pin.command_key` references the immutable Command that established the current pin; its existing `command_seq` is the pin order.
+Unpin and archive intent clear that pointer with a typed Session-head update, retaining the row.
+The SQLite step preserves all Commands and their references while widening the kind CHECK.
+The operator-run MySQL step resolves the exact old kind CHECK in the current database catalog, because its generated name can differ between fresh and previously migrated Stores.
+An absent or ambiguous match refuses before DDL; unrelated checks and foreign keys remain unchanged.
 Each format PR appends its own version and step; even unreleased steps and digests already on main are immutable (D226).
 The schema writes each closed value set as fixed literals, so the Store format never silently follows a code enum, and changing a set is a format change that needs a new version.
 Provider labels and codec names are open by design (Divyansh, 2026-10-31 provider-plugin design): the schema checks their syntax, and a Host refuses a label or codec it does not serve.
@@ -206,7 +212,7 @@ No running Hosts prints `No running Hosts.` and starts nothing.
 Source/release installers and `rui upgrade` use this one install-wide restart owner; only installation eligibility differs.
 
 Lifecycle control observation is separate from ordinary client readiness.
-Upgrade can read the complete bounded Host-info envelope using only the current wire or the historical wire `13` and `9` profiles, with matching HTTP and body versions and peer PID from that same connection.
+Upgrade can read the complete bounded Host-info envelope using only the current wire or the historical wire `17`, `16`, `15`, `14`, `13` and `9` profiles, with matching HTTP and body versions and peer PID from that same connection.
 Only an explicit wrong-wire response permits the historical read-only profile; malformed, unavailable or unknown profiles grant no authority.
 A historical managed Host is paused through its retained executable with the captured exact instance, then the same Store lease must retire.
 Target readiness still requires the current protocol and the pinned launch identity; historical control facts never grant Session access.

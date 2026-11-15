@@ -263,9 +263,10 @@ test "the touch oracle names a sender whose sent Message changed without its tou
                 // Make the Message a sent one, touching both its Sessions.
                 const entry = try store_core.enter(&storage, .none);
                 defer entry.release();
+                // Name the missing sender, not an arbitrary member of two missing touches.
+                try touchForTesting(&storage, recipient.slice());
                 try store_testing.exec(&storage, "UPDATE message_admission SET sender_session_ref=?1,sender_position=1000000 WHERE command_key='oracle-message'", .{sender.slice()});
                 try std.testing.expectEqualStrings(sender.slice(), &store_core.untouchedForTesting(&storage).?);
-                try touchForTesting(&storage, recipient.slice());
                 try touchForTesting(&storage, sender.slice());
                 try std.testing.expect(store_core.untouchedForTesting(&storage) == null);
             }

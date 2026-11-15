@@ -30,6 +30,37 @@ Callers retain key and exact inputs before sending, without managing Turn identi
 Concurrent Session use remains outside the expected usage.
 `rui session stop --all` reads the Session listing and sends one ordinary Session stop, with its own generated key, for each Session the overview's Ctrl-X could stop; it adds no cross-Session stop authority, and a Session that starts work after its listing page is read is not stopped.
 
+#### Pinning a Session
+
+Pinning is shared organization for one Store, independent of configuration, work, and model Messages.
+`POST /v1/control/session-pin` accepts `session`, `key`, and an explicit desired `pinned` boolean.
+The existing serialized Store transition owns admission, replay classification, and fault fencing.
+Repeating pin with a fresh key is an accepted no-op that preserves the first pin order; repeating unpin is harmless.
+Unpin followed by pin gives the Session the newest pin order.
+An unknown Session rejects either desired value.
+Pinning an archiving or archived Session rejects; unpinning an existing archived Session is accepted.
+Replay classifies the saved key and semantic digest before inspecting current state.
+It returns the historical answer without applying an old pin after unpin or archive; reusing a key for another target or desired value conflicts.
+
+`/pin` and `/unpin` in chat use the overview's existing request ledger, worker effects, captured requests, and recovery outcomes.
+They appear in shared slash completion and admit no Message or Configure.
+The shell exposes `rui session pin --session ID` and `rui session unpin --session ID` through the same captured-command protocol.
+Right-click or Option/Alt-left-click on an actual Session row toggles the desired value captured in the drawn frame.
+The generic List hit test and GroupedList frame retain its Session identity and desired value; the overview does not re-hit-test coordinates or reread selection.
+The gesture neither opens the row nor changes the active conversation, focus, selection, or draft.
+Release does not repeat it, and alternate gestures on New Session, Settings, or other non-Session controls never fall through to normal activation.
+A normal left-click still opens the Session.
+There is no pin marker or menu.
+
+Pinned rows appear once, below the fixed New Session control, newest pin first.
+Activity changes never reorder pins.
+`overview_view.visible` and `arrange` produce the one visible and navigation order in `State.order`; unpinned rows retain their existing comparator exactly.
+Pinned empty Sessions remain visible after leaving the conversation, subject to the ordinary archive filter.
+Admission of archive intent clears the pin in that same transaction, including while its stop is pending.
+Restore and Message-unarchive never resurrect it, and ordinary stop never clears it.
+Parents and children have independent organization.
+No optimistic durable pin state, second list, or second comparator exists in the client.
+
 #### Archiving a Session
 
 Archive organization is independent of the derived work state.
@@ -40,7 +71,7 @@ An incomplete stop derives `archiving`; a completed stop derives `archived`.
 There is no separate archive worker or recovery queue.
 
 `POST /v1/control/session-archive` accepts `session`, `key`, and the `archived` boolean.
-An archive request atomically saves its intent and selects the current work for stop.
+An archive request atomically saves its intent, clears its current pin, and selects the current work for stop.
 Acknowledgment reports `pending` until that stop completes, then `completed`.
 The Session stays in the unarchived view while its stop is pending.
 Stop completion has the existing semantic guarantee, not proof of remote termination or complete local transport disposal.

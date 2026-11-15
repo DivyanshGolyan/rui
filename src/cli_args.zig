@@ -34,6 +34,8 @@ pub const Command = enum {
     session_stop,
     session_archive,
     session_unarchive,
+    session_pin,
+    session_unpin,
     session_interrupt_model,
     session_read_conversation,
     session_resume,
@@ -79,6 +81,8 @@ pub const Command = enum {
             .session_stop => .{ .resource = .session, .name = "stop", .description = "Admit a stop for selected Session work. The stop is saved, so a restarted Host does not resume that work. The address remains reusable by later input; acknowledgment is not physical retirement. --all stops every Session in the Store that is pending, working, retrying, running Bash or awaiting approval, as overview Ctrl-X would, each as its own recoverable request with one JSON reply line and a recovery handle on stderr; it needs a running Host.", .options = destination ++ session ++ capture ++ &[_]Option{flag("all")}, .conflicts = &.{ .{ .code = .all_excludes_session, .a = "all", .b = "session" }, .{ .code = .all_excludes_record, .a = "all", .b = "record" }, .{ .code = .all_excludes_key, .a = "all", .b = "key" }, .{ .code = .all_excludes_key, .a = "all", .b = "key-hex" } }, .mutation = true, .requires = &.{&.{ "session", "all" }} },
             .session_archive => .{ .resource = .session, .name = "archive", .description = "Stop current and queued work, then archive once it has settled. The saved intent survives Host restart. Pending archival rejects new Messages; a later Message to an archived Session restores it. The receipt reports pending or completed archival.", .options = destination ++ session ++ capture, .mutation = true, .requires = need_session },
             .session_unarchive => .{ .resource = .session, .name = "unarchive", .description = "Restore an archived Session to active lists without resuming stopped work. Refused while archival is still settling.", .options = destination ++ session ++ capture, .mutation = true, .requires = need_session },
+            .session_pin => .{ .resource = .session, .name = "pin", .description = "Pin a Session above unpinned Sessions. Repeated pinning preserves its position. Refused for archiving or archived Sessions.", .options = destination ++ session ++ capture, .mutation = true, .requires = need_session },
+            .session_unpin => .{ .resource = .session, .name = "unpin", .description = "Unpin a Session without changing its work. An already unpinned Session is unchanged.", .options = destination ++ session ++ capture, .mutation = true, .requires = need_session },
             .session_interrupt_model => .{ .resource = .session, .name = "interrupt-model", .description = "Interrupt the exact model Operation after inspecting its Session and Turn.", .options = destination ++ session ++ capture ++ &[_]Option{ value("turn", "ID"), value("operation", "ID") }, .mutation = true, .requires = need_session ++ &[_][]const []const u8{ &.{"turn"}, &.{"operation"} } },
             .session_read_conversation => .{ .resource = .session, .name = "read-conversation", .description = "Stream the exact saved public Conversation content at position and ordinal.", .options = destination ++ session ++ &[_]Option{ value("position", "POSITION"), value("ordinal", "ORDINAL") }, .requires = need_session ++ &[_][]const []const u8{ &.{"position"}, &.{"ordinal"} } },
             .session_resume => .{ .resource = .session, .name = "resume", .description = "Open an existing Session in the live terminal frontend. Requires terminal input/output; starts or attaches to a managed Host.", .options = destination ++ session, .positional = "ID", .positional_conflicts = &.{.{ .code = .session_selector_repeated, .option = "session" }}, .requires = &.{&.{ "", "session" }} },
@@ -571,7 +575,7 @@ test "typed choices share enum names with help and refuse unknown values" {
         .{ .command = .session_start, .name = "provider", .choices = &.{ "codex", "openai", "chatgpt" } },
         .{ .command = .session_configure, .name = "reasoning-effort", .choices = &.{ "none", "low", "medium", "high", "xhigh", "max", "default" } },
         .{ .command = .defaults_configure, .name = "notifications", .choices = &.{ "on", "off" } },
-        .{ .command = .request_recover, .name = "kind", .choices = &.{ "configure", "message", "session-stop", "session-archive", "model-interruption", "permission-decision" } },
+        .{ .command = .request_recover, .name = "kind", .choices = &.{ "configure", "message", "session-stop", "session-archive", "model-interruption", "permission-decision", "session-pin" } },
         .{ .command = .session_inspect, .name = "profile", .choices = &.{ "current", "full" } },
         .{ .command = .session_inspect, .name = "failed-response", .choices = &.{ "body", "metadata" } },
     };
@@ -705,7 +709,7 @@ test "Session IDs in positional argv name the missing selector flag" {
     _ = try expectRefusal(.session_send, &.{ "--to", "k7m2qx", "v948er" }, .message_not_stdin, "v948er");
     _ = try expectRefusal(.session_send, &.{ "--record", "--to", "v948er" }, .session_id_needs_to, "v948er");
     _ = try expectRefusal(.session_send, &.{"message text"}, .message_not_stdin, "message text");
-    inline for (.{ Command.session_inspect, Command.session_stop, Command.session_archive, Command.session_unarchive, Command.session_interrupt_model, Command.session_read_conversation, Command.action_allow, Command.action_deny }) |command| {
+    inline for (.{ Command.session_inspect, Command.session_stop, Command.session_archive, Command.session_unarchive, Command.session_pin, Command.session_unpin, Command.session_interrupt_model, Command.session_read_conversation, Command.action_allow, Command.action_deny }) |command| {
         _ = try expectRefusal(command, &.{"v948er"}, .session_id_needs_session, "v948er");
     }
 }
@@ -727,7 +731,7 @@ test "request wait accepts only one original identity and a bounded timeout" {
 }
 
 test "archive commands require a Session and retain capture recovery options" {
-    inline for (.{ Command.session_archive, Command.session_unarchive }) |command| {
+    inline for (.{ Command.session_archive, Command.session_unarchive, Command.session_pin, Command.session_unpin }) |command| {
         try std.testing.expect(try expectMissing(command, &.{}) != null);
         try std.testing.expect(try expectMissing(command, &.{ "--session", "k7m2qx" }) == null);
         try expectValidation(command, &.{ "--session", "k7m2qx", "--store", "/s", "--key", "key", "--record", "saved.json" }, false);

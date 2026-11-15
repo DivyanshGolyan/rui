@@ -140,6 +140,7 @@ pub const Kind = enum {
     message,
     session_stop,
     session_archive,
+    session_pin,
     model_interruption,
     permission_decision,
     observe_command,
@@ -166,6 +167,7 @@ pub const SkillRequest = struct {
 
 pub const SessionStopCommand = command_input.SessionStopCommand;
 pub const SessionArchiveCommand = command_input.SessionArchiveCommand;
+pub const SessionPinCommand = command_input.SessionPinCommand;
 pub const ModelInterruptionCommand = command_input.ModelInterruptionCommand;
 
 pub const PermissionDecision = mutation_answer.PermissionDecision;
@@ -184,6 +186,7 @@ pub const SessionArchiveObservation = mutation_answer.SessionArchiveObservation;
 pub const TurnEnding = turn_ending.TurnEnding;
 pub const SessionStopRejection = mutation_answer.SessionStopRejection;
 pub const SessionArchiveRejection = mutation_answer.SessionArchiveRejection;
+pub const SessionPinRejection = mutation_answer.SessionPinRejection;
 pub const ModelInterruptionRejection = mutation_answer.ModelInterruptionRejection;
 pub const PermissionDecisionRejection = mutation_answer.PermissionDecisionRejection;
 pub const MessageProgressStatus = WorkState.Progress;
@@ -526,6 +529,7 @@ pub const PermissionMode = cli_value.PermissionMode;
 pub const SessionRow = struct {
     read_version: change_ring.Token = .{ .instance = @splat(0), .generation = 0 },
     archive_state: SessionArchiveState = .active,
+    pin_order: ?u64 = null,
     reference: Bounded(max_session_bytes) = .{},
     workspace: Bounded(max_workspace_bytes) = .{},
     provider: Provider = .codex,
@@ -545,11 +549,10 @@ pub const SessionRow = struct {
     peers: PeerFacts = .{},
 
     pub const json_shape = .{
-        "{\"read_version\":\"", Hole{ .text = change_ring.Token.max_bytes }, "\",\"archive_state\":\"", Hole{ .tag = SessionArchiveState },         "\",\"reference\":",  Hole{ .string = max_session_bytes },       ",\"workspace\":",         Hole{ .string = max_workspace_bytes },
-        ",\"provider\":\"",     Hole{ .tag = Provider },                     "\",\"model\":",           Hole{ .string = max_model_bytes },          ",\"tools\":",        Hole{ .text = max_tool_names_json_bytes }, ",\"permission_mode\":\"", Hole{ .tag = PermissionMode },
-        "\",\"parent\":",       Hole{ .optional_string = session_id_bytes }, ",\"label\":",             Hole{ .optional_string = max_label_bytes }, ",\"created_at\":\"", Hole.decimal,                              "\",\"revision\":\"",      Hole.decimal,
-        "\",\"end\":\"",        Hole.decimal,                                "\",\"first_message\":",   Hole{ .optional_json = FirstMessage },      ",\"last_line\":",    Hole{ .optional_json = LastLine.Fields },  ",\"work\":",              Hole{ .json = SessionWork },
-        ",\"peers\":",          Hole{ .json = PeerFacts },                   "}",
+        "{\"read_version\":\"", Hole{ .text = change_ring.Token.max_bytes }, "\",\"archive_state\":\"", Hole{ .tag = SessionArchiveState }, "\",\"pin_order\":",  Hole.optional_id,                          ",\"reference\":",         Hole{ .string = max_session_bytes }, ",\"workspace\":",       Hole{ .string = max_workspace_bytes },
+        ",\"provider\":\"",     Hole{ .tag = Provider },                     "\",\"model\":",           Hole{ .string = max_model_bytes },  ",\"tools\":",        Hole{ .text = max_tool_names_json_bytes }, ",\"permission_mode\":\"", Hole{ .tag = PermissionMode },       "\",\"parent\":",        Hole{ .optional_string = session_id_bytes },
+        ",\"label\":",          Hole{ .optional_string = max_label_bytes },  ",\"created_at\":\"",      Hole.decimal,                       "\",\"revision\":\"", Hole.decimal,                              "\",\"end\":\"",           Hole.decimal,                        "\",\"first_message\":", Hole{ .optional_json = FirstMessage },
+        ",\"last_line\":",      Hole{ .optional_json = LastLine.Fields },    ",\"work\":",              Hole{ .json = SessionWork },        ",\"peers\":",        Hole{ .json = PeerFacts },                 "}",
     };
     pub const max_json_bytes = shapeBytes(json_shape);
     /// A row may never exceed this, whatever its fields hold: a new field that
@@ -564,6 +567,7 @@ pub const SessionRow = struct {
     pub const Fields = struct {
         read_version: change_ring.Token = .{ .instance = @splat(0), .generation = 0 },
         archive_state: SessionArchiveState = .active,
+        pin_order: ?u64 = null,
         reference: []const u8,
         workspace: []const u8,
         provider: Provider,
@@ -586,9 +590,9 @@ pub const SessionRow = struct {
         pub fn writeJson(f: *const Fields, out: *std.Io.Writer) !void {
             var token_buffer: [change_ring.Token.max_bytes]u8 = undefined;
             try writeShape(out, json_shape, .{
-                f.read_version.format(&token_buffer), f.archive_state,   f.reference, f.workspace, f.provider,   f.model,
-                f.tools,                              f.permission_mode, f.parent,    f.label,     f.created_at, f.revision,
-                f.end,                                f.first_message,   f.last_line, f.work,      f.peers,
+                f.read_version.format(&token_buffer), f.archive_state,   f.pin_order, f.reference, f.workspace,  f.provider, f.model,
+                f.tools,                              f.permission_mode, f.parent,    f.label,     f.created_at, f.revision, f.end,
+                f.first_message,                      f.last_line,       f.work,      f.peers,
             });
         }
     };
@@ -608,6 +612,7 @@ pub const SessionRow = struct {
         const fields: Fields = .{
             .read_version = self.read_version,
             .archive_state = self.archive_state,
+            .pin_order = self.pin_order,
             .reference = self.reference.slice(),
             .workspace = self.workspace.slice(),
             .provider = self.provider,
@@ -659,6 +664,7 @@ fn RequestOf(comptime Custody: type) type {
         message: MessageCommand,
         session_stop: SessionStopCommand,
         session_archive: SessionArchiveCommand,
+        session_pin: SessionPinCommand,
         model_interruption: ModelInterruptionCommand,
         permission_decision: PermissionDecisionCommand,
         observe_command: ObserveCommand,
@@ -679,7 +685,7 @@ fn RequestOf(comptime Custody: type) type {
             switch (self.*) {
                 .configure => |*command| try command.removeTemporaryContent(io),
                 .message => |*command| try command.removeTemporaryContent(io),
-                .host_info, .host_stop, .host_pause, .session_stop, .session_archive, .model_interruption, .permission_decision, .observe_command, .read_result, .read_action_call_id, .read_action_arguments, .inspect_session, .list_sessions, .conversation_page, .conversation_content, .activity_page, .activity_search, .activity_content, .skill_suggestions, .model_list => {},
+                .host_info, .host_stop, .host_pause, .session_stop, .session_archive, .session_pin, .model_interruption, .permission_decision, .observe_command, .read_result, .read_action_call_id, .read_action_arguments, .inspect_session, .list_sessions, .conversation_page, .conversation_content, .activity_page, .activity_search, .activity_content, .skill_suggestions, .model_list => {},
             }
         }
 
@@ -778,6 +784,10 @@ fn ParserOf(comptime Custody: type) type {
                 .session_archive => {
                     out.* = .{ .session_archive = .{ .store = store } };
                     try self.parseSessionArchive(&out.session_archive, &members);
+                },
+                .session_pin => {
+                    out.* = .{ .session_pin = .{ .store = store } };
+                    try self.parseSessionPin(&out.session_pin, &members);
                 },
                 .model_interruption => {
                     out.* = .{ .model_interruption = .{ .store = store } };
@@ -1210,6 +1220,17 @@ fn ParserOf(comptime Custody: type) type {
                 .archived => out.archived = try self.readBoolean(),
             };
             try require(Field, seen, &.{ .key, .session });
+        }
+
+        fn parseSessionPin(self: *Parser, out: *SessionPinCommand, members: *Members) !void {
+            const Field = enum { key, session, pinned };
+            var seen: std.enums.EnumSet(Field) = .empty;
+            while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
+                .key => try self.readCommandKey(&out.key),
+                .session => try self.readSmallString(&out.session),
+                .pinned => out.pinned = try self.readBoolean(),
+            };
+            try require(Field, seen, &.{ .key, .session, .pinned });
         }
 
         fn parseModelInterruption(self: *Parser, out: *ModelInterruptionCommand, members: *Members) !void {
@@ -1980,6 +2001,12 @@ pub const session_archive_request = struct {
     pub const tail = .{"}"};
     pub const all = head ++ archived ++ tail;
 };
+pub const session_pin_request = struct {
+    pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"session_pin\",\"store\":", store_hole, ",\"key\":", key_hole, ",\"session\":", session_hole };
+    pub const pinned = .{ ",\"pinned\":", Hole.boolean };
+    pub const tail = .{"}"};
+    pub const all = head ++ pinned ++ tail;
+};
 /// Holes: Store, key, Session, turn, operation.
 pub const model_interruption_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"model_interruption\",\"store\":", store_hole, ",\"key\":", key_hole, ",\"target\":{\"session\":", session_hole, ",\"turn\":\"", Hole.decimal, "\",\"operation\":\"", Hole.decimal, "\"}}" };
 /// Holes: Store, key, Session, Action, decision.
@@ -2091,9 +2118,10 @@ pub const message_request = struct {
 
 pub const max_session_stop_request_bytes = shapeBytes(session_stop_request);
 pub const max_session_archive_request_bytes = shapeBytes(session_archive_request.all);
+pub const max_session_pin_request_bytes = shapeBytes(session_pin_request.all);
 pub const max_model_interruption_request_bytes = shapeBytes(model_interruption_request);
 pub const max_permission_decision_request_bytes = shapeBytes(permission_decision_request);
-pub const max_control_request_bytes = maxShapeBytes(.{ session_stop_request, session_archive_request.all, model_interruption_request, permission_decision_request });
+pub const max_control_request_bytes = maxShapeBytes(.{ session_stop_request, session_archive_request.all, session_pin_request.all, model_interruption_request, permission_decision_request });
 pub const max_observe_command_request_bytes = shapeBytes(observe_command_request.all);
 pub const max_host_info_request_bytes = shapeBytes(host_info_request);
 pub const max_host_stop_request_bytes = shapeBytes(host_stop_request);
@@ -2173,6 +2201,14 @@ pub const session_archive_reply = struct {
     pub const rejected = .{ head ++ "\"rejected\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"code\":\"", Hole{ .tag = SessionArchiveRejection }, "\"},\"completion\":{\"status\":\"unavailable\"}}" };
     /// Hole: Session.
     pub const conflict = .{ head ++ "\"conflict\",\"replayed\":false,\"session\":", Hole{ .string = max_session_bytes }, ",\"code\":\"idempotency_key_conflict\"},\"completion\":{\"status\":\"unavailable\"}}" };
+    pub const max_bytes = maxShapeBytes(.{ accepted, rejected, conflict });
+};
+
+pub const session_pin_reply = struct {
+    const head = "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"session_pin_reply\",\"answer\":{\"status\":";
+    pub const accepted = .{ head ++ "\"accepted\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"pinned\":", Hole.boolean, "}}" };
+    pub const rejected = .{ head ++ "\"rejected\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"code\":\"", Hole{ .tag = SessionPinRejection }, "\"}}" };
+    pub const conflict = .{ head ++ "\"conflict\",\"replayed\":false,\"session\":", Hole{ .string = max_session_bytes }, ",\"code\":\"idempotency_key_conflict\"}}" };
     pub const max_bytes = maxShapeBytes(.{ accepted, rejected, conflict });
 };
 
@@ -2288,6 +2324,8 @@ pub const command_observation_reply = struct {
     };
     /// Holes: selected Turn, admission cutoff, completion.
     pub const session_stop = .{ ",\"selection\":{\"turn\":", Hole.optional_id, ",\"admission_cutoff\":\"", Hole.decimal, "\"},\"completion\":{\"status\":\"", Hole{ .tag = SessionStopCompletion }, "\"}" };
+    /// Holes: pinned.
+    pub const session_pin = .{ ",\"pinned\":", Hole.boolean };
     /// Holes: archived, completion.
     pub const session_archive = .{ ",\"archived\":", Hole.boolean, ",\"completion\":{\"status\":\"", Hole{ .tag = SessionStopCompletion }, "\"}" };
     /// Holes: the interruption target's.
@@ -2304,6 +2342,7 @@ pub const command_observation_reply = struct {
             .message => maxShapeBytes(message_variants),
             .session_stop => shapeBytes(session_stop),
             .session_archive => shapeBytes(session_archive),
+            .session_pin => shapeBytes(session_pin),
             .model_interruption => shapeBytes(model_interruption),
             .permission_decision => shapeBytes(permission_decision),
         };
@@ -2325,7 +2364,7 @@ pub const max_control_error_response_bytes = shapeBytes(error_reply);
 
 pub const max_mutation_response_bytes = @max(
     @max(@max(configuration_reply.max_bytes, message_reply.max_bytes), @max(session_stop_reply.max_bytes, model_interruption_reply.max_bytes)),
-    @max(session_archive_reply.max_bytes, @max(permission_decision_reply.max_bytes, max_control_error_response_bytes)),
+    @max(session_pin_reply.max_bytes, @max(session_archive_reply.max_bytes, @max(permission_decision_reply.max_bytes, max_control_error_response_bytes))),
 );
 
 /// Holes: Store, instance, Active and intake capacity, descriptor limit
@@ -3334,4 +3373,33 @@ test "parent spec relation parses creation without a workspace and rejects null 
         var parser: Tested.Parser = .{ .source = &source };
         try std.testing.expectError(case[1], parseForTest(&parser));
     }
+}
+
+test "session pin parser requires an explicit desired value and binds semantic replay" {
+    const prefix = "{\"version\":\"" ++ wire_version ++ "\",\"store\":\"s\",\"kind\":\"session_pin\",\"key\":\"k\",\"session\":\"k7m2qx\"";
+    inline for (.{ .{ ",\"pinned\":true}", true }, .{ ",\"pinned\":false}", false } }) |case| {
+        var source: MetadataSource = .{ .input = prefix ++ case[0] };
+        var parser: Tested.Parser = .{ .source = &source };
+        const request = try parseForTest(&parser);
+        try std.testing.expectEqual(case[1], request.session_pin.pinned);
+    }
+    inline for (.{ "}", ",\"pinned\":null}", ",\"pinned\":\"false\"}", ",\"pinned\":true,\"pinned\":false}", ",\"archived\":true}" }) |tail| {
+        var source: MetadataSource = .{ .input = prefix ++ tail };
+        var parser: Tested.Parser = .{ .source = &source };
+        if (parseForTest(&parser)) |_| return error.TestExpectedInvalidPin else |_| {}
+    }
+    var pin: SessionPinCommand = .{};
+    try pin.session.set("k7m2qx");
+    const digest = pin.semanticDigest();
+    try pin.key.set("another");
+    try pin.store.set("elsewhere");
+    try std.testing.expectEqualSlices(u8, &digest, &pin.semanticDigest());
+    pin.pinned = false;
+    try std.testing.expect(!std.mem.eql(u8, &digest, &pin.semanticDigest()));
+    pin.pinned = true;
+    try pin.session.set("rhvzwc");
+    try std.testing.expect(!std.mem.eql(u8, &digest, &pin.semanticDigest()));
+    var archive: SessionArchiveCommand = .{};
+    try archive.session.set("k7m2qx");
+    try std.testing.expect(!std.mem.eql(u8, &digest, &archive.semanticDigest()));
 }

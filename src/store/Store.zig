@@ -83,6 +83,7 @@ const PublicConversationPage = reads_domain.PublicConversationPage;
 const SessionObservation = reads_domain.SessionObservation;
 const SessionStopReply = command_domain.SessionStopReply;
 const SessionArchiveReply = command_domain.SessionArchiveReply;
+const SessionPinReply = command_domain.SessionPinReply;
 const SupersedingControl = action_domain.SupersedingControl;
 const ValidatedOutput = model_settlement_domain.ValidatedOutput;
 const Queue = @import("queue.zig").Queue;
@@ -790,6 +791,14 @@ pub const Store = struct {
         faults: Faults,
     ) SessionStopReply {
         return self.noteControl(transition.apply(self, command_domain.StopSession, .ofStop(command, false), faults) catch .infrastructure_failure);
+    }
+
+    pub fn pinSession(self: *Store, command: *const command_input.SessionPinCommand, faults: Faults) SessionPinReply {
+        return self.queue().write(pinSessionHeld, .{ self, command, faults });
+    }
+
+    fn pinSessionHeld(self: *Store, command: *const command_input.SessionPinCommand, faults: Faults) SessionPinReply {
+        return transition.apply(self, command_domain.PinSession, .{ .command = command }, faults) catch .infrastructure_failure;
     }
 
     pub fn archiveSession(self: *Store, command: *const command_input.SessionArchiveCommand, faults: Faults) SessionArchiveReply {

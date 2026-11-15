@@ -215,7 +215,7 @@ fn capture(raw: *anyopaque, ctx: *vxfw.EventContext, routed: vxfw.Event) !void {
         .paste_end => .paste_end,
         .mouse => |mouse| .{ .mouse = switch (mouse.button) {
             .wheel_up, .wheel_down, .wheel_left, .wheel_right => .wheel,
-            else => if (mouse.type == .motion) .motion else if (mouse.type != .press or mouse.button != .left or self.size.width < split_at) .click else if (mouse.col < list_width) .list_click else .chat_click,
+            else => if (mouse.type == .motion) .motion else if (mouse.type != .press or mouse.button != .left or mouse.mods.alt or self.size.width < split_at) .click else if (mouse.col < list_width) .list_click else .chat_click,
         } },
         .key_release => .key_release,
         .color_report, .color_scheme => .colors,
@@ -1067,6 +1067,7 @@ test "App root hands list activation unchanged to its one core" {
         .{ .col = 50, .row = 10, .button = .left, .type = .motion, .mods = .{} },
         .{ .col = 50, .row = 10, .button = .left, .type = .release, .mods = .{} },
         .{ .col = 50, .row = 10, .button = .right, .type = .press, .mods = .{} },
+        .{ .col = 50, .row = 10, .button = .left, .type = .press, .mods = .{ .alt = true } },
     }) |mouse| {
         try root.widget().captureEvent(&ctx, .{ .mouse = mouse });
         try std.testing.expect(root.input.list_focused);

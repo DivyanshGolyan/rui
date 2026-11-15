@@ -69,6 +69,7 @@ test "every function that enters the Store has a round budget" {
         @embedFile("../Store.zig"),
         @embedFile("../access.zig"),
         @embedFile("../archive_tests.zig"),
+        @embedFile("../pin_tests.zig"),
         @embedFile("../engine.zig"),
         @embedFile("../engine/Sqlite.zig"),
         @embedFile("../engine/Mysql.zig"),
@@ -360,6 +361,11 @@ test "each Store entry point takes its round budget on its common path" {
             archive.archived = false;
             try archive.key.set("budget-unarchive");
             try std.testing.expect(storage.archiveSession(&archive, .{}) == .accepted);
+            var pin: protocol.SessionPinCommand = .{ .session = session, .pinned = true };
+            try pin.key.set("budget-pin");
+            meter.start();
+            try std.testing.expect(storage.pinSession(&pin, .{}) == .accepted);
+            meter.stop(.pinSession);
         }
 
         /// Drive MCP through an actual frozen tool set offer, without changing

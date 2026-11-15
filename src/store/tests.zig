@@ -1198,6 +1198,7 @@ pub const EntryPoint = enum {
     submitMessageWithModel,
     stopSession,
     archiveSession,
+    pinSession,
     interruptModel,
     decidePermission,
     observeCommand,
@@ -1269,6 +1270,9 @@ pub const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .submitMessageWithModel = 2,
     .stopSession = 2,
     .archiveSession = 2,
+    // Fresh admission runs saved, branch facts, then commit; the transition
+    // declaration counts only its always round and commit.
+    .pinSession = 3,
     .interruptModel = 2,
     .decidePermission = 2,
     .observeCommand = 3,

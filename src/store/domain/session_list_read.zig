@@ -229,6 +229,7 @@ fn readChangedSessions(a: *ReadAccess, request: *const session_list.ListSessions
 
 const settings_columns = "session.session_ref,session.parent_ref,session.workspace,session.provider,session.model," ++ tool_set.namesSql("session.tool_set_id") ++ " AS tools,session.permission_mode,session.label,session.created_at,session.revision,session.next_position," ++
     command_domain.archive_state_sql ++ " AS archive_state," ++
+    "(SELECT pin_command.command_seq FROM session_pin pin JOIN core_command pin_command ON pin_command.command_key=pin.command_key WHERE pin.session_ref=session.session_ref) AS pin_order," ++
     "(" ++ report_domain.person_message_sql ++ ") AS from_person_at," ++
     last_line_columns ++ ",";
 
@@ -281,6 +282,7 @@ const ListRow = struct {
     revision: rsql.Positive,
     next_position: rsql.Positive,
     archive_state: session_archive.State,
+    pin_order: ?rsql.Positive,
     from_person_at: ?rsql.Positive,
     last_turn_position: ?rsql.Positive,
     last_answer: ?rsql.Blob(1024),
@@ -389,6 +391,7 @@ fn rowValues(rows: []const ShownRow, index: usize, now_ms: u64, row: *const List
     const first_message = try report_domain.firstMessage(row, rows[index].first);
     return .{
         .archive_state = row.archive_state,
+        .pin_order = if (row.pin_order) |rank| rank.get() else null,
         .reference = row.session_ref.slice(),
         .parent = if (row.parent_ref) |*parent| parent.slice() else null,
         .workspace = row.workspace.slice(),

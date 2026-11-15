@@ -117,7 +117,7 @@ pub fn open(storage: *Store, tmp: *std.testing.TmpDir, io: std.Io, options: test
         };
         if (!exists) {
             for (comptime schema.objects(.mysql)) |object| try run(object.sql);
-            try run(try std.fmt.bufPrint(&buffer, "CREATE DATABASE {s}_oracle;CREATE TABLE {s}_oracle.touched_oracle(session_ref VARCHAR(6))", .{ name, name }));
+            try run(try std.fmt.bufPrint(&buffer, "CREATE DATABASE {s}_oracle;CREATE TABLE {s}_oracle.touched_oracle" ++ dialect.touch_oracle_definition, .{ name, name }));
             // Trigger names live in the Store schema; their root definer can
             // write the sibling schema without enlarging the app's grants.
             inline for (comptime sqlite.touchOracleTriggers(.mysql, "ORACLE.touched_oracle")) |sql| {
@@ -2311,4 +2311,46 @@ test "store.mysql live lone single writes guard their shared COMMIT and payload 
     }
     needs_close = false;
     try storage.close();
+}
+
+test "store.mysql touch oracle observes and clears uncommitted entry writes without changing rollback" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try openLive(&storage, &tmp);
+    defer storage.close() catch unreachable;
+    const session = try testing.configureTestSession(&storage, "oracle-uncommitted");
+    const entry = try store_core.enter(&storage, .none);
+    defer entry.release();
+    const Head = @import("tests.zig").TestingRound.head;
+    var head: Head.Row = undefined;
+    const mysql = &storage.engine.mysql;
+    try mysql.bind(Head, &.{ .session_ref = session.slice() }, 0);
+    try mysql.startPass();
+    try std.testing.expect(try mysql.nextRow());
+    try mysql.decodeRow(Head.Row, &head);
+    try std.testing.expect(!try mysql.nextRow());
+    mysql.endStatement();
+    try mysql.finishPass();
+    try store_core.begin(&storage);
+    defer if (storage.engine.inTransaction()) store_core.rollbackAfterError(&storage, .{}) catch @panic("oracle fixture rollback failed");
+    // The restricted application connection changes canonical rows, deliberately
+    // without a typed touch, while the root oracle observes another connection.
+    const forgotten_touch = rsql.Write(.{
+        .sql = "UPDATE session SET label='oracle uncommitted' WHERE session_ref=@session(?1)",
+        .Args = struct { session: rsql.SessionHead },
+        .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
+    });
+    try std.testing.expectEqual(@as(u64, 1), try liveWrite(&storage, forgotten_touch, .{ .session = head.head }));
+    // A pending BEGIN is not enough: this pass must have sent it to MySQL.
+    try std.testing.expect(storage.engine.mysql.state.begin == .sent);
+    const missing = store_core.untouchedForTesting(&storage);
+    try std.testing.expectEqual(true, missing != null);
+    try std.testing.expectEqualStrings(session.slice(), &missing.?);
+    // This is the next queued entry's clear, before the batch's COMMIT.
+    clearTouchOracleForTesting(&storage);
+    try std.testing.expect(storage.engine.inTransaction());
+    try std.testing.expect(store_core.untouchedForTesting(&storage) == null);
+    try store_core.rollbackAfterError(&storage, .{});
+    try std.testing.expectEqual(@as(u64, 0), try queryU64(&storage, "SELECT count(*) FROM session WHERE label='oracle uncommitted'", .{}));
 }

@@ -352,7 +352,7 @@ test "skills do not replace a command argument or invent an argument list" {
 test "leading skill collisions use the complete grammar including hidden commands" {
     // Independent command-domain oracle: the two recovery actions are grammar,
     // even though neither is a row in the slash list.
-    const names = [_][]const u8{ "archive", "clear", "copy", "discard", "effort", "model", "new", "recover", "reload-skills", "rename", "requests", "result", "setup", "unarchive" };
+    const names = [_][]const u8{ "archive", "clear", "copy", "discard", "effort", "model", "new", "pin", "recover", "reload-skills", "rename", "requests", "result", "setup", "unarchive", "unpin" };
     var entries: [names.len]skill_suggestions.Entry = undefined;
     for (names, &entries) |name, *entry| entry.* = .{ .name = name, .description = "Colliding skill" };
     var reads: Reads = .{};
@@ -405,8 +405,8 @@ test "leading skill collisions use the complete grammar including hidden command
 
 test "chat table lists all commands with descriptions plus every loaded skill" {
     try std.testing.expect(!@hasDecl(slash_commands, "overview"));
-    const names = [_][]const u8{ "archive", "clear", "copy", "effort", "model", "new", "reload-skills", "rename", "requests", "result", "setup", "unarchive" };
-    const descriptions = [_][]const u8{ "archive this chat", "start a new chat", "copy the last answer", "change effort", "change model", "start a new chat", "reload skills", "rename this chat", "recover a lost request", "show a saved answer", "defaults for new chats", "restore this chat" };
+    const names = [_][]const u8{ "archive", "clear", "copy", "effort", "model", "new", "pin", "reload-skills", "rename", "requests", "result", "setup", "unarchive", "unpin" };
+    const descriptions = [_][]const u8{ "archive this chat", "start a new chat", "copy the last answer", "change effort", "change model", "start a new chat", "pin this chat", "reload skills", "rename this chat", "recover a lost request", "show a saved answer", "defaults for new chats", "restore this chat", "unpin this chat" };
     var skill_names: [skill_suggestions.capacity][16]u8 = undefined;
     var entries: [skill_suggestions.capacity]skill_suggestions.Entry = undefined;
     for (&entries, &skill_names, 0..) |*entry, *name, index| entry.* = .{

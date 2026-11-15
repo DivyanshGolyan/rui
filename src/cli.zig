@@ -307,6 +307,8 @@ noinline fn clientCommand(init: std.process.Init, command: cli_args.Command, par
         .session_stop => try stopSession(init, parsed),
         .session_archive => try archiveSession(init, parsed, true),
         .session_unarchive => try archiveSession(init, parsed, false),
+        .session_pin => try pinSession(init, parsed, true),
+        .session_unpin => try pinSession(init, parsed, false),
         .session_interrupt_model => try interruptModel(init, parsed),
         .session_read_conversation => try readConversation(init, parsed),
         .session_resume => try resumeSession(init, parsed),
@@ -3246,6 +3248,16 @@ fn archiveSession(init: std.process.Init, parsed: *const cli_args.Parsed, archiv
     try sendCapturedMutation(.{ .io = init.io, .drop_reply = parsed.get("test-drop-reply") }, &captured, .{ .map = init.environ_map }, null, .json);
 }
 
+fn pinSession(init: std.process.Init, parsed: *const cli_args.Parsed, pinned: bool) !void {
+    const session = parsed.get("session").?;
+    var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const store = try selectedStore(init, parsed.get("store"), &selected_buffer);
+    var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const target = try captureTarget(init, parsed, &directory_buffer);
+    var captured = try client.captureSessionPin(init.io, .{ .store = store, .session = session, .pinned = pinned }, target);
+    try sendCapturedMutation(.{ .io = init.io, .drop_reply = parsed.get("test-drop-reply") }, &captured, .{ .map = init.environ_map }, null, .json);
+}
+
 fn sendSessionStop(init: std.process.Init, parsed: *const cli_args.Parsed, input: client.SessionStopInput, target: client.CaptureTarget) !void {
     var captured = try client.captureSessionStop(init.io, input, target);
     try sendCapturedMutation(.{ .io = init.io, .drop_reply = parsed.get("test-drop-reply") }, &captured, .{ .map = init.environ_map }, null, .json);
@@ -3718,6 +3730,7 @@ fn writeSavedRejection(out: *std.Io.Writer, reply: protocol_reply.MutationReply)
         .message => |target| if (target.creates_session) "start" else "send",
         .session_stop => "stop",
         .session_archive => |target| if (target.archived) "archive" else "unarchive",
+        .session_pin => |target| if (target.pinned) "pin" else "unpin",
         .model_interruption => "interrupt-model",
         .permission_decision => |target| if (target.decision == .allow_once) "allow" else "deny",
     };
@@ -3822,6 +3835,7 @@ fn presentMutationReply(writer: *std.Io.Writer, reply: protocol_reply.MutationRe
             try writer.print("admission cutoff: {d}; completion: {s}\n", .{ value.admission_cutoff, @tagName(value.completion) });
         },
         .session_archive => |value| try writer.print("archived: {}; completion: {s}\n", .{ value.archived, @tagName(value.completion) }),
+        .session_pin => |value| try writer.print("pinned: {}\n", .{value.pinned}),
         .model_interruption, .permission_decision => {},
     };
     try writer.flush();
@@ -3898,6 +3912,7 @@ fn writeMutationJson(writer: *std.Io.Writer, reply: protocol_reply.MutationReply
                 try writer.print(",\"admission_cutoff\":\"{d}\"}}", .{value.admission_cutoff});
             },
             .session_archive => |value| try writer.print(",\"archived\":{}", .{value.archived}),
+            .session_pin => |value| try writer.print(",\"pinned\":{}", .{value.pinned}),
             .model_interruption, .permission_decision => {},
         },
         .rejected => |code| {
