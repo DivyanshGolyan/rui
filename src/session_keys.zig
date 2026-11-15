@@ -58,6 +58,9 @@ pub const keys: keymap.Keymap(Action) = .init(.{
     .ctrl_r = .recover,
     .ctrl_x = .stop,
     .alt_a = .archive,
+    // Root routes chat switching to the overview, including from the draft.
+    .alt_up = null,
+    .alt_down = null,
     .up = .previous,
     .down = .next,
     // The draft's caret; Left on an empty draft goes to the list and the

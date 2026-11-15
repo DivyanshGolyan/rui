@@ -7,7 +7,7 @@ import signal
 import subprocess
 import sys
 
-from host_process import wait_for
+from host_process import close_stdin, dispose_all, stop_process, wait_for
 import os_semantics
 
 
@@ -25,6 +25,16 @@ def run_start(store, env, *arguments, **options):
         text=True,
         timeout=COMMAND_TIMEOUT,
         **options,
+    )
+
+
+
+def dispose_provider_case(process, store):
+    dispose_all(
+        lambda: close_stdin(process) if process is not None else None,
+        lambda: process.wait(timeout=20) if process is not None else None,
+        lambda: stop_process(process, timeout=5) if process is not None else None,
+        lambda: forced_crash_cleanup(store),
     )
 
 

@@ -75,10 +75,21 @@ class PrepushTest(unittest.TestCase):
                 self.assertEqual(commands, {"whitespace": WHITESPACE})
 
     def test_zig_change_formats_only_its_file_and_keeps_selected_builds(self):
-        commands = self.commands(["src/request_encoding.zig"])
-        self.assertEqual(set(commands), SOURCE_CHECKS | {"whitespace", "zig fmt", "generated files", "development selection", "macOS type check"})
-        self.assertEqual(commands["zig fmt"], ["zig", "fmt", "--check", "--ast-check", "src/request_encoding.zig"])
-        self.assertEqual(commands["development selection"], ["zig", "build", "test-logic", "test-native", "--summary", "line"])
+        for store, targets in ((False, ["test-logic", "test-native"]),
+                               (True, ["test", "test-logic"])):
+            with self.subTest(store=store):
+                files = {
+                    "src/tests.zig": 'const encoding = @import("request_encoding.zig");',
+                    "src/logic_tests.zig": 'const cores = .{\n};\nconst encoding = @import("request_encoding.zig");',
+                    "src/request_encoding.zig": "",
+                    "src/store.zig": 'const encoding = @import("request_encoding.zig");' if store else "",
+                }
+                graph = select_tests.Graph(files, files.__getitem__)
+                with patch.object(select_tests, "tree_graph", return_value=graph):
+                    commands = self.commands(["src/request_encoding.zig"])
+                self.assertEqual(set(commands), SOURCE_CHECKS | {"whitespace", "zig fmt", "generated files", "development selection", "macOS type check"})
+                self.assertEqual(commands["zig fmt"], ["zig", "fmt", "--check", "--ast-check", "src/request_encoding.zig"])
+                self.assertEqual(commands["development selection"], ["zig", "build", *targets, "--summary", "line"])
 
     def test_cli_inventory_uses_its_existing_owner_predicate(self):
         for path in ("src/cli.zig", "src/cli_args.zig", "src/client.zig", "src/preferences.zig", "src/caller_new.zig"):

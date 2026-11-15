@@ -253,6 +253,10 @@ pub fn step(state: *State, facts: Facts, input: Input) Effects {
     // end still reaches this same pane after clearing the stream flag; an
     // editor that accepted the start owns its completion, even with no text.
     const delivery: Effects.Delivery = .{ .under = .main, .pasted = state.pasting };
+    // Chat switching belongs to the list's opening owner even while the
+    // composer has keys. Paste and covering pages retain their own custody.
+    if (!state.pasting and input == .key and (input.key.named == .alt_up or input.key.named == .alt_down))
+        return .{ .route = .{ .overview = delivery } };
     if (state.list_focused) return .{ .route = .{ .overview = delivery } };
 
     return .{ .route = if (facts.session_open) .{ .session = delivery } else .{ .overview = delivery } };
@@ -592,5 +596,28 @@ test "App input paste completion routes to the same owner for every focus and pa
         const delivery = if (overview) end.route.overview else end.route.session;
         try std.testing.expect(!delivery.pasted and !state.pasting);
         try std.testing.expectEqual(list_focused, state.list_focused);
+    };
+}
+
+test "Option session navigation routes main chords without taking paste or modal custody" {
+    for ([_]keymap.Key{ .alt_up, .alt_down }) |key| for ([_]bool{ false, true }) |wide| for ([_]bool{ false, true }) |open| for ([_]bool{ false, true }) |focused| for ([_]bool{ false, true }) |pasted| for ([_]Layer{ .main, .settings, .{ .sign_in = .{ .over = .main } } }) |layer| {
+        var state: State = .{ .layer = layer, .list_focused = focused, .pasting = pasted };
+        const effects = step(&state, .{ .wide = wide, .session_open = open }, .{ .key = .{ .named = key } });
+        if (layer == .sign_in) {
+            try std.testing.expect(effects.route == .sign_in);
+        } else if (layer == .settings) {
+            if (pasted) try std.testing.expect(effects.route == .swallow) else {
+                try std.testing.expect(effects.route == .overview);
+                try std.testing.expectEqual(Layer.Covered.settings, effects.route.overview.under);
+            }
+        } else if (layer == .main) {
+            if (!pasted or focused or !open) {
+                try std.testing.expect(effects.route == .overview);
+                try std.testing.expectEqual(pasted, effects.route.overview.pasted);
+            } else try std.testing.expect(effects.route == .session);
+        }
+        try std.testing.expectEqual(focused, state.list_focused);
+        try std.testing.expectEqual(pasted, state.pasting);
+        try std.testing.expect(effects.focus == null);
     };
 }

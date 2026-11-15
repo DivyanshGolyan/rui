@@ -53,7 +53,8 @@ pub const openssl_version = "3.6.3";
 pub const max_url_bytes = url_value.max_url_bytes;
 /// The longest DNS name; IP literals are shorter.
 pub const max_host_bytes = url_value.max_host_bytes;
-pub const max_endpoints = 4;
+/// Distinct URL registrations per Client, including paths sharing an origin.
+pub const max_endpoints = 6;
 /// Request fields a caller may set; pseudo-headers, content-length and
 /// accept-encoding are the client's own.
 pub const max_fields = 16;
