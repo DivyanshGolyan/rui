@@ -51,7 +51,9 @@ test "Session pin preserves first rank and historical replay through unpin archi
             try std.testing.expectEqual(@as(?u64, null), try order(&storage, &tmp, first.slice()));
             var pin = try command("pin-first", first.slice(), true);
             try expectAccepted(storage.pinSession(&pin, .{}), true, false);
-            try std.testing.expect((try order(&storage, &tmp, first.slice())) != null);
+            const first_pin_order = try order(&storage, &tmp, first.slice());
+            if (first_pin_order == null) std.debug.print("pinning oracle: first accepted pin has no current pin_order\n", .{});
+            try std.testing.expect(first_pin_order != null);
             const rank = (try order(&storage, &tmp, first.slice())).?;
             var other = try command("pin-second", second.slice(), true);
             try expectAccepted(storage.pinSession(&other, .{}), true, false);
