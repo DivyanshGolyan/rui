@@ -42,8 +42,6 @@ pub const SessionControls = struct {
         const self: *SessionControls = @ptrCast(@alignCast(raw));
         if (value == .mouse and (value.mouse.button == .wheel_up or value.mouse.button == .wheel_down)) return;
         try self.row.widget().handleEvent(ctx, value);
-        // Tabs own per-label focus; whole-row hover would cover that background.
-        if (value == .mouse and value.mouse.row == 1) try self.row.inner.hover.handleEvent(ctx, .mouse_leave);
     }
 
     fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
@@ -53,8 +51,8 @@ pub const SessionControls = struct {
         const built = try overview_view.listSegments(ctx.arena, self.state, .new_session, width, self.caps, 0);
         const tabs = try overview_view.listSegments(ctx.arena, self.state, .views, width, self.caps, 0);
         var regions: std.ArrayList(GroupedList.Region) = .empty;
-        if (tabs.sessions) |at| try regions.append(ctx.arena, .{ .start = at.start, .end = at.end, .target = .sessions });
-        if (tabs.archived) |at| try regions.append(ctx.arena, .{ .start = at.start, .end = at.end, .target = .archived });
+        if (tabs.sessions) |at| try regions.append(ctx.arena, .{ .start = at.start, .end = at.end, .target = .sessions, .selected = self.state.selected == .sessions });
+        if (tabs.archived) |at| try regions.append(ctx.arena, .{ .start = at.start, .end = at.end, .target = .archived, .selected = self.state.selected == .archived });
         const rows = try ctx.arena.create([]const GroupedList.Row);
         rows.* = try ctx.arena.dupe(GroupedList.Row, &.{
             .{ .segments = built.segments, .target = .new_session },

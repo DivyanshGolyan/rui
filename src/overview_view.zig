@@ -3022,7 +3022,6 @@ pub fn listSegments(arena: Allocator, state: *const State, item: Item, width: u1
                 const cells = try built.put(start, tab[0], width -| 1 -| start, .{
                     .colour = if (active or focused) .strong else .quiet,
                     .bold = active,
-                    .background = if (focused) .selection else .ground,
                 });
                 if (cells != 0) tab[3].* = .{ .start = @intCast(start), .end = @intCast(start + cells) };
             }
