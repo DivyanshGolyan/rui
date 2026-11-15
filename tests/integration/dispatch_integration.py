@@ -426,7 +426,7 @@ def compaction_cases(state, processes, endpoints, releases):
         assert history(compaction["input"])[-1] == {"type": "compaction_trigger"}, compaction
         # The originating Operation's address and baseline survive overflow
         # into its compaction Operation.
-        address = model_instructions(ROOT, "baseline", store=store, session=session)
+        address = model_instructions(ROOT, "baseline", store=store, session=session, model="gpt-6-sol")
         assert [json.loads(request)["instructions"] for request in endpoint.requests[:2]] == [address, address], endpoint.requests[:2]
         assert compaction["store"] is False and compaction["stream"] is True, compaction
         assert compaction["include"] == ["reasoning.encrypted_content"], compaction
@@ -523,7 +523,7 @@ def compaction_cases(state, processes, endpoints, releases):
     assert len(endpoint.requests) == 3, endpoint.requests
     assert user_texts(json.loads(endpoint.requests[1])) == ["first"]
     assert user_texts(json.loads(endpoint.requests[2])) == ["first", "apply only after compaction"]
-    address = model_instructions(ROOT, store=store, session=session)
+    address = model_instructions(ROOT, store=store, session=session, model="gpt-6-sol")
     assert str(store) not in address and "雪" not in address, address
     assert [json.loads(request)["instructions"] for request in endpoint.requests] == [address] * 3, endpoint.requests
     stop_host(host)
@@ -542,7 +542,7 @@ def compaction_cases(state, processes, endpoints, releases):
     outcome = wait_for(lambda: (value := observe(store, "irreducible")).get("result") and value, "irreducible overflow settlement")
     assert outcome["state"] == "failed" and outcome["result"]["code"] == "ResourceExceeded", outcome
     assert len(endpoint.requests) == 3, endpoint.requests
-    address = model_instructions(ROOT, store=store, session=session)
+    address = model_instructions(ROOT, store=store, session=session, model="gpt-6-sol")
     assert [json.loads(request)["instructions"] for request in endpoint.requests] == [address] * 3, endpoint.requests
     stop_host(host)
     processes.remove(host)
@@ -566,7 +566,7 @@ def compaction_cases(state, processes, endpoints, releases):
     report = command("session", "inspect", "--store", store, "--session", session, "--profile", "full")
     assert report["actions"]["count"] == "0" and not forbidden_effect.exists(), report
     assert len(endpoint.requests) == 2, endpoint.requests
-    address = model_instructions(ROOT, store=store, session=session)
+    address = model_instructions(ROOT, store=store, session=session, model="gpt-6-sol")
     assert [json.loads(request)["instructions"] for request in endpoint.requests] == [address] * 2, endpoint.requests
     stop_host(host)
     processes.remove(host)
@@ -2134,7 +2134,11 @@ def main(mode="all", correlation_case="all"):
         wait_for(lambda: len(success_endpoint.requests) == 2, "two successful requests")
         first_request = json.loads(success_endpoint.requests[0])
         second_request = json.loads(success_endpoint.requests[1])
-        assert first_request["instructions"] == second_request["instructions"] == model_instructions(ROOT, store=success_store, session=success_session)
+        assert first_request["model"] == "gpt-6-sol", first_request
+        assert first_request["instructions"] == model_instructions(
+            ROOT, store=success_store, session=success_session, model="gpt-6-sol"), first_request
+        assert second_request["instructions"] == model_instructions(
+            ROOT, store=success_store, session=success_session, model="gpt-6.1-sol"), second_request
         assert history(first_request["input"]) == [
             {"role": "user", "content": [{"type": "input_text", "text": "first question"}]},
         ]
@@ -2256,7 +2260,7 @@ def main(mode="all", correlation_case="all"):
         assert retry_endpoint.request_times[2] - retry_endpoint.request_times[1] >= 0.90
         assert retry_endpoint.requests[0] == retry_endpoint.requests[1]
         assert retry_endpoint.requests[1] == retry_endpoint.requests[2]
-        assert json.loads(retry_endpoint.requests[0])["instructions"] == model_instructions(ROOT, store=retry_store, session=retry_session)
+        assert json.loads(retry_endpoint.requests[0])["instructions"] == model_instructions(ROOT, store=retry_store, session=retry_session, model="gpt-6-sol")
         stop_host(retry_host)
         processes.remove(retry_host)
         database = sqlite3.connect(retry_store / "rui.sqlite3")
@@ -2555,7 +2559,7 @@ def main(mode="all", correlation_case="all"):
         frozen_retry = json.loads(continued_endpoint.requests[2])
         # Later settings cannot re-address or re-baseline the replacement Attempt.
         assert frozen_retry["instructions"] == model_instructions(
-            ROOT, "original instructions", store=continued_store, session=continued_retry_session
+            ROOT, "original instructions", store=continued_store, session=continued_retry_session, model="gpt-6-sol"
         ), frozen_retry
         expected_private = dict(continued_reasoning)
         expected_private.pop("created_by")
@@ -2823,7 +2827,7 @@ def main(mode="all", correlation_case="all"):
         pending_request = json.loads(pending_endpoint.requests[1])
         expected_pending_reasoning = dict(pending_reasoning)
         expected_pending_reasoning.pop("created_by")
-        assert pending_request["instructions"] == model_instructions(ROOT, store=pending_store, session=pending_session)
+        assert pending_request["instructions"] == model_instructions(ROOT, store=pending_store, session=pending_session, model="gpt-6-sol")
         assert history(pending_request["input"]) == [
             {"role": "user", "content": [{"type": "input_text", "text": "before cutoff"}]},
             expected_pending_reasoning,
@@ -3670,7 +3674,7 @@ def main(mode="all", correlation_case="all"):
             "parallel_tool_calls": True,
             "include": ["reasoning.encrypted_content"],
             "reasoning": {"effort": start_effort("gpt-6-sol")},
-            "instructions": model_instructions(ROOT, "A", store=store, session=main_session),
+            "instructions": model_instructions(ROOT, "A", store=store, session=main_session, model="gpt-6-sol"),
             "input": [
                 {
                     "role": "user",

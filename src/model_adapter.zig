@@ -2668,8 +2668,9 @@ test "request preparation keeps the starting effort at the top and changes it at
             const sealed = try drainLivePreparation(&preparation, 1, 1, 32768);
             var owned = true;
             defer if (owned) sealed.deinit(std.testing.io, preparation.writer.budget);
-            var buffer: [8192]u8 = undefined;
-            const count = try sealed.file.readPositionalAll(std.testing.io, &buffer, 0);
+            const buffer = try std.testing.allocator.alloc(u8, @intCast(sealed.length));
+            defer std.testing.allocator.free(buffer);
+            const count = try sealed.file.readPositionalAll(std.testing.io, buffer, 0);
             const bytes = buffer[0..count];
             try std.testing.expectEqual(sealed.length, count);
             try std.testing.expectEqual(sealed.length, try sealed.file.length(std.testing.io));
@@ -5733,15 +5734,10 @@ test "raw image preparation rejects a wrong canonical digest before sealing" {
 }
 
 test "request preparation streams exact built-in instructions across provider routes" {
-    const cases = [_]struct { model: []const u8, body: []const u8 }{
-        .{ .model = "gpt-6-luna", .body = @embedFile("model_instructions/luna.txt") },
-        .{ .model = "gpt-6.1-terra", .body = @embedFile("model_instructions/terra-astra.txt") },
-        .{ .model = "gpt-6.1-sol", .body = @embedFile("model_instructions/sol.txt") },
-        .{ .model = "gpt-6-astra", .body = @embedFile("model_instructions/terra-astra.txt") },
-        .{ .model = "openai/gpt-6-luna", .body = "" },
-    };
+    const models = [_][]const u8{ "gpt-6-luna", "gpt-6.1-terra", "gpt-6.1-sol", "gpt-6-astra", "openai/gpt-6-luna" };
     const baseline = "Caller rules {} \"quoted\"\n雪";
-    for (cases) |case| for ([_][]const u8{ "codex", "openai", "chatgpt" }) |provider_name| {
+    for (models) |model| for ([_][]const u8{ "codex", "openai", "chatgpt" }) |provider_name| {
+        const body = model_catalog.builtinInstructions(model).bytes();
         var setup: PreparationTestSetup = undefined;
         try setup.init();
         defer setup.close();
@@ -5755,7 +5751,7 @@ test "request preparation streams exact built-in instructions across provider ro
         command.configuration.provider.state = .value;
         try command.configuration.provider.value.set(provider_name);
         command.configuration.model.state = .value;
-        try command.configuration.model.value.set(case.model);
+        try command.configuration.model.value.set(model);
         command.configuration.tools.state = .value;
         command.configuration.permission_mode.state = .value;
         try command.configuration.permission_mode.value.set("bypass");
@@ -5781,14 +5777,14 @@ test "request preparation streams exact built-in instructions across provider ro
         defer std.testing.allocator.free(result.bytes);
         const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, result.bytes, .{});
         defer parsed.deinit();
-        try std.testing.expectEqualStrings(case.model, parsed.value.object.get("model").?.string);
+        try std.testing.expectEqualStrings(model, parsed.value.object.get("model").?.string);
         const quoted_workspace = try std.json.Stringify.valueAlloc(std.testing.allocator, setup.workspace, .{});
         defer std.testing.allocator.free(quoted_workspace);
-        const expected = try std.mem.concat(std.testing.allocator, u8, &.{ context_parts[0], quoted_workspace[1 .. quoted_workspace.len - 1], context_parts[1], session.slice(), context_parts[2], case.body, context_parts[3], baseline });
+        const expected = try std.mem.concat(std.testing.allocator, u8, &.{ context_parts[0], quoted_workspace[1 .. quoted_workspace.len - 1], context_parts[1], session.slice(), context_parts[2], body, context_parts[3], baseline });
         defer std.testing.allocator.free(expected);
         const instructions = parsed.value.object.get("instructions").?.string;
         try std.testing.expectEqualStrings(expected, instructions);
-        if (case.body.len != 0) try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, instructions, case.body));
+        if (body.len != 0) try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, instructions, body));
         try std.testing.expectEqual(@as(u64, result.bytes.len), result.length);
         try std.testing.expectEqual(protocol.contentDigest(result.bytes), result.digest);
         try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));

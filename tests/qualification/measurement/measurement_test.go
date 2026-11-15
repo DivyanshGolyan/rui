@@ -20,7 +20,7 @@ import (
 	"github.com/shirou/gopsutil/v4/process"
 )
 
-func TestModelInstructionsMatchIndependentRequestOracle(t *testing.T) {
+func TestModelInstructionsMatchPythonEncoding(t *testing.T) {
 	fixtures, err := filepath.Abs("../../integration")
 	if err != nil {
 		t.Fatal(err)
@@ -44,12 +44,12 @@ sys.stdout.buffer.write(model_instructions(sys.argv[2] + "\0", store=sys.argv[3]
 			if err != nil {
 				var exited *exec.ExitError
 				if errors.As(err, &exited) {
-					t.Fatalf("independent Python request oracle: %v: %s", err, exited.Stderr)
+					t.Fatalf("source-backed Python encoding oracle: %v: %s", err, exited.Stderr)
 				}
-				t.Fatalf("independent Python request oracle: %v", err)
+				t.Fatalf("source-backed Python encoding oracle: %v", err)
 			}
 			if got := ModelInstructions(workspace+"\x00", session, model); got != string(want) {
-				t.Fatalf("Go request instructions differ from independent oracle:\ngot: %q\nwant: %q", got, want)
+				t.Fatalf("Go request instructions differ from Python encoding oracle:\ngot: %q\nwant: %q", got, want)
 			}
 		})
 	}

@@ -4,6 +4,7 @@ const shared_fixtures = @import("../tests.zig");
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
 const wire_request = @import("../../wire_request.zig");
+const model_catalog = @import("../../model_catalog.zig");
 const model_capability = @import("../../model_capability.zig");
 const product_defaults = @import("../../product_defaults.zig");
 const store_core = @import("../Store.zig");
@@ -1072,13 +1073,13 @@ test "built-in instructions contribute to unanchored pressure but not eligible u
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             const cases = .{
-                .{ "model-a", "model-a", @as(usize, 0) },
-                .{ "gpt-6-luna", "gpt-6-luna", @embedFile("../../model_instructions/luna.txt").len },
-                .{ "gpt-6.1-terra", "gpt-6.1-terra", @embedFile("../../model_instructions/terra-astra.txt").len },
-                .{ "gpt-6.1-sol", "gpt-6.1-sol", @embedFile("../../model_instructions/sol.txt").len },
-                .{ "gpt-6-astra", "gpt-6-astra", @embedFile("../../model_instructions/terra-astra.txt").len },
-                .{ "gpt-6-luna", "gpt-6.1-sol", @embedFile("../../model_instructions/sol.txt").len },
-                .{ "gpt-6.1-sol", "model-a", @as(usize, 0) },
+                .{ "model-a", "model-a" },
+                .{ "gpt-6-luna", "gpt-6-luna" },
+                .{ "gpt-6.1-terra", "gpt-6.1-terra" },
+                .{ "gpt-6.1-sol", "gpt-6.1-sol" },
+                .{ "gpt-6-astra", "gpt-6-astra" },
+                .{ "gpt-6-luna", "gpt-6.1-sol" },
+                .{ "gpt-6.1-sol", "model-a" },
             };
             inline for (cases) |models| {
                 for ([_]bool{ false, true }) |usage| {
@@ -1109,7 +1110,7 @@ test "built-in instructions contribute to unanchored pressure but not eligible u
                         try std.testing.expect(try storage.configure(&patch, .{}) == .accepted);
                     }
                     const anchored = usage and std.mem.eql(u8, models[0], models[1]);
-                    const expected: u64 = if (anchored) 0 else (4 + models[2]) / 4;
+                    const expected: u64 = if (anchored) 0 else (4 + model_catalog.builtinInstructions(models[1]).bytes().len) / 4;
                     try std.testing.expectEqual(@as(?u64, expected), try testingContextEstimate(&storage, &tmp, session.slice()));
                     const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
                     try std.testing.expectEqual(if (expected >= 1000) ModelOperationKind.compaction else ModelOperationKind.assistant_response, try storage.modelOperationKind(next));

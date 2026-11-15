@@ -87,20 +87,26 @@ func ModelInstructions(workspace, session, model string) string {
 		session + modelContextParts[2] + builtinInstructions(model) + modelContextParts[3]
 }
 
+var builtinInstructionPaths = func() map[string]string {
+	_, source, _, _ := runtime.Caller(0)
+	text, err := os.ReadFile(filepath.Join(filepath.Dir(source), "../../../src/model_catalog.zig"))
+	if err != nil {
+		panic(err)
+	}
+	paths, err := instructionPaths(string(text))
+	if err != nil {
+		panic(err)
+	}
+	return paths
+}()
+
 func builtinInstructions(model string) string {
-	name := ""
-	switch model {
-	case "gpt-6-luna":
-		name = "luna"
-	case "gpt-6.1-terra", "gpt-6-astra":
-		name = "terra-astra"
-	case "gpt-6.1-sol":
-		name = "sol"
-	default:
+	path := builtinInstructionPaths[model]
+	if path == "" {
 		return ""
 	}
 	_, source, _, _ := runtime.Caller(0)
-	text, err := os.ReadFile(filepath.Join(filepath.Dir(source), "../../../src/model_instructions", name+".txt"))
+	text, err := os.ReadFile(filepath.Join(filepath.Dir(source), "../../../src", path))
 	if err != nil {
 		panic(err)
 	}
