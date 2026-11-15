@@ -77,6 +77,7 @@ test "every function that enters the Store has a round budget" {
         @embedFile("../engine/mysql_open.zig"),
         @embedFile("../engine/mysql_refusal.zig"),
         @embedFile("../domain/action.zig"),
+        @embedFile("../domain/action_read.zig"),
         @embedFile("../domain/forward.zig"),
         @embedFile("../domain/command.zig"),
         @embedFile("../domain/configuration.zig"),
@@ -95,6 +96,7 @@ test "every function that enters the Store has a round budget" {
         @embedFile("../domain/session_obligation.zig"),
         @embedFile("../domain/session_report_read.zig"),
         @embedFile("../domain/skills.zig"),
+        @embedFile("../domain/sourced_input.zig"),
         @embedFile("../domain/tool_offer.zig"),
         @embedFile("../domain/tool_set.zig"),
         @embedFile("../domain/turn.zig"),
@@ -577,6 +579,10 @@ test "each Store entry point takes its round budget on its common path" {
             meter.start();
             _ = try storage.actionArguments(session.slice(), allowed);
             meter.stop(.actionContent);
+            var action_read: @import("../../action_read.zig").Read = undefined;
+            meter.start();
+            try storage.readAction(&.{ .session = session, .action_id = allowed }, &action_read);
+            meter.stop(.readAction);
             var allow: protocol.PermissionDecisionCommand = .{ .action_id = allowed, .decision = .allow_once };
             try allow.key.set("budget-allow");
             try allow.session.set(session.slice());

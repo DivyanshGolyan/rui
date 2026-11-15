@@ -175,6 +175,15 @@ pub fn renderPermissionDecisionReply(
     };
 }
 
+pub fn renderActionRead(response: protocol.JsonOut, value: *const @import("action_read.zig").Read) !void {
+    const shapes = protocol.action_read_reply;
+    try response.appendShape(shapes.head, .{ value.session.slice(), value.action_id });
+    switch (value.status) {
+        .pending => |state| try response.appendShape(shapes.pending, .{state}),
+        .resolved => |*final| try response.appendShape(shapes.final, .{ final.resolution.position, final.resolution.code.slice(), final.resolution.content.length, final.resolution.content.digest, final.window.offset, final.window.next, final.window.more, final.window.text.slice() }),
+    }
+}
+
 pub fn commandObservationBytes(observed: *const command_reply.Observed) usize {
     const shapes = protocol.command_observation_reply;
     return switch (observed.*) {
@@ -548,4 +557,33 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     var suggestions_response: protocol.FixedJsonBuffer(protocol.skill_suggestions_reply.max_bytes) = .{};
     try suggestions_response.render(renderSkillSuggestions, .{&suggestions});
     try std.testing.expectEqual(protocol.skill_suggestions_reply.max_bytes, suggestions_response.len);
+}
+
+test "Action read JSON reaches its exact bound with an escaped final window" {
+    const Read = @import("action_read.zig").Read;
+    const value = try std.testing.allocator.create(Read);
+    defer std.testing.allocator.destroy(value);
+    const max = std.math.maxInt(u64);
+    value.* = .{
+        .session = .{ .bytes = @splat(1), .len = protocol.max_session_bytes },
+        .action_id = max,
+        .status = .{ .resolved = .{
+            .resolution = .{ .position = max, .code = .{ .bytes = @splat(1), .len = protocol.max_code_bytes }, .content = .{ .length = max, .digest = @splat(0xff) } },
+            .window = .{ .offset = max, .next = max, .more = false, .text = .{ .bytes = @splat(1), .len = @import("action_read.zig").window_bytes } },
+        } },
+    };
+    const bytes = try std.testing.allocator.alloc(u8, protocol.action_read_reply.max_bytes);
+    defer std.testing.allocator.free(bytes);
+    var writer = std.Io.Writer.fixed(bytes);
+    try renderActionRead(.{ .writer = &writer }, value);
+    try std.testing.expectEqual(protocol.action_read_reply.max_bytes, writer.buffered().len);
+    writer = .fixed(bytes);
+    try renderActionRead(.{ .writer = &writer }, value);
+    const decoded = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, writer.buffered(), .{});
+    defer decoded.deinit();
+    try std.testing.expectEqualStrings("resolved", decoded.value.object.get("state").?.string);
+    value.status = .{ .pending = .queued };
+    writer = .fixed(bytes);
+    try renderActionRead(.{ .writer = &writer }, value);
+    try std.testing.expect(std.mem.endsWith(u8, writer.buffered(), "\"final\":null}"));
 }
