@@ -407,12 +407,11 @@ pub const HistoricalView = struct {
     /// view once did, and reads the first page of the output check.
     pub fn settings(self: *HistoricalView, out: *HistoricalSettings) !void {
         std.debug.assert(self.active);
-        if (self.settled == out) {
+        if (self.settled == out and !self.compound_inputs) {
             self.settled = null;
-            if (self.compound_inputs) try self.store.queue().run(verifyHistoricalInputsHeld, .{ self.store, self });
             return;
         }
-        try self.allocatePage();
+        if (self.settled != out) try self.allocatePage();
         return readHistoricalSettings(self.store, self, out);
     }
 
@@ -794,6 +793,11 @@ fn readHistoricalSettingsHeld(self: *Store, view: *HistoricalView, out: *Histori
     defer entry.release();
     var access: ReadAccess = .open(&entry);
     defer access.deinit();
+    if (view.settled == out) {
+        view.settled = null;
+        _ = try entry.finish(Ordinary.attempt_binding, model_settlement_domain.readAttemptKind(&entry, view.binding));
+        return entry.finish(error{}, verifyHistoricalInputs(&access, view));
+    }
     return entry.finish(Ordinary.attempt_binding, settingsOf(&access, view, out));
 }
 
@@ -894,15 +898,6 @@ fn verifyHistoricalInputs(a: *ReadAccess, view: *HistoricalView) !void {
         try input_domain.verify(a, row.command_key);
         after = row.session_position.get();
     }
-}
-
-fn verifyHistoricalInputsHeld(self: *Store, view: *HistoricalView) !void {
-    const entry = try store_core.enter(self, .none);
-    defer entry.release();
-    _ = try entry.finish(Ordinary.attempt_binding, model_settlement_domain.readAttemptKind(&entry, view.binding));
-    var access: ReadAccess = .open(&entry);
-    defer access.deinit();
-    return entry.finish(error{}, verifyHistoricalInputs(&access, view));
 }
 
 /// Where an admission starts the request of the Attempt it admits: the

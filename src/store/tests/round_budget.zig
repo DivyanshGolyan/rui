@@ -287,6 +287,17 @@ test "each Store entry point takes its round budget on its common path" {
             meter.start();
             try submitTestMessage(storage, tmp, "budget-plain-input", "budget-plain-key", session.slice(), "hello");
             meter.stop(.submitMessageWithModel);
+            var cursor: @import("../domain/input.zig").Cursor = undefined;
+            meter.start();
+            const certificate = try storage.openInput(.{ .message = try protocol.Bounded(protocol.max_key_bytes).from("budget-plain-key") }, &cursor);
+            meter.stop(.openInput);
+            try std.testing.expectEqual(@as(u32, 1), certificate.retained);
+            meter.start();
+            const part = (try storage.readInputPart(&cursor)).?;
+            meter.stop(.readInputPart);
+            try std.testing.expect(part.kind == .text);
+            try std.testing.expectEqual(@as(u64, 5), part.reference.length);
+            try std.testing.expectEqual(protocol.contentDigest("hello"), part.reference.digest);
             const search = try std.testing.allocator.create(protocol.ActivitySearchFacts);
             defer std.testing.allocator.destroy(search);
             var search_request: protocol.ActivitySearch = .{ .session = session, .kinds = .initOne(.admission), .limit = 1 };

@@ -1087,7 +1087,7 @@ pub const Store = struct {
         defer entry.release();
         var access: ReadAccess = .open(&entry);
         defer access.deinit();
-        return entry.finish(Ordinary.content, report_domain.failedResponseBinding(&access, session_ref, operation, attempt_ordinal));
+        return entry.finish(error{ContentNotFound}, report_domain.failedResponseBinding(&access, session_ref, operation, attempt_ordinal));
     }
 
     /// Reads the report of `session_ref` under one Entry and hands it to
