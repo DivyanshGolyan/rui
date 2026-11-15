@@ -2494,7 +2494,7 @@ test "App overview paints its ground and plain footer" {
     }
 }
 
-test "a blank line on the ground sits under New Session, selected or not, at narrow and wide widths" {
+test "separate view tabs and a ground gap follow New Session at narrow and wide widths" {
     var cancellation: client.Cancellation = .{};
     const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
     defer rig.close();
@@ -2512,16 +2512,16 @@ test "a blank line on the ground sits under New Session, selected or not, at nar
         var shown = try rig.shown(width, 30);
         defer shown.deinit();
         try std.testing.expect(std.mem.startsWith(u8, try shown.line(0), "  + New Session"));
-        try std.testing.expect(std.mem.indexOf(u8, try shown.line(0), "Archived") != null);
+        try std.testing.expect(std.mem.indexOf(u8, try shown.line(1), "Archived") != null);
         try std.testing.expectEqual(selection == .new_session, std.meta.eql(highlight, shown.screen.readCell(1, 0).?.style.bg));
         // The gap is blank ground in every column of the list, never part
         // of the New Session row's highlight.
         for (0..30) |col| {
-            const cell = shown.screen.readCell(@intCast(col), 1).?;
+            const cell = shown.screen.readCell(@intCast(col), 2).?;
             try std.testing.expect(std.mem.trim(u8, cell.char.grapheme, " ").len == 0);
             try std.testing.expectEqual(ground, cell.style.bg);
         }
-        try std.testing.expect((try shown.line(2)).len != 0);
+        try std.testing.expect((try shown.line(3)).len != 0);
     };
 }
 
@@ -2627,7 +2627,7 @@ test "each effect runs its client operation and each result reaches the core" {
     try std.testing.expectEqualStrings("n3w5es", &Seen.now.conversed);
 
     // Ctrl-X twice stops the selected Session.
-    try std.testing.expect(try rig.press("\x1b[H\x1b[B\x18\x18") == null);
+    try std.testing.expect(try rig.press("\x1b[H\x1b[B\x1b[B\x18\x18") == null);
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expectEqual(@as(usize, 1), Seen.now.stops);
     try std.testing.expectEqualStrings("k7m2qx", &Seen.now.stopped);
@@ -3012,7 +3012,7 @@ test "a stop whose reply was lost names its request on departure" {
     defer rig.close();
     try std.testing.expect(try rig.overview.event(.{ .tick = test_now_s * 1000 }) == null);
     try std.testing.expect(try rig.settle() == null);
-    try std.testing.expect(try rig.press("\x1b[H\x1b[B\x18\x18") == null);
+    try std.testing.expect(try rig.press("\x1b[H\x1b[B\x1b[B\x18\x18") == null);
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expectEqualStrings("! k7m2qx stop unsure; details on exit", rig.overview.state.notice.?.text());
     const guidance = "rui: Not sure k7m2qx stopped. Check with: rui request recover stop-handle\n";
@@ -3024,7 +3024,7 @@ test "a stop whose reply was lost names its request on departure" {
     try std.testing.expect(try rig.overview.event(.{ .tick = test_now_s * 1000 + view.list_interval_ms }) == null);
     try std.testing.expect(try rig.settle() == null);
     rig.overview.state.notice = null;
-    try std.testing.expect(try rig.press("\x1b[H\x1b[B\x18\x18") == null);
+    try std.testing.expect(try rig.press("\x1b[H\x1b[B\x1b[B\x18\x18") == null);
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expectEqual(@as(usize, 1), Seen.now.stops);
     try std.testing.expectEqualStrings("! k7m2qx stop unsure; details on exit", rig.overview.state.notice.?.text());
@@ -3033,7 +3033,7 @@ test "a stop whose reply was lost names its request on departure" {
     defer running.close();
     try std.testing.expect(try running.overview.event(.{ .tick = test_now_s * 1000 }) == null);
     try std.testing.expect(try running.settle() == null);
-    try std.testing.expect(try running.press("\x1b[H\x1b[B\x18\x18") == null);
+    try std.testing.expect(try running.press("\x1b[H\x1b[B\x1b[B\x18\x18") == null);
     try running.overview.dispatch(.all);
     try std.testing.expectEqual(Job.stop, std.meta.activeTag(running.overview.job));
     var buffer: [1024]u8 = undefined;
@@ -3427,7 +3427,7 @@ test "a stop answered under a conversation says so there, and goes before a list
     defer finished.close();
     try std.testing.expect(try finished.overview.event(.{ .tick = test_now_s * 1000 }) == null);
     try std.testing.expect(try finished.settle() == null);
-    try std.testing.expect(try finished.press("\x1b[H\x1b[B\x18\x18") == null);
+    try std.testing.expect(try finished.press("\x1b[H\x1b[B\x1b[B\x18\x18") == null);
     try finished.overview.dispatch(.all);
     try finished.answered();
     try std.testing.expect(try finished.overview.event(.{ .tick = test_now_s * 1000 + view.list_interval_ms }) == null);
@@ -3443,7 +3443,7 @@ test "a stop answered under a conversation says so there, and goes before a list
     try std.testing.expect(try queued.overview.event(.{ .tick = test_now_s * 1000 }) == null);
     try std.testing.expect(try queued.settle() == null);
     try std.testing.expect(try queued.overview.event(.{ .tick = test_now_s * 1000 + view.list_interval_ms }) == null);
-    try std.testing.expect(try queued.press("\x1b[H\x1b[B\x18\x18") == null);
+    try std.testing.expect(try queued.press("\x1b[H\x1b[B\x1b[B\x18\x18") == null);
     queued.overview.opened = "k7m2qx".*;
     _ = try service(queued.overview);
     try std.testing.expectEqual(Job.stop, std.meta.activeTag(queued.overview.job));
@@ -4328,7 +4328,7 @@ test "a stop captured and then not sent keeps its handle, here and on departure"
     defer rig.close();
     try std.testing.expect(try rig.overview.event(.{ .tick = test_now_s * 1000 }) == null);
     try std.testing.expect(try rig.settle() == null);
-    try std.testing.expect(try rig.press("\x1b[H\x1b[B\x18\x18") == null);
+    try std.testing.expect(try rig.press("\x1b[H\x1b[B\x1b[B\x18\x18") == null);
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expectEqualStrings("! k7m2qx stop unsure; details on exit", rig.overview.state.notice.?.text());
     var buffer: [1024]u8 = undefined;
@@ -4342,7 +4342,7 @@ test "leaving with a stop still queued says it was not sent" {
     try std.testing.expect(try rig.overview.event(.{ .tick = test_now_s * 1000 }) == null);
     try std.testing.expect(try rig.settle() == null);
     // Ctrl-X twice and Ctrl-C in one read: the stop is queued and never sent.
-    try std.testing.expect((try rig.press("\x1b[H\x1b[B\x18\x18\x03")).? == .overview);
+    try std.testing.expect((try rig.press("\x1b[H\x1b[B\x1b[B\x18\x18\x03")).? == .overview);
     var buffer: [1024]u8 = undefined;
     try std.testing.expectEqualStrings("rui: k7m2qx was not stopped.\n", try finishedGuidance(rig, &buffer));
     try std.testing.expectEqual(@as(usize, 0), Seen.now.stops);
@@ -4553,7 +4553,7 @@ test "overview archive effects preserve server filter, pending visibility, and r
     try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 + 2 * view.list_interval_ms }) == null);
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expectEqual(@as(usize, 0), overview.state.rows.items.len);
-    try std.testing.expect(try rig.press("\x1b[H\x1b[C\r") == null);
+    try std.testing.expect(try rig.press("\x1b[H\x1b[B\x1b[C\r") == null);
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expectEqual(protocol.SessionArchiveFilter.archived, Seen.now.archive_filter);
     try std.testing.expectEqual(@as(usize, 1), overview.state.rows.items.len);
@@ -4601,7 +4601,7 @@ test "a stop that ends with no answer reads as failed, whatever the job before i
         }
     }.stop;
     overview.state.notice = null;
-    try std.testing.expect(try rig.press("\x1b[H\x1b[B\x18\x18") == null);
+    try std.testing.expect(try rig.press("\x1b[H\x1b[B\x1b[B\x18\x18") == null);
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expectEqual(@as(usize, 1), Seen.now.stops);
     try std.testing.expectEqualStrings("! k7m2qx not stopped: stop_request_failed", overview.state.notice.?.text());
@@ -5758,8 +5758,8 @@ test "pinned New Session remains above the end marker and responds to clicks and
             var shown = try rig.shown(width, 11);
             defer shown.deinit();
             try std.testing.expect(std.mem.startsWith(u8, try shown.line(0), "  + New Session"));
-            try std.testing.expect(std.mem.indexOf(u8, try shown.line(0), "Archived") != null);
-            try std.testing.expect(std.mem.indexOf(u8, try shown.line(1), "↑") != null);
+            try std.testing.expect(std.mem.indexOf(u8, try shown.line(1), "Archived") != null);
+            try std.testing.expect(std.mem.indexOf(u8, try shown.line(2), "↑") != null);
             const span = for (rig.overview.app_sessions.shown_at) |span| {
                 if (span.target) |target| if (target == .open and std.mem.eql(u8, &target.open, &selected)) break span;
             } else return error.SelectedSessionMissing;
@@ -5819,7 +5819,7 @@ test "chat sidebar and overview share pinned New Session and Archived controls" 
         var shown = try rig.shown(width, 20);
         defer shown.deinit();
         try std.testing.expect(std.mem.startsWith(u8, try shown.line(0), "  + New Session"));
-        try std.testing.expect(std.mem.indexOf(u8, try shown.line(0), "Archived") != null);
+        try std.testing.expect(std.mem.indexOf(u8, try shown.line(1), "Archived") != null);
     }
 }
 
@@ -5866,7 +5866,7 @@ test "chat pinned controls preserve late-listed Sessions and the physical last-r
             if (size.width == 140) {
                 try std.testing.expectEqual(if (listed) listed_references.len + 1 else 1, overview.app_sessions.shown_at.len);
                 if (listed) {
-                    try std.testing.expect(std.mem.indexOf(u8, try shown.line(2), "Fix the flaky test") != null);
+                    try std.testing.expect(std.mem.indexOf(u8, try shown.line(3), "Fix the flaky test") != null);
                     for (overview.app_sessions.shown_at[1..], 0..) |span, index| {
                         try std.testing.expectEqual(@as(i17, @intCast(index * 2 + 1)), span.row);
                         try std.testing.expectEqual(@as(u16, 2), span.height);
@@ -5883,10 +5883,10 @@ test "chat pinned controls preserve late-listed Sessions and the physical last-r
         var shown = try rig.shown(width, 30);
         defer shown.deinit();
         try std.testing.expect(std.mem.startsWith(u8, try shown.line(0), "  + New Session"));
-        try std.testing.expect(std.mem.indexOf(u8, try shown.line(0), "Archived") != null);
-        const gap = try shown.line(1);
+        try std.testing.expect(std.mem.indexOf(u8, try shown.line(1), "Archived") != null);
+        const gap = try shown.line(2);
         try std.testing.expect(std.mem.trim(u8, gap, " │").len == 0);
-        try std.testing.expect(std.mem.indexOf(u8, try shown.line(2), "Fix the flaky test") != null);
+        try std.testing.expect(std.mem.indexOf(u8, try shown.line(3), "Fix the flaky test") != null);
     }
 }
 
@@ -5903,7 +5903,7 @@ test "pinned New Session wins the last header row over a provider band" {
         var shown = try rig.shown(width, 2);
         defer shown.deinit();
         try std.testing.expect(std.mem.startsWith(u8, try shown.line(0), "  + New Session"));
-        try std.testing.expect(std.mem.indexOf(u8, try shown.line(0), "Archived") != null);
+        try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "Archived") == null);
     }
 }
 
@@ -6097,18 +6097,18 @@ test "App settings Model borrow ends on every Overview menu replacement or relea
     }
 }
 
-test "the bare arrows move within the pinned row, in CSI and SS3 form: right as the table's open_session, left as a choice key" {
+test "bare CSI and SS3 arrows move between view tabs through the existing key table" {
     for ([_][]const u8{ "\x1b[C", "\x1bOC" }) |right| for ([_][]const u8{ "\x1b[D", "\x1bOD" }) |left| {
         const rig = try openOverview();
         defer rig.close();
-        rig.overview.state.selected = .new_session;
+        rig.overview.state.selected = .sessions;
         _ = try rig.press(right);
         try std.testing.expectEqual(view.Selection.archived, rig.overview.state.selected);
         _ = try rig.press(left);
-        try std.testing.expectEqual(view.Selection.new_session, rig.overview.state.selected);
+        try std.testing.expectEqual(view.Selection.sessions, rig.overview.state.selected);
         _ = try rig.press("\x1b[1;5C");
         _ = try rig.press("\x1b[1;3C");
-        try std.testing.expectEqual(view.Selection.new_session, rig.overview.state.selected);
+        try std.testing.expectEqual(view.Selection.sessions, rig.overview.state.selected);
     };
 }
 

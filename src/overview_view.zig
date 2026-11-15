@@ -4383,7 +4383,7 @@ test "a first line arriving titles its unlabelled row" {
     try std.testing.expectEqualStrings("summarize yesterday's CI failures", state.lineOf(state.find("h8q2mz".*).?).?);
     try std.testing.expectEqual(Line.unavailable, state.find("f6g7h8".*).?.line);
     try std.testing.expectEqual(Line.requested, state.find("p3q4r5".*).?.line);
-    try expectScreenLine(&state, position(&state, "h8q2mz".*).? * 2 + 2, " ✓ summarize yesterday's CI failures                                        12m");
+    try expectScreenLine(&state, position(&state, "h8q2mz".*).? * 2 + 3, " ✓ summarize yesterday's CI failures                                        12m");
     // Lines in flight or unreadable are not asked for again, and a refresh
     // that replaces a row keeps the line of its unchanged first Message.
     try expectEffects(&.{}, try refresh(&state, .changed, testToken(2), &.{session("h8q2mz", .{ .working = ago(0) }, .{ .yours = true })}));
@@ -4436,9 +4436,9 @@ test "Host facts change only the counts line, and a row from before a restart st
     defer state.deinit();
     const before = try screenText(&state, 80, 24, .{});
     defer std.testing.allocator.free(before);
-    try expectScreenLine(&state, 0, "  + New Session                                                        Archived");
+    try expectScreenLine(&state, 0, "  + New Session");
     _ = try step(&state, .{ .host = .{ .started_at = test_now_s - 20, .slots = 2, .slots_in_use = 2 } });
-    try expectScreenLine(&state, 0, "  + New Session                                                        Archived");
+    try expectScreenLine(&state, 0, "  + New Session");
     const after = try screenText(&state, 80, 24, .{});
     defer std.testing.allocator.free(after);
     try std.testing.expectEqualStrings(before[std.mem.indexOf(u8, before, "  + New Session").?..], after[std.mem.indexOf(u8, after, "  + New Session").?..]);
@@ -4579,6 +4579,8 @@ test "overview selection walks both ends and every row without folding" {
     try std.testing.expectEqual(null, selectedLine(&state));
     _ = try press(&state, .previous);
     try std.testing.expectEqual(Selection.new_session, state.selected);
+    _ = try press(&state, .next);
+    try std.testing.expectEqual(Selection.sessions, state.selected);
     for (state.order.items, 0..) |index, at| {
         _ = try press(&state, .next);
         try expectSelected(&state, &state.rows.items[index].reference);
@@ -4595,6 +4597,8 @@ test "overview selection walks both ends and every row without folding" {
         _ = try press(&state, .previous);
         try expectSelected(&state, &state.rows.items[state.order.items[at]].reference);
     }
+    _ = try press(&state, .previous);
+    try std.testing.expectEqual(Selection.sessions, state.selected);
     _ = try press(&state, .previous);
     try std.testing.expectEqual(Selection.new_session, state.selected);
     _ = try press(&state, .last);
@@ -4765,13 +4769,13 @@ test "the overview lists once a second, one listing at a time" {
     try expectEffects(&.{}, try step(&state, .{ .list = .failed }));
     try expectEffects(&.{.{ .list = testToken(1) }}, try step(&state, .{ .tick = start + 3 * list_interval_ms }));
     try expectEffects(&.{}, try step(&state, .{ .list = .failed }));
-    try expectScreenLine(&state, 0, "  + New Session                                                        Archived");
+    try expectScreenLine(&state, 0, "  + New Session");
     var screen = try Frame.of(&state, 80, 24, .{}, 0);
     defer screen.deinit();
-    try expectScreenLine(&state, 2, " ? Review PR 412                                                             3m");
+    try expectScreenLine(&state, 3, " ? Review PR 412                                                             3m");
     try std.testing.expectEqual(Colour.attention, screen.styleAt(3, 1).?.colour);
     _ = try refresh(&state, .not_modified, testToken(1), &.{});
-    try expectScreenLine(&state, 0, "  + New Session                                                        Archived");
+    try expectScreenLine(&state, 0, "  + New Session");
 }
 
 test "a tick moves a retry that fell due to pending" {
@@ -4945,7 +4949,7 @@ test "the overview's rows draw twenty mixed rows" {
     for ([_]u16{ 80, 200 }) |width| {
         var shown = try Frame.of(&state, width, 60, .{}, 0);
         defer shown.deinit();
-        try std.testing.expectEqual(@as(usize, mixed.len * 2 + 2), shown.list.len);
+        try std.testing.expectEqual(@as(usize, mixed.len * 2 + 3), shown.list.len);
         const text = try shown.text();
         defer std.testing.allocator.free(text);
         for (mixed) |row| if (row.label) |label| try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, label));
@@ -5009,7 +5013,7 @@ test "bidi controls in a title cannot reorder a row" {
 test "untrusted text cannot reach the terminal as control bytes" {
     var state = try opened(&.{session("k7m2qx", .{ .working = ago(5) }, .{ .label = "Bell\x07 and \x1b[31mred" })});
     defer state.deinit();
-    try expectScreenLine(&state, 2, " ⠹ Bell? and ?[31mred                                                        5s");
+    try expectScreenLine(&state, 3, " ⠹ Bell? and ?[31mred                                                        5s");
 }
 
 test "overview idle rows never fold" {
@@ -5449,6 +5453,8 @@ test "overview refresh removes selection to next row else New Session and preser
     try std.testing.expectEqual(Selection.settings, state.selected);
     _ = try press(&state, .first);
     try std.testing.expectEqual(Selection.new_session, state.selected);
+    _ = try press(&state, .next);
+    try std.testing.expectEqual(Selection.sessions, state.selected);
     _ = try press(&state, .next);
     try std.testing.expectEqual(Selection.settings, state.selected);
     var empty = try opened(&.{});

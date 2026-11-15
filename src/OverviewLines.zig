@@ -166,7 +166,14 @@ test "session tabs press only separate drawn destinations and clear clipped targ
         // A smaller draw invalidates the old tab hit spans, including height zero.
         const shown = try controls.widget().draw(draw.withConstraints(.{}, .{ .width = width, .height = height }));
         var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
-        if (width >= 20 and height >= 1) try std.testing.expect(std.mem.startsWith(u8, try cells(arena.allocator(), shown, 0), "  + New Session"));
+        if (width >= 20 and height >= 1) {
+            var screen: vaxis.Screen = try .init(arena.allocator(), .{ .cols = width, .rows = height, .x_pixel = 0, .y_pixel = 0 });
+            const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = height, .screen = &screen };
+            try shown.render(window, controls.widget());
+            var line: std.ArrayList(u8) = .empty;
+            for (0..width) |col| try line.appendSlice(arena.allocator(), screen.readCell(@intCast(col), 0).?.char.grapheme);
+            try std.testing.expect(std.mem.startsWith(u8, line.items, "  + New Session"));
+        }
         for (0..3) |row| for (0..@max(1, width)) |col| {
             clicks.got = null;
             events.consume_event = false;
