@@ -60,6 +60,8 @@ const cores = .{
     .{ "http1/Parser.zig", @import("http1/Parser.zig") },
     .{ "http1/request.zig", @import("http1/request.zig") },
     .{ "idempotency_key.zig", @import("idempotency_key.zig") },
+    .{ "input_media.zig", @import("input_media.zig") },
+    .{ "input_parts.zig", @import("input_parts.zig") },
     .{ "json_ascii.zig", @import("json_ascii.zig") },
     .{ "json_limits.zig", @import("json_limits.zig") },
     .{ "json_scalar.zig", @import("json_scalar.zig") },
@@ -441,7 +443,7 @@ test "overview benchmark: batched initial and refreshed listings at 1,000 and 10
                     const shown: *const overview_view.State = @ptrCast(@alignCast(userdata));
                     const item = overview_view.listItem(shown, index).?;
                     const built = try overview_view.listSegments(arena, shown, item, 200, .{}, 0);
-                    return .{ .segments = built.segments, .heading = built.heading, .height = if (item == .row) 2 else 1, .second = if (item == .row) try overview_view.rowSecondSegments(arena, shown, item.row, 200, .{}) else null };
+                    return .{ .segments = built.segments, .heading = built.heading };
                 }
             };
             list.rows = .{ .userdata = &state, .count = @intCast(overview_view.listLength(&state)), .rowFn = Source.row };

@@ -1143,3 +1143,60 @@ test "schema 75 MySQL pin migration refuses absent and ambiguous kind checks bef
         }, &.{ "SELECT 0", if (ambiguous) "SELECT 3" else "SELECT 1" });
     }
 }
+
+test "obligation projection MySQL row counts match SQLite for null changed unchanged missing and refused values" {
+    const Projection = rsql.ObligationProjection(.{
+        .sql = "SELECT session_ref,obligation_since AS saved_since,?2 AS owed_since FROM session WHERE session_ref=?1 UNION ALL " ++
+            "SELECT session_ref,obligation_since AS saved_since,?3 AS owed_since FROM session WHERE session_ref=?1",
+        .Args = struct { session: []const u8, owed: ?u64, other: ?u64 },
+    });
+    const io = std.testing.io;
+    mutex.lockUncancelable(io);
+    defer mutex.unlock(io);
+    _ = connection() orelse return if (state == .absent) error.SkipZigTest else error.MysqlUnavailable;
+    const name = "rui_obligation_projection_parity";
+    try setup("DROP DATABASE IF EXISTS " ++ name ++ ";CREATE DATABASE " ++ name ++ ";USE " ++ name);
+    defer restore("DROP DATABASE IF EXISTS " ++ name);
+    defer restore("USE " ++ database);
+    const ddl_text = "CREATE TABLE session(session_ref VARCHAR(6) PRIMARY KEY,obligation_since BIGINT CHECK(obligation_since IS NULL OR obligation_since>0))";
+    try setup(ddl_text);
+    try setup("INSERT INTO session(session_ref,obligation_since) VALUES('aaaaaa',NULL),('bbbbbb',80)");
+    try setup(comptime statements(prepareQuery(Projection.mysql.prepared()))[0]);
+    defer restore("DEALLOCATE PREPARE rui_dialect_check");
+    try std.testing.expectEqualDeep(@as([]const rsql.Slot, &.{ .{ .argument = 1 }, .{ .argument = 0 }, .{ .argument = 2 }, .{ .argument = 0 } }), Projection.mysql.slots);
+
+    const Case = struct { saved: ?u64, owed: ?u64, other: ?u64 = null, missing: bool = false, rows: u64, expected: ?u64, refused: bool = false };
+    const cases = [_]Case{
+        .{ .saved = null, .owed = null, .rows = 0, .expected = null },
+        .{ .saved = null, .owed = 17, .rows = 1, .expected = 17 },
+        .{ .saved = 17, .owed = 17, .rows = 0, .expected = 17 },
+        .{ .saved = 17, .owed = 31, .other = 9, .rows = 1, .expected = 9 },
+        .{ .saved = null, .owed = null, .other = 17, .rows = 1, .expected = 17 },
+        .{ .saved = 9, .owed = null, .rows = 1, .expected = null },
+        .{ .saved = 17, .owed = 99, .missing = true, .rows = 0, .expected = 17 },
+        .{ .saved = 17, .owed = 0, .rows = 0, .expected = 17, .refused = true },
+    };
+    try store_testing.expectSqliteObligationProjection(Projection.sql, ddl_text, cases);
+    inline for (cases) |case| {
+        const saved = if (case.saved) |n| std.fmt.comptimePrint("{d}", .{n}) else "NULL";
+        const owed = if (case.owed) |n| std.fmt.comptimePrint("{d}", .{n}) else "NULL";
+        const other = if (case.other) |n| std.fmt.comptimePrint("{d}", .{n}) else "NULL";
+        const key = if (case.missing) "zzzzzz" else "aaaaaa";
+        try setup("UPDATE session SET obligation_since=" ++ saved ++ " WHERE session_ref='aaaaaa'");
+        try setup("SET @rui_projection_key='" ++ key ++ "',@rui_projection_owed=" ++ owed ++ ",@rui_projection_other=" ++ other);
+        if (case.refused) {
+            const refusal = (try run("EXECUTE rui_dialect_check USING @rui_projection_owed,@rui_projection_key,@rui_projection_other,@rui_projection_key")) orelse return error.MissingProjectionRefusal;
+            try std.testing.expectEqual(@as(u16, 3819), refusal.code);
+        } else {
+            var counted: std.Io.Writer.Allocating = .init(std.testing.allocator);
+            defer counted.deinit();
+            try writeResult("EXECUTE rui_dialect_check USING @rui_projection_owed,@rui_projection_key,@rui_projection_other,@rui_projection_key;SELECT ROW_COUNT()", &counted.writer);
+            try std.testing.expectEqualStrings(std.fmt.comptimePrint("\n 1:{d}", .{case.rows}), counted.written());
+        }
+        var retained: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer retained.deinit();
+        try writeResult("SELECT session_ref,obligation_since FROM session ORDER BY session_ref", &retained.writer);
+        const expected = if (case.expected) |n| std.fmt.comptimePrint(" {d}:{d}", .{ std.fmt.comptimePrint("{d}", .{n}).len, n }) else " null";
+        try std.testing.expectEqualStrings("\n 6:aaaaaa" ++ expected ++ "\n 6:bbbbbb 2:80", retained.written());
+    }
+}

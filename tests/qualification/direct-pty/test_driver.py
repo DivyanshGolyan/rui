@@ -182,7 +182,7 @@ class OverviewTests(unittest.TestCase):
             scenarios.editor(fixture, row)
         fixture.answer.assert_has_calls([call("TD4 saved conversation answer"), call("TD4 exact answer")])
         overview.assert_called_once_with(tty, "TD4 saved conversation")
-        self.assertEqual(tty.send.call_args_list, [call(b"TD4 saved conversation\r"), call(b"\x1b[H\x1b[B\r")])
+        self.assertEqual(tty.send.call_args_list, [call(b"TD4 saved conversation\r"), call(b"\x1b[H\x1b[B\x1b[B\r")])
         self.assertEqual(tty.draft.call_args_list, [call("", 2), call("ab", 4), call("", 2)])
         self.assertEqual(tty.marker.call_args_list, [call("TD4 saved conversation answer"), call("TD4 exact answer")])
         self.assertEqual(submitted.call_args_list, [

@@ -2,7 +2,7 @@
 
 Each case drives a real Host into a work state, opens bare `rui` on a PTY
 and reads the rows as the terminal shows them: the group headings, each
-row's mark and colour, quiet second line, folder and age.
+row's mark and colour, primary name and state duration.
 """
 import json
 import pathlib
@@ -47,11 +47,6 @@ def row(frame, title):
     return rows[0]
 
 
-def detail(frame, title):
-    lines = frame.split("\n")
-    return lines[lines.index(row(frame, title)) + 1]
-
-
 def cells(screen, title):
     """The drawn cells of the row showing `title` in the latest frame."""
     for line in screen.capture.completed_cells:
@@ -62,7 +57,7 @@ def cells(screen, title):
 
 def needs_you():
     """A Session waiting on an Action leads, marked `?` in the attention
-    colour, selected, its detail the waiting command's first line."""
+    colour, selected, with a compact state duration."""
     bash = json.dumps({"cmd": "echo first line of the command\necho second line", "timeout_ms": None,
                        "description": "Print two lines"})
     with world("groups-needs", {
@@ -77,32 +72,30 @@ def needs_you():
         wait_state(w, asking, "approval")
         # Detail/row contracts use the full-screen list below the split threshold.
         with w.overview(columns=99, rows=20) as screen:
-            frame = screen.contains("echo first line of the command")
+            frame = screen.contains("Asks before running")
             lines = frame.split("\n")
             headings = [line for line in lines if re.fullmatch(r" \S.* · \d+", line)]
             assert headings == [], frame
-            assert lines[0] == f"{'  + New Session':<{screen.capture.columns - 9}}Archived" and lines[1] == "", frame
+            assert lines[0] == "  + New Session" and lines[1] == "  Sessions  Archived" and lines[2] == "", frame
             asked = row(frame, "Asks before running")
             assert re.fullmatch(r" \? Asks before running {2,}\d+s", asked), asked
             assert len(asked) == 98, asked
             assert "second line" not in frame, frame
-            assert lines.index(asked) == 2, frame
-            assert detail(frame, "Asks before running").startswith("   echo first line of the command"), frame
-            assert detail(frame, "Asks before running").rstrip().endswith("workspace"), frame
+            assert lines.index(asked) == 3, frame
+            assert "echo first line" not in frame and "workspace" not in frame, frame
             assert re.fullmatch(r" ✓ Answered already {2,}\d+s", row(frame, "Answered already")), frame
             mark = cells(screen, "Asks before running")[1]
             ordinary = cells(screen, "Answered already")[1]
             assert (mark.data, ordinary.data) == ("?", "✓"), (mark, ordinary)
             assert mark.fg is not None and mark.fg != ordinary.fg, (mark, ordinary)
             assert screen.style("Asks before running").bold, frame
-            assert screen.style("echo first line of the command").fg != mark.fg, frame
             # The list opens on the waiting row: Enter opens that Session.
             screen.keys(b"\r")
             # Its conversation's status line names it; the card may fill
             # the view before its Message row shows.
             opened = screen.contains("Asks before running · gpt-6-luna")
             assert "Answered already" not in opened, opened
-    print("overview groups: an Action's wait leads the flat list, `?` in the attention colour, selected, with its command's first line", flush=True)
+    print("overview groups: an Action's wait leads the flat list, `?` in the attention colour, selected, with compact state duration", flush=True)
 
 
 def queued_in_active():
@@ -131,18 +124,18 @@ def queued_in_active():
                 lines = frame.split("\n")
                 headings = [line for line in lines if re.fullmatch(r" \S.* · \d+", line)]
                 assert headings == [], frame
-                assert "Queued" in frame, frame
+                assert "Queued" not in frame, frame
                 working = row(frame, "First peer task")
                 queued = row(frame, "Second peer task")
                 assert re.fullmatch(r" ⠹ First peer task {2,}\d+s", working), working
-                assert re.fullmatch(r" ◌ Second peer task", queued), queued
+                assert re.fullmatch(r" ◌ Second peer task +\d+s", queued), queued
                 done = row(frame, "Dispatcher")
                 assert lines.index(working) < lines.index(done) < lines.index(queued), frame
                 drawn = cells(screen, "Second peer task")
                 queued_mark = drawn[1]
                 working_mark = cells(screen, "First peer task")[1]
                 assert queued_mark.data == "◌", queued_mark
-                assert queued_mark.fg == screen.style("Queued").fg, frame
+                assert re.fullmatch(r" ◌ Second peer task +\d+s", queued), frame
                 assert queued_mark.fg != working_mark.fg, frame
         finally:
             hold.set()
@@ -150,8 +143,7 @@ def queued_in_active():
 
 
 def detail_column():
-    """A rate-limited row counts down to its retry; a failed row names its
-    cause and nobody who started it."""
+    """Retrying and failed rows show state duration without a detail line."""
     limited = fixture.ResponseSpec(b'{"error":{"message":"slow down"}}', {"Retry-After": "40"}, status=429)
     failing = fixture.ResponseSpec(b'{"error":{"message":"unavailable"}}', {}, status=503)
     with world("groups-detail", {"rate limit me": limited, "fail every time": failing}) as w:
@@ -163,21 +155,18 @@ def detail_column():
         send(w, retrying, "rate limit me")
         wait_state(w, retrying, "retrying")
         with w.overview(columns=99, rows=20) as screen:
-            frame = screen.wait(lambda shown: "retry in" in shown and "Fails every time" in shown,
-                                "the retry countdown and the failed row")
+            frame = screen.wait(lambda shown: "Rate limited task" in shown and "Fails every time" in shown,
+                                "the retrying and failed rows")
             shown = row(frame, "Rate limited task")
             assert re.fullmatch(r" ⠹ Rate limited task {2,}\d+s", shown), shown
-            match = re.match(r"   Rate limited · retry in (\d+)s", detail(frame, "Rate limited task"))
-            assert match and 0 < int(match[1]) <= 41, (shown, frame)
+            assert "retry in" not in frame and "workspace" not in frame, frame
             failure = row(frame, "Fails every time")
             assert re.fullmatch(r" × Fails every time {2,}\d+s", failure), (failure, code)
             assert "you" not in failure.lower(), failure
-            assert detail(frame, "Fails every time").startswith("   Retries ran out"), frame
+            assert "Retries ran out" not in frame, frame
             failed_mark = cells(screen, "Fails every time")[1]
-            assert failed_mark.fg != screen.style("Retries ran out").fg, frame
-            # The countdown asks for attention; the failure keeps its colour.
-            assert cells(screen, "Rate limited task")[1].fg != screen.style("Rate limited ·").fg, frame
-    print("overview groups: a rate-limited row reads `Rate limited · retry in Ns`; a failed row names its cause only", flush=True)
+            assert failed_mark.fg != cells(screen, "Rate limited task")[1].fg, frame
+    print("overview groups: retrying and failed rows show state duration with no detail line", flush=True)
 
 
 def narrow():
@@ -198,7 +187,7 @@ def narrow():
             assert match and len(cut) == 39, (cut, frame)
             room = 40 - 3 - len(match[2]) - 2
             assert match[1].rstrip() == "A much longer title that cannot fit here"[:room - 1] + "…", cut
-            assert detail(frame, "Narrow title").rstrip().endswith("workspace"), frame
+            assert "workspace" not in frame, frame
 
     print("overview groups: at 40 columns a row keeps its mark, title and age, a long title cut short", flush=True)
 
