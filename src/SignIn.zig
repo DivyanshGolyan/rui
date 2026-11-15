@@ -467,8 +467,8 @@ fn runAttempt(self: *Self) !Published {
     const fixture = std.mem.eql(u8, init_.environ_map.get("RUI_TEST_LOGIN") orelse "", "waiting");
     var connection: ?host_start.ConnectionSave = null;
     switch (self.attempt) {
-        .chatgpt => try provider_login.chatgpt(init_, if (fixture) .{ .fixture = "http://127.0.0.1:1" } else .openai, show, .{ .read = pasted }, cancelled, publish),
-        .codex => {
+        .browser => try provider_login.chatgpt(init_, if (fixture) .{ .fixture = "http://127.0.0.1:1" } else .openai, show, .{ .read = pasted }, cancelled, publish),
+        .device => {
             if (fixture) {
                 try display("BDL9-KI88H");
                 while (!cancelled()) try init_.io.sleep(.fromMilliseconds(20), .awake);
@@ -518,7 +518,7 @@ fn beginWithFault(self: *Self, ctx: *vxfw.EventContext, attempt: core.Attempt, f
     if (attempt == .key or self.frozen == null or self.frozen.?.provider != .openai) self.saved = null;
     self.gate.store(.cancellable, .release);
     if (self.init == null) return;
-    if (attempt == .chatgpt) {
+    if (attempt == .browser) {
         if (fault == .browser_map) return self.setupFailed(ctx, error.InjectedBrowserMapFailure);
         const mapped = pages.Mapped(Browser).map() catch |err| return self.setupFailed(ctx, err);
         mapped.value.init();
@@ -713,8 +713,8 @@ fn freeze(self: *Self, attempt: core.Attempt, action: core.Action) !bool {
     }
     var intent = self.selectors;
     var provider: core.Provider = switch (attempt) {
-        .chatgpt => .chatgpt,
-        .codex => .codex,
+        .browser => .chatgpt,
+        .device => .codex,
         .key => .openai,
         else => if (self.frozen) |frozen| frozen.provider else .chatgpt,
     };
@@ -1585,7 +1585,7 @@ test "Sign-in both OAuth methods retry published Host failures without authentic
         activation.launch.?.outcome.failed.store = activation.store;
         var page: Self = .{
             .state = .{ .page = if (method == .browser) .browser else .device, .attempt = 1 },
-            .attempt = if (method == .browser) .chatgpt else .codex,
+            .attempt = if (method == .browser) .browser else .device,
             .outcome = .{ .published = .{
                 .defaults = if (defaults_failed) error.UnsupportedPreferencesVersion else {},
                 .activation = if (activation_error) error.HostReadinessUnconfirmed else activation,
@@ -1693,12 +1693,12 @@ test "Sign-in cleanup failure retains original error resource identity and depar
 }
 
 test "Sign-in API pending receipt never authorizes either later ChatGPT method" {
-    for ([_]core.Attempt{ .chatgpt, .codex }) |attempt_| {
+    for ([_]core.Attempt{ .browser, .device }) |attempt_| {
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
         var page: Self = .{ .saved = .{ .saved = .{} } };
-        try std.testing.expect(try page.freeze(attempt_, .{ .method = if (attempt_ == .chatgpt) .browser else .device }));
+        try std.testing.expect(try page.freeze(attempt_, .{ .method = if (attempt_ == .browser) .browser else .device }));
         try page.begin(&ctx, attempt_);
         try std.testing.expect(page.saved == null);
         page.outcome = .{ .published = .{ .defaults = error.UnsupportedPreferencesVersion, .activation = error.HostReadinessUnconfirmed } };
@@ -2003,7 +2003,7 @@ test "Sign-in setup map and worker start failures retain cause and permit recove
         const page = &rig.page;
         page.frozen = .{ .intent = .{}, .provider = .chatgpt, .model = "fixture-model", .key = .{ .provided = "" }, .endpoint = .{ .unchanged = host_start.openai_endpoint } };
         page.state = .{ .page = .browser };
-        try page.beginWithFault(&rig.ctx, .chatgpt, fault);
+        try page.beginWithFault(&rig.ctx, .browser, fault);
         const expected = if (fault == .browser_map) error.InjectedBrowserMapFailure else error.InjectedWorkerStartFailure;
         try std.testing.expectEqual(expected, page.outcome.?.failed.cause);
         try std.testing.expect(page.task.thread == null and page.browser == null and page.state.page == .failed);
@@ -2202,7 +2202,7 @@ test "Sign-in every guided page and focused control stays bounded and masked ove
     _ = form.key.set("never-render-this-key", "never-render-this-key".len);
     try page.code.set("DRAWN-1234");
     try page.target.set("/synthetic store");
-    const pages_ = [_]core.Page{ .account, .method, .api, .browser, .device, .{ .stopping = .method }, .{ .saving = .key }, .{ .failed = .{ .failure = .expired, .retry = .chatgpt } }, .pending, .connected };
+    const pages_ = [_]core.Page{ .account, .method, .api, .browser, .device, .{ .stopping = .method }, .{ .saving = .key }, .{ .failed = .{ .failure = .expired, .retry = .browser } }, .pending, .connected };
     const widths = [_]u16{ 0, 1, 2, 3, 14, 19, 20, 39, 40, 71, 72, 80 };
     const heights = [_]u16{ 0, 1, 2, 3, 4, 7, 12, 24 };
     for ([_]bool{ false, true }) |unicode| for (pages_) |page_| {
@@ -2224,7 +2224,7 @@ test "Sign-in every guided page and focused control stays bounded and masked ove
 }
 
 test "Sign-in pending and uncertain API receipts survive replacement by either ChatGPT method without lending authority" {
-    for ([_]bool{ false, true }) |uncertain| for ([_]core.Attempt{ .chatgpt, .codex }) |next| {
+    for ([_]bool{ false, true }) |uncertain| for ([_]core.Attempt{ .browser, .device }) |next| {
         var rig: BrowserRig = undefined;
         try rig.open();
         defer rig.close();
@@ -2240,8 +2240,8 @@ test "Sign-in pending and uncertain API receipts survive replacement by either C
         try page.settle(.{ .screen = &rig.ctx });
         try std.testing.expect(page.state.page == .pending and page.saved != null);
         try page.stageReceipt(null);
-        try std.testing.expect(try page.freeze(next, .{ .method = if (next == .chatgpt) .browser else .device }));
-        page.state.page = if (next == .chatgpt) .browser else .device;
+        try std.testing.expect(try page.freeze(next, .{ .method = if (next == .browser) .browser else .device }));
+        page.state.page = if (next == .browser) .browser else .device;
         try page.beginWithFault(&rig.ctx, next, .worker_start);
         try std.testing.expect(page.saved == null and page.state.page == .failed);
         var report: std.Io.Writer.Allocating = .init(rig.arena.allocator());
