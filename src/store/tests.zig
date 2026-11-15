@@ -114,6 +114,7 @@ const output_metadata_record_bytes = output_format.output_metadata_record_bytes;
 
 test {
     _ = @import("domain/configuration.zig");
+    _ = @import("domain/session_obligation.zig");
     _ = @import("rsql.zig");
     _ = @import("schema.zig");
     _ = @import("access.zig");
