@@ -579,7 +579,7 @@ test "typed choices share enum names with help and refuse unknown values" {
         .{ .command = .session_start, .name = "provider", .choices = &.{ "codex", "openai", "chatgpt" } },
         .{ .command = .session_configure, .name = "reasoning-effort", .choices = &.{ "none", "low", "medium", "high", "xhigh", "max", "default" } },
         .{ .command = .defaults_configure, .name = "notifications", .choices = &.{ "on", "off" } },
-        .{ .command = .request_recover, .name = "kind", .choices = &.{ "configure", "message", "session-stop", "session-archive", "model-interruption", "permission-decision", "session-pin" } },
+        .{ .command = .request_recover, .name = "kind", .choices = &.{ "configure", "message", "session-stop", "session-archive", "model-interruption", "permission-decision", "session-pin", "action-background" } },
         .{ .command = .session_inspect, .name = "profile", .choices = &.{ "current", "full" } },
         .{ .command = .session_inspect, .name = "failed-response", .choices = &.{ "body", "metadata" } },
     };
