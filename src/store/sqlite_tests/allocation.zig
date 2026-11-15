@@ -37,7 +37,7 @@ test "an engine OutOfMemory under configure, a skills reload or a catalog read a
             const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             const calls = [_]TestingCall{.{ .item_id = "reload-item", .name = "skill", .encoded_call_id = "reload-call", .decoded_call_id = "reload-call", .encoded_arguments = "{\\\"operation\\\":\\\"reload\\\"}", .decoded_arguments = "{\"operation\":\"reload\"}" }};
             try settleCallsForTesting(&storage, &tmp, model, "engine-oom-calls", &calls);
-            break :binding (try storage.nextCoreWork()).?.action.binding;
+            break :binding (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action.binding;
         } else undefined;
         // The first statement the call prepares again fails in the engine,
         // as when its cache cannot grow, with the caller's own memory to spare.

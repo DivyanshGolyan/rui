@@ -360,7 +360,7 @@ test "read_transcript core runner reads other Session outlines before full windo
     try std.testing.expectEqual(@as(u64, 1), try storage.testing.sqlite_only.queryU64(&database, "SELECT count(*) FROM model_tool_call WHERE description='Read zzzzzz''s transcript'", .{}));
 
     for (args, 0..) |_, index| {
-        const work = (try database.nextCoreWork()).?.action;
+        const work = (try database.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action;
         try std.testing.expect(work.tool == .read_transcript);
         try run(&database, arena, &work, .{});
         const result_id = try storage.testing.sqlite_only.queryU64(&database, "SELECT resolution_content_id FROM action_operation WHERE action_id=?1", .{work.binding.action_id});
@@ -423,7 +423,7 @@ test "read_transcript core runner reads other Session outlines before full windo
             else => unreachable,
         }
     }
-    try std.testing.expect(try database.nextCoreWork() == null);
+    try std.testing.expect(try database.nextCoreWork(.{ .free_credit = true, .mcp_open = true }) == null);
 }
 
 test "read_transcript opens public calls and no-content rows and identifies nonzero result ordinals" {
@@ -466,7 +466,7 @@ test "read_transcript opens public calls and no-content rows and identifies nonz
         .{ .item_id = "sender", .name = "bash", .encoded_call_id = "sender", .decoded_call_id = "sender", .encoded_arguments = quoted_sender[1 .. quoted_sender.len - 1], .decoded_arguments = sender_arguments },
     };
     try settleCallsForTesting(&database, &tmp, source_model, "transcript-source-calls", &source_calls);
-    const work = (try database.nextCoreWork()).?.action;
+    const work = (try database.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action;
     try std.testing.expect(try database.deliverAgentMessage(work.binding, "zzzzzz", "hello", .{}) == .failed);
     const sender_action = (try database.admitNextActionAttempt(300_000, .{})).?.permit.binding;
     var sender_input: ActionExecutionInput = undefined;
@@ -564,7 +564,7 @@ test "read_transcript opens public calls and no-content rows and identifies nonz
     }
     try settleCallsForTesting(&database, &tmp, model, "transcript-reader-calls", &calls);
     for (arguments, 0..) |_, index| {
-        const input = (try database.nextCoreWork()).?.action;
+        const input = (try database.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action;
         try run(&database, arena, &input, .{});
         const result_id = try storage.testing.sqlite_only.queryU64(&database, "SELECT resolution_content_id FROM action_operation WHERE action_id=?1", .{input.binding.action_id});
         const reference = try testingContentReference(&database, result_id);
@@ -664,10 +664,10 @@ test "searchActivity finds start_agent call names and stored JSON arguments not 
     try std.testing.expectEqual(@as(usize, 0), result.count);
     // Settle the earlier invalid start call at its owner boundary, then run
     // read_transcript against the same public call inventory (D163).
-    const start = (try database.nextCoreWork()).?.action;
+    const start = (try database.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action;
     try std.testing.expect(start.tool == .start_agent);
     _ = try database.failCoreCall(start.binding, "invalid start arguments", .{});
-    const read = (try database.nextCoreWork()).?.action;
+    const read = (try database.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action;
     try run(&database, arena, &read, .{});
     const id = try storage.testing.sqlite_only.queryU64(&database, "SELECT resolution_content_id FROM action_operation WHERE action_id=?1", .{read.binding.action_id});
     const reference = try testingContentReference(&database, id);

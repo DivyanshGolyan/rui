@@ -86,14 +86,14 @@ test "MCP ask approval uses the frozen server after its Session offer changes" {
     var sink: Sink = .{};
     try View.renderPermissionArguments(std.testing.io, scratch, &sink, false, &tool);
     try std.testing.expectEqualStrings("\n? fetch_page\n  Tool: fetch_page\n  Server: docs\n  Arguments:\n  │ {}\n", sink.bytes[0..sink.len]);
-    try std.testing.expect((try storage.nextCoreWork()) == null);
-    try std.testing.expect(!(try storage.dispatchWork(false, true)).mcp);
+    try std.testing.expect((try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })) == null);
+    try std.testing.expect(!(try storage.dispatchWork(false, .{ .free_credit = true, .mcp_open = true })).mcp);
     var allow: protocol.PermissionDecisionCommand = .{ .action_id = action, .decision = .allow_once };
     try allow.key.set("approval-allow");
     allow.session = session;
     try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
-    try std.testing.expectEqual(action, (try storage.nextCoreWork()).?.mcp.action_id);
+    try std.testing.expectEqual(action, (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.mcp.action_id);
     // The dispatch loop's work read names the same call, as MCP work alone.
-    const work = try storage.dispatchWork(false, true);
+    const work = try storage.dispatchWork(false, .{ .free_credit = true, .mcp_open = true });
     try std.testing.expect(work.mcp and !work.core);
 }

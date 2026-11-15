@@ -1,4 +1,5 @@
 const std = @import("std");
+pub const DispatchCapacity = @import("execution.zig").DispatchCapacity;
 
 pub const retained_cleanup_retry_ms = 100;
 pub const retry_poll_interval_ns: u64 = std.time.ns_per_s;
@@ -19,7 +20,7 @@ pub const Outcome = union(enum) {
     terminate,
 };
 
-const AdmissionKey = struct { generation: u64, slot_changes: u64, paused: bool, custody_available: bool, include_mcp: bool };
+const AdmissionKey = struct { generation: u64, slot_changes: u64, paused: bool, capacity: DispatchCapacity };
 
 /// Which commit-driven scans would find work, as one Store round read it
 /// (`Store.dispatchWork`). A hint: each scan still selects for itself.
@@ -34,7 +35,7 @@ pub const Work = struct {
     retry: bool = true,
 };
 
-const WorkKey = struct { generation: u64, paused: bool, include_mcp: bool };
+const WorkKey = struct { generation: u64, paused: bool, mcp_credit: bool };
 
 /// The retry scans read Store rows, which a commit moves, and skip the
 /// Operations execution slots hold, which a slot change moves. A scheduled
@@ -116,19 +117,18 @@ noinline fn admitWork(state: *State, context: anytype, now: std.Io.Clock.Timesta
         .generation = context.commitGeneration(),
         .slot_changes = context.slotChanges(),
         .paused = context.turnsPaused(),
-        .custody_available = context.custodyAvailable(),
-        .include_mcp = context.includeMcp(),
+        .capacity = context.dispatchCapacity(),
     };
     const retry_key: RetryKey = .{ .generation = admission_key.generation, .slot_changes = admission_key.slot_changes };
     const scanned = if (state.idle_admission) |previous| std.meta.eql(previous, admission_key) else false;
-    const work_key: WorkKey = .{ .generation = admission_key.generation, .paused = admission_key.paused, .include_mcp = admission_key.include_mcp };
+    const work_key: WorkKey = .{ .generation = admission_key.generation, .paused = admission_key.paused, .mcp_credit = admission_key.capacity.includesMcp() };
     const core_due = if (state.idle_core) |kept| !std.meta.eql(kept, work_key) else true;
     // One round says which of the scans below would find work, so a commit
     // costs that round rather than an empty scan of each kind.
     const work_stands = if (state.work) |kept| std.meta.eql(kept.key, work_key) else false;
     if (!work_stands and (core_due or !scanned)) {
         state.work = null;
-        state.work = .{ .key = work_key, .found = try context.scanWork(admission_key.paused, admission_key.include_mcp) };
+        state.work = .{ .key = work_key, .found = try context.scanWork(admission_key.paused, admission_key.capacity) };
     }
     const work: Work = if (state.work) |kept| kept.found else .{};
     // No commit since that round read no Attempt for the retry scans, so
@@ -426,12 +426,8 @@ const Recording = struct {
         return self.slot_changes;
     }
 
-    fn custodyAvailable(self: *const Recording) bool {
-        return (self.custody_free orelse self.free) != 0;
-    }
-
-    fn includeMcp(self: *const Recording) bool {
-        return self.custodyAvailable() and self.mcp_open;
+    fn dispatchCapacity(self: *const Recording) DispatchCapacity {
+        return .{ .free_credit = (self.custody_free orelse self.free) != 0, .mcp_open = self.mcp_open };
     }
 
     fn freeSlots(self: *const Recording) usize {
@@ -467,7 +463,7 @@ const Recording = struct {
     }
 
     fn runCoreAction(self: *Recording) Admission {
-        if (self.mcp_available and self.includeMcp()) {
+        if (self.mcp_available and self.dispatchCapacity().includesMcp()) {
             self.mcp_available = false;
             self.mcp_runs += 1;
             return .admitted;
@@ -486,12 +482,12 @@ const Recording = struct {
         return self.retry_admission;
     }
 
-    fn scanWork(self: *Recording, paused: bool, include_mcp: bool) error{Fence}!Work {
+    fn scanWork(self: *Recording, paused: bool, capacity: DispatchCapacity) error{Fence}!Work {
         self.work_scans += 1;
         self.work_paused = paused;
         if (self.work_fence) return error.Fence;
         var found = self.work;
-        found.mcp = found.mcp and include_mcp;
+        found.mcp = found.mcp and capacity.includesMcp();
         if (self.release_during_scan) {
             self.custody_free = 1;
             self.release_during_scan = false;
@@ -1191,9 +1187,9 @@ test "ordinary custody release admits finite work while MCP remains locally full
     var state: State = .{};
     for (0..2) |_| try std.testing.expect(run(&state, &context) == .wait);
     try std.testing.expectEqual(@as(usize, 0), context.count(.admit_new));
-    try std.testing.expect(!context.includeMcp());
+    try std.testing.expect(!context.dispatchCapacity().includesMcp());
     context.custody_free = 1;
-    try std.testing.expect(!context.includeMcp());
+    try std.testing.expect(!context.dispatchCapacity().includesMcp());
     try std.testing.expect(run(&state, &context) == .continue_immediately);
     try std.testing.expectEqual(@as(usize, 1), context.count(.admit_new));
     try std.testing.expectEqual(@as(usize, 1), context.work_scans);

@@ -290,11 +290,8 @@ test "production turn preserves skipped continuation preference through actual S
                 pub fn freeSlots(_: *@This()) usize {
                     return 1;
                 }
-                pub fn custodyAvailable(self: *@This()) bool {
-                    return self.freeSlots() != 0;
-                }
-                pub fn includeMcp(_: *@This()) bool {
-                    return false;
+                pub fn dispatchCapacity(self: *@This()) turn.DispatchCapacity {
+                    return .{ .free_credit = self.freeSlots() != 0, .mcp_open = false };
                 }
                 pub fn providerConfigured(_: *@This()) bool {
                     return true;
@@ -322,8 +319,8 @@ test "production turn preserves skipped continuation preference through actual S
                     self.action = admission.permit.consume() catch unreachable;
                     return .admitted;
                 }
-                pub fn scanWork(self: *@This(), paused: bool, include_mcp: bool) error{Fence}!turn.Work {
-                    const found = self.storage.dispatchWork(paused, include_mcp) catch |err| {
+                pub fn scanWork(self: *@This(), paused: bool, capacity: turn.DispatchCapacity) error{Fence}!turn.Work {
+                    const found = self.storage.dispatchWork(paused, capacity) catch |err| {
                         self.failure = err;
                         return error.Fence;
                     };
@@ -526,14 +523,14 @@ test "runnable discovery fences structurally incomplete current tool calls" {
 const WorkParity = struct {
     /// The slot-free runners. Reads only, so any state can call it.
     fn core(storage: *Store) !void {
-        const work = try storage.dispatchWork(false, true);
-        try std.testing.expectEqual((try storage.nextCoreWorkForHost(false)) != null, work.core);
-        try std.testing.expectEqual((try storage.nextCoreWork()) != null, work.core or work.mcp);
+        const work = try storage.dispatchWork(false, .{ .free_credit = true, .mcp_open = true });
+        try std.testing.expectEqual((try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = false })) != null, work.core);
+        try std.testing.expectEqual((try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })) != null, work.core or work.mcp);
     }
 
     fn model(storage: *Store, kind: ModelAdmissionKind) !?AttemptBinding {
         try core(storage);
-        const work = try storage.dispatchWork(kind == .open_turn_message, true);
+        const work = try storage.dispatchWork(kind == .open_turn_message, .{ .free_credit = true, .mcp_open = true });
         const admission = try storage.admitModelAttempt(kind, .{});
         try std.testing.expectEqual(admission != null, if (kind == .tool_continuation) work.tool_continuation else work.message);
         return if (admission) |found| found.permit.binding else null;
@@ -541,7 +538,7 @@ const WorkParity = struct {
 
     fn bash(storage: *Store) !?ActionAttemptBinding {
         try core(storage);
-        const work = try storage.dispatchWork(false, true);
+        const work = try storage.dispatchWork(false, .{ .free_credit = true, .mcp_open = true });
         const admission = try storage.admitNextActionAttempt(300_000, .{});
         try std.testing.expectEqual(admission != null, work.bash);
         return if (admission) |found| found.permit.binding else null;
@@ -563,7 +560,7 @@ test "the dispatch work read answers as each admission owner does, in every stat
             try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
             defer storage.close() catch unreachable;
             try WorkParity.idle(&storage);
-            try std.testing.expect(!(try storage.dispatchWork(false, true)).retry);
+            try std.testing.expect(!(try storage.dispatchWork(false, .{ .free_credit = true, .mcp_open = true })).retry);
 
             // Waiting input: a new Turn takes it unless new Turns are held.
             const session = try configureTestSessionAsk(&storage, "parity-config");
@@ -574,12 +571,12 @@ test "the dispatch work read answers as each admission owner does, in every stat
             try WorkParity.idle(&storage);
             // Its running Attempt is what a retry scan would read; once it
             // resolves, neither scan has a row.
-            try std.testing.expect((try storage.dispatchWork(false, true)).retry);
+            try std.testing.expect((try storage.dispatchWork(false, .{ .free_credit = true, .mcp_open = true })).retry);
 
             // Two Bash calls wait on a person: a blocked Operation, no work.
             try settleTwoActionsForTesting(&storage, &tmp, first, "parity-config");
             try WorkParity.idle(&storage);
-            try std.testing.expect(!(try storage.dispatchWork(false, true)).retry);
+            try std.testing.expect(!(try storage.dispatchWork(false, .{ .free_credit = true, .mcp_open = true })).retry);
             try std.testing.expect(!try storage.recoverOneExhaustedModelAttempt(ActiveOperationFilter.empty()));
             var scheduled: ?u64 = 0;
             try std.testing.expect((try storage.tryAdmitNextModelRetry(ActiveOperationFilter.empty(), .{}, &scheduled)) == null);
@@ -626,11 +623,11 @@ test "the dispatch work read answers as each admission owner does, in every stat
             const asking = (try WorkParity.model(&storage, .message)).?;
             const agent_calls = [_]TestingCall{.{ .item_id = "agent-item", .name = "message_agent", .encoded_call_id = "agent-call", .decoded_call_id = "agent-call", .encoded_arguments = "{\\\"id\\\":\\\"zzzzzz\\\",\\\"text\\\":\\\"hi\\\"}", .decoded_arguments = "{\"id\":\"zzzzzz\",\"text\":\"hi\"}" }};
             try settleCallsForTesting(&storage, &tmp, asking, "parity-agent-calls", &agent_calls);
-            try std.testing.expect((try storage.dispatchWork(false, true)).core);
+            try std.testing.expect((try storage.dispatchWork(false, .{ .free_credit = true, .mcp_open = true })).core);
             try WorkParity.idle(&storage);
-            const call = (try storage.nextCoreWork()).?.action;
+            const call = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })).?.action;
             try std.testing.expectEqual(command_domain.AgentDelivery.failed, try storage.deliverAgentMessage(call.binding, "zzzzzz", "hi", .{}));
-            try std.testing.expect(!(try storage.dispatchWork(false, true)).core);
+            try std.testing.expect(!(try storage.dispatchWork(false, .{ .free_credit = true, .mcp_open = true })).core);
             _ = (try WorkParity.model(&storage, .tool_continuation)).?;
             try WorkParity.idle(&storage);
 
@@ -641,7 +638,7 @@ test "the dispatch work read answers as each admission owner does, in every stat
             _ = (try WorkParity.model(&storage, .message)).?;
             var stop = try completeSessionStop("parity-stop", caller.slice());
             try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
-            try std.testing.expect((try storage.dispatchWork(false, true)).core);
+            try std.testing.expect((try storage.dispatchWork(false, .{ .free_credit = true, .mcp_open = true })).core);
             try WorkParity.core(&storage);
         }
     }.run);
@@ -672,7 +669,7 @@ test "the dispatch work read fences a Store whose blocked Operations are malform
                     },
                 }
                 try std.testing.expect(!storage.isFenced());
-                try std.testing.expectError(error.CorruptStore, storage.dispatchWork(false, true));
+                try std.testing.expectError(error.CorruptStore, storage.dispatchWork(false, .{ .free_credit = true, .mcp_open = true }));
                 try std.testing.expect(storage.isFenced());
             }
         }
@@ -1199,21 +1196,22 @@ test "ordinary MCP physical eligibility cannot hide later no-credit core work" {
             const core_action = try propose(&storage, &tmp, "later-core", "find_tools");
             try std.testing.expect(mcp_action < core_action);
             for ([_]usize{ 0, 1, 2 }) |free| {
-                const include_mcp = free != 0;
-                const selected = (try storage.nextCoreWorkForHost(include_mcp)).?;
+                const capacity: @import("../../execution.zig").DispatchCapacity = .{ .free_credit = free != 0, .mcp_open = true };
+                const include_mcp = capacity.includesMcp();
+                const selected = (try storage.nextCoreWork(capacity)).?;
                 if (include_mcp) try std.testing.expectEqual(mcp_action, selected.mcp.action_id) else try std.testing.expectEqual(core_action, selected.action.binding.action_id);
-                const work = try storage.dispatchWork(false, include_mcp);
+                const work = try storage.dispatchWork(false, capacity);
                 try std.testing.expect(work.core);
                 try std.testing.expectEqual(include_mcp, work.mcp);
                 try std.testing.expect(!work.bash);
             }
-            try std.testing.expectEqual(core_action, (try storage.nextCoreWorkForHost(false)).?.action.binding.action_id);
+            try std.testing.expectEqual(core_action, (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = false })).?.action.binding.action_id);
             try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE attempt_ordinal=0 AND authorized=1 AND resolution_code IS NULL", .{}));
-            const core = (try storage.nextCoreWorkForHost(false)).?.action;
+            const core = (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = false })).?.action;
             try std.testing.expect(try storage.succeedCoreCall(core.binding, "Found", .{}));
-            const blocked = try storage.dispatchWork(false, false);
+            const blocked = try storage.dispatchWork(false, .{ .free_credit = true, .mcp_open = false });
             try std.testing.expect(!blocked.core and !blocked.mcp);
-            const resumed = try storage.dispatchWork(false, true);
+            const resumed = try storage.dispatchWork(false, .{ .free_credit = true, .mcp_open = true });
             try std.testing.expect(!resumed.core and resumed.mcp);
         }
     }.run);

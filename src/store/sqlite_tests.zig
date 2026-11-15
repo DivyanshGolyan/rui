@@ -494,7 +494,7 @@ const mcp_digests = blk: {
 pub const mcp_tool_set: tool_defs.HostToolSet = .{ .records = &mcp_records, .digests = &mcp_digests };
 
 pub fn expectOnlyForwardsThenIdle(storage: *Store) !void {
-    while (try storage.nextCoreWork()) |work| {
+    while (try storage.nextCoreWork(.{ .free_credit = true, .mcp_open = true })) |work| {
         try std.testing.expect(work == .forward);
         try std.testing.expect(try storage.deliverSessionForward(work.forward, .{}));
     }

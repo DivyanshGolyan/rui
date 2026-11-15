@@ -25,6 +25,7 @@ const command_input = @import("../command_input.zig");
 const retry_policy = @import("../retry_policy.zig");
 const change_ring = @import("../change_ring.zig");
 const action_domain = @import("domain/action.zig");
+const DispatchCapacity = @import("../execution.zig").DispatchCapacity;
 const command_domain = @import("domain/command.zig");
 const configuration_domain = @import("domain/configuration.zig");
 const skills_domain = @import("domain/skills.zig");
@@ -1314,43 +1315,38 @@ pub const Store = struct {
         return transition.apply(self, forward_domain.Deliver, .{ .forward_id = forward_id }, faults);
     }
 
-    /// Owed stops, ending Messages and ancestor feed hops precede calls.
-    pub fn nextCoreWork(self: *Store) !?CoreWork {
-        return self.nextCoreWorkForHost(true);
-    }
-
     /// Which of the dispatch loop's commit-driven scans would find work,
     /// in one round; `paused` is whether new Turns are held.
-    pub fn dispatchWork(self: *Store, paused: bool, include_mcp: bool) !DispatchWork {
-        return self.queue().run(dispatchWorkHeld, .{ self, paused, include_mcp });
+    pub fn dispatchWork(self: *Store, paused: bool, capacity: DispatchCapacity) !DispatchWork {
+        return self.queue().run(dispatchWorkHeld, .{ self, paused, capacity });
     }
 
-    fn dispatchWorkHeld(self: *Store, paused: bool, include_mcp: bool) !DispatchWork {
+    fn dispatchWorkHeld(self: *Store, paused: bool, capacity: DispatchCapacity) !DispatchWork {
         const survey = self.identities().survey;
         const asked: @FieldType(Survey, "asked") = if (paused) .paused else .running;
         self.identities().survey.kept = .none;
         self.identities().survey.asked = asked;
-        self.identities().survey.include_mcp = include_mcp;
+        self.identities().survey.capacity = capacity;
         // Nothing committed since the survey ran, right after its COMMIT.
-        if (survey.kept == .ready and survey.asked == asked and survey.include_mcp == include_mcp and !self.isFenced())
+        if (survey.kept == .ready and survey.asked == asked and survey.capacity.includesMcp() == capacity.includesMcp() and !self.isFenced())
             return .{ .core = survey.core, .mcp = survey.mcp, .bash = survey.bash, .message = survey.message, .tool_continuation = survey.tool_continuation, .retry = survey.retry };
         const entry = try enter(self, .none);
         defer entry.release();
         var access: store_access.Access(.survey, error{}) = .open(&entry);
         defer access.deinit();
-        return entry.finish(Ordinary.none, model_admission_domain.dispatchWork(&access, paused, include_mcp));
+        return entry.finish(Ordinary.none, model_admission_domain.dispatchWork(&access, paused, capacity));
     }
 
-    pub fn nextCoreWorkForHost(self: *Store, include_mcp: bool) !?CoreWork {
-        return self.queue().run(nextCoreWorkHeld, .{ self, include_mcp });
+    pub fn nextCoreWork(self: *Store, capacity: DispatchCapacity) !?CoreWork {
+        return self.queue().run(nextCoreWorkHeld, .{ self, capacity });
     }
 
-    fn nextCoreWorkHeld(self: *Store, include_mcp: bool) !?CoreWork {
+    fn nextCoreWorkHeld(self: *Store, capacity: DispatchCapacity) !?CoreWork {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: ReadAccess = .open(&entry);
         defer access.deinit();
-        return entry.finish(Ordinary.none, action_domain.nextCoreWork(&access, include_mcp));
+        return entry.finish(Ordinary.none, action_domain.nextCoreWork(&access, capacity));
     }
 
     /// Runs the `message_agent` call `binding` names with its checked
@@ -2099,7 +2095,7 @@ pub noinline fn commitWithSurvey(self: *Store, writer: anytype, follow: anytype)
     defer reads.deinit();
     if (follow) |after| after.queue(&reads);
     var survey: model_admission_domain.DispatchSurvey = .{};
-    if (surveyed) survey.queue(&reads, kept.asked == .paused, kept.include_mcp);
+    if (surveyed) survey.queue(&reads, kept.asked == .paused, kept.capacity);
     if (reads.failure != null) {
         self.engine.dropTail();
         return writer.passCommit(null);
@@ -2387,8 +2383,8 @@ const Survey = packed struct(u16) {
     message: bool = false,
     tool_continuation: bool = false,
     retry: bool = false,
-    include_mcp: bool = true,
-    _: u5 = 0,
+    capacity: DispatchCapacity = .{ .free_credit = true, .mcp_open = true },
+    _: u4 = 0,
 };
 
 const Admitted = struct {

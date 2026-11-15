@@ -302,6 +302,15 @@ pub const CustodyRecord = struct {
     timing: model_timing.Attempt = .{},
 };
 
+pub const DispatchCapacity = packed struct(u2) {
+    free_credit: bool,
+    mcp_open: bool,
+
+    pub fn includesMcp(capacity: DispatchCapacity) bool {
+        return capacity.free_credit and capacity.mcp_open;
+    }
+};
+
 pub const CustodyPool = struct {
     records: []CustodyRecord,
 
@@ -476,6 +485,10 @@ pub const CustodyPool = struct {
             }
         }
         return count;
+    }
+
+    pub fn dispatchCapacity(self: *const CustodyPool, mcp_open: bool) DispatchCapacity {
+        return .{ .free_credit = self.occupied() < self.records.len, .mcp_open = mcp_open };
     }
 
     pub fn occupied(self: *const CustodyPool) usize {
@@ -1050,4 +1063,23 @@ test "model prepared routes preserve one shot handoff across rejection and reuse
             try pool.releaseUnused(reused);
         }
     }
+}
+
+test "dispatch capacity reflects shared custody through detached cleanup" {
+    var records: [1]CustodyRecord = @splat(.{});
+    var pool = CustodyPool.initialize(&records);
+    const open = pool.dispatchCapacity(true);
+    try std.testing.expect(open.free_credit and open.includesMcp());
+    const locally_full = pool.dispatchCapacity(false);
+    try std.testing.expect(locally_full.free_credit and !locally_full.includesMcp());
+    const token = pool.reserve().?;
+    try std.testing.expect(!pool.dispatchCapacity(true).free_credit);
+    try std.testing.expect(!pool.dispatchCapacity(true).includesMcp());
+    var permit = attempt.DispatchPermit{ .binding = .{ .turn_id = 1, .operation_id = 2, .attempt_ordinal = 1 } };
+    _ = try pool.attach(token, &permit);
+    try pool.detach(token);
+    try std.testing.expect(!pool.dispatchCapacity(true).free_credit);
+    try pool.cleanupComplete(token);
+    try std.testing.expect(pool.dispatchCapacity(true).includesMcp());
+    try std.testing.expect(open.free_credit and open.includesMcp());
 }

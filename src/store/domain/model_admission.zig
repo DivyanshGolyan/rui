@@ -2,6 +2,7 @@
 //! facts, context estimates and retries.
 
 const std = @import("std");
+const DispatchCapacity = @import("../../execution.zig").DispatchCapacity;
 const replay_recipe = @import("../../replay_recipe.zig");
 const attempt = @import("../../attempt.zig");
 const outcome_code = @import("../../outcome_code.zig");
@@ -1145,8 +1146,8 @@ pub const DispatchSurvey = struct {
     /// The statement whose failed step names the read's failure.
     pub const named = .{.{ blocked_operation, error.CallReadFailed }};
 
-    pub fn queue(survey: *DispatchSurvey, reader: anytype, paused: bool, include_mcp: bool) void {
-        survey.actions.queue(reader, include_mcp);
+    pub fn queue(survey: *DispatchSurvey, reader: anytype, paused: bool, capacity: DispatchCapacity) void {
+        survey.actions.queue(reader, capacity);
         queueSelection(reader, if (paused) .open_turn_message else .message, &survey.message);
         queueSelection(reader, .tool_continuation, &survey.continuation);
         survey.idle.queue(reader);
@@ -1181,9 +1182,9 @@ pub const DispatchSurvey = struct {
 
 /// Reads `DispatchWork`: `DispatchSurvey`'s round, then the blocked
 /// calls' outcomes when the idle checks ask for them.
-pub fn dispatchWork(reader: anytype, paused: bool, include_mcp: bool) !DispatchWork {
+pub fn dispatchWork(reader: anytype, paused: bool, capacity: DispatchCapacity) !DispatchWork {
     var survey: DispatchSurvey = .{};
-    survey.queue(reader, paused, include_mcp);
+    survey.queue(reader, paused, capacity);
     try store_access.runNamed(reader, DispatchSurvey.named, error.TurnReadFailed);
     if (try survey.unsettled()) try validateBlockedToolCalls(reader);
     return survey.found();
