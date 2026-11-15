@@ -50,6 +50,7 @@ jobs:
       draft_run: ${{ steps.select.outputs.draft_run }}
       candidate_ref: ${{ steps.select.outputs.candidate_ref }}
       targets: ${{ steps.select.outputs.targets }}
+      linux_compile_targets: ${{ steps.select.outputs.linux_compile_targets }}
       native_targets: ${{ steps.select.outputs.native_targets }}
       native: ${{ steps.select.outputs.native }}
       upgrade: ${{ steps.select.outputs.upgrade }}
@@ -75,6 +76,7 @@ jobs:
         env:
           CANDIDATE_REF: ${{ github.sha }}
           # A PR's base.sha can trail the main its merge commit was built on.
+          BRANCH_HEAD: ${{ github.event.pull_request.head.sha }}
           BASE: ${{ github.event_name == 'pull_request' && 'HEAD^1' || inputs.base }}
           DRAFT: ${{ github.event.pull_request.draft || false }}
           EVENT_NAME: ${{ github.event_name }}
@@ -83,7 +85,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$CANDIDATE_REF"
-          python3 tests/ci/select_tests.py --base "$BASE" --phase review > selection.json
+          python3 tests/ci/select_tests.py --base "$BASE" --branch-head "${BRANCH_HEAD:-}" --phase review > selection.json
           cat selection.json
           BASE=$(python3 -c 'import json; print(json.load(open("selection.json"))["base"])')
           git diff --check "$BASE" HEAD
@@ -198,7 +200,7 @@ jobs:
           done
   linux_build:
     needs: plan
-    if: ${{ needs.plan.outputs.targets != '' && needs.plan.outputs.targets != '[]' }}
+    if: ${{ needs.plan.outputs.linux_compile_targets != '' && needs.plan.outputs.linux_compile_targets != '[]' }}
     runs-on: ubuntu-24.04
     # Match the cold Release producer budget: a dependency repin misses the compiled cache,
     # and a producer that times out never saves the warm one.
@@ -211,11 +213,11 @@ jobs:
           ref: ${{ needs.plan.outputs.candidate_ref }}
       - uses: ./.github/actions/setup
         with:
-          targets: ${{ needs.plan.outputs.targets }}
+          targets: ${{ needs.plan.outputs.linux_compile_targets }}
           check-part: compiled
       - name: Compile selected gates once, never test acceptance
         env:
-          TARGETS: ${{ needs.plan.outputs.targets }}
+          TARGETS: ${{ needs.plan.outputs.linux_compile_targets }}
           PART: ${{ needs.plan.outputs.linux_split == 'true' && 'rest' || 'all' }}
         run: python3 -B tests/ci/build_artifact.py build "$TARGETS" --part "$PART"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -243,7 +245,7 @@ jobs:
           check-part: compiled-unit
       - name: Compile the unit test roots once, never test acceptance
         env:
-          TARGETS: ${{ needs.plan.outputs.targets }}
+          TARGETS: ${{ needs.plan.outputs.linux_compile_targets }}
         run: python3 -B tests/ci/build_artifact.py build "$TARGETS" --part unit
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         id: publish
@@ -369,7 +371,7 @@ jobs:
     needs: [plan, linux_build, linux_build_unit]
     # The unit producer is skipped when no selected target compiles it. A
     # compile-only build stops at its producers.
-    if: ${{ !cancelled() && needs.plan.outputs.compile_only == 'false' && needs.linux_build.result == 'success' && contains(fromJSON('["success", "skipped"]'), needs.linux_build_unit.result) }}
+    if: ${{ !cancelled() && needs.plan.outputs.compile_only == 'false' && needs.plan.outputs.targets != '' && needs.plan.outputs.targets != '[]' && needs.linux_build.result == 'success' && contains(fromJSON('["success", "skipped"]'), needs.linux_build_unit.result) }}
     runs-on: ubuntu-24.04
     # Ordinary shards take under ten minutes; a local rebuild after a rejected
     # handoff compiles without the producer's cache. A failed promotion shard
@@ -407,7 +409,7 @@ jobs:
             "$socket_dir/mysqld.sock" "$password" "$RUNNER_TEMP/mysql-dialect-check-record"
       - name: Use the verified producer artifact or compile locally
         env:
-          TARGETS: ${{ needs.plan.outputs.targets }}
+          TARGETS: ${{ needs.plan.outputs.linux_compile_targets }}
           ARTIFACT_ID: ${{ needs.linux_build.outputs.artifact }}
           UNIT_ARTIFACT_ID: ${{ needs.linux_build_unit.outputs.artifact }}
           GH_TOKEN: ${{ github.token }}
@@ -513,6 +515,7 @@ jobs:
           DRAFT_RUN: ${{ needs.plan.outputs.draft_run }}
           CHANGE_KIND: ${{ needs.plan.outputs.change_kind }}
           TARGETS: ${{ needs.plan.outputs.targets }}
+          COMPILE_TARGETS: ${{ needs.plan.outputs.linux_compile_targets }}
           PLAN_RESULT: ${{ needs.plan.result }}
           POLICY_RESULT: ${{ needs.policy.result }}
           BUILD_RESULT: ${{ needs.linux_build.result }}
@@ -537,6 +540,7 @@ jobs:
               test "$COMPILE_ONLY" = false
               test "$POLICY_RESULT" = skipped
               test "$TARGETS" = '[]'
+              test "$COMPILE_TARGETS" = '[]'
               test "$SPLIT" = false
               test "$CODEGEN" = false
               test "$TYPECHECK" = false
@@ -555,11 +559,14 @@ jobs:
             false) test "$TYPECHECK_RESULT" = skipped ;;
             *) echo 'Missing or invalid typecheck selection' >&2; exit 1 ;;
           esac
-          if [ -n "$TARGETS" ] && [ "$TARGETS" != '[]' ]; then
+          if [ -n "$COMPILE_TARGETS" ] && [ "$COMPILE_TARGETS" != '[]' ]; then
             test "$BUILD_RESULT" = success
-            test "$NATIVE_RESULT" = "$RAN"
           else
             test "$BUILD_RESULT" = skipped
+          fi
+          if [ -n "$TARGETS" ] && [ "$TARGETS" != '[]' ]; then
+            test "$NATIVE_RESULT" = "$RAN"
+          else
             test "$NATIVE_RESULT" = skipped
           fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

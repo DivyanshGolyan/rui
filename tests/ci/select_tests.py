@@ -955,6 +955,7 @@ def select(paths, phase, available, graph=None, contents=None, fixture_literals=
             "live_needs": sorted(([root, reason] for root, reason in live_needs), key=lambda need: (need[0] or "", need[1])),
             "native_targets": sorted(native_targets), "native_required": bool(native_targets),
             "mac_required": mac_required, "upgrade_required": upgrade_required,
+            "unit_compile_required": "src/store/schema.zig" in paths,
             # Store, recovery and upgrade changes fail for real; never rerun them.
             "retry": not strict(paths),
             "cache_execution_checks": cache_execution_checks,
@@ -978,6 +979,16 @@ def changed_paths(base, head):
     return [p.decode("utf-8", "surrogateescape") for p in raw.split(b"\0") if p], base_commit
 
 
+def merged_base(base, ref, head="HEAD"):
+    """Whether branch history since base merges a commit reachable from ref."""
+    merges = subprocess.check_output(["git", "rev-list", "--merges", "--parents", f"{base}..{head}"], text=True)
+    for line in merges.splitlines():
+        for parent in line.split()[2:]:
+            if subprocess.run(["git", "merge-base", "--is-ancestor", parent, ref]).returncode == 0:
+                return True
+    return False
+
+
 def revision_text(commit, path):
     """The path's text at commit, or None where the commit has no such file."""
     shown = subprocess.run(["git", "show", f"{commit}:{path}"], capture_output=True, text=True,
@@ -989,6 +1000,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base", required=True)
     parser.add_argument("--head", default="HEAD")
+    parser.add_argument("--branch-head", default="", help="PR branch head whose main-merge history requires all-unit compilation")
     parser.add_argument("--phase", choices=("development", "review"), default="review")
     args = parser.parse_args()
     available = set(build_files.steps())
@@ -999,6 +1011,9 @@ def main():
                               for path in paths
                               if path.startswith("src/") or path == FIXTURE_TABLE
                               or any(matches(path, patterns) for patterns, _ in CONTENT_RULES.values())})
+    if args.branch_head:
+        branch_base = subprocess.check_output(["git", "merge-base", args.branch_head, base], text=True).strip()
+        result["unit_compile_required"] |= merged_base(branch_base, base, args.branch_head)
     result["base"] = base
     result["head"] = head
     print(json.dumps(result, indent=2))

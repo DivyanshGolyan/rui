@@ -28,7 +28,7 @@ Make reversible choices inside the accepted contract yourself.
 For unresolved behavior, architecture, scope or access, finish independent authorized work, then present bounded options with a recommendation and consequences.
 
 A request to create or update a PR authorizes scoped pushes and follow-up fixes for review or CI, including across agent handoffs.
-Routine steps need no approval: creating a branch, committing, pushing to your PR's branch, opening a draft PR, commenting `@codex review`, resolving review threads your fixes answered, marking your PR ready once Codex is clean, a diagnostic CI rerun, filing or labelling a CI issue, merging under the [standing grant](#landing), and dispatching a promotion ([Promote](docs/agents/landing.md#promote)).
+Routine steps need no approval: creating a branch, committing, pushing to your PR's branch, opening a ready PR, commenting `@codex review`, resolving review threads your fixes answered, marking an older draft ready to overlap CI and review, a diagnostic CI rerun, filing or labelling a CI issue, merging under the [standing grant](#landing), and dispatching a promotion ([Promote](docs/agents/landing.md#promote)).
 Ask before publishing elsewhere, widening scope, force-pushing, deploying anywhere other than through promotion, or closing issues.
 Honor narrower user limits and one-way-door approvals.
 
@@ -42,7 +42,7 @@ Rewording the command, handing it to another agent or using a credential the tas
 
 Finish the whole request before ending a turn.
 Diagnose ordinary obstacles (an error, a timeout, a failing tool, a busy build slot) and work through them with the access you have.
-CI and Codex can take 40 minutes: start the next unit meanwhile, stacked when it shares files ([Concurrent PRs](docs/agents/landing.md#concurrent-prs)).
+CI and Codex can take 40 minutes: start the next unit meanwhile, stacked when it shares source or API ownership ([Concurrent PRs](docs/agents/landing.md#concurrent-prs)).
 Stop early only for a decision [Authority](#authority) gives the user, or for a deliberate block.
 When a task cannot be done as written (a missing input, a spec that contradicts the contract, a test that asserts the wrong behavior), say so and continue with the independent parts.
 An invented stand-in, a weakened check or a silently narrowed task is not a finished task.
