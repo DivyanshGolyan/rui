@@ -161,7 +161,8 @@ const PromotedApproval = struct {
         const expected: ?u64 = if (present) action else null;
         var request: protocol.ActivityPage = .{};
         try request.session.set(session);
-        const page = try @import("store/Store.zig").activityPageForTesting(storage, request);
+        var page: @import("activity_facts.zig").Page = undefined;
+        try storage.activityPage(&request, &page);
         const report_file = try tmp.dir.createFile(std.testing.io, "native-promotion-report", .{ .read = true });
         defer report_file.close(std.testing.io);
         try report_file.writePositionalAll(std.testing.io, bytes, 0);
