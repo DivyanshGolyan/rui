@@ -1106,8 +1106,9 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     if (self.app_consent.request == null) if (screen.commands) |*shown| {
         self.app_palette.shown = shown;
         self.app_palette.caps = self.app_caps;
-        self.app_palette.style = normal;
-        self.app_palette.quiet = quiet;
+        self.app_palette.style = style.of(self.app_caps, .{ .background = .input_surface });
+        self.app_palette.quiet = style.of(self.app_caps, .{ .colour = .quiet, .background = .input_surface });
+        self.app_palette.max_height = @max(1, ctx.max.height.? / 3 -| 1);
         self.app_palette.hover_style = hover;
         self.app_palette.userdata = self;
         self.app_palette.on_select = appSelectCommand;
@@ -9316,6 +9317,52 @@ test "chat info supplies the one bottom footer after the input and both dividers
     };
 }
 
+test "App Session palette total budget stays input anchored without reserving feed rows" {
+    const Find = struct {
+        fn widget(surface: vxfw.Surface, target: vxfw.Widget) ?vxfw.SubSurface {
+            if (surface.widget.eql(target)) return .{ .origin = .{ .row = 0, .col = 0 }, .surface = surface };
+            for (surface.children) |child| {
+                var found = @This().widget(child.surface, target) orelse continue;
+                found.origin.row += child.origin.row;
+                found.origin.col += child.origin.col;
+                return found;
+            }
+            return null;
+        }
+    };
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const before = try held.draw();
+    const input_before = Find.widget(before, held.self.app_input.widget()).?;
+    const feed_before = held.self.app_content.size;
+    try held.keys("/");
+    const after = try held.draw();
+    try std.testing.expectEqual(input_before.origin, Find.widget(after, held.self.app_input.widget()).?.origin);
+    try std.testing.expectEqual(feed_before, held.self.app_content.size);
+    try std.testing.expect(!held.self.app_screen.overlay_reserves_space);
+    held.screen.commands.?.highlight = held.screen.commands.?.list.count - 1;
+    for (1..49) |height| {
+        held.size.height = @intCast(height);
+        const surface = try held.draw();
+        const input = Find.widget(surface, held.self.app_input.widget()).?;
+        const panel = Find.widget(surface, held.self.app_palette.widget()).?;
+        const limit = @max(1, height / 3 -| 1);
+        try std.testing.expectEqual(limit, held.self.app_palette.max_height);
+        try std.testing.expect(panel.surface.size.height <= limit);
+        try std.testing.expectEqual(input.origin.row, panel.origin.row + panel.surface.size.height);
+        if (input.origin.row == 0) {
+            try std.testing.expectEqual(@as(u16, 0), panel.surface.size.height);
+            try std.testing.expectEqual(.hidden, held.screen.commands.?.seen);
+        } else {
+            try std.testing.expect(panel.surface.size.height > 0);
+            try std.testing.expectEqual(.drawn, held.screen.commands.?.seen);
+            const index = held.screen.commands.?.highlight - held.self.app_palette.first;
+            const rect = held.self.app_palette.hover.targets[index];
+            try std.testing.expect(panel.surface.readCell(@intCast(rect.col), @intCast(rect.row)).style.reverse);
+        }
+    }
+}
+
 test "App Session palette clicks follow Enter for command words options and values and retain hover across frames" {
     const Case = struct { draft: []const u8, word: []const u8, after: []const u8, queued: ?[]const u8 = null, notice: ?[]const u8 = null };
     for ([_]Case{
@@ -9336,10 +9383,11 @@ test "App Session palette clicks follow Enter for command words options and valu
         const index = for (shown.list.shown(), 0..) |entry, index| {
             if (std.mem.eql(u8, case.word, entry.word)) break index;
         } else return error.TestExpectedRow;
-        shown.highlight = if (index == 0) shown.list.count - 1 else 0;
+        shown.highlight = @min(index + 1, shown.list.count - 1);
         const selected = shown.highlight;
         _ = try held.draw();
-        const row: i16 = @intCast(index - held.self.app_palette.first);
+        const target = held.self.app_palette.hover.targets[index - held.self.app_palette.first];
+        const row: i16 = @intCast(target.row);
         const widget_ = held.self.app_palette.widget();
         var events = held.context();
         try widget_.handleEvent(&events, .mouse_enter);
@@ -9353,7 +9401,7 @@ test "App Session palette clicks follow Enter for command words options and valu
             try std.testing.expect(!cell.style.reverse);
             try std.testing.expectEqual(held.self.app_palette.hover_style.bg, cell.style.bg);
             try std.testing.expectEqual(held.self.app_palette.hover_style.ul_style, cell.style.ul_style);
-            try std.testing.expect(palette.readCell(2, @intCast(selected - held.self.app_palette.first)).style.reverse);
+            try std.testing.expect(palette.readCell(2, @intCast(held.self.app_palette.hover.targets[selected - held.self.app_palette.first].row)).style.reverse);
         }
         try std.testing.expectEqual(selected, held.screen.commands.?.highlight);
         try std.testing.expectEqualStrings(case.draft, held.self.input.composition().bytes);
@@ -9380,7 +9428,8 @@ test "App Session palette refuses clicks on stale drafts closed lists and during
     _ = try held.draw();
     const widget_ = held.self.app_palette.widget();
     var events = held.context();
-    const click: vxfw.Event = .{ .mouse = .{ .col = 2, .row = 0, .button = .left, .type = .press, .mods = .{} } };
+    const target = held.self.app_palette.hover.targets[0];
+    const click: vxfw.Event = .{ .mouse = .{ .col = @intCast(target.col), .row = @intCast(target.row), .button = .left, .type = .press, .mods = .{} } };
     try held.keys("en"); // The drawn /reload-skills row is not the new /rename row.
     try widget_.handleEvent(&events, click);
     try std.testing.expectEqualStrings("/ren", held.self.input.composition().bytes);
@@ -9421,10 +9470,10 @@ test "App Session palette clicks requests rows with an empty draft as Enter does
     var events = held.context();
     const widget_ = held.self.app_palette.widget();
     try widget_.handleEvent(&events, .mouse_enter);
-    try widget_.handleEvent(&events, .{ .mouse = .{ .col = 2, .row = 1, .button = .none, .type = .motion, .mods = .{} } });
+    try widget_.handleEvent(&events, .{ .mouse = .{ .col = 2, .row = 2, .button = .none, .type = .motion, .mods = .{} } });
     try std.testing.expectEqual(@as(usize, 0), held.screen.commands.?.highlight);
     try widget_.handleEvent(&events, .mouse_leave);
-    try widget_.handleEvent(&events, .{ .mouse = .{ .col = 2, .row = 1, .button = .left, .type = .press, .mods = .{} } });
+    try widget_.handleEvent(&events, .{ .mouse = .{ .col = 2, .row = 2, .button = .left, .type = .press, .mods = .{} } });
     try std.testing.expectEqualStrings("/result " ++ older, held.self.input.queuedCommand().?);
     try std.testing.expectEqualStrings("", held.self.input.composition().bytes);
 }
@@ -9453,13 +9502,13 @@ test "App Session palette clicks replace the caret skill without sending or movi
     const widget_ = held.self.app_palette.widget();
     var events = held.context();
     try widget_.handleEvent(&events, .mouse_enter);
-    try widget_.handleEvent(&events, .{ .mouse = .{ .col = 2, .row = 1, .button = .none, .type = .motion, .mods = .{} } });
+    try widget_.handleEvent(&events, .{ .mouse = .{ .col = 2, .row = 2, .button = .none, .type = .motion, .mods = .{} } });
     _ = try held.draw();
     try std.testing.expectEqual(@as(usize, 0), held.screen.commands.?.highlight);
     try std.testing.expectEqualStrings("please /re now", held.self.input.composition().bytes);
     for (events.cmds.items) |command| try std.testing.expect(command != .request_focus);
     try widget_.handleEvent(&events, .mouse_leave);
-    try widget_.handleEvent(&events, .{ .mouse = .{ .col = 2, .row = 1, .button = .left, .type = .press, .mods = .{} } });
+    try widget_.handleEvent(&events, .{ .mouse = .{ .col = 2, .row = 2, .button = .left, .type = .press, .mods = .{} } });
     try std.testing.expectEqualStrings("please /review now", held.self.input.composition().bytes);
     try std.testing.expectEqual("please /review".len, held.self.input.composition().cursor);
     try std.testing.expectEqual(null, held.self.input.queuedCommand());
