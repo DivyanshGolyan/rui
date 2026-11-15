@@ -129,11 +129,11 @@ pub const State = struct {
             },
             .failed => |failure| {
                 if (self.page == .stopping and !failure.saved()) return self.step(.cancelled);
-                const retry: Attempt = if (failure == .superseded) .key else switch (self.page) {
+                const retry: Attempt = if (failure.saved()) .existing else if (failure == .superseded) .key else switch (self.page) {
                     .api => .key,
                     .browser => .chatgpt,
                     .device => .codex,
-                    .saving => |attempt| if (failure.saved()) .existing else attempt,
+                    .saving => |attempt| attempt,
                     else => .existing,
                 };
                 self.show(.{ .failed = .{ .failure = failure, .retry = retry } }, .retry);
@@ -244,4 +244,23 @@ test "Sign-in API setup and superseded connection retries reload the form instea
         try std.testing.expectEqual(Effect.none, act(&state, .retry));
         try std.testing.expect(state.page == .api and state.focus == .key);
     }
+}
+
+test "Sign-in published failures retry existing credentials before either OAuth page" {
+    for ([_]Page{ .browser, .device }) |page| for (std.enums.values(Failure)) |failure| {
+        var state: State = .{ .page = page, .attempt = 1 };
+        _ = state.step(.{ .failed = failure });
+        const expected: Attempt = switch (failure) {
+            .defaults, .host, .defaults_and_host, .uncertain => .existing,
+            .superseded => .key,
+            .expired, .denied, .unreachable_service, .answer, .plan, .host_id, .login, .settings => if (page == .browser) .chatgpt else .codex,
+        };
+        try std.testing.expect(state.page == .failed);
+        try std.testing.expectEqual(expected, state.page.failed.retry);
+        const retry = act(&state, .retry);
+        if (expected == .key) {
+            try std.testing.expectEqual(Effect.none, retry);
+            try std.testing.expect(state.page == .api);
+        } else try std.testing.expectEqual(expected, retry.start);
+    };
 }
