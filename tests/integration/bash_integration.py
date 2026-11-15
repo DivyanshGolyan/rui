@@ -924,7 +924,7 @@ def prove_native_background(state, *, deadline=None):
             if name != "stopped":
                 assert (workspace / "expected-final").read_bytes() in assembled
             assert command("action", "read", "--store", store, "--session", session, "--action", identity) == first
-            replay = command("request", "recover", "--store", store, "--record", case / "promote.json", "--kind", "action-background")
+            replay = command("request", "recover", "--store", store, "--record", case / "promote.json", "--kind", "action-background", expect=3 if capacity == 1 else 0)
             assert replay["answer"]["replayed"] is True
             if capacity == 1:
                 assert replay["answer"]["code"] == "background_unavailable", replay
