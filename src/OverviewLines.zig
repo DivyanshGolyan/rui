@@ -26,35 +26,43 @@ pub const Header = struct {
     }
 };
 
-/// A one-line pinned control, using the list owner for row styles and presses.
-pub const NewSession = struct {
+/// Separate New Session action and view tabs, using the existing list press owner.
+pub const SessionControls = struct {
     state: *const overview_view.State,
     caps: overview_view.Caps = .{},
     userdata: *anyopaque,
     on_click: *const fn (*anyopaque, *vxfw.EventContext, overview_view.Click) anyerror!void,
     row: @import("GroupedList.zig") = .{},
 
-    pub fn widget(self: *NewSession) vxfw.Widget {
+    pub fn widget(self: *SessionControls) vxfw.Widget {
         return .{ .userdata = self, .drawFn = draw, .eventHandler = event };
     }
 
     fn event(raw: *anyopaque, ctx: *vxfw.EventContext, value: vxfw.Event) !void {
-        const self: *NewSession = @ptrCast(@alignCast(raw));
+        const self: *SessionControls = @ptrCast(@alignCast(raw));
+        if (value == .mouse and (value.mouse.button == .wheel_up or value.mouse.button == .wheel_down)) return;
         try self.row.widget().handleEvent(ctx, value);
     }
 
     fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
-        const self: *NewSession = @ptrCast(@alignCast(raw));
+        const self: *SessionControls = @ptrCast(@alignCast(raw));
         const GroupedList = @import("GroupedList.zig");
-        const built = try overview_view.listSegments(ctx.arena, self.state, .new_session, ctx.max.width.?, self.caps, 0);
+        const width = ctx.max.width.?;
+        const built = try overview_view.listSegments(ctx.arena, self.state, .new_session, width, self.caps, 0);
+        const tabs = try overview_view.listSegments(ctx.arena, self.state, .views, width, self.caps, 0);
+        var regions: std.ArrayList(GroupedList.Region) = .empty;
+        if (tabs.sessions) |at| try regions.append(ctx.arena, .{ .start = at.start, .end = at.end, .target = .sessions, .selected = self.state.selected == .sessions });
+        if (tabs.archived) |at| try regions.append(ctx.arena, .{ .start = at.start, .end = at.end, .target = .archived, .selected = self.state.selected == .archived });
         const rows = try ctx.arena.create([]const GroupedList.Row);
-        const regions: []const GroupedList.Region = if (built.archived) |at| try ctx.arena.dupe(GroupedList.Region, &.{.{ .start = at.start, .end = at.end, .target = .archived }}) else &.{};
-        rows.* = try ctx.arena.dupe(GroupedList.Row, &.{.{ .segments = built.segments, .target = .new_session, .regions = regions }});
+        rows.* = try ctx.arena.dupe(GroupedList.Row, &.{
+            .{ .segments = built.segments, .target = .new_session },
+            .{ .segments = tabs.segments, .regions = regions.items },
+        });
         self.row.rows = .of(rows);
         self.row.selected = if (built.selected) 0 else null;
         self.row.caps = self.caps;
         self.row.on_press = .{ .userdata = self.userdata, .pressed = self.on_click };
-        var surface = try self.row.widget().draw(ctx.withConstraints(.{}, .{ .width = ctx.max.width.?, .height = @min(1, ctx.max.height.?) }));
+        var surface = try self.row.widget().draw(ctx.withConstraints(.{}, .{ .width = ctx.max.width.?, .height = @min(2, ctx.max.height.?) }));
         surface.widget = self.widget();
         return surface;
     }
@@ -143,24 +151,36 @@ pub const Settings = struct {
     }
 };
 
-test "pinned New Session row presses Archived at its drawn word and New Session elsewhere" {
+test "session tabs press only separate drawn destinations and clear clipped targets" {
     var state: overview_view.State = undefined;
     try state.init(std.testing.allocator, .{ .cwd = "/w", .home = "/h" });
     defer state.deinit();
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    for ([_]bool{ false, true }) |sidebar| for ([_]u16{ 46, 140 }) |width| {
+    for ([_]bool{ false, true }) |sidebar| for ([_]u16{ 0, 1, 9, 20, 46, 140 }) |width| for ([_]u16{ 0, 1, 2 }) |height| {
         state.conversing = if (sidebar) "aaaaaa".* else null;
         var clicks: Clicks = .{};
-        var row: NewSession = .{ .state = &state, .userdata = &clicks, .on_click = Clicks.take };
-        _ = try row.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 1 }, .cell_size = .{} });
+        var controls: SessionControls = .{ .state = &state, .userdata = &clicks, .on_click = Clicks.take };
+        const draw: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 2 }, .cell_size = .{} };
+        _ = try controls.widget().draw(draw);
+        // A smaller draw invalidates the old tab hit spans, including height zero.
+        const shown = try controls.widget().draw(draw.withConstraints(.{}, .{ .width = width, .height = height }));
         var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
-        for ([_]u16{ width - 9, width - 2, 4, width - 12 }, 0..) |column, at| {
-            clicks.got = null;
-            try row.widget().handleEvent(&events, .{ .mouse = .{ .col = @intCast(column), .row = 0, .button = .left, .type = .press, .mods = .{} } });
-            const expected: overview_view.Click = if (at < 2) .archived else .new_session;
-            try std.testing.expectEqual(expected, clicks.got.?);
+        if (width >= 20 and height >= 1) {
+            var screen: vaxis.Screen = try .init(arena.allocator(), .{ .cols = width, .rows = height, .x_pixel = 0, .y_pixel = 0 });
+            const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = height, .screen = &screen };
+            try shown.render(window, controls.widget());
+            var line: std.ArrayList(u8) = .empty;
+            for (0..width) |col| try line.appendSlice(arena.allocator(), screen.readCell(@intCast(col), 0).?.char.grapheme);
+            try std.testing.expect(std.mem.startsWith(u8, line.items, "  + New Session"));
         }
+        for (0..3) |row| for (0..@max(1, width)) |col| {
+            clicks.got = null;
+            events.consume_event = false;
+            try controls.widget().handleEvent(&events, .{ .mouse = .{ .col = @intCast(col), .row = @intCast(row), .button = .left, .type = .press, .mods = .{} } });
+            const expected: ?overview_view.Click = if (col >= width or row >= height) null else if (row == 0) .new_session else if (col >= 2 and col < @min(10, width -| 1)) .sessions else if (col >= 12 and col < @min(20, width -| 1)) .archived else null;
+            try std.testing.expectEqual(expected, clicks.got);
+        };
     };
 }
 
@@ -258,7 +278,7 @@ test "Session pin alternate gestures never activate New Session or Settings" {
     try state.init(std.testing.allocator, .{ .cwd = "/w", .home = "/h" });
     defer state.deinit();
     var clicks: Clicks = .{};
-    var new_session: NewSession = .{ .state = &state, .userdata = &clicks, .on_click = Clicks.take };
+    var new_session: SessionControls = .{ .state = &state, .userdata = &clicks, .on_click = Clicks.take };
     var settings: Settings = .{ .selected = false, .caps = .{}, .userdata = &clicks, .on_click = Clicks.take };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -280,5 +300,32 @@ test "Session pin alternate gestures never activate New Session or Settings" {
     for (events.cmds.items) |cmd| switch (cmd) {
         .set_mouse_shape => {},
         else => return error.TestUnexpectedCommand,
+    };
+}
+
+test "session tab focus survives pointer hover without changing active filter" {
+    var state: overview_view.State = undefined;
+    try state.init(std.testing.allocator, .{ .cwd = "/w", .home = "/h" });
+    defer state.deinit();
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var clicks: Clicks = .{};
+    var controls: SessionControls = .{ .state = &state, .userdata = &clicks, .on_click = Clicks.take };
+    const draw: vxfw.DrawContext = .{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 2 }, .cell_size = .{} };
+    var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    for ([_]overview_view.ArchiveFilter{ .active, .archived }) |filter| for ([_]overview_view.Selection{ .sessions, .archived }) |focus| for ([_]i16{ 3, 13, 30 }) |pointer| {
+        state.archive = filter;
+        state.selected = focus;
+        _ = try controls.widget().draw(draw);
+        try controls.widget().handleEvent(&events, .{ .mouse = .{ .col = pointer, .row = 1, .button = .none, .type = .motion, .mods = .{} } });
+        const shown = try controls.widget().draw(draw);
+        var screen: vaxis.Screen = try .init(arena.allocator(), .{ .cols = 46, .rows = 2, .x_pixel = 0, .y_pixel = 0 });
+        const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 46, .height = 2, .screen = &screen };
+        try shown.render(window, controls.widget());
+        try std.testing.expectEqual(widget_style.of(.{}, .{ .background = .selection }).bg, screen.readCell(if (focus == .sessions) 2 else 12, 1).?.style.bg);
+        try std.testing.expectEqual(filter == .active, screen.readCell(2, 1).?.style.bold);
+        try std.testing.expectEqual(filter == .archived, screen.readCell(12, 1).?.style.bold);
+        try std.testing.expectEqual(focus, state.selected);
+        try std.testing.expectEqual(filter, state.archive);
     };
 }

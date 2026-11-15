@@ -5258,8 +5258,6 @@ test "one settled stop read updates the chat and its list row without a listing"
     const row = overview.state.find(ref).?;
     try std.testing.expectEqualDeep(stopped.state, overview.state.workOf(row).state);
     try std.testing.expectEqual(stopped.turn, overview.state.workOf(row).turn);
-    var detail: [overview_view.max_second_line_bytes]u8 = undefined;
-    try std.testing.expectEqualStrings("Stopped", overview_view.secondLine(&overview.state, row, &detail));
     try std.testing.expect(!ArchiveOverview.line(&overview, .stopped).stoppable);
     try std.testing.expectEqual(@as(usize, 0), overview.state.summary.counts.working);
 }

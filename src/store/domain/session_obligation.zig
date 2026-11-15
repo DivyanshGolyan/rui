@@ -64,3 +64,14 @@ pub fn hint(a: anytype, row: *const ancestors.Row) bool {
     a.obligationTouch(row.session);
     return true;
 }
+
+test "obligation projection renders one grouped MySQL frontier with the original four bindings" {
+    const rendered = comptime update.mysql.prepared();
+    try std.testing.expect(std.mem.startsWith(u8, rendered, "UPDATE session JOIN (SELECT session_ref,min(saved_since) AS saved_since,min(owed_since) AS owed_since FROM (WITH RECURSIVE obligation_walk("));
+    try std.testing.expect(std.mem.endsWith(u8, rendered, "SET session.obligation_since=obligation_new.owed_since WHERE (NOT (obligation_new.owed_since <=> obligation_new.saved_since))"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, rendered, "WITH RECURSIVE obligation_walk("));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, rendered, "GROUP BY session_ref"));
+    try std.testing.expectEqualDeep(@as([]const rsql.Slot, &.{ .{ .argument = 0 }, .{ .argument = 1 }, .{ .argument = 2 }, .{ .argument = 3 } }), update.mysql.slots);
+    try std.testing.expectEqual(@as(usize, 0), update.session_fields.len);
+    try std.testing.expect(update.guarded);
+}

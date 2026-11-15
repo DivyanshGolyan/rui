@@ -10,7 +10,7 @@ const List = @import("widgets/List.zig");
 pub const Segment = overview_view.Segment;
 /// What a press on a row means, as the screen's core takes it.
 pub const Target = overview_view.Click;
-pub const Region = struct { start: u16, end: u16, target: Target };
+pub const Region = struct { start: u16, end: u16, target: Target, selected: bool = false };
 pub const Row = struct {
     segments: []const Segment,
     heading: bool = false,
@@ -108,7 +108,7 @@ const Frame = struct {
         for (built.regions, regions) |region, *dest| {
             const id: u32 = @intCast(self.targets.items.len);
             try self.targets.append(arena, .{ .id = id, .target = region.target });
-            dest.* = .{ .start = region.start, .end = region.end, .target = id };
+            dest.* = .{ .start = region.start, .end = region.end, .target = id, .selected = region.selected };
         }
         const lines = try arena.alloc(List.Line, built.height);
         lines[0] = segments;
@@ -233,8 +233,6 @@ test "GroupedList quiet rows normalize whole lines before selection and hover in
         const first = try view.listSegments(arena.allocator(), &state, .{ .row = 0 }, width, caps, 0);
         const rows: []const Row = &.{.{
             .segments = first.segments,
-            .second = try view.rowSecondSegments(arena.allocator(), &state, 0, width, caps),
-            .height = 2,
             .target = .{ .open = listed.reference },
         }};
         var presses: Pressed = .{};
@@ -246,11 +244,12 @@ test "GroupedList quiet rows normalize whole lines before selection and hover in
             try list.widget().handleEvent(&events, .{ .mouse = .{ .col = 1, .row = row, .button = .none, .type = .motion, .mods = .{} } });
         }
         const surface = try list.widget().draw(ctx);
-        const background: view.Background = if (selected) .selection else if (hover_row != null) .hover else .ground;
+        const hovered = hover_row == 0;
+        const background: view.Background = if (selected) .selection else if (hovered) .hover else .ground;
         const highlight = widget_style.of(caps, .{ .background = background });
         for (surface.children[0].surface.buffer) |cell| {
-            // Includes both lines' visible text, interstitial padding and ends.
-            try std.testing.expectEqual(!wrote and !selected and hover_row == null, cell.style.dim);
+            // Includes the line's visible text, interstitial padding and ends.
+            try std.testing.expectEqual(!wrote and !selected and !hovered, cell.style.dim);
             try std.testing.expectEqual(highlight.bg, cell.style.bg);
             try std.testing.expectEqual(highlight.reverse, cell.style.reverse);
             try std.testing.expectEqual(highlight.ul_style, cell.style.ul_style);

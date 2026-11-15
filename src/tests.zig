@@ -1,4 +1,5 @@
 test {
+    _ = @import("InputCapture.zig");
     _ = @import("host_start.zig");
     _ = @import("server_mcp_settings.zig");
     _ = @import("testing/host_settings.zig");

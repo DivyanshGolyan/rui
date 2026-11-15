@@ -167,7 +167,7 @@ def flat_list():
             listed = screen.wait(lambda frame: all(f" ✓ {label}" in frame for label in peers_by_label),
                                  "every finished peer without folding")
             lines = listed.split("\n")
-            assert lines[0] == f"{'  + New Session':<{screen.capture.columns - 9}}Archived" and lines[1] == "", listed
+            assert lines[0] == "  + New Session" and lines[1] == "  Sessions  Archived" and lines[2] == "", listed
             assert not any(re.fullmatch(r" \S.* · \d+", line) for line in lines), listed
             assert " more" not in listed, listed
             # New Session opens an empty chat, then returns to this flat list.
