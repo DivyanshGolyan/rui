@@ -381,7 +381,7 @@ const OversizedItem = struct {
             .response_id = .{},
             .model_evidence = testing_absent_model_evidence,
             .request_id = .{},
-        }, .{});
+        }, true, .{});
     }
 
     /// Checks every row the settlement saved for operation `operation`

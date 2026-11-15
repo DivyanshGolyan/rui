@@ -724,3 +724,71 @@ test "schema 54 gains empty model catalog tables at 55 without changing its rows
     try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_fact", .{}));
     try std.testing.expect(try storage.readModelCatalogSource() == null);
 }
+
+fn finalSourceReferenceGate(raw: *c.sqlite3) !void {
+    const invalid = [_][:0]const u8{
+        "INSERT INTO message_admission(admission_id,session_ref,content_id,admission_position,admitted_at,final_action_id) VALUES(100,'d8mv7p',1,100,1793781721,1)",
+        "INSERT INTO message_admission(admission_id,session_ref,content_id,admission_position,admitted_at,final_action_id) VALUES(100,'brhkcj',2,100,1793781721,1)",
+        "INSERT INTO message_admission(admission_id,session_ref,content_id,admission_position,admitted_at,final_action_id) VALUES(100,'brhkcj',1,100,1793781721,2)",
+    };
+    for (invalid) |sql| {
+        const statement = try sqlite.prepare(raw, sql);
+        defer _ = c.sqlite3_finalize(statement);
+        if (c.sqlite3_step(statement) != c.SQLITE_CONSTRAINT or c.sqlite3_extended_errcode(raw) != c.SQLITE_CONSTRAINT_FOREIGNKEY)
+            return error.FinalSourceReferenceNotEnforced;
+    }
+}
+
+test "schema 75 final source enforces exact Session Action and sole content on fresh and migrated catalogs" {
+    for ([_]bool{ false, true }) |migrated| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+        const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+        var path_buffer: [platform.max_database_path_bytes]u8 = undefined;
+        const path = try std.fmt.bufPrint(&path_buffer, "{s}/source.sqlite3", .{root});
+        const raw = try openRaw(path);
+        defer _ = c.sqlite3_close(raw);
+        try sqlite.exec(raw, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
+        if (migrated) {
+            try sqlite.exec(raw, store_testing.baseline_sqlite_ddl);
+            try sqlite.exec(raw, store_testing.baseline_rows);
+            inline for (store_schema.migrations) |step| {
+                inline for (step.sqlite) |sql| try sqlite.exec(raw, sql);
+            }
+        } else {
+            try sqlite.exec(raw, store_schema.ddl(.sqlite));
+            try sqlite.exec(raw, store_testing.expected_rows);
+        }
+        try sqlite.exec(raw, "PRAGMA foreign_keys=ON");
+        try sqlite.exec(raw, "UPDATE action_operation SET resolution_code='failed',resolution_content_id=1,acceptance_position=10,resolved_at=1793781721 WHERE action_id=1");
+        try finalSourceReferenceGate(raw);
+        try sqlite.exec(raw, "INSERT INTO message_admission(admission_id,session_ref,content_id,admission_position,admitted_at,final_action_id) VALUES(100,'brhkcj',1,100,1793781721,1)");
+        try std.testing.expectEqual(@as(u64, 1), try store_testing.sqliteQueryU64(raw, "SELECT count(*) FROM message_admission WHERE admission_id=100 AND command_key IS NULL AND sender_session_ref IS NULL AND sender_position IS NULL", .{}));
+        try std.testing.expectEqual(@as(u64, 0), try store_testing.sqliteQueryU64(raw, "SELECT count(*) FROM pragma_foreign_key_check", .{}));
+    }
+}
+
+test "schema 75 exact final source gate rejects only-new-reference-removed negative control" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var path_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "{s}/mutant.sqlite3", .{root});
+    const raw = try openRaw(path);
+    defer _ = c.sqlite3_close(raw);
+    const removed = " FOREIGN KEY(session_ref,final_action_id,content_id) REFERENCES action_operation(session_ref,action_id,resolution_content_id),\n";
+    const canonical = store_schema.ddl(.sqlite);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, canonical, removed));
+    const mutant = try std.mem.replaceOwned(u8, std.testing.allocator, canonical, removed, "");
+    defer std.testing.allocator.free(mutant);
+    const sql = try std.testing.allocator.dupeSentinel(u8, mutant, 0);
+    defer std.testing.allocator.free(sql);
+    try sqlite.exec(raw, sql);
+    try sqlite.exec(raw, "PRAGMA foreign_keys=OFF");
+    try sqlite.exec(raw, store_testing.expected_rows);
+    try sqlite.exec(raw, "PRAGMA foreign_keys=ON");
+    try sqlite.exec(raw, "UPDATE action_operation SET resolution_code='failed',resolution_content_id=1,acceptance_position=10,resolved_at=1793781721 WHERE action_id=1");
+    try std.testing.expectError(error.FinalSourceReferenceNotEnforced, finalSourceReferenceGate(raw));
+}

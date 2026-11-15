@@ -30,6 +30,34 @@ Bundled and custom binaries and their child Host launch are application-owned.
 Standalone client Upgrade does not mutate npm packages or blindly stop an application-owned Host, and reports installation separately from activation.
 There is no HTTP installer endpoint or background update polling; update the application's dependencies and lifecycle explicitly.
 
+## Background Actions
+
+Host-owned function tools accept optional `rui_execution: "background"` in their arguments.
+Omitting it, or setting `"foreground"`, keeps the original call blocked until its result.
+Provider-hosted `web_search` does not accept this option.
+
+To release a blocked call without relaunching its Action, use the same Session handle and Action id:
+
+```ts
+const selection = await session.backgroundAction(action, { idempotencyKey: "promote-once" });
+const status = await session.readAction(action);
+const stopSelection = await session.stopAction(action, { idempotencyKey: "stop-once" });
+```
+
+Keep ids, positions, and result cursors as decimal strings.
+`readAction` returns one bounded UTF-8 result window when a final result exists.
+Pass `status.final.window.next` as its second argument while `status.final.window.more` is true.
+Reading does not consume the result.
+
+Background acceptance fulfills the original function call once. It does not grant permission or claim that execution has started.
+The final result later arrives as tool-data input to the same Session, without replacing the original answer.
+A Session stop also selects older background Actions and attached children. A stopped source's later result remains readable but does not reopen the Session.
+`stopAction` selects stop; it does not prove that a remote effect did not run.
+
+A Host with active capacity 1 refuses background acceptance. Dispatch needs two genuinely free custody records, and promotion of an attempted Action needs one free record.
+Cleanup still occupies custody. A saved resource refusal leaves the original foreground call unchanged.
+Use a new idempotency key to try again after capacity becomes available.
+
 ## Host settings and migration
 
 The breaking signature is `Rui.connect(settings: HostSettings, options?: ClientOptions)`.

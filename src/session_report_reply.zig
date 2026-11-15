@@ -82,6 +82,7 @@ pub fn Reply(comptime Capture: type) type {
                 peers,
                 if (values.first_message) |first| protocol.FirstMessage.fromCore(first) else null,
                 values.selected_message,
+                values.selected_source_action,
             });
         }
 
@@ -102,7 +103,7 @@ pub fn Reply(comptime Capture: type) type {
             reply.first = false;
             const capture = reply.capture;
             switch (values.*) {
-                .recent_messages => |recent| try appendShape(capture, CurrentJson.Recent.json_shape, .{ recent.turn, recent.message, recent.outcome }),
+                .recent_messages => |recent| try appendShape(capture, CurrentJson.Recent.json_shape, .{ recent.turn, recent.message, recent.source_action, recent.outcome }),
                 .unresolved_actions => |action| {
                     try appendShape(capture, CurrentJson.Unresolved.head ++ .{H{ .json = ToolName }} ++ CurrentJson.Unresolved.authorization, .{
                         action.action,
@@ -288,7 +289,7 @@ fn TextSink(comptime Capture: type) type {
 
 fn writeMessage(capture: anytype, message: *const session_report.Message, text: anytype) !void {
     const shape = FullJson.Message;
-    try appendShape(capture, shape.head, .{ message.admission, message.command_key });
+    try appendShape(capture, shape.head, .{ message.admission, message.command_key, message.source_action });
     try writeText(capture, message.content, text);
     switch (message.application) {
         .applied => |applied| {
@@ -387,7 +388,7 @@ const missing_text = "\",\"session\":null,\"pending_messages\":\"0\",\"execution
 const after_settings = .{ ",\"archive_state\":\"", H{ .tag = session_archive.State }, "\",\"pending_messages\":\"", H.decimal, "\",\"work\":" };
 
 /// The Current facts between the work and the first list.
-const after_work = .{ ",\"peers\":", H{ .json = protocol.PeerFacts }, ",\"first_message\":", H{ .optional_json = protocol.FirstMessage }, ",\"selected_message\":", H{ .optional_string = idempotency_key.max_bytes }, ",\"recent_messages\":" };
+const after_work = .{ ",\"peers\":", H{ .json = protocol.PeerFacts }, ",\"first_message\":", H{ .optional_json = protocol.FirstMessage }, ",\"selected_message\":", H{ .optional_string = idempotency_key.max_bytes }, ",\"selected_source_action\":", H.optional_id, ",\"recent_messages\":" };
 
 /// Wire shapes of the report envelope. Full history is present only for
 /// the full profile.
@@ -500,7 +501,7 @@ pub const CurrentJson = struct {
     };
     pub const Recent = struct {
         pub const openapi_name = "domainreportCurrentJsonRecent";
-        pub const json_shape = .{ "{\"turn\":\"", H.decimal, "\",\"message\":", H{ .string = idempotency_key.max_bytes }, ",\"outcome\":", H{ .string = outcome_code.max_bytes }, "}" };
+        pub const json_shape = .{ "{\"turn\":\"", H.decimal, "\",\"message\":", H{ .optional_string = idempotency_key.max_bytes }, ",\"source_action\":", H.optional_id, ",\"outcome\":", H{ .string = outcome_code.max_bytes }, "}" };
     };
     /// A built-in call names its tool; an MCP call names an MCP tool and
     /// its server.
@@ -628,7 +629,7 @@ pub const FullJson = struct {
     };
     pub const Message = struct {
         pub const openapi_name = "domainreport_full_shapeFullMessage";
-        const head = .{ "{\"admission\":\"", H.decimal, "\",\"command_key\":", H{ .string = idempotency_key.max_bytes }, ",\"content\":" };
+        const head = .{ "{\"admission\":\"", H.decimal, "\",\"command_key\":", H{ .optional_string = idempotency_key.max_bytes }, ",\"source_action\":", H.optional_id, ",\"content\":" };
         const application = .{ ",\"turn\":", H.optional_id, ",\"application\":\"", H{ .tag = session_report.Application }, "\",\"exclusion\":", H{ .optional_json = Exclusion }, ",\"outcome\":" };
         pub const json_shape = head ++ .{H{ .json = Inline }} ++ application ++ .{ H{ .optional_json = Outcome }, "}" };
     };

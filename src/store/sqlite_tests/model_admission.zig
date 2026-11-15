@@ -461,7 +461,7 @@ test "continued accepted output allows model revisions and keeps public text rea
         .model_evidence = testing_absent_model_evidence,
         .request_id = .{},
     };
-    try storage.settleModelSuccess(binding, &output, .{});
+    try storage.settleModelSuccess(binding, &output, true, .{});
     var public_request = protocol.ConversationPage{};
     try public_request.session.set(created_session_0.slice());
     const public_page = try store_core.publicConversationPageForTesting(&storage, public_request);
@@ -518,7 +518,7 @@ test "continued accepted output allows model revisions and keeps public text rea
     try std.testing.expectEqualStrings("model-b", (try storage.inspectSessionForTesting(created_session_0.slice())).model.slice());
 
     const completion_binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-    try storage.settleModelSuccess(completion_binding, &output, .{});
+    try storage.settleModelSuccess(completion_binding, &output, true, .{});
     // The same output is an answer both before and after pending input is
     // consumed. Only the owning Turn's completion decision differs.
     try std.testing.expectEqual(@as(u64, 2), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM model_operation WHERE resolution_code='answer'", .{}));

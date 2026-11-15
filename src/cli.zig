@@ -317,6 +317,9 @@ noinline fn clientCommand(init: std.process.Init, command: cli_args.Command, par
         .request_list => try requests(init),
         .action_inspect => try inspectAction(init, .{ .io = init.io }, parsed.get("store"), parsed.get("session").?, (try parsed.number(u64, "action")).?),
         .action_allow => try decideAction(init, parsed, .allow_once),
+        .action_background => try controlAction(init, parsed, .background),
+        .action_stop => try controlAction(init, parsed, .stop),
+        .action_read => try readAction(init, parsed),
         .action_deny => try decideAction(init, parsed, .deny),
         .action_read_call_id => try readActionContent(init, parsed, .call_id),
         .action_read_arguments => try readActionContent(init, parsed, .arguments),
@@ -2730,10 +2733,13 @@ fn takeStatus(taken: *status_page.Session, current: *const protocol_reply.Curren
     }
     work.indeterminate = current.first_indeterminate;
     work.indeterminate_count = current.indeterminate_count;
-    work.recent_count = current.recent_count;
-    for (current.recent[0..current.recent_count], work.recent[0..current.recent_count]) |*from, *to| {
-        try to.message.set(from.message.slice());
+    work.recent_count = 0;
+    for (current.recent[0..current.recent_count]) |*from| {
+        const message_key = from.message orelse continue;
+        const to = &work.recent[work.recent_count];
+        try to.message.set(message_key.slice());
         try to.outcome.set(from.outcome.slice());
+        work.recent_count += 1;
     }
 }
 
@@ -3289,6 +3295,34 @@ fn sendCapturedMutation(sender: client.Requests, captured: *client.CapturedRecor
     try writeMutationReply(io, reply, presentation, replay);
 }
 
+fn controlAction(init: std.process.Init, parsed: *const cli_args.Parsed, kind: @import("action_control.zig").Kind) !void {
+    var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const selected = try selectedStore(init, parsed.get("store"), &selected_buffer);
+    var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const target = try captureTarget(init, parsed, &directory_buffer);
+    var captured = try client.captureActionControl(init.io, .{ .store = selected, .session = parsed.get("session").?, .action_id = (try parsed.number(u64, "action")).? }, kind, target);
+    try sendCapturedMutation(.{ .io = init.io, .drop_reply = parsed.get("test-drop-reply") }, &captured, .{ .map = init.environ_map }, null, .json);
+}
+
+fn readAction(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
+    var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const selected = try selectedStore(init, parsed.get("store"), &selected_buffer);
+    var reply_buffer: client.ReplyBuffer = .{};
+    var output: JsonOutput = undefined;
+    var sink: JsonOutput.Sink = .{ .writer = output.init(init.io, .stdout) };
+    const reply = (client.Requests{ .io = init.io }).readAction(selected, parsed.get("session").?, (try parsed.number(u64, "action")).?, (try parsed.number(u64, "offset")) orelse 0, &sink, &reply_buffer) catch |err| return readTransportFailure(init.io, selected, err);
+    switch (reply) {
+        .report => {
+            try sink.writer.writeByte('\n');
+            try output.finish();
+        },
+        .command => |command_reply| {
+            try writeCommandReply(init.io, command_reply, .stderr);
+            return error.HostInvocationFailed;
+        },
+    }
+}
+
 fn decideAction(init: std.process.Init, parsed: *const cli_args.Parsed, decision: @FieldType(client.PermissionDecisionInput, "decision")) !void {
     const io = init.io;
     var input = client.PermissionDecisionInput{
@@ -3689,10 +3723,12 @@ fn writeSavedRejection(out: *std.Io.Writer, reply: protocol_reply.MutationReply)
         .session_archive => |target| if (target.archived) "archive" else "unarchive",
         .model_interruption => "interrupt-model",
         .permission_decision => |target| if (target.decision == .allow_once) "allow" else "deny",
+        .action_background => "background",
+        .action_stop => "stop",
     };
     // Only the saved rejection is authority. In particular, replay never
     // borrows a current argv value or reads today's configuration for advice.
-    try caller_error.writeSavedLine(out, savedRejectionCode(answer), .{ .resource = if (reply.target == .permission_decision) "action" else "session", .operation = operation });
+    try caller_error.writeSavedLine(out, savedRejectionCode(answer), .{ .resource = if (reply.target == .permission_decision or reply.target == .action_background or reply.target == .action_stop) "action" else "session", .operation = operation });
 }
 
 fn reportUnconfirmed(context: protocol_reply.MutationIdentity, replay: client.Replay, err: anyerror) void {
@@ -3792,6 +3828,7 @@ fn presentMutationReply(writer: *std.Io.Writer, reply: protocol_reply.MutationRe
         },
         .session_archive => |value| try writer.print("archived: {}; completion: {s}\n", .{ value.archived, @tagName(value.completion) }),
         .model_interruption, .permission_decision => {},
+        .action_background, .action_stop => |selection| try writer.print("selected: {s}; position: {d}\n", .{ @tagName(selection.kind), selection.position }),
     };
     try writer.flush();
 }
@@ -3854,6 +3891,7 @@ fn writeMutationJson(writer: *std.Io.Writer, reply: protocol_reply.MutationReply
         try std.json.Stringify.value(reply.context.session.slice(), .{}, writer);
     }
     if (reply.target == .permission_decision) try writer.print(",\"action\":\"{d}\",\"decision\":\"{s}\"", .{ reply.target.permission_decision.action, @tagName(reply.target.permission_decision.decision) });
+    if (reply.target == .action_background or reply.target == .action_stop) try writer.print(",\"action\":\"{d}\",\"operation\":\"{s}\"", .{ if (reply.target == .action_background) reply.target.action_background else reply.target.action_stop, if (reply.target == .action_background) "background" else "stop" });
     switch (answer.result) {
         .accepted => |accepted| switch (accepted) {
             .configure => |value| {
@@ -3864,10 +3902,11 @@ fn writeMutationJson(writer: *std.Io.Writer, reply: protocol_reply.MutationReply
             .session_stop => |value| {
                 try writer.writeAll(",\"selection\":{\"turn\":");
                 if (value.turn) |turn| try writer.print("\"{d}\"", .{turn}) else try writer.writeAll("null");
-                try writer.print(",\"admission_cutoff\":\"{d}\"}}", .{value.admission_cutoff});
+                try writer.print(",\"admission_cutoff\":\"{d}\",\"action_cutoff\":\"{d}\"}}", .{ value.admission_cutoff, value.action_cutoff });
             },
             .session_archive => |value| try writer.print(",\"archived\":{}", .{value.archived}),
             .model_interruption, .permission_decision => {},
+            .action_background, .action_stop => |selection| try writer.print(",\"action_selection\":{{\"kind\":\"{s}\",\"position\":\"{d}\"}}", .{ @tagName(selection.kind), selection.position }),
         },
         .rejected => |code| {
             try writer.writeAll(",\"code\":");

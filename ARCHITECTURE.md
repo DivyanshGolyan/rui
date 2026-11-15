@@ -220,7 +220,7 @@ Message acceptance identifies one immutable admission to the Session queue; it n
 The [processing boundary](#conversation-entries-and-pending-messages) establishes the message's result binding once.
 Distinct messages processed in one Turn share its result.
 
-Every state-changing caller command to core requires a stable core idempotency key: configuration, message submission, Session stop, Session archive, Permission Decision and exact Model Interruption.
+Every state-changing caller command to core requires a stable core idempotency key: configuration, message submission, Session stop, Session archive, Permission Decision, exact Model Interruption, Action background selection and Action stop.
 Once committed, its inputs, admission-time selection and original admission answer never change; retries recover that decision rather than select new work.
 This gives callers one lost-reply recovery rule across intervening work and crashes.
 Reads and waits observe current facts without retained command identities.
@@ -314,7 +314,8 @@ Supported metadata for CLI consumers is:
 | Common | Key; absent, accepted or rejected admission; kind, original Session and rejection code when present; CLI `request inspect` adds top-level `as_of`, its Unix seconds at render as a canonical decimal string |
 | Configure | Accepted revision and created flag |
 | Message | Required Host-derived `state`; input text length/digest reference; `queue` admission and `admitted_at`; optional `binding` Turn/Operation/Attempt; nonterminal `work` with Session work `state` and nullable `first_action`; optional retained `recovery`; terminal result status/code or answer text reference |
-| Session stop | Original selected nullable Turn, admission cutoff and pending/completed semantic completion |
+| Session stop | Original selected nullable Turn, admission and Action cutoffs, and pending/completed semantic completion |
+| Action background / Action stop | Original Session and Action, saved background/final/stop selection and its position |
 | Model Interruption / Permission Decision | Original Session/Turn/Operation or Action/decision, including retained rejected targets |
 
 **Unchanged observations.**
@@ -618,7 +619,7 @@ Each model Operation owns one immutable **Model Request Manifest** binding its p
 References/digests identify canonical content; runtime facts retain their original rendering references.
 Session facts and Operation admission share one committed per-Session order on their owning records, without a duplicate payload log.
 The Operation's admission position fixes its historical boundary.
-Accepted model output, call rejection and Action Resolution become available at their acceptance positions, not a producing Operation's earlier admission position.
+Accepted model output, call rejection and Action fulfillment and Resolution become available at their acceptance positions, not a producing Operation's earlier admission position.
 Historical visibility does not bypass pending-input applicability, expose an incomplete Tool Result group or change Conversation/tool-call order.
 
 If the transport answer exceeds 4 MiB, retain the received JSON prefix through the optional scratch path with a larger-than-limit note, not a claim that the complete answer was saved.
@@ -867,7 +868,7 @@ The view provides:
 
 - historical settings, applicable host inputs and accepted model results;
 - complete model output in provider order, including private objects with no Conversation projection;
-- each Tool Call's sole rejection or Action Resolution, complete terminal coverage at the manifest boundary, and derived Tool Results streamed in call order;
+- each Tool Call's sole fulfillment, complete fulfillment coverage at the manifest boundary, and derived Tool Results streamed in call order;
 - a compaction anchor identifying its producing Operation and item ordinal, with traversal from that item through the end of the same output.
 
 Core owns visibility, source relationships and structural coverage.
@@ -1366,20 +1367,59 @@ It recommends 40–60 characters and excludes status, safety, and success claims
 These are wording guidance, not prose-quality validation.
 Observed state and outcomes come from core facts, never the model's description.
 
-Each call rejection or Action Resolution owns its canonical result content and Conversation acceptance position; siblings settle independently and never rewrite one another.
-Once every Tool Call has exactly one outcome, the next model Operation may start without another user message.
-Its frozen core-owned historical view joins each original call to that outcome and derives one provider `function_call_output` with the exact call ID in original call order.
+Each call has exactly one original fulfillment: its rejection, accepted background receipt, or Action Resolution.
+Each owns canonical result content and a Conversation acceptance position. Siblings fulfill independently and never rewrite one another.
+Once every Tool Call has one fulfillment, the next model Operation may start without another user message.
+Its frozen core-owned historical view joins each original call to that fulfillment and derives one provider `function_call_output` with the exact call ID in original call order.
 The complete group precedes input selected at the same boundary.
 No copied Tool Result, result batch or publication marker is durable authority.
 Physical completion order cannot reorder provider input.
 Call rejection, Action denial, failure, cancellation and uncertainty all produce results.
 
+### Foreground and background Actions
+
+Host-owned function tools accept the optional root argument `rui_execution`, either `foreground` or `background`.
+Omission means foreground. Provider-hosted `web_search` has no execution option.
+The offered schema adds this reserved name centrally, including MCP tools, and refuses a server schema that already owns it.
+The exact raw arguments remain canonical. Host execution metadata is removed before tool-specific validation and execution.
+
+Foreground calls block the original continuation until their rejection or sole Resolution.
+Background acceptance fulfills that same call with an accepted receipt naming its Action, not a running-process claim.
+Permission may still wait, and authorized work may still wait for capacity.
+Acceptance never grants permission, creates another Action or resets an Attempt, launch, timeout or deadline.
+`rui action background --session ID --action N` promotes an existing foreground invocation without replacing its executor.
+If terminal acceptance commits first, promotion selects that final instead. Otherwise the receipt remains the original fulfillment even after final settlement.
+A refusal changes neither the original fulfillment nor execution authority.
+
+An Action belongs to its Session after its causal model Operation and Turn finish.
+A later background Resolution admits a new tool-final input in the same transaction, referencing the sole Resolution content without copying its payload or outcome.
+This source cannot receive a command answer or bind a skill. The adapter identifies it as tool output data, not a person or peer instruction.
+The original tool call receives no second `function_call_output`.
+The final acceptance position and source admission determine the new input's frozen boundary, never the earlier background receipt position.
+A stop selecting the source suppresses later delivery permanently, including after fresh Session work. Truthful terminal evidence remains saved and readable.
+Bash cancellation and MCP effect certainty retain their existing runner-owned rules.
+
+The existing custody pool counts model, Bash, MCP and cleanup owners together.
+Dispatch of background work requires two genuinely free custody records and reserves one atomically while checking that one remains free.
+Promotion of an attempted Action requires one genuinely free record but never releases, detaches or reserves its existing token.
+Capacity one refuses background acceptance or promotion. A pending background Action may wait.
+Detached cleanup still occupies capacity. An ordinary finite consumer may take the remaining credit after the background reservation.
+This conservative policy does not promise a permanently idle record or unlimited fairness.
+
+`rui action read --session ID --action N [--offset N]` returns status and one bounded, repeatable final-result window without waiting or consuming it.
+Attempted status does not establish that a process runs or that a remote request was sent.
+`rui action stop` saves a stop selection, not a claim that the effect has ended.
+Native keyed controls retain their existing Owner authority. Model tools `read_action` and `stop_action` can target only their originating Session.
+Configured tool-name narrowing still applies. `stop_action` revalidates its originating Action and commits target selection with its own Resolution atomically.
+The existing exact call-ID and argument reads remain proposal inspection, separate from result/status reads.
+These Actions add no intermediate publication, JavaScript runtime, inbox, durable execution restoration or execution checkpoint.
+
 ### Authorizing exact actions
 
 The model-visible **Tool Catalog** contains definitions/schema/result contracts, not execution authority.
-It holds `bash`, which Rui runs as Actions; `find_tools`, `message_agent`, `read_transcript`, `skill` and `start_agent`, which the core runs itself; and `web_search`, which the provider hosts: the request names it (OpenAI with live page access) and the provider runs it inside the response, so it never becomes an Action and needs no approval.
+It holds `bash`, which Rui runs as Actions; `find_tools`, `message_agent`, `read_action`, `read_transcript`, `skill`, `start_agent` and `stop_action`, which the core runs itself; and `web_search`, which the provider hosts: the request names it (OpenAI with live page access) and the provider runs it inside the response, so it never becomes an Action and needs no approval.
 The CLI and TUI put `bash`, `skill` and `web_search` in a fresh Session's spec; the Host never supplies a tools list (D104).
-CLI `--tools` accepts a comma list of those names or `none`; the public configuration and report arrays list each chosen tool once, in catalog order (`bash`, `find_tools`, `message_agent`, `read_transcript`, `skill`, `start_agent`, `web_search`).
+CLI `--tools` accepts a comma list of those names or `none`; the public configuration and report arrays list each chosen tool once, in catalog order (`bash`, `find_tools`, `message_agent`, `read_action`, `read_transcript`, `skill`, `start_agent`, `stop_action`, `web_search`).
 A Session's optional `loaded_tools` uses the same name-list grammar (`--loaded-tools a,b|none` in the CLI), defaults to all its `tools`, and records loaded-name intent; the Operation's projected, frozen offer is sent to the model and used to validate calls.
 Every loaded name must be in its resulting tools or configure refuses `loaded_tools_not_in_tools`; a strict subset must contain `find_tools` or configure refuses `loaded_tools_unreachable`.
 Changing tools without specifying loaded_tools keeps equality when the saved sets were equal; otherwise it intersects the saved loaded set with the new tools and applies the same checks.
@@ -2101,14 +2141,15 @@ Model replacement follows the retry policy above and may incur duplicate cost.
 
 A **Session stop** selects current work once.
 Its saved selection prevents that work from advancing; it does not close the reusable Session.
-The transaction binds the core idempotency key, Session reference, active Turn (if any), queued admission cutoff and admission answer with stop authority.
+The transaction binds the core idempotency key, Session reference, active Turn (if any), queued admission cutoff, highest owned Action ID and admission answer with stop authority.
 The saved fact excludes unselected input through that cutoff, including between failure and successor admission.
 Input after the cutoff is not selected by this stop.
 Earlier committed results remain unchanged.
 
 Acknowledgment confirms that Rui saved the stop intent and selection, not that the selected work has finished.
-With no active Turn, the queued-input exclusion commit completes the stop.
-Otherwise completion requires the selected Turn's terminal outcome and atomic occupancy release, including every selected Action's terminal outcome and complete derived Tool Result coverage.
+The stop selects every existing Session-owned Action through its saved Action cutoff, including background Actions whose causal Turns already ended.
+Completion requires the selected Turn, if any, and every selected Action to become terminal.
+The existing owed-stop mechanism propagates this selection through the attached tree. Unattached Sessions keep their independent lifetimes.
 
 Stop completion follows no future work and proves neither remote provider termination nor the end of billing.
 Model transport may still retain custody for local cleanup.
@@ -3505,7 +3546,7 @@ Proposal metadata grants no authorization: a later approval still binds the fres
 
 ### Public Session activity
 
-Session activity is a separate projection of eleven row kinds, not Conversation repurposed as an inventory: a person's or script's Message admission (`admission`), another Session's Message admission (`received`, which always names its `sender`), applied User entry, assistant text, immutable Tool Call, complete-group Tool Result, hosted call, terminal Turn outcome, accepted Session stop, sent Message and refused send.
+Session activity is a separate projection of eleven row kinds, not Conversation repurposed as an inventory: a person's or script's Message admission or a tool-final input (`admission`, whose `source_action` identifies tool data and whose command key is null), another Session's Message admission (`received`, which always names its `sender`), applied User entry, assistant text, immutable Tool Call, complete-group Tool Result, hosted call, terminal Turn outcome, accepted Session stop, sent Message and refused send.
 `received` mirrors `sent` on the receiving side; it split from `admission` on 2026-11-03 so a page can list a person's Messages alone (design thread on Rui's core and plug-in points).
 Admission, stop, send, refusal and every terminal outcome claim the existing Session sequence in their owning transaction, and each also records its commit time there.
 No copied log or second frontier exists; this schema change follows the [Store format policy](#store-format-and-upgrades).
@@ -4294,7 +4335,7 @@ On Linux with glibc, the execution loop calls `malloc_trim(0)` once each time it
 
 | Boundary | Selected value and scope |
 | --- | --- |
-| Active Capacity | Startup default 100 shared model/Bash/Edit executions and cleanup, the product default for every start path; adjustable with `--set execution.activeCapacity=N`, no independent hard maximum. A running Host keeps its startup value. |
+| Active Capacity | Startup default 100 shared model, Bash, MCP, and Edit executions and cleanup, the product default for every start path; adjustable with `--set execution.activeCapacity=N`, no independent hard maximum. A running Host keeps its startup value. MCP also retains its independent 16-call limit and 4 MiB answer-buffer bound per call. |
 | Shared scratch | Startup default 8 GiB logical owned bytes, including pending growth and overlapping copies; no allowance-sized allocation/reservation. |
 | History memo | At most 1 GiB of [memo](#history-memo) file bytes in the scratch directory, additional to shared scratch; one fixed-size index entry per unit of Active Capacity. |
 | Session list page | Eight rows. The worst-case row is derived at compile time from its field bounds and must fit 32 KiB; the derived page bound covers the capture. |

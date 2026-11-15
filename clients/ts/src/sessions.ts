@@ -60,6 +60,10 @@ export interface WriteOptions {
 	idempotencyKey?: string;
 }
 
+/** One bounded status/result read, retaining the Host's exact decimal cursors. */
+export type ActionStatus = Schemas["ReadActionReply"];
+export type ActionSelection = Extract<Schemas["ActionBackgroundReply"]["answer"], { status: "accepted" }>["action_selection"];
+
 export interface SendOptions {
 	idempotencyKey: string;
 	/** The environment Bash runs in. Defaults to empty: the caller's own never reaches Bash (D121). */
@@ -332,6 +336,39 @@ export class Session {
 			if (!gone) throw error;
 		}
 		this.#link.activity?.notify(this.id);
+	}
+
+	/** Reads an owned Action. Acceptance and attempted state do not assert a running process. */
+	async readAction(action: string, offset = "0"): Promise<ActionStatus> {
+		return parse<ActionStatus>(await this.#link.exchange("/v1/read-action", (store) => JSON.stringify({
+			version: WIRE_VERSION, kind: "read_action", store, session: this.id, action, offset,
+		} satisfies Schemas["ReadActionRequest"])));
+	}
+
+	/** Fulfills the original call while the same Action continues. Never grants permission or relaunches. */
+	async backgroundAction(action: string, options?: WriteOptions): Promise<ActionSelection> {
+		const idempotencyKey = key(options);
+		const reply = parse<Schemas["ActionBackgroundReply"]>(await this.#link.exchange(
+			"/v1/control/action-background", (store) => JSON.stringify({
+				version: WIRE_VERSION, kind: "action_background", store, key: idempotencyKey, session: this.id, action,
+			} satisfies Schemas["ActionBackgroundRequest"]),
+		));
+		const selection = accepted(reply.answer).action_selection;
+		this.#link.activity?.notify(this.id);
+		return selection;
+	}
+
+	/** Selects stop without asserting that a process or remote effect has already ended. */
+	async stopAction(action: string, options?: WriteOptions): Promise<ActionSelection> {
+		const idempotencyKey = key(options);
+		const reply = parse<Schemas["ActionStopReply"]>(await this.#link.exchange(
+			"/v1/control/action-stop", (store) => JSON.stringify({
+				version: WIRE_VERSION, kind: "action_stop", store, key: idempotencyKey, session: this.id, action,
+			} satisfies Schemas["ActionStopRequest"]),
+		));
+		const selection = accepted(reply.answer).action_selection;
+		this.#link.activity?.notify(this.id);
+		return selection;
 	}
 
 	/** Answers an approval. `requestId` is the Action id of the `approval_requested` entry (D15). */

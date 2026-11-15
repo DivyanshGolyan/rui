@@ -181,7 +181,7 @@ pub fn forEachEngine(comptime run: anytype) !void {
         if (engine != .mysql or try mysql_testing.available()) {
             var case: Case = .{ .engine = engine };
             run(&case) catch |err| {
-                std.debug.print("conformance test failed on engine {s}\n", .{@tagName(engine)});
+                std.debug.print("conformance test failed on engine {s}: {s}\n", .{ @tagName(engine), @errorName(err) });
                 return err;
             };
             if (engine == .mysql) {
@@ -752,7 +752,7 @@ pub fn answerTestTurn(
         .model_evidence = testing_absent_model_evidence,
         .request_id = .{},
     };
-    try storage.settleModelSuccess(binding, &output, .{});
+    try storage.settleModelSuccess(binding, &output, true, .{});
 }
 
 /// Gives compaction Operation `operation` the floor at the position of
@@ -817,7 +817,7 @@ pub fn settleCompactionForTesting(storage: *Store, tmp: *std.testing.TmpDir, bin
         .response_id = .{},
         .model_evidence = testing_absent_model_evidence,
         .request_id = .{},
-    }, .{});
+    }, true, .{});
 }
 
 /// Settles `binding` with `items`, raw provider items judged in order, of
@@ -863,7 +863,7 @@ pub fn settleSelectedItemsForTesting(storage: *Store, tmp: *std.testing.TmpDir, 
         .response_id = .{},
         .model_evidence = testing_absent_model_evidence,
         .request_id = .{},
-    }, .{});
+    }, true, .{});
 }
 
 /// Counts the content rows besides those only tool records name: every

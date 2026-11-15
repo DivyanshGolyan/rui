@@ -2,6 +2,7 @@
 //! reports, and fencing Attempts superseded by a control.
 
 const std = @import("std");
+const action_receipt = @import("../../action_receipt.zig");
 const model_attempt = @import("model_attempt.zig");
 const tool_proposal = @import("../../tool_proposal.zig");
 const FieldCertificate = @import("../../activity_read.zig").FieldCertificate;
@@ -953,9 +954,9 @@ const insert_call = rsql.Write(.{
 /// Under an `ask` revision it keeps its call's position as the feed's
 /// approval request.
 const insert_action = rsql.Write(.{
-    .sql = "INSERT INTO action_operation(action_id,parent_operation_id,call_ordinal,session_ref,tool_kind,permission_revision,authorized,bash_timeout_override_ms,resolution_code,decided_at,approval_position) " ++
-        "VALUES(?1,?2,?3,@session(?4),1,?5,?6,?7,NULL,CASE WHEN ?6=1 THEN @now END,?8)",
-    .Args = struct { action_id: u64, operation_id: u64, call_ordinal: u64, session: rsql.SessionHead, revision: u64, authorized: bool, timeout_ms: ?u64, approval_position: ?u64 },
+    .sql = "INSERT INTO action_operation(action_id,parent_operation_id,call_ordinal,session_ref,tool_kind,permission_revision,authorized,bash_timeout_override_ms,resolution_code,decided_at,approval_position,background_content_id,background_position,background_at,resolution_content_id,acceptance_position,resolved_at) " ++
+        "VALUES(?1,?2,?3,@session(?4),1,?5,?6,?7,CASE WHEN ?11 IS NOT NULL THEN 'failed' END,CASE WHEN ?6=1 THEN @now END,?8,?9,?10,CASE WHEN ?10 IS NOT NULL THEN @now END,?11,?12,CASE WHEN ?11 IS NOT NULL THEN @now END)",
+    .Args = struct { action_id: u64, operation_id: u64, call_ordinal: u64, session: rsql.SessionHead, revision: u64, authorized: bool, timeout_ms: ?u64, approval_position: ?u64, background_content_id: ?u64, background_position: ?u64, refusal_content_id: ?u64, refusal_position: ?u64 },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
@@ -1129,6 +1130,8 @@ pub const Batch = struct {
     /// Each item's id digest, or each call's call_id digest, in order.
     ids: DuplicateIds,
     digest_count: u8,
+    first_action_id: u64,
+    action_mask: u64,
     lookups: [max_lookups]LookupVisitor,
     lookup_count: u8,
     duplicates: DuplicateVisitor,
@@ -1182,8 +1185,26 @@ pub const Batch = struct {
         batch.last = false;
         batch.identity_count = 0;
         batch.digest_count = 0;
+        batch.first_action_id = 0;
+        batch.action_mask = 0;
         batch.lookup_count = 0;
         batch.duplicates = .{ .batch = batch };
+    }
+
+    fn planAction(batch: *Batch, index: usize, action_id: u64) !void {
+        if (index >= batch_items or action_id == 0) return error.CorruptStore;
+        const bit = @as(u64, 1) << @as(u6, @intCast(index));
+        if (batch.action_mask & bit != 0) return error.CorruptStore;
+        if (batch.action_mask == 0) batch.first_action_id = action_id;
+        if (action_id != batch.first_action_id + @popCount(batch.action_mask)) return error.CorruptStore;
+        batch.action_mask |= bit;
+    }
+
+    fn plannedAction(batch: *const Batch, index: usize) ?u64 {
+        std.debug.assert(index < batch_items);
+        const bit = @as(u64, 1) << @as(u6, @intCast(index));
+        if (batch.action_mask & bit == 0) return null;
+        return batch.first_action_id + @popCount(batch.action_mask & (bit - 1));
     }
 
     /// Ends the batch at `at`, where the collecting walk failed with
@@ -1393,7 +1414,7 @@ const PartBoundary = struct { offset: u64, identities: u16 };
 /// it, its rejection text. Unknown names collect both possible results before
 /// the history read, so deciding withdrawn versus unknown adds no round.
 /// Noinline keeps call inspection scratch off the subsequent SQL call chain.
-noinline fn collectCalls(batch: *Batch, output: *const ValidatedOutput, io: std.Io, start: u64, offered: *const tool_record.Offered) void {
+noinline fn collectCalls(a: anytype, batch: *Batch, output: *const ValidatedOutput, io: std.Io, start: u64, offered: *const tool_record.Offered, background_supported: bool) void {
     @setEvalBranchQuota(20_000);
     comptime std.debug.assert(batch_identities >= 4 * batch_items + 1);
     batch.reset(.calls, start);
@@ -1428,6 +1449,16 @@ noinline fn collectCalls(batch: *Batch, output: *const ValidatedOutput, io: std.
                         batch.history_needed = true;
                         const fits = batch.add(.ofBytes(tool_defs.removed_tool_result, false));
                         std.debug.assert(fits);
+                    }
+                    if (tool_defs.classifyCall(&facts) == null) {
+                        const action_id = a.identity(.action_id) catch |err| return batch.stop(err, record_start);
+                        batch.planAction(batch.digest_count, action_id) catch |err| return batch.stop(err, record_start);
+                        if (facts.execution == .background) {
+                            var buffer: action_receipt.Bytes = undefined;
+                            const text = if (background_supported) action_receipt.format(action_id, &buffer) else action_receipt.capacity_refusal;
+                            const fits = batch.add(.ofBytes(text, false));
+                            std.debug.assert(fits);
+                        }
                     }
                     if (tool_defs.classifyCall(&facts)) |code| {
                         var buffer: [192]u8 = undefined;
@@ -1527,6 +1558,7 @@ pub const SettleSuccess = struct {
         faults: Faults,
         /// The Store's settlement scratch (`Store.settlementBatch`).
         batch: *Batch,
+        background_supported: bool,
     };
     pub const Result = void;
     pub const Ordinary = store_core.Ordinary.model_success;
@@ -1597,6 +1629,7 @@ pub const SettleSuccess = struct {
             .purpose = purpose,
             .tools = .{ .names = batch.offered_names.slice(), .historical_digests = &batch.identity_digests, .withdrawn = &batch.withdrawn },
             .settling = t.success,
+            .background_supported = t.input.background_supported,
             .call_items = call_items,
         };
         t.settlement.call_item = try t.settlement.call_items.nextItem();
@@ -1681,6 +1714,7 @@ const Settlement = struct {
     purpose: ModelOperationKind,
     tools: tool_record.Offered,
     settling: success_facts.Row,
+    background_supported: bool,
     imported_items: u64 = 0,
     imported_calls: u64 = 0,
     entries: u64 = 0,
@@ -1707,13 +1741,13 @@ const Settlement = struct {
                     } else if (batch.last) {
                         try s.itemsDone();
                         oversized.cut = null;
-                        collectCalls(batch, s.output, s.io, 0, &s.tools);
+                        collectCalls(a, batch, s.output, s.io, 0, &s.tools, s.background_supported);
                     } else collectItems(batch, s.output, s.io, batch.end, false, &oversized.cut);
                 },
                 .calls => {
                     try s.writeCalls(a, batch);
                     if (batch.last) break;
-                    collectCalls(batch, s.output, s.io, batch.end, &s.tools);
+                    collectCalls(a, batch, s.output, s.io, batch.end, &s.tools, s.background_supported);
                 },
             }
             // A batch with nothing to read has nothing to write.
@@ -2049,12 +2083,23 @@ const Settlement = struct {
             }
             break :id row.id;
         } else null;
-        try s.recordCall(a, &fields, .{ name_content_id, call_id_content_id, arguments_content_id }, &call_facts, rejection_code, rejection_content_id);
+        const action_id = if (rejection_code == null) batch.plannedAction(index) orelse return error.OutputSourceChanged else null;
+        const background_content_id: ?u64 = if (action_id != null and call_facts.execution == .background) content_id: {
+            var buffer: action_receipt.Bytes = undefined;
+            const text = if (s.background_supported) action_receipt.format(action_id.?, &buffer) else action_receipt.capacity_refusal;
+            const row = try content(a, batch, .ofBytes(text, false));
+            if (try sinkFor(a, row, text.len)) |sink| {
+                defer sink.close();
+                try sink.write(text, 0);
+            }
+            break :content_id row.id;
+        } else null;
+        try s.recordCall(a, &fields, .{ name_content_id, call_id_content_id, arguments_content_id }, &call_facts, rejection_code, rejection_content_id, action_id, background_content_id);
     }
 
     /// All content sinks have closed before saving the certificate and
     /// line. Keep their bounded row-binding scratch off those sink paths.
-    noinline fn recordCall(s: *Settlement, a: anytype, fields: *const [3]OutputMetadataRecord, content_ids: [3]u64, call_facts: *const tool_defs.CallFacts, rejection_code: ?tool_proposal.Rejection, rejection_content_id: ?u64) !void {
+    noinline fn recordCall(s: *Settlement, a: anytype, fields: *const [3]OutputMetadataRecord, content_ids: [3]u64, call_facts: *const tool_defs.CallFacts, rejection_code: ?tool_proposal.Rejection, rejection_content_id: ?u64, planned_action_id: ?u64, background_content_id: ?u64) !void {
         const record = fields[2];
         const name_content_id, const call_id_content_id, const arguments_content_id = content_ids;
         // The call's certificate: (little-endian length, SHA-256) for its
@@ -2083,7 +2128,8 @@ const Settlement = struct {
         if (rejection_code != null) return;
         // A core tool acts only on the Store, so no person decides it.
         const authorized = call_facts.tool.?.runner() == .core or s.settling.permission_mode;
-        const action_id = try a.identity(.action_id);
+        const action_id = planned_action_id orelse return error.OutputSourceChanged;
+        const refused = background_content_id != null and !s.background_supported;
         a.write(insert_action, .{
             .action_id = action_id,
             .operation_id = s.binding.operation_id,
@@ -2092,9 +2138,13 @@ const Settlement = struct {
             .revision = s.settling.revision.get(),
             .authorized = authorized,
             .timeout_ms = if (call_facts.bashArguments()) |arguments| arguments.timeout_ms else null,
-            .approval_position = if (authorized) null else s.first_item_position + record.ordinal,
+            .approval_position = if (authorized or refused) null else s.first_item_position + record.ordinal,
+            .background_content_id = if (refused) null else background_content_id,
+            .background_position = if (!refused and background_content_id != null) try s.positions.take(1) else null,
+            .refusal_content_id = if (refused) background_content_id else null,
+            .refusal_position = if (refused) try s.positions.take(1) else null,
         });
-        if (!authorized) try forward_domain.queue(a, &s.session.ref, &s.session.ref, .approval, action_id);
+        if (!authorized and !refused) try forward_domain.queue(a, &s.session.ref, &s.session.ref, .approval, action_id);
     }
 };
 
@@ -2209,7 +2259,7 @@ noinline fn callDescription(facts: *const tool_defs.CallFacts, io: std.Io, file:
         try fallback.set(tool.name);
         // Classification already checked the JSON. Invalid arguments retain
         // the name without trying to extract a line from a rejected document.
-        if (facts.invalid_mcp_arguments) return fallback;
+        if (facts.invalid_arguments) return fallback;
         var source: output_format.JsonStringSource = .{
             .encoded = .{ .io = io, .file = file, .position = arguments.start, .end = try arguments.end() },
         };
@@ -2273,4 +2323,23 @@ pub noinline fn validateJsonFile(io: std.Io, file: std.Io.File) !bool {
         if (json_reader.stackHeight() > @import("../../json_limits.zig").max_depth) return false;
         if (token == .end_of_document) return true;
     }
+}
+
+test "background batch Action plans keep sparse call ordinals within resident ceiling" {
+    var batch: Batch = undefined;
+    batch.reset(.calls, 0);
+    try batch.planAction(0, 420);
+    try batch.planAction(2, 421);
+    try batch.planAction(63, 422);
+    try std.testing.expectEqual(@as(?u64, 420), batch.plannedAction(0));
+    try std.testing.expectEqual(@as(?u64, null), batch.plannedAction(1));
+    try std.testing.expectEqual(@as(?u64, 421), batch.plannedAction(2));
+    try std.testing.expectEqual(@as(?u64, 422), batch.plannedAction(63));
+    try std.testing.expectError(error.CorruptStore, batch.planAction(63, 423));
+    batch.reset(.calls, 0);
+    try batch.planAction(0, 500);
+    try std.testing.expectError(error.CorruptStore, batch.planAction(1, 502));
+    try std.testing.expectEqual(@as(?u64, null), batch.plannedAction(1));
+    try batch.planAction(1, 501);
+    try std.testing.expectEqual(@as(?u64, 501), batch.plannedAction(1));
 }

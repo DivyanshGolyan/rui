@@ -45,6 +45,9 @@ pub const Command = enum {
     action_inspect,
     action_allow,
     action_deny,
+    action_background,
+    action_stop,
+    action_read,
     action_read_call_id,
     action_read_arguments,
     host_start,
@@ -90,6 +93,9 @@ pub const Command = enum {
             .action_inspect => .{ .resource = .action, .name = "inspect", .description = "Read the exact saved Action proposal before allowing or denying it. Inspection grants nothing.", .options = destination ++ session ++ action, .requires = need_action },
             .action_allow => .{ .resource = .action, .name = "allow", .description = "Admit permission to run this exact inspected Action once; the Host revalidates its target.", .options = destination ++ session ++ action ++ capture, .mutation = true, .requires = need_action },
             .action_deny => .{ .resource = .action, .name = "deny", .description = "Admit denial of this exact inspected Action.", .options = destination ++ session ++ action ++ capture, .mutation = true, .requires = need_action },
+            .action_background => .{ .resource = .action, .name = "background", .description = "Promote this Session's existing Action to background waiting without restarting its effect. A capacity refusal leaves the original call unchanged.", .options = destination ++ session ++ action ++ capture, .mutation = true, .requires = need_action },
+            .action_stop => .{ .resource = .action, .name = "stop", .description = "Select a stop of this Session's Action. Acceptance is not proof that an attempted remote effect did not run.", .options = destination ++ session ++ action ++ capture, .mutation = true, .requires = need_action },
+            .action_read => .{ .resource = .action, .name = "read", .description = "Read an Action's status and one final-result window; --offset continues at a returned byte cursor. Does not wait or consume.", .options = destination ++ session ++ action ++ &[_]Option{value("offset", "BYTES")}, .requires = need_action },
             .action_read_call_id => .{ .resource = .action, .name = "read-call-id", .description = "Stream the exact saved Action call ID bytes.", .options = destination ++ session ++ action, .requires = need_action },
             .action_read_arguments => .{ .resource = .action, .name = "read-arguments", .description = "Stream the exact saved Action argument bytes.", .options = destination ++ session ++ action, .requires = need_action },
             .host_start => .{ .resource = .host, .name = "start", .description = "Start or connect to a managed Host. An already-running Host keeps its original settings.", .options = serve_grammar.settings_options, .retired_options = serve_grammar.retired_options },
@@ -758,7 +764,7 @@ test "tool help lists every built-in including skill in name order" {
         var help: std.Io.Writer.Allocating = .init(std.testing.allocator);
         defer help.deinit();
         try command.definition().help(&help.writer);
-        try std.testing.expect(std.mem.indexOf(u8, help.written(), "--tools bash,find_tools,message_agent,read_transcript,skill,start_agent,web_search|none") != null);
+        try std.testing.expect(std.mem.indexOf(u8, help.written(), "--tools bash,find_tools,message_agent,read_action,read_transcript,skill,start_agent,stop_action,web_search|none") != null);
     }
 }
 

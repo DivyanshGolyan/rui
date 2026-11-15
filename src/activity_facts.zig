@@ -37,14 +37,13 @@ pub const Item = struct {
     /// The Host Unix second the row's owning fact committed.
     at: u64,
     value: Value,
-    /// `admission` is a Message a person or script sent; `received` one
-    /// another Session sent, which always names it as `sender`.
+    /// `admission` is person input or a tool final; `received` is peer input.
     pub const Value = union(activity_read.Kind) { admission: Message, user: Message, assistant: Assistant, call: Call, tool_result: struct { content: Content, presentation: ToolPresentation }, hosted_call: ToolPresentation, turn_ended: TurnEnded, stop: Stop, sent: Sent, send_failed: SendFailed, received: Message, approval_requested: ApprovalRequested, session_changed: SessionChanged, compacted: Compacted, model_call: ModelCall };
     pub const Kind = std.meta.Tag(Value);
     pub const Content = struct { length: u64, digest: [32]u8 };
+    pub const MessageSource = union(enum) { person: Bounded(idempotency_key.max_bytes), peer: struct { key: Bounded(idempotency_key.max_bytes), sender: NamedPeer }, tool_final: u64 };
     // `admitted_at` is the Host wall-clock second the Message was admitted.
-    // A null `sender` means a human or script sent the Message.
-    pub const Message = struct { admission: u64, key: Bounded(idempotency_key.max_bytes), turn: ?u64, state: enum { queued, applied, excluded }, content: Content, admitted_at: u64, sender: ?NamedPeer = null };
+    pub const Message = struct { admission: u64, source: MessageSource, turn: ?u64, state: enum { queued, applied, excluded }, content: Content, admitted_at: u64 };
     pub const Call = activity_read.ProposalMetadata;
     /// `final` marks the Turn's answer: the assistant row a `done` Turn
     /// ended with, once its `turn_ended` row is within the page's end.

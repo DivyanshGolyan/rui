@@ -51,6 +51,8 @@ pub const Target = union(CommandKind) {
     session_archive: struct { archived: bool },
     model_interruption: struct { turn: u64, operation: u64 },
     permission_decision: struct { action: u64, decision: PermissionDecision },
+    action_background: u64,
+    action_stop: u64,
 };
 
 pub const Answer = struct {
@@ -60,10 +62,12 @@ pub const Answer = struct {
         accepted: union(enum) {
             configure: struct { revision: u64, created: bool, skills: ?SkillsReloadStatus = null },
             message: struct { admission: u64 },
-            session_stop: struct { turn: ?u64, admission_cutoff: u64, completion: SessionStopCompletion },
+            session_stop: struct { turn: ?u64, admission_cutoff: u64, action_cutoff: u64 = 0, completion: SessionStopCompletion },
             session_archive: SessionArchiveObservation,
             model_interruption,
             permission_decision,
+            action_background: @import("action_control.zig").Selection,
+            action_stop: @import("action_control.zig").Selection,
         },
         rejected: Bounded(max_code_bytes),
         conflict,
@@ -95,8 +99,10 @@ pub const Wire = struct {
         admission: OmittableJson(JsonString(20)) = .{},
         action: OmittableJson(JsonString(20)) = .{},
         decision: OmittableJson(JsonString(16)) = .{},
+        operation: OmittableJson(JsonEnum(@import("action_control.zig").Kind)) = .{},
+        action_selection: OmittableJson(struct { kind: JsonEnum(@FieldType(@import("action_control.zig").Selection, "kind")), position: JsonString(20) }) = .{},
         archived: OmittableJson(bool) = .{},
-        selection: OmittableJson(struct { turn: ?JsonString(20), admission_cutoff: JsonString(20) }) = .{},
+        selection: OmittableJson(struct { turn: ?JsonString(20), admission_cutoff: JsonString(20), action_cutoff: ?JsonString(20) = null }) = .{},
         target: OmittableJson(struct { session: JsonString(max_session_bytes), turn: JsonString(20), operation: JsonString(20) }) = .{},
     }) = .{},
     input: OmittableJson(struct { type: JsonString(8), bytes: JsonString(20), sha256: JsonString(64) }) = .{},
@@ -127,6 +133,7 @@ pub fn decide(current_version: []const u8, wire: Wire, status: u16, session: []c
         .session_archive => "session_archive_reply",
         .model_interruption => "model_interruption_reply",
         .permission_decision => "permission_decision_reply",
+        .action_background, .action_stop => "action_control_reply",
     };
     if (!wire.version.eql(current_version) or !wire.type.eql(expected_type) or wire.code.value != null) return error.InvalidResponse;
     const answer = wire.answer.value orelse return error.InvalidResponse;
@@ -148,7 +155,13 @@ pub fn decide(current_version: []const u8, wire: Wire, status: u16, session: []c
     if (target == .permission_decision) {
         if (try decimalId(answer.action.value orelse return error.InvalidResponse, true) != target.permission_decision.action or
             !(answer.decision.value orelse return error.InvalidResponse).eql(@tagName(target.permission_decision.decision))) return error.RequestBindingMismatch;
+    } else if (target == .action_background or target == .action_stop) {
+        const expected = if (target == .action_background) target.action_background else target.action_stop;
+        if (try decimalId(answer.action.value orelse return error.InvalidResponse, false) != expected or
+            (answer.operation.value orelse return error.InvalidResponse).value != (if (target == .action_background) @import("action_control.zig").Kind.background else .stop)) return error.RequestBindingMismatch;
+        if (answer.decision.value != null) return error.InvalidResponse;
     } else if (answer.action.value != null or answer.decision.value != null) return error.InvalidResponse;
+    if (target != .action_background and target != .action_stop and (answer.operation.value != null or answer.action_selection.value != null)) return error.InvalidResponse;
     const accepted = answer.status.eql("accepted");
     const conflict = answer.status.eql("conflict");
     if ((!accepted and !conflict and !answer.status.eql("rejected")) or (status == 409) != conflict) return error.InvalidResponse;
@@ -158,7 +171,7 @@ pub fn decide(current_version: []const u8, wire: Wire, status: u16, session: []c
         if (answer.code.value != null) return error.InvalidResponse;
     } else {
         const code = answer.code.value orelse return error.InvalidResponse;
-        if (code.slice().len == 0 or answer.revision.value != null or answer.created.value != null or answer.admission.value != null or answer.selection.value != null or answer.archived.value != null) return error.InvalidResponse;
+        if (code.slice().len == 0 or answer.revision.value != null or answer.created.value != null or answer.admission.value != null or answer.selection.value != null or answer.archived.value != null or answer.action_selection.value != null) return error.InvalidResponse;
         if (conflict and (!code.eql("idempotency_key_conflict") or answer.replayed)) return error.InvalidResponse;
     }
     var value: @FieldType(@FieldType(Answer, "result"), "accepted") = undefined;
@@ -196,6 +209,7 @@ pub fn decide(current_version: []const u8, wire: Wire, status: u16, session: []c
                 value = .{ .session_stop = .{
                     .turn = if (selection.turn) |turn| try decimalId(turn, false) else null,
                     .admission_cutoff = try decimalId(selection.admission_cutoff, true),
+                    .action_cutoff = if (selection.action_cutoff) |cutoff| try decimalId(cutoff, true) else 0,
                     .completion = std.meta.stringToEnum(@FieldType(@FieldType(@TypeOf(value), "session_stop"), "completion"), completion.status.slice()) orelse return error.InvalidResponse,
                 } };
             } else if (!completion.status.eql("unavailable")) return error.InvalidResponse;
@@ -216,6 +230,13 @@ pub fn decide(current_version: []const u8, wire: Wire, status: u16, session: []c
         },
         .permission_decision => if (accepted) {
             value = .permission_decision;
+        },
+        .action_background, .action_stop => if (accepted) {
+            const selection = answer.action_selection.value orelse return error.InvalidResponse;
+            const kind = selection.kind.value;
+            if (target == .action_background and kind == .stop or target == .action_stop and kind == .background) return error.InvalidResponse;
+            const selected: @import("action_control.zig").Selection = .{ .kind = kind, .position = try decimalId(selection.position, false) };
+            value = if (target == .action_background) .{ .action_background = selected } else .{ .action_stop = selected };
         },
     }
     if ((target != .configure and (answer.revision.value != null or answer.created.value != null)) or

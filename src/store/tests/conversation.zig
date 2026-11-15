@@ -173,7 +173,7 @@ test "private-only model output never becomes public conversation" {
                 .response_id = .{},
                 .model_evidence = testing_absent_model_evidence,
                 .request_id = .{},
-            }, .{});
+            }, true, .{});
             var request = protocol.ConversationPage{};
             try request.session.set(session.slice());
             const page = try store_core.publicConversationPageForTesting(&storage, request);

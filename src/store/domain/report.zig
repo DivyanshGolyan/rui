@@ -4,6 +4,7 @@
 //! binding.
 
 const std = @import("std");
+const sourced_input = @import("sourced_input.zig");
 const obligation = @import("session_obligation.zig");
 const attempt = @import("../../attempt.zig");
 const named_scratch = @import("../../named_scratch.zig");
@@ -266,7 +267,7 @@ pub const FirstCandidates = struct {
 
 /// The latest Message to the Session ?1 with no Session sender.
 pub const person_message_sql = "SELECT admitted_at FROM message_admission @index(message_admission_person) " ++
-    "WHERE session_ref=?1 AND sender_session_ref IS NULL ORDER BY admission_position DESC LIMIT 1";
+    "WHERE session_ref=?1 AND sender_session_ref IS NULL AND final_action_id IS NULL ORDER BY admission_position DESC LIMIT 1";
 
 pub const person_message = rsql.Read(.{
     .sql = person_message_sql,
@@ -1552,7 +1553,7 @@ pub const full_messages = rsql.Page(.{
     .arms = &.{.{
         .on = .{ .index = "message_admission_position" },
         .alias = "m",
-        .columns = "m.admission_id,m.command_key,m.content_id,input.byte_length AS content_length,input.digest AS content_digest," ++
+        .columns = "m.admission_id,m.command_key,m.final_action_id," ++ sourced_input.consistentSql("m") ++ " AS source_consistent,m.content_id,input.byte_length AS content_length,input.digest AS content_digest," ++
             "m.turn_id,t.operation_id,o.attempt_ordinal,t.outcome_code,t.outcome_content_id,outcome.byte_length AS outcome_length,outcome.digest AS outcome_digest," ++
             "CASE WHEN m.turn_id IS NULL THEN (SELECT stopped.command_key FROM session_stop stopped " ++
             "WHERE stopped.session_ref=m.session_ref AND stopped.admission_cutoff>=m.admission_id " ++
@@ -1564,7 +1565,9 @@ pub const full_messages = rsql.Page(.{
     .Row = struct {
         admission_position: rsql.Positive,
         admission_id: rsql.Positive,
-        command_key: Bounded(128),
+        command_key: ?Bounded(128),
+        final_action_id: ?rsql.Positive,
+        source_consistent: bool,
         content_id: rsql.Positive,
         content_length: u64,
         content_digest: [32]u8,
@@ -1618,11 +1621,13 @@ pub const Messages = struct {
     /// Its outcome's reference is checked after its content, which main
     /// streamed first.
     pub fn values(a: *ReadAccess, row: *const S.Row) !session_report.FullRow {
+        if (!row.source_consistent) return error.CorruptStore;
         const projection = try command_domain.projectMessage(row, if (row.excluding_stop) |*stop| stop.slice() else null);
         const content: session_report.Text = .{ .id = row.content_id.get(), .length = row.content_length, .digest = row.content_digest };
         return .{ .message = .{
             .admission = projection.admission_id,
-            .command_key = row.command_key.slice(),
+            .command_key = optionalSlice(&row.command_key),
+            .source_action = if (row.final_action_id) |id| id.get() else null,
             .content = content,
             .application = switch (projection.state) {
                 .applied => |applied| .{ .applied = .{
@@ -2064,18 +2069,6 @@ const Interruptions = struct {
     }
 };
 
-/// The Session's Tool Results, by Operation, then acceptance: a rejected
-/// call's result is its rejection, an accepted call's its Action's
-/// resolution (the tables' checks keep a rejected call without an
-/// Action), each walked on its own table's index and merged. Positions
-/// are unique per Session, so the key orders every result; `next` makes
-/// a tie `CorruptStore`. A resolution's call is a LEFT JOIN: a missing
-/// call decodes NULL into `call_id`, which is `CorruptStore`, never a
-/// dropped row. On SQLite, each arm:
-///   ... FROM model_tool_call tool_call INDEXED BY model_tool_call_session_results ...
-///   WHERE tool_call.session_ref=?1 AND tool_call.acceptance_position IS NOT NULL
-///   AND (tool_call.operation_id,tool_call.acceptance_position)>(?2,?3)
-/// merged by ORDER BY operation_id,acceptance_position LIMIT 9.
 pub const full_results = rsql.Page(.{
     .arms = &.{
         .{
@@ -2096,6 +2089,16 @@ pub const full_results = rsql.Page(.{
             .joins = "LEFT JOIN model_tool_call tool_call ON tool_call.operation_id=action.parent_operation_id AND tool_call.call_ordinal=action.call_ordinal " ++
                 "LEFT JOIN content call_id_content ON call_id_content.content_id=tool_call.call_id_content_id " ++
                 "LEFT JOIN content result ON result.content_id=action.resolution_content_id",
+        },
+        .{
+            .on = .{ .index = "action_operation_background_results" },
+            .alias = "action",
+            .columns = "action.call_ordinal,tool_call.call_id_content_id AS call_id,call_id_content.byte_length AS call_id_length," ++
+                "call_id_content.digest AS call_id_digest,'background' AS code,action.background_content_id AS result_id," ++
+                "result.byte_length AS result_length,result.digest AS result_digest",
+            .joins = "LEFT JOIN model_tool_call tool_call ON tool_call.operation_id=action.parent_operation_id AND tool_call.call_ordinal=action.call_ordinal " ++
+                "LEFT JOIN content call_id_content ON call_id_content.content_id=tool_call.call_id_content_id " ++
+                "LEFT JOIN content result ON result.content_id=action.background_content_id",
         },
     },
     .Row = struct {

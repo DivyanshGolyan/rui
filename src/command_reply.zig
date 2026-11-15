@@ -77,6 +77,8 @@ pub const CommandObservation = struct {
         session_archive: ?mutation_answer.SessionArchiveObservation,
         model_interruption: ModelInterruptionTarget,
         permission_decision: struct { action_id: u64, decision: mutation_answer.PermissionDecision },
+        action_background: @import("action_control.zig").Observation,
+        action_stop: @import("action_control.zig").Observation,
     } = .{ .configure = .{} },
 
     /// The Host's one ordered Message-state rule. Clients consume this value.
@@ -101,6 +103,7 @@ pub const CommandObservation = struct {
 pub const SessionStopSelection = struct {
     selected_turn_id: ?u64 = null,
     admission_cutoff: u64,
+    action_cutoff: u64 = 0,
 };
 
 pub const SessionStopObservation = struct {
@@ -160,6 +163,7 @@ pub const PublicConversationItem = struct {
     presentation: ?tool_presentation.ToolPresentation = null,
     admitted_at: ?u64 = null, // The Host wall-clock second a User item was admitted.
     sender: ?protocol.NamedPeer = null, // A User item's sending peer Session.
+    source_action: ?u64 = null,
 };
 
 pub const PublicConversationPage = struct {

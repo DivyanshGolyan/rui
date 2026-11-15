@@ -16,12 +16,10 @@ pub fn run(store: *storage.Store, arena: std.mem.Allocator, input: *const storag
     // argument scratch in the same arena as the feed windows.
     const arguments = try arena.create(core.ReadTranscript);
     arguments.* = .{};
-    const check: core.ReadTranscriptCheck = if (input.arguments.length > core.read_transcript_max_argument_bytes)
-        .{ .rejected = "the arguments take more than 4096 bytes" }
-    else check: {
-        const bytes = try arena.alloc(u8, @intCast(input.arguments.length));
-        try store.readCoreArguments(input, bytes);
-        break :check try core.checkReadTranscript(arena, bytes, arguments);
+    const check: core.ReadTranscriptCheck = checked: {
+        const bytes = try arena.alloc(u8, @intCast(@min(input.arguments.length, core.read_transcript_max_argument_bytes)));
+        const payload = (try store.readCoreToolArguments(input, bytes)) orelse break :checked .{ .rejected = "the arguments take more than 4096 bytes" };
+        break :checked try core.checkReadTranscript(arena, payload, arguments);
     };
     if (check == .rejected) return fail(store, arena, input, check.rejected, faults);
     const session = if (arguments.id) |id| id.slice() else input.session.slice();
@@ -188,9 +186,12 @@ fn outline(store: *storage.Store, arena: std.mem.Allocator, session: []const u8,
     try out.print("{d}.{d} {s}", .{ item.position, item.ordinal, @tagName(item.value) });
     var note: ?protocol.Bounded(protocol.max_tool_description_bytes) = null;
     switch (item.value) {
-        .admission, .user => try out.writeAll(" person"),
-        // A Label is display text, never model input: only the sender's ID.
-        .received => |message| if (message.sender) |sender| try out.print(" {s}", .{sender.session.slice()}),
+        .admission, .user, .received => |message| switch (message.source) {
+            .tool_final => |id| try out.print(" tool-final Action {d}", .{id}),
+            .person => try out.writeAll(" person"),
+            // A Label is display text, never model input: only the sender's ID.
+            .peer => |peer| try out.print(" {s}", .{peer.sender.session.slice()}),
+        },
         .sent => |sent| try out.print(" {s}", .{sent.target.session.slice()}),
         .send_failed => |sent| if (sent.target) |target|
             try out.print(" {s}", .{target.session.slice()})

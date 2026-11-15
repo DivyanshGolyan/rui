@@ -7,6 +7,7 @@
 const std = @import("std");
 const document = @import("document.zig");
 const shape = @import("shape.zig");
+const tool_execution = @import("../tool_execution.zig");
 const json = @import("../codecs/json.zig");
 const codec_abi = @import("../codec_abi.zig");
 
@@ -32,6 +33,7 @@ pub fn writeForServer(writer: *std.Io.Writer, input_schema: []const u8, argument
             if (split.description == null) split.description = description(found.value);
             continue;
         }
+        if (document.keyIs(found.key, tool_execution.property)) continue;
         const listed = properties orelse continue;
         if (document.kind(listed) != .object or !hasKey(listed, found.key)) continue;
         if (!first) try writer.writeByte(',');
@@ -213,4 +215,11 @@ test "streamed description propagates source errors before and after a match" {
         var source: DescriptionSource = .{ .bytes = arguments, .fail_at = fail_at };
         try std.testing.expectError(error.SourceFailed, descriptionRange(&source));
     }
+}
+
+test "execution metadata never crosses the MCP server boundary even if its schema lists it" {
+    var buffer: [1024]u8 = undefined;
+    const result = try forServer(&buffer, "{\"properties\":{\"q\":{},\"rui_execution\":{},\"rui_call_description\":{}}}", "{\"q\":\"x\",\"rui_execution\":\"background\",\"rui_call_description\":\"Find x\"}");
+    try std.testing.expectEqualStrings("{\"q\":\"x\"}", result.text);
+    try std.testing.expectEqualStrings("Find x", result.split.description.?);
 }

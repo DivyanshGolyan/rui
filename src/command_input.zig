@@ -414,6 +414,26 @@ pub const PermissionDecisionCommand = struct {
     }
 };
 
+pub const ActionControlCommand = struct {
+    store: Bounded(max_store_bytes) = .{},
+    key: Bounded(max_key_bytes) = .{},
+    session: Bounded(max_session_bytes) = .{},
+    action_id: u64 = 0,
+
+    pub fn semanticDigest(self: *const ActionControlCommand, kind: @import("action_control.zig").Kind) [32]u8 {
+        var hash = std.crypto.hash.sha2.Sha256.init(.{});
+        hashField(&hash, switch (kind) {
+            .background => "rui/core/action-background/v1",
+            .stop => "rui/core/action-stop/v1",
+        });
+        hashField(&hash, self.session.slice());
+        var value: [8]u8 = undefined;
+        std.mem.writeInt(u64, &value, self.action_id, .big);
+        hash.update(&value);
+        return hash.finalResult();
+    }
+};
+
 fn hashField(hash: *std.crypto.hash.sha2.Sha256, value: []const u8) void {
     var length: [8]u8 = undefined;
     std.mem.writeInt(u64, &length, value.len, .big);

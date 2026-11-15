@@ -26,6 +26,7 @@ const command_input = @import("../../command_input.zig");
 const store_core = @import("../Store.zig");
 const Store = store_core.Store;
 const action_domain = @import("action.zig");
+const sourced_input = @import("sourced_input.zig");
 const configuration_domain = @import("configuration.zig");
 const content_domain = @import("content.zig");
 const reads_domain = @import("reads.zig");
@@ -83,8 +84,6 @@ pub const max_permission_decision_bytes = sqlite.maxEnumTagBytes(mutation_answer
 
 const MessageProjection = struct {
     admission_id: u64,
-    command_key: Bounded(128),
-    content_id: i64,
     state: union(enum) {
         pending,
         excluded: Bounded(128),
@@ -103,7 +102,7 @@ const MessageProjection = struct {
 const message_sender = rsql.Read(.{
     .sql = "SELECT s.session_ref,s.workspace_key,s.next_position FROM action_operation action JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
         "JOIN session s ON s.session_ref=action.session_ref WHERE action.sender_handle=?1 AND action.attempt_ordinal=1 AND action.resolution_code IS NULL " ++
-        "AND NOT EXISTS(SELECT 1 FROM session_stop stop WHERE stop.selected_turn_id=operation.turn_id) LIMIT 1",
+        "AND NOT " ++ sourced_input.actionStoppedSql("action", "operation") ++ " LIMIT 1",
     .Args = struct { handle: []const u8 },
     .Row = struct { session: rsql.SessionHead },
     .cardinality = .optional,
@@ -118,22 +117,7 @@ const message_replay = rsql.Read(.{
     .cardinality = .one,
 });
 
-/// A person's Message.
-const admit_message = rsql.Write(.{
-    .sql = "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at) VALUES(?1,@session(?2),?3,?4,?5,@now)",
-    .Args = struct { admission_id: u64, session: rsql.SessionHead, key: []const u8, content_id: u64, position: u64 },
-    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
-});
-pub const admit_message_sql = admit_message.sql;
-
-/// A peer's Message: the sender's own position orders the send among its
-/// other facts.
-const admit_sent_message = rsql.Write(.{
-    .sql = "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at,sender_session_ref,sender_position) " ++
-        "VALUES(?1,@session(?2),?3,?4,?5,@now,@session(?6),?7)",
-    .Args = struct { admission_id: u64, session: rsql.SessionHead, key: []const u8, content_id: u64, position: u64, sender: rsql.SessionHead, sender_position: u64 },
-    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
-});
+pub const admit_message_sql = sourced_input.admit_sql;
 
 /// The one writer of a Message from another Session. Heads were read (or
 /// created) by the caller in this transaction; admission never adds a round.
@@ -150,17 +134,7 @@ fn admitFromSession(
     answer: *const StoredAnswer,
 ) !u64 {
     try queueMessageCommand(a, target, key, content_id, digest, configured, answer);
-    const admission_id = try a.identity(.admission_id);
-    a.write(admit_sent_message, .{
-        .admission_id = admission_id,
-        .session = target.*,
-        .key = key,
-        .content_id = content_id,
-        .position = try (try a.positions(target.*)).take(1),
-        .sender = sender.*,
-        .sender_position = try (try a.positions(sender.*)).take(1),
-    });
-    return admission_id;
+    return sourced_input.queue(a, target.*, .{ .peer = .{ .key = key, .sender = sender.* } }, content_id);
 }
 
 fn queueMessageCommand(a: anytype, target: *const rsql.SessionHead, key: []const u8, content_id: u64, digest: *const [32]u8, configured: ?*const configuration_domain.Applied, answer: *const StoredAnswer) !void {
@@ -534,9 +508,7 @@ pub const SubmitMessage = struct {
             try admitFromSession(r, &message.sender.?.session, &t.head, command.key.slice(), text_id, &message.digest, configured, &t.answer)
         else person: {
             try queueMessageCommand(r, &t.head, command.key.slice(), text_id, &message.digest, configured, &t.answer);
-            const admission_id = try r.identity(.admission_id);
-            r.write(admit_message, .{ .admission_id = admission_id, .session = t.head, .key = command.key.slice(), .content_id = text_id, .position = try (try r.positions(t.head)).take(1) });
-            break :person admission_id;
+            break :person try sourced_input.queue(r, t.head, .{ .person = command.key.slice() }, text_id);
         };
         t.later = .{ .skills = .{ .admission_id = admission_id, .bound = message.bound } };
         t.admission_id = admission_id;
@@ -719,7 +691,7 @@ pub const DeliverAgentMessage = struct {
 
     fn resolve(t: *DeliverAgentMessage, r: *transition.Round(DeliverAgentMessage)) !transition.Next(DeliverAgentMessage) {
         const outcome_id = try content_domain.importBytes(r, &t.outcome, t.result);
-        try action_domain.queueResolution(r, t.input.binding, t.facts.?.session, if (t.delivered) .succeeded else .failed, outcome_id);
+        try action_domain.queueResolution(r, t.input.binding, t.facts.?.session, t.facts.?.background, if (t.delivered) .succeeded else .failed, outcome_id);
         if (r.faults().before_commit) return error.InjectedCommitFailure;
         return .commit;
     }
@@ -1108,7 +1080,7 @@ pub const StartAgent = struct {
     /// Imports the result and resolves the call, then commits.
     fn resolve(t: *StartAgent, r: *transition.Round(StartAgent)) !transition.Next(StartAgent) {
         const outcome_id = try content_domain.importBytes(r, &t.outcome, t.result);
-        try action_domain.queueResolution(r, t.input.binding, t.facts.?.session, if (t.applied != null) .succeeded else .failed, outcome_id);
+        try action_domain.queueResolution(r, t.input.binding, t.facts.?.session, t.facts.?.background, if (t.applied != null) .succeeded else .failed, outcome_id);
         if (r.faults().before_commit) return error.InjectedCommitFailure;
         return .commit;
     }
@@ -1460,7 +1432,7 @@ pub const ResolveCoreCall = struct {
         if (found.stopped) return .{ .done = false };
         if (r.faults().content_import) return error.InjectedContentImportFailure;
         const outcome_id = try content_domain.importBytes(r, &t.outcome, t.input.result);
-        try action_domain.queueResolution(r, binding, found.session, t.input.code, outcome_id);
+        try action_domain.queueResolution(r, binding, found.session, found.background, t.input.code, outcome_id);
         if (r.faults().before_commit) return error.InjectedCommitFailure;
         return .commit;
     }
@@ -1475,6 +1447,9 @@ pub const ResolveCoreCall = struct {
 /// any: the cause and position its owed key names.
 const stop_target = rsql.Read(.{
     .sql = "SELECT session_ref,workspace_key,next_position,(SELECT coalesce(max(admission_id),0) FROM message_admission WHERE session_ref=?1) AS admission_cutoff," ++
+        "(SELECT coalesce(max(action_id),0) FROM action_operation WHERE session_ref=?1) AS action_cutoff," ++
+        "(SELECT count(*) FROM action_operation WHERE session_ref=?1 AND resolution_code IS NULL AND attempt_ordinal=0) AS cancellable," ++
+        "EXISTS(SELECT 1 FROM action_operation WHERE session_ref=?1 AND resolution_code IS NULL AND attempt_ordinal=1) AS in_flight," ++
         turn_domain.unowedChildrenSql("?1") ++ " AS unowed_children," ++
         "(SELECT cause_ref FROM session_stop_owed WHERE child_ref=?1 AND settled=0) AS owed_cause,(SELECT cause_position FROM session_stop_owed WHERE child_ref=?1 AND settled=0) AS owed_position " ++
         "FROM session WHERE session_ref=?1",
@@ -1482,6 +1457,9 @@ const stop_target = rsql.Read(.{
     .Row = struct {
         session: rsql.SessionHead,
         admission_cutoff: u64,
+        action_cutoff: u64,
+        cancellable: u64,
+        in_flight: bool,
         unowed_children: u64,
         owed_cause: ?Bounded(session_id.bytes),
         owed_position: ?u64,
@@ -1514,16 +1492,16 @@ const stop_turn = rsql.Read(.{
 /// The Actions of `operation_id` a stop cancels, in call order, from the
 /// call `after` on.
 const cancellable_actions = rsql.Read(.{
-    .sql = "SELECT action_id,call_ordinal FROM action_operation WHERE parent_operation_id=?1 AND resolution_code IS NULL AND attempt_ordinal=0 " ++
-        "AND call_ordinal>=?2 ORDER BY call_ordinal",
-    .Args = struct { operation_id: u64, after: u64 },
-    .Row = struct { action_id: rsql.Positive, call_ordinal: u64 },
+    .sql = "SELECT action_id FROM action_operation WHERE session_ref=?1 AND resolution_code IS NULL AND attempt_ordinal=0 " ++
+        "AND action_id>=?2 AND action_id<=?3 ORDER BY action_id",
+    .Args = struct { session: []const u8, after: u64, cutoff: u64 },
+    .Row = struct { action_id: rsql.Positive },
     .cardinality = .each,
 });
 
 const insert_stop = rsql.Write(.{
-    .sql = "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff,position,stopped_at,parent_caused) VALUES(?1,@session(?2),?3,?4,?5,@now,?6)",
-    .Args = struct { key: []const u8, session: rsql.SessionHead, selected_turn_id: ?u64, admission_cutoff: u64, position: u64, parent_caused: bool },
+    .sql = "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff,position,stopped_at,parent_caused,action_cutoff) VALUES(?1,@session(?2),?3,?4,?5,@now,?6,?7)",
+    .Args = struct { key: []const u8, session: rsql.SessionHead, selected_turn_id: ?u64, admission_cutoff: u64, position: u64, parent_caused: bool, action_cutoff: u64 },
     // A replay was classified first, so the key is free.
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
@@ -1596,17 +1574,17 @@ const CancelChunk = struct {
     pub fn visit(chunk: *CancelChunk, row: *const cancellable_actions.Row) bool {
         chunk.action_ids[chunk.len] = row.action_id.get();
         chunk.len += 1;
-        chunk.next = row.call_ordinal + 1;
+        chunk.next = row.action_id.get() + 1;
         return chunk.len < cancel_chunk;
     }
 };
 
-/// A stop's saved selection, and whether the Turn it selected has closed.
 const stop_selection = rsql.Read(.{
-    .sql = "SELECT stop.selected_turn_id,stop.admission_cutoff,t.outcome_code IS NOT NULL AS turn_closed FROM session_stop stop " ++
+    .sql = "SELECT stop.selected_turn_id,stop.admission_cutoff,stop.action_cutoff," ++
+        sourced_input.stopCompletedSql("stop", "t", "NULL") ++ " AS completed FROM session_stop stop " ++
         "LEFT JOIN turn t ON t.turn_id=stop.selected_turn_id WHERE stop.command_key=?1",
     .Args = struct { key: []const u8 },
-    .Row = struct { selected_turn_id: ?rsql.Positive, admission_cutoff: u64, turn_closed: bool },
+    .Row = struct { selected_turn_id: ?rsql.Positive, admission_cutoff: u64, action_cutoff: u64, completed: bool },
     .cardinality = .one,
 });
 
@@ -1619,10 +1597,9 @@ const stop_interrupted = rsql.Read(.{
 });
 
 fn stopObservation(row: *const stop_selection.Row) SessionStopObservation {
-    const turn = row.selected_turn_id orelse return .{ .selection = .{ .admission_cutoff = row.admission_cutoff }, .completion = .completed };
     return .{
-        .selection = .{ .selected_turn_id = turn.get(), .admission_cutoff = row.admission_cutoff },
-        .completion = if (row.turn_closed) .completed else .pending,
+        .selection = .{ .selected_turn_id = if (row.selected_turn_id) |turn| turn.get() else null, .admission_cutoff = row.admission_cutoff, .action_cutoff = row.action_cutoff },
+        .completion = if (row.completed) .completed else .pending,
     };
 }
 
@@ -1699,7 +1676,6 @@ pub const StopSession = struct {
     /// in place until commit.
     cancellation: content_domain.Import = unattempted_stop_content,
     chunk: CancelChunk = .{},
-    cancellation_id: u64 = 0,
     cancelled: u64 = 0,
     reply: SessionStopReply = undefined,
     trace: ?store_core.ControlTrace = null,
@@ -1731,7 +1707,7 @@ pub const StopSession = struct {
             },
             .cancel => {
                 if (r.faults().content_import) return error.InjectedContentImportFailure;
-                t.cancellation_id = try content_domain.importBytes(r, &t.cancellation, unattempted_stop_text);
+                _ = try content_domain.importBytes(r, &t.cancellation, unattempted_stop_text);
                 return t.cancelPage(r);
             },
             .page => return t.cancelPage(r),
@@ -1769,9 +1745,9 @@ pub const StopSession = struct {
         const positions = try r.positions(head.*);
         t.answer = .{ .accepted = true };
         try queueCommand(r, key, kind, session, &t.input.digest, null, null, &t.answer);
-        const selection = SessionStopSelection{ .selected_turn_id = if (t.turn) |open| open.turn_id.get() else null, .admission_cutoff = found.admission_cutoff };
+        const selection = SessionStopSelection{ .selected_turn_id = if (t.turn) |open| open.turn_id.get() else null, .admission_cutoff = found.admission_cutoff, .action_cutoff = found.action_cutoff };
         const stop_position = try positions.take(1);
-        r.write(insert_stop, .{ .key = key, .session = head.*, .selected_turn_id = selection.selected_turn_id, .admission_cutoff = selection.admission_cutoff, .position = stop_position, .parent_caused = found.owed_cause != null });
+        r.write(insert_stop, .{ .key = key, .session = head.*, .selected_turn_id = selection.selected_turn_id, .admission_cutoff = selection.admission_cutoff, .position = stop_position, .parent_caused = found.owed_cause != null, .action_cutoff = selection.action_cutoff });
         if (t.input.archive) {
             r.write(insert_archive_command, .{ .key = key, .archived = true });
             if (t.archive_existing != null) r.write(update_archive, .{ .session = head.*, .key = key }) else r.write(insert_archive, .{ .session = head.*, .key = key });
@@ -1788,11 +1764,11 @@ pub const StopSession = struct {
                 interrupt_operation.queue(r, .{ .operation_id = open.operation_id.get(), .command_key = key, .session = head.* });
                 t.reply.accepted.interrupted_operation_id = open.operation_id.get();
             }
-            if (open.cancellable != 0) {
-                content_domain.lookup(r, &t.cancellation);
-                r.readEach(cancellable_actions, .{ .operation_id = open.operation_id.get(), .after = 0 }, cancel_chunk, &t.chunk);
-                return .{ .round = .cancel };
-            }
+        }
+        if (found.cancellable != 0) {
+            content_domain.lookup(r, &t.cancellation);
+            r.readEach(cancellable_actions, .{ .session = session, .after = 0, .cutoff = found.action_cutoff }, cancel_chunk, &t.chunk);
+            return .{ .round = .cancel };
         }
         return t.finish(r);
     }
@@ -1805,14 +1781,14 @@ pub const StopSession = struct {
     /// when the last page was read, so a multiple of `cancel_chunk` costs no
     /// empty round.
     fn cancelPage(t: *StopSession, r: *transition.Round(StopSession)) !transition.Next(StopSession) {
-        const open = t.turn.?;
+        const target = t.target.?;
         const chunk = &t.chunk;
         if (chunk.len != 0) {
             switch (chunk.len) {
                 inline 1...cancel_chunk => |n| {
                     @setEvalBranchQuota(100_000);
                     var args: CancelArgs(n) = undefined;
-                    args.content_id = t.cancellation_id;
+                    args.content_id = (t.cancellation.found orelse return error.CorruptStore).content_id.get();
                     args.first_position = try (try r.positions(t.target.?.session)).take(n);
                     args.session = t.target.?.session;
                     inline for (0..n) |k| @field(args, cancelField(k)) = chunk.action_ids[k];
@@ -1821,15 +1797,15 @@ pub const StopSession = struct {
                 else => unreachable,
             }
             t.cancelled += chunk.len;
-            if (t.cancelled < open.cancellable and chunk.len == cancel_chunk) {
+            if (t.cancelled < target.cancellable and chunk.len == cancel_chunk) {
                 chunk.len = 0;
-                r.readEach(cancellable_actions, .{ .operation_id = open.operation_id.get(), .after = chunk.next }, cancel_chunk, chunk);
+                r.readEach(cancellable_actions, .{ .session = t.input.session, .after = chunk.next, .cutoff = target.action_cutoff }, cancel_chunk, chunk);
                 return .{ .round = .page };
             }
         }
         // Main checked that the cancelling UPDATE changed as many rows as it
         // counted.
-        if (t.cancelled != open.cancellable) return error.StopSelectionChanged;
+        if (t.cancelled != target.cancellable) return error.StopSelectionChanged;
         return t.finish(r);
     }
 
@@ -1840,6 +1816,7 @@ pub const StopSession = struct {
         if (t.turn) |open| {
             if (open.in_flight) t.reply.accepted.completion = .pending else try turn_domain.queueClose(r, try r.positions(t.target.?.session), open.turn_id.get(), .cancelled);
         }
+        if (t.target.?.in_flight) t.reply.accepted.completion = .pending;
         if (r.faults().before_commit) return error.InjectedCommitFailure;
         return .commit;
     }
@@ -1853,7 +1830,7 @@ pub const StopSession = struct {
 /// All unattempted runners use the same bytes today. Prove that before
 /// sharing one content import and one cancellation batch, without another
 /// read or a runner column. A runner that changes this must split the batch.
-const unattempted_stop_text = blk: {
+pub const unattempted_stop_text = blk: {
     const runners = @import("../../tool_record.zig").Runner;
     const text = runners.bash.beforeAdmissionStopText();
     for (.{ runners.bash, runners.mcp, runners.core }) |runner| {
@@ -1883,7 +1860,7 @@ const suppress_archive_endings = rsql.Write(.{
 
 pub const archive_state_sql =
     "CASE WHEN EXISTS(SELECT 1 FROM session_archive ar JOIN session_stop astop ON astop.command_key=ar.command_key " ++
-    "JOIN turn aturn ON aturn.turn_id=astop.selected_turn_id WHERE ar.session_ref=session.session_ref AND aturn.outcome_code IS NULL) THEN 'archiving' " ++
+    "LEFT JOIN turn aturn ON aturn.turn_id=astop.selected_turn_id WHERE ar.session_ref=session.session_ref AND NOT (" ++ sourced_input.stopCompletedSql("astop", "aturn", "NULL") ++ ")) THEN 'archiving' " ++
     "WHEN EXISTS(SELECT 1 FROM session_archive ar WHERE ar.session_ref=session.session_ref AND ar.command_key IS NOT NULL) THEN 'archived' ELSE 'active' END";
 
 const insert_archive_command = rsql.Write(.{
@@ -2206,12 +2183,12 @@ pub const InterruptModel = struct {
 
 /// The Action a permission decision names, with its Turn.
 const decision_action = rsql.Read(.{
-    .sql = "SELECT s.session_ref,s.workspace_key,s.next_position,a.authorized,a.resolution_code IS NULL AS unresolved,t.outcome_code IS NULL AS turn_open,t.turn_id," ++
+    .sql = "SELECT s.session_ref,s.workspace_key,s.next_position,a.authorized,a.background_position IS NOT NULL AS background,a.resolution_code IS NULL AS unresolved,(t.outcome_code IS NULL OR a.background_position IS NOT NULL) AS turn_open,t.turn_id," ++
         "EXISTS(SELECT 1 FROM session_forward f WHERE f.target_ref=?2 AND f.kind=1 AND f.source_id=a.action_id AND f.position IS NOT NULL) AS forwarded " ++
         "FROM action_operation a JOIN session s ON s.session_ref=a.session_ref " ++
         "JOIN model_operation operation ON operation.operation_id=a.parent_operation_id JOIN turn t ON t.turn_id=operation.turn_id WHERE a.action_id=?1",
     .Args = struct { action_id: u64, target: []const u8 },
-    .Row = struct { session: rsql.SessionHead, authorized: bool, unresolved: bool, turn_open: bool, turn_id: rsql.Positive, forwarded: bool },
+    .Row = struct { session: rsql.SessionHead, authorized: bool, background: bool, unresolved: bool, turn_open: bool, turn_id: rsql.Positive, forwarded: bool },
     .cardinality = .optional,
 });
 
@@ -2321,6 +2298,7 @@ pub const DecidePermission = struct {
                     const positions = try r.positions(head);
                     const content_id = try content_domain.importBytes(r, &t.content, denial_text);
                     r.write(deny_action, .{ .action_id = command.action_id, .content_id = content_id, .position = try positions.take(1), .session = head });
+                    try sourced_input.queueFinal(r, head, command.action_id, found.background);
                     turn_domain.queueContinuation(r, found.turn_id.get(), head);
                 },
             }
@@ -2391,6 +2369,8 @@ fn kindCode(kind: cli_value.CommandKind) u8 {
         .model_interruption => 4,
         .permission_decision => 5,
         .session_archive => 6,
+        .action_background => 7,
+        .action_stop => 8,
     };
 }
 
@@ -2621,6 +2601,10 @@ pub fn observeCommand(a: anytype, key: []const u8, observation: *CommandObservat
             try a.run();
             observation.kind = .{ .model_interruption = try modelInterruptionTarget(&row) };
         },
+        .action_background, .action_stop => {
+            const selected = try @import("action_control.zig").readSaved(a, key);
+            observation.kind = if (command.kind == .action_background) .{ .action_background = selected } else .{ .action_stop = selected };
+        },
         .permission_decision => {
             var row: permission_target.Row = undefined;
             a.read(permission_target, .{ .key = key }, &row);
@@ -2757,15 +2741,13 @@ pub fn commandResult(a: anytype, key: []const u8) !ContentReference {
     }
 }
 
-/// Where a Message stands, from `row`'s admission_id, command_key,
-/// content_id, turn_id, operation_id, attempt_ordinal, outcome_code and
+/// Where an admitted input stands, from `row`'s admission_id,
+/// turn_id, operation_id, attempt_ordinal, outcome_code and
 /// outcome_content_id: applied by a Turn, excluded by the stop
 /// `excluding_stop`, or pending.
 pub fn projectMessage(row: anytype, excluding_stop: ?[]const u8) !MessageProjection {
     var projection: MessageProjection = .{
         .admission_id = row.admission_id.get(),
-        .command_key = row.command_key,
-        .content_id = @intCast(row.content_id.get()),
         .state = .pending,
     };
     const turn_id = row.turn_id orelse {

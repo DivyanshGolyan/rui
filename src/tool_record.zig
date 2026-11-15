@@ -2,6 +2,7 @@
 const std = @import("std");
 const Bounded = @import("bounded.zig").Bounded;
 const built_in_tool = @import("built_in_tool.zig");
+const tool_execution = @import("tool_execution.zig");
 const content_string = @import("content_string.zig");
 const tool_name = @import("tool_name.zig");
 const tool_presentation = @import("tool_presentation.zig");
@@ -350,6 +351,19 @@ pub const start_agent_record: Record = .{
     .input_schema = start_agent_schema,
 };
 
+pub const read_action_record: Record = .{
+    .name = "read_action",
+    .owner = .rui,
+    .description = "Read an Action owned by your own Session, including its waiting, attempted or resolved status and one bounded final-result window. action is its decimal Action ID. Omit offset for the first window; continue with the returned next byte offset. Attempted does not assert that a remote effect ran. Reads do not wait for or consume a result.",
+    .input_schema = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"Decimal Action ID in your own Session.\"},\"offset\":{\"type\":\"string\",\"description\":\"Decimal byte offset returned by an earlier read; omit for zero.\"}},\"required\":[\"action\"],\"additionalProperties\":false}",
+};
+pub const stop_action_record: Record = .{
+    .name = "stop_action",
+    .owner = .rui,
+    .description = "Select a stop of one Action owned by your own Session. action is its decimal Action ID. This does not stop the Session or other Actions. Stop acceptance is an intent, not proof that an attempted remote effect did not run; read_action reports the sole final result when available.",
+    .input_schema = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"Decimal Action ID in your own Session.\"}},\"required\":[\"action\"],\"additionalProperties\":false}",
+};
+
 pub const web_search_record: Record = .{ .name = "web_search", .owner = .provider };
 
 /// Who carries out an accepted call, derived from its frozen record and
@@ -404,9 +418,11 @@ pub const built_in_rows = std.enums.EnumArray(Tool, BuiltInRow).init(.{
     .bash = .{ .record = &bash_record, .runner = .bash },
     .find_tools = .{ .record = &find_tools_record, .runner = .core },
     .message_agent = .{ .record = &message_agent_record, .runner = .core },
+    .read_action = .{ .record = &read_action_record, .runner = .core },
     .read_transcript = .{ .record = &read_transcript_record, .runner = .core },
     .skill = .{ .record = &skill_record, .runner = .core },
     .start_agent = .{ .record = &start_agent_record, .runner = .core },
+    .stop_action = .{ .record = &stop_action_record, .runner = .core },
     .web_search = .{ .record = &web_search_record, .runner = .provider },
 });
 
@@ -428,7 +444,7 @@ pub fn coreTool(name: []const u8) ?CoreTool {
 
 /// The built-in record of each tool `Tool` names: the text a new set saves.
 pub fn record(tool: Tool) *const Record {
-    return built_in_rows.get(tool).record;
+    return &built_in_records[@backingInt(tool)];
 }
 
 /// The built-ins, as the tool set of a Host with no other tools.
@@ -436,7 +452,10 @@ pub const built_in_tool_set: HostToolSet = .{ .records = &built_in_records, .dig
 
 const built_in_records = blk: {
     var out: [std.enums.values(Tool).len]Record = undefined;
-    for (std.enums.values(Tool), &out) |tool, *each| each.* = record(tool).*;
+    for (built_in_rows.values, &out) |row, *each| {
+        each.* = row.record.*;
+        if (each.owner != .provider) each.input_schema = tool_execution.schema(row.record.input_schema);
+    }
     break :blk out;
 };
 
@@ -545,5 +564,24 @@ test "MCP missing tools tool set resolution covers every empty-server combinatio
             if (mask & (@as(usize, 1) << @intCast(index)) == 0) try std.testing.expectEqualStrings(server, empty.next().?);
         }
         try std.testing.expectEqual(@as(?[]const u8, null), empty.next());
+    }
+}
+
+test "Host-owned tools offer optional execution intent without changing provider tools" {
+    const document = @import("mcp/document.zig");
+    for (std.enums.values(Tool)) |tool| {
+        const selected = record(tool);
+        if (selected.owner == .provider) {
+            try std.testing.expectEqualStrings("", selected.input_schema);
+            continue;
+        }
+        const properties = document.member(selected.input_schema, "properties").?;
+        const execution = document.member(properties, "rui_execution") orelse return error.TestExpectedExecutionOption;
+        try std.testing.expectEqualStrings("\"string\"", document.member(execution, "type").?);
+        try std.testing.expectEqualStrings("[\"foreground\",\"background\"]", document.member(execution, "enum").?);
+        if (document.member(selected.input_schema, "required")) |required| {
+            var names = document.Items.init(required);
+            while (names.next()) |name| try std.testing.expect(!document.keyIs(document.contents(name), "rui_execution"));
+        }
     }
 }

@@ -338,7 +338,7 @@ pub fn settleCallsForTestingWithFaults(
         .response_id = .{},
         .model_evidence = testing_absent_model_evidence,
         .request_id = .{},
-    }, faults);
+    }, true, faults);
 }
 
 pub fn settleTwoActionsForTesting(
@@ -1200,6 +1200,8 @@ pub const EntryPoint = enum {
     archiveSession,
     interruptModel,
     decidePermission,
+    controlAction,
+    readAction,
     observeCommand,
     commandResult,
     inspectSession,
@@ -1271,6 +1273,8 @@ pub const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .archiveSession = 2,
     .interruptModel = 2,
     .decidePermission = 2,
+    .controlAction = 2,
+    .readAction = 1,
     .observeCommand = 3,
     .commandResult = 1,
     .inspectSession = 3,

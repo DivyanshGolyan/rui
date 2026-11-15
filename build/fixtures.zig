@@ -25,6 +25,7 @@ pub const fixtures = [_]Fixture{
     .{ .step = "request-wait-integration", .description = "Run request wait completion, recovery and conditional polling witnesses", .script = "tests/integration/request_wait_integration.py" },
     .{ .step = "canonical-failure-integration", .description = "Run canonical invocation failure at real producer and caller boundaries", .script = "tests/integration/canonical_failure_integration.py", .screen = true },
     .{ .step = "server-delivery-integration", .description = "Run real reply inactivity, connection headroom and Host drain separately from load", .script = "tests/integration/server_delivery_integration.py" },
+    .{ .step = "async-actions-integration", .description = "Run same-process background promotion and typed final input through public CLI", .script = "tests/integration/async_actions_integration.py" },
     .{ .step = "bash-integration", .description = "Run authorized Bash execution, stop, failure, and recovery cases", .script = "tests/integration/bash_integration.py" },
     .{ .step = "bash-walkthrough", .description = "Run the narrated public Bash approve-and-recover journey", .script = "tests/integration/bash_integration.py", .args = &.{"--walkthrough"} },
     .{ .step = "bash-environment-integration", .description = "Run Bash in the sending terminal's environment across terminals, peers and recovery", .script = "tests/integration/bash_environment_integration.py" },

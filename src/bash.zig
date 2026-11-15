@@ -905,6 +905,7 @@ pub const Preparation = struct {
     faults: Faults,
     source: ContentSource,
     parser: tools.BashParser = .{},
+    arguments: @import("tool_execution.zig").Arguments(*ContentSource) = undefined,
     cleanup: PreparedCleanup = .{},
     command: std.ArrayList(u8) = .empty,
     /// Decoded stdin staged between parser steps.
@@ -938,6 +939,7 @@ pub const Preparation = struct {
             .source = .{ .length = input.arguments.length },
         };
         self.source.reader.open(arguments);
+        self.arguments = .{ .source = &self.source };
         if (faults.preparation) return self.fail(error.BashPreparationFailed);
         for ([_]struct { *?OwnedFile, named_scratch.NumericName }{
             .{ &self.cleanup.stdout_capture, .@"bash-stdout" },
@@ -956,7 +958,7 @@ pub const Preparation = struct {
     pub fn advance(self: *Preparation, out: *Prepared) Progress {
         var writer = PreparationWriter{ .owner = self };
         var input = PreparationInputWriter{ .owner = self };
-        const progress = self.parser.advance(&self.source, &writer, &input, self.source.buffer.len) catch |err| {
+        const progress = self.parser.advance(&self.arguments, &writer, &input, self.source.buffer.len) catch |err| {
             return .{ .failed = self.fail(if (tools.isBashDescriptorError(err)) error.InvalidCanonicalBashDescriptor else err) };
         };
         input.flush() catch |err| return .{ .failed = self.fail(err) };
@@ -1806,44 +1808,7 @@ test "output publication closes producer aliases before making output evictable"
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
 }
 
-/// Decoded content read a byte at a time, as the argument parsers read it.
-pub const ContentSource = struct {
-    reader: store.ContentReader = undefined,
-    length: u64,
-    position: u64 = 0,
-    buffer_start: u64 = 0,
-    buffer_length: usize = 0,
-    buffer: [4096]u8 = undefined,
-
-    pub fn peek(self: *ContentSource) !?u8 {
-        if (self.position == self.length) return null;
-        if (self.position < self.buffer_start or self.position >= self.buffer_start + self.buffer_length) {
-            self.buffer_start = self.position;
-            const wanted: usize = @intCast(@min(self.length - self.position, self.buffer.len));
-            self.buffer_length = try self.reader.read(self.position, self.buffer[0..wanted]);
-            if (self.buffer_length != wanted) return error.ShortCanonicalRead;
-        }
-        return self.buffer[@intCast(self.position - self.buffer_start)];
-    }
-
-    pub fn take(self: *ContentSource) !u8 {
-        const byte = try self.peek() orelse return error.InvalidDescriptorJson;
-        self.position += 1;
-        return byte;
-    }
-
-    pub fn space(self: *ContentSource) !void {
-        while (try self.peek()) |byte| switch (byte) {
-            ' ', '\t', '\r', '\n' => _ = try self.take(),
-            else => return,
-        };
-    }
-
-    pub fn expect(self: *ContentSource, byte: u8) !void {
-        try self.space();
-        if (try self.take() != byte) return error.InvalidDescriptorJson;
-    }
-};
+pub const ContentSource = store.ContentSource;
 
 const Utf8Unit = struct {
     source_length: usize,

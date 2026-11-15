@@ -71,7 +71,7 @@ test "model_call derives frozen model and usage from the resolved Operation" {
                 .response_id = validated.evidence.response_id,
                 .model_evidence = accepted.model_evidence,
                 .request_id = .{},
-            }, .{});
+            }, true, .{});
             const page = try store_core.activityPageForTesting(&storage, request);
             try std.testing.expectEqual(@as(usize, 1), page.count);
             const item = page.items[0];

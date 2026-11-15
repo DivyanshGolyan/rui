@@ -42,6 +42,7 @@ pub const ConversationPage = struct {
         presentation: ?protocol.ToolPresentation = null,
         admitted_at: ?u64 = null, // Host wall-clock second; User items only.
         sender: ?protocol.NamedPeer = null, // A User item's peer sender.
+        source_action: ?u64 = null,
     };
     end: u64,
     items: [protocol.public_conversation_page_items]Item = undefined,
@@ -62,6 +63,7 @@ pub const ConversationPage = struct {
             presentation: ?JsonToolPresentation = null,
             admitted_at: ?JsonString(20) = null,
             sender: ?JsonNamedPeer = null, // User items only.
+            source_action: ?JsonString(20) = null,
         };
         const Rows = JsonArray(Row, protocol.public_conversation_page_items);
         const Wire = struct {
@@ -89,6 +91,8 @@ pub const ConversationPage = struct {
             item.presentation = if (row.presentation) |p| p.value else null;
             item.admitted_at = if (row.admitted_at) |second| try decimalId(second, false) else null;
             item.sender = if (row.sender) |sender| sender.peer() catch return error.InvalidConversationPage else null;
+            item.source_action = if (row.source_action) |id_| try decimalId(id_, false) else null;
+            if (item.source_action != null and (item.kind != .user or item.sender != null)) return error.InvalidConversationPage;
             if ((item.kind == .tool_result or hosted) != (item.presentation != null) or (item.kind == .user) != (item.admitted_at != null) or
                 (item.kind != .user and item.sender != null) or
                 (item.admitted_at orelse 0) > std.math.maxInt(i64)) return error.InvalidConversationPage;
@@ -144,7 +148,7 @@ pub const ActivityPage = struct {
         if (bytes.len > activity_reply.max_page_bytes) return error.InvalidActivityPage;
         const Ref = struct { bytes: JsonString(20), sha256: JsonString(64) };
         const Fact = protocol.ActivityItem;
-        const Message = struct { admission: JsonString(20), key: JsonString(protocol.max_key_bytes), turn: ?JsonString(20), state: JsonEnum(@FieldType(Fact.Message, "state")), admitted_at: JsonString(20), sender: ?JsonNamedPeer, content: Ref };
+        const Message = struct { admission: JsonString(20), key: ?JsonString(protocol.max_key_bytes), source_action: ?JsonString(20) = null, turn: ?JsonString(20), state: JsonEnum(@FieldType(Fact.Message, "state")), admitted_at: JsonString(20), sender: ?JsonNamedPeer, content: Ref };
         const Sent = struct { admission: JsonString(20), admitted_at: JsonString(20), target: JsonNamedPeer, content: Ref };
         const SendFailed = struct { key: JsonString(protocol.max_key_bytes), target: ?JsonNamedPeer, code: JsonString(protocol.max_code_bytes) };
         const Call = struct { operation: JsonString(20), turn: JsonString(20), call_ordinal: JsonString(20), action: ?JsonString(20), rejection: ?JsonEnum(protocol.ProposalRejection), fields: [3]Ref, description: ?JsonString(protocol.max_tool_description_bytes), tool: ?JsonString(protocol.max_tool_name_bytes), server: ?JsonString(protocol.max_tool_name_bytes) };
@@ -199,11 +203,20 @@ pub const ActivityPage = struct {
                 }) or !cursor.kinds.contains(std.meta.stringToEnum(protocol.ActivityItem.Kind, @tagName(item.value)).?)) return error.InvalidActivityPage;
             switch (item.value) {
                 inline .admission, .user, .received => |message, kind| {
-                    const value: Fact.Message = .{ .admission = try id(message.admission, false), .key = message.key.value, .turn = if (message.turn) |turn| try id(turn, false) else null, .state = message.state.value, .content = try content(message.content), .admitted_at = try id(message.admitted_at, false), .sender = if (message.sender) |sender| try sender.peer() else null };
+                    const source: Fact.MessageSource = if (message.key) |key|
+                        if (message.source_action != null) return error.InvalidActivityPage else if (message.sender) |sender|
+                            .{ .peer = .{ .key = key.value, .sender = try sender.peer() } }
+                        else
+                            .{ .person = key.value }
+                    else if (message.source_action) |action|
+                        if (message.sender != null) return error.InvalidActivityPage else .{ .tool_final = try id(action, false) }
+                    else
+                        return error.InvalidActivityPage;
+                    const value: Fact.Message = .{ .admission = try id(message.admission, false), .source = source, .turn = if (message.turn) |turn| try id(turn, false) else null, .state = message.state.value, .content = try content(message.content), .admitted_at = try id(message.admitted_at, false) };
                     if ((value.state == .applied) != (value.turn != null) or (kind == .user and value.state != .applied)) return error.InvalidActivityPage;
                     // An admission row is dated by the admission itself, and
                     // names its sender exactly when another Session sent it.
-                    if (kind != .user and (fact.at != value.admitted_at or (kind == .received) != (value.sender != null))) return error.InvalidActivityPage;
+                    if (kind != .user and (fact.at != value.admitted_at or (kind == .received) != (value.source == .peer))) return error.InvalidActivityPage;
                     fact.value = @unionInit(Fact.Value, @tagName(kind), value);
                 },
                 .sent => |sent| {
@@ -397,6 +410,7 @@ test "a model list reply reads as what the Host writes" {
 /// Read-only Host information profiles; historical profiles grant no ordinary requests.
 pub const HostInfoProfile = enum {
     current,
+    released_17,
     released_16,
     released_15,
     released_14,
@@ -411,6 +425,7 @@ pub const HostInfoProfile = enum {
     pub fn wire(self: HostInfoProfile) []const u8 {
         return switch (self) {
             .current => protocol.wire_version,
+            .released_17 => "17",
             .released_16 => "16",
             .released_15 => "15",
             .released_14 => "14",
@@ -420,10 +435,10 @@ pub const HostInfoProfile = enum {
     }
 
     /// Providers are decoded at this boundary, not inferred by consumers.
-    /// Current wire 17 requires every route; wire 13 spans both released shapes.
     fn Providers(comptime self: HostInfoProfile) type {
         return switch (self) {
             .current => protocol.Routes,
+            .released_17 => struct { codex: protocol.Route, openai: protocol.Route, chatgpt: protocol.Route },
             .released_16 => struct { codex: protocol.Route, openai: protocol.Route, chatgpt: protocol.Route },
             .released_15 => struct { codex: protocol.Route, openai: protocol.Route, chatgpt: protocol.Route },
             .released_14 => struct { codex: protocol.Route, openai: protocol.Route, chatgpt: protocol.Route },
@@ -717,6 +732,12 @@ test "upgrade Host information profiles retain the entire strict shape" {
     defer std.testing.allocator.free(historical);
     const historical_full = try std.mem.replaceOwned(u8, std.testing.allocator, current, "\"version\":\"" ++ protocol.wire_version ++ "\"", historical_field);
     defer std.testing.allocator.free(historical_full);
+    const released_17 = try std.mem.replaceOwned(u8, std.testing.allocator, current, "\"version\":\"" ++ protocol.wire_version ++ "\"", "\"version\":\"" ++ comptime HostInfoProfile.released_17.wire() ++ "\"");
+    defer std.testing.allocator.free(released_17);
+    try std.testing.expectError(error.InvalidHostInfo, parseHostInfo(released_17, "/one"));
+    const missing_17 = try std.mem.replaceOwned(u8, std.testing.allocator, released_17, ",\"chatgpt\":\"unserved\"", "");
+    defer std.testing.allocator.free(missing_17);
+    try std.testing.expectError(error.MissingField, parseHostInfoForProfile(missing_17, "/one", .released_17));
     const released_16 = try std.mem.replaceOwned(u8, std.testing.allocator, current, "\"version\":\"" ++ protocol.wire_version ++ "\"", "\"version\":\"" ++ comptime HostInfoProfile.released_16.wire() ++ "\"");
     defer std.testing.allocator.free(released_16);
     try std.testing.expectError(error.InvalidHostInfo, parseHostInfo(released_16, "/one"));
@@ -736,6 +757,7 @@ test "upgrade Host information profiles retain the entire strict shape" {
     defer std.testing.allocator.free(missing_14);
     try std.testing.expectError(error.MissingField, parseHostInfoForProfile(missing_14, "/one", .released_14));
     const samples = [_]struct { body: []const u8, profile: HostInfoProfile, historical: bool }{
+        .{ .body = released_17, .profile = .released_17, .historical = true },
         .{ .body = released_16, .profile = .released_16, .historical = true },
         .{ .body = released_15, .profile = .released_15, .historical = true },
         .{ .body = released_14, .profile = .released_14, .historical = true },
@@ -963,7 +985,7 @@ pub const Current = struct {
             try writeObject(self, jw);
         }
     };
-    pub const Recent = struct { turn: Id, message: JsonString(protocol.max_key_bytes), outcome: JsonString(protocol.max_code_bytes) };
+    pub const Recent = struct { turn: Id, message: ?JsonString(protocol.max_key_bytes), source_action: ?Id = null, outcome: JsonString(protocol.max_code_bytes) };
     pub const Execution = struct {
         status: JsonEnum(enum { partial, unavailable }),
         reason: OmittableJson(JsonEnum(enum { session_not_found })) = .{},
@@ -1037,6 +1059,7 @@ pub const Current = struct {
     /// Omitted by Hosts that predate it.
     first_message: OmittableJson(?JsonFirstMessage) = .{},
     selected_message: ?JsonString(protocol.max_key_bytes),
+    selected_source_action: ?u64 = null,
     recent: [10]Recent,
     recent_count: usize,
     action_total: u64,
@@ -1081,6 +1104,8 @@ pub const Current = struct {
         }
         try writer.writeAll(",\"selected_message\":");
         try std.json.Stringify.value(self.selected_message, .{}, writer);
+        try writer.writeAll(",\"selected_source_action\":");
+        if (self.selected_source_action) |id_| try writer.print("\"{d}\"", .{id_}) else try writer.writeAll("null");
         try writer.writeAll(",\"recent_messages\":");
         try std.json.Stringify.value(self.recent[0..self.recent_count], .{}, writer);
         try writer.print(",\"actions\":{{\"count\":\"{d}\",\"unresolved\":", .{self.action_total});
@@ -1128,7 +1153,11 @@ pub const Current = struct {
                     if (result.count == result.rows.len) return error.InvalidObservation;
                     const row = try std.json.innerParse(Recent, allocator, source, options);
                     if (row.outcome.slice().len == 0) return error.InvalidObservation;
-                    for (result.rows[0..result.count]) |prior| if (prior.message.eql(row.message.slice())) return error.InvalidObservation;
+                    if ((row.message == null) != (row.source_action != null)) return error.InvalidObservation;
+                    for (result.rows[0..result.count]) |prior| {
+                        if (prior.message) |message| if (row.message) |other| if (message.eql(other.slice())) return error.InvalidObservation;
+                        if (prior.source_action) |action| if (row.source_action) |other| if (action.value == other.value) return error.InvalidObservation;
+                    }
                     result.rows[result.count] = row;
                     result.count += 1;
                 }
@@ -1149,6 +1178,7 @@ pub const Current = struct {
             peers: OmittableJson(Peers) = .{},
             first_message: OmittableJson(?JsonFirstMessage) = .{},
             selected_message: OmittableJson(?JsonString(protocol.max_key_bytes)) = .{},
+            selected_source_action: ?Id = null,
             recent_messages: OmittableJson(RecentRows) = .{},
             actions: OmittableJson(struct { count: Count, unresolved: AttentionRows(.unresolved), resolved: AttentionRows(.resolved) }) = .{},
             rejected_calls: OmittableJson(struct { count: Count, items: AttentionRows(.rejected) }) = .{},
@@ -1205,6 +1235,7 @@ pub const Current = struct {
             .peers = peers,
             .first_message = wire.first_message,
             .selected_message = wire.selected_message.value orelse return error.InvalidObservation,
+            .selected_source_action = if (wire.selected_source_action) |id_| id_.value else null,
             .recent = recent.rows,
             .recent_count = recent.count,
             .action_total = actions.count.value,
@@ -1631,11 +1662,13 @@ pub const CommandObservation = struct {
     result: ?struct { status: enum { completed, failed, cancelled }, code: ?protocol.Bounded(protocol.max_code_bytes), text: ?ContentReference } = null,
     work: ?struct { state: protocol.WorkState, first_action: ?u64 } = null,
     recovery: ?Recovery = null,
-    selection: ?struct { turn: ?u64, admission_cutoff: u64 } = null,
+    selection: ?struct { turn: ?u64, admission_cutoff: u64, action_cutoff: u64 = 0 } = null,
     archived: ?bool = null,
     completion: ?protocol.SessionStopCompletion = null,
     interruption_target: ?struct { session: protocol.Bounded(protocol.max_session_bytes), turn: u64, operation: u64 } = null,
     permission_target: ?struct { action: u64, decision: protocol.PermissionDecision } = null,
+    action_target: ?u64 = null,
+    action_selection: ?@import("action_control.zig").Selection = null,
 
     pub const ContentReference = mutation_answer.ContentReference;
 
@@ -1702,7 +1735,7 @@ pub const CommandObservation = struct {
         if (self.selection) |selection| {
             try writer.writeAll(",\"selection\":{\"turn\":");
             if (selection.turn) |turn| try writer.print("\"{d}\"", .{turn}) else try writer.writeAll("null");
-            try writer.print(",\"admission_cutoff\":\"{d}\"}},\"completion\":{{\"status\":\"{s}\"}}", .{ selection.admission_cutoff, @tagName(self.completion.?) });
+            try writer.print(",\"admission_cutoff\":\"{d}\",\"action_cutoff\":\"{d}\"}},\"completion\":{{\"status\":\"{s}\"}}", .{ selection.admission_cutoff, selection.action_cutoff, @tagName(self.completion.?) });
         }
         if (self.archived) |archived| {
             try writer.print(",\"archived\":{s},\"completion\":{{\"status\":\"{s}\"}}", .{ if (archived) "true" else "false", @tagName(self.completion.?) });
@@ -1713,6 +1746,8 @@ pub const CommandObservation = struct {
             try writer.print(",\"turn\":\"{d}\",\"operation\":\"{d}\"}}", .{ target.turn, target.operation });
         }
         if (self.permission_target) |target| try writer.print(",\"permission_target\":{{\"action\":\"{d}\",\"decision\":\"{s}\"}}", .{ target.action, @tagName(target.decision) });
+        if (self.action_target) |target| try writer.print(",\"action_target\":{{\"action\":\"{d}\"}}", .{target});
+        if (self.action_selection) |selection| try writer.print(",\"action_selection\":{{\"kind\":\"{s}\",\"position\":\"{d}\"}}", .{ @tagName(selection.kind), selection.position });
         try writer.writeByte('}');
     }
 
@@ -1749,10 +1784,12 @@ pub const CommandObservation = struct {
             work: OmittableJson(struct { state: JsonWorkState, first_action: ?JsonString(20) }) = .{},
             recovery: OmittableJson(struct { unknown_outcomes: Outcomes, more: bool }) = .{},
             archived: OmittableJson(bool) = .{},
-            selection: OmittableJson(struct { turn: ?JsonString(20), admission_cutoff: JsonString(20) }) = .{},
+            selection: OmittableJson(struct { turn: ?JsonString(20), admission_cutoff: JsonString(20), action_cutoff: ?JsonString(20) = null }) = .{},
             completion: OmittableJson(struct { status: JsonEnum(@typeInfo(@FieldType(CommandObservation, "completion")).optional.child) }) = .{},
             interruption_target: OmittableJson(struct { session: JsonString(protocol.max_session_bytes), turn: JsonString(20), operation: JsonString(20) }) = .{},
             permission_target: OmittableJson(struct { action: JsonString(20), decision: JsonEnum(protocol.PermissionDecision) }) = .{},
+            action_target: OmittableJson(struct { action: JsonString(20) }) = .{},
+            action_selection: OmittableJson(struct { kind: JsonEnum(@FieldType(@import("action_control.zig").Selection, "kind")), position: JsonString(20) }) = .{},
         };
         const Since = struct {
             value: ?JsonString(SessionToken.max_bytes),
@@ -1802,10 +1839,12 @@ pub const CommandObservation = struct {
             }
             observed.recovery = recovery;
         }
-        if (facts.selection.value) |value| observed.selection = .{ .turn = if (value.turn) |turn| try decimalId(turn, false) else null, .admission_cutoff = try decimalId(value.admission_cutoff, true) };
+        if (facts.selection.value) |value| observed.selection = .{ .turn = if (value.turn) |turn| try decimalId(turn, false) else null, .admission_cutoff = try decimalId(value.admission_cutoff, true), .action_cutoff = if (value.action_cutoff) |cutoff| try decimalId(cutoff, true) else 0 };
         if (facts.completion.value) |value| observed.completion = value.status.value;
         if (facts.interruption_target.value) |value| observed.interruption_target = .{ .session = value.session.value, .turn = try decimalId(value.turn, true), .operation = try decimalId(value.operation, true) };
         if (facts.permission_target.value) |value| observed.permission_target = .{ .action = try decimalId(value.action, true), .decision = value.decision.value };
+        if (facts.action_target.value) |value| observed.action_target = try decimalId(value.action, true);
+        if (facts.action_selection.value) |value| observed.action_selection = .{ .kind = value.kind.value, .position = try decimalId(value.position, false) };
         try observed.validate();
         if (since) |token| {
             const target = observed.target orelse return error.InvalidObservation;
@@ -1823,7 +1862,7 @@ pub const CommandObservation = struct {
 
     fn validate(self: *const CommandObservation) !void {
         if (self.status == .absent) {
-            inline for (.{ "kind", "target", "code", "revision", "created", "input", "state", "queue", "binding", "result", "work", "recovery", "selection", "archived", "completion", "interruption_target", "permission_target" }) |name| if (@field(self, name) != null) return error.InvalidObservation;
+            inline for (.{ "kind", "target", "code", "revision", "created", "input", "state", "queue", "binding", "result", "work", "recovery", "selection", "archived", "completion", "interruption_target", "permission_target", "action_target", "action_selection" }) |name| if (@field(self, name) != null) return error.InvalidObservation;
             return;
         }
         const kind = self.kind orelse return error.InvalidObservation;
@@ -1839,6 +1878,9 @@ pub const CommandObservation = struct {
             (self.completion != null) != (accepted and (kind == .session_stop or kind == .session_archive))) return error.InvalidObservation;
         if ((self.interruption_target != null) != (kind == .model_interruption) or (self.permission_target != null) != (kind == .permission_decision)) return error.InvalidObservation;
         if (self.interruption_target) |target| if (!target.session.eql(self.target.?.slice())) return error.RequestBindingMismatch;
+        const control = kind == .action_background or kind == .action_stop;
+        if ((self.action_target != null) != control or (self.action_selection != null) != (control and accepted)) return error.InvalidObservation;
+        if (self.action_selection) |selection| if (kind == .action_background and selection.kind == .stop or kind == .action_stop and selection.kind == .background) return error.InvalidObservation;
         if (kind != .message) {
             if (self.state != null or self.input != null or self.queue != null or self.binding != null or self.result != null or self.work != null or self.recovery != null) return error.InvalidObservation;
             return;
@@ -2312,7 +2354,7 @@ test "a turn_ended row's ending agrees with its saved code and content, and a fi
 
 test "an activity row carries its time, and a Message's rows carry its admission time" {
     const content: protocol.ActivityItem.Content = .{ .length = 0, .digest = protocol.contentDigest("") };
-    const message: protocol.ActivityItem.Message = .{ .admission = 1, .key = .{}, .turn = null, .state = .queued, .content = content, .admitted_at = 1792925000 };
+    const message: protocol.ActivityItem.Message = .{ .admission = 1, .source = .{ .person = .{} }, .turn = null, .state = .queued, .content = content, .admitted_at = 1792925000 };
     var peer: protocol.NamedPeer = .{ .session = .{} };
     try peer.session.set("k7m2qx");
     const sent: protocol.ActivityItem.Sent = .{ .admission = 2, .target = peer, .content = content, .admitted_at = 1792925000 };
@@ -2360,6 +2402,115 @@ test "an activity row carries its time, and a Message's rows carry its admission
     var missing: [activity_reply.max_page_bytes]u8 = undefined;
     const bytes = try std.fmt.bufPrint(&missing, "{s}{s}", .{ writer.buffered()[0..at], writer.buffered()[at + field.len ..] });
     try std.testing.expectError(error.InvalidActivityPage, ActivityPage.parse(bytes, .{}));
+}
+
+test "activity Message sources round trip person peer and tool final without changing wire bytes" {
+    var key: protocol.Bounded(protocol.max_key_bytes) = .{};
+    try key.set("typed-source");
+    var sender: protocol.NamedPeer = .{ .session = .{} };
+    try sender.session.set("k7m2qx");
+    try sender.label.set("Peer");
+    const sources = [_]protocol.ActivityItem.MessageSource{
+        .{ .person = key },
+        .{ .peer = .{ .key = key, .sender = sender } },
+        .{ .tool_final = 7 },
+    };
+    inline for (.{ .admission, .user, .received }) |kind| {
+        for (sources) |source| {
+            if (kind != .user and (kind == .received) != (source == .peer)) continue;
+            var facts: protocol.ActivityFacts = .{ .end = 1, .count = 1, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };
+            facts.items[0] = .{ .position = 1, .at = 1, .value = @unionInit(protocol.ActivityItem.Value, @tagName(kind), .{
+                .admission = 1,
+                .source = source,
+                .turn = if (kind == .user) 1 else null,
+                .state = if (kind == .user) .applied else .queued,
+                .content = .{ .length = 0, .digest = protocol.contentDigest("") },
+                .admitted_at = 1,
+            }) };
+            try facts.work.workspace.set("/w");
+            var buffer: [activity_reply.max_page_bytes]u8 = undefined;
+            var writer = std.Io.Writer.fixed(&buffer);
+            try activity_reply.writePage(&writer, &facts);
+            const parsed = try ActivityPage.parse(writer.buffered(), .{});
+            try std.testing.expectEqualDeep(source, @field(parsed.facts.items[0].value, @tagName(kind)).source);
+            var again: [activity_reply.max_page_bytes]u8 = undefined;
+            var repeated = std.Io.Writer.fixed(&again);
+            try activity_reply.writePage(&repeated, &parsed.facts);
+            try std.testing.expectEqualStrings(writer.buffered(), repeated.buffered());
+        }
+    }
+}
+
+test "activity Message raw source tuples reject every malformed combination and wrong outer kind" {
+    var key: protocol.Bounded(protocol.max_key_bytes) = .{};
+    try key.set("typed-source");
+    inline for (.{ .admission, .user, .received }) |kind| {
+        var facts: protocol.ActivityFacts = .{ .end = 1, .count = 1, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };
+        facts.items[0] = .{ .position = 1, .at = 1, .value = @unionInit(protocol.ActivityItem.Value, @tagName(kind), .{
+            .admission = 1,
+            .source = .{ .person = key },
+            .turn = if (kind == .user) 1 else null,
+            .state = if (kind == .user) .applied else .queued,
+            .content = .{ .length = 0, .digest = protocol.contentDigest("") },
+            .admitted_at = 1,
+        }) };
+        try facts.work.workspace.set("/w");
+        var buffer: [activity_reply.max_page_bytes]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&buffer);
+        try activity_reply.writePage(&writer, &facts);
+        for ([_]bool{ false, true }) |has_key| {
+            for ([_]bool{ false, true }) |has_sender| {
+                for ([_]bool{ false, true }) |has_final| {
+                    const keyed = try std.mem.replaceOwned(u8, std.testing.allocator, writer.buffered(), "\"key\":\"typed-source\"", if (has_key) "\"key\":\"typed-source\"" else "\"key\":null");
+                    defer std.testing.allocator.free(keyed);
+                    const peer = try std.mem.replaceOwned(u8, std.testing.allocator, keyed, "\"sender\":null", if (has_sender) "\"sender\":{\"session\":\"k7m2qx\",\"label\":null}" else "\"sender\":null");
+                    defer std.testing.allocator.free(peer);
+                    const raw = try std.mem.replaceOwned(u8, std.testing.allocator, peer, "\"source_action\":null", if (has_final) "\"source_action\":\"7\"" else "\"source_action\":null");
+                    defer std.testing.allocator.free(raw);
+                    const valid_tuple = (has_key and !has_final) or (!has_key and has_final and !has_sender);
+                    const valid_kind = kind == .user or ((kind == .received) == has_sender);
+                    if (valid_tuple and valid_kind) {
+                        const parsed = try ActivityPage.parse(raw, .{});
+                        const source = @field(parsed.facts.items[0].value, @tagName(kind)).source;
+                        if (has_final) try std.testing.expectEqual(@as(u64, 7), source.tool_final) else if (has_sender) {
+                            try std.testing.expectEqualStrings("typed-source", source.peer.key.slice());
+                            try std.testing.expectEqualStrings("k7m2qx", source.peer.sender.session.slice());
+                        } else try std.testing.expectEqualStrings("typed-source", source.person.slice());
+                    } else try std.testing.expectError(error.InvalidActivityPage, ActivityPage.parse(raw, .{}));
+                }
+            }
+        }
+    }
+}
+
+test "activity tool-final Messages retain state turn and timestamp guards" {
+    for ([_]struct { state: @FieldType(protocol.ActivityItem.Message, "state"), turn: ?u64, at: u64, valid: bool }{
+        .{ .state = .queued, .turn = null, .at = 1, .valid = true },
+        .{ .state = .applied, .turn = 2, .at = 1, .valid = true },
+        .{ .state = .excluded, .turn = null, .at = 1, .valid = true },
+        .{ .state = .queued, .turn = 2, .at = 1, .valid = false },
+        .{ .state = .applied, .turn = null, .at = 1, .valid = false },
+        .{ .state = .excluded, .turn = 2, .at = 1, .valid = false },
+        .{ .state = .queued, .turn = null, .at = 2, .valid = false },
+    }) |case| {
+        inline for (.{ .admission, .user }) |kind| {
+            var facts: protocol.ActivityFacts = .{ .end = 1, .count = 1, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };
+            facts.items[0] = .{ .position = 1, .at = case.at, .value = @unionInit(protocol.ActivityItem.Value, @tagName(kind), .{
+                .admission = 1,
+                .source = .{ .tool_final = 7 },
+                .turn = case.turn,
+                .state = case.state,
+                .content = .{ .length = 0, .digest = protocol.contentDigest("") },
+                .admitted_at = 1,
+            }) };
+            try facts.work.workspace.set("/w");
+            var buffer: [activity_reply.max_page_bytes]u8 = undefined;
+            var writer = std.Io.Writer.fixed(&buffer);
+            try activity_reply.writePage(&writer, &facts);
+            const valid = case.valid and (kind != .user or case.state == .applied);
+            if (valid) _ = try ActivityPage.parse(writer.buffered(), .{}) else try std.testing.expectError(error.InvalidActivityPage, ActivityPage.parse(writer.buffered(), .{}));
+        }
+    }
 }
 
 test "refused peer activity retains absent and canonical targets" {
@@ -3285,7 +3436,7 @@ test "keyed observation distinguishes named statuses and omitted fields from num
     inline for (.{ "\"status\":2,\"kind\":\"message\"}}", "\"status\":\"2\",\"kind\":\"message\"}}", "\"status\":\"rejected\",\"kind\":1}}" }) |fields|
         try std.testing.expectError(error.InvalidObservation, CommandObservation.parse(.{ .status = 200, .body = prefix ++ fields }, "k"));
     const absent = testing_observation_prefix ++ "{\"status\":\"absent\"";
-    inline for (.{ "kind", "target", "code", "revision", "created", "input", "state", "queue", "binding", "result", "work", "recovery", "selection", "completion", "interruption_target", "permission_target" }) |field|
+    inline for (.{ "kind", "target", "code", "revision", "created", "input", "state", "queue", "binding", "result", "work", "recovery", "selection", "completion", "interruption_target", "permission_target", "action_target", "action_selection" }) |field|
         try std.testing.expectError(error.InvalidObservation, CommandObservation.parse(.{ .status = 200, .body = absent ++ ",\"" ++ field ++ "\":null}}" }, "k"));
 }
 

@@ -20,7 +20,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 74;
+pub const schema_version: u32 = 75;
 
 pub const IdentityMismatch = struct {
     saved_selector: Bounded(store_path.max_bytes) = .{},
@@ -61,6 +61,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 72, .digest = 0x93ee71c21e7438ab },
     .{ .schema_version = 73, .digest = 0x515b60c7f5df332d },
     .{ .schema_version = 74, .digest = 0xda8e267adbfcef45 },
+    .{ .schema_version = 75, .digest = 0xb58d130e72afa580 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -698,6 +699,68 @@ pub const migrations = [_]Migration{
             "DELETE FROM store_meta WHERE meta_key='wire_version'",
         },
     },
+    .{
+        .from = 74,
+        .sqlite = &.{
+            "ALTER TABLE core_command RENAME TO core_command_before_75",
+            "CREATE TABLE core_command(\n command_key TEXT NOT NULL UNIQUE CHECK(length(CAST(command_key AS BLOB))<=128),\n kind INTEGER NOT NULL CHECK(kind BETWEEN 1 AND 8),\n target TEXT NOT NULL CHECK(length(CAST(target AS BLOB))<=128),\n input_digest BLOB NOT NULL CHECK(length(input_digest)=32),\n primary_content_id INTEGER REFERENCES content(content_id),\n secondary_content_id INTEGER REFERENCES content(content_id),\n accepted INTEGER NOT NULL CHECK(accepted IN (0,1)),\n code TEXT NOT NULL CHECK(length(CAST(code AS BLOB))<=96),\n revision INTEGER NOT NULL CHECK(revision>=0),\n created INTEGER NOT NULL CHECK(created IN (0,1)),\n command_seq INTEGER PRIMARY KEY NOT NULL CHECK(command_seq>0)\n) STRICT",
+            "INSERT INTO core_command SELECT * FROM core_command_before_75",
+            "DROP TABLE core_command_before_75",
+            "CREATE INDEX core_command_target_order ON core_command(target,kind,command_seq)",
+            "ALTER TABLE action_operation RENAME TO action_operation_before_75",
+            "CREATE TABLE action_operation(\n action_id INTEGER PRIMARY KEY NOT NULL CHECK(action_id>0),\n parent_operation_id INTEGER NOT NULL REFERENCES model_operation(operation_id),\n call_ordinal INTEGER NOT NULL CHECK(call_ordinal>=0),\n session_ref TEXT NOT NULL REFERENCES session(session_ref),\n tool_kind INTEGER NOT NULL CHECK(tool_kind=1),\n permission_revision INTEGER NOT NULL CHECK(permission_revision>0),\n authorized INTEGER NOT NULL CHECK(authorized IN (0,1)),\n attempt_ordinal INTEGER NOT NULL DEFAULT 0 CHECK(attempt_ordinal IN (0,1)),\n bash_timeout_override_ms INTEGER CHECK(bash_timeout_override_ms IS NULL OR bash_timeout_override_ms>0),\n attempt_timeout_ms INTEGER CHECK(attempt_timeout_ms IS NULL OR attempt_timeout_ms>0),\n sender_handle TEXT CHECK(sender_handle IS NULL OR (length(CAST(sender_handle AS BLOB))=32 AND (sender_handle NOT GLOB '*[^0-9a-f]*' AND length(sender_handle)=length(CAST(sender_handle AS BLOB))))),\n resolution_code TEXT CHECK(resolution_code IS NULL OR (resolution_code='denied' OR resolution_code='cancelled' OR resolution_code='succeeded' OR resolution_code='failed' OR resolution_code='timed_out' OR resolution_code='indeterminate' OR resolution_code='storage_failed' OR resolution_code='spawn_failed' OR resolution_code='infrastructure_shutdown')),\n resolution_content_id INTEGER REFERENCES content(content_id),\n acceptance_position INTEGER CHECK(acceptance_position IS NULL OR acceptance_position>0),\n attempt_at INTEGER CHECK(attempt_at IS NULL OR attempt_at>0),\n decided_at INTEGER CHECK(decided_at IS NULL OR decided_at>0),\n resolved_at INTEGER CHECK(resolved_at IS NULL OR resolved_at>0),\n approval_position INTEGER CHECK(approval_position IS NULL OR approval_position>0),\n background_content_id INTEGER REFERENCES content(content_id),\n background_position INTEGER CHECK((background_content_id IS NULL AND background_position IS NULL) OR (background_content_id IS NOT NULL AND background_position IS NOT NULL AND background_position>0 AND (acceptance_position IS NULL OR background_position<acceptance_position))),\n background_at INTEGER CHECK((background_position IS NULL AND background_at IS NULL) OR (background_position IS NOT NULL AND background_at IS NOT NULL AND background_at>0)),\n UNIQUE(parent_operation_id,call_ordinal),\n FOREIGN KEY(parent_operation_id,session_ref) REFERENCES model_operation(operation_id,session_ref),\n FOREIGN KEY(parent_operation_id,call_ordinal,tool_kind) REFERENCES model_tool_call(operation_id,call_ordinal,action_kind),\n FOREIGN KEY(session_ref,permission_revision) REFERENCES session_revision(session_ref,revision),\n CHECK((resolution_code IS NOT 'denied') OR (authorized=0 AND attempt_ordinal=0)),\n CHECK((attempt_ordinal=0 AND attempt_timeout_ms IS NULL) OR (attempt_ordinal=1 AND attempt_timeout_ms IS NOT NULL)),\n CHECK((resolution_code IS NULL AND resolution_content_id IS NULL AND acceptance_position IS NULL) OR (resolution_code IS NOT NULL AND resolution_content_id IS NOT NULL AND acceptance_position IS NOT NULL)),\n CHECK((attempt_ordinal=1)=(attempt_at IS NOT NULL)),\n CHECK((authorized=1)=(decided_at IS NOT NULL)),\n CHECK((resolution_code IS NULL)=(resolved_at IS NULL))\n) STRICT",
+            "INSERT INTO action_operation SELECT old.*,NULL,NULL,NULL FROM action_operation_before_75 old",
+            "DROP TABLE action_operation_before_75",
+            "CREATE INDEX action_operation_acceptance ON action_operation(session_ref,acceptance_position)",
+            "CREATE INDEX action_operation_approval ON action_operation(session_ref,approval_position) WHERE approval_position IS NOT NULL",
+            "CREATE INDEX action_operation_executable ON action_operation(action_id) WHERE authorized=1 AND resolution_code IS NULL AND attempt_ordinal=0",
+            "CREATE INDEX action_operation_indeterminate ON action_operation(session_ref,parent_operation_id,call_ordinal) WHERE resolution_code='indeterminate'",
+            "CREATE UNIQUE INDEX action_operation_sender_handle ON action_operation(sender_handle) WHERE sender_handle IS NOT NULL",
+            "CREATE INDEX action_operation_session_order ON action_operation(session_ref,action_id)",
+            "CREATE INDEX action_operation_unresolved_attempt ON action_operation(action_id) WHERE resolution_code IS NULL AND attempt_ordinal=1",
+            "CREATE UNIQUE INDEX action_operation_final_reference ON action_operation(session_ref,action_id,resolution_content_id)",
+            "CREATE INDEX action_operation_background ON action_operation(session_ref,background_position)",
+            "CREATE INDEX action_operation_background_results ON action_operation(session_ref,parent_operation_id,background_position) WHERE background_position IS NOT NULL",
+            "CREATE INDEX action_operation_session_results ON action_operation(session_ref,parent_operation_id,acceptance_position) WHERE acceptance_position IS NOT NULL AND background_position IS NULL",
+            "ALTER TABLE session_stop RENAME TO session_stop_before_75",
+            "CREATE TABLE session_stop(\n command_key TEXT PRIMARY KEY NOT NULL REFERENCES core_command(command_key),\n session_ref TEXT NOT NULL REFERENCES session(session_ref),\n selected_turn_id INTEGER REFERENCES turn(turn_id),\n position INTEGER CHECK(position>0),\n admission_cutoff INTEGER NOT NULL CHECK(admission_cutoff>=0),\n stopped_at INTEGER NOT NULL CHECK(stopped_at>0),\n parent_caused INTEGER NOT NULL DEFAULT 0 CHECK(parent_caused IN (0,1)),\n action_cutoff INTEGER NOT NULL DEFAULT 0 CHECK(action_cutoff>=0)\n) STRICT, WITHOUT ROWID",
+            "INSERT INTO session_stop SELECT old.*,0 FROM session_stop_before_75 old",
+            "DROP TABLE session_stop_before_75",
+            "CREATE INDEX session_stop_exclusion ON session_stop(session_ref,admission_cutoff,position)",
+            "CREATE INDEX session_stop_position ON session_stop(session_ref,position)",
+            "CREATE INDEX session_stop_turn ON session_stop(selected_turn_id)",
+            "CREATE INDEX session_stop_unpositioned ON session_stop(session_ref) WHERE position IS NULL",
+            "ALTER TABLE message_admission RENAME TO message_admission_before_75",
+            "CREATE TABLE message_admission(\n admission_id INTEGER PRIMARY KEY NOT NULL CHECK(admission_id>0),\n session_ref TEXT NOT NULL REFERENCES session(session_ref),\n command_key TEXT UNIQUE REFERENCES core_command(command_key),\n content_id INTEGER NOT NULL REFERENCES content(content_id),\n admission_position INTEGER CHECK(admission_position>0),\n turn_id INTEGER REFERENCES turn(turn_id),\n admitted_at INTEGER NOT NULL CHECK(admitted_at>0),\n sender_session_ref TEXT REFERENCES session(session_ref),\n sender_position INTEGER CHECK(sender_position>0),\n final_action_id INTEGER UNIQUE,\n FOREIGN KEY(session_ref,final_action_id,content_id) REFERENCES action_operation(session_ref,action_id,resolution_content_id),\n CHECK((sender_session_ref IS NULL)=(sender_position IS NULL)),\n CHECK((final_action_id IS NULL AND command_key IS NOT NULL) OR (final_action_id IS NOT NULL AND command_key IS NULL AND sender_session_ref IS NULL AND sender_position IS NULL))\n) STRICT",
+            "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at,sender_session_ref,sender_position) SELECT admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at,sender_session_ref,sender_position FROM message_admission_before_75",
+            "DROP TABLE message_admission_before_75",
+            "CREATE UNIQUE INDEX message_admission_sent ON message_admission(sender_session_ref,sender_position) WHERE sender_session_ref IS NOT NULL",
+            "CREATE INDEX message_admission_session_order ON message_admission(session_ref,turn_id,admission_id)",
+            "CREATE INDEX message_admission_pending ON message_admission(admission_id,session_ref) WHERE turn_id IS NULL",
+            "CREATE INDEX message_admission_session_pending ON message_admission(session_ref,admission_id) WHERE turn_id IS NULL",
+            "CREATE INDEX message_admission_person ON message_admission(session_ref,admission_position) WHERE sender_session_ref IS NULL AND final_action_id IS NULL",
+            "CREATE INDEX message_admission_unpositioned ON message_admission(session_ref) WHERE admission_position IS NULL",
+            "CREATE INDEX message_admission_position ON message_admission(session_ref,admission_position)",
+            "CREATE TABLE action_control_command(\n command_key TEXT PRIMARY KEY NOT NULL REFERENCES core_command(command_key),\n action_id TEXT NOT NULL CHECK(length(CAST(action_id AS BLOB)) BETWEEN 1 AND 20 AND (action_id NOT GLOB '*[^0-9]*' AND length(action_id)=length(CAST(action_id AS BLOB)))),\n selected_action_id INTEGER REFERENCES action_operation(action_id),\n selection TEXT CHECK(selection IS NULL OR (selection='background' OR selection='final' OR selection='stop')),\n selection_position INTEGER CHECK(selection_position>0),\n CHECK((selected_action_id IS NULL AND selection IS NULL AND selection_position IS NULL) OR (selected_action_id IS NOT NULL AND selection IS NOT NULL AND selection_position IS NOT NULL))\n) STRICT, WITHOUT ROWID",
+            "CREATE INDEX action_control_stop ON action_control_command(selected_action_id,selection_position) WHERE selection='stop'",
+        },
+        .mysql = &.{
+            "SET @rui_kind_check=(SELECT constraint_name FROM information_schema.check_constraints WHERE constraint_schema=DATABASE() AND constraint_name IN (SELECT constraint_name FROM information_schema.table_constraints WHERE table_schema=DATABASE() AND table_name='core_command' AND constraint_type='CHECK') AND REPLACE(REPLACE(REPLACE(REPLACE(LOWER(check_clause),'`',''),' ',''),'(',''),')','')='kindbetween1and6')",
+            "SET @rui_kind_alter=CONCAT('ALTER TABLE core_command DROP CHECK `',REPLACE(@rui_kind_check,'`','``'),'`, ADD CHECK(kind BETWEEN 1 AND 8)')",
+            "PREPARE rui_kind_statement FROM @rui_kind_alter",
+            "EXECUTE rui_kind_statement",
+            "DEALLOCATE PREPARE rui_kind_statement",
+            "ALTER TABLE action_operation ADD COLUMN background_content_id BIGINT AFTER approval_position, ADD COLUMN background_position BIGINT AFTER background_content_id, ADD COLUMN background_at BIGINT AFTER background_position, ADD CHECK((background_position IS NULL AND background_at IS NULL) OR (background_position IS NOT NULL AND background_at IS NOT NULL AND background_at>0)), ADD FOREIGN KEY(background_content_id) REFERENCES content(content_id), ADD CHECK((background_content_id IS NULL AND background_position IS NULL) OR (background_content_id IS NOT NULL AND background_position IS NOT NULL AND background_position>0 AND (acceptance_position IS NULL OR background_position<acceptance_position)))",
+            "CREATE UNIQUE INDEX action_operation_final_reference ON action_operation(session_ref,action_id,resolution_content_id)",
+            "CREATE INDEX action_operation_background ON action_operation(session_ref,background_position)",
+            "ALTER TABLE action_operation ADD COLUMN action_operation_background_results_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN background_position IS NOT NULL THEN session_ref END) STORED, ADD INDEX action_operation_background_results(action_operation_background_results_lead,parent_operation_id,background_position), DROP INDEX action_operation_session_results, MODIFY action_operation_session_results_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN acceptance_position IS NOT NULL AND background_position IS NULL THEN session_ref END) STORED, ADD INDEX action_operation_session_results(action_operation_session_results_lead,parent_operation_id,acceptance_position)",
+            "ALTER TABLE session_stop ADD COLUMN action_cutoff BIGINT NOT NULL DEFAULT 0 CHECK(action_cutoff>=0) AFTER parent_caused",
+            "ALTER TABLE message_admission MODIFY command_key VARCHAR(128) NULL, ADD COLUMN final_action_id BIGINT AFTER sender_position, ADD UNIQUE(final_action_id), ADD FOREIGN KEY(session_ref,final_action_id,content_id) REFERENCES action_operation(session_ref,action_id,resolution_content_id), ADD CHECK((final_action_id IS NULL AND command_key IS NOT NULL) OR (final_action_id IS NOT NULL AND command_key IS NULL AND sender_session_ref IS NULL AND sender_position IS NULL))",
+            "ALTER TABLE message_admission DROP INDEX message_admission_person, MODIFY message_admission_person_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN sender_session_ref IS NULL AND final_action_id IS NULL THEN session_ref END) STORED, ADD INDEX message_admission_person(message_admission_person_lead,admission_position)",
+            "CREATE TABLE action_control_command(\n command_key VARCHAR(128) NOT NULL,\n action_id TEXT NOT NULL,\n selected_action_id BIGINT,\n selection VARCHAR(10),\n selection_position BIGINT,\n action_control_stop_lead BIGINT GENERATED ALWAYS AS (CASE WHEN selection='stop' THEN selected_action_id END) STORED,\n PRIMARY KEY(command_key),\n FOREIGN KEY(command_key) REFERENCES core_command(command_key),\n FOREIGN KEY(selected_action_id) REFERENCES action_operation(action_id),\n CHECK(OCTET_LENGTH(action_id) BETWEEN 1 AND 20 AND (NOT REGEXP_LIKE(action_id,'[^0-9]','c'))),\n CHECK(selection IS NULL OR (selection='background' OR selection='final' OR selection='stop')),\n CHECK(selection_position>0),\n CHECK((selected_action_id IS NULL AND selection IS NULL AND selection_position IS NULL) OR (selected_action_id IS NOT NULL AND selection IS NOT NULL AND selection_position IS NOT NULL))\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
+            "CREATE INDEX action_control_stop ON action_control_command(action_control_stop_lead,selection_position)",
+        },
+    },
 };
 
 comptime {
@@ -1176,7 +1239,7 @@ pub const tables = [_]Table{
         .name = "core_command",
         .columns = &.{
             .{ .name = "command_key", .type = .{ .text = .{ .max = 128 } } },
-            .{ .name = "kind", .type = .int, .check = "kind BETWEEN 1 AND 6" },
+            .{ .name = "kind", .type = .int, .check = "kind BETWEEN 1 AND 8" },
             .{ .name = "target", .type = .{ .text = .{ .max = 128 } } },
             .{ .name = "input_digest", .type = .{ .bytes = .{ .min = 32, .max = 32 } } },
             .{ .name = "primary_content_id", .type = .int, .nullable = true },
@@ -1269,16 +1332,17 @@ pub const tables = [_]Table{
         .columns = &.{
             .{ .name = "admission_id", .type = .int, .check = "admission_id>0", .read_by = .both },
             .{ .name = "session_ref", .type = .{ .text = null }, .read_by = .both },
-            .{ .name = "command_key", .type = .{ .text = null }, .read_by = .both },
+            .{ .name = "command_key", .type = .{ .text = null }, .nullable = true, .read_by = .both },
             .{ .name = "content_id", .type = .int, .read_by = .both },
             .{ .name = "admission_position", .type = .int, .nullable = true, .check = "admission_position>0" },
             .{ .name = "turn_id", .type = .int, .nullable = true },
             .{ .name = "admitted_at", .type = .int, .check = "admitted_at>0", .read_by = .both },
             .{ .name = "sender_session_ref", .type = .{ .text = null }, .nullable = true, .read_by = .both },
             .{ .name = "sender_position", .type = .int, .nullable = true, .check = "sender_position>0", .read_by = .both },
+            .{ .name = "final_action_id", .type = .int, .nullable = true },
         },
         .primary_key = &.{"admission_id"},
-        .uniques = &.{&.{"command_key"}},
+        .uniques = &.{ &.{"command_key"}, &.{"final_action_id"} },
         .foreign_keys = &.{
             references("session_ref", "session", session_reference),
             references("command_key", "core_command", command_reference),
@@ -1287,8 +1351,12 @@ pub const tables = [_]Table{
             // Admission is written with turn_id NULL, and set once its Turn exists.
             references("turn_id", "turn", &.{"turn_id"}),
             references("sender_session_ref", "session", session_reference),
+            .{ .columns = &.{ "session_ref", "final_action_id", "content_id" }, .references = "action_operation", .referenced = &.{ "session_ref", "action_id", "resolution_content_id" } },
         },
-        .checks = &.{"(sender_session_ref IS NULL)=(sender_position IS NULL)"},
+        .checks = &.{
+            "(sender_session_ref IS NULL)=(sender_position IS NULL)",
+            "(final_action_id IS NULL AND command_key IS NOT NULL) OR (final_action_id IS NOT NULL AND command_key IS NULL AND sender_session_ref IS NULL AND sender_position IS NULL)",
+        },
     },
     .{
         .name = "sent_rejection",
@@ -1339,6 +1407,7 @@ pub const tables = [_]Table{
             .{ .name = "stopped_at", .type = .int, .check = "stopped_at>0" },
             // Causal provenance, independent of which Command recorded the stop.
             .{ .name = "parent_caused", .type = .flag, .default = "0" },
+            .{ .name = "action_cutoff", .type = .int, .default = "0", .check = "action_cutoff>=0" },
         },
         .primary_key = &.{"command_key"},
         .foreign_keys = &.{
@@ -1709,6 +1778,9 @@ pub const tables = [_]Table{
             // insert under an `ask` revision and never changed. Stored
             // because the feed seeks it and no index can see the revision.
             .{ .name = "approval_position", .type = .int, .nullable = true, .check = "approval_position IS NULL OR approval_position>0" },
+            .{ .name = "background_content_id", .type = .int, .nullable = true },
+            .{ .name = "background_position", .type = .int, .nullable = true, .check = "(background_content_id IS NULL AND background_position IS NULL) OR (background_content_id IS NOT NULL AND background_position IS NOT NULL AND background_position>0 AND (acceptance_position IS NULL OR background_position<acceptance_position))" },
+            .{ .name = "background_at", .type = .int, .nullable = true, .check = "(background_position IS NULL AND background_at IS NULL) OR (background_position IS NOT NULL AND background_at IS NOT NULL AND background_at>0)" },
         },
         .primary_key = &.{"action_id"},
         .uniques = &.{&.{ "parent_operation_id", "call_ordinal" }},
@@ -1716,6 +1788,7 @@ pub const tables = [_]Table{
             references("parent_operation_id", "model_operation", &.{"operation_id"}),
             references("session_ref", "session", session_reference),
             references("resolution_content_id", "content", content_reference),
+            references("background_content_id", "content", content_reference),
             .{ .columns = &.{ "parent_operation_id", "session_ref" }, .references = "model_operation", .referenced = &.{ "operation_id", "session_ref" } },
             .{ .columns = &.{ "parent_operation_id", "call_ordinal", "tool_kind" }, .references = "model_tool_call", .referenced = &.{ "operation_id", "call_ordinal", "action_kind" } },
             .{ .columns = &.{ "session_ref", "permission_revision" }, .references = "session_revision", .referenced = &.{ "session_ref", "revision" } },
@@ -1741,9 +1814,28 @@ pub const tables = [_]Table{
         .foreign_keys = &.{references("command_key", "core_command", command_reference)},
         .without_rowid = true,
     },
+    .{
+        .name = "action_control_command",
+        .columns = &.{
+            .{ .name = "command_key", .type = .{ .text = null } },
+            .{ .name = "action_id", .type = .{ .text = .{ .min = 1, .max = 20 } }, .check = "@charset(action_id,'0-9')" },
+            .{ .name = "selected_action_id", .type = .int, .nullable = true },
+            .{ .name = "selection", .type = .{ .tag = &.{ "background", "final", "stop" } }, .nullable = true },
+            .{ .name = "selection_position", .type = .int, .nullable = true, .check = "selection_position>0" },
+        },
+        .primary_key = &.{"command_key"},
+        .foreign_keys = &.{
+            references("command_key", "core_command", command_reference),
+            references("selected_action_id", "action_operation", &.{"action_id"}),
+        },
+        .checks = &.{"(selected_action_id IS NULL AND selection IS NULL AND selection_position IS NULL) OR (selected_action_id IS NOT NULL AND selection IS NOT NULL AND selection_position IS NOT NULL)"},
+        .without_rowid = true,
+    },
 };
 
 pub const indexes = [_]Index{
+    .{ .name = "action_operation_final_reference", .table = "action_operation", .columns = &.{ "session_ref", "action_id", "resolution_content_id" }, .unique = true },
+    .{ .name = "action_control_stop", .table = "action_control_command", .columns = &.{ "selected_action_id", "selection_position" }, .where = "selection='stop'" },
     .{ .name = "session_obligation_parent", .table = "session", .columns = &.{ "parent_ref", "obligation_since", "session_ref" }, .where = "obligation_since IS NOT NULL" },
     .{ .name = "session_forward_owed_message", .table = "session_forward", .columns = &.{ "target_ref", "message_delivered" } },
     .{ .name = "session_workspace_list", .table = "session", .columns = &.{ "workspace_digest", "created_seq" } },
@@ -1753,7 +1845,7 @@ pub const indexes = [_]Index{
     .{ .name = "message_admission_session_order", .table = "message_admission", .columns = &.{ "session_ref", "turn_id", "admission_id" } },
     .{ .name = "message_admission_pending", .table = "message_admission", .columns = &.{ "admission_id", "session_ref" }, .where = "turn_id IS NULL" },
     .{ .name = "message_admission_session_pending", .table = "message_admission", .columns = &.{ "session_ref", "admission_id" }, .where = "turn_id IS NULL" },
-    .{ .name = "message_admission_person", .table = "message_admission", .columns = &.{ "session_ref", "admission_position" }, .where = "sender_session_ref IS NULL" },
+    .{ .name = "message_admission_person", .table = "message_admission", .columns = &.{ "session_ref", "admission_position" }, .where = "sender_session_ref IS NULL AND final_action_id IS NULL" },
     .{ .name = "message_admission_unpositioned", .table = "message_admission", .columns = &.{"session_ref"}, .where = "admission_position IS NULL" },
     .{ .name = "message_admission_position", .table = "message_admission", .columns = &.{ "session_ref", "admission_position" } },
     .{ .name = "core_command_target_order", .table = "core_command", .columns = &.{ "target", "kind", "command_seq" } },
@@ -1775,13 +1867,13 @@ pub const indexes = [_]Index{
     .{ .name = "action_operation_session_order", .table = "action_operation", .columns = &.{ "session_ref", "action_id" } },
     .{ .name = "action_operation_sender_handle", .table = "action_operation", .columns = &.{"sender_handle"}, .unique = true, .where = "sender_handle IS NOT NULL" },
     .{ .name = "action_operation_acceptance", .table = "action_operation", .columns = &.{ "session_ref", "acceptance_position" } },
-    // Results walk it (`report.full_results`): the predicate holds exactly
-    // for a resolved Action (action_operation's CHECK).
-    .{ .name = "action_operation_session_results", .table = "action_operation", .columns = &.{ "session_ref", "parent_operation_id", "acceptance_position" }, .where = "acceptance_position IS NOT NULL" },
+    .{ .name = "action_operation_background", .table = "action_operation", .columns = &.{ "session_ref", "background_position" } },
+    .{ .name = "action_operation_session_results", .table = "action_operation", .columns = &.{ "session_ref", "parent_operation_id", "acceptance_position" }, .where = "acceptance_position IS NOT NULL AND background_position IS NULL" },
     .{ .name = "action_operation_approval", .table = "action_operation", .columns = &.{ "session_ref", "approval_position" }, .where = "approval_position IS NOT NULL" },
     .{ .name = "action_operation_executable", .table = "action_operation", .columns = &.{"action_id"}, .where = "authorized=1 AND resolution_code IS NULL AND attempt_ordinal=0" },
     .{ .name = "action_operation_unresolved_attempt", .table = "action_operation", .columns = &.{"action_id"}, .where = "resolution_code IS NULL AND attempt_ordinal=1" },
     .{ .name = "action_operation_indeterminate", .table = "action_operation", .columns = &.{ "session_ref", "parent_operation_id", "call_ordinal" }, .where = "resolution_code='indeterminate'" },
+    .{ .name = "action_operation_background_results", .table = "action_operation", .columns = &.{ "session_ref", "parent_operation_id", "background_position" }, .where = "background_position IS NOT NULL" },
     // Calls walk it (`report.full_calls`).
     .{ .name = "model_tool_call_session_order", .table = "model_tool_call", .columns = &.{ "session_ref", "operation_id", "call_ordinal" } },
     // Results walk it: the predicate holds exactly for a rejected call
@@ -2970,8 +3062,9 @@ test "schema 74 migration only deletes the saved wire label on SQLite and MySQL"
         try std.testing.expectEqualStrings("DELETE FROM store_meta WHERE meta_key='wire_version'", statements[0]);
     }
     try std.testing.expectEqualStrings("DELETE FROM store_meta WHERE meta_key='wire_version';\n", mysqlMigration(73));
-    // Older formats' composed text ends with the format alone, never a wire label.
-    try std.testing.expect(std.mem.endsWith(u8, mysqlMigrationFrom(migration_baseline).?, "DELETE FROM store_meta WHERE meta_key='wire_version';\nUPDATE store_meta SET meta_value='" ++ format_text ++ "' WHERE meta_key='format';\n"));
+    const composed = mysqlMigrationFrom(migration_baseline).?;
+    try std.testing.expect(std.mem.indexOf(u8, composed, "DELETE FROM store_meta WHERE meta_key='wire_version';\n") != null);
+    try std.testing.expect(std.mem.endsWith(u8, composed, "UPDATE store_meta SET meta_value='" ++ format_text ++ "' WHERE meta_key='format';\n"));
 }
 
 test "schema 72 migration updates only wire metadata on SQLite and MySQL" {

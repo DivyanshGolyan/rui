@@ -491,3 +491,42 @@ const content_prefetch_bytes = 128 * 1024;
 /// Import-time copy and decode windows: small, so settlement frames stay
 /// within the Host stack rule.
 pub const import_window_bytes = 512;
+
+/// Decoded content read a byte at a time, as the argument parsers read it.
+pub const ContentSource = struct {
+    reader: ContentReader = undefined,
+    length: u64,
+    position: u64 = 0,
+    buffer_start: u64 = 0,
+    buffer_length: usize = 0,
+    buffer: [4096]u8 = undefined,
+
+    pub fn peek(self: *ContentSource) !?u8 {
+        if (self.position == self.length) return null;
+        if (self.position < self.buffer_start or self.position >= self.buffer_start + self.buffer_length) {
+            self.buffer_start = self.position;
+            const wanted: usize = @intCast(@min(self.length - self.position, self.buffer.len));
+            self.buffer_length = try self.reader.read(self.position, self.buffer[0..wanted]);
+            if (self.buffer_length != wanted) return error.ShortCanonicalRead;
+        }
+        return self.buffer[@intCast(self.position - self.buffer_start)];
+    }
+
+    pub fn take(self: *ContentSource) !u8 {
+        const byte = try self.peek() orelse return error.InvalidDescriptorJson;
+        self.position += 1;
+        return byte;
+    }
+
+    pub fn space(self: *ContentSource) !void {
+        while (try self.peek()) |byte| switch (byte) {
+            ' ', '\t', '\r', '\n' => _ = try self.take(),
+            else => return,
+        };
+    }
+
+    pub fn expect(self: *ContentSource, byte: u8) !void {
+        try self.space();
+        if (try self.take() != byte) return error.InvalidDescriptorJson;
+    }
+};

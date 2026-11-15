@@ -5,6 +5,8 @@ export {
 	Session,
 	Sessions,
 	type AgentSpec,
+	type ActionStatus,
+	type ActionSelection,
 	type ListSessionsOptions,
 	type SessionArchiveState,
 	type SessionArchiveResult,

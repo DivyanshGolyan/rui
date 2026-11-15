@@ -51,6 +51,7 @@ pub const ConfigureReply = configuration_domain.ConfigureReply;
 pub const PresetDecision = configuration_domain.PresetDecision;
 pub const ContentLocation = content_domain.ContentLocation;
 pub const ContentReader = content_domain.ContentReader;
+pub const ContentSource = content_domain.ContentSource;
 pub const ContentReference = content_domain.ContentReference;
 pub const ControlTrace = store_core.ControlTrace;
 pub const ControlTracePhase = store_core.ControlTracePhase;
@@ -123,11 +124,13 @@ pub const ValidatedOutput = model_settlement_domain.ValidatedOutput;
 test {
     _ = @import("store/domain/action.zig");
     _ = @import("store/domain/history_floor.zig");
+    _ = @import("store/domain/sourced_input.zig");
     _ = @import("store/tests.zig");
     _ = @import("store/tests/access.zig");
     _ = @import("store/tests/access_rules.zig");
     _ = @import("store/tests/action.zig");
     _ = @import("store/tests/activity.zig");
+    _ = @import("store/tests/async_actions.zig");
     _ = @import("store/tests/agent.zig");
     _ = @import("store/tests/compaction.zig");
     _ = @import("store/tests/configuration.zig");
@@ -201,3 +204,5 @@ test {
     _ = @import("store/mysql_session_tests.zig");
     _ = @import("store/wire/mysql_connection.zig");
 }
+
+pub const ActionCapacityView = @import("store/domain/action_control.zig").CapacityView;

@@ -1060,3 +1060,170 @@ test "schema 66 MySQL migration freezes actual effort emission and prior admitte
         writeRecord();
     };
 }
+
+test "schema 75 command kind migration resolves actual catalog name and fails closed on missing or duplicate semantics" {
+    const io = std.testing.io;
+    mutex.lockUncancelable(io);
+    defer mutex.unlock(io);
+    _ = connection() orelse return if (state == .absent) error.SkipZigTest else error.MysqlUnavailable;
+    defer restore("USE " ++ database);
+    const name = "rui_async_kind_check";
+    const step = schema.migrations[74 - schema.migration_baseline];
+    inline for ([_][]const u8{ "core_command_chk_1", "historically_renamed_kind" }) |constraint| {
+        try setup("DROP DATABASE IF EXISTS " ++ name ++ ";CREATE DATABASE " ++ name);
+        try load(name, "CREATE TABLE core_command(kind BIGINT NOT NULL,CONSTRAINT `" ++ constraint ++ "` CHECK(kind BETWEEN 1 AND 6)) ENGINE=InnoDB", false);
+        inline for (step.mysql[0..5]) |sql| try load(name, sql, false);
+        try load(name, "INSERT INTO core_command(kind) VALUES(7),(8)", false);
+        const invalid = try run("INSERT INTO core_command(kind) VALUES(9)") orelse return error.KindConstraintNotEnforced;
+        try std.testing.expectEqual(@as(u16, 3819), invalid.code);
+    }
+    inline for ([_]bool{ false, true }) |duplicate| {
+        try setup("DROP DATABASE IF EXISTS " ++ name ++ ";CREATE DATABASE " ++ name);
+        try load(name, "CREATE TABLE core_command(kind BIGINT NOT NULL) ENGINE=InnoDB", false);
+        if (duplicate) try load(name, "ALTER TABLE core_command ADD CONSTRAINT one_kind CHECK(kind BETWEEN 1 AND 6), ADD CONSTRAINT two_kind CHECK(kind BETWEEN 1 AND 6)", false);
+        try load(name, "SET @rui_kind_check='stale';SET @rui_kind_alter='ALTER TABLE core_command ADD COLUMN stale_fallthrough BIGINT';PREPARE rui_kind_statement FROM @rui_kind_alter", false);
+        const text = comptime blk: {
+            var result: []const u8 = "";
+            for (step.mysql[0..5]) |sql| result = result ++ sql ++ ";\n";
+            break :blk result;
+        };
+        _ = try run(text) orelse return error.AmbiguousKindMigrationAccepted;
+        var observed: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer observed.deinit();
+        try writeResult("SELECT count(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='" ++ name ++ "' AND TABLE_NAME='core_command' AND COLUMN_NAME='stale_fallthrough'", &observed.writer);
+        try std.testing.expectEqualStrings("\n 1:0", observed.written());
+    }
+    try setup("DROP DATABASE " ++ name);
+    done.migrations += 1;
+    writeRecord();
+}
+
+fn finalSourceReferenceGate() !void {
+    for ([_][]const u8{
+        "INSERT INTO message_admission(admission_id,session_ref,content_id,admission_position,admitted_at,final_action_id) VALUES(100,'d8mv7p',1,100,1793781721,1)",
+        "INSERT INTO message_admission(admission_id,session_ref,content_id,admission_position,admitted_at,final_action_id) VALUES(100,'brhkcj',2,100,1793781721,1)",
+        "INSERT INTO message_admission(admission_id,session_ref,content_id,admission_position,admitted_at,final_action_id) VALUES(100,'brhkcj',1,100,1793781721,2)",
+    }) |sql| {
+        const refusal = try run(sql) orelse return error.FinalSourceReferenceNotEnforced;
+        if (refusal.code != 1452) return error.WrongFinalSourceRefusal;
+    }
+}
+
+test "schema 75 MySQL final source enforces exact reference and rejects only-new-reference-removed control" {
+    const io = std.testing.io;
+    mutex.lockUncancelable(io);
+    defer mutex.unlock(io);
+    _ = connection() orelse return if (state == .absent) error.SkipZigTest else error.MysqlUnavailable;
+    defer restore("USE " ++ database);
+    inline for ([_]bool{ false, true }) |migrated| {
+        const name = "rui_async_final_reference";
+        try setup("DROP DATABASE IF EXISTS " ++ name ++ ";CREATE DATABASE " ++ name);
+        defer restore("DROP DATABASE IF EXISTS " ++ name);
+        if (migrated) {
+            try load(name, store_testing.baseline_mysql_ddl, false);
+            try load(name, store_testing.baseline_rows, true);
+            try load(name, schema.mysqlMigrationFrom(schema.migration_baseline).?, false);
+        } else {
+            try load(name, schema.ddl(.mysql), false);
+            try load(name, store_testing.expected_mysql_rows, true);
+        }
+        try load(name, "UPDATE action_operation SET resolution_code='failed',resolution_content_id=1,acceptance_position=10,resolved_at=1793781721 WHERE action_id=1", false);
+        try finalSourceReferenceGate();
+        try load(name, "INSERT INTO message_admission(admission_id,session_ref,content_id,admission_position,admitted_at,final_action_id) VALUES(100,'brhkcj',1,100,1793781721,1)", false);
+        try load(name, "DELETE FROM message_admission WHERE admission_id=100", false);
+        try load(name, "SET @rui_final_fk=(SELECT constraint_name FROM information_schema.KEY_COLUMN_USAGE WHERE table_schema=DATABASE() AND table_name='message_admission' AND column_name='final_action_id' AND referenced_table_name='action_operation');SET @rui_final_drop=CONCAT('ALTER TABLE message_admission DROP FOREIGN KEY `',REPLACE(@rui_final_fk,'`','``'),'`');PREPARE rui_final_statement FROM @rui_final_drop;EXECUTE rui_final_statement;DEALLOCATE PREPARE rui_final_statement", false);
+        try std.testing.expectError(error.FinalSourceReferenceNotEnforced, finalSourceReferenceGate());
+    }
+    done.migrations += 1;
+    writeRecord();
+}
+
+test "obligation projection MySQL row counts match SQLite for null changed unchanged missing and refused values" {
+    const Projection = rsql.ObligationProjection(.{
+        .sql = "SELECT session_ref,obligation_since AS saved_since,?2 AS owed_since FROM session WHERE session_ref=?1 UNION ALL " ++
+            "SELECT session_ref,obligation_since AS saved_since,?3 AS owed_since FROM session WHERE session_ref=?1",
+        .Args = struct { session: []const u8, owed: ?u64, other: ?u64 },
+    });
+    const io = std.testing.io;
+    mutex.lockUncancelable(io);
+    defer mutex.unlock(io);
+    _ = connection() orelse return if (state == .absent) error.SkipZigTest else error.MysqlUnavailable;
+    const name = "rui_obligation_projection_parity";
+    try setup("DROP DATABASE IF EXISTS " ++ name ++ ";CREATE DATABASE " ++ name ++ ";USE " ++ name);
+    defer restore("DROP DATABASE IF EXISTS " ++ name);
+    defer restore("USE " ++ database);
+    const ddl_text = "CREATE TABLE session(session_ref VARCHAR(6) PRIMARY KEY,obligation_since BIGINT CHECK(obligation_since IS NULL OR obligation_since>0))";
+    try setup(ddl_text);
+    try setup("INSERT INTO session(session_ref,obligation_since) VALUES('aaaaaa',NULL),('bbbbbb',80)");
+    try setup(comptime statements(prepareQuery(Projection.mysql.prepared()))[0]);
+    defer restore("DEALLOCATE PREPARE rui_dialect_check");
+    try std.testing.expectEqualDeep(@as([]const rsql.Slot, &.{ .{ .argument = 1 }, .{ .argument = 0 }, .{ .argument = 2 }, .{ .argument = 0 } }), Projection.mysql.slots);
+
+    var raw: ?*sqlite.c.sqlite3 = null;
+    if (sqlite.c.sqlite3_open(":memory:", &raw) != sqlite.c.SQLITE_OK) {
+        if (raw) |opened| _ = sqlite.c.sqlite3_close(opened);
+        return error.StoreOpenFailed;
+    }
+    const local = raw.?;
+    defer {
+        const closed = sqlite.c.sqlite3_close(local);
+        if (closed != sqlite.c.SQLITE_OK) std.log.err("obligation parity SQLite close failed: {d}", .{closed});
+    }
+    try sqlite.exec(local, ddl_text);
+    try sqlite.exec(local, "INSERT INTO session(session_ref,obligation_since) VALUES('aaaaaa',NULL),('bbbbbb',80)");
+    const statement = try sqlite.prepare(local, Projection.sql);
+    defer _ = sqlite.c.sqlite3_finalize(statement);
+    const Case = struct { saved: ?u64, owed: ?u64, other: ?u64 = null, missing: bool = false, rows: u64, expected: ?u64, refused: bool = false };
+    inline for ([_]Case{
+        .{ .saved = null, .owed = null, .rows = 0, .expected = null },
+        .{ .saved = null, .owed = 17, .rows = 1, .expected = 17 },
+        .{ .saved = 17, .owed = 17, .rows = 0, .expected = 17 },
+        .{ .saved = 17, .owed = 31, .other = 9, .rows = 1, .expected = 9 },
+        .{ .saved = null, .owed = null, .other = 17, .rows = 1, .expected = 17 },
+        .{ .saved = 9, .owed = null, .rows = 1, .expected = null },
+        .{ .saved = 17, .owed = 99, .missing = true, .rows = 0, .expected = 17 },
+        .{ .saved = 17, .owed = 0, .rows = 0, .expected = 17, .refused = true },
+    }) |case| {
+        const saved = if (case.saved) |n| std.fmt.comptimePrint("{d}", .{n}) else "NULL";
+        const owed = if (case.owed) |n| std.fmt.comptimePrint("{d}", .{n}) else "NULL";
+        const other = if (case.other) |n| std.fmt.comptimePrint("{d}", .{n}) else "NULL";
+        const key = if (case.missing) "zzzzzz" else "aaaaaa";
+        try setup("UPDATE session SET obligation_since=" ++ saved ++ " WHERE session_ref='aaaaaa'");
+        try sqlite.exec(local, "UPDATE session SET obligation_since=" ++ saved ++ " WHERE session_ref='aaaaaa'");
+        try setup("SET @rui_projection_key='" ++ key ++ "',@rui_projection_owed=" ++ owed ++ ",@rui_projection_other=" ++ other);
+        try std.testing.expectEqual(sqlite.c.SQLITE_OK, sqlite.c.sqlite3_reset(statement));
+        try std.testing.expectEqual(sqlite.c.SQLITE_OK, sqlite.c.sqlite3_clear_bindings(statement));
+        try std.testing.expectEqual(sqlite.c.SQLITE_OK, sqlite.c.sqlite3_bind_text(statement, 1, key.ptr, @intCast(key.len), null));
+        const bound = if (case.owed) |n| sqlite.c.sqlite3_bind_int64(statement, 2, @intCast(n)) else sqlite.c.sqlite3_bind_null(statement, 2);
+        try std.testing.expectEqual(sqlite.c.SQLITE_OK, bound);
+        const other_bound = if (case.other) |n| sqlite.c.sqlite3_bind_int64(statement, 3, @intCast(n)) else sqlite.c.sqlite3_bind_null(statement, 3);
+        try std.testing.expectEqual(sqlite.c.SQLITE_OK, other_bound);
+        const local_result = sqlite.c.sqlite3_step(statement);
+        if (case.refused) {
+            try std.testing.expectEqual(sqlite.c.SQLITE_CONSTRAINT, local_result & 0xff);
+            const refusal = (try run("EXECUTE rui_dialect_check USING @rui_projection_owed,@rui_projection_key,@rui_projection_other,@rui_projection_key")) orelse return error.MissingProjectionRefusal;
+            try std.testing.expectEqual(@as(u16, 3819), refusal.code);
+        } else {
+            try std.testing.expectEqual(sqlite.c.SQLITE_DONE, local_result);
+            try std.testing.expectEqual(case.rows, @as(u64, @intCast(sqlite.c.sqlite3_changes64(local))));
+            var counted: std.Io.Writer.Allocating = .init(std.testing.allocator);
+            defer counted.deinit();
+            try writeResult("EXECUTE rui_dialect_check USING @rui_projection_owed,@rui_projection_key,@rui_projection_other,@rui_projection_key;SELECT ROW_COUNT()", &counted.writer);
+            try std.testing.expectEqualStrings(std.fmt.comptimePrint("\n 1:{d}", .{case.rows}), counted.written());
+        }
+        var retained: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer retained.deinit();
+        try writeResult("SELECT session_ref,obligation_since FROM session ORDER BY session_ref", &retained.writer);
+        const expected = if (case.expected) |n| std.fmt.comptimePrint(" {d}:{d}", .{ std.fmt.comptimePrint("{d}", .{n}).len, n }) else " null";
+        try std.testing.expectEqualStrings("\n 6:aaaaaa" ++ expected ++ "\n 6:bbbbbb 2:80", retained.written());
+        const check = try sqlite.prepare(local, "SELECT obligation_since FROM session ORDER BY session_ref");
+        defer _ = sqlite.c.sqlite3_finalize(check);
+        try std.testing.expectEqual(sqlite.c.SQLITE_ROW, sqlite.c.sqlite3_step(check));
+        if (case.expected) |n| {
+            try std.testing.expectEqual(n, @as(u64, @intCast(sqlite.c.sqlite3_column_int64(check, 0))));
+        } else try std.testing.expectEqual(sqlite.c.SQLITE_NULL, sqlite.c.sqlite3_column_type(check, 0));
+        try std.testing.expectEqual(sqlite.c.SQLITE_ROW, sqlite.c.sqlite3_step(check));
+        try std.testing.expectEqual(@as(i64, 80), sqlite.c.sqlite3_column_int64(check, 0));
+        try std.testing.expectEqual(sqlite.c.SQLITE_DONE, sqlite.c.sqlite3_step(check));
+    }
+}

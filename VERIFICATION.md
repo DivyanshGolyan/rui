@@ -8,6 +8,20 @@ Record revision, machine, dependencies, inputs and measurements.
 Prototypes, source inspection and compilation are not production qualification; [research evidence](research/README.md) records those limits.
 Git history keeps earlier test specifications and dated results.
 
+## Background Action lifecycle
+
+`async-actions-integration` drives the public CLI against a local model endpoint and a gated native Bash producer.
+The fsynced launch record and PID establish one physical launch through foreground blocking, promotion, the original answer and final delivery.
+The fixture also separates background acceptance from permission to launch, proves capacity-one refusal leaves the caller unchanged, and drives configured model `read_action` and `stop_action` against an approval-waiting invocation.
+The endpoint captures a single original-call receipt and one later tool-data input, not a second output for the original call ID.
+
+Store conformance cases in `store/tests/async_actions.zig` cover immutable fulfillment, promotion refusal, source-stop suppression, exact replay, atomic core stop authority, complete siblings, frozen busy-model boundaries, attached-tree versus standalone stop, and recovery without effect replay.
+`rsql.zig`'s conditional sourced-input projection cases hold Session markers, nullable sender absence and every source-table tie to the same write authority as ordinary input insertion.
+The native migration tests compare fresh and migrated catalogs and rows on SQLite and MySQL.
+The final-source negative control removes only the new exact reference and must fail the same Session/Action/content acceptance gate with every other foreign key enabled.
+Custody tests cover reserve-and-headroom interleavings, detached cleanup and rollback without reusable stale tokens.
+Source inspection, the transition prototype and Python SQLite probes are design evidence, not substitutes for these native and public gates.
+
 ## Canonical gates
 
 Integration fixtures require Python 3.11 or newer on PATH, with the packages pinned in [tests/integration/requirements.txt](tests/integration/requirements.txt) (python-h2 serves every loopback fixture over h2c); the composed driver rejects older interpreters and records the one selected.

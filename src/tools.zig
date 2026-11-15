@@ -459,3 +459,36 @@ test "find_tools is a core tool and settlement defers its words check" {
     }
     try std.testing.expectEqual(Runner.core, Runner.of(&find_tools_record));
 }
+
+test "named Host calls accept execution metadata before tool argument validation" {
+    const NameSource = struct {
+        bytes: []const u8,
+        at: usize = 0,
+        pub fn next(self: *@This()) !?u8 {
+            if (self.at == self.bytes.len) return null;
+            defer self.at += 1;
+            return self.bytes[self.at];
+        }
+    };
+    const Case = struct { name: []const u8, arguments: []const u8, accepted: bool };
+    const cases = [_]Case{
+        .{ .name = "bash", .arguments = "{\"cmd\":\"true\",\"description\":\"Run fixture\",\"rui_execution\":\"background\"}", .accepted = true },
+        .{ .name = "bash", .arguments = "{\"rui_execution\":\"foreground\",\"cmd\":\"true\",\"description\":\"Run fixture\"}", .accepted = true },
+        .{ .name = "bash", .arguments = "{\"cmd\":\"true\",\"rui_\\u0065xecution\":\"back\\u0067round\",\"description\":\"Run fixture\"}", .accepted = true },
+        .{ .name = "message_agent", .arguments = "{\"id\":\"k7m2qx\",\"text\":\"fixture\",\"rui_execution\":\"background\"}", .accepted = true },
+        .{ .name = "fetch_page", .arguments = "{\"q\":\"fixture\",\"rui_execution\":\"background\"}", .accepted = true },
+        .{ .name = "fetch_page", .arguments = "{\"rui_execution\":null}", .accepted = false },
+        .{ .name = "fetch_page", .arguments = "{\"rui_execution\":false}", .accepted = false },
+        .{ .name = "fetch_page", .arguments = "{\"rui_execution\":\"running\"}", .accepted = false },
+        .{ .name = "fetch_page", .arguments = "{\"rui_execution\":\"background\",\"rui_execution\":\"foreground\"}", .accepted = false },
+        .{ .name = "bash", .arguments = "{\"cmd\":\"true\",\"description\":\"Run fixture\",\"nested\":{\"rui_execution\":\"background\"}}", .accepted = false },
+    };
+    const offered: Offered = .{ .names = "bash,fetch_page,message_agent" };
+    for (cases) |case| {
+        var name: NameSource = .{ .bytes = case.name };
+        var arguments: TestSource = .{ .bytes = case.arguments };
+        const facts = try inspectCall(&name, case.name.len, &arguments, &offered);
+        errdefer std.debug.print("call {s} {s}\n", .{ case.name, case.arguments });
+        try std.testing.expectEqual(case.accepted, classifyCall(&facts) == null);
+    }
+}

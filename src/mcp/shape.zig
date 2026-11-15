@@ -6,6 +6,7 @@
 //! A functional core: a checked schema in, bytes out.
 const std = @import("std");
 const document = @import("document.zig");
+const tool_execution = @import("../tool_execution.zig");
 
 /// The property the model fills in.
 pub const description_property = "rui_call_description";
@@ -40,7 +41,7 @@ pub fn writeSchema(writer: *std.Io.Writer, input_schema: []const u8) Error!void 
         var own = document.Members.init(properties);
         while (own.next()) |found| try writer.print("\"{s}\":{s},", .{ found.key, found.value });
     }
-    try writer.writeAll(property_text ++ "}");
+    try writer.writeAll(property_text ++ "," ++ tool_execution.property_schema ++ "}");
     try separate(writer, &first);
     try writer.writeAll("\"required\":[");
     if (document.member(input_schema, "required")) |required| {
@@ -55,7 +56,7 @@ fn check(input_schema: []const u8) Error!void {
         if (document.kind(properties) != .object) return error.Malformed;
         var own = document.Members.init(properties);
         while (own.next()) |found| {
-            if (document.keyIs(found.key, description_property)) return error.NameTaken;
+            if (document.keyIs(found.key, description_property) or document.keyIs(found.key, tool_execution.property)) return error.NameTaken;
         }
     }
     if (document.member(input_schema, "required")) |required| {
@@ -83,7 +84,7 @@ test "a schema gains the description property and requires it" {
     var buffer: [512]u8 = undefined;
     const out = try shaped(&buffer, "{\"type\":\"object\",\"properties\":{\"q\":{\"type\":\"string\"}},\"required\":[\"q\"]}");
     try std.testing.expectEqualStrings(
-        "{\"type\":\"object\",\"properties\":{\"q\":{\"type\":\"string\"},\"rui_call_description\":{\"type\":\"string\",\"maxLength\":200}},\"required\":[\"q\",\"rui_call_description\"]}",
+        "{\"type\":\"object\",\"properties\":{\"q\":{\"type\":\"string\"},\"rui_call_description\":{\"type\":\"string\",\"maxLength\":200}," ++ tool_execution.property_schema ++ "},\"required\":[\"q\",\"rui_call_description\"]}",
         out,
     );
     try document.check(out);
@@ -93,7 +94,7 @@ test "a schema without properties or required gets both" {
     var buffer: [512]u8 = undefined;
     const out = try shaped(&buffer, "{\"type\":\"object\"}");
     try std.testing.expectEqualStrings(
-        "{\"type\":\"object\",\"properties\":{\"rui_call_description\":{\"type\":\"string\",\"maxLength\":200}},\"required\":[\"rui_call_description\"]}",
+        "{\"type\":\"object\",\"properties\":{\"rui_call_description\":{\"type\":\"string\",\"maxLength\":200}," ++ tool_execution.property_schema ++ "},\"required\":[\"rui_call_description\"]}",
         out,
     );
     try document.check(out);
@@ -110,6 +111,8 @@ test "other members are copied as written" {
 test "a schema that already names the property is refused" {
     var buffer: [512]u8 = undefined;
     try std.testing.expectError(error.NameTaken, shaped(&buffer, "{\"properties\":{\"rui_call_description\":{}}}"));
+    try std.testing.expectError(error.NameTaken, shaped(&buffer, "{\"properties\":{\"rui_execution\":{}}}"));
+    try std.testing.expectError(error.NameTaken, shaped(&buffer, "{\"properties\":{\"rui_\\u0065xecution\":{}}}"));
     // Spelled with an escape, it is the same name.
     try std.testing.expectError(error.NameTaken, shaped(&buffer, "{\"properties\":{\"rui_call_\\u0064escription\":{}}}"));
 }

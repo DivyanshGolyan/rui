@@ -288,7 +288,7 @@ test "a peer sender is resolved from its Action handle and exact replays survive
             try session.set(allocated_session_1.slice());
             const received = try store_core.activityPageForTesting(&storage, .{ .session = session });
             try std.testing.expectEqual(@as(usize, 1), received.count);
-            const peer = received.items[0].value.received.sender.?;
+            const peer = received.items[0].value.received.source.peer.sender;
             try std.testing.expectEqualStrings(sender, peer.session.slice());
             {
                 // The receiver's row names that peer as its starter; no person has
@@ -330,7 +330,7 @@ test "a peer sender is resolved from its Action handle and exact replays survive
                 var receiver: protocol.Bounded(protocol.max_session_bytes) = .{};
                 try receiver.set(allocated_session_1.slice());
                 const named = try store_core.activityPageForTesting(&storage, .{ .session = receiver });
-                try std.testing.expectEqualStrings("Lead", named.items[0].value.received.sender.?.label.slice());
+                try std.testing.expectEqualStrings("Lead", named.items[0].value.received.source.peer.sender.label.slice());
             }
             try storage.revokeActionSender(action);
             try std.testing.expect(storage.submitMessageWithModel(&sent, null, .{}).accepted.replayed);
@@ -349,7 +349,7 @@ test "a peer sender is resolved from its Action handle and exact replays survive
             defer view.close();
             const entry = (try view.nextEntry(0)).?;
             try std.testing.expect(entry.kind == .user);
-            try std.testing.expectEqualStrings(sender, entry.sender.?.slice());
+            try std.testing.expectEqualStrings(sender, entry.source.?.peer.slice());
         }
     }.run);
 }

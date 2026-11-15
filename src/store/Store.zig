@@ -25,6 +25,8 @@ const command_input = @import("../command_input.zig");
 const retry_policy = @import("../retry_policy.zig");
 const change_ring = @import("../change_ring.zig");
 const action_domain = @import("domain/action.zig");
+const action_control_domain = @import("domain/action_control.zig");
+const action_read_domain = @import("domain/action_read.zig");
 const command_domain = @import("domain/command.zig");
 const configuration_domain = @import("domain/configuration.zig");
 const skills_domain = @import("domain/skills.zig");
@@ -844,6 +846,23 @@ pub const Store = struct {
         return self.noteControl(transition.apply(self, command_domain.DecidePermission, .{ .command = command }, faults) catch .infrastructure_failure);
     }
 
+    pub fn controlAction(self: *Store, source: @import("../action_control.zig").Source, command: *const command_input.ActionControlCommand, capacity: action_control_domain.CapacityView, faults: Faults) !@import("../action_control.zig").Reply {
+        EntryTrace.fromControl(faults.control_trace).mark(.requested);
+        return self.queue().write(controlActionHeld, .{ self, source, command, capacity, faults });
+    }
+
+    fn controlActionHeld(self: *Store, source: @import("../action_control.zig").Source, command: *const command_input.ActionControlCommand, capacity: action_control_domain.CapacityView, faults: Faults) !@import("../action_control.zig").Reply {
+        const entry = enter(self, .fromControl(faults.control_trace)) catch return .infrastructure_failure;
+        defer entry.release();
+        const Control = action_control_domain.Control;
+        var control: Control = .{ .input = .{ .command = command, .capacity = capacity, .source = source, .scratch = self.reportScratch(Control.Scratch) } };
+        const result = entry.finishTransaction(Control.Ordinary, faults, transition.run(&entry, Control, &control, faults)) catch |err| switch (err) {
+            error.StaleActionAttemptBinding => return err,
+            else => @import("../action_control.zig").Reply.infrastructure_failure,
+        };
+        return self.noteControl(result);
+    }
+
     /// Tier 1: atomics only, with no holder or connection access.
     fn unchangedSession(self: *const Store, since: ?change_ring.SessionToken) ?change_ring.SessionToken {
         const token = since orelse return null;
@@ -1082,6 +1101,18 @@ pub const Store = struct {
                 return entry.finishCapture(watched.failed, result);
             }
         };
+    }
+
+    pub fn readAction(self: *Store, request: *const @import("../action_read.zig").Request, out: *@import("../action_read.zig").Read) !void {
+        return self.queue().run(readActionHeld, .{ self, request, out });
+    }
+
+    fn readActionHeld(self: *Store, request: *const @import("../action_read.zig").Request, out: *@import("../action_read.zig").Read) !void {
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: ReadAccess = .open(&entry);
+        defer access.deinit();
+        return entry.finish(Ordinary.action_read, action_read_domain.actionRead(&access, request, out));
     }
 
     pub fn actionArguments(self: *Store, session_ref: []const u8, action_id: u64) !ContentReference {
@@ -1607,27 +1638,45 @@ pub const Store = struct {
         self: *Store,
         binding: AttemptBinding,
         output: *const ValidatedOutput,
+        background_supported: bool,
         faults: Faults,
     ) !void {
         EntryTrace.fromSettlement(faults.settlement_trace).mark(.requested);
-        return self.queue().write(settleModelSuccessHeld, .{ self, binding, output, faults });
+        return self.queue().write(settleModelSuccessHeld, .{ self, binding, output, background_supported, faults });
     }
 
     fn settleModelSuccessHeld(
         self: *Store,
         binding: AttemptBinding,
         output: *const ValidatedOutput,
+        background_supported: bool,
         faults: Faults,
     ) !void {
         const entry = try enter(self, .fromSettlement(faults.settlement_trace));
         defer entry.release();
         const Settle = model_settlement_domain.SettleSuccess;
-        var settlement: Settle = .{ .input = .{ .io = self.io, .binding = binding, .output = output, .faults = faults, .batch = self.settlementBatch() } };
+        var settlement: Settle = .{ .input = .{ .io = self.io, .binding = binding, .output = output, .faults = faults, .batch = self.settlementBatch(), .background_supported = background_supported } };
         return entry.finishTransaction(Ordinary.model_success, faults, transition.run(&entry, Settle, &settlement, faults));
     }
 
     pub fn openContent(self: *Store, reference: ContentReference) !ContentLocation {
         return content_domain.openContentIdentity(self, reference, false);
+    }
+
+    /// Removes only Rui's execution metadata before core-specific checks.
+    /// A null result means the named arguments exceed the caller's bound.
+    pub fn readCoreToolArguments(self: *Store, input: *const CoreActionInput, bytes: []u8) !?[]const u8 {
+        var source: content_domain.ContentSource = .{ .length = input.arguments.length };
+        source.reader.open(try self.openContent(input.arguments));
+        defer source.reader.close();
+        var arguments: @import("../tool_execution.zig").Arguments(*content_domain.ContentSource) = .{ .source = &source };
+        var offset: usize = 0;
+        while (try arguments.peek()) |_| {
+            if (offset == bytes.len) return null;
+            bytes[offset] = try arguments.take();
+            offset += 1;
+        }
+        return bytes[0..offset];
     }
 
     /// Reads a core call's whole arguments into `bytes`, which holds exactly
@@ -1790,11 +1839,10 @@ comptime {
     // The settlement batch keeps the request's offered names and borrows
     // existing content identities for withdrawn names. Binding transient
     // history arguments avoids retaining a second copy of every call name.
-    // Its 19032 bytes are below the previous 19240-byte resident ceiling;
-    // configuration reads reuse saved_tools for parent names and use 15624,
+    // Configuration reads reuse saved_tools for parent names and use 15624,
     // with what validation and application keep between their rounds.
     // Exact, so a change to either size is a decision.
-    if (@sizeOf(configuration_domain.ConfigurationReads) != 15624 or scratch_bytes != 19032)
+    if (@sizeOf(configuration_domain.ConfigurationReads) != 15624 or scratch_bytes != 19048)
         @compileError(std.fmt.comptimePrint("the Store's scratch is {d} bytes and the configure reads {d}; restate them here", .{ scratch_bytes, @sizeOf(configuration_domain.ConfigurationReads) }));
     if (scratch_bytes - 4888 > accepted_settlement_growth) @compileError("the settlement batch outgrew what the owner accepted");
 }
@@ -1839,6 +1887,7 @@ pub const Ordinary = struct {
     const content = error{ContentNotFound};
     const public_content = error{ ContentNotFound, RangeOutOfBounds };
     pub const action = error{ActionNotFound};
+    pub const action_read = action || error{InvalidCursor};
     const result = error{ ResultNotFound, ResultNotReady, ResultFailed };
     pub const attempt_binding = error{ StaleAttemptBinding, SupersededByControl };
     pub const historical_entry = error{HistoricalPending};

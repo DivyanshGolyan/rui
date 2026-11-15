@@ -1257,7 +1257,7 @@ const FakeHost = struct {
     }
 
     fn message(admission: u64) protocol.ActivityItem.Value {
-        return .{ .admission = .{ .admission = admission, .key = .{}, .turn = null, .state = .queued, .content = content(), .admitted_at = 1 } };
+        return .{ .admission = .{ .admission = admission, .source = .{ .person = .{} }, .turn = null, .state = .queued, .content = content(), .admitted_at = 1 } };
     }
 
     const Row = struct { position: u64, ordinal: u64 = 0 };
@@ -1501,7 +1501,7 @@ test "session_view Message placement is identical in either direction at every p
             try peer.label.set("Peer");
             const outbound: protocol.ActivityItem.Value = .{ .sent = .{ .admission = 99, .target = peer, .content = FakeHost.content(), .admitted_at = std.math.maxInt(u64) } };
             var incoming = FakeHost.message(90).admission;
-            incoming.sender = peer;
+            incoming.source = .{ .peer = .{ .key = .{}, .sender = peer } };
             incoming.admitted_at = std.math.maxInt(u64);
             // People and scripts both have no Session sender; distinct keys do
             // not change placement. Peer Messages show at received in all states.
@@ -1512,8 +1512,8 @@ test "session_view Message placement is identical in either direction at every p
                         value.state = state;
                         value.turn = if (state == .applied) 1 else null;
                         value.admitted_at = std.math.maxInt(u64);
-                        if (source == .script) try value.key.set("script");
-                        if (source == .session) value.sender = peer;
+                        if (source == .script) try value.source.person.set("script");
+                        if (source == .session) value.source = .{ .peer = .{ .key = .{}, .sender = peer } };
                         const rows = [_]protocol.ActivityItem{
                             .{ .position = 2, .at = 1, .value = if (source == .session) .{ .received = value } else .{ .admission = value } },
                             .{ .position = 3, .at = 1, .value = .{ .received = incoming } },
@@ -1710,7 +1710,7 @@ test "session_reads rendered row kinds keep their own text and feed_window draws
     const Kind = struct { value: protocol.ActivityItem.Value, line: []const u8, packed_: bool };
     const kinds = [_]Kind{
         .{ .value = .{ .sent = .{ .admission = 4, .target = peer, .content = content, .admitted_at = std.math.maxInt(u64) } }, .line = "→ Messaged 9f8e7d", .packed_ = true },
-        .{ .value = .{ .received = .{ .admission = 5, .key = .{}, .turn = 3, .state = .applied, .content = content, .admitted_at = std.math.maxInt(u64), .sender = peer } }, .line = "← Received message from 9f8e7d", .packed_ = true },
+        .{ .value = .{ .received = .{ .admission = 5, .source = .{ .peer = .{ .key = .{}, .sender = peer } }, .turn = 3, .state = .applied, .content = content, .admitted_at = std.math.maxInt(u64) } }, .line = "← Received message from 9f8e7d", .packed_ = true },
         .{ .value = .{ .hosted_call = .{ .description = search, .code = .succeeded, .publication_position = null } }, .line = "✓ Search", .packed_ = true },
         .{ .value = .{ .hosted_call = .{ .description = find, .code = .failed, .publication_position = null } }, .line = "× Find", .packed_ = false },
         .{ .value = .{ .send_failed = .{ .key = .{}, .target = null, .code = .{} } }, .line = "× Message not delivered", .packed_ = false },
@@ -1870,7 +1870,7 @@ test "session_reads replay replaces a provisional echo after intervening rows an
     var peer: protocol.NamedPeer = .{ .session = .{} };
     try peer.session.set("9f8e7d");
     var incoming = FakeHost.message(90).admission;
-    incoming.sender = peer;
+    incoming.source = .{ .peer = .{ .key = .{}, .sender = peer } };
     var applied = FakeHost.message(1).admission;
     applied.state = .applied;
     applied.turn = 1;

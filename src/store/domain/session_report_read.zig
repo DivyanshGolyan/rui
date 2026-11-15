@@ -5,6 +5,8 @@
 //! plain values too (`report.readFull`).
 
 const std = @import("std");
+const sourced_input = @import("sourced_input.zig");
+const tool_fulfillment = @import("tool_fulfillment.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
 const built_in_tool = @import("../../built_in_tool.zig");
 const cli_value = @import("../../cli_value.zig");
@@ -98,20 +100,20 @@ pub noinline fn readHead(a: *ReadAccess, session_ref: []const u8, profile: cli_v
 /// The Message the active Turn started from: an active Turn owns the
 /// selection even if a successor is queued.
 const selected_active = rsql.Read(.{
-    .sql = "SELECT m.command_key FROM turn t @index(turn_one_active_per_session) JOIN message_admission m ON m.admission_id=t.first_admission_id " ++
+    .sql = "SELECT m.command_key,m.final_action_id," ++ sourced_input.consistentSql("m") ++ " AS source_consistent FROM turn t @index(turn_one_active_per_session) JOIN message_admission m ON m.admission_id=t.first_admission_id " ++
         "WHERE t.session_ref=?1 AND t.outcome_code IS NULL",
     .Args = struct { session: []const u8 },
     .Row = SelectedRow,
     .cardinality = .each,
 });
 
-const SelectedRow = struct { command_key: Bounded(idempotency_key.max_bytes) };
+const SelectedRow = struct { command_key: ?Bounded(idempotency_key.max_bytes), final_action_id: ?rsql.Positive, source_consistent: bool };
 
 /// Without an active Turn, the oldest Message queued after the latest
 /// stop's cutoff ?2.
 const selected_queued = rsql.Read(.{
-    .sql = "SELECT command_key FROM message_admission @index(message_admission_session_pending) " ++
-        "WHERE session_ref=?1 AND turn_id IS NULL AND admission_id>?2 ORDER BY admission_id LIMIT 1",
+    .sql = "SELECT m.command_key,m.final_action_id," ++ sourced_input.consistentSql("m") ++ " AS source_consistent FROM message_admission m @index(message_admission_session_pending) " ++
+        "WHERE m.session_ref=?1 AND m.turn_id IS NULL AND m.admission_id>?2 ORDER BY m.admission_id LIMIT 1",
     .Args = struct { session: []const u8, cutoff: u64 },
     .Row = SelectedRow,
     .cardinality = .each,
@@ -122,12 +124,12 @@ const selected_queued = rsql.Read(.{
 /// stops after ten Messages, even when older history or other Sessions
 /// grow.
 const recent_messages = rsql.Read(.{
-    .sql = "SELECT t.turn_id,m.command_key,t.outcome_code FROM turn t @index(turn_session_latest) " ++
+    .sql = "SELECT t.turn_id,m.command_key,m.final_action_id," ++ sourced_input.consistentSql("m") ++ " AS source_consistent,t.outcome_code FROM turn t @index(turn_session_latest) " ++
         "CROSS JOIN message_admission m @index(message_admission_session_order) " ++
         "WHERE t.session_ref=?1 AND t.outcome_code IS NOT NULL AND m.session_ref=t.session_ref AND m.turn_id=t.turn_id " ++
         "ORDER BY t.turn_id DESC,m.admission_id DESC LIMIT 10",
     .Args = struct { session: []const u8 },
-    .Row = struct { turn_id: rsql.Positive, command_key: Bounded(idempotency_key.max_bytes), outcome_code: Code },
+    .Row = struct { turn_id: rsql.Positive, command_key: ?Bounded(idempotency_key.max_bytes), final_action_id: ?rsql.Positive, source_consistent: bool, outcome_code: Code },
     .cardinality = .each,
 });
 
@@ -179,8 +181,8 @@ const Description = Bounded(tool_presentation.max_description_bytes);
 /// Action resolved (`action_operation`'s), main's terminal calls, so this
 /// counts what main counted.
 const publications_sql = "WITH publications AS (SELECT operation.operation_id," ++
-    "CASE WHEN count(*)=count(coalesce(sibling.acceptance_position,sibling_action.acceptance_position)) " ++
-    "THEN max(coalesce(sibling.acceptance_position,sibling_action.acceptance_position)) END AS publication " ++
+    "CASE WHEN count(*)=count(" ++ tool_fulfillment.positionSql("sibling", "sibling_action") ++ ") " ++
+    "THEN max(" ++ tool_fulfillment.positionSql("sibling", "sibling_action") ++ ") END AS publication " ++
     "FROM turn active @index(turn_one_active_per_session) " ++
     "CROSS JOIN model_operation operation @index(model_operation_turn_history) ON operation.turn_id=active.turn_id " ++
     "CROSS JOIN model_tool_call sibling ON sibling.operation_id=operation.operation_id " ++
@@ -389,6 +391,7 @@ noinline fn readCurrent(a: *ReadAccess, session_ref: []const u8, profile: cli_va
     const work = try facts.work.work(current.created_at, now_ms);
     const first_message = if (facts.first_row) |*found| try report_domain.firstMessage(found, admission) else null;
     const selected = if (facts.active.row) |*row| row else if (facts.queued.row) |*row| row else null;
+    if (selected) |row| if (!row.source_consistent or ((row.command_key == null) != (row.final_action_id != null))) return error.CorruptStore;
     const values: session_report.Current = .{
         .reference = session_ref,
         .parent = if (current.parent_ref) |*parent| parent.slice() else null,
@@ -419,7 +422,8 @@ noinline fn readCurrent(a: *ReadAccess, session_ref: []const u8, profile: cli_va
         } else null,
         .peers = .{ .from_person_at = if (facts.person) |found| found.admitted_at.get() else null },
         .first_message = first_message,
-        .selected_message = if (selected) |row| row.command_key.slice() else null,
+        .selected_message = if (selected) |row| if (row.command_key) |key| key.slice() else null else null,
+        .selected_source_action = if (selected) |row| if (row.final_action_id) |id| id.get() else null else null,
         .actions = counted.actions,
         .rejected_calls = counted.rejected,
     };
@@ -485,7 +489,8 @@ fn ListRead(comptime Row: type, comptime values: anytype, comptime Watcher: type
 }
 
 fn recentRow(row: *const recent_messages.Row) ValuesError!session_report.Row {
-    return .{ .recent_messages = .{ .turn = row.turn_id.get(), .message = row.command_key.slice(), .outcome = row.outcome_code.slice() } };
+    if (!row.source_consistent or ((row.command_key == null) != (row.final_action_id != null))) return error.CorruptStore;
+    return .{ .recent_messages = .{ .turn = row.turn_id.get(), .message = if (row.command_key) |*key| key.slice() else null, .source_action = if (row.final_action_id) |id| id.get() else null, .outcome = row.outcome_code.slice() } };
 }
 
 fn unresolvedRow(row: *const unresolved_actions.Row) ValuesError!session_report.Row {

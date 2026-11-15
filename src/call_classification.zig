@@ -1,5 +1,6 @@
 //! Classification and descriptions of tool calls over supplied sources.
 const std = @import("std");
+const tool_execution = @import("tool_execution.zig");
 const codec_abi = @import("codec_abi.zig");
 const core_tools = @import("message_agent_arguments.zig");
 const Bounded = @import("bounded.zig").Bounded;
@@ -27,9 +28,11 @@ pub const Call = union(Tool) {
     /// The core checks its arguments when it runs the call.
     find_tools,
     message_agent: *const core_tools.MessageAgentArguments,
+    read_action,
     read_transcript: ?Bounded(session_id.bytes),
     skill,
     start_agent,
+    stop_action,
     web_search: WebSearchCall,
 };
 
@@ -75,6 +78,16 @@ pub fn describe(call: Call) Description {
         .start_agent => blk: {
             var out: Description = .{};
             out.set("Start an agent") catch unreachable;
+            break :blk out;
+        },
+        .read_action => blk: {
+            var out: Description = .{};
+            out.set("Read own Action") catch unreachable;
+            break :blk out;
+        },
+        .stop_action => blk: {
+            var out: Description = .{};
+            out.set("Stop own Action") catch unreachable;
             break :blk out;
         },
         .web_search => |search| describeWebSearch(search),
@@ -213,7 +226,9 @@ pub const CallFacts = struct {
     message_agent: ?core_tools.MessageAgentCheck = null,
     /// Whether an unknown call names a tool the Session withdrew.
     removed: bool = false,
-    invalid_mcp_arguments: bool = false,
+    invalid_arguments: bool = false,
+    invalid_execution: bool = false,
+    execution: tool_execution.Intent = .foreground,
     find_tools: bool = false,
     skill: bool = false,
     read_transcript: bool = false,
@@ -247,6 +262,10 @@ pub const CallFacts = struct {
         if (self.skill) return describe(.skill);
         if (self.read_transcript) return describe(.{ .read_transcript = self.transcript_id });
         if (self.tool) |*selected| if (selected.runner() == .core and std.mem.eql(u8, selected.name, start_agent_record.name)) return describe(.start_agent);
+        if (self.tool) |*selected| if (selected.runner() == .core) {
+            if (std.mem.eql(u8, selected.name, "read_action")) return describe(.read_action);
+            if (std.mem.eql(u8, selected.name, "stop_action")) return describe(.stop_action);
+        };
         return null;
     }
 };
@@ -303,21 +322,39 @@ pub fn inspectCall(name_source: anytype, name_length: u64, arguments: anytype, o
     else
         null else null;
     const removed = tool == null and complete and !provider and offered.wasWithdrawn(name[0..length]);
-    // A call's arguments are read whether or not it was offered, so a
-    // rejected call keeps its description for presentation.
-    var discard: Discard = .{};
     const runner = if (tool) |*selected| selected.runner() else null;
-    return .{
+    var facts: CallFacts = .{
         .tool = tool,
-        .bash = if (named and (runner == null or runner == .bash)) try checkBashArguments(arguments) else null,
-        .message_agent = if (messaging and (runner == null or runner == .core)) try core_tools.checkMessageAgent(arguments, &discard) else null,
+        .bash = null,
         .removed = removed,
-        .invalid_mcp_arguments = if (runner == .mcp) !try checkMcpArguments(arguments) else false,
         .read_transcript = transcript and (runner == null or runner == .core),
-        .transcript_id = if (transcript and (runner == null or runner == .core)) try transcriptDescriptionId(arguments) else null,
         .find_tools = finding and (runner == null or runner == .core),
         .skill = skill and (runner == null or runner == .core),
     };
+    var filtered: tool_execution.Arguments(@TypeOf(arguments)) = .{ .source = arguments };
+    inspectArguments(&facts, &filtered, named, messaging) catch |err| switch (err) {
+        error.InvalidExecutionOption => facts.invalid_execution = true,
+        error.MalformedArguments => facts.invalid_arguments = true,
+        else => return err,
+    };
+    facts.execution = filtered.intent;
+    return facts;
+}
+
+fn inspectArguments(facts: *CallFacts, arguments: anytype, named: bool, messaging: bool) !void {
+    var discard: Discard = .{};
+    const runner = if (facts.tool) |*selected| selected.runner() else null;
+    if (named and (runner == null or runner == .bash)) {
+        facts.bash = try checkBash(arguments, &discard, &discard);
+    } else if (messaging and (runner == null or runner == .core)) {
+        facts.message_agent = try core_tools.checkMessageAgent(arguments, &discard);
+    } else if (runner == .mcp) {
+        facts.invalid_arguments = !try checkMcpArguments(arguments);
+    } else if (facts.read_transcript) {
+        facts.transcript_id = try transcriptDescriptionId(arguments);
+    } else while (try arguments.peek() != null) {
+        _ = try arguments.take();
+    }
 }
 
 fn checkMcpArguments(source: anytype) !bool {
@@ -426,7 +463,8 @@ pub const removed_tool_result = "This tool was removed.";
 pub fn rejectionResult(code: tool_proposal.Rejection, facts: *const CallFacts, name: anytype, name_length: u64, name_digest: [32]u8, buffer: *[192]u8) ![]const u8 {
     switch (code) {
         .invalid_arguments => {
-            if (facts.invalid_mcp_arguments) return std.fmt.bufPrint(buffer, "Invalid arguments for tool '{s}': the arguments are not one well-formed JSON object.", .{facts.tool.?.name});
+            if (facts.invalid_execution) return std.fmt.bufPrint(buffer, "Invalid arguments for tool '{s}': rui_execution must occur at most once and be foreground or background.", .{facts.tool.?.name});
+            if (facts.invalid_arguments) return std.fmt.bufPrint(buffer, "Invalid arguments for tool '{s}': the arguments are not one well-formed JSON object.", .{facts.tool.?.name});
             if (facts.message_agent) |check| return switch (check.rejected) {
                 inline else => |value| "Invalid arguments for tool 'message_agent': " ++ comptime value.text() ++ ".",
             };
@@ -455,7 +493,7 @@ pub fn rejectionResult(code: tool_proposal.Rejection, facts: *const CallFacts, n
 /// (D49), before its arguments are judged.
 pub fn classifyCall(facts: *const CallFacts) ?tool_proposal.Rejection {
     if (facts.tool == null) return .unknown_tool;
-    if (facts.invalid_mcp_arguments) return .invalid_arguments;
+    if (facts.invalid_execution or facts.invalid_arguments) return .invalid_arguments;
     if (facts.bash) |check| if (check == .rejected) return .invalid_arguments;
     if (facts.message_agent) |check| if (check == .rejected) return .invalid_arguments;
     return null;
@@ -488,11 +526,19 @@ pub const BashCheck = union(enum) {
 
 pub fn checkBashArguments(source: anytype) !BashCheck {
     var discard: Discard = .{};
-    return checkBash(source, &discard, &discard);
+    var filtered: tool_execution.Arguments(@TypeOf(source)) = .{ .source = source };
+    return checkBash(&filtered, &discard, &discard) catch |err| switch (err) {
+        error.InvalidExecutionOption, error.MalformedArguments => .{ .rejected = .malformed_json },
+        else => return err,
+    };
 }
 
 fn parseBashArguments(source: anytype, writer: anytype, input: anytype) !?BashArguments {
-    return switch (try checkBash(source, writer, input)) {
+    var filtered: tool_execution.Arguments(@TypeOf(source)) = .{ .source = source };
+    return switch (checkBash(&filtered, writer, input) catch |err| switch (err) {
+        error.InvalidExecutionOption, error.MalformedArguments => return null,
+        else => return err,
+    }) {
         .accepted => |accepted| accepted,
         .rejected => null,
     };

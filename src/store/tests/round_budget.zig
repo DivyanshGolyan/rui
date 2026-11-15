@@ -76,6 +76,8 @@ test "every function that enters the Store has a round budget" {
         @embedFile("../engine/mysql_open.zig"),
         @embedFile("../engine/mysql_refusal.zig"),
         @embedFile("../domain/action.zig"),
+        @embedFile("../domain/action_control.zig"),
+        @embedFile("../domain/action_read.zig"),
         @embedFile("../domain/forward.zig"),
         @embedFile("../domain/command.zig"),
         @embedFile("../domain/configuration.zig"),
@@ -94,6 +96,8 @@ test "every function that enters the Store has a round budget" {
         @embedFile("../domain/session_obligation.zig"),
         @embedFile("../domain/session_report_read.zig"),
         @embedFile("../domain/skills.zig"),
+        @embedFile("../domain/sourced_input.zig"),
+        @embedFile("../domain/tool_fulfillment.zig"),
         @embedFile("../domain/tool_offer.zig"),
         @embedFile("../domain/tool_set.zig"),
         @embedFile("../domain/turn.zig"),
@@ -571,6 +575,12 @@ test "each Store entry point takes its round budget on its common path" {
             meter.start();
             _ = try storage.actionArguments(session.slice(), allowed);
             meter.stop(.actionContent);
+            var status: @import("../../action_read.zig").Read = undefined;
+            const read_request: @import("../../action_read.zig").Request = .{ .session = session, .action_id = allowed };
+            meter.start();
+            try storage.readAction(&read_request, &status);
+            meter.stop(.readAction);
+            try std.testing.expectEqual(@import("../../action_read.zig").State.waiting_approval, status.state);
             var allow: protocol.PermissionDecisionCommand = .{ .action_id = allowed, .decision = .allow_once };
             try allow.key.set("budget-allow");
             try allow.session.set(session.slice());
@@ -596,6 +606,17 @@ test "each Store entry point takes its round budget on its common path" {
             meter.start();
             _ = try storage.settleActionAttempt(action, .succeeded, "Bash succeeded.", .{});
             meter.stop(.settleActionAttempt);
+            var stop_action: @import("../../command_input.zig").ActionControlCommand = .{ .session = session, .action_id = allowed };
+            try stop_action.key.set("budget-action-stop");
+            const capacity = struct {
+                fn free(_: *const anyopaque) usize {
+                    return 1;
+                }
+            };
+            meter.start();
+            const stopped = try storage.controlAction(.{ .owner = .stop }, &stop_action, .{ .total = 2, .context = storage, .freeFn = capacity.free }, .{});
+            meter.stop(.controlAction);
+            try std.testing.expect(stopped == .accepted and stopped.accepted.selection.kind == .final);
             var deny: protocol.PermissionDecisionCommand = .{ .action_id = denied, .decision = .deny };
             try deny.key.set("budget-deny");
             try deny.session.set(session.slice());

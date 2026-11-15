@@ -165,6 +165,29 @@ pub const routes = [_]Route{
         .conflict = jsonReply(.{protocol.permission_decision_reply.conflict}),
     },
     .{
+        .path = protocol.CommandKind.action_background.route(),
+        .kind = .action_background,
+        .summary = "Changes waiting for the same Session-owned Action to background. Retried by key; capacity refusal leaves its invocation unchanged.",
+        .variants = &.{variant(protocol.action_background_request, .{})},
+        .reply = jsonReply(.{ protocol.action_control_reply.accepted, protocol.action_control_reply.rejected }),
+        .conflict = jsonReply(.{protocol.action_control_reply.conflict}),
+    },
+    .{
+        .path = protocol.CommandKind.action_stop.route(),
+        .kind = .action_stop,
+        .summary = "Selects a stop of one Session-owned Action. Retried by key. Acceptance does not prove that an attempted remote effect did not run.",
+        .variants = &.{variant(protocol.action_stop_request, .{})},
+        .reply = jsonReply(.{ protocol.action_control_reply.accepted, protocol.action_control_reply.rejected }),
+        .conflict = jsonReply(.{protocol.action_control_reply.conflict}),
+    },
+    .{
+        .path = "/v1/read-action",
+        .kind = .read_action,
+        .summary = "Reads one Session-owned Action's status and one bounded final-result window without waiting or consuming it.",
+        .variants = &.{variant(protocol.read_action_request, .{})},
+        .reply = jsonReply(.{ protocol.action_read_reply.head ++ .{"null}"}, protocol.action_read_reply.head ++ protocol.action_read_reply.final ++ .{"}"} }),
+    },
+    .{
         .path = "/v1/observe-command",
         .kind = .observe_command,
         .summary = "What became of the command sent with this key.",
@@ -489,6 +512,7 @@ fn observationSchema(d: *Document) anyerror!Value {
             .session_archive => .{ .{}, o.session_archive },
             .model_interruption => .{ .{}, o.model_interruption },
             .permission_decision => .{ .{}, o.permission_decision },
+            .action_background, .action_stop => .{ o.action_target, o.action_target ++ o.action_selection },
         };
         var variants: [2 * bodies.len]Value = undefined;
         inline for (bodies, 0..) |body, at| {
