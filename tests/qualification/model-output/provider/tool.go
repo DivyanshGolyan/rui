@@ -297,7 +297,7 @@ func (s *ToolServer) serve(w http.ResponseWriter, r *http.Request) {
 	s.summary.Requests++
 	s.summary.H2Streams++
 	fact := s.sessions[session]
-	if err != nil || fact == nil || request.Instructions != measurement.ModelInstructions(s.config.Workspace, session) {
+	if err != nil || fact == nil || request.Instructions != measurement.ModelInstructions(s.config.Workspace, session, "gpt-6-luna") {
 		s.fail(fmt.Sprintf("unexpected request session %q: %v", session, err))
 		s.mu.Unlock()
 		http.Error(w, "unexpected session", http.StatusConflict)

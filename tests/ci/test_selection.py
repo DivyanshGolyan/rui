@@ -769,6 +769,10 @@ class SelectionTest(unittest.TestCase):
         for path, readers in (("src/model_instructions.txt", {"codex-h2-integration", "current-facts-integration",
                                                                "server-delivery-integration", "peer-integration",
                                                                "measurement-check"}),
+                              *((f"src/model_instructions/{name}.txt", {"codex-h2-integration", "current-facts-integration",
+                                                                        "server-delivery-integration", "peer-integration",
+                                                                        "measurement-check"})
+                                for name in ("luna", "terra-astra", "sol")),
                               ("src/peer_message.txt", {"peer-integration", "sender-identity-integration"})):
             with self.subTest(path=path):
                 targets = set(select([path], "review", AVAILABLE)["targets"])

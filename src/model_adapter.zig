@@ -529,7 +529,7 @@ const HistoricalSource = struct {
 const context_parts = blk: {
     @setEvalBranchQuota(10_000);
     var parts = std.mem.splitSequence(u8, @embedFile("model_instructions.txt"), "{}");
-    const result = .{ parts.next().?, parts.next().?, parts.next().? };
+    const result = .{ parts.next().?, parts.next().?, parts.next().?, parts.next().? };
     std.debug.assert(parts.next() == null);
     break :blk result;
 };
@@ -1303,7 +1303,9 @@ pub const Preparation = struct {
                 // The originating Operation's ID, rebuilt on every Attempt.
                 3 => .{ .source = .{ .bytes = self.settings.session.slice() }, .quoted = true },
                 4 => .{ .source = .{ .bytes = context_parts[2] } },
-                5 => .{ .source = .{ .content = self.settings.baseline_instructions } },
+                5 => .{ .source = .{ .bytes = model_catalog.builtinInstructions(self.settings.model.slice()).bytes() } },
+                6 => .{ .source = .{ .bytes = context_parts[3] } },
+                7 => .{ .source = .{ .content = self.settings.baseline_instructions } },
                 else => null,
             },
             .sender => switch (index) {
@@ -1954,9 +1956,9 @@ fn requestGolden(workspace: []const u8, session: []const u8, request: []const u8
     defer std.testing.allocator.free(quoted_workspace);
     const quoted_session = try std.json.Stringify.valueAlloc(std.testing.allocator, session, .{});
     defer std.testing.allocator.free(quoted_session);
-    const context = try std.testing.allocator.print("{s}{s}{s}{s}{s}", .{
+    const context = try std.testing.allocator.print("{s}{s}{s}{s}{s}{s}", .{
         context_parts[0],                            quoted_workspace[1 .. quoted_workspace.len - 1], context_parts[1],
-        quoted_session[1 .. quoted_session.len - 1], context_parts[2],
+        quoted_session[1 .. quoted_session.len - 1], context_parts[2],                                context_parts[3],
     });
     defer std.testing.allocator.free(context);
     const encoded = try std.json.Stringify.valueAlloc(std.testing.allocator, context, .{});
@@ -2371,7 +2373,7 @@ test "request preparation minimal golden is exact across schedules" {
         defer parsed.deinit();
         const instructions = parsed.value.object.get("instructions").?.string;
         // Slots are found by the prompt file's own parts, never its wording.
-        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, instructions, context_parts[2]));
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, instructions, context_parts[3]));
         const path_start = context_parts[0].len - 1;
         const path_end = std.mem.indexOf(u8, instructions, context_parts[1]).? + 1;
         const decoded_path = try std.json.parseFromSlice([]const u8, std.testing.allocator, instructions[path_start..path_end], .{});
@@ -2513,8 +2515,8 @@ test "request preparation escapes instructions and user content" {
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, first.bytes, .{});
     defer parsed.deinit();
     const instructions = parsed.value.object.get("instructions").?.string;
-    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, instructions, context_parts[2]));
-    try std.testing.expect(std.mem.endsWith(u8, instructions, context_parts[2] ++ instructions_text));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, instructions, context_parts[3]));
+    try std.testing.expect(std.mem.endsWith(u8, instructions, context_parts[3] ++ instructions_text));
     const input = parsed.value.object.get("input").?.array.items;
     try std.testing.expectEqualStrings(user_text, input[0].object.get("content").?.array.items[0].object.get("text").?.string);
 
@@ -2643,6 +2645,9 @@ test "request preparation keeps the starting effort at the top and changes it at
         try std.testing.expect(configured == .accepted);
         const session = configured.accepted.session;
         try setup.submit("effort-message", "effort-message", session.slice(), "keep this exact input");
+        const encoded_builtin = try std.json.Stringify.valueAlloc(std.testing.allocator, model_catalog.builtinInstructions(case.model).bytes(), .{});
+        defer std.testing.allocator.free(encoded_builtin);
+        const step_bound = 32768 + preparationTestStepBound(encoded_builtin.len - 2);
         // Ordinary and compaction envelopes must use their admitted effort.
         for (0..2) |purpose| {
             var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
@@ -2663,11 +2668,12 @@ test "request preparation keeps the starting effort at the top and changes it at
             setup.storage.openHistoricalView(binding, &preparation.view);
             try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
             defer if (preparation.state.active) preparation.cancel();
-            const sealed = try drainLivePreparation(&preparation, 1, 1, 32768);
+            const sealed = try drainLivePreparation(&preparation, 1, 1, step_bound);
             var owned = true;
             defer if (owned) sealed.deinit(std.testing.io, preparation.writer.budget);
-            var buffer: [8192]u8 = undefined;
-            const count = try sealed.file.readPositionalAll(std.testing.io, &buffer, 0);
+            const buffer = try std.testing.allocator.alloc(u8, @intCast(sealed.length));
+            defer std.testing.allocator.free(buffer);
+            const count = try sealed.file.readPositionalAll(std.testing.io, buffer, 0);
             const bytes = buffer[0..count];
             try std.testing.expectEqual(sealed.length, count);
             try std.testing.expectEqual(sealed.length, try sealed.file.length(std.testing.io));
@@ -3692,8 +3698,8 @@ test "compaction preparation appends request only trigger and replays asymmetric
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, request.bytes, .{});
     defer parsed.deinit();
     const instructions = parsed.value.object.get("instructions").?.string;
-    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, instructions, context_parts[2]));
-    try std.testing.expect(std.mem.endsWith(u8, instructions, context_parts[2]));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, instructions, context_parts[3]));
+    try std.testing.expect(std.mem.endsWith(u8, instructions, context_parts[3]));
     const input = parsed.value.object.get("input").?.array.items;
     // The base covers the earlier declarations, so the Operation after the
     // anchor declares its tools again.
@@ -5728,4 +5734,63 @@ test "raw image preparation rejects a wrong canonical digest before sealing" {
     preparation.cancel();
     try std.testing.expectEqual(@as(usize, 0), preparation.view.outstandingReaders());
     try std.testing.expectEqual(@as(u64, 0), used.load(.monotonic));
+}
+
+test "request preparation streams exact built-in instructions across provider routes" {
+    const models = [_][]const u8{ "gpt-6-luna", "gpt-6.1-terra", "gpt-6.1-sol", "gpt-6-astra", "openai/gpt-6-luna" };
+    const baseline = "Caller rules {} \"quoted\"\n雪";
+    for (models) |model| for ([_][]const u8{ "codex", "openai", "chatgpt" }) |provider_name| {
+        const body = model_catalog.builtinInstructions(model).bytes();
+        var setup: PreparationTestSetup = undefined;
+        try setup.init();
+        defer setup.close();
+        const file = try setup.tmp.dir.createFile(std.testing.io, "instructions", .{ .read = true });
+        try file.writeStreamingAll(std.testing.io, baseline);
+        try file.sync(std.testing.io);
+        var command: wire_request.ConfigureCommand = .{};
+        try command.key.set("config");
+        command.configuration.workspace.state = .value;
+        try command.configuration.workspace.value.set(setup.workspace);
+        command.configuration.provider.state = .value;
+        try command.configuration.provider.value.set(provider_name);
+        command.configuration.model.state = .value;
+        try command.configuration.model.value.set(model);
+        command.configuration.tools.state = .value;
+        command.configuration.permission_mode.state = .value;
+        try command.configuration.permission_mode.value.set("bypass");
+        command.configuration.compaction_trigger.state = .value;
+        try command.configuration.compaction_trigger.value.set("115200");
+        command.configuration.reasoning_effort.state = .value;
+        try command.configuration.reasoning_effort.value.set("low");
+        command.configuration.instructions = .{ .state = .value, .file = file, .length = baseline.len, .digest = protocol.contentDigest(baseline) };
+        defer command.removeTemporaryContent(std.testing.io) catch unreachable;
+        const created = try setup.storage.configure(&command, .{});
+        try std.testing.expect(created == .accepted);
+        const session = created.accepted.session;
+        try setup.submit("input", "message", session.slice(), "work");
+        var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
+        const binding = try admitted.permit.consume();
+        var used: std.atomic.Value(u64) = .init(0);
+        var retained: ?named_scratch.Owner = null;
+        var prep: Preparation = undefined;
+        setup.storage.openHistoricalView(binding, &prep.view);
+        try prep.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
+        defer if (prep.state.active) prep.cancel();
+        const result = try drainPreparation(&prep, 7, 1, 1024 * 1024);
+        defer std.testing.allocator.free(result.bytes);
+        const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, result.bytes, .{});
+        defer parsed.deinit();
+        try std.testing.expectEqualStrings(model, parsed.value.object.get("model").?.string);
+        const quoted_workspace = try std.json.Stringify.valueAlloc(std.testing.allocator, setup.workspace, .{});
+        defer std.testing.allocator.free(quoted_workspace);
+        const expected = try std.mem.concat(std.testing.allocator, u8, &.{ context_parts[0], quoted_workspace[1 .. quoted_workspace.len - 1], context_parts[1], session.slice(), context_parts[2], body, context_parts[3], baseline });
+        defer std.testing.allocator.free(expected);
+        const instructions = parsed.value.object.get("instructions").?.string;
+        try std.testing.expectEqualStrings(expected, instructions);
+        if (body.len != 0) try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, instructions, body));
+        try std.testing.expectEqual(@as(u64, result.bytes.len), result.length);
+        try std.testing.expectEqual(protocol.contentDigest(result.bytes), result.digest);
+        try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+        try std.testing.expect(retained == null);
+    };
 }

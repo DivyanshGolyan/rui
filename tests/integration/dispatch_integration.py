@@ -426,7 +426,7 @@ def compaction_cases(state, processes, endpoints, releases):
         assert history(compaction["input"])[-1] == {"type": "compaction_trigger"}, compaction
         # The originating Operation's address and baseline survive overflow
         # into its compaction Operation.
-        address = model_instructions(ROOT, "baseline", store=store, session=session)
+        address = model_instructions(ROOT, "baseline", store=store, session=session, model="gpt-6-sol")
         assert [json.loads(request)["instructions"] for request in endpoint.requests[:2]] == [address, address], endpoint.requests[:2]
         assert compaction["store"] is False and compaction["stream"] is True, compaction
         assert compaction["include"] == ["reasoning.encrypted_content"], compaction
@@ -523,7 +523,7 @@ def compaction_cases(state, processes, endpoints, releases):
     assert len(endpoint.requests) == 3, endpoint.requests
     assert user_texts(json.loads(endpoint.requests[1])) == ["first"]
     assert user_texts(json.loads(endpoint.requests[2])) == ["first", "apply only after compaction"]
-    address = model_instructions(ROOT, store=store, session=session)
+    address = model_instructions(ROOT, store=store, session=session, model="gpt-6-sol")
     assert str(store) not in address and "雪" not in address, address
     assert [json.loads(request)["instructions"] for request in endpoint.requests] == [address] * 3, endpoint.requests
     stop_host(host)
@@ -542,7 +542,7 @@ def compaction_cases(state, processes, endpoints, releases):
     outcome = wait_for(lambda: (value := observe(store, "irreducible")).get("result") and value, "irreducible overflow settlement")
     assert outcome["state"] == "failed" and outcome["result"]["code"] == "ResourceExceeded", outcome
     assert len(endpoint.requests) == 3, endpoint.requests
-    address = model_instructions(ROOT, store=store, session=session)
+    address = model_instructions(ROOT, store=store, session=session, model="gpt-6-sol")
     assert [json.loads(request)["instructions"] for request in endpoint.requests] == [address] * 3, endpoint.requests
     stop_host(host)
     processes.remove(host)
@@ -566,7 +566,7 @@ def compaction_cases(state, processes, endpoints, releases):
     report = command("session", "inspect", "--store", store, "--session", session, "--profile", "full")
     assert report["actions"]["count"] == "0" and not forbidden_effect.exists(), report
     assert len(endpoint.requests) == 2, endpoint.requests
-    address = model_instructions(ROOT, store=store, session=session)
+    address = model_instructions(ROOT, store=store, session=session, model="gpt-6-sol")
     assert [json.loads(request)["instructions"] for request in endpoint.requests] == [address] * 2, endpoint.requests
     stop_host(host)
     processes.remove(host)
@@ -1267,6 +1267,140 @@ def held_message_denial_cases(state, processes, endpoints):
     print("Held Message: denial and pending reason share one continuation request, after the complete call group")
 
 
+def builtin_instruction_cases(state, processes, endpoints, releases):
+    workspace = state / 'workspace{} "quoted"\\雪\nSession instructions:'
+    workspace.mkdir()
+    baseline = 'Caller baseline {} "quoted"\n雪'
+
+    def endpoint_for(responses):
+        endpoint = SuccessEndpoint(responses)
+        thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+        endpoints[endpoint] = thread
+        thread.start()
+        return endpoint, f"http://127.0.0.1:{endpoint.server_port}/responses"
+
+    def config(store, key, model, provider="codex", session=None, instructions=baseline):
+        args = ["session", "configure", "--store", store, "--record", state / (key + ".json"),
+                "--key", key, "--workspace", workspace, "--provider", provider, "--model", model,
+                "--tools", "none", "--permission-mode", "bypass", "--reasoning-effort", "low",
+                "--instructions", "-"]
+        if session is not None:
+            args += ["--session", session]
+        reply = command(*args, input=instructions)
+        assert reply["answer"]["status"] == "accepted", reply
+        return reply["context"]["session"]
+
+    models = ("gpt-6-luna", "gpt-6.1-terra", "gpt-6.1-sol", "gpt-6-astra", "openai/gpt-6-luna")
+    for provider in ("codex", "openai", "chatgpt"):
+        selected = models if provider == "codex" else models[:1]
+        responses = [sse_answer(f"{provider}-{index}", f"r-{index}", f"m-{index}", "mapped")[0]
+                     for index, _ in enumerate(selected)]
+        endpoint, url = endpoint_for(responses)
+        store = state / ("builtin-" + provider)
+        host = start_host(store, url, "--set", f"providers.{provider}.endpoint={url}",
+                          "--set", f"providers.{provider}.unauthenticated=true")
+        processes.append(host)
+        for index, model in enumerate(selected):
+            key = f"builtin-{provider}-{index}"
+            session = config(store, key + "-config", model, provider)
+            message(state, store, key, session, "work")
+            wait_for_result_release(store, key, session, time.monotonic() + 15)
+            request = json.loads(endpoint.requests[index])
+            assert request["model"] == model, request
+            assert request["instructions"] == model_instructions(
+                workspace, baseline, store=store, session=session, model=model), request
+        assert len(endpoint.requests) == len(selected), endpoint.requests
+        stop_host(host)
+        processes.remove(host)
+        stop_endpoint(endpoint, endpoints)
+
+    release = threading.Event()
+    releases.append(release.set)
+    answer_a = sse_answer("builtin-retry-a", "retry-r-a", "retry-m-a", "answer A")[0]
+    answer_b = sse_answer("builtin-retry-b", "retry-r-b", "retry-m-b", "answer B")[0]
+    endpoint, url = endpoint_for([(ResponseSpec(b"temporary", {}, 503), release), answer_a, answer_b])
+    store = state / "builtin-retry"
+    host = start_host(store, url)
+    processes.append(host)
+    session = config(store, "builtin-retry-config", "gpt-6-luna")
+    message(state, store, "builtin-retry-a", session, "input A")
+    wait_for(lambda: len(endpoint.requests) == 1, "admitted model A request")
+    initial_developers = [item for item in history(json.loads(endpoint.requests[0])["input"])
+                          if item.get("role") == "developer"]
+    config(store, "builtin-retry-config-b", "gpt-6.1-sol", session=session, instructions="rules B")
+    config(store, "builtin-retry-config-c", "gpt-6.1-sol", session=session, instructions="rules C")
+    message(state, store, "builtin-retry-b", session, "input B")
+    release.set()
+    wait_for_result_release(store, "builtin-retry-b", session, time.monotonic() + 15)
+    assert len(endpoint.requests) == 3, endpoint.requests
+    assert endpoint.requests[0] == endpoint.requests[1], "replacement Attempt changed its frozen request"
+    original, _, fresh = map(json.loads, endpoint.requests)
+    assert original["model"] == "gpt-6-luna", original
+    assert original["instructions"] == model_instructions(
+        workspace, baseline, store=store, session=session, model="gpt-6-luna"), original
+    assert fresh["model"] == "gpt-6.1-sol", fresh
+    assert fresh["instructions"] == model_instructions(
+        workspace, baseline, store=store, session=session, model="gpt-6.1-sol"), fresh
+    updates = [item for item in history(fresh["input"]) if item.get("role") == "developer"]
+    assert updates == initial_developers + [
+        {"role": "developer", "content": [{"type": "input_text", "text": text}]}
+        for text in ("rules B", "rules C")
+    ], updates
+    before = command("session", "inspect", "--store", store, "--session", session,
+                     "--profile", "full")["full"]["model_operations"]
+    assert len(before) == 2, before
+    replay = retry_message(state, store, "builtin-retry-b")
+    assert replay["answer"]["replayed"] is True, replay
+    assert read_result(store, "builtin-retry-b") == b"answer B"
+    after = command("session", "inspect", "--store", store, "--session", session,
+                    "--profile", "full")["full"]["model_operations"]
+    assert after == before, (before, after)
+    assert len(endpoint.requests) == 3, endpoint.requests
+    stop_host(host)
+    processes.remove(host)
+    stop_endpoint(endpoint, endpoints)
+
+    overflow = ResponseSpec(b'{"error":{"code":"context_length_exceeded"}}', {}, 400)
+    anchor = {"type": "compaction", "id": "builtin-anchor", "encrypted_content": "opaque"}
+    compact = encode_sse([
+        {"type": "response.output_item.done", "output_index": 0, "item": anchor},
+        {"type": "response.completed", "response": {"id": "builtin-compact", "status": "completed", "output": [anchor]}},
+    ])
+    answer = sse_answer("builtin-successor", "successor-r", "successor-m", "compacted answer")[0]
+    compact_release = threading.Event()
+    releases.append(compact_release.set)
+    endpoint, url = endpoint_for([overflow, (compact, compact_release), answer])
+    store = state / "builtin-compaction"
+    host = start_host(store, url)
+    processes.append(host)
+    session = config(store, "builtin-compaction-config", "gpt-6.1-sol")
+    message(state, store, "builtin-compaction-input", session, "covered input")
+    wait_for(lambda: len(endpoint.requests) == 2, "admitted Sol compaction request")
+    initial_developers = [item for item in history(json.loads(endpoint.requests[0])["input"])
+                          if item.get("role") == "developer"]
+    config(store, "builtin-compaction-change", "gpt-6-luna", session=session, instructions="during compaction")
+    message(state, store, "builtin-compaction-pending", session, "pending input")
+    compact_release.set()
+    wait_for_result_release(store, "builtin-compaction-pending", session, time.monotonic() + 15)
+    assert len(endpoint.requests) == 3, endpoint.requests
+    requests = list(map(json.loads, endpoint.requests))
+    expected = model_instructions(workspace, baseline, store=store, session=session, model="gpt-6.1-sol")
+    assert all(request["model"] == "gpt-6.1-sol" and request["instructions"] == expected for request in requests[:2])
+    assert any(item.get("type") == "compaction_trigger" for item in requests[1]["input"]), requests[1]
+    assert requests[2]["model"] == "gpt-6-luna", requests[2]
+    assert requests[2]["instructions"] == model_instructions(
+        workspace, baseline, store=store, session=session, model="gpt-6-luna"), requests[2]
+    assert "pending input" in [item["content"][0]["text"] for item in requests[2]["input"] if item.get("role") == "user"]
+    updates = [item for item in history(requests[2]["input"]) if item.get("role") == "developer"]
+    assert updates == initial_developers + [
+        {"role": "developer", "content": [{"type": "input_text", "text": "during compaction"}]}
+    ], updates
+    stop_host(host)
+    processes.remove(host)
+    stop_endpoint(endpoint, endpoints)
+    print("Built-in instructions preserve exact models, provider routes, frozen retries, authored updates, replay and compaction")
+
+
 def main(mode="all", correlation_case="all"):
     state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-dispatch."))
     endpoint = FailureEndpoint()
@@ -1286,6 +1420,11 @@ def main(mode="all", correlation_case="all"):
     continuation_diagnostics = None
     completed = False
     try:
+        if mode in ("all", "builtin-instructions"):
+            builtin_instruction_cases(state, processes, endpoints, releases)
+            if mode == "builtin-instructions":
+                completed = True
+                return
         if mode in ("all", "sse-framing"):
             sse_framing_cases(state, processes, endpoints)
             if mode == "sse-framing":
@@ -1995,7 +2134,11 @@ def main(mode="all", correlation_case="all"):
         wait_for(lambda: len(success_endpoint.requests) == 2, "two successful requests")
         first_request = json.loads(success_endpoint.requests[0])
         second_request = json.loads(success_endpoint.requests[1])
-        assert first_request["instructions"] == second_request["instructions"] == model_instructions(ROOT, store=success_store, session=success_session)
+        assert first_request["model"] == "gpt-6-sol", first_request
+        assert first_request["instructions"] == model_instructions(
+            ROOT, store=success_store, session=success_session, model="gpt-6-sol"), first_request
+        assert second_request["instructions"] == model_instructions(
+            ROOT, store=success_store, session=success_session, model="gpt-6.1-sol"), second_request
         assert history(first_request["input"]) == [
             {"role": "user", "content": [{"type": "input_text", "text": "first question"}]},
         ]
@@ -2117,7 +2260,7 @@ def main(mode="all", correlation_case="all"):
         assert retry_endpoint.request_times[2] - retry_endpoint.request_times[1] >= 0.90
         assert retry_endpoint.requests[0] == retry_endpoint.requests[1]
         assert retry_endpoint.requests[1] == retry_endpoint.requests[2]
-        assert json.loads(retry_endpoint.requests[0])["instructions"] == model_instructions(ROOT, store=retry_store, session=retry_session)
+        assert json.loads(retry_endpoint.requests[0])["instructions"] == model_instructions(ROOT, store=retry_store, session=retry_session, model="gpt-6-sol")
         stop_host(retry_host)
         processes.remove(retry_host)
         database = sqlite3.connect(retry_store / "rui.sqlite3")
@@ -2416,7 +2559,7 @@ def main(mode="all", correlation_case="all"):
         frozen_retry = json.loads(continued_endpoint.requests[2])
         # Later settings cannot re-address or re-baseline the replacement Attempt.
         assert frozen_retry["instructions"] == model_instructions(
-            ROOT, "original instructions", store=continued_store, session=continued_retry_session
+            ROOT, "original instructions", store=continued_store, session=continued_retry_session, model="gpt-6-sol"
         ), frozen_retry
         expected_private = dict(continued_reasoning)
         expected_private.pop("created_by")
@@ -2684,7 +2827,7 @@ def main(mode="all", correlation_case="all"):
         pending_request = json.loads(pending_endpoint.requests[1])
         expected_pending_reasoning = dict(pending_reasoning)
         expected_pending_reasoning.pop("created_by")
-        assert pending_request["instructions"] == model_instructions(ROOT, store=pending_store, session=pending_session)
+        assert pending_request["instructions"] == model_instructions(ROOT, store=pending_store, session=pending_session, model="gpt-6-sol")
         assert history(pending_request["input"]) == [
             {"role": "user", "content": [{"type": "input_text", "text": "before cutoff"}]},
             expected_pending_reasoning,
@@ -3531,7 +3674,7 @@ def main(mode="all", correlation_case="all"):
             "parallel_tool_calls": True,
             "include": ["reasoning.encrypted_content"],
             "reasoning": {"effort": start_effort("gpt-6-sol")},
-            "instructions": model_instructions(ROOT, "A", store=store, session=main_session),
+            "instructions": model_instructions(ROOT, "A", store=store, session=main_session, model="gpt-6-sol"),
             "input": [
                 {
                     "role": "user",
@@ -3603,7 +3746,7 @@ def main(mode="all", correlation_case="all"):
             {"role": "user", "content": [{"type": "input_text", "text": "later message"}]}
         ]
         assert successor["input"] == later_input, successor
-        assert successor["instructions"] == model_instructions(ROOT, "A", store=store, session=main_session), successor
+        assert successor["instructions"] == model_instructions(ROOT, "A", store=store, session=main_session, model="gpt-6.1-sol"), successor
         assert successor["model"] == "gpt-6.1-sol", successor
         assert successor["tools"] == [], successor
         assert successor["text"] == {"verbosity": "low"}, successor
@@ -5681,8 +5824,8 @@ if __name__ == "__main__":
     host_process.enter()
     mode = sys.argv[2] if len(sys.argv) >= 3 else "all"
     correlation_case = sys.argv[3] if len(sys.argv) == 4 else "all"
-    if (len(sys.argv) not in (2, 3, 4) or mode not in ("all", "http-quota", "failure-correlation", "phased-messages", "held-message-denial", "failed-response-export", "empty-answers", "stream-failures", "refusals", "sse-framing")
+    if (len(sys.argv) not in (2, 3, 4) or mode not in ("all", "builtin-instructions", "http-quota", "failure-correlation", "phased-messages", "held-message-denial", "failed-response-export", "empty-answers", "stream-failures", "refusals", "sse-framing")
             or correlation_case not in ("all", "rejected", "correlated", "exhausted")
             or (len(sys.argv) == 4 and mode != "failure-correlation")):
-        raise SystemExit("usage: dispatch_integration.py RUI [all|sse-framing|http-quota|stream-failures|empty-answers|refusals|failed-response-export|held-message-denial|phased-messages|failure-correlation [all|rejected|correlated|exhausted]]")
+        raise SystemExit("usage: dispatch_integration.py RUI [all|builtin-instructions|sse-framing|http-quota|stream-failures|empty-answers|refusals|failed-response-export|held-message-denial|phased-messages|failure-correlation [all|rejected|correlated|exhausted]]")
     main(mode, correlation_case)

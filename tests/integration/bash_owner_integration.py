@@ -76,7 +76,7 @@ def prove_timeout_feedback(state):
             outputs = [item["output"] for item in replay["input"] if item.get("type") == "function_call_output"]
             assert outputs == [result], replay
             instructions = replay["instructions"]
-            assert instructions == fixture.model_instructions(workspace, store=store, session=session), instructions
+            assert instructions == fixture.model_instructions(workspace, store=store, session=session, model="gpt-6-sol"), instructions
             assert fixture.instructions_workspace(instructions) == str(workspace), instructions
             if effective is None:
                 # The model and the saved result get exactly the outcome and the

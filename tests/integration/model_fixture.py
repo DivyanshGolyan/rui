@@ -5,6 +5,7 @@ import http.server
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import threading
@@ -21,13 +22,66 @@ ROOT = pathlib.Path.cwd()
 MODEL_CONTEXT_PARTS = (pathlib.Path(__file__).resolve().parents[2] / "src" / "model_instructions.txt").read_text().split("{}")
 
 
-def model_instructions(workspace, baseline="", *, store, session):
+def _builtin_instruction_paths(source):
+    def block(pattern):
+        matches = re.findall(pattern, source, re.MULTILINE | re.DOTALL)
+        if len(matches) != 1:
+            raise ValueError("src/model_catalog.zig: unsupported built-in instruction shape")
+        return matches[0]
+
+    def rows(pattern, text):
+        matches = list(re.finditer(pattern, text))
+        if not matches or re.sub(pattern, "", text).strip():
+            raise ValueError("src/model_catalog.zig: unsupported built-in instruction rows")
+        return matches
+
+    enum = block(r"^pub const BuiltinInstructions = enum \{\n(.*?)^};$")
+    shape = re.fullmatch(
+        r"\s*((?:\w+,\s*)+)pub fn bytes\(self: BuiltinInstructions\) \[\]const u8 \{"
+        r"\s*return switch \(self\) \{(.*?)\};\s*}\s*", enum, re.DOTALL)
+    if shape is None:
+        raise ValueError("src/model_catalog.zig: unsupported built-in instruction bytes")
+    tags = re.findall(r"\w+", shape[1])
+    bodies = {}
+    for row in rows(r'((?:\.\w+\s*,\s*)*\.\w+)\s*=>\s*(?:""|@embedFile\("(model_instructions/[\w-]+\.txt)"\)),', shape[2]):
+        for tag in re.findall(r"\.(\w+)", row[1]):
+            if tag in bodies:
+                raise ValueError("src/model_catalog.zig: duplicate built-in instruction variant")
+            bodies[tag] = row[2]
+    if len(tags) != len(set(tags)) or set(tags) != set(bodies) or bodies.get("generic", "missing") is not None:
+        raise ValueError("src/model_catalog.zig: incomplete built-in instruction variants")
+    selector = block(r"^pub fn builtinInstructions\(model: \[\]const u8\) BuiltinInstructions \{\n(.*?)^}$")
+    shape = re.fullmatch(
+        r"\s*const reviewed = \.\{(.*?)\};\s*"
+        r"inline for \(reviewed\) \|entry\| if \(std\.mem\.eql\(u8, model, entry\[0\]\)\) return entry\[1\];"
+        r"\s*return \.generic;\s*", selector, re.DOTALL)
+    if shape is None:
+        raise ValueError("src/model_catalog.zig: unsupported built-in instruction selector")
+    paths = {}
+    for row in rows(r'\.\{ "([^"\\]+)", BuiltinInstructions\.(\w+) },', shape[1]):
+        model, tag = row[1], row[2]
+        if model in paths or tag not in bodies:
+            raise ValueError("src/model_catalog.zig: invalid built-in instruction selection")
+        paths[model] = bodies[tag]
+    return paths
+
+
+_INSTRUCTION_ROOT = pathlib.Path(__file__).resolve().parents[2] / "src"
+_INSTRUCTION_PATHS = _builtin_instruction_paths((_INSTRUCTION_ROOT / "model_catalog.zig").read_text())
+
+
+def builtin_instructions(model):
+    path = _INSTRUCTION_PATHS.get(model)
+    return "" if path is None else (_INSTRUCTION_ROOT / path).read_text()
+
+
+def model_instructions(workspace, baseline="", *, store, session, model):
     """Shared prose with independently encoded, caller-supplied fixture facts."""
     parts = MODEL_CONTEXT_PARTS
     workspace = json.dumps(str(workspace), ensure_ascii=False)[1:-1]
     assert len(session) == 6 and all(c in "0123456789abcdefghjkmnpqrstvwxyz" for c in session), session
-    prefix, address, suffix = parts
-    return prefix + workspace + address + session + suffix + baseline
+    prefix, address, middle, suffix = parts
+    return prefix + workspace + address + session + middle + builtin_instructions(model) + suffix + baseline
 
 
 def instructions_session(instructions):

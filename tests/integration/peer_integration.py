@@ -53,8 +53,7 @@ B_LABEL = "Worker: multiply"
 
 
 def model_instructions(workspace, session):
-    prefix, address, suffix = (pathlib.Path(__file__).resolve().parents[2] / "src" / "model_instructions.txt").read_text().split("{}")
-    return prefix + json.dumps(str(workspace), ensure_ascii=False)[1:-1] + address + session + suffix
+    return fixture.model_instructions(workspace, store=None, session=session, model="gpt-6-sol")
 
 
 def last_user(request):

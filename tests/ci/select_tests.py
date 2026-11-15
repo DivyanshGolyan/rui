@@ -536,7 +536,7 @@ RULES = (
      ("test", "host-launch-integration", "descriptor-capacity-integration", "codex-h2-integration", "transport-h2-integration"),
      ("test", "host-launch-integration", "descriptor-capacity-integration", "codex-h2-integration", "transport-h2-integration"),
      "Startup capacity: every refusal boundary, managed transport and its companion oracle"),
-    (("src/model_instructions.txt",),
+    (("src/model_instructions.txt", "src/model_instructions/*.txt"),
      ("transport-h2-integration", "codex-h2-integration", "current-facts-integration",
       "server-delivery-integration", "measurement-check"),
      ("transport-h2-integration", "codex-h2-integration", "current-facts-integration",
