@@ -18,3 +18,13 @@ pub const ContentField = commands.ContentField;
 pub const Configuration = commands.Configuration;
 pub const ConfigureCommand = commands.ConfigureCommand;
 pub const MessageCommand = commands.MessageCommand;
+
+/// Borrowed from one sealed capture. This range owns neither its descriptor
+/// nor any scratch charge. Only the capture closes or refunds them.
+pub const Range = struct {
+    file: File,
+    offset: u64,
+    length: u64,
+    digest: [32]u8,
+    sealed_length: u64,
+};
