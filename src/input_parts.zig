@@ -211,4 +211,3 @@ test "input spool record preserves exact text and image identities without norma
     try std.testing.expectError(error.EmptyInput, empty.finish());
     try std.testing.expectError(error.InvalidImageName, displayName("\xff"));
 }
-
