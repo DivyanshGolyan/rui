@@ -8,7 +8,7 @@
 Before publishing, establish or reuse the relevant focused evidence in [Evidence](../../CODING_STANDARDS.md#evidence).
 A PR description has a Summary, the Evidence it was checked with, and its Merge danger.
 The description lists every behavior change in the diff, small ones included, so the summary and the diff agree.
-PRs changing `src/` carry a [Shape section](../../CODING_STANDARDS.md#shape-before-code), and the plan job refuses them without it.
+PRs changing `src/` follow [Shape before code](../../CODING_STANDARDS.md#shape-before-code); the plan checks the description, and review checks the shape.
 Every PR commit states its actual test commands and results.
 Open every PR with `python3 tests/ci/open_pr.py open --title TITLE --body-file FILE`, which reports overlapping work and opens it ready for review.
 Selected CI and the opener's `@codex review` request start together on the published candidate.

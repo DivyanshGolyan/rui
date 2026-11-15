@@ -48,7 +48,9 @@ Obtain independent opinions on material design questions.
 
 ### Shape before code
 
-Before writing code for a change to `src/`, write a `## Shape` section in the PR description answering:
+Before writing code for a change to `src/`, show the changed structure in a fenced diagram, diff-sketch or tree in the PR's `## Summary`.
+An existing `## Shape` section remains accepted for compatibility.
+The plan checks for a nonempty closed sketch in Summary or the legacy heading; review answers the applicable questions below, not a repeated section template:
 
 - **[Values in](#ownership-and-transitions).** The value each user action or worker result arrives as.
   An input carries what the user saw (the drawn row, list or frame), never state re-read later.
@@ -148,7 +150,7 @@ On Host threads:
 
 ## Review
 
-Codex is the code review; request `@codex review for duplicated authority and braided concerns, and against the PR's Shape section; group symptoms by owner` when production or operational changes invalidate the previous review.
+Codex is the code review; request `@codex review for duplicated authority and braided concerns, and against the PR's Summary shape; group symptoms by owner` when production or operational changes invalidate the previous review.
 [Landing](docs/agents/landing.md#publish-and-merge) owns ready publication, clean review evidence and its reuse exceptions.
 The [Code Review Rules](AGENTS.md#code-review-rules) own how it groups and orders its findings; the rules it applies stay here.
 The author's own reviews are design reviews of the approved design, and a redesign when fixes keep producing new findings.
