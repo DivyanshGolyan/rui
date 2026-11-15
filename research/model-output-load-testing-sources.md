@@ -1,6 +1,6 @@
 # Model-output load qualification: external evidence
 
-Researched 2026-09-15. This is an evidence note with unaccepted recommendations, not a specification or a change to fixture thresholds. No benchmark was run. The owning contracts remain [ARCHITECTURE.md](../ARCHITECTURE.md#resources-storage-and-diagnostics) and [VERIFICATION.md](../VERIFICATION.md#resources-and-accepted-host-qualification-targets).
+Researched 2026-09-15. This is an evidence note with unaccepted recommendations, not a specification or a change to fixture thresholds. No benchmark was run. The owning contracts remain [ARCHITECTURE.md](../docs/contracts/resources.md#resources-storage-and-diagnostics) and [VERIFICATION.md](../docs/contracts/resources.md#resources-and-accepted-host-qualification-targets).
 
 ## Question and local boundary
 

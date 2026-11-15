@@ -1,0 +1,5 @@
+ts	phase	decision	why	evidence	result
+2026-11-15T10:50:53+00:00	frame	Kept shared roots and moved subsystem contracts with their evidence	Avoid always loading unrelated behavior and preserve one authority	tests/ci/doc_move_map.json	69 spans cover all 5666 original lines
+2026-11-15T10:50:53+00:00	routing	Updated Markdown anchors and literal source and policy consumers together	Moving text alone would break navigation or shrink the retired-workflow check	tests/ci/test_selection.py	18 focused tests pass; coverage and link audit pass
+2026-11-15T10:50:53+00:00	review-prep	Preserved five duplicate-heading destinations with explicit evidence anchors	Co-located contract and verification headings can share a GitHub slug	tests/ci/test_doc_moves.py	Evidence links target the suffixed heading
+2026-11-15T10:50:53+00:00	scope	Left baseline broken links and conflicting Remaining decisions unchanged	Organization does not authorize a contract redesign	research/doc-organization/README.md	11 pre-existing broken links; no new link regression

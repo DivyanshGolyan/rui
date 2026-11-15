@@ -7,14 +7,14 @@ You are an owner and long-term maintainer of this codebase, inside the accepted 
 When a change would add a second path beside an existing owner, restructure so one owner serves both ([Ownership and transitions](CODING_STANDARDS.md#ownership-and-transitions)); unrelated cleanup goes in its own PR.
 Load guidance for the task at hand, combining applicable routes:
 
-- **Product scope or behavior:** read [README.md](README.md) and the affected [Architecture](ARCHITECTURE.md) sections.
+- **Product scope or behavior:** read [README.md](README.md), then use the [Architecture index](ARCHITECTURE.md) to load the affected subsystem contract.
 - **Engineering:** for implementation, design, debugging, builds or engineering review, read [Engineering](CODING_STANDARDS.md#engineering).
 - **Review:** read [Review](CODING_STANDARDS.md#review), including when implementing findings.
   Reviews are read-only unless fixes are requested.
 - **Performance:** for implementation or review, read [Performance](CODING_STANDARDS.md#performance), including build-latency changes.
 - **Documentation, terminology or decisions:** read [Contract maintenance](CODING_STANDARDS.md#contract-maintenance) and the documentation checks in [Evidence](CODING_STANDARDS.md#evidence).
-- **Implementation or verification:** read [Evidence](CODING_STANDARDS.md#evidence) and the applicable [Verification](VERIFICATION.md) cases.
-- **Test selection or CI changes:** read [Canonical gates](VERIFICATION.md#canonical-gates).
+- **Implementation or verification:** read [Evidence](CODING_STANDARDS.md#evidence) and use the [Verification index](VERIFICATION.md#contract-index) to load the affected subsystem's required evidence.
+- **Test selection or CI changes:** read [Canonical gates](docs/verification/gates.md#canonical-gates).
 - **Red CI:** use [rui-ci-triage](.claude/skills/rui-ci-triage/SKILL.md).
 - **Issue work:** read the live issue, discussion and dependencies, then [issue guidance](docs/agents/issue-tracker.md) and [triage labels](docs/agents/triage-labels.md).
   Follow the latest accepted decision.

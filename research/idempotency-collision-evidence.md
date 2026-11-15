@@ -1,6 +1,6 @@
 # Durable command identity: collision handling
 
-Research date: 2026-09-12. Primary-source reading and local contract reasoning at ab686a6; no runtime measurements, qualification or accepted contract changes. [ARCHITECTURE.md](../ARCHITECTURE.md#recovering-a-submission-after-a-lost-reply) remains authoritative.
+Research date: 2026-09-12. Primary-source reading and local contract reasoning at ab686a6; no runtime measurements, qualification or accepted contract changes. [ARCHITECTURE.md](../docs/contracts/admission.md#recovering-a-submission-after-a-lost-reply) remains authoritative.
 
 ## Recommendation
 

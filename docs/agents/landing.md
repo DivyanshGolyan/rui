@@ -1,7 +1,7 @@
 # Land a change
 
 [AGENTS.md](../../AGENTS.md#authority) owns authorization and the [standing landing grant](../../AGENTS.md#landing).
-[Landing cadence](../../VERIFICATION.md#landing-cadence) owns candidate admission, promotion, releases, strict paths and recovery.
+[Landing cadence](../verification/release.md#landing-cadence) owns candidate admission, promotion, releases, strict paths and recovery.
 
 ## Publish and merge
 
@@ -98,4 +98,4 @@ Whoever dispatches a promotion watches it to the end and reports the result unpr
 A failed step means the promotion is red even while its bisect step keeps the run in progress for up to four hours; report it then.
 A red promotion names, on each `promotion-red` issue it files, the first batch commit where each failed step of that job fails; a suite batch with several causes names only its earliest.
 Fix forward through an ordinary PR, then promote again.
-Recover a red Release as [Release publication](../../VERIFICATION.md#release-publication) says; a red wire recheck there follows publication, not a failed one.
+Recover a red Release as [Release publication](../verification/release.md#release-publication) says; a red wire recheck there follows publication, not a failed one.

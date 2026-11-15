@@ -5,12 +5,17 @@ These standards own engineering methods, not runtime behavior or qualification r
 
 ## Contract maintenance
 
-Each requirement has one home: [Architecture](ARCHITECTURE.md) owns accepted behavior, terminology, decisions and rationale; [Verification](VERIFICATION.md) owns required evidence and gates; GitHub issues hold unresolved decisions and research.
+Each requirement has one home.
+[Architecture](ARCHITECTURE.md) owns shared guarantees, terminology, and the source map.
+The accepted-contract sections in its linked subsystem references own behavior, decisions, and rationale.
+[Verification](VERIFICATION.md) owns global evidence rules and gates; the required-evidence sections in its linked subsystem references own the cases.
+GitHub issues hold unresolved decisions and research.
 Implementation slices link accepted contracts and define proof.
 A Store format change appends one version, bootstrap digest row and forward step for each dialect; main's existing rows and steps remain immutable, and `python3 tests/ci/schema_number.py --check` confirms the number against current main. The Store keeps no wire label (format 74), so a wire bump is no Store format change.
-The [wire-version gate](tests/ci/test_wire_version.py) requires a version greater than the newest release's when generated `openapi.json` changes beyond `info.version` and documentation-only annotations, under the [wire contract rule](ARCHITECTURE.md#staged-persistent-input).
+The [wire-version gate](tests/ci/test_wire_version.py) requires a version greater than the newest release's when generated `openapi.json` changes beyond `info.version` and documentation-only annotations, under the [wire contract rule](docs/contracts/session-ui.md#staged-persistent-input).
 
-Edit [Architecture](ARCHITECTURE.md) or [Verification](VERIFICATION.md) only when a change alters user-visible behavior, the Store format or a gate.
+Edit the owning contract or required-evidence section only when a change alters user-visible behavior, the Store format, or a gate.
+An organization-only move preserves every requirement and migrates its references and enforcement consumers together.
 Accepted behavior changes only by the user's decision: when an implementation departs from it, raise the conflict and change the code or ask, keeping the contract text as accepted.
 Then edit the owning section and affected verification cases; keep rationale beside the contract.
 Identify conflicts with accepted behavior explicitly.
@@ -27,14 +32,14 @@ Each listed contract has one owning enforcement; change the owner and its check 
 
 | Contract | Owning enforcement | Existing local and CI checks |
 | --- | --- | --- |
-| [Mutation presentation and admission truth](ARCHITECTURE.md#public-operations) | `cli.writeMutationReply` owns quiet Configure success and contextual errors through `MutationPresentation`. Configure records admission before output and always invokes that renderer. | `human_cli_integration.py` checks quiet success; `canonical_failure_integration.py` checks original context, binding/null failures and no resend. Both run in `check`. |
-| [Original result and release deadlines](VERIFICATION.md#transport) | `model_fixture.wait_for_result_release` requires a deadline. Population callers create one deadline before their first result wait and forward it through all reads and global release. | `transport_h2_integration_test.py` drives shared, managed and seven population caller clocks; `host_process_test.py` drives the stop-receipt caller. Both run through existing build targets. |
-| [Required native receipts](ARCHITECTURE.md#shared-optional-stderr) | `start_ready_process` selects native capture and crash-cut plans and external failure retention before launch. `HostDiagnostics` rejects optional authority for named required phases. | `host_process_test.py` rejects missing, duplicate, lost and optional-only receipts and verifies retention after root teardown; `check` runs it. |
-| [Receipt versus publication retirement](VERIFICATION.md#native-owner-observations) | `crash_host` requires unsealed publication retirement within its original crash/reap budget. Ordinary teardown uses sealed `stop_process`; immutable final validity remains mandatory. | `host_process_test.py` holds delivered custody and injects a future writer through the actual crash caller; existing native publication holds remain in `check`. |
-| [No-launch crash cut](VERIFICATION.md#native-owner-observations) | The existing opt-in prepared transition blocks before launch authority. `ReleaseGate.assert_held` requires the owned empty FIFO, independently of marker absence and observation retirement. | Native Bash integration retains the gated prelaunch crash and recovery; `host_process_test.py` rejects released, credited and replaced gates and verifies unlink-failure closure. |
-| [Canonical fault fencing](ARCHITECTURE.md#canonical-state-and-transactions) | `enter` and `Access.finish`/`finishTransaction` in `src/store/Store.zig` own every locked Store entry point. Each declares the ordinary errors its body returns, checked at compile time; every other error from the body fences the Store before it returns. | `src/store/tests/` pins locking, fencing and classifier return to that owner and fences injected SQLite step faults on six entry points; `canonical_failure_integration.py` checks that a Host read fault fences instead of returning `result_not_found`. Both run in `check`. |
-| [Stable installation and activation](ARCHITECTURE.md#store-format-and-upgrades) | `Installation` alone publishes complete managed builds; the local upgrade coordinator composes separate publication and exact-instance Host lifecycle outcomes. Shell installers share the native publication and PATH owners, then invoke the sequential restart-all coordinator, which reuses HostLifecycle rather than owning launch or exact-stop policy. | `upgrade-integration` exercises real CLI, both PTY/tmux screens, cancellation and exact pinned activation; focused native owner tests and both installer suites check final eligibility, ordering and reporting; restart-all cases cover two Stores, already-current Hosts, stale/unreadable sockets and explained application-owned skips. |
-| [Caller diagnostics](ARCHITECTURE.md#help-and-prerequisites) | `caller_error.of`, its catalog and invocation-owned witnesses classify CLI failures; `tests/ci/caller_errors.py` inventories CLI-owned production errors and ratchets pending causes against the same scoped trusted-main inventory. | `test_caller_errors.py` rejects pending growth, raw caller error names and unmapped errors in CLI-owned sources, without catalog coupling to Host-internal owners; prepush and CI policy run the gate. |
+| [Mutation presentation and admission truth](docs/contracts/cli.md#public-operations) | `cli.writeMutationReply` owns quiet Configure success and contextual errors through `MutationPresentation`. Configure records admission before output and always invokes that renderer. | `human_cli_integration.py` checks quiet success; `canonical_failure_integration.py` checks original context, binding/null failures and no resend. Both run in `check`. |
+| [Original result and release deadlines](docs/contracts/resources.md#transport) | `model_fixture.wait_for_result_release` requires a deadline. Population callers create one deadline before their first result wait and forward it through all reads and global release. | `transport_h2_integration_test.py` drives shared, managed and seven population caller clocks; `host_process_test.py` drives the stop-receipt caller. Both run through existing build targets. |
+| [Required native receipts](docs/contracts/diagnostics.md#shared-optional-stderr) | `start_ready_process` selects native capture and crash-cut plans and external failure retention before launch. `HostDiagnostics` rejects optional authority for named required phases. | `host_process_test.py` rejects missing, duplicate, lost and optional-only receipts and verifies retention after root teardown; `check` runs it. |
+| [Receipt versus publication retirement](docs/contracts/diagnostics.md#native-owner-observations) | `crash_host` requires unsealed publication retirement within its original crash/reap budget. Ordinary teardown uses sealed `stop_process`; immutable final validity remains mandatory. | `host_process_test.py` holds delivered custody and injects a future writer through the actual crash caller; existing native publication holds remain in `check`. |
+| [No-launch crash cut](docs/contracts/diagnostics.md#native-owner-observations) | The existing opt-in prepared transition blocks before launch authority. `ReleaseGate.assert_held` requires the owned empty FIFO, independently of marker absence and observation retirement. | Native Bash integration retains the gated prelaunch crash and recovery; `host_process_test.py` rejects released, credited and replaced gates and verifies unlink-failure closure. |
+| [Canonical fault fencing](docs/contracts/store.md#canonical-state-and-transactions) | `enter` and `Access.finish`/`finishTransaction` in `src/store/Store.zig` own every locked Store entry point. Each declares the ordinary errors its body returns, checked at compile time; every other error from the body fences the Store before it returns. | `src/store/tests/` pins locking, fencing and classifier return to that owner and fences injected SQLite step faults on six entry points; `canonical_failure_integration.py` checks that a Host read fault fences instead of returning `result_not_found`. Both run in `check`. |
+| [Stable installation and activation](docs/contracts/store.md#store-format-and-upgrades) | `Installation` alone publishes complete managed builds; the local upgrade coordinator composes separate publication and exact-instance Host lifecycle outcomes. Shell installers share the native publication and PATH owners, then invoke the sequential restart-all coordinator, which reuses HostLifecycle rather than owning launch or exact-stop policy. | `upgrade-integration` exercises real CLI, both PTY/tmux screens, cancellation and exact pinned activation; focused native owner tests and both installer suites check final eligibility, ordering and reporting; restart-all cases cover two Stores, already-current Hosts, stale/unreadable sockets and explained application-owned skips. |
+| [Caller diagnostics](docs/contracts/cli.md#help-and-prerequisites) | `caller_error.of`, its catalog and invocation-owned witnesses classify CLI failures; `tests/ci/caller_errors.py` inventories CLI-owned production errors and ratchets pending causes against the same scoped trusted-main inventory. | `test_caller_errors.py` rejects pending growth, raw caller error names and unmapped errors in CLI-owned sources, without catalog coupling to Host-internal owners; prepush and CI policy run the gate. |
 | [Host stack budget](CODING_STANDARDS.md#host-stacks) | `tests/ci/stack_frames.py` and [stack_frames.json](tests/ci/stack_frames.json) own the ReleaseSafe frame budget, each Host thread's chain ceiling and the shrink-only exceptions. | `stack-frames` runs in `check`. `test_stack_frames.py` self-tests the gate and fails when an exception or ceiling grows past the trusted `origin/main` copy; the policy job runs it with the other `tests/ci` unittests. |
 | [Primary failure and mandatory disposal](CODING_STANDARDS.md#evidence) | Shared process, held-endpoint, Control and Bash disposal owners attempt every cleanup and keep the original failure primary. | `host_process_test.py` injects disposal and retention failures; `transport_h2_integration_test.py` drives body/cleanup fault pairs and successful-body cleanup failure. Existing build targets run both. |
 
@@ -144,7 +149,7 @@ On Host threads:
   Name a big field's small parts instead, as in `.{ .workspace = .{ .len = 0 } }`.
 - Rare work with scratch of its own (a trace, a diagnostic line, an error envelope, startup) is a `noinline` function, so the scratch stays off its caller's frame.
 
-`stack-frames` enforces the frame budget ([canonical gates](VERIFICATION.md#canonical-gates)).
+`stack-frames` enforces the frame budget ([canonical gates](docs/verification/gates.md#canonical-gates)).
 
 ## Review
 
@@ -152,7 +157,7 @@ Codex is the code review; request `@codex review for duplicated authority and br
 [Landing](docs/agents/landing.md#publish-and-merge) owns ready publication, clean review evidence and its reuse exceptions.
 The [Code Review Rules](AGENTS.md#code-review-rules) own how it groups and orders its findings; the rules it applies stay here.
 The author's own reviews are design reviews of the approved design, and a redesign when fixes keep producing new findings.
-Reviewers apply the rules below and the [product tenets](VERIFICATION.md#product-tenets).
+Reviewers apply the rules below and the [product tenets](docs/verification/gates.md#product-tenets).
 The author fixes each finding at its class ([Ownership and transitions](#ownership-and-transitions)), or records in the PR why it stays.
 Review signoff does not gate landing a green change ([Landing](AGENTS.md#landing)).
 
@@ -183,7 +188,7 @@ Keep unrelated cleanup separate; exclude personal style, speculative extensibili
 
 ## Evidence
 
-Use [canonical gates](VERIFICATION.md#canonical-gates) for required commands, focused checks, cache conditions and assembled-versus-independently-merged cadence; confirm commands in `build.zig`.
+Use [canonical gates](docs/verification/gates.md#canonical-gates) for required commands, focused checks, cache conditions and assembled-versus-independently-merged cadence; confirm commands in `build.zig`.
 This section owns the local feedback policy; [landing](docs/agents/landing.md#publish-and-merge) owns publication and merge gates.
 
 Use `python3 tests/ci/prepush.py` for cheap changed-file feedback before first publication and after changes invalidate that feedback.
@@ -205,7 +210,7 @@ Record the evidence's revision or tree and explain relevant changes since it ran
 Rerun evidence invalidated by semantic changes or the final integration of changed paths, not by a commit, push or review round alone.
 A new TUI interaction still needs the independent plain-PTY journey in [landing](docs/agents/landing.md#publish-and-merge); compilation and CI do not demonstrate it.
 
-Ready CI owns selected broad unit and integration tests, Mac checks, stack frames, live engines, migrations and premerge all-unit compilation obligations ([canonical gates](VERIFICATION.md#canonical-gates)).
+Ready CI owns selected broad unit and integration tests, Mac checks, stack frames, live engines, migrations and premerge all-unit compilation obligations ([canonical gates](docs/verification/gates.md#canonical-gates)).
 `python3 tests/ci/prepush.py --full` remains an opt-in diagnostic, not a publication toll.
 It adds development targets, Mac typechecking, unfiltered unit compilation, stack frames and selected reachable local MySQL checks.
 UID-global Upgrade remains hosted on an ordinary runner; local output records it as deferred, never passed.
@@ -245,7 +250,7 @@ A signature that already fails on main is not permission to bypass admission.
 Assertions, unexplained timeouts and unknown results require diagnosis, not replay.
 Pause the affected outcome, not independent work; a publication failure does not create another main admission gate.
 Diagnostic reruns need no routine grant; state the hypothesis or correction and preserve every failure.
-An unexplained fail-then-pass is not reliable green; only a [listed flake](VERIFICATION.md#listed-flakes)'s signature may fail then pass.
+An unexplained fail-then-pass is not reliable green; only a [listed flake](docs/verification/gates.md#listed-flakes)'s signature may fail then pass.
 
 Required checks execute on the gated tip; build caches accelerate compilation and never cache test acceptance.
 Keep results in PR checks and existing artifacts rather than growing coordination records.
