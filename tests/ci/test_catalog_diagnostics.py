@@ -28,6 +28,8 @@ class CatalogDiagnosticsTest(unittest.TestCase):
                     configured="accepted", completed="completed", answer=b"HTTP still works",
                     requests=1):
         hosts = []
+        environments = []
+        trust_environment = {"SSL_CERT_FILE": "fixture-missing-ca.pem"}
 
         def start(args, **kwargs):
             log = Path(args[4])
@@ -36,6 +38,7 @@ class CatalogDiagnosticsTest(unittest.TestCase):
             host = SimpleNamespace(log=log, enabled=enabled, returncode=None)
             host.poll = lambda: 1 if exited else host.returncode
             hosts.append(host)
+            environments.append(kwargs["env"])
             return host, {"socket": "fixture.sock"}
 
         def stop(host):
@@ -56,6 +59,8 @@ class CatalogDiagnosticsTest(unittest.TestCase):
         required = subprocess.CompletedProcess([], required_code, required_stdout, required_stderr)
         with tempfile.TemporaryDirectory() as directory, contextlib.ExitStack() as stack:
             stack.enter_context(patch.object(catalog.tempfile, "mkdtemp", return_value=directory))
+            trust = stack.enter_context(patch.object(catalog.os_semantics, "system_trust",
+                                                    return_value=trust_environment))
             stack.enter_context(patch.object(catalog, "start_ready_process", side_effect=start))
             stack.enter_context(patch.object(catalog.fixture, "stop_host", side_effect=stop))
             calls = stack.enter_context(patch.object(catalog.h2_fixture, "closed_host_request", side_effect=request))
@@ -81,6 +86,11 @@ class CatalogDiagnosticsTest(unittest.TestCase):
                 self.assertEqual(calls.call_count, 12)
                 mandatory.assert_called_once()
             else:
+                self.assertEqual([entry.args for entry in trust.call_args_list],
+                                 [(Path(directory).resolve() / "missing-ca.pem",)] * 2)
+                for environment in environments:
+                    self.assertEqual({name: environment.get(name) for name in trust_environment},
+                                     trust_environment)
                 self.assertEqual(calls.call_count, 6)
                 message.assert_called_once()
                 endpoint.shutdown.assert_called_once()

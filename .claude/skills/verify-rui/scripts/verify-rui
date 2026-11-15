@@ -784,7 +784,8 @@ def cmd_new(args):
             "binary_sha256": build["files_sha256"]["rui"], "source": build["source"],
             "scratch": str(scratch), "home": str(scratch / "home"), "store": str(scratch / "store"),
             "project": str(scratch / "project"), "created": wall(), "label": args.label,
-            "helper_sha256": sha256(HERE), "answers": getattr(args, "answers", "echo")}
+            "helper_sha256": sha256(HERE), "answers": getattr(args, "answers", "echo"),
+            "no_sessions": args.no_sessions}
     (root / "run.json").write_text(json.dumps(meta, indent=1) + "\n")
     run = Run(root)
     (run.home / ".config/rui").mkdir(parents=True, mode=0o700)
@@ -899,7 +900,27 @@ def cmd_doctor(args):
     check("owned Host process holds this Store open", any(line[1:].startswith(str(run.store)) for line in held.splitlines()),
           f"pid={host_pid}")
     sessions = run.rui_cmd("session", "list", "--store", run.store, "--all", log=False)
-    check("configured Sessions present", sessions.returncode == 0 and all(f'"{run.sid(name)}"' in sessions.stdout for name in ("demo", "approve")),
+    no_sessions = run.meta.get("no_sessions", False)
+    registered = run.meta.get("sessions")
+    registry_ok = (type(no_sessions) is bool and isinstance(registered, dict)
+                   and all(isinstance(label, str) and label.strip() and isinstance(sid, str) and sid.strip()
+                           for label, sid in registered.items())
+                   and len(set(registered.values())) == len(registered)
+                   and (no_sessions or {"demo", "approve"} <= registered.keys()))
+    try:
+        listing = json.loads(sessions.stdout)
+    except ValueError:
+        listing = None
+    rows = listing.get("sessions") if isinstance(listing, dict) else None
+    references = ([row.get("reference") if isinstance(row, dict) else None for row in rows]
+                  if isinstance(rows, list) else None)
+    listing_ok = (references is not None
+                  and all(isinstance(sid, str) and sid.strip() for sid in references)
+                  and len(set(references)) == len(references))
+    sessions_ok = (sessions.returncode == 0 and registry_ok and listing_ok
+                   and set(registered.values()) <= set(references)
+                   and (bool(registered) or (no_sessions and not references)))
+    check("configured Sessions present", sessions_ok,
           sessions.stdout.strip()[:300] or sessions.stderr.strip()[:300])
     if run.sock.exists():
         server = run.tmux("display-message", "-p", "#{pid} #{socket_path}", check=False)
