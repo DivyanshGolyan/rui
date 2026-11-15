@@ -674,7 +674,7 @@ test "each Store entry point takes its round budget on its common path" {
             try std.testing.expect(try storage.tryAdmitNextModelRetry(ActiveOperationFilter.empty(), .{}, null) == null);
             meter.stop(.tryAdmitNextModelRetry);
             meter.start();
-            _ = try storage.dispatchWork(false);
+            _ = try storage.dispatchWork(false, true);
             meter.stop(.dispatchWork);
             meter.start();
             try std.testing.expect(!try storage.recoverOneExhaustedModelAttempt(ActiveOperationFilter.empty()));
