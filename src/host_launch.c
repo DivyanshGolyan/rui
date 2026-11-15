@@ -376,13 +376,16 @@ int rui_launch_pinned(const char *helper_executable, const char *executable,
 /* Two independently bounded byte channels. The application decides whether any
  * stdout line is a startup refusal; this transport knows no application grammar. */
 int rui_launch_detached_reported(const char *executable, const char *const *argv,
-                                 size_t argc, int *startup_read, int *output_read) {
+                                 size_t argc, int *startup_read, int *output_read,
+                                 int *launched_pid, unsigned long long *launched_started) {
     int channels[2][2];
     int writers[2] = {-1, -1};
     int opened = 0;
     int result = 0;
     *startup_read = -1;
     *output_read = -1;
+    *launched_pid = 0;
+    *launched_started = 0;
     for (int i = 0; i < 2; ++i) {
         if (pipe(channels[i]) != 0) { result = errno; break; }
         opened++;
@@ -392,7 +395,7 @@ int rui_launch_detached_reported(const char *executable, const char *const *argv
             fcntl(channels[i][0], F_SETFL, O_NONBLOCK) < 0) { result = errno; break; }
     }
     if (!result) result = launch_with_signals(executable, executable, argv, argc,
-        (const char *const *)environ, writers[0], writers[1], NULL, NULL);
+        (const char *const *)environ, writers[0], writers[1], launched_pid, launched_started);
     for (int i = 0; i < opened; ++i) {
         if (writers[i] >= 0) close(writers[i]);
         if (result) close(channels[i][0]);

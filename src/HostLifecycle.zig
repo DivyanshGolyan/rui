@@ -534,7 +534,7 @@ fn startPinned(init: std.process.Init, allocator: std.mem.Allocator, plan: *cons
 /// launch identity. A mismatch never grants ordinary Host request readiness.
 fn activationReading(reading: client.HostProcessReading, launched_pid: c_int, launched_started: u64, snapshot: *const identity.Snapshot, executable: []const u8, capacity: usize) ActivationOutcome {
     if (reading.pid() != launched_pid) return .replacement_observed;
-    if (!matchesLaunch(launched_pid, launched_started, snapshot, executable)) return .{ .unconfirmed = .verifying };
+    if (!identity.matchesLaunch(launched_pid, launched_started, snapshot, executable)) return .{ .unconfirmed = .verifying };
     return switch (reading) {
         .incompatible => |pid| .{ .client_incompatible = pid },
         .ready => |observed| if (observed.ready.active_capacity != capacity)
@@ -542,10 +542,6 @@ fn activationReading(reading: client.HostProcessReading, launched_pid: c_int, la
         else
             .{ .ready = .{ .instance = observed.ready.instance, .pid = observed.pid } },
     };
-}
-
-fn matchesLaunch(pid: c_int, started: u64, snapshot: *const identity.Snapshot, executable: []const u8) bool {
-    return pid > 0 and started != 0 and snapshot.pid == pid and snapshot.started == started and std.mem.eql(u8, snapshot.executable, executable);
 }
 
 test "upgrade private launch buffers wipe argv environment and sentinels on every construction exit" {
@@ -645,11 +641,11 @@ test "upgrade private launch buffers wipe argv environment and sentinels on ever
 
 test "upgrade launch identity rejects same PID with a replacement generation" {
     const snapshot: identity.Snapshot = .{ .pid = 42, .started = 12, .executable = "/pinned/rui", .argv = &.{}, .environment = &.{}, .storage = &.{}, .entries = &.{} };
-    try std.testing.expect(matchesLaunch(42, 12, &snapshot, "/pinned/rui"));
-    try std.testing.expect(!matchesLaunch(42, 11, &snapshot, "/pinned/rui"));
-    try std.testing.expect(!matchesLaunch(42, 0, &snapshot, "/pinned/rui"));
-    try std.testing.expect(!matchesLaunch(43, 12, &snapshot, "/pinned/rui"));
-    try std.testing.expect(!matchesLaunch(42, 12, &snapshot, "/other/rui"));
+    try std.testing.expect(identity.matchesLaunch(42, 12, &snapshot, "/pinned/rui"));
+    try std.testing.expect(!identity.matchesLaunch(42, 11, &snapshot, "/pinned/rui"));
+    try std.testing.expect(!identity.matchesLaunch(42, 0, &snapshot, "/pinned/rui"));
+    try std.testing.expect(!identity.matchesLaunch(43, 12, &snapshot, "/pinned/rui"));
+    try std.testing.expect(!identity.matchesLaunch(42, 12, &snapshot, "/other/rui"));
 }
 
 test "relaunch activation reading requires the pinned launch for either wire" {

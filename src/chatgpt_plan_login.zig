@@ -185,7 +185,7 @@ pub fn login(io: std.Io, options: Options, display: anytype, paste: Paste, cance
         .fixture => |base| try std.fmt.bufPrint(&room.shown, "{s}/oauth/authorize{s}", .{ base, issued[wire.authorize_url.len..] }),
     };
     try display(Shown{ .link = link });
-    if (options.opener) |command| openBrowser(io, command, link);
+    if (options.opener) |command| openBrowser(io, command, link) catch {};
 
     const arrived = try waitForCallback(io, room, if (listener) |*server| server else null, paste, cancelled, display, wait_ns);
     const browser: ?*Connection = if (arrived) |index| &room.connections[index] else null;
@@ -259,9 +259,9 @@ fn listen(io: std.Io) ?std.Io.net.Server {
 
 /// Starts the browser on `link` and does not wait for it: the user can
 /// always open the printed link instead.
-fn openBrowser(io: std.Io, command: []const u8, link: []const u8) void {
+pub fn openBrowser(io: std.Io, command: []const u8, link: []const u8) !void {
     const argv = [_][]const u8{ command, link };
-    _ = std.process.spawn(io, .{ .argv = &argv, .stdin = .ignore, .stdout = .ignore, .stderr = .ignore }) catch {};
+    _ = try std.process.spawn(io, .{ .argv = &argv, .stdin = .ignore, .stdout = .ignore, .stderr = .ignore });
 }
 
 /// Waits up to `wait` until the listener or a paste delivers this attempt's

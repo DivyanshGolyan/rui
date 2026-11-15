@@ -2562,15 +2562,18 @@ def frame_steps(run, terminal, steps, exiting=False):
 
 
 def frame_initial_ready(terminal, first_wait=None, allow_exit=False):
-    # Chat/sign-in and old baseline images have a prompt. The editorless
-    # overview instead commits its pinned actions and bottom footer. Keep
-    # both paths so current recipes can still capture the unfixed baseline.
-    # The opening read resets the scroll anchor before input is released.
-    terminal.wait(lambda c: ("›" in c.completed or all(text in c.completed for text in
-                              ("+ New Session", "Settings", "enter open")))
-                  and "Opening…" not in c.completed
-                  and (not first_wait or first_wait in c.completed),
-                  "initial screen ready" + (f" with {first_wait!r}" if first_wait else ""),
+    def ready(capture):
+        text = capture.completed
+        guided = (re.search(r"^ *Sign in to Rui *$", text, re.M) is not None
+                  and all(re.search(r"^ *" + re.escape(label) + r" {2,}\S", text, re.M)
+                          for label in ("ChatGPT", "API key"))
+                  and re.search(r"^ *(?:Close {2,}\S|\[ Close \] *$)", text, re.M) is not None
+                  and re.search(r"^ *(?:Navigation {2,})?Tab / Shift-Tab", text, re.M) is not None)
+        return (("›" in text or all(marker in text for marker in
+                 ("+ New Session", "Settings", "enter open")) or guided)
+                and "Opening…" not in text and (not first_wait or first_wait in text))
+
+    terminal.wait(ready, "initial screen ready" + (f" with {first_wait!r}" if first_wait else ""),
                   allow_exit=allow_exit)
 
 
@@ -2629,13 +2632,22 @@ def frame_background_failure(state, frame):
     return None
 
 
+def frame_contains(text, plain):
+    if text in plain:
+        return True
+    if text.startswith("https://"):
+        from terminal_screen import shown
+        return shown(text, plain)
+    return False
+
+
 def frame_ready(terminal, state, allow_exit=False, sessions=None):
     # Transitions are asserted at the frame their last wait observed, not
     # polled until a later frame happens to satisfy the regression oracle.
     if state.get("first_frame", False):
         return
     expected, absent = frame_expectations(state), frame_absences(state, sessions)
-    terminal.wait(lambda c: all(text in c.completed for text in expected)
+    terminal.wait(lambda c: all(frame_contains(text, c.completed) for text in expected)
                   and all(text not in c.completed for text in absent)
                   and frame_row_failure(state, c.completed) is None,
                   "state expectations: " + repr({
@@ -2650,7 +2662,7 @@ def frame_capture(run, target, out, state, size, reason):
     files = {ext: f"{stem}.{ext}" for ext in ("txt", "ansi", "html")}
     frame = target.frame
     plain, ansi, page = cells_render(frame)
-    missing = next((text for text in frame_expectations(state) if text not in plain), None)
+    missing = next((text for text in frame_expectations(state) if not frame_contains(text, plain)), None)
     if missing is not None and reason is None:
         reason = f"state left before capture: {missing}"
     unexpected = next((text for text in frame_absences(state, run.meta.get("sessions", {})) if text in plain), None)

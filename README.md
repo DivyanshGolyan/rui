@@ -62,8 +62,10 @@ See [upgrade and activation](docs/host.md#upgrade-and-activation) before updatin
 <a id="start-a-conversation"></a>
 
 Run `rui` in your project directory.
-The first run signs you in with your ChatGPT account in your browser, or with an OpenAI API key.
-The first run and `rui auth login chatgpt` both open ChatGPT in your browser; on a machine whose browser cannot reach back, paste the address the browser ends on, or sign in with a code instead: press Tab on the first-run screen, or add `--device-code`.
+The first run asks you to choose a ChatGPT account or an API key.
+For ChatGPT, choose browser or device-code sign-in, then press Enter.
+Browser sign-in shows a link and an explicit Open browser action; if the browser cannot reach back, paste the address it ends on or change to the device-code method.
+The separate `rui auth login chatgpt` command still opens a browser automatically; add `--device-code` to that command to sign in with a code instead.
 A code sign-in needs Codex device code authorization turned on in ChatGPT security settings first, or your workspace admin to allow it; keep the code private.
 The [Host guide](docs/host.md#run-in-the-foreground) covers signing in from scripts.
 

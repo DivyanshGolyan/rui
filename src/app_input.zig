@@ -236,10 +236,7 @@ pub fn step(state: *State, facts: Facts, input: Input) Effects {
     if (input == .mouse and (input.mouse == .click or input.mouse == .list_click or input.mouse == .chat_click) and state.pasting) return .{ .route = .swallow };
     // The sign-in page owns keys and pastes even over settings or a list
     // that had focus before it opened, and no click navigates behind it.
-    if (state.layer == .sign_in) return switch (input) {
-        .mouse => .{ .route = .swallow },
-        else => .{ .route = .sign_in },
-    };
+    if (state.layer == .sign_in) return .{ .route = .sign_in };
     if (input == .key and state.layer == .settings) return settingsKey(state, facts.settings, input.key);
     if (state.layer == .main and input == .mouse and facts.session_open and facts.wide) switch (input.mouse) {
         .list_click => {
@@ -348,7 +345,7 @@ test "Root input routing over every layer, main pane, settings state and input" 
         .{ .layers = &signing, .events = &keys, .effects = .{ .route = .sign_in } },
         .{ .layers = &signing, .events = &.{.paste_start}, .effects = .{ .route = .sign_in }, .pasting = true },
         .{ .layers = &signing, .events = &.{.paste_end}, .effects = .{ .route = .sign_in }, .pasting = false },
-        .{ .layers = &signing, .events = &.{ .click, .wheel }, .effects = .{ .route = .swallow } },
+        .{ .layers = &signing, .events = &.{ .click, .wheel }, .effects = .{ .route = .sign_in } },
         // Under main and settings, vxfw's path takes the rest.
         .{ .layers = &.{.settings}, .events = &.{.paste_start}, .effects = .{}, .pasting = true },
         .{ .layers = &.{.settings}, .events = &.{.paste_end}, .effects = .{}, .pasting = false },
