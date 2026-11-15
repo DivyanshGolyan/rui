@@ -1325,6 +1325,8 @@ def builtin_instruction_cases(state, processes, endpoints, releases):
     session = config(store, "builtin-retry-config", "gpt-6-luna")
     message(state, store, "builtin-retry-a", session, "input A")
     wait_for(lambda: len(endpoint.requests) == 1, "admitted model A request")
+    initial_developers = [item for item in history(json.loads(endpoint.requests[0])["input"])
+                          if item.get("role") == "developer"]
     config(store, "builtin-retry-config-b", "gpt-6.1-sol", session=session, instructions="rules B")
     config(store, "builtin-retry-config-c", "gpt-6.1-sol", session=session, instructions="rules C")
     message(state, store, "builtin-retry-b", session, "input B")
@@ -1339,9 +1341,11 @@ def builtin_instruction_cases(state, processes, endpoints, releases):
     assert fresh["model"] == "gpt-6.1-sol", fresh
     assert fresh["instructions"] == model_instructions(
         workspace, baseline, store=store, session=session, model="gpt-6.1-sol"), fresh
-    updates = [item["content"][0]["text"] for item in history(fresh["input"])
-               if item.get("role") == "developer"]
-    assert updates == ["rules B", "rules C"], updates
+    updates = [item for item in history(fresh["input"]) if item.get("role") == "developer"]
+    assert updates == initial_developers + [
+        {"role": "developer", "content": [{"type": "input_text", "text": text}]}
+        for text in ("rules B", "rules C")
+    ], updates
     with sqlite3.connect(store / "rui.sqlite3") as database:
         before = database.execute("SELECT count(*) FROM model_operation").fetchone()[0]
     replay = message(state, store, "builtin-retry-b", session, "input B")
@@ -1370,6 +1374,8 @@ def builtin_instruction_cases(state, processes, endpoints, releases):
     session = config(store, "builtin-compaction-config", "gpt-6.1-sol")
     message(state, store, "builtin-compaction-input", session, "covered input")
     wait_for(lambda: len(endpoint.requests) == 2, "admitted Sol compaction request")
+    initial_developers = [item for item in history(json.loads(endpoint.requests[0])["input"])
+                          if item.get("role") == "developer"]
     config(store, "builtin-compaction-change", "gpt-6-luna", session=session, instructions="during compaction")
     message(state, store, "builtin-compaction-pending", session, "pending input")
     compact_release.set()
@@ -1383,7 +1389,10 @@ def builtin_instruction_cases(state, processes, endpoints, releases):
     assert requests[2]["instructions"] == model_instructions(
         workspace, baseline, store=store, session=session, model="gpt-6-luna"), requests[2]
     assert "pending input" in [item["content"][0]["text"] for item in requests[2]["input"] if item.get("role") == "user"]
-    assert [item["content"][0]["text"] for item in history(requests[2]["input"]) if item.get("role") == "developer"] == ["during compaction"]
+    updates = [item for item in history(requests[2]["input"]) if item.get("role") == "developer"]
+    assert updates == initial_developers + [
+        {"role": "developer", "content": [{"type": "input_text", "text": "during compaction"}]}
+    ], updates
     stop_host(host)
     processes.remove(host)
     stop_endpoint(endpoint, endpoints)
