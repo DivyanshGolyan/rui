@@ -4901,6 +4901,26 @@ test "a saved rejection code this build does not know keeps the answer and says 
     try std.testing.expectEqualStrings("{\"context\":{\"store\":\"/s\",\"session\":\"k7m2qx\",\"key\":\"saved\",\"kind\":\"configure\"},\"answer\":{\"status\":\"rejected\",\"replayed\":false,\"session\":\"k7m2qx\",\"code\":\"future_cause\"}}\n", out.buffered());
 }
 
+test "native promotion saved refusals keep their catalog code and refused exit" {
+    inline for (.{ "source_stopped", "background_unavailable" }) |code| {
+        const body = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"action_background_reply\",\"answer\":{\"status\":\"rejected\",\"replayed\":true,\"session\":\"k7m2qx\",\"action\":\"42\",\"code\":\"" ++ code ++ "\"}}";
+        var reply = protocol_reply.decodeMutationReply(.{ .status = 200, .body = body }, "k7m2qx", .{ .action_background = 42 });
+        try reply.context.store.set("/s");
+        try reply.context.key.set("saved");
+        reply.context.kind = .action_background;
+        var storage: [2048]u8 = undefined;
+        var out = std.Io.Writer.fixed(&storage);
+        try writeSavedRejection(&out, reply);
+        try std.testing.expect(std.mem.startsWith(u8, out.buffered(), "rui action background: "));
+        try std.testing.expect(std.mem.endsWith(u8, out.buffered(), "[" ++ code ++ "]\n"));
+        try std.testing.expectEqual(caller_exit.Status.refused, caller_exit.forCode(.saved_refusal, savedRejectionCode(try reply.answer)));
+        out = .fixed(&storage);
+        try std.testing.expectError(error.MutationNotAccepted, presentMutationReply(&out, reply, .json));
+        try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "\"code\":\"" ++ code ++ "\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "\"replayed\":true") != null);
+    }
+}
+
 test "saved CLI rejection goldens preserve JSON and explain permission and incomplete configuration" {
     const cases = [_]struct { code: []const u8, session: []const u8, line: []const u8 }{
         .{ .code = "unsupported_permission_mode", .session = "k7m2qx", .line = "rui session configure: --permission-mode: Rui has no such permission mode. Accepted: ask, bypass. Next: Use one of the accepted values. This rejection was saved and replays as saved; a resend needs a new key. [unsupported_permission_mode]\n" },
