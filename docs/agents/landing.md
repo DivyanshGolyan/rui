@@ -27,7 +27,10 @@ Every UI PR embeds actual-implementation screenshots or a screen recording in it
 Use [verify-rui](../../.claude/skills/verify-rui/SKILL.md) for the independent plain-PTY journey; reuse its raw captures to render media where possible.
 For interaction changes, show the sequence with a recording or labelled screenshots; include meaningful before/after layout views when available.
 State the source revision, terminal surface and limits, retain raw capture provenance, and exclude secrets.
-Upload through native `gh pr edit PR --attach '/absolute/image.png#Alt text'` (see `gh pr edit --help` for body placement and video), then read back the description and verify the uploaded media is viewable.
+Check `gh pr edit --help` for `--attach` before using the native upload command.
+When supported, use `gh pr edit PR --attach '/absolute/image.png#Alt text'`; the help owns body placement and video options.
+If that capability is absent, edit the PR description in GitHub's browser editor and drag the image or video into that description, then save it ([attachment instructions](https://docs.github.com/en/get-started/writing-on-github/working-with-advanced-formatting/attaching-files)).
+After either route, read back the description and verify the uploaded media is viewable.
 If upload partially fails, inspect the updated body before retrying.
 A comment, local path or artifact pointer alone does not meet the description requirement; visual evidence does not replace behavior assertions or hosted acceptance.
 Keep published commits unchanged so their CI evidence retains its SHA.
