@@ -689,7 +689,7 @@ const NativePromotion = struct {
         try store_testing.settleItemsForTesting(storage, tmp, binding, &.{"{\"type\":\"message\",\"id\":\"answer-item\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"Done.\"}]}"}, "Done.");
     }
 
-    fn expectPermission(storage: *Store, tmp: *std.testing.TmpDir, session: []const u8, action: u64, present: bool) !void {
+    fn expectReported(storage: *Store, tmp: *std.testing.TmpDir, session: []const u8, action: u64, visible: bool, actionable: bool) !void {
         const bytes = try testingSessionReport(storage, tmp, session, 1024 * 1024);
         defer std.testing.allocator.free(bytes);
         const decoded = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
@@ -697,19 +697,17 @@ const NativePromotion = struct {
         const report = decoded.value.object;
         const pending = report.get("actions").?.object.get("unresolved").?.array.items;
         const permissions = report.get("actionable_permissions").?.array.items;
-        try std.testing.expectEqual(@as(usize, if (present) 1 else 0), pending.len);
-        try std.testing.expectEqual(@as(usize, if (present) 1 else 0), permissions.len);
-        if (present) {
-            try std.testing.expectEqual(action, try std.fmt.parseInt(u64, pending[0].object.get("action").?.string, 10));
-            try std.testing.expectEqual(action, try std.fmt.parseInt(u64, permissions[0].object.get("action").?.string, 10));
-        }
-        const expected: ?u64 = if (present) action else null;
+        try std.testing.expectEqual(@as(usize, if (visible) 1 else 0), pending.len);
+        try std.testing.expectEqual(@as(usize, if (actionable) 1 else 0), permissions.len);
+        if (visible) try std.testing.expectEqual(action, try std.fmt.parseInt(u64, pending[0].object.get("action").?.string, 10));
+        if (actionable) try std.testing.expectEqual(action, try std.fmt.parseInt(u64, permissions[0].object.get("action").?.string, 10));
+        const expected: ?u64 = if (actionable) action else null;
         const first = report.get("work").?.object.get("first_action").?;
         try std.testing.expectEqual(expected, if (first == .null) null else @as(?u64, try std.fmt.parseInt(u64, first.string, 10)));
         var request: protocol.ActivityPage = .{};
         try request.session.set(session);
         const page = store_core.activityPageForTesting(storage, request) catch |err| {
-            std.debug.print("native promotion Activity read: {s} present={any}\n", .{ @errorName(err), present });
+            std.debug.print("native promotion Activity read: {s} visible={any} actionable={any}\n", .{ @errorName(err), visible, actionable });
             return err;
         };
         try std.testing.expectEqual(expected, page.work.work.first_action);
@@ -820,9 +818,9 @@ test "native promotion preserves old Turn approval discovery without launching b
                 const session = try configureTestSessionAsk(&storage, "configure");
                 const action = try NativePromotion.promoted(&storage, &tmp, session.slice());
                 const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-                try NativePromotion.expectPermission(&storage, &tmp, session.slice(), action, true);
+                try NativePromotion.expectReported(&storage, &tmp, session.slice(), action, true, true);
                 try NativePromotion.finishModel(&storage, &tmp, continuation);
-                try NativePromotion.expectPermission(&storage, &tmp, session.slice(), action, true);
+                try NativePromotion.expectReported(&storage, &tmp, session.slice(), action, true, true);
                 try std.testing.expect((try storage.admitNextActionAttempt(.fromFree(2, true), 30_000, .{})) == null);
                 if (choice == .stop) {
                     var stop = try completeSessionStop("stop-pending", session.slice());
@@ -838,7 +836,7 @@ test "native promotion preserves old Turn approval discovery without launching b
                         _ = try storage.settleActionAttempt(binding, .succeeded, "Approved after Turn ended", .{});
                     }
                 }
-                try NativePromotion.expectPermission(&storage, &tmp, session.slice(), action, false);
+                try NativePromotion.expectReported(&storage, &tmp, session.slice(), action, false, false);
                 try std.testing.expect((try storage.admitNextModelAttempt(.{})) == null);
             }
         }
@@ -932,6 +930,60 @@ test "native promotion Host recovery retains background fulfillment and records 
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission", .{}));
             try std.testing.expect((try storage.admitNextModelAttempt(.{})) == null);
             try std.testing.expectError(error.StaleActionAttemptBinding, storage.settleActionAttempt(binding, .succeeded, "Cannot replace recovery evidence", .{}));
+        }
+    }.run);
+}
+
+test "native promotion reports stopped Actions until settlement while suppressing approval and dispatch" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            for ([_]bool{ false, true }) |terminal| {
+                for ([_]bool{ false, true }) |owed| {
+                    for ([_]bool{ false, true }) |attempted| {
+                        var tmp = std.testing.tmpDir(.{});
+                        defer tmp.cleanup();
+                        var storage: Store = undefined;
+                        try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                        defer storage.close() catch unreachable;
+                        const root = try configureTestSessionAsk(&storage, "root");
+                        const session = if (owed) child: {
+                            var child: wire_request.ConfigureCommand = .{};
+                            try child.key.set("child");
+                            child.configuration = try shared_fixtures.testingAgentSpec(&.{"bash"}, "ask");
+                            child.configuration.parent.state = .value;
+                            try child.configuration.parent.value.set(root.slice());
+                            break :child (try storage.configure(&child, .{})).accepted.session;
+                        } else root;
+                        const action = try NativePromotion.promoted(&storage, &tmp, session.slice());
+                        const binding: ?store_core.ActionAttemptBinding = if (attempted) held: {
+                            var allow: protocol.PermissionDecisionCommand = .{ .session = session, .action_id = action, .decision = .allow_once };
+                            try allow.key.set("allow-held");
+                            try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
+                            break :held (try storage.admitNextActionAttempt(.fromFree(2, true), 30_000, .{})).?.permit.binding;
+                        } else null;
+                        const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                        if (terminal) try NativePromotion.finishModel(&storage, &tmp, continuation);
+                        try NativePromotion.expectReported(&storage, &tmp, session.slice(), action, true, !attempted);
+                        var stop = try completeSessionStop("stop-selected", root.slice());
+                        try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+                        try NativePromotion.expectReported(&storage, &tmp, session.slice(), action, owed or attempted, false);
+                        try std.testing.expect((try storage.nextAction(.bash, .fromFree(2, true))) == null);
+                        if (owed) {
+                            const selected = (try storage.nextCoreWork(.fromFree(2, false))).?;
+                            try std.testing.expect(selected == .stop);
+                            try std.testing.expectEqualStrings(session.slice(), selected.stop.session.slice());
+                            var child_stop: protocol.SessionStopCommand = .{ .key = selected.stop.key, .session = session };
+                            try std.testing.expect(storage.stopOwedSession(&child_stop, .{}) == .accepted);
+                        }
+                        try NativePromotion.expectReported(&storage, &tmp, session.slice(), action, attempted, false);
+                        if (binding) |held| {
+                            try std.testing.expect((try storage.actionSupersededByStop(held)) != null);
+                            _ = try storage.settleActionAttempt(held, .succeeded, "Terminal evidence after stop", .{});
+                        }
+                        try NativePromotion.expectReported(&storage, &tmp, session.slice(), action, false, false);
+                    }
+                }
+            }
         }
     }.run);
 }

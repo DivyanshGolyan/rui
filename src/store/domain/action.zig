@@ -167,13 +167,17 @@ pub fn stopCompletedSql(comptime stop: []const u8, comptime turn: []const u8, co
 
 const capacity_sql = "(?1=1 AND (action.background_position IS NULL OR ?2=1))";
 
-pub fn unresolvedSql(comptime action: []const u8, comptime operation: []const u8, comptime turn: []const u8) []const u8 {
-    return action ++ ".resolution_code IS NULL AND (" ++ turn ++ ".outcome_code IS NULL OR " ++ action ++ ".background_position IS NOT NULL) AND NOT " ++
+pub fn unresolvedSql(comptime action: []const u8) []const u8 {
+    return action ++ ".resolution_code IS NULL";
+}
+
+pub fn eligibleSql(comptime action: []const u8, comptime operation: []const u8, comptime turn: []const u8) []const u8 {
+    return unresolvedSql(action) ++ " AND (" ++ turn ++ ".outcome_code IS NULL OR " ++ action ++ ".background_position IS NOT NULL) AND NOT " ++
         actionStoppedSql(action, operation) ++ " AND NOT EXISTS(SELECT 1 FROM session_stop_owed owed WHERE owed.child_ref=" ++ action ++ ".session_ref AND owed.settled=0)";
 }
 
 fn bashReadySql(comptime first: u8) []const u8 {
-    return "action.authorized=1 AND action.attempt_ordinal=0 AND " ++ unresolvedSql("action", "operation", "active") ++ " AND NOT " ++ nonBashCallSql(first);
+    return "action.authorized=1 AND action.attempt_ordinal=0 AND " ++ eligibleSql("action", "operation", "active") ++ " AND NOT " ++ nonBashCallSql(first);
 }
 
 /// The next Action ready for an Attempt, with its Session. Reads only
@@ -927,7 +931,7 @@ const mcp_serial_sql = "NOT EXISTS(SELECT 1 FROM action_operation earlier JOIN m
 
 // Runner identity is established by mcpCallSql for point lookups and by the
 // frozen-offer joins in the ordered selection. The remaining readiness is shared.
-const mcp_ready_sql = "action.authorized=1 AND action.attempt_ordinal=0 AND " ++ unresolvedSql("action", "operation", "active") ++ " AND " ++ mcp_serial_sql;
+const mcp_ready_sql = "action.authorized=1 AND action.attempt_ordinal=0 AND " ++ eligibleSql("action", "operation", "active") ++ " AND " ++ mcp_serial_sql;
 
 const mcp_facts_sql = "SELECT action.action_id,action.parent_operation_id,operation.turn_id,s.session_ref,s.workspace_key,s.next_position,action.background_position IS NOT NULL AS background,NULL AS timeout_override_ms " ++
     "FROM action_operation action @index(action_operation_executable) " ++

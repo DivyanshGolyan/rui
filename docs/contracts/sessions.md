@@ -11,14 +11,15 @@
 
 A **Session stop** selects current work once.
 Its saved selection prevents that work from advancing; it does not close the reusable Session.
-The transaction binds the core idempotency key, Session reference, active Turn (if any), queued admission cutoff and admission answer with stop authority.
+The transaction binds the core idempotency key, Session reference, active Turn (if any), queued admission cutoff, background Action cutoff and admission answer with stop authority.
 The saved fact excludes unselected input through that cutoff, including between failure and successor admission.
 Input after the cutoff is not selected by this stop.
 Earlier committed results remain unchanged.
 
 Acknowledgment confirms that Rui saved the stop intent and selection, not that the selected work has finished.
-With no active Turn, the queued-input exclusion commit completes the stop.
-Otherwise completion requires the selected Turn's terminal outcome and atomic occupancy release, including every selected Action's terminal outcome and complete derived Tool Result coverage.
+Completion requires the selected Turn's terminal outcome and atomic occupancy release, when a Turn was selected, and every selected background Action's terminal outcome through the saved Action cutoff.
+With no selected Turn or background Action, the queued-input exclusion commit completes the stop.
+An accepted background receipt remains the original Tool Result; stop waits for the sole Action Resolution without replacing that receipt.
 
 Stop completion follows no future work and proves neither remote provider termination nor the end of billing.
 Model transport may still retain custody for local cleanup.

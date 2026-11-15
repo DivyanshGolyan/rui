@@ -132,8 +132,7 @@ const recent_messages = rsql.Read(.{
     .cardinality = .each,
 });
 
-/// The active Turn's current Operation's unresolved Actions, with each
-/// call's line for its presentation.
+/// Every unresolved Action in the Session, with its call's presentation.
 const unresolved_actions = rsql.Read(.{
     .sql = "SELECT a.action_id,a.parent_operation_id,a.call_ordinal,a.permission_revision,a.authorized,revision.permission_mode,@payload(call_name) AS tool_name," ++
         "call_id.byte_length AS call_id_length,call_id.digest AS call_id_digest,arguments.byte_length AS arguments_length,arguments.digest AS arguments_digest," ++
@@ -145,7 +144,7 @@ const unresolved_actions = rsql.Read(.{
         "CROSS JOIN content call_id ON call_id.content_id=tool_call.call_id_content_id " ++
         "CROSS JOIN content arguments ON arguments.content_id=tool_call.arguments_content_id " ++
         "CROSS JOIN content call_name ON call_name.content_id=tool_call.name_content_id " ++
-        "WHERE a.session_ref=?1 AND " ++ action_domain.unresolvedSql("a", "operation", "active") ++ " ORDER BY a.action_id",
+        "WHERE a.session_ref=?1 AND " ++ action_domain.unresolvedSql("a") ++ " ORDER BY a.action_id",
     .Args = struct { session: []const u8 },
     .Row = struct {
         action_id: rsql.Positive,
@@ -256,7 +255,7 @@ const rejected_calls = rsql.Read(.{
 const actionable_permissions = rsql.Read(.{
     .sql = "SELECT action.action_id,action.permission_revision FROM action_operation action " ++
         "JOIN model_operation operation ON operation.operation_id=action.parent_operation_id JOIN turn active ON active.turn_id=operation.turn_id " ++
-        "WHERE action.session_ref=?1 AND action.authorized=0 AND " ++ action_domain.unresolvedSql("action", "operation", "active") ++ " ORDER BY action.action_id",
+        "WHERE action.session_ref=?1 AND action.authorized=0 AND " ++ action_domain.eligibleSql("action", "operation", "active") ++ " ORDER BY action.action_id",
     .Args = struct { session: []const u8 },
     .Row = struct { action_id: rsql.Positive, permission_revision: rsql.Positive },
     .cardinality = .each,

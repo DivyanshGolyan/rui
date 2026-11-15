@@ -369,7 +369,7 @@ const active_tool_calls = reads_domain.ToolOutcome("", "SELECT DISTINCT operatio
 const action_count = rsql.Read(.{
     .sql = "SELECT count(*) AS actions FROM action_operation action " ++
         "JOIN model_operation operation ON operation.operation_id=action.parent_operation_id JOIN turn active ON active.turn_id=operation.turn_id " ++
-        "WHERE action.session_ref=?1 AND (active.outcome_code IS NULL OR (" ++ action_domain.unresolvedSql("action", "operation", "active") ++ "))",
+        "WHERE action.session_ref=?1 AND (active.outcome_code IS NULL OR (" ++ action_domain.unresolvedSql("action") ++ "))",
     .Args = struct { session: []const u8 },
     .Row = struct { actions: u64 },
     .cardinality = .each,
@@ -463,7 +463,7 @@ fn WorkLatest(comptime Args: type, comptime session: []const u8) type {
             "(SELECT stopped_at FROM session_stop @index(session_stop_turn) WHERE selected_turn_id=t.turn_id ORDER BY position LIMIT 1) AS stopped_at," ++
             "(SELECT min(approval.action_id) FROM action_operation approval JOIN model_operation source_operation ON source_operation.operation_id=approval.parent_operation_id " ++
             "JOIN turn source_turn ON source_turn.turn_id=source_operation.turn_id WHERE approval.session_ref=t.session_ref AND approval.authorized=0 AND " ++
-            action_domain.unresolvedSql("approval", "source_operation", "source_turn") ++ ") AS first_action " ++
+            action_domain.eligibleSql("approval", "source_operation", "source_turn") ++ ") AS first_action " ++
             "FROM turn t @index(turn_session_latest) JOIN model_operation o ON o.operation_id=t.operation_id " ++
             "WHERE t.session_ref=" ++ session ++ " ORDER BY t.turn_id DESC LIMIT 1",
         .Args = Args,
