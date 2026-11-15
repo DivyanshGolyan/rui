@@ -24,6 +24,25 @@ The Store returns ordinary outcomes unchanged and fences itself on every other e
 Argument checks before the lock return without fencing.
 A caller may still escalate an ordinary outcome, such as a stale settlement, to a dispatch fence.
 
+### Message input custody
+
+A kind-2 `core_command` owns one ordered sequence of original Text or Image parts through `input_part`.
+Raw bytes remain immutable public Content, including an Image's original container bytes.
+The Message saves its part count and input reference in the same transaction as all associations and its accepted or refused answer.
+Admission and User Conversation rows retain ordering and provenance, with no scalar payload authority.
+Action Resolution content keeps its existing owner.
+
+One Text retains its existing Content length, digest, and Message semantic identity.
+Compound identity includes part order, kinds, Image metadata, and each Content identity.
+The canonical cursor checks contiguous ordinals, producer kind, count, and the complete input reference before returning the last part.
+Missing or inconsistent advertised facts fence the Store, including when a reader cannot represent compound input.
+Existing Text readers validate compound facts before returning ordinary `InputPartsNotSupported`.
+
+The migration backfills accepted legacy Messages from their authentic Content references.
+Old refused Messages did not save their authored originals. Their certificate explicitly reports `legacy_unavailable`, while their diagnostic and replay identity remain unchanged.
+New refused Messages retain their actual parts and cannot select legacy absence.
+The existing public ingress still accepts Text only. Typed internal admission and cursor inspection do not imply model Image support.
+
 ### Store format and upgrades
 
 The Store's format version is the `format` row of `store_meta`, and SQLite's `PRAGMA user_version` repeats it so an older binary refuses the file cheaply.

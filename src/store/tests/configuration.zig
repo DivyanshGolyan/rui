@@ -764,7 +764,8 @@ test "historical model immutability rejections replay while fresh model switches
             const configure_digest = update.semanticDigest();
             const message_digest = message.semanticDigest();
             try store_testing.exec(&storage, "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) VALUES(?1,1,?2,?3,0,'model_is_immutable',0,0,?4)", .{ update.key.slice(), session.slice(), store_testing.Blob{ .bytes = &configure_digest }, sequence });
-            try store_testing.exec(&storage, "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) VALUES(?1,2,?2,?3,0,'model_is_immutable',0,0,?4)", .{ message.key.slice(), session.slice(), store_testing.Blob{ .bytes = &message_digest }, sequence + 1 });
+            // A migrated refusal has no recoverable authored input.
+            try store_testing.exec(&storage, "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq,input_part_count) VALUES(?1,2,?2,?3,0,'model_is_immutable',0,0,?4,0)", .{ message.key.slice(), session.slice(), store_testing.Blob{ .bytes = &message_digest }, sequence + 1 });
             try storage.close();
             try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
 

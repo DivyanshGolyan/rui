@@ -29,6 +29,7 @@ pub fn run(store: *storage.Store, arena: std.mem.Allocator, input: *const storag
         error.SessionNotFound => return fail(store, arena, input, "id names an unknown Session", faults),
         error.EntryNotFound, error.ContentNotFound => return fail(store, arena, input, "full names no public entry", faults),
         error.InvalidCursor => return fail(store, arena, input, if (arguments.full != null) "full names no public entry" else "before must name a public entry or position in this Session", faults),
+        error.InputPartsNotSupported => return fail(store, arena, input, "this Host cannot render this ordered input yet", faults),
         error.InvalidEntryText => return fail(store, arena, input, "full entry is not valid UTF-8 text", faults),
         error.InvalidOffset => return fail(store, arena, input, "offset must be within the entry and on a UTF-8 character boundary", faults),
         else => return err,

@@ -4,6 +4,8 @@
 //! binding.
 
 const std = @import("std");
+const sourced_input = @import("sourced_input.zig");
+const input_domain = @import("input.zig");
 const obligation = @import("session_obligation.zig");
 const attempt = @import("../../attempt.zig");
 const named_scratch = @import("../../named_scratch.zig");
@@ -277,10 +279,11 @@ pub const person_message = rsql.Read(.{
 
 /// The first Message `m`'s own row and its content's metadata.
 pub const first_message_columns = "m.admission_id AS first_admission,m.admission_position AS first_position,m.admitted_at AS first_admitted_at," ++
-    "m.sender_session_ref AS first_sender,first_content.byte_length AS first_length,first_content.digest AS first_digest,first_content.private AS first_private";
+    "m.command_key AS first_key,m.sender_session_ref AS first_sender,first_content.byte_length AS first_length,first_content.digest AS first_digest,first_content.private AS first_private," ++ sourced_input.consistentSql("m", "first_command") ++ " AS first_consistent";
 
 /// The content metadata of the first Message `m`.
-pub const first_content_join = "JOIN content first_content ON first_content.content_id=m.content_id";
+pub const first_content_join = "LEFT JOIN core_command first_command ON first_command.command_key=m.command_key " ++
+    "LEFT JOIN content first_content ON first_content.content_id=" ++ input_domain.messageTextIdSql("first_command");
 
 /// A first Message as `firstMessage` reads it; a list row's are null
 /// when it has none.
@@ -288,10 +291,12 @@ const FirstMessageColumns = struct {
     first_admission: ?rsql.Positive,
     first_position: ?rsql.Positive,
     first_admitted_at: ?rsql.Positive,
+    first_key: ?Bounded(128),
     first_sender: ?SessionText,
     first_length: ?u64,
     first_digest: ?[32]u8,
     first_private: ?bool,
+    first_consistent: ?bool,
 };
 
 pub const first_message = rsql.Read(.{
@@ -328,8 +333,15 @@ pub fn sortedToolNames(names: ?[]const u8, sorted: *[tool_defs.max_tools][]const
 /// The first Message of a row with `FirstMessageColumns`, read for the
 /// admission `first` (0 for none). Content that is private is
 /// `CorruptStore`.
-pub fn firstMessage(row: anytype, first: u64) error{CorruptStore}!?session_list.FirstMessage {
+pub fn verifyFirstMessage(a: *ReadAccess, row: anytype) !void {
+    if (row.first_consistent != true) return error.CorruptStore;
+    if (row.first_length == null) try input_domain.verify(a, row.first_key orelse return error.CorruptStore);
+}
+
+pub fn firstMessage(row: anytype, first: u64) !?session_list.FirstMessage {
     if (first == 0) return null;
+    if (row.first_consistent != true) return error.CorruptStore;
+    if (row.first_length == null) return error.InputPartsNotSupported;
     if (row.first_private orelse return error.CorruptStore) return error.CorruptStore;
     return .{
         .position = (row.first_position orelse return error.CorruptStore).get(),
@@ -1552,12 +1564,12 @@ pub const full_messages = rsql.Page(.{
     .arms = &.{.{
         .on = .{ .index = "message_admission_position" },
         .alias = "m",
-        .columns = "m.admission_id,m.command_key,m.content_id,input.byte_length AS content_length,input.digest AS content_digest," ++
+        .columns = "m.admission_id,m.command_key," ++ input_domain.messageTextIdSql("authored") ++ " AS content_id," ++ sourced_input.consistentSql("m", "authored") ++ " AS consistent,input.byte_length AS content_length,input.digest AS content_digest," ++
             "m.turn_id,t.operation_id,o.attempt_ordinal,t.outcome_code,t.outcome_content_id,outcome.byte_length AS outcome_length,outcome.digest AS outcome_digest," ++
             "CASE WHEN m.turn_id IS NULL THEN (SELECT stopped.command_key FROM session_stop stopped " ++
             "WHERE stopped.session_ref=m.session_ref AND stopped.admission_cutoff>=m.admission_id " ++
             "ORDER BY stopped.admission_cutoff,stopped.position LIMIT 1) END AS excluding_stop",
-        .joins = "LEFT JOIN content input ON input.content_id=m.content_id " ++
+        .joins = "LEFT JOIN core_command authored ON authored.command_key=m.command_key LEFT JOIN content input ON input.content_id=" ++ input_domain.messageTextIdSql("authored") ++ " " ++
             "LEFT JOIN turn t ON t.turn_id=m.turn_id LEFT JOIN model_operation o ON o.operation_id=t.operation_id " ++
             "LEFT JOIN content outcome ON outcome.content_id=t.outcome_content_id",
     }},
@@ -1565,9 +1577,10 @@ pub const full_messages = rsql.Page(.{
         admission_position: rsql.Positive,
         admission_id: rsql.Positive,
         command_key: Bounded(128),
-        content_id: rsql.Positive,
-        content_length: u64,
-        content_digest: [32]u8,
+        content_id: ?rsql.Positive,
+        consistent: bool,
+        content_length: ?u64,
+        content_digest: ?[32]u8,
         turn_id: ?rsql.Positive,
         operation_id: ?rsql.Positive,
         attempt_ordinal: ?rsql.Positive,
@@ -1618,8 +1631,13 @@ pub const Messages = struct {
     /// Its outcome's reference is checked after its content, which main
     /// streamed first.
     pub fn values(a: *ReadAccess, row: *const S.Row) !session_report.FullRow {
+        if (!row.consistent) return error.CorruptStore;
+        if (row.content_id == null) {
+            try input_domain.verify(a, row.command_key);
+            return error.InputPartsNotSupported;
+        }
         const projection = try command_domain.projectMessage(row, if (row.excluding_stop) |*stop| stop.slice() else null);
-        const content: session_report.Text = .{ .id = row.content_id.get(), .length = row.content_length, .digest = row.content_digest };
+        const content: session_report.Text = .{ .id = row.content_id.?.get(), .length = row.content_length orelse return error.CorruptStore, .digest = row.content_digest orelse return error.CorruptStore };
         return .{ .message = .{
             .admission = projection.admission_id,
             .command_key = row.command_key.slice(),
@@ -1655,7 +1673,7 @@ const full_conversation = rsql.Page(.{
         .on = .{ .primary_key = "conversation_entry" },
         .alias = "e",
         .columns = "e.session_position,e.entry_kind,e.turn_id,coalesce(e.source_admission_id,e.source_skill_admission_id) AS source_admission_id,e.source_revision,e.source_catalog_position,e.source_skill_position,e.source_operation_id," ++
-            "c.byte_length AS content_length,c.digest AS content_digest," ++ reads_domain.publicEntryColumns("(e.entry_kind=2 AND (e.source_catalog_position IS NULL OR " ++ skills_domain.instructionConsistentSql("e") ++ ")) OR " ++
+            "authored.command_key AS input_key,c.byte_length AS content_length,c.digest AS content_digest," ++ reads_domain.publicEntryColumns("(e.entry_kind=2 AND (e.source_catalog_position IS NULL OR " ++ skills_domain.instructionConsistentSql("e") ++ ")) OR " ++
             "(e.entry_kind=4 AND t.session_ref=e.session_ref AND EXISTS(SELECT 1 FROM message_skill skill JOIN message_admission owner ON owner.admission_id=skill.admission_id " ++
             "WHERE skill.admission_id=e.source_skill_admission_id AND skill.position=e.source_skill_position AND skill.content_id=e.content_id " ++
             "AND owner.session_ref=e.session_ref AND owner.turn_id=e.turn_id)) OR "),
@@ -1671,8 +1689,9 @@ const full_conversation = rsql.Page(.{
         source_catalog_position: ?rsql.Positive,
         source_skill_position: ?rsql.Positive,
         source_operation_id: ?rsql.Positive,
-        content_length: u64,
-        content_digest: [32]u8,
+        input_key: ?Bounded(128),
+        content_length: ?u64,
+        content_digest: ?[32]u8,
         consistent: bool,
     },
     .take = takes(Conversation.kept_rows),
@@ -1704,8 +1723,12 @@ pub const Conversation = struct {
         if (!missing.catalogs_consistent or !missing.assistants_consistent) return error.CorruptStore;
     }
 
-    pub fn values(_: *ReadAccess, row: *const S.Row) error{CorruptStore}!session_report.FullRow {
+    pub fn values(a: *ReadAccess, row: *const S.Row) !session_report.FullRow {
         if (row.entry_kind < 1 or row.entry_kind > 4 or !row.consistent) return error.CorruptStore;
+        if (row.entry_kind == 1 and row.content_length == null) {
+            try input_domain.verify(a, row.input_key orelse return error.CorruptStore);
+            return error.InputPartsNotSupported;
+        }
         return .{ .conversation = .{
             .ordinal = row.entry_ordinal.get(),
             .position = row.session_position.get(),
@@ -1716,7 +1739,7 @@ pub const Conversation = struct {
             .source_catalog_position = optional(row.source_catalog_position),
             .source_skill_position = optional(row.source_skill_position),
             .source_operation = optional(row.source_operation_id),
-            .content = .{ .length = row.content_length, .digest = row.content_digest },
+            .content = .{ .length = row.content_length orelse return error.CorruptStore, .digest = row.content_digest orelse return error.CorruptStore },
         } };
     }
 };

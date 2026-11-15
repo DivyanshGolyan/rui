@@ -3,6 +3,8 @@
 const std = @import("std");
 const transport_policy = @import("transport_policy.zig");
 
+pub const ordered_input_not_supported = "local_ordered_input_not_supported";
+
 pub const Class = enum {
     /// The provider refused the content; resending it will be refused again.
     policy,

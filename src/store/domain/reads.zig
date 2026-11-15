@@ -33,6 +33,7 @@ const Store = store_core.Store;
 const configuration_domain = @import("configuration.zig");
 const content_domain = @import("content.zig");
 const sourced_input = @import("sourced_input.zig");
+const input_domain = @import("input.zig");
 const report_domain = @import("report.zig");
 const session_list_domain = @import("session_list_read.zig");
 const store_schema = @import("../schema.zig");
@@ -483,8 +484,9 @@ fn runCounts(a: *ReadAccess) !void {
 /// items/instructions never enter it.
 const public_page = rsql.Read(.{
     .sql = public_tool_groups_sql ++
-        "public AS (SELECT e.session_position AS position,0 AS ordinal,e.entry_kind AS kind,e.content_id " ++
-        "FROM conversation_entry e WHERE e.session_ref=?1 AND e.entry_kind IN (1,3) AND e.session_position<=?2 " ++
+        "public AS (SELECT e.session_position AS position,0 AS ordinal,e.entry_kind AS kind," ++ public_entry_content_sql ++ " AS content_id " ++
+        "FROM conversation_entry e LEFT JOIN message_admission m ON m.admission_id=e.source_admission_id " ++
+        "LEFT JOIN core_command authored ON authored.command_key=m.command_key WHERE e.session_ref=?1 AND e.entry_kind IN (1,3) AND e.session_position<=?2 " ++
         "UNION ALL SELECT tool_groups.position,tool_call.call_ordinal+1,4,coalesce(tool_call.rejection_content_id,action.resolution_content_id) " ++
         "FROM tool_groups JOIN model_tool_call tool_call ON tool_call.operation_id=tool_groups.operation_id " ++
         "LEFT JOIN action_operation action ON action.parent_operation_id=tool_call.operation_id AND action.call_ordinal=tool_call.call_ordinal " ++
@@ -537,7 +539,7 @@ pub fn publicConversationPage(a: *ReadAccess, request: *const conversation_read.
             error.ContentNotFound => {},
             else => return err,
         };
-        cursor.found() catch |err| switch (err) {
+        cursor.found(a) catch |err| switch (err) {
             error.ContentNotFound => return error.InvalidCursor,
             else => return err,
         };
@@ -559,7 +561,7 @@ pub fn publicConversationPage(a: *ReadAccess, request: *const conversation_read.
         }, .content = .{ .length = 0, .digest = content_string.digest("") } };
         if (row.kind == 5) {
             if (row.ordinal != 0) return error.CorruptStore;
-        } else if ((row.content_id orelse 0) == 0 or (row.kind == 4) != (row.ordinal > 0)) return error.CorruptStore;
+        } else if ((row.kind == 4) != (row.ordinal > 0)) return error.CorruptStore;
     }
     page.count = shown.len;
     const upper = if (request.before_position == 0) end else @min(end, request.before_position - @intFromBool(request.before_ordinal == 0));
@@ -599,9 +601,12 @@ noinline fn readPublicRows(a: *ReadAccess, session: []const u8, rows: []const pu
     for (rows, items, reads[0..items.len]) |row, *item, *read| switch (read.reads) {
         .hosted => |*hosted| try hosted.found(),
         .content => |*content| {
-            try content.found();
+            try content.found(a);
+            // Canonical validation precedes unsupported projection. Every
+            // exposed content inventory still requires its actual identity.
+            if ((row.content_id orelse 0) == 0) return error.CorruptStore;
             const found = &content.content;
-            if (@as(u64, @intCast(found.id)) != row.content_id.? or (row.kind == 1) != (found.admitted_at != null)) return error.CorruptStore;
+            if (@as(u64, @intCast(found.id)) != (row.content_id orelse return error.CorruptStore) or (row.kind == 1) != (found.admitted_at != null)) return error.CorruptStore;
             item.admitted_at = found.admitted_at;
             content.queueMetadata(a);
             contents = true;
@@ -702,31 +707,34 @@ pub fn publicEntryRead(comptime columns: []const u8, comptime also: []const u8, 
 /// empty), or when it is public: its content is, and its message or
 /// assistant provenance agrees with it.
 pub fn publicEntryColumns(comptime also: []const u8) []const u8 {
-    return "CASE WHEN " ++ also ++ "(c.content_id IS NOT NULL AND c.private=0 AND t.session_ref=e.session_ref AND " ++
-        "((e.entry_kind=1 AND m.session_ref=e.session_ref AND m.turn_id=e.turn_id AND m.content_id=e.content_id) OR " ++
-        "(e.entry_kind=3 AND o.purpose=0 AND o.session_ref=e.session_ref AND o.turn_id=e.turn_id " ++
+    return "CASE WHEN " ++ also ++ "(t.session_ref=e.session_ref AND " ++
+        "((e.entry_kind=1 AND m.session_ref=e.session_ref AND m.turn_id=e.turn_id AND e.content_id IS NULL AND " ++ sourced_input.consistentSql("m", "authored") ++ ") OR " ++
+        "(c.content_id IS NOT NULL AND c.private=0 AND e.entry_kind=3 AND o.purpose=0 AND o.session_ref=e.session_ref AND o.turn_id=e.turn_id " ++
         "AND item.item_kind=2 AND item.message_content_id=e.content_id AND item.session_ref=e.session_ref " ++
         "AND item.session_position=e.session_position AND item.attempt_ordinal=o.attempt_ordinal " ++
         "AND " ++ store_schema.oneOf("o.resolution_code", &accepted_resolutions) ++ "))) THEN 1 ELSE 0 END AS consistent";
 }
+
+pub const public_entry_content_sql = "CASE WHEN e.entry_kind=1 THEN " ++ input_domain.messageTextIdSql("authored") ++ " ELSE e.content_id END";
 
 /// The rows that make an entry `e` public. LEFT JOINs, which keep damage
 /// instead of hiding a missing row, under the aliases t, m, o, item and c,
 /// which a read's columns and WHERE may also read.
 pub const public_entry_joins = "LEFT JOIN turn t ON t.turn_id=e.turn_id " ++
     "LEFT JOIN message_admission m ON m.admission_id=e.source_admission_id " ++
+    "LEFT JOIN core_command authored ON authored.command_key=m.command_key " ++
     "LEFT JOIN model_operation o ON o.operation_id=e.source_operation_id " ++
     "LEFT JOIN model_output_item item ON item.operation_id=e.source_operation_id AND item.item_ordinal=e.source_item_ordinal " ++
-    "LEFT JOIN content c ON c.content_id=e.content_id";
+    "LEFT JOIN content c ON c.content_id=" ++ public_entry_content_sql;
 
 /// An ordinary entry at a position, with the provenance that makes it
 /// public. One indexed ordinary identity owns provenance for pages,
 /// cursors and bytes.
 const public_entry = rsql.Read(.{
-    .sql = publicEntryRead("e.content_id,CASE WHEN e.entry_kind=1 THEN m.admitted_at END AS admitted_at," ++
+    .sql = publicEntryRead(public_entry_content_sql ++ " AS content_id,authored.command_key AS input_key,CASE WHEN e.entry_kind=1 THEN m.admitted_at END AS admitted_at," ++
         "CASE WHEN e.entry_kind=1 THEN m.sender_session_ref END AS sender,e.recorded_at", "", "WHERE e.session_ref=?1 AND e.session_position=?2 AND e.entry_kind IN(1,3)"),
     .Args = struct { session: []const u8, position: u64 },
-    .Row = struct { content_id: rsql.Positive, admitted_at: ?rsql.Positive, sender: ?SessionText, recorded_at: rsql.Positive, consistent: bool },
+    .Row = struct { content_id: ?rsql.Positive, input_key: ?Bounded(idempotency_key.max_bytes), admitted_at: ?rsql.Positive, sender: ?SessionText, recorded_at: rsql.Positive, consistent: bool },
     .cardinality = .each,
 });
 
@@ -790,6 +798,8 @@ const PublicContentRead = struct {
     metadata: content_metadata.Row = undefined,
     outcome: ToolOutcomeCheck = .{},
     count: RowCount = .{},
+    unsupported: bool = false,
+    input_key: ?Bounded(idempotency_key.max_bytes) = null,
 
     fn queue(read: *PublicContentRead, a: *ReadAccess, session: []const u8) void {
         read.missing = null;
@@ -806,7 +816,9 @@ const PublicContentRead = struct {
     fn keep(read: *PublicContentRead, row: anytype) error{CorruptStore}!void {
         if (!row.consistent) return error.CorruptStore;
         if (@TypeOf(row.*) == public_entry.Row) {
-            read.content = .{ .id = @intCast(row.content_id.get()), .metadata = undefined, .tool_operation = null, .admitted_at = if (row.admitted_at) |second| second.get() else null, .at = row.recorded_at.get() };
+            read.unsupported = row.content_id == null;
+            read.input_key = row.input_key;
+            read.content = .{ .id = if (row.content_id) |id| @intCast(id.get()) else 0, .metadata = undefined, .tool_operation = null, .admitted_at = if (row.admitted_at) |second| second.get() else null, .at = row.recorded_at.get() };
             if (read.sender) |sender| sender.* = if (row.sender) |session| .{ .session = session } else null;
         } else {
             read.content = .{ .id = @intCast(row.content_id.get()), .metadata = undefined, .tool_operation = row.operation_id.get(), .admitted_at = null, .at = row.at.get() };
@@ -814,9 +826,13 @@ const PublicContentRead = struct {
     }
 
     /// After the first round: none is `ContentNotFound`.
-    fn found(read: *const PublicContentRead) !void {
+    fn found(read: *const PublicContentRead, a: *ReadAccess) !void {
         if (read.missing != null) return error.CorruptStore;
         if (!try read.count.found()) return error.ContentNotFound;
+        if (read.unsupported) {
+            try input_domain.verify(a, read.input_key orelse return error.CorruptStore);
+            return error.InputPartsNotSupported;
+        }
     }
 
     /// The outcome check first: a failure it records stops only its own
@@ -838,7 +854,7 @@ fn publicConversationContent(a: *ReadAccess, session: []const u8, position: u64,
     var read: PublicContentRead = .{ .position = position, .ordinal = ordinal };
     read.queue(a, session);
     try runRows(a);
-    try read.found();
+    try read.found(a);
     read.queueMetadata(a);
     try runRows(a);
     try read.takeMetadata();
@@ -1396,12 +1412,12 @@ const peer_label = rsql.Read(.{
 /// An admitted Message of the Session, with whether it was applied or
 /// excluded at end ?2 and whether its command and Turn agree with it.
 const activity_message = rsql.Read(.{
-    .sql = "SELECT m.command_key,m.turn_id,m.content_id," ++
+    .sql = "SELECT m.command_key,m.turn_id," ++ input_domain.messageTextIdSql("c") ++ " AS content_id," ++
         "EXISTS(SELECT 1 FROM conversation_entry e WHERE e.session_ref=m.session_ref AND e.source_admission_id=m.admission_id AND e.session_position<=?2) AS applied," ++
         "EXISTS(SELECT 1 FROM session_stop s WHERE s.session_ref=m.session_ref AND s.admission_cutoff>=m.admission_id AND s.position<=?2) AS excluded," ++
         sourced_input.consistentSql("m", "c") ++ " " ++
         "AND (m.turn_id IS NULL OR (t.session_ref=m.session_ref AND EXISTS(SELECT 1 FROM conversation_entry e " ++
-        "WHERE e.source_admission_id=m.admission_id AND e.session_ref=m.session_ref AND e.turn_id=m.turn_id AND e.content_id=m.content_id))) AS consistent," ++
+        "WHERE e.source_admission_id=m.admission_id AND e.session_ref=m.session_ref AND e.turn_id=m.turn_id AND e.content_id IS NULL))) AS consistent," ++
         "m.admitted_at,m.sender_session_ref FROM message_admission m " ++
         "LEFT JOIN core_command c ON c.command_key=m.command_key LEFT JOIN turn t ON t.turn_id=m.turn_id " ++
         "WHERE m.session_ref=?1 AND m.admission_id=?3",
@@ -1409,7 +1425,7 @@ const activity_message = rsql.Read(.{
     .Row = struct {
         command_key: Bounded(idempotency_key.max_bytes),
         turn_id: ?rsql.Positive,
-        content_id: rsql.Positive,
+        content_id: ?rsql.Positive,
         applied: bool,
         excluded: bool,
         consistent: bool,
@@ -1528,10 +1544,10 @@ fn checkCallDetails(details: *const call_details.Row, metadata: *const activity_
 /// A Message the Session sent from position ?3, with whether its command
 /// agrees with it.
 const sent_message = rsql.Read(.{
-    .sql = "SELECT m.session_ref,m.content_id,m.admitted_at," ++ sourced_input.consistentSql("m", "c") ++ " AS consistent " ++
+    .sql = "SELECT m.session_ref,m.command_key," ++ input_domain.messageTextIdSql("c") ++ " AS content_id,m.admitted_at," ++ sourced_input.consistentSql("m", "c") ++ " AS consistent " ++
         "FROM message_admission m LEFT JOIN core_command c ON c.command_key=m.command_key WHERE m.admission_id=?1 AND m.sender_session_ref=?2 AND m.sender_position=?3",
     .Args = struct { admission: u64, session: []const u8, position: u64 },
-    .Row = struct { session_ref: SessionText, content_id: rsql.Positive, admitted_at: rsql.Positive, consistent: bool },
+    .Row = struct { session_ref: SessionText, command_key: Bounded(idempotency_key.max_bytes), content_id: ?rsql.Positive, admitted_at: rsql.Positive, consistent: bool },
     .cardinality = .each,
 });
 
@@ -1626,6 +1642,7 @@ const LabelRead = struct {
 const MessageRead = struct {
     message: *activity_facts.Item.Message,
     content_id: u64 = 0,
+    unsupported: bool = false,
     count: RowCount = .{},
 
     fn queue(read: *MessageRead, a: *ReadAccess, session: []const u8, end: u64) void {
@@ -1645,7 +1662,8 @@ const MessageRead = struct {
         message.admitted_at = row.admitted_at.get();
         message.sender = if (row.sender_session_ref) |sender| .{ .session = sender } else null;
         if (row.applied) message.turn = (row.turn_id orelse return error.CorruptStore).get();
-        read.content_id = row.content_id.get();
+        read.unsupported = row.content_id == null;
+        read.content_id = if (row.content_id) |id| id.get() else 0;
     }
 };
 
@@ -1654,6 +1672,8 @@ const SentRead = struct {
     position: u64,
     sent: *activity_facts.Item.Sent,
     content_id: u64 = 0,
+    unsupported: bool = false,
+    input_key: Bounded(idempotency_key.max_bytes) = .{},
     count: RowCount = .{},
 
     fn queue(read: *SentRead, a: *ReadAccess, session: []const u8) void {
@@ -1666,9 +1686,11 @@ const SentRead = struct {
 
     fn keep(read: *SentRead, row: *const sent_message.Row) error{CorruptStore}!void {
         if (!row.consistent) return error.CorruptStore;
+        read.input_key = row.command_key;
         read.sent.target = .{ .session = row.session_ref };
         read.sent.admitted_at = row.admitted_at.get();
-        read.content_id = row.content_id.get();
+        read.unsupported = row.content_id == null;
+        read.content_id = if (row.content_id) |id| id.get() else 0;
     }
 };
 
@@ -1888,7 +1910,7 @@ const ItemRead = struct {
         }
     }
 
-    fn take(read: *ItemRead) !void {
+    fn take(read: *ItemRead, a: *ReadAccess) !void {
         defer read.round += 1;
         const item = read.item;
         if (read.round == 0) return read.takeRow();
@@ -1900,7 +1922,11 @@ const ItemRead = struct {
                     // A source names a person's Message or a received one
                     // by its sender; the row read must agree.
                     if (kind != 2 and (kind == 11) != (message.read.message.sender != null)) return error.CorruptStore;
-                    if (kind == 2) try message.entry.found();
+                    if (kind == 2) try message.entry.found(a);
+                    if (message.read.unsupported) {
+                        try input_domain.verify(a, message.read.message.key);
+                        return error.InputPartsNotSupported;
+                    }
                     return;
                 }
                 const content = try content_domain.publicMetadata(&message.metadata);
@@ -1918,7 +1944,7 @@ const ItemRead = struct {
             3, 5 => {
                 const content = &read.state.content;
                 switch (read.round) {
-                    1 => return content.read.found(),
+                    1 => return content.read.found(a),
                     2 => {
                         try content.read.takeMetadata();
                         const found = content.read.content;
@@ -1957,6 +1983,10 @@ const ItemRead = struct {
                 const sent = &read.state.sent;
                 if (read.round == 1) {
                     if (!try sent.read.count.found()) return error.CorruptStore;
+                    if (sent.read.unsupported) {
+                        try input_domain.verify(a, sent.read.input_key);
+                        return error.InputPartsNotSupported;
+                    }
                     item.at = item.value.sent.admitted_at;
                     return;
                 }
@@ -2145,7 +2175,7 @@ noinline fn readItems(comptime max: usize, a: *ReadAccess, session: []const u8, 
         };
         if (!busy) break;
         try runRows(a);
-        for (reads[0..at.len]) |*read| if (!read.done) try read.take();
+        for (reads[0..at.len]) |*read| if (!read.done) try read.take(a);
         if (calls) |activity| try activity.take(round);
     }
     if (located) |first| first.* = reads[0].located();

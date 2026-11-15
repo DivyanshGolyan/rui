@@ -21,6 +21,7 @@
 //! nothing, so literal typing, guards, row counts, transactions and query
 //! plans are not checked here.
 const std = @import("std");
+const input_domain = @import("domain/input.zig");
 const wire_version = @import("../wire_version.zig").wire_version;
 const rsql = @import("rsql.zig");
 const schema = @import("schema.zig");
@@ -576,6 +577,111 @@ test "a MySQL Store at the migration baseline with its rows takes every migratio
     writeRecord();
 }
 
+test "ordered input MySQL migration preserves accepted originals and diagnostic-only refusal across inspection replay and reopen" {
+    const io = std.testing.io;
+    const protocol = @import("../protocol.zig");
+    const fixtures = @import("tests.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const original = "use /skill, not the saved diagnostic";
+    var refused: @import("../wire_request.zig").MessageCommand = .{ .text = try fixtures.testingBytesContent(&tmp, "ordered-legacy-original", original) };
+    defer refused.removeTemporaryContent(io) catch unreachable;
+    try refused.key.set("ordered-legacy-refusal");
+    try refused.session.set("d8mv7p");
+    const semantic_digest = refused.semanticDigest();
+    const selector = "/mysql-ordered-input-migration";
+    {
+        mutex.lockUncancelable(io);
+        defer mutex.unlock(io);
+        _ = connection() orelse return if (state == .absent) error.SkipZigTest else error.MysqlUnavailable;
+        defer restore("USE " ++ database);
+        try setup("DROP DATABASE IF EXISTS " ++ migrated_database ++ ";CREATE DATABASE " ++ migrated_database);
+        try load(migrated_database, store_testing.baseline_mysql_ddl, false);
+        try load(migrated_database, store_testing.baseline_rows, true);
+        inline for (schema.migrations) |step| {
+            if (step.from < 75) try load(migrated_database, schema.mysqlMigration(step.from), false);
+        }
+        try load(migrated_database, "INSERT INTO store_meta(meta_key,meta_value) VALUES('format','75'),('store_selector','" ++ selector ++ "')", false);
+        var seed_buffer: [512]u8 = undefined;
+        const hex_digest = std.fmt.bytesToHex(semantic_digest, .lower);
+        try load(migrated_database, try std.fmt.bufPrint(
+            &seed_buffer,
+            "INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,accepted,code,revision,created,command_seq) " ++
+                "VALUES('ordered-legacy-refusal',2,'d8mv7p',X'{s}',5,0,'skill_file_unavailable',0,0,1000)",
+            .{&hex_digest},
+        ), false);
+        // MySQL applies the operator-run DDL export, not SQLite's atomic
+        // migration-open transaction. This successful case claims no rollback
+        // or restoration after a partially applied MySQL DDL step.
+        try load(migrated_database, schema.mysqlMigrationFrom(75).?, false);
+        try expectCatalog(migrated_database);
+        try expectMigratedOrdinaryInputs();
+        try setup("DROP DATABASE IF EXISTS " ++ migrated_database ++ "_oracle;CREATE DATABASE " ++ migrated_database ++ "_oracle;CREATE TABLE " ++ migrated_database ++ "_oracle.touched_oracle(session_ref TEXT)");
+        for (comptime sqlite.touchOracleTriggers(.mysql, migrated_database ++ "_oracle.touched_oracle")) |text| try setup(text);
+    }
+    refused.text.file.?.close(io);
+    refused.text.file = null;
+    try tmp.dir.deleteFile(io, "ordered-legacy-original");
+    const config = (try rootConfig()).?;
+    for (0..2) |_| {
+        var storage: @import("Store.zig").Store = undefined;
+        try storage.openTarget(io, .{ .mysql = .{
+            .address = .{ .unix_socket = config.socket },
+            .user = "root",
+            .password = config.password,
+            .database = migrated_database,
+        } }, selector, .{});
+        defer storage.close() catch unreachable;
+        const accepted = [_]struct { key: []const u8, content_id: u64, bytes: []const u8 }{
+            .{ .key = "fixture-answer-key", .content_id = 2, .bytes = "input" },
+            .{ .key = "fixture-ask-message", .content_id = 6, .bytes = "propose" },
+        };
+        for (accepted) |expected| {
+            const producer: input_domain.Producer = .{ .message = try protocol.Bounded(protocol.max_key_bytes).from(expected.key) };
+            var cursor: input_domain.Cursor = undefined;
+            const certificate = try storage.openInput(producer, &cursor);
+            try std.testing.expect(certificate == .retained);
+            try std.testing.expectEqual(@as(u32, 1), certificate.retained);
+            const part = (try storage.readInputPart(&cursor)).?;
+            try std.testing.expect(part.kind == .text);
+            try std.testing.expectEqual(@as(u32, 0), part.ordinal);
+            try std.testing.expectEqual(expected.content_id, part.content_id);
+            try std.testing.expectEqual(@as(u64, expected.bytes.len), part.reference.length);
+            try std.testing.expectEqual(protocol.contentDigest(expected.bytes), part.reference.digest);
+            try std.testing.expect((try storage.readInputPart(&cursor)) == null);
+            var reader: @import("domain/content.zig").ContentReader = undefined;
+            reader.open(try storage.openContent(part.reference));
+            defer reader.close();
+            var bytes: [64]u8 = undefined;
+            const count = try reader.read(0, &bytes);
+            try std.testing.expectEqualSlices(u8, expected.bytes, bytes[0..count]);
+            try std.testing.expectEqual(@as(usize, 0), try reader.read(count, &bytes));
+        }
+        try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, "SELECT count(*) FROM conversation_entry WHERE entry_kind=1 AND content_id IS NULL", .{}));
+        try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM core_command WHERE command_key='fixture-answer-key' AND input_digest=X'f1c556d56340cf43f947a5c7efa143b121b78165d59292dc801d9331b8e7206a' AND primary_content_id IS NULL AND input_part_count=1", .{}));
+        var cursor: input_domain.Cursor = undefined;
+        const producer: input_domain.Producer = .{ .message = refused.key };
+        try std.testing.expect(try storage.openInput(producer, &cursor) == .legacy_unavailable);
+        try std.testing.expect(!storage.isFenced());
+        try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM input_part WHERE command_key=?1", .{refused.key.slice()}));
+        try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM core_command WHERE command_key=?1 AND accepted=0 AND input_part_count=0 AND input_reference_length IS NULL AND input_reference_digest IS NULL AND primary_content_id=5 AND input_digest=?2", .{ refused.key.slice(), store_testing.Blob{ .bytes = &semantic_digest } }));
+        const diagnostic = try fixtures.testingContentReference(&storage, 5);
+        try fixtures.expectContent(&storage, diagnostic, "hello\nworld");
+        const replay = storage.submitMessageWithModel(&refused, null, .{});
+        try std.testing.expect(replay == .rejected and replay.rejected.replayed);
+        try std.testing.expectEqual(protocol.MessageRejection.skill_file_unavailable, replay.rejected.code);
+        try std.testing.expectEqual(protocol.contentDigest(original), replay.rejected.content.digest);
+        try std.testing.expectEqual(@as(u64, original.len), replay.rejected.content.length);
+        try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM content WHERE digest=?1 AND private=0", .{store_testing.Blob{ .bytes = &refused.text.digest }}));
+        try std.testing.expectEqual(@as(u64, 10), try store_testing.queryU64(&storage, "SELECT count(*) FROM core_command", .{}));
+        try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM store_meta WHERE meta_key='format' AND meta_value=?1", .{std.fmt.comptimePrint("{d}", .{schema.schema_version})}));
+    }
+    mutex.lockUncancelable(io);
+    defer mutex.unlock(io);
+    done.migrations += 1;
+    writeRecord();
+}
+
 test "model call timing MySQL format 68 migration preserves format 67 resolutions with null final attempt timings" {
     const io = std.testing.io;
     mutex.lockUncancelable(io);
@@ -641,6 +747,27 @@ pub fn conformancePassed() void {
     writeRecord();
 }
 
+const migrated_ordinary_rows = blk: {
+    const content_id = "CASE WHEN e.entry_kind=1 THEN " ++ input_domain.messageTextIdSql("authored") ++ " ELSE e.content_id END";
+    break :blk "SELECT e.session_ref,e.entry_ordinal,e.session_position,e.entry_kind,e.turn_id,e.source_admission_id,e.source_revision,e.source_operation_id,e.source_item_ordinal," ++ content_id ++ ",e.recorded_at,HEX(c.digest),c.byte_length,c.private,k.chunk_index,HEX(k.bytes) " ++
+        "FROM conversation_entry e LEFT JOIN message_admission admission ON admission.admission_id=e.source_admission_id " ++
+        "LEFT JOIN core_command authored ON authored.command_key=admission.command_key AND authored.kind=2 " ++
+        "JOIN content c ON c.content_id=" ++ content_id ++ " LEFT JOIN content_chunk k ON k.content_id=c.content_id ORDER BY e.session_ref,e.entry_ordinal,k.chunk_index";
+};
+
+fn expectMigratedOrdinaryInputs() !void {
+    try expectSameResults(&.{
+        "SELECT count(*),count(content_id) FROM conversation_entry WHERE entry_kind=1",
+        "SELECT e.session_ref,p.content_id FROM conversation_entry e JOIN message_admission a ON a.admission_id=e.source_admission_id " ++
+            "JOIN core_command c ON c.command_key=a.command_key AND c.kind=2 AND c.accepted=1 AND c.input_part_count=1 AND c.primary_content_id IS NULL " ++
+            "JOIN input_part p ON p.command_key=c.command_key AND p.command_kind=2 AND p.part_count=1 AND p.ordinal=0 AND p.part_kind=1 " ++
+            "WHERE e.entry_kind=1 ORDER BY e.session_ref",
+    }, &.{
+        "SELECT 2,0",
+        "SELECT 'brhkcj',6 UNION ALL SELECT 'd8mv7p',2 ORDER BY 1",
+    });
+}
+
 test "skills schema 56 wire 9 MySQL migration preserves ordinary rows and reaches the current shape" {
     const io = std.testing.io;
     mutex.lockUncancelable(io);
@@ -680,7 +807,8 @@ test "skills schema 56 wire 9 MySQL migration preserves ordinary rows and reache
     try std.testing.expectEqualStrings("", result.written());
     var after: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer after.deinit();
-    try writeResult(ordinary_rows, &after.writer);
+    try writeResult(migrated_ordinary_rows, &after.writer);
+    try expectMigratedOrdinaryInputs();
     try std.testing.expectEqualStrings(before.written(), after.written());
     var provenance: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer provenance.deinit();
@@ -747,7 +875,8 @@ test "skills schema 58 wire 10 MySQL migration preserves archive refusal and ord
     try std.testing.expectEqualStrings("", result.written());
     var after: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer after.deinit();
-    try writeResult(ordinary_rows, &after.writer);
+    try writeResult(migrated_ordinary_rows, &after.writer);
+    try expectMigratedOrdinaryInputs();
     try std.testing.expectEqualStrings(before.written(), after.written());
     var after_facts: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer after_facts.deinit();

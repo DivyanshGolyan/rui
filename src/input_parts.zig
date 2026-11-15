@@ -17,6 +17,12 @@ pub const Identity = struct {
     kind: Kind,
 };
 
+/// This identifies an ordered original, rather than flattened Content bytes.
+pub const Reference = union(enum) {
+    text: struct { length: u64, digest: [32]u8 },
+    parts: struct { count: u32, digest: [32]u8 },
+};
+
 /// A compound's identity includes boundaries even between adjacent Text
 /// parts. A single Text producer uses its existing legacy identity instead.
 pub const Digest = struct {

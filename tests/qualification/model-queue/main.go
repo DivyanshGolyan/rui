@@ -212,7 +212,7 @@ func initializeTemplate(binary, sqliteBinary, directory, store string, deadline 
 	}
 	// turn and message_admission reference each other, so their foreign keys
 	// are checked at COMMIT, once both are gone.
-	_, err = sql(deadline, sqliteBinary, store, "BEGIN; PRAGMA defer_foreign_keys=ON; DELETE FROM conversation_entry; DELETE FROM model_operation; DELETE FROM turn; DELETE FROM message_admission; DELETE FROM core_command WHERE command_key='template-message'; COMMIT;")
+	_, err = sql(deadline, sqliteBinary, store, "BEGIN; PRAGMA defer_foreign_keys=ON; DELETE FROM conversation_entry; DELETE FROM model_operation; DELETE FROM turn; DELETE FROM message_admission; DELETE FROM input_part WHERE command_key='template-message'; DELETE FROM core_command WHERE command_key='template-message'; COMMIT;")
 	return eligible, err
 }
 
@@ -224,11 +224,11 @@ func populate(deadline measurement.Deadline, sqliteBinary, store string, p popul
 CREATE TEMP TABLE q(v INTEGER);
 INSERT INTO q SELECT content_id FROM content WHERE byte_length>0 ORDER BY content_id DESC LIMIT 1;
 WITH RECURSIVE n(i) AS (SELECT 1 WHERE %[1]d>0 UNION ALL SELECT i+1 FROM n WHERE i<%[1]d)
-INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq)
- SELECT 'h-msg-'||i,2,(SELECT target FROM core_command WHERE command_key='template-configure'),randomblob(32),(SELECT v FROM q),NULL,1,'',1,0,(SELECT coalesce(max(command_seq),0) FROM core_command)+i FROM n;
+INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq,input_part_count,input_reference_length,input_reference_digest)
+ SELECT 'h-msg-'||i,2,(SELECT target FROM core_command WHERE command_key='template-configure'),randomblob(32),NULL,NULL,1,'',1,0,(SELECT coalesce(max(command_seq),0) FROM core_command)+i,1,(SELECT byte_length FROM content WHERE content_id=(SELECT v FROM q)),(SELECT digest FROM content WHERE content_id=(SELECT v FROM q)) FROM n;
 WITH RECURSIVE n(i) AS (SELECT 1 WHERE %[1]d>0 UNION ALL SELECT i+1 FROM n WHERE i<%[1]d)
 INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at)
- SELECT 100+i,(SELECT target FROM core_command WHERE command_key='template-configure'),'h-msg-'||i,(SELECT v FROM q),4*i-3,NULL,unixepoch() FROM n;
+ SELECT 100+i,(SELECT target FROM core_command WHERE command_key='template-configure'),'h-msg-'||i,NULL,4*i-3,NULL,unixepoch() FROM n;
 WITH RECURSIVE n(i) AS (SELECT 1 WHERE %[1]d>0 UNION ALL SELECT i+1 FROM n WHERE i<%[1]d)
 INSERT INTO turn(turn_id,session_ref,first_admission_id,input_cutoff,operation_id,outcome_code,outcome_content_id,outcome_position,outcome_at)
  SELECT 100+i,(SELECT target FROM core_command WHERE command_key='template-configure'),100+i,100+i,100+i,'provider_http_422',NULL,4*i,unixepoch() FROM n;
@@ -238,26 +238,28 @@ INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,i
  SELECT 100+i,100+i,(SELECT target FROM core_command WHERE command_key='template-configure'),1,100+i,4*i-1,1,NULL,'provider_http_422',0,unixepoch(),(SELECT coalesce(loaded_tool_set_id,tool_set_id) FROM session WHERE session_ref=(SELECT target FROM core_command WHERE command_key='template-configure')),0 FROM n;
 WITH RECURSIVE n(i) AS (SELECT 1 WHERE %[1]d>0 UNION ALL SELECT i+1 FROM n WHERE i<%[1]d)
 INSERT INTO conversation_entry(session_ref,entry_ordinal,session_position,entry_kind,turn_id,source_admission_id,source_revision,source_operation_id,content_id,recorded_at)
- SELECT (SELECT target FROM core_command WHERE command_key='template-configure'),i,4*i-2,1,100+i,100+i,NULL,NULL,(SELECT v FROM q),unixepoch() FROM n;
+ SELECT (SELECT target FROM core_command WHERE command_key='template-configure'),i,4*i-2,1,100+i,100+i,NULL,NULL,NULL,unixepoch() FROM n;
 UPDATE session SET next_position=4*%[1]d+1 WHERE session_ref=(SELECT target FROM core_command WHERE command_key='template-configure');
 WITH RECURSIVE n(i) AS (SELECT 1 WHERE %[2]d>0 UNION ALL SELECT i+1 FROM n WHERE i<%[2]d)
-INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq)
- SELECT 's-msg-'||i,2,(SELECT target FROM core_command WHERE command_key='s-config'),randomblob(32),(SELECT v FROM q),NULL,1,'',1,0,(SELECT coalesce(max(command_seq),0) FROM core_command)+i FROM n;
+INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq,input_part_count,input_reference_length,input_reference_digest)
+ SELECT 's-msg-'||i,2,(SELECT target FROM core_command WHERE command_key='s-config'),randomblob(32),NULL,NULL,1,'',1,0,(SELECT coalesce(max(command_seq),0) FROM core_command)+i,1,(SELECT byte_length FROM content WHERE content_id=(SELECT v FROM q)),(SELECT digest FROM content WHERE content_id=(SELECT v FROM q)) FROM n;
 WITH RECURSIVE n(i) AS (SELECT 1 WHERE %[2]d>0 UNION ALL SELECT i+1 FROM n WHERE i<%[2]d)
 INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at)
- SELECT 1000100+i,(SELECT target FROM core_command WHERE command_key='s-config'),'s-msg-'||i,(SELECT v FROM q),i,NULL,unixepoch() FROM n;
+ SELECT 1000100+i,(SELECT target FROM core_command WHERE command_key='s-config'),'s-msg-'||i,NULL,i,NULL,unixepoch() FROM n;
 INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq)
  SELECT 's-stop',3,(SELECT target FROM core_command WHERE command_key='s-config'),randomblob(32),NULL,NULL,1,'',1,0,(SELECT coalesce(max(command_seq),0)+1 FROM core_command) WHERE %[2]d>0;
 INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff,position,stopped_at)
  SELECT 's-stop',(SELECT target FROM core_command WHERE command_key='s-config'),NULL,1000100+%[2]d,%[2]d+1,unixepoch() WHERE %[2]d>0;
 UPDATE session SET next_position=%[2]d+2 WHERE %[2]d>0 AND session_ref=(SELECT target FROM core_command WHERE command_key='s-config');
 WITH RECURSIVE n(i) AS (SELECT 1 WHERE %[3]d>0 UNION ALL SELECT i+1 FROM n WHERE i<%[3]d)
-INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq)
- SELECT 'e-msg-'||i,2,(SELECT target FROM core_command WHERE command_key='e-config-'||i),randomblob(32),(SELECT v FROM q),NULL,1,'',1,0,(SELECT coalesce(max(command_seq),0) FROM core_command)+i FROM n;
+INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq,input_part_count,input_reference_length,input_reference_digest)
+ SELECT 'e-msg-'||i,2,(SELECT target FROM core_command WHERE command_key='e-config-'||i),randomblob(32),NULL,NULL,1,'',1,0,(SELECT coalesce(max(command_seq),0) FROM core_command)+i,1,(SELECT byte_length FROM content WHERE content_id=(SELECT v FROM q)),(SELECT digest FROM content WHERE content_id=(SELECT v FROM q)) FROM n;
 WITH RECURSIVE n(i) AS (SELECT 1 WHERE %[3]d>0 UNION ALL SELECT i+1 FROM n WHERE i<%[3]d)
 INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at)
- SELECT 2000100+i,(SELECT target FROM core_command WHERE command_key='e-config-'||i),'e-msg-'||i,(SELECT v FROM q),1,NULL,unixepoch() FROM n;
+ SELECT 2000100+i,(SELECT target FROM core_command WHERE command_key='e-config-'||i),'e-msg-'||i,NULL,1,NULL,unixepoch() FROM n;
 UPDATE session SET next_position=2 WHERE session_ref IN (SELECT target FROM core_command WHERE kind=1 AND command_key GLOB 'e-config-[0-9]*');
+INSERT INTO input_part(input_part_id,command_key,command_kind,part_count,ordinal,content_id,part_kind)
+ SELECT (SELECT coalesce(max(input_part_id),0) FROM input_part)+row_number() OVER (ORDER BY command_seq),command_key,2,1,0,(SELECT v FROM q),1 FROM core_command WHERE command_key GLOB '[hse]-msg-*';
 DROP TABLE q; COMMIT;`, p.History, p.Ineligible, p.Eligible)
 	if _, err := sql(deadline, sqliteBinary, store, query); err != nil {
 		return err
@@ -280,7 +282,6 @@ UNION ALL SELECT 'history-resolution:'||count(*) FROM model_operation o JOIN tur
 	}
 	return nil
 }
-
 func parseExecutionFacts(rows string) (executionFacts, error) {
 	result := executionFacts{Messages: []messageExecutionFact{}, Turns: []turnExecutionFact{}, Operations: []operationExecutionFact{}}
 	if rows == "" {

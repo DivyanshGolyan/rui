@@ -44,27 +44,35 @@ pub const ConfigureReply = union(enum) {
     infrastructure_failure,
 };
 
-pub const AcceptedMessage = struct {
-    replayed: bool,
-    admission_id: u64,
-    content: ContentReference,
-    session: Bounded(session_id.max_reference_bytes),
-};
+/// Message receipt fields are identical for the existing text door and
+/// the internal ordered-input door. The public text receipt stays unchanged.
+pub fn MessageReceipt(comptime Reference: type) type {
+    return struct {
+        pub const Accepted = struct {
+            replayed: bool,
+            admission_id: u64,
+            content: Reference,
+            session: Bounded(session_id.max_reference_bytes),
+        };
+        pub const Rejected = struct {
+            replayed: bool,
+            code: message_admission.Rejection,
+            /// Current Host advice, not a saved command field.
+            message: ?@import("tool_record.zig").HostToolSet.MissingTool = null,
+            content: Reference,
+        };
+        pub const Reply = union(enum) {
+            accepted: Accepted,
+            rejected: Rejected,
+            conflict,
+            infrastructure_failure,
+        };
+    };
+}
 
-pub const RejectedMessage = struct {
-    replayed: bool,
-    code: message_admission.Rejection,
-    /// Advisory detail from the current Host, not a saved command field.
-    message: ?@import("tool_record.zig").HostToolSet.MissingTool = null,
-    content: ContentReference,
-};
-
-pub const MessageReply = union(enum) {
-    accepted: AcceptedMessage,
-    rejected: RejectedMessage,
-    conflict,
-    infrastructure_failure,
-};
+pub const AcceptedMessage = MessageReceipt(ContentReference).Accepted;
+pub const RejectedMessage = MessageReceipt(ContentReference).Rejected;
+pub const MessageReply = MessageReceipt(ContentReference).Reply;
 
 pub const CommandObservation = struct {
     status: message_observation.CommandObservationStatus,

@@ -29,6 +29,7 @@ const command_domain = @import("domain/command.zig");
 const configuration_domain = @import("domain/configuration.zig");
 const skills_domain = @import("domain/skills.zig");
 const content_domain = @import("domain/content.zig");
+const input_domain = @import("domain/input.zig");
 const tool_set_domain = @import("domain/tool_set.zig");
 const model_facts_domain = @import("domain/model_facts.zig");
 const model_catalog = @import("../model_catalog.zig");
@@ -744,24 +745,33 @@ pub const Store = struct {
     }
 
     pub fn submitMessageCapturedSkills(self: *Store, command: *const content_custody.MessageCommand, committed: ?MessageCommitted, initial_skills: ?*const skills_domain.Initial, captured_skill: ?*const skills_domain.MessageCapture, faults: Faults) MessageReply {
-        return self.queue().write(submitMessageWithModelHeld, .{ self, command, committed, initial_skills, captured_skill, faults });
+        return input_domain.textReply(self.submitMessageInput(command, .{ .text = .{ .sealed = &command.text } }, committed, initial_skills, captured_skill, faults));
+    }
+
+    /// Internal typed input, not a new wire/CLI ingress. Both this and the
+    /// existing text door run the same Message transition and Saving owner.
+    pub fn submitMessageInput(self: *Store, command: *const content_custody.MessageCommand, authored: input_domain.Input, committed: ?MessageCommitted, initial_skills: ?*const skills_domain.Initial, captured_skill: ?*const skills_domain.MessageCapture, faults: Faults) input_domain.MessageReply {
+        if (authored == .parts) std.debug.assert(command.text.state == .omitted);
+        return self.queue().write(submitMessageWithModelHeld, .{ self, command, authored, committed, initial_skills, captured_skill, faults });
     }
 
     fn submitMessageWithModelHeld(
         self: *Store,
         command: *const content_custody.MessageCommand,
+        authored: input_domain.Input,
         committed: ?MessageCommitted,
         initial_skills: ?*const skills_domain.Initial,
         captured_skill: ?*const skills_domain.MessageCapture,
         faults: Faults,
-    ) MessageReply {
-        var reply: MessageReply = undefined;
+    ) input_domain.MessageReply {
+        var reply: input_domain.MessageReply = undefined;
         transition.apply(self, command_domain.SubmitMessage, .{
             .io = self.io,
             .served = self.served,
             .tools = self.hostTools(),
             .selector = self.selector.slice(),
             .command = command,
+            .authored = authored,
             .committed = committed,
             .initial_skills = initial_skills,
             .captured = captured_skill,
@@ -774,6 +784,37 @@ pub const Store = struct {
                 reply.rejected.message = configuration_domain.missingToolMessage(self.hostTools().host_tool_set, reply.rejected.code, &configuration.tools);
         }
         return reply;
+    }
+
+    /// Opens immutable ordered metadata in caller-owned cursor storage.
+    /// The legacy absence certificate never aliases a refusal diagnostic.
+    pub fn openInput(self: *Store, producer: input_domain.Producer, cursor: *input_domain.Cursor) !input_domain.Certificate {
+        return self.queue().run(openInputHeld, .{ self, producer, cursor });
+    }
+
+    fn openInputHeld(self: *Store, producer: input_domain.Producer, cursor: *input_domain.Cursor) !input_domain.Certificate {
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: ReadAccess = .open(&entry);
+        defer access.deinit();
+        cursor.* = .{ .producer = producer };
+        cursor.queueOpen(&access);
+        try entry.finish(Ordinary.none, access.run());
+        return entry.finish(Ordinary.none, cursor.opened());
+    }
+
+    pub fn readInputPart(self: *Store, cursor: *input_domain.Cursor) !?input_domain.Part {
+        return self.queue().run(readInputPartHeld, .{ self, cursor });
+    }
+
+    fn readInputPartHeld(self: *Store, cursor: *input_domain.Cursor) !?input_domain.Part {
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: ReadAccess = .open(&entry);
+        defer access.deinit();
+        if (!try entry.finish(Ordinary.none, cursor.queueNext(&access))) return null;
+        try entry.finish(Ordinary.none, access.run());
+        return try entry.finish(Ordinary.none, cursor.next());
     }
 
     pub fn stopSession(
@@ -900,7 +941,7 @@ pub const Store = struct {
         out.* = .{ .full = .{ .token = null } };
         var access: ReadAccess = .open(&entry);
         defer access.deinit();
-        try entry.finish(Ordinary.none, command_domain.observeCommand(&access, key, &out.full.observation));
+        try entry.finish(Ordinary.input_projection, command_domain.observeCommand(&access, key, &out.full.observation));
         const observation = &out.full.observation;
         if (observation.status != .absent and session_id.valid(observation.target.slice())) {
             out.full.token = .{ .instance = self.instance, .generation = generation, .session = observation.target.slice()[0..session_id.bytes].* };
@@ -1844,11 +1885,12 @@ fn destroyRing(ring: *change_ring.Ring) void {
 /// Store before the caller sees it.
 pub const Ordinary = struct {
     pub const none = error{};
-    const page = error{ SessionNotFound, InvalidCursor };
-    const content = error{ContentNotFound};
-    const public_content = error{ ContentNotFound, RangeOutOfBounds };
+    const page = error{ SessionNotFound, InvalidCursor, InputPartsNotSupported };
+    const content = error{ ContentNotFound, InputPartsNotSupported };
+    const public_content = error{ ContentNotFound, RangeOutOfBounds, InputPartsNotSupported };
     pub const action = error{ActionNotFound};
     const result = error{ ResultNotFound, ResultNotReady, ResultFailed };
+    const input_projection = error{InputPartsNotSupported};
     pub const attempt_binding = error{ StaleAttemptBinding, SupersededByControl };
     pub const historical_entry = error{HistoricalPending};
     pub const model_success = attempt_binding || error{InvalidProviderEnvelope};
@@ -1946,7 +1988,7 @@ pub const Entry = struct {
     fn finishCapture(self: Entry, ordinary: bool, result: anytype) @TypeOf(result) {
         comptime assertSmallResult(@TypeOf(result));
         return result catch |err| {
-            if (ordinary) return err;
+            if (ordinary or err == error.InputPartsNotSupported) return err;
             return fence(self.store, err);
         };
     }
@@ -2322,7 +2364,7 @@ pub fn publicConversationPageForTesting(self: *Store, request: conversation_read
 
 /// A column whose values the Host hands out: a row's id, or its place in
 /// a Store-wide order.
-pub const Identity = enum { turn_id, operation_id, action_id, content_id, created_seq, command_seq, admission_id, tool_record_id, tool_set_id, forward_id };
+pub const Identity = enum { turn_id, operation_id, action_id, content_id, created_seq, command_seq, admission_id, tool_record_id, tool_set_id, forward_id, input_part_id };
 
 /// A tool set `readHostToolSet` read back, in its caller's memory.
 pub const SavedHostToolSet = struct {
@@ -2439,6 +2481,7 @@ fn IdentityCeiling(comptime column: Identity) type {
         .tool_record_id => "tool_record",
         .tool_set_id => "tool_set",
         .forward_id => "session_forward",
+        .input_part_id => "input_part",
     };
     return rsql.Read(.{
         .sql = "SELECT coalesce(max(" ++ @tagName(column) ++ "),0) AS ceiling FROM " ++ table,

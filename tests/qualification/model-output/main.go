@@ -1050,7 +1050,7 @@ func auditCapacity(deadline measurement.Deadline, store string, keys, sessions [
 		"(SELECT count(*) FROM model_output_item oi WHERE oi.operation_id=mo.operation_id) AS output_items," +
 		"(SELECT count(*) FROM model_output_item oi JOIN content private_content ON private_content.content_id=oi.extras_content_id WHERE oi.operation_id=mo.operation_id AND private_content.private=1) AS private_output_items," +
 		"(SELECT count(*) FROM conversation_entry ce WHERE ce.source_operation_id=mo.operation_id AND ce.entry_kind=3) AS assistant_projections " +
-		"FROM message_admission ma JOIN content c ON c.content_id=ma.content_id JOIN turn t ON t.turn_id=ma.turn_id " +
+		"FROM message_admission ma JOIN input_part input ON input.command_key=ma.command_key AND input.command_kind=2 AND input.part_count=1 AND input.ordinal=0 AND input.part_kind=1 JOIN content c ON c.content_id=input.content_id JOIN turn t ON t.turn_id=ma.turn_id " +
 		"JOIN model_operation mo ON mo.operation_id=t.operation_id WHERE ma.command_key GLOB '" + prefix + "*' ORDER BY ma.admission_id;"
 	output, err := measurement.Run(deadline, "/usr/bin/sqlite3", "-json", filepath.Join(store, "rui.sqlite3"), query)
 	if err != nil {

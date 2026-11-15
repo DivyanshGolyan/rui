@@ -20,7 +20,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 75;
+pub const schema_version: u32 = 76;
 
 pub const IdentityMismatch = struct {
     saved_selector: Bounded(store_path.max_bytes) = .{},
@@ -62,6 +62,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 73, .digest = 0x515b60c7f5df332d },
     .{ .schema_version = 74, .digest = 0xda8e267adbfcef45 },
     .{ .schema_version = 75, .digest = 0xcea5bf4db0d3978d },
+    .{ .schema_version = 76, .digest = 0xcef9bf6b936783fc },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -721,6 +722,51 @@ pub const migrations = [_]Migration{
             "CREATE TABLE session_pin_command(\n command_key VARCHAR(128) NOT NULL,\n pinned TINYINT NOT NULL,\n PRIMARY KEY(command_key),\n FOREIGN KEY(command_key) REFERENCES core_command(command_key),\n CHECK(pinned IN (0,1))\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
         },
     },
+    .{
+        .from = 75,
+        .sqlite = &.{
+            "ALTER TABLE core_command RENAME TO core_command_75",
+            "ALTER TABLE message_admission RENAME TO message_admission_75",
+            "ALTER TABLE conversation_entry RENAME TO conversation_entry_75",
+            "CREATE TABLE core_command(\n command_key TEXT NOT NULL UNIQUE CHECK(length(CAST(command_key AS BLOB))<=128),\n kind INTEGER NOT NULL CHECK(kind BETWEEN 1 AND 7),\n target TEXT NOT NULL CHECK(length(CAST(target AS BLOB))<=128),\n input_digest BLOB NOT NULL CHECK(length(input_digest)=32),\n primary_content_id INTEGER REFERENCES content(content_id),\n secondary_content_id INTEGER REFERENCES content(content_id),\n accepted INTEGER NOT NULL CHECK(accepted IN (0,1)),\n code TEXT NOT NULL CHECK(length(CAST(code AS BLOB))<=96),\n revision INTEGER NOT NULL CHECK(revision>=0),\n created INTEGER NOT NULL CHECK(created IN (0,1)),\n command_seq INTEGER PRIMARY KEY NOT NULL CHECK(command_seq>0),\n input_part_count INTEGER CHECK(input_part_count IS NULL OR input_part_count BETWEEN 0 AND 4294967295),\n input_reference_length INTEGER CHECK(input_reference_length IS NULL OR input_reference_length>=0),\n input_reference_digest BLOB CHECK(input_reference_digest IS NULL OR length(input_reference_digest)=32),\n UNIQUE(command_key,kind,input_part_count),\n CHECK((kind=2 AND input_part_count IS NOT NULL AND (input_part_count>0 OR accepted=0)) OR (kind<>2 AND input_part_count IS NULL)),\n CHECK(kind<>2 OR accepted=0 OR primary_content_id IS NULL),\n CHECK(((input_part_count IS NULL OR input_part_count=0) AND input_reference_length IS NULL AND input_reference_digest IS NULL) OR (input_part_count>0 AND input_reference_digest IS NOT NULL AND (input_reference_length IS NULL OR input_part_count=1)))\n) STRICT",
+            "CREATE TABLE message_admission(\n admission_id INTEGER PRIMARY KEY NOT NULL CHECK(admission_id>0),\n session_ref TEXT NOT NULL REFERENCES session(session_ref),\n command_key TEXT NOT NULL UNIQUE REFERENCES core_command(command_key),\n content_id INTEGER REFERENCES content(content_id) CHECK(content_id IS NULL),\n admission_position INTEGER CHECK(admission_position>0),\n turn_id INTEGER REFERENCES turn(turn_id),\n admitted_at INTEGER NOT NULL CHECK(admitted_at>0),\n sender_session_ref TEXT REFERENCES session(session_ref),\n sender_position INTEGER CHECK(sender_position>0),\n CHECK((sender_session_ref IS NULL)=(sender_position IS NULL))\n) STRICT",
+            "CREATE TABLE conversation_entry(\n session_ref TEXT NOT NULL,\n entry_ordinal INTEGER NOT NULL CHECK(entry_ordinal>0),\n session_position INTEGER NOT NULL CHECK(session_position>0),\n entry_kind INTEGER NOT NULL CHECK(entry_kind BETWEEN 1 AND 4),\n turn_id INTEGER REFERENCES turn(turn_id),\n source_admission_id INTEGER UNIQUE REFERENCES message_admission(admission_id),\n source_revision INTEGER,\n source_catalog_position INTEGER,\n source_skill_admission_id INTEGER,\n source_skill_position INTEGER,\n source_operation_id INTEGER REFERENCES model_operation(operation_id),\n source_item_ordinal INTEGER CHECK(source_item_ordinal IS NULL OR source_item_ordinal>=0),\n content_id INTEGER REFERENCES content(content_id),\n recorded_at INTEGER NOT NULL CHECK(recorded_at>0),\n PRIMARY KEY(session_ref,entry_ordinal),\n UNIQUE(session_ref,session_position),\n UNIQUE(session_ref,source_revision),\n UNIQUE(session_ref,source_catalog_position),\n UNIQUE(source_skill_admission_id,source_skill_position),\n FOREIGN KEY(session_ref,source_revision) REFERENCES session_revision(session_ref,revision),\n FOREIGN KEY(session_ref,source_catalog_position) REFERENCES session_skill_catalog(session_ref,position),\n FOREIGN KEY(source_skill_admission_id,source_skill_position) REFERENCES message_skill(admission_id,position),\n FOREIGN KEY(source_operation_id,source_item_ordinal) REFERENCES model_output_item(operation_id,item_ordinal),\n CHECK((entry_kind=1)=(content_id IS NULL)),\n CHECK((entry_kind=3)=(source_item_ordinal IS NOT NULL)),\n CHECK((turn_id IS NULL)=(source_catalog_position IS NOT NULL)),\n CHECK(source_catalog_position IS NULL OR source_catalog_position=session_position),\n CHECK((source_skill_admission_id IS NULL)=(source_skill_position IS NULL)),\n CHECK((entry_kind=4)=(source_skill_position IS NOT NULL)),\n CHECK((entry_kind=1 AND source_admission_id IS NOT NULL AND source_revision IS NULL AND source_catalog_position IS NULL AND source_operation_id IS NULL) OR (entry_kind=2 AND source_admission_id IS NULL AND ((source_revision IS NOT NULL AND source_catalog_position IS NULL) OR (source_revision IS NULL AND source_catalog_position IS NOT NULL)) AND source_operation_id IS NULL) OR (entry_kind=3 AND source_admission_id IS NULL AND source_revision IS NULL AND source_catalog_position IS NULL AND source_operation_id IS NOT NULL) OR (entry_kind=4 AND source_admission_id IS NULL AND source_revision IS NULL AND source_catalog_position IS NULL AND source_operation_id IS NULL))\n) STRICT, WITHOUT ROWID",
+            "CREATE TABLE input_part(\n input_part_id INTEGER PRIMARY KEY NOT NULL CHECK(input_part_id>0),\n command_key TEXT NOT NULL,\n command_kind INTEGER NOT NULL CHECK(command_kind=2),\n part_count INTEGER NOT NULL CHECK(part_count BETWEEN 1 AND 4294967295),\n ordinal INTEGER NOT NULL CHECK(ordinal>=0 AND ordinal<part_count),\n content_id INTEGER NOT NULL REFERENCES content(content_id),\n part_kind INTEGER NOT NULL CHECK(part_kind IN (1,2)),\n image_format INTEGER CHECK(image_format IS NULL OR image_format IN (1,2)),\n image_width INTEGER,\n image_height INTEGER,\n display_name TEXT CHECK(display_name IS NULL OR length(CAST(display_name AS BLOB)) BETWEEN 1 AND 255),\n UNIQUE(command_key,ordinal),\n FOREIGN KEY(command_key,command_kind,part_count) REFERENCES core_command(command_key,kind,input_part_count),\n CHECK((part_kind=1 AND image_format IS NULL AND image_width IS NULL AND image_height IS NULL AND display_name IS NULL) OR (part_kind=2 AND image_format IS NOT NULL AND image_width IS NOT NULL AND image_width BETWEEN 1 AND 4294967295 AND image_height IS NOT NULL AND image_height BETWEEN 1 AND 4294967295))\n) STRICT",
+            "INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq,input_part_count,input_reference_length,input_reference_digest) SELECT command_key,kind,target,input_digest,CASE WHEN kind=2 AND accepted=1 THEN NULL ELSE primary_content_id END,secondary_content_id,accepted,code,revision,created,command_seq,CASE WHEN kind=2 THEN CASE WHEN accepted=1 THEN 1 ELSE 0 END ELSE NULL END,CASE WHEN kind=2 AND accepted=1 THEN (SELECT byte_length FROM content WHERE content_id=core_command_75.primary_content_id) ELSE NULL END,CASE WHEN kind=2 AND accepted=1 THEN (SELECT digest FROM content WHERE content_id=core_command_75.primary_content_id) ELSE NULL END FROM core_command_75",
+            "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at,sender_session_ref,sender_position) SELECT admission_id,session_ref,command_key,NULL,admission_position,turn_id,admitted_at,sender_session_ref,sender_position FROM message_admission_75",
+            "INSERT INTO conversation_entry(session_ref,entry_ordinal,session_position,entry_kind,turn_id,source_admission_id,source_revision,source_catalog_position,source_skill_admission_id,source_skill_position,source_operation_id,source_item_ordinal,content_id,recorded_at) SELECT session_ref,entry_ordinal,session_position,entry_kind,turn_id,source_admission_id,source_revision,source_catalog_position,source_skill_admission_id,source_skill_position,source_operation_id,source_item_ordinal,CASE WHEN entry_kind=1 THEN NULL ELSE content_id END,recorded_at FROM conversation_entry_75",
+            "INSERT INTO input_part(input_part_id,command_key,command_kind,part_count,ordinal,content_id,part_kind) SELECT row_number() OVER (ORDER BY command_seq),command_key,2,1,0,primary_content_id,1 FROM core_command_75 WHERE kind=2 AND accepted=1",
+            "DROP TABLE core_command_75",
+            "DROP TABLE message_admission_75",
+            "DROP TABLE conversation_entry_75",
+            "CREATE UNIQUE INDEX message_admission_sent ON message_admission(sender_session_ref,sender_position) WHERE sender_session_ref IS NOT NULL",
+            "CREATE INDEX message_admission_session_order ON message_admission(session_ref,turn_id,admission_id)",
+            "CREATE INDEX message_admission_pending ON message_admission(admission_id,session_ref) WHERE turn_id IS NULL",
+            "CREATE INDEX message_admission_session_pending ON message_admission(session_ref,admission_id) WHERE turn_id IS NULL",
+            "CREATE INDEX message_admission_person ON message_admission(session_ref,admission_position) WHERE sender_session_ref IS NULL",
+            "CREATE INDEX message_admission_unpositioned ON message_admission(session_ref) WHERE admission_position IS NULL",
+            "CREATE INDEX message_admission_position ON message_admission(session_ref,admission_position)",
+            "CREATE INDEX core_command_target_order ON core_command(target,kind,command_seq)",
+            "CREATE INDEX conversation_entry_history ON conversation_entry(session_ref,session_position)",
+        },
+        .mysql = &.{
+            "ALTER TABLE core_command ADD COLUMN input_part_count BIGINT AFTER command_seq",
+            "ALTER TABLE core_command ADD COLUMN input_reference_length BIGINT AFTER input_part_count, ADD COLUMN input_reference_digest VARBINARY(32) AFTER input_reference_length",
+            "UPDATE core_command c JOIN content original ON original.content_id=c.primary_content_id SET c.input_reference_length=original.byte_length,c.input_reference_digest=original.digest WHERE c.kind=2 AND c.accepted=1",
+            "UPDATE core_command SET input_part_count=CASE WHEN kind=2 THEN CASE WHEN accepted=1 THEN 1 ELSE 0 END ELSE NULL END",
+            "ALTER TABLE core_command ADD UNIQUE(command_key,kind,input_part_count)",
+            "CREATE TABLE input_part(\n input_part_id BIGINT NOT NULL,\n command_key VARCHAR(128) NOT NULL,\n command_kind BIGINT NOT NULL,\n part_count BIGINT NOT NULL,\n ordinal BIGINT NOT NULL,\n content_id BIGINT NOT NULL,\n part_kind BIGINT NOT NULL,\n image_format BIGINT,\n image_width BIGINT,\n image_height BIGINT,\n display_name TEXT,\n PRIMARY KEY(input_part_id),\n UNIQUE(command_key,ordinal),\n FOREIGN KEY(content_id) REFERENCES content(content_id),\n FOREIGN KEY(command_key,command_kind,part_count) REFERENCES core_command(command_key,kind,input_part_count),\n CHECK(input_part_id>0),\n CHECK(command_kind=2),\n CHECK(part_count BETWEEN 1 AND 4294967295),\n CHECK(ordinal>=0 AND ordinal<part_count),\n CHECK(part_kind IN (1,2)),\n CHECK(image_format IS NULL OR image_format IN (1,2)),\n CHECK(display_name IS NULL OR OCTET_LENGTH(display_name) BETWEEN 1 AND 255),\n CHECK((part_kind=1 AND image_format IS NULL AND image_width IS NULL AND image_height IS NULL AND display_name IS NULL) OR (part_kind=2 AND image_format IS NOT NULL AND image_width IS NOT NULL AND image_width BETWEEN 1 AND 4294967295 AND image_height IS NOT NULL AND image_height BETWEEN 1 AND 4294967295))\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
+            "INSERT INTO input_part(input_part_id,command_key,command_kind,part_count,ordinal,content_id,part_kind) SELECT row_number() OVER (ORDER BY command_seq),command_key,2,1,0,primary_content_id,1 FROM core_command WHERE kind=2 AND accepted=1",
+            "UPDATE core_command SET primary_content_id=NULL WHERE kind=2 AND accepted=1",
+            "ALTER TABLE core_command ADD CHECK(input_part_count IS NULL OR input_part_count BETWEEN 0 AND 4294967295), ADD CHECK((kind=2 AND input_part_count IS NOT NULL AND (input_part_count>0 OR accepted=0)) OR (kind<>2 AND input_part_count IS NULL)), ADD CHECK(kind<>2 OR accepted=0 OR primary_content_id IS NULL), ADD CHECK(input_reference_length IS NULL OR input_reference_length>=0), ADD CHECK(input_reference_digest IS NULL OR OCTET_LENGTH(input_reference_digest)=32), ADD CHECK(((input_part_count IS NULL OR input_part_count=0) AND input_reference_length IS NULL AND input_reference_digest IS NULL) OR (input_part_count>0 AND input_reference_digest IS NOT NULL AND (input_reference_length IS NULL OR input_part_count=1)))",
+            "ALTER TABLE message_admission MODIFY content_id BIGINT NULL",
+            "UPDATE message_admission SET content_id=NULL",
+            "ALTER TABLE message_admission ADD CHECK(content_id IS NULL)",
+            "ALTER TABLE conversation_entry MODIFY content_id BIGINT NULL",
+            "UPDATE conversation_entry SET content_id=NULL WHERE entry_kind=1",
+            "ALTER TABLE conversation_entry ADD CHECK((entry_kind=1)=(content_id IS NULL))",
+        },
+    },
 };
 
 comptime {
@@ -1211,12 +1257,20 @@ pub const tables = [_]Table{
             // Command order, allocated by the Host in the recording
             // transaction: the rowid, so command order costs no index.
             .{ .name = "command_seq", .type = .int, .check = "command_seq>0" },
+            .{ .name = "input_part_count", .type = .int, .nullable = true, .check = "input_part_count IS NULL OR input_part_count BETWEEN 0 AND 4294967295" },
+            .{ .name = "input_reference_length", .type = .int, .nullable = true, .check = "input_reference_length IS NULL OR input_reference_length>=0" },
+            .{ .name = "input_reference_digest", .type = .{ .bytes = .{ .min = 32, .max = 32 } }, .nullable = true },
         },
         .primary_key = &.{"command_seq"},
-        .uniques = &.{&.{"command_key"}},
+        .uniques = &.{ &.{"command_key"}, &.{ "command_key", "kind", "input_part_count" } },
         .foreign_keys = &.{
             references("primary_content_id", "content", content_reference),
             references("secondary_content_id", "content", content_reference),
+        },
+        .checks = &.{
+            "(kind=2 AND input_part_count IS NOT NULL AND (input_part_count>0 OR accepted=0)) OR (kind<>2 AND input_part_count IS NULL)",
+            "kind<>2 OR accepted=0 OR primary_content_id IS NULL",
+            "((input_part_count IS NULL OR input_part_count=0) AND input_reference_length IS NULL AND input_reference_digest IS NULL) OR (input_part_count>0 AND input_reference_digest IS NOT NULL AND (input_reference_length IS NULL OR input_part_count=1))",
         },
     },
     .{
@@ -1286,14 +1340,14 @@ pub const tables = [_]Table{
         // `.both`: what the sender's activity page reads of a sent Message,
         // by sender_session_ref: its sources (`reads.activitySources`, kind
         // 8: sender_position, admission_id) and its item (`reads.zig`, kind
-        // 8: session_ref, content_id, admitted_at, and command_key, which
+        // 8: session_ref, admitted_at, and command_key, which
         // joins the command), keyed by admission_id, sender_session_ref and
         // sender_position.
         .columns = &.{
             .{ .name = "admission_id", .type = .int, .check = "admission_id>0", .read_by = .both },
             .{ .name = "session_ref", .type = .{ .text = null }, .read_by = .both },
             .{ .name = "command_key", .type = .{ .text = null }, .read_by = .both },
-            .{ .name = "content_id", .type = .int, .read_by = .both },
+            .{ .name = "content_id", .type = .int, .nullable = true, .check = "content_id IS NULL", .read_by = .both },
             .{ .name = "admission_position", .type = .int, .nullable = true, .check = "admission_position>0" },
             .{ .name = "turn_id", .type = .int, .nullable = true },
             .{ .name = "admitted_at", .type = .int, .check = "admitted_at>0", .read_by = .both },
@@ -1608,7 +1662,7 @@ pub const tables = [_]Table{
             .{ .name = "source_skill_position", .type = .int, .nullable = true },
             .{ .name = "source_operation_id", .type = .int, .nullable = true },
             .{ .name = "source_item_ordinal", .type = .int, .nullable = true, .check = "source_item_ordinal IS NULL OR source_item_ordinal>=0" },
-            .{ .name = "content_id", .type = .int },
+            .{ .name = "content_id", .type = .int, .nullable = true },
             .{ .name = "recorded_at", .type = .int, .check = "recorded_at>0" },
         },
         .primary_key = &.{ "session_ref", "entry_ordinal" },
@@ -1624,6 +1678,7 @@ pub const tables = [_]Table{
             .{ .columns = &.{ "source_operation_id", "source_item_ordinal" }, .references = "model_output_item", .referenced = &.{ "operation_id", "item_ordinal" } },
         },
         .checks = &.{
+            "(entry_kind=1)=(content_id IS NULL)",
             "(entry_kind=3)=(source_item_ordinal IS NOT NULL)",
             "(turn_id IS NULL)=(source_catalog_position IS NOT NULL)",
             "source_catalog_position IS NULL OR source_catalog_position=session_position",
@@ -1787,6 +1842,32 @@ pub const tables = [_]Table{
         .primary_key = &.{"command_key"},
         .foreign_keys = &.{references("command_key", "core_command", command_reference)},
         .without_rowid = true,
+    },
+    .{
+        .name = "input_part",
+        .columns = &.{
+            .{ .name = "input_part_id", .type = .int, .check = "input_part_id>0" },
+            .{ .name = "command_key", .type = .{ .text = null } },
+            .{ .name = "command_kind", .type = .int, .check = "command_kind=2" },
+            .{ .name = "part_count", .type = .int, .check = "part_count BETWEEN 1 AND 4294967295" },
+            .{ .name = "ordinal", .type = .int, .check = "ordinal>=0 AND ordinal<part_count" },
+            .{ .name = "content_id", .type = .int },
+            .{ .name = "part_kind", .type = .int, .check = "part_kind IN (1,2)" },
+            .{ .name = "image_format", .type = .int, .nullable = true, .check = "image_format IS NULL OR image_format IN (1,2)" },
+            .{ .name = "image_width", .type = .int, .nullable = true },
+            .{ .name = "image_height", .type = .int, .nullable = true },
+            .{ .name = "display_name", .type = .{ .text = .{ .min = 1, .max = 255 } }, .nullable = true },
+        },
+        .primary_key = &.{"input_part_id"},
+        .uniques = &.{&.{ "command_key", "ordinal" }},
+        .foreign_keys = &.{
+            references("content_id", "content", content_reference),
+            .{ .columns = &.{ "command_key", "command_kind", "part_count" }, .references = "core_command", .referenced = &.{ "command_key", "kind", "input_part_count" } },
+        },
+        .checks = &.{
+            "(part_kind=1 AND image_format IS NULL AND image_width IS NULL AND image_height IS NULL AND display_name IS NULL) OR " ++
+                "(part_kind=2 AND image_format IS NOT NULL AND image_width IS NOT NULL AND image_width BETWEEN 1 AND 4294967295 AND image_height IS NOT NULL AND image_height BETWEEN 1 AND 4294967295)",
+        },
     },
 };
 

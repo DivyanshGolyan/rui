@@ -23,6 +23,7 @@ const configuration_domain = @import("configuration.zig");
 const operation_effort = @import("operation_effort.zig");
 const historical_domain = @import("historical.zig");
 const history_floor_domain = @import("history_floor.zig");
+const input_domain = @import("input.zig");
 const model_settlement_domain = @import("model_settlement.zig");
 const model_facts_domain = @import("model_facts.zig");
 const model_attempt = @import("model_attempt.zig");
@@ -366,27 +367,30 @@ fn latestUsageSql(comptime session: []const u8, comptime provider: []const u8, c
 /// Operation admitted at `result_admission`, in the Session `session`.
 fn uncoveredBytesSql(comptime session: []const u8, comptime usage_position: []const u8, comptime frontier: []const u8, comptime result_admission: []const u8) []const u8 {
     const later = "max(" ++ usage_position ++ "," ++ frontier ++ ")";
-    return "(SELECT coalesce(sum(c.byte_length),0) FROM conversation_entry e JOIN content c ON c.content_id=e.content_id " ++
-        "WHERE e.session_ref=" ++ session ++ " AND e.entry_kind IN (1,2,4) AND e.session_position>" ++ usage_position ++ ") + " ++
-        "(SELECT coalesce(sum(" ++ history_floor_domain.item_bytes_sql ++ "),0) FROM model_output_item i " ++
+    const t0 = "(SELECT coalesce(sum(CASE WHEN e.entry_kind=1 THEN " ++ input_domain.messageBytesSql("authored") ++ " ELSE c.byte_length END),0) FROM conversation_entry e " ++
+        "LEFT JOIN message_admission m ON m.admission_id=e.source_admission_id AND m.session_ref=e.session_ref LEFT JOIN core_command authored ON authored.command_key=m.command_key " ++
+        "LEFT JOIN content c ON c.content_id=e.content_id " ++
+        "WHERE e.session_ref=" ++ session ++ " AND e.entry_kind IN (1,2,4) AND e.session_position>" ++ usage_position ++ ")";
+    const t1 = "(SELECT coalesce(sum(" ++ history_floor_domain.item_bytes_sql ++ "),0) FROM model_output_item i " ++
         "WHERE i.session_ref=" ++ session ++ " AND i.session_position>=max(" ++ usage_position ++ "+1,coalesce((SELECT max(anchor.session_position) " ++
         "FROM model_operation b @index(model_operation_compaction_bases) JOIN model_output_item anchor ON anchor.operation_id=b.operation_id AND anchor.session_ref=b.session_ref " ++
-        "WHERE b.session_ref=" ++ session ++ " AND b.purpose=1 AND " ++ store_schema.resolutionIs("b.resolution_code", .compacted) ++ " AND b.admission_position=" ++ frontier ++ " AND anchor.item_kind=4),0))) + " ++
-        "(SELECT coalesce(sum(c.byte_length),0) FROM model_operation o @index(model_operation_context_history) " ++
+        "WHERE b.session_ref=" ++ session ++ " AND b.purpose=1 AND " ++ store_schema.resolutionIs("b.resolution_code", .compacted) ++ " AND b.admission_position=" ++ frontier ++ " AND anchor.item_kind=4),0)))";
+    const t2 = "(SELECT coalesce(sum(c.byte_length),0) FROM model_operation o @index(model_operation_context_history) " ++
         "CROSS JOIN model_tool_call tool_call ON tool_call.operation_id=o.operation_id AND tool_call.session_ref=o.session_ref " ++
         "JOIN content c ON c.content_id=tool_call.rejection_content_id WHERE o.session_ref=" ++ session ++ " AND o.admission_position>=" ++ result_admission ++ " " ++
-        "AND " ++ store_schema.oneOf("o.resolution_code", &accepted_resolutions) ++ " AND tool_call.acceptance_position>" ++ later ++ ") + " ++
-        "(SELECT coalesce(sum(c.byte_length),0) FROM action_operation a JOIN content c ON c.content_id=a.resolution_content_id " ++
-        "WHERE a.session_ref=" ++ session ++ " AND a.acceptance_position>" ++ later ++ ") + " ++
-        "(SELECT coalesce(sum(c.byte_length),0) FROM message_admission m JOIN content c ON c.content_id=m.content_id " ++
-        "WHERE m.session_ref=" ++ session ++ " AND " ++ runnable_eligibility_sql ++ ") + " ++
-        "(SELECT coalesce(sum(c.byte_length),0) FROM message_admission m JOIN message_skill k ON k.admission_id=m.admission_id " ++
-        "JOIN content c ON c.content_id=k.content_id WHERE m.session_ref=" ++ session ++ " AND " ++ runnable_eligibility_sql ++ ") + " ++
-        "(SELECT coalesce(sum(c.byte_length),0) FROM session_revision r JOIN content c ON c.content_id=r.instructions_content_id " ++
+        "AND " ++ store_schema.oneOf("o.resolution_code", &accepted_resolutions) ++ " AND tool_call.acceptance_position>" ++ later ++ ")";
+    const t3 = "(SELECT coalesce(sum(c.byte_length),0) FROM action_operation a JOIN content c ON c.content_id=a.resolution_content_id " ++
+        "WHERE a.session_ref=" ++ session ++ " AND a.acceptance_position>" ++ later ++ ")";
+    const t4 = "(SELECT coalesce(sum(" ++ input_domain.messageBytesSql("authored") ++ "),0) FROM message_admission m JOIN core_command authored ON authored.command_key=m.command_key " ++
+        "WHERE m.session_ref=" ++ session ++ " AND " ++ runnable_eligibility_sql ++ ")";
+    const t5 = "(SELECT coalesce(sum(c.byte_length),0) FROM message_admission m JOIN message_skill k ON k.admission_id=m.admission_id " ++
+        "JOIN content c ON c.content_id=k.content_id WHERE m.session_ref=" ++ session ++ " AND " ++ runnable_eligibility_sql ++ ")";
+    const t6 = "(SELECT coalesce(sum(c.byte_length),0) FROM session_revision r JOIN content c ON c.content_id=r.instructions_content_id " ++
         "WHERE r.session_ref=" ++ session ++ " AND r.revision>coalesce((SELECT max(e.source_revision) FROM conversation_entry e WHERE e.session_ref=" ++ session ++ "),1) " ++
-        "AND r.instructions_updated=1) + " ++
-        "(SELECT coalesce(sum(c.byte_length),0) FROM session_revision r JOIN content c ON c.content_id=r.instructions_content_id " ++
+        "AND r.instructions_updated=1)";
+    const t7 = "(SELECT coalesce(sum(c.byte_length),0) FROM session_revision r JOIN content c ON c.content_id=r.instructions_content_id " ++
         "WHERE r.session_ref=" ++ session ++ " AND r.revision=1 AND " ++ usage_position ++ "=0)";
+    return "((" ++ t0 ++ "+" ++ t1 ++ ")+(" ++ t2 ++ "+" ++ t3 ++ "))+((" ++ t4 ++ "+" ++ t5 ++ ")+(" ++ t6 ++ "+" ++ t7 ++ "))";
 }
 
 /// The raw newest base, before model compatibility is decided by Recipe.select.
@@ -647,7 +651,7 @@ fn selectedBeforeSql(comptime ahead: []const u8) []const u8 {
 /// bound: the selection's count.
 const project_messages = rsql.Write(.{
     .sql = entry_columns ++ "SELECT m.session_ref," ++ lastOrdinalSql("@session(?1)") ++ "+row_number() OVER (ORDER BY m.admission_id)+" ++ prior_skills_sql ++ "," ++
-        "?3+row_number() OVER (ORDER BY m.admission_id)-1+" ++ prior_skills_sql ++ ",1,?2,m.admission_id,NULL,NULL,m.content_id,@now " ++
+        "?3+row_number() OVER (ORDER BY m.admission_id)-1+" ++ prior_skills_sql ++ ",1,?2,m.admission_id,NULL,NULL,NULL,@now " ++
         "FROM message_admission m WHERE m.session_ref=@session(?1) AND m.turn_id=?2 AND m.admission_id>=?4 ORDER BY m.admission_id",
     .Args = struct { session: rsql.SessionHead, turn_id: u64, position_base: u64, first_admission: u64 },
     .expect = .{ .counted = .{ .otherwise = error.ProjectionFailed } },

@@ -1226,13 +1226,18 @@ pub noinline fn queueConfiguredCommand(
     a: anytype,
     applied: *const Applied,
     key: []const u8,
-    kind: cli_value.CommandKind,
+    kind: command_domain.NonMessageKind,
     digest: *const [32]u8,
     primary_content_id: ?u64,
     secondary_content_id: ?u64,
     answer: *const StoredAnswer,
 ) !void {
     try command_domain.queueCommand(a, key, kind, applied.session.slice(), digest, primary_content_id, secondary_content_id, answer);
+    try queueConfiguredRevision(a, applied, key);
+}
+
+/// Saves the revision after its owning command has been queued.
+pub fn queueConfiguredRevision(a: anytype, applied: *const Applied, key: []const u8) !void {
     a.write(insert_revision, .{ .session = applied.head, .command_key = key, .instructions_updated = applied.instructions_updated, .effort_choice = applied.changes.contains(.model) or applied.changes.contains(.reasoning_effort) });
     if (applied.changes.count() == 0) return;
     const position = try (try a.positions(applied.head)).take(1);

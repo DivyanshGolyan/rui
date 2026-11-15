@@ -325,8 +325,18 @@ fn MessageCommandOf(comptime Custody: type) type {
         }
 
         pub fn semanticDigest(self: *const MessageCommand) [32]u8 {
+            return self.inputDigest(null);
+        }
+
+        /// Internal typed input uses the same command authority. One Text
+        /// preserves v4 exactly; compound identity binds its ordered parts.
+        pub fn semanticDigestForInput(self: *const MessageCommand, input: @import("input_parts.zig").Reference) [32]u8 {
+            return self.inputDigest(input);
+        }
+
+        fn inputDigest(self: *const MessageCommand, input: ?@import("input_parts.zig").Reference) [32]u8 {
             var hash = std.crypto.hash.sha2.Sha256.init(.{});
-            hashField(&hash, "rui/core/message/v4");
+            hashField(&hash, if (input != null and input.? == .parts) "rui/core/message/parts/v1" else "rui/core/message/v4");
             hashField(&hash, self.session.slice());
             hash.update(&.{@intFromBool(self.sender != null)});
             if (self.sender) |sender| {
@@ -335,7 +345,15 @@ fn MessageCommandOf(comptime Custody: type) type {
             }
             hash.update(&.{@intFromBool(self.sender_handle != null)});
             if (self.sender_handle) |handle| hashField(&hash, handle.slice());
-            hashContent(&hash, &self.text);
+            if (input) |reference| switch (reference) {
+                .text => |text| hashContentIdentity(&hash, .value, text.length, &text.digest),
+                .parts => |ordered| {
+                    var count: [8]u8 = undefined;
+                    std.mem.writeInt(u64, &count, ordered.count, .big);
+                    hash.update(&count);
+                    hash.update(&ordered.digest);
+                },
+            } else hashContent(&hash, &self.text);
             if (self.configuration) |*configuration| {
                 // The creation's own digest covers its capability condition.
                 hashField(&hash, "initial-configuration");
@@ -452,11 +470,22 @@ fn hashOptional(hash: *std.crypto.hash.sha2.Sha256, field: anytype) void {
 }
 
 fn hashContent(hash: *std.crypto.hash.sha2.Sha256, field: anytype) void {
-    hash.update(&.{@backingInt(field.state)});
-    if (field.state == .value) {
+    hashContentIdentity(hash, field.state, field.length, &field.digest);
+}
+
+fn hashContentIdentity(hash: *std.crypto.hash.sha2.Sha256, state: FieldState, size: u64, digest: *const [32]u8) void {
+    hash.update(&.{@backingInt(state)});
+    if (state == .value) {
         var length: [8]u8 = undefined;
-        std.mem.writeInt(u64, &length, field.length, .big);
+        std.mem.writeInt(u64, &length, size, .big);
         hash.update(&length);
-        hash.update(&field.digest);
+        hash.update(digest);
     }
 }
+
+const TestCustody = struct {
+    pub const File = struct {};
+    pub const Budget = struct {};
+    pub const Io = void;
+    pub fn release(_: ?File, _: ?Budget, _: u64, _: Io) void {}
+};

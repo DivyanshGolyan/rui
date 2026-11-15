@@ -427,8 +427,8 @@ test "session message writer covers peer message_agent start_agent and ending wi
                     try std.testing.expect(commits.calls[0].from_peer);
                     try std.testing.expectEqualStrings(receiver.slice(), commits.calls[0].session.slice());
                 }
-                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission m JOIN content c ON c.content_id=m.content_id WHERE m.command_key=?1 AND m.session_ref=?2 AND m.sender_session_ref=?3 AND m.sender_position=?4 AND c.digest=?5", .{ key, receiver.slice(), sender.slice(), sender_position, store_testing.Blob{ .bytes = &protocol.contentDigest(text) } }));
-                const content_id = try store_testing.queryU64(&storage, "SELECT content_id FROM message_admission WHERE command_key=?1", .{key});
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission m JOIN input_part p ON p.command_key=m.command_key AND p.ordinal=0 AND p.part_kind=1 JOIN content c ON c.content_id=p.content_id WHERE m.command_key=?1 AND m.session_ref=?2 AND m.sender_session_ref=?3 AND m.sender_position=?4 AND m.content_id IS NULL AND c.digest=?5", .{ key, receiver.slice(), sender.slice(), sender_position, store_testing.Blob{ .bytes = &protocol.contentDigest(text) } }));
+                const content_id = try store_testing.queryU64(&storage, "SELECT content_id FROM input_part WHERE command_key=?1 AND ordinal=0 AND part_kind=1", .{key});
                 try expectContent(&storage, try testingContentReference(&storage, content_id), text);
                 // Positions belong to the receiving Session, not the sender.
                 try std.testing.expectEqual(try store_testing.queryU64(&storage, "SELECT next_position-1 FROM session WHERE session_ref=?1", .{receiver.slice()}), try store_testing.queryU64(&storage, "SELECT admission_position FROM message_admission WHERE command_key=?1", .{key}));
@@ -540,11 +540,11 @@ test "core call writes roll back on injected faults and save every bound skill" 
                 try expectContent(&storage, try testingContentReference(&storage, result_id), expected.result);
             }
 
-            // A call whose command key is taken sends nothing and fails.
+            // A non-Message command already owns the key; the call sends nothing.
             const taken = (try storage.nextCoreWork()).?.action;
             var key_buffer: [128]u8 = undefined;
             const key = try std.fmt.bufPrint(&key_buffer, "rui.core/message_agent/{d}", .{taken.binding.action_id});
-            try store_testing.exec(&storage, "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) VALUES(?1,2,?2,?3,1,'',0,0,1000000)", .{ key, receiver.slice(), store_testing.Blob{ .bytes = &protocol.contentDigest("taken") } });
+            try store_testing.exec(&storage, "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) VALUES(?1,1,?2,?3,1,'',0,0,1000000)", .{ key, receiver.slice(), store_testing.Blob{ .bytes = &protocol.contentDigest("taken") } });
             try std.testing.expectEqual(command_domain.AgentDelivery.failed, try storage.deliverAgentMessage(taken.binding, receiver.slice(), "hello", .{}));
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE session_ref=?1", .{receiver.slice()}));
             const taken_id = try store_testing.queryU64(&storage, "SELECT resolution_content_id FROM action_operation WHERE action_id=?1 AND resolution_code='failed'", .{taken.binding.action_id});
@@ -949,15 +949,18 @@ test "received and sent Activity reject disagreement with their accepted Message
                     const request: protocol.ActivityPage = .{ .session = if (sent) sender else receiver, .kinds = if (sent) .initOne(.sent) else .initOne(.received) };
                     const page = try store_core.activityPageForTesting(&storage, request);
                     try std.testing.expectEqual(@as(usize, 1), page.count);
-                    const id = try store_testing.queryU64(&storage, "SELECT content_id FROM message_admission WHERE session_ref=?1", .{receiver.slice()});
+                    const id = try store_testing.queryU64(&storage, "SELECT p.content_id FROM input_part p JOIN message_admission m ON m.command_key=p.command_key WHERE m.session_ref=?1 AND p.ordinal=0", .{receiver.slice()});
                     try expectContent(&storage, try testingContentReference(&storage, id), original);
                     try std.testing.expect(!storage.isFenced());
                     switch (damage) {
-                        .kind => try store_testing.exec(&storage, "UPDATE core_command SET kind=1 WHERE command_key=(SELECT command_key FROM message_admission WHERE session_ref=?1)", .{receiver.slice()}),
+                        .kind => try store_testing.withoutForeignKeys(&storage, "UPDATE core_command SET kind=1,input_part_count=NULL,input_reference_length=NULL,input_reference_digest=NULL WHERE command_key=(SELECT command_key FROM message_admission WHERE session_ref=?1)", .{receiver.slice()}),
                         .accepted => try store_testing.exec(&storage, "UPDATE core_command SET accepted=0 WHERE command_key=(SELECT command_key FROM message_admission WHERE session_ref=?1)", .{receiver.slice()}),
                         .target => try store_testing.exec(&storage, "UPDATE core_command SET target=?1 WHERE command_key=(SELECT command_key FROM message_admission WHERE session_ref=?2)", .{ sender.slice(), receiver.slice() }),
-                        .content => try store_testing.exec(&storage, "UPDATE core_command SET primary_content_id=(SELECT content_id FROM message_admission WHERE command_key='source-check-task') WHERE command_key=(SELECT command_key FROM message_admission WHERE session_ref=?1)", .{receiver.slice()}),
-                        .missing_content => try store_testing.exec(&storage, "UPDATE core_command SET primary_content_id=NULL WHERE command_key=(SELECT command_key FROM message_admission WHERE session_ref=?1)", .{receiver.slice()}),
+                        .content => {
+                            const replacement = try store_testing.queryU64(&storage, "SELECT content_id FROM input_part WHERE command_key='source-check-task' AND ordinal=0", .{});
+                            try store_testing.exec(&storage, "UPDATE input_part SET content_id=?1 WHERE command_key=(SELECT command_key FROM message_admission WHERE session_ref=?2) AND ordinal=0", .{ replacement, receiver.slice() });
+                        },
+                        .missing_content => try store_testing.withoutForeignKeys(&storage, "DELETE FROM content WHERE content_id=(SELECT content_id FROM input_part WHERE command_key=(SELECT command_key FROM message_admission WHERE session_ref=?1) AND ordinal=0)", .{receiver.slice()}),
                         .missing_command => try store_testing.withoutForeignKeys(&storage, "DELETE FROM core_command WHERE command_key=(SELECT command_key FROM message_admission WHERE session_ref=?1)", .{receiver.slice()}),
                     }
                     try std.testing.expectError(error.CorruptStore, store_core.activityPageForTesting(&storage, request));

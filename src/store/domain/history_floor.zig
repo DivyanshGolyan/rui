@@ -19,6 +19,7 @@
 //! counted. The newest unit is always kept: it is the work in hand.
 
 const std = @import("std");
+const input_domain = @import("input.zig");
 const output_item = @import("../../output_item.zig");
 const model_capability = @import("../../model_capability.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
@@ -153,10 +154,10 @@ pub const item_bytes_sql = "coalesce((SELECT bag.byte_length FROM content bag WH
 /// base (?5) whose output later requests send. A failed call holds nothing,
 /// and a compaction's output is sent only while it is the base, which is kept.
 const units = rsql.Read(.{
-    .sql = "SELECT e.session_position AS start,content.byte_length+coalesce((SELECT sum(body.byte_length) FROM message_skill skill " ++
+    .sql = "SELECT e.session_position AS start," ++ input_domain.messageBytesSql("authored") ++ "+coalesce((SELECT sum(body.byte_length) FROM message_skill skill " ++
         "JOIN content body ON body.content_id=skill.content_id WHERE skill.admission_id=e.source_admission_id),0) AS size FROM model_operation current " ++
         "JOIN conversation_entry e @index(conversation_entry_history) ON e.session_ref=current.session_ref " ++
-        "JOIN content ON content.content_id=e.content_id " ++
+        "JOIN message_admission m ON m.admission_id=e.source_admission_id JOIN core_command authored ON authored.command_key=m.command_key " ++
         "WHERE current.operation_id=?1 AND e.session_position<?2 AND e.session_position>?3 AND e.entry_kind=1 AND e.session_position!=?4 UNION ALL " ++
         "SELECT o.admission_position,(SELECT coalesce(sum(" ++ item_bytes_sql ++ "),0) FROM model_output_item i WHERE i.operation_id=o.operation_id)+" ++
         "coalesce((SELECT sum(result.byte_length) FROM action_operation a JOIN content result ON result.content_id=a.resolution_content_id " ++

@@ -288,6 +288,15 @@ fn RoundOf(comptime R: type, comptime commit: Commit, comptime Guards: type, com
             return r.get().writer.store.configurationReads();
         }
 
+        /// A transition's large metadata shares the existing Entry-owned
+        /// Store scratch. One composite State holds every simultaneously
+        /// live value, including configure reads when the transition creates
+        /// a Session. This leases no additional resident bytes.
+        pub fn scratch(r: *Self, comptime State: type) *State {
+            transacts("leases transition state");
+            return r.get().writer.store.reportScratch(State);
+        }
+
         /// `Access.attemptTimings`.
         pub fn attemptTimings(r: *Self, operation: u64) @import("../model_timing.zig").Values {
             writes("ends no Attempt");

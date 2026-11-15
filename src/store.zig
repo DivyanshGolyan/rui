@@ -130,6 +130,7 @@ test {
     _ = @import("store/tests/action.zig");
     _ = @import("store/tests/activity.zig");
     _ = @import("store/tests/agent.zig");
+    _ = @import("store/tests/input.zig");
     _ = @import("store/tests/compaction.zig");
     _ = @import("store/tests/configuration.zig");
     _ = @import("store/tests/content.zig");

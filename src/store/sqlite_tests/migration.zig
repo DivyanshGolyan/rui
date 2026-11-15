@@ -73,6 +73,90 @@ test "a Store at the migration baseline with its rows takes every migration at o
     try std.testing.expectEqualStrings(fresh_rows.written(), migrated_rows.written());
 }
 
+test "ordered input migration rolls back backfill and preserves accepted bytes and legacy refusal absence across reopen" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const original = "use /skill, not the saved diagnostic";
+    var refused: wire_request.MessageCommand = .{ .text = try testingBytesContent(&tmp, "ordered-legacy-original", original) };
+    defer refused.removeTemporaryContent(io) catch unreachable;
+    try refused.key.set("ordered-legacy-refusal");
+    try refused.session.set("d8mv7p");
+    const semantic_digest = refused.semanticDigest();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    var path_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "{s}/ordered-legacy.sqlite3", .{root});
+    {
+        const raw = try openRaw(path);
+        defer _ = c.sqlite3_close(raw);
+        try sqlite.exec(raw, store_testing.baseline_sqlite_ddl);
+        try sqlite.exec(raw, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
+        try sqlite.exec(raw, store_testing.baseline_rows);
+        inline for (store_schema.migrations) |step| if (step.from < 75) {
+            inline for (step.sqlite) |sql| try sqlite.exec(raw, sql);
+        };
+        const meta = try sqlite.prepare(raw, "INSERT INTO store_meta(meta_key,meta_value) VALUES('format','75'),('store_selector',?1)");
+        defer _ = c.sqlite3_finalize(meta);
+        try sqlite.bindText(meta, 1, root);
+        try sqlite.expectDone(meta);
+        const seed = try sqlite.prepare(raw, "INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,accepted,code,revision,created,command_seq) VALUES('ordered-legacy-refusal',2,'d8mv7p',?1,5,0,'skill_file_unavailable',0,0,1000)");
+        defer _ = c.sqlite3_finalize(seed);
+        try sqlite.bindBlob(seed, 1, &semantic_digest);
+        try sqlite.expectDone(seed);
+        try sqlite.exec(raw, std.fmt.comptimePrint("PRAGMA foreign_keys=ON;PRAGMA legacy_alter_table=OFF;PRAGMA application_id={d};PRAGMA user_version=75", .{store_schema.application_id}));
+        const step = store_schema.migrations[75 - store_schema.migration_baseline];
+        // Fail after the actual complete rebuild, at its immutable certificate CHECK.
+        const bad = step.sqlite[0..step.sqlite.len].* ++ [_][:0]const u8{"UPDATE core_command SET input_reference_digest=NULL WHERE kind=2 AND accepted=1"};
+        try std.testing.expectError(error.SqliteExecFailed, store_schema.migrate(io, raw, root, 75, &.{.{ .from = 75, .sqlite = &bad, .mysql = &.{} }}, null));
+        try std.testing.expectEqual(@as(u32, 75), try sqlite.pragmaInt(raw, "PRAGMA user_version"));
+        try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(raw, "SELECT count(*) FROM sqlite_schema WHERE name='input_part'"));
+        try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(raw, "SELECT count(*) FROM pragma_table_info('core_command') WHERE name='input_part_count'"));
+        try std.testing.expectEqual(@as(u32, 2), try sqlite.pragmaInt(raw, "SELECT count(*) FROM core_command WHERE (command_key='fixture-answer-key' AND primary_content_id=2) OR (command_key='ordered-legacy-refusal' AND primary_content_id=5 AND accepted=0)"));
+    }
+    refused.text.file.?.close(io);
+    refused.text.file = null;
+    try tmp.dir.deleteFile(io, "ordered-legacy-original");
+    for (0..2) |_| {
+        var storage: Store = undefined;
+        try storage.open(io, path, root);
+        defer storage.close() catch unreachable;
+        const input = @import("../domain/input.zig");
+        const accepted = [_]struct { key: []const u8, id: u64, bytes: []const u8 }{
+            .{ .key = "fixture-answer-key", .id = 2, .bytes = "input" },
+            .{ .key = "fixture-ask-message", .id = 6, .bytes = "propose" },
+        };
+        for (accepted) |expected| {
+            var cursor: input.Cursor = undefined;
+            const certificate = try storage.openInput(.{ .message = try protocol.Bounded(protocol.max_key_bytes).from(expected.key) }, &cursor);
+            try std.testing.expect(certificate == .retained);
+            try std.testing.expectEqual(@as(u32, 1), certificate.retained);
+            const part = (try storage.readInputPart(&cursor)).?;
+            try std.testing.expect(part.kind == .text);
+            try std.testing.expectEqual(expected.id, part.content_id);
+            try std.testing.expectEqual(@as(u32, 0), part.ordinal);
+            try std.testing.expectEqual(@as(u64, expected.bytes.len), part.reference.length);
+            try std.testing.expectEqual(protocol.contentDigest(expected.bytes), part.reference.digest);
+            try tests.expectContent(&storage, part.reference, expected.bytes);
+            try std.testing.expect((try storage.readInputPart(&cursor)) == null);
+        }
+        try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, "SELECT count(*) FROM conversation_entry WHERE entry_kind=1 AND content_id IS NULL", .{}));
+        try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM core_command WHERE command_key='fixture-answer-key' AND input_digest=X'f1c556d56340cf43f947a5c7efa143b121b78165d59292dc801d9331b8e7206a' AND primary_content_id IS NULL AND input_part_count=1", .{}));
+        var cursor: input.Cursor = undefined;
+        try std.testing.expect(try storage.openInput(.{ .message = refused.key }, &cursor) == .legacy_unavailable);
+        try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM input_part WHERE command_key=?1", .{refused.key.slice()}));
+        try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM core_command WHERE command_key=?1 AND accepted=0 AND input_part_count=0 AND input_reference_digest IS NULL AND input_reference_length IS NULL AND primary_content_id=5 AND input_digest=?2", .{ refused.key.slice(), store_testing.Blob{ .bytes = &semantic_digest } }));
+        try tests.expectContent(&storage, try tests.testingContentReference(&storage, 5), "hello\nworld");
+        const replay = storage.submitMessageWithModel(&refused, null, .{});
+        try std.testing.expect(replay == .rejected and replay.rejected.replayed);
+        try std.testing.expectEqual(protocol.MessageRejection.skill_file_unavailable, replay.rejected.code);
+        try std.testing.expectEqual(protocol.contentDigest(original), replay.rejected.content.digest);
+        try std.testing.expectEqual(@as(u64, original.len), replay.rejected.content.length);
+        try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM content WHERE digest=?1 AND private=0", .{store_testing.Blob{ .bytes = &refused.text.digest }}));
+        try std.testing.expect(!storage.isFenced());
+    }
+}
+
 test "schema 74 migration deletes a populated Store's wire label, whatever it reads, and preserves its rows" {
     // Format 73 Stores saved wire 16; an unknown label migrates the same way.
     for ([_][]const u8{ "16", "unknown-label" }) |label| {

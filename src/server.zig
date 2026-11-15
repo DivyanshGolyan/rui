@@ -1916,6 +1916,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
         .observe_command => |*command| {
             var observation: store_module.Observed = undefined;
             host.store.observeCommand(command.key.slice(), command.since, &observation) catch |err| {
+                if (err == error.InputPartsNotSupported) return respondStatic(fd, 409, .observation_error, "input_parts_not_supported");
                 fenceDispatch(host, "command observation", err);
                 return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
             };
@@ -1970,6 +1971,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
                     fenceDispatch(host, "session report scratch cleanup", err);
                     return respondStatic(fd, 500, .observation_error, "report_scratch_cleanup_failed");
                 }
+                if (err == error.InputPartsNotSupported) return respondStatic(fd, 409, .observation_error, "input_parts_not_supported");
                 if (host.store.isFenced()) {
                     fenceDispatch(host, "session inspection", err);
                     return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
@@ -1995,6 +1997,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
                     fenceDispatch(host, "Session list scratch cleanup", err);
                     return respondStatic(fd, 500, .observation_error, "report_scratch_cleanup_failed");
                 }
+                if (err == error.InputPartsNotSupported) return respondStatic(fd, 409, .observation_error, "input_parts_not_supported");
                 if (host.store.isFenced()) {
                     fenceDispatch(host, "Session list", err);
                     return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
@@ -2008,6 +2011,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             defer host.allocator.destroy(page);
             host.store.publicConversationPage(command, page) catch |err| switch (err) {
                 error.SessionNotFound, error.InvalidCursor => return respondStatic(fd, 409, .conversation_unavailable, @errorName(err)),
+                error.InputPartsNotSupported => return respondStatic(fd, 409, .conversation_unavailable, "input_parts_not_supported"),
                 else => {
                     fenceDispatch(host, "conversation page", err);
                     return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
@@ -2021,6 +2025,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             defer host.allocator.destroy(page);
             host.store.activityPage(command, page) catch |err| switch (err) {
                 error.SessionNotFound, error.InvalidCursor => return respondStatic(fd, 409, .activity_unavailable, @errorName(err)),
+                error.InputPartsNotSupported => return respondStatic(fd, 409, .activity_unavailable, "input_parts_not_supported"),
                 else => {
                     fenceDispatch(host, "activity page", err);
                     return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
@@ -2033,6 +2038,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             defer host.allocator.destroy(page);
             host.store.searchActivity(command, page) catch |err| switch (err) {
                 error.SessionNotFound, error.InvalidCursor => return respondStatic(fd, 409, .activity_unavailable, @errorName(err)),
+                error.InputPartsNotSupported => return respondStatic(fd, 409, .activity_unavailable, "input_parts_not_supported"),
                 else => {
                     fenceDispatch(host, "activity search", err);
                     return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
@@ -2043,6 +2049,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
         .activity_content => |*command| {
             const location = host.store.openActivityContent(command) catch |err| switch (err) {
                 error.ContentNotFound => return respondStatic(fd, 409, .activity_unavailable, @errorName(err)),
+                error.InputPartsNotSupported => return respondStatic(fd, 409, .activity_unavailable, "input_parts_not_supported"),
                 else => {
                     fenceDispatch(host, "activity content", err);
                     return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
@@ -2145,6 +2152,7 @@ fn deliverConversationContent(host: *Host, fd: std.posix.fd_t, command: protocol
 fn prepareConversationContent(host: *Host, fd: *Reply, command: *const protocol.ConversationContent) !void {
     const location = host.store.openPublicConversationContent(command) catch |err| switch (err) {
         error.ContentNotFound, error.RangeOutOfBounds => return respondStatic(fd, 409, .conversation_unavailable, @errorName(err)),
+        error.InputPartsNotSupported => return respondStatic(fd, 409, .conversation_unavailable, "input_parts_not_supported"),
         else => {
             fenceDispatch(host, "conversation content", err);
             return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");

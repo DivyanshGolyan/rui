@@ -30,6 +30,7 @@ const Store = store_core.Store;
 const action_domain = @import("action.zig");
 const configuration_domain = @import("configuration.zig");
 const content_domain = @import("content.zig");
+const input_domain = @import("input.zig");
 const reads_domain = @import("reads.zig");
 const report_domain = @import("report.zig");
 const store_schema = @import("../schema.zig");
@@ -87,7 +88,6 @@ pub const max_permission_decision_bytes = sqlite.maxEnumTagBytes(mutation_answer
 const MessageProjection = struct {
     admission_id: u64,
     command_key: Bounded(128),
-    content_id: i64,
     state: union(enum) {
         pending,
         excluded: Bounded(128),
@@ -114,35 +114,42 @@ const message_sender = rsql.Read(.{
 
 /// A saved Message's admission and the identity of its text.
 const message_replay = rsql.Read(.{
-    .sql = "SELECT m.admission_id,m.session_ref,m.content_id,content.byte_length AS length,content.digest FROM message_admission m " ++
-        "JOIN content ON content.content_id=m.content_id WHERE m.command_key=?1",
+    .sql = "SELECT admission_id,session_ref FROM message_admission WHERE command_key=?1",
     .Args = struct { key: []const u8 },
-    .Row = struct { admission_id: rsql.Positive, session_ref: Bounded(session_id.max_reference_bytes), content_id: rsql.Positive, length: u64, digest: [32]u8 },
+    .Row = struct { admission_id: rsql.Positive, session_ref: Bounded(session_id.max_reference_bytes) },
     .cardinality = .one,
 });
 
-/// Saves the peer's command before queuing its admission; the caller
-/// then saves the skills its text bound (`skills_domain.SavingBound`).
+/// The one writer of a Message from another Session. Heads were read (or
+/// created) by the caller in this transaction; admission never adds a round.
+/// The caller then saves the skills its text bound
+/// (`skills_domain.SavingBound`), a round each.
 fn admitFromSession(
     a: anytype,
     sender: *const rsql.SessionHead,
     target: *const rsql.SessionHead,
     key: []const u8,
-    content_id: u64,
+    reference: input_domain.Reference,
     digest: *const [32]u8,
     configured: ?*const configuration_domain.Applied,
     answer: *const StoredAnswer,
 ) !u64 {
-    try queueMessageCommand(a, target, key, content_id, digest, configured, answer);
-    return sourced_input.queue(a, target, .{ .peer = .{ .key = key, .session = sender.* } }, content_id);
+    try queueMessageCommand(a, target, key, reference, digest, configured, answer);
+    return sourced_input.queue(a, target, .{ .peer = .{ .key = key, .session = sender.* } });
 }
 
-fn queueMessageCommand(a: anytype, target: *const rsql.SessionHead, key: []const u8, content_id: u64, digest: *const [32]u8, configured: ?*const configuration_domain.Applied, answer: *const StoredAnswer) !void {
-    if (configured) |applied| {
-        try configuration_domain.queueConfiguredCommand(a, applied, key, .message, digest, content_id, null, answer);
-    } else {
-        try queueCommand(a, key, .message, &target.ref, digest, content_id, null, answer);
-    }
+fn queueMessageCommand(a: anytype, target: *const rsql.SessionHead, key: []const u8, reference: input_domain.Reference, digest: *const [32]u8, configured: ?*const configuration_domain.Applied, answer: *const StoredAnswer) !void {
+    try queueMessageRecord(a, key, &target.ref, reference, digest, null, answer);
+    if (configured) |applied| try configuration_domain.queueConfiguredRevision(a, applied, key);
+}
+
+fn queueMessageRecord(a: anytype, key: []const u8, target: []const u8, reference: input_domain.Reference, digest: *const [32]u8, diagnostic: ?u64, answer: *const StoredAnswer) !void {
+    if (input_domain.referenceCount(reference) == 0 or (answer.accepted and diagnostic != null)) return error.ContentChanged;
+    try queueSavedCommand(a, key, .message, target, digest, diagnostic, null, reference, answer);
+}
+
+fn messageProducer(key: []const u8) !input_domain.Producer {
+    return .{ .message = try Bounded(idempotency_key.max_bytes).from(key) };
 }
 
 fn sentDigest(comptime domain: []const u8, content_digest: *const [32]u8) [32]u8 {
@@ -213,6 +220,7 @@ pub const SubmitMessage = struct {
     pub const rounds = transition.rounds(.{
         .facts = .{.always},
         .replay = .{.branch},
+        .replay_part = .{.paged},
         .model = .{.branch},
         .saved_tools = .{.branch},
         .saved_loaded = .{.branch},
@@ -222,6 +230,7 @@ pub const SubmitMessage = struct {
         .catalog = .{.branch},
         .text = .{.branch},
         .failure = .{.branch},
+        .part = .{.paged},
         .skill = .{.paged},
     });
     pub const round_budget = 2;
@@ -235,12 +244,13 @@ pub const SubmitMessage = struct {
         /// This Store's selector, which a peer sender's address names.
         selector: []const u8,
         command: *const content_custody.MessageCommand,
+        authored: input_domain.Input,
         committed: ?MessageCommitted,
         initial_skills: ?*const skills_domain.Initial,
         captured: ?*const skills_domain.MessageCapture,
         /// Where the answer goes, in the caller's frame: a step's result
         /// stays one word wide.
-        reply: *MessageReply,
+        reply: *input_domain.MessageReply,
     };
     pub const Result = void;
     pub const Ordinary = store_core.Ordinary.none;
@@ -248,8 +258,6 @@ pub const SubmitMessage = struct {
     pub const Declined = error{};
 
     input: Input,
-    /// A plain Message's reads; a creation's are its configure reads'.
-    plain: MessageReads = undefined,
     target: target_session.Result = null,
     /// A creation's configure reads, leased from the Store's scratch.
     creation: *configuration_domain.ConfigurationReads = undefined,
@@ -271,12 +279,23 @@ pub const SubmitMessage = struct {
     } = undefined,
     /// The admission the commit saves, or 0 for a refusal.
     admission_id: u64 = 0,
+    saving: *input_domain.Saving = undefined,
+    text_ready: bool = false,
+    replay_cursor: *input_domain.Cursor = undefined,
+    replay_accepted: bool = false,
 
     pub fn step(t: *SubmitMessage, r: *transition.Round(SubmitMessage), ran: ?rounds.At) !transition.Next(SubmitMessage) {
         const at = ran orelse return t.start(r);
         switch (at) {
-            .facts => return t.decide(r),
-            .replay => return t.replayed(),
+            .facts => {
+                t.text_ready = t.input.command.configuration == null and t.input.authored == .text;
+                return t.decide(r);
+            },
+            .replay => return t.replayed(r),
+            .replay_part => {
+                _ = try t.replay_cursor.next();
+                return t.replayParts(r);
+            },
             .model, .saved_tools, .saved_loaded, .loaded_source, .loaded => {
                 if (try t.validate(r, switch (at) {
                     inline .model, .saved_tools, .saved_loaded, .loaded_source, .loaded => |tag| @field(configuration_domain.ValidationRound, @tagName(tag)),
@@ -287,11 +306,16 @@ pub const SubmitMessage = struct {
             .creation => return t.apply(r, .creation),
             .catalog => return t.apply(r, .catalog),
             .text => {
+                t.text_ready = true;
                 const applied = &t.creation.applied;
                 t.head = applied.head;
                 return t.admit(r, applied);
             },
             .failure => return t.rejectDiagnosed(r),
+            .part => {
+                try t.saving.save(r, t.input.io, r.faults());
+                return t.saveParts(r);
+            },
             .skill => return t.saveSkill(r),
         }
     }
@@ -308,27 +332,40 @@ pub const SubmitMessage = struct {
     }
 
     fn reads(t: *SubmitMessage) *MessageReads {
-        return if (t.input.command.configuration != null) &t.creation.message else &t.plain;
+        return &t.creation.message;
     }
 
     // The steps that run a round's work are noinline, so none sits under
     // another on the engine thread's chain.
+    const Scratch = struct {
+        creation: configuration_domain.ConfigurationReads,
+        saving: input_domain.Saving,
+        replay: input_domain.Cursor,
+    };
+
     noinline fn start(t: *SubmitMessage, r: *transition.Round(SubmitMessage)) transition.Next(SubmitMessage) {
+        const scratch = r.scratch(Scratch);
+        t.creation = &scratch.creation;
+        t.saving = &scratch.saving;
+        t.replay_cursor = &scratch.replay;
         const command = t.input.command;
         if (command.configuration != null) {
             // Creation's configuration and Message facts have one address in
             // the Store's scratch until this transaction settles.
-            t.creation = r.configurationReads();
             t.creation.* = .{ .next = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } } };
         }
         const message = t.reads();
-        message.* = .{ .digest = command.semanticDigest(), .text = content_domain.sealedIdentity(&command.text) };
+        const reference = t.input.authored.reference();
+        message.* = .{ .digest = command.semanticDigestForInput(reference), .text = if (reference == .text)
+            .{ .length = reference.text.length, .digest = reference.text.digest, .private = false }
+        else
+            undefined };
         readMessage(r, t.input.selector, command, message);
         if (command.configuration) |*configuration| {
             configuration_domain.prepareConfiguration(r, t.input.tools.host_tool_set, "", configuration, t.creation);
         } else {
             readTarget(r, command.session.slice(), &t.target);
-            content_domain.lookup(r, &message.text);
+            if (t.input.authored == .text) content_domain.lookup(r, &message.text);
         }
         return .{ .round = .facts };
     }
@@ -341,13 +378,11 @@ pub const SubmitMessage = struct {
         switch (try classify(message_admission.Rejection, &message.saved, .message, command.session.slice(), &message.digest)) {
             .fresh => {},
             .conflict => return t.done(.conflict),
-            .rejected => |code| return t.done(.{ .rejected = .{ .replayed = true, .code = code, .content = .{ .length = command.text.length, .digest = command.text.digest } } }),
-            .accepted => |existing| {
-                _ = existing.primary_content_id orelse return error.CorruptStore;
-                t.later = .{ .replay = undefined };
-                r.read(message_replay, .{ .key = command.key.slice() }, &t.later.replay);
-                return .{ .round = .replay };
+            .rejected => |code| {
+                t.rejection = code;
+                return t.openReplay(r, false);
             },
+            .accepted => return t.openReplay(r, true),
         }
         t.sender_valid = senderValid(command, t.input.selector, message.sender);
         if (command.configuration != null) return t.decideCreation(r);
@@ -376,27 +411,44 @@ pub const SubmitMessage = struct {
         return t.admit(r, null);
     }
 
-    /// After `.replay`: the saved admission, which must be the one the
-    /// command saved.
-    noinline fn replayed(t: *SubmitMessage) !transition.Next(SubmitMessage) {
-        const command = t.input.command;
-        const message = t.reads();
-        const existing = switch (try classify(message_admission.Rejection, &message.saved, .message, command.session.slice(), &message.digest)) {
-            .accepted => |existing| existing,
-            else => unreachable,
-        };
-        const row = &t.later.replay;
-        if (row.content_id.get() != existing.primary_content_id.? or !existing.target.eql(row.session_ref.slice())) return error.CorruptStore;
-        return t.done(.{ .accepted = .{
-            .replayed = true,
-            .admission_id = row.admission_id.get(),
-            .content = .{ .length = row.length, .digest = row.digest },
-            .session = existing.target,
-        } });
+    fn openReplay(t: *SubmitMessage, r: *transition.Round(SubmitMessage), accepted: bool) transition.Next(SubmitMessage) {
+        t.replay_accepted = accepted;
+        t.replay_cursor.* = .{ .producer = .{ .message = t.input.command.key } };
+        t.replay_cursor.queueOpen(r);
+        if (accepted) {
+            t.later = .{ .replay = undefined };
+            r.read(message_replay, .{ .key = t.input.command.key.slice() }, &t.later.replay);
+        }
+        return .{ .round = .replay };
+    }
+
+    /// Replay needs no caller byte custody. Its retained sequence, if any,
+    /// is checked through the same canonical reader as history/inspection.
+    fn replayed(t: *SubmitMessage, r: *transition.Round(SubmitMessage)) !transition.Next(SubmitMessage) {
+        const certificate = try t.replay_cursor.opened();
+        if (certificate == .legacy_unavailable) {
+            if (t.replay_accepted) return error.CorruptStore;
+            return t.done(.{ .rejected = .{ .replayed = true, .code = t.rejection, .content = t.input.authored.reference() } });
+        }
+        if (certificate.retained != t.input.authored.count()) return error.CorruptStore;
+        if (t.replay_accepted) {
+            const existing = (try savedAnswer(&t.reads().saved)) orelse return error.CorruptStore;
+            if (!existing.target.eql(t.later.replay.session_ref.slice())) return error.CorruptStore;
+        }
+        return t.replayParts(r);
+    }
+
+    fn replayParts(t: *SubmitMessage, r: *transition.Round(SubmitMessage)) !transition.Next(SubmitMessage) {
+        if (try t.replay_cursor.queueNext(r)) return .{ .round = .replay_part };
+        const actual = try t.replay_cursor.reference();
+        if (!std.meta.eql(actual, t.input.authored.reference())) return error.CorruptStore;
+        if (!t.replay_accepted) return t.done(.{ .rejected = .{ .replayed = true, .code = t.rejection, .content = actual } });
+        const existing = (try savedAnswer(&t.reads().saved)) orelse return error.CorruptStore;
+        return t.done(.{ .accepted = .{ .replayed = true, .admission_id = t.later.replay.admission_id.get(), .content = actual, .session = existing.target } });
     }
 
     /// Answers `reply` without writing.
-    fn done(t: *SubmitMessage, reply: MessageReply) transition.Next(SubmitMessage) {
+    fn done(t: *SubmitMessage, reply: input_domain.MessageReply) transition.Next(SubmitMessage) {
         t.input.reply.* = reply;
         return .{ .done = {} };
     }
@@ -463,8 +515,12 @@ pub const SubmitMessage = struct {
             } },
             .accepted => {},
         }
-        content_domain.lookup(r, &t.creation.message.text);
-        return .{ .round = .text };
+        if (t.input.authored == .text) {
+            content_domain.lookup(r, &t.creation.message.text);
+            return .{ .round = .text };
+        }
+        t.head = t.creation.applied.head;
+        return t.admit(r, &t.creation.applied);
     }
 
     /// A refusal; one with a diagnostic looks its row up in `.failure`.
@@ -483,13 +539,12 @@ pub const SubmitMessage = struct {
         const message = t.reads();
         t.answer = .{ .accepted = false };
         try t.answer.code.set(@tagName(t.rejection));
-        try queueCommand(r, command.key.slice(), .message, command.session.slice(), &message.digest, outcome_id, null, &t.answer);
+        try queueMessageRecord(r, command.key.slice(), command.session.slice(), t.input.authored.reference(), &message.digest, outcome_id, &t.answer);
         if (command.sender != null and t.sender_valid) {
             const sender = message.sender.?.session;
             r.write(reject_sent, .{ .key = command.key.slice(), .sender = sender, .position = try (try r.positions(sender)).take(1) });
         }
-        if (r.faults().before_commit) return error.InjectedCommitFailure;
-        return .commit;
+        return t.beginParts(r);
     }
 
     /// After the text's lookup round: imports the text and saves the
@@ -502,17 +557,32 @@ pub const SubmitMessage = struct {
     ) !transition.Next(SubmitMessage) {
         const command = t.input.command;
         const message = t.reads();
-        const text_id = try content_domain.importSealed(r, t.input.io, &command.text, &message.text, r.faults());
         t.answer = .{ .accepted = true };
         const admission_id = if (command.sender != null)
-            try admitFromSession(r, &message.sender.?.session, &t.head, command.key.slice(), text_id, &message.digest, configured, &t.answer)
+            try admitFromSession(r, &message.sender.?.session, &t.head, command.key.slice(), t.input.authored.reference(), &message.digest, configured, &t.answer)
         else person: {
-            try queueMessageCommand(r, &t.head, command.key.slice(), text_id, &message.digest, configured, &t.answer);
-            break :person try sourced_input.queue(r, &t.head, .{ .person = command.key.slice() }, text_id);
+            try queueMessageCommand(r, &t.head, command.key.slice(), t.input.authored.reference(), &message.digest, configured, &t.answer);
+            break :person try sourced_input.queue(r, &t.head, .{ .person = command.key.slice() });
         };
         t.later = .{ .skills = .{ .admission_id = admission_id, .bound = message.bound } };
         t.admission_id = admission_id;
-        return t.saveSkills(r);
+        return t.beginParts(r);
+    }
+
+    fn beginParts(t: *SubmitMessage, r: *transition.Round(SubmitMessage)) !transition.Next(SubmitMessage) {
+        t.saving.init(t.input.authored, .{ .message = t.input.command.key });
+        if (t.text_ready) {
+            t.saving.foundText(t.reads().text);
+            try t.saving.save(r, t.input.io, r.faults());
+        }
+        return t.saveParts(r);
+    }
+
+    fn saveParts(t: *SubmitMessage, r: *transition.Round(SubmitMessage)) !transition.Next(SubmitMessage) {
+        if (try t.saving.lookupNext(r)) return .{ .round = .part };
+        if (t.answer.accepted) return t.saveSkills(r);
+        if (r.faults().before_commit) return error.InjectedCommitFailure;
+        return .commit;
     }
 
     /// A `.skill` round for the next bound skill, or the commit once every
@@ -538,16 +608,15 @@ pub const SubmitMessage = struct {
     pub fn committed(t: *SubmitMessage) Result {
         const command = t.input.command;
         if (t.admission_id == 0) {
-            t.input.reply.* = .{ .rejected = .{ .replayed = false, .code = t.rejection, .content = .{ .length = command.text.length, .digest = command.text.digest } } };
+            t.input.reply.* = .{ .rejected = .{ .replayed = false, .code = t.rejection, .content = t.input.authored.reference() } };
             return;
         }
-        const message = t.reads();
         t.input.reply.* = .{
             .accepted = .{
                 .replayed = false,
                 .admission_id = t.admission_id,
                 // The text's row was found or written under exactly this identity.
-                .content = .{ .length = message.text.length, .digest = message.text.digest },
+                .content = t.input.authored.reference(),
                 .session = if (command.configuration != null) t.creation.applied.session else command.session,
             },
         };
@@ -616,6 +685,7 @@ pub const DeliverAgentMessage = struct {
     saved: saved_command.Result = undefined,
     receiver: target_session.Result = null,
     message: content_domain.Import = undefined,
+    message_saving: *input_domain.Saving = undefined,
     /// The call's result, which its content write reads in place.
     result_buffer: [160]u8 = undefined,
     result: []const u8 = &.{},
@@ -626,6 +696,7 @@ pub const DeliverAgentMessage = struct {
     pub fn step(t: *DeliverAgentMessage, r: *transition.Round(DeliverAgentMessage), ran: ?rounds.At) !transition.Next(DeliverAgentMessage) {
         const binding = t.input.binding;
         const at = ran orelse {
+            t.message_saving = r.scratch(input_domain.Saving);
             t.key = agentMessageKey(&t.key_buffer, binding.action_id);
             const names: action_domain.CoreNames = .of();
             r.read(action_domain.core_facts, names.args(.{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id }), &t.facts);
@@ -643,9 +714,11 @@ pub const DeliverAgentMessage = struct {
                 if (!t.delivered) return t.resolve(r);
                 const receiver = &t.receiver.?;
                 if (receiver.archive_state == .archived) r.write(clear_archive, .{ .session = receiver.session });
-                const text_id = try content_domain.importBytes(r, &t.message, t.input.text);
                 const digest = sentDigest("rui/core/message_agent/v1", &content_string.digest(t.input.text));
-                const admission_id = try admitFromSession(r, &t.facts.?.session, &receiver.session, t.key, text_id, &digest, null, &.{ .accepted = true });
+                const admission_id = try admitFromSession(r, &t.facts.?.session, &receiver.session, t.key, .{ .text = .{ .length = t.message.length, .digest = t.message.digest } }, &digest, null, &.{ .accepted = true });
+                t.message_saving.init(.{ .text = .{ .bytes = t.input.text } }, try messageProducer(t.key));
+                t.message_saving.foundText(t.message);
+                try t.message_saving.saveText(r, r.faults());
                 t.skills = .{ .admission_id = admission_id, .bound = boundOf(t.input.captured) };
                 return t.saveSkills(r);
             },
@@ -708,7 +781,7 @@ fn childEndingKey(buffer: *[idempotency_key.max_bytes]u8, turn_id: u64) []const 
 /// The owed ending of `turn_id`: its child's Session, its parent, and how
 /// its Turn ended, with the answer's digest when done or its bounded report.
 const owed_ending_facts = rsql.Read(.{
-    .sql = "SELECT child.session_ref,child.workspace_key,child.next_position,child.parent_ref AS parent,t.outcome_code,t.outcome_content_id,c.digest,CASE WHEN t.outcome_content_id IS NOT NULL AND t.outcome_code<>'completed' THEN @payload(c) ELSE NULL END AS report," ++
+    .sql = "SELECT child.session_ref,child.workspace_key,child.next_position,child.parent_ref AS parent,t.outcome_code,t.outcome_content_id,c.digest,c.byte_length,c.private,CASE WHEN t.outcome_content_id IS NOT NULL AND t.outcome_code<>'completed' THEN @payload(c) ELSE NULL END AS report," ++
         action_domain.ending_stop_sql ++ " FROM session_forward e JOIN turn t ON t.turn_id=e.source_id " ++
         "JOIN session child ON child.session_ref=t.session_ref LEFT JOIN content c ON c.content_id=t.outcome_content_id WHERE e.source_id=?1 AND e.message_delivered=0",
     .Args = struct { turn_id: u64 },
@@ -718,6 +791,8 @@ const owed_ending_facts = rsql.Read(.{
         outcome_code: Bounded(outcome_code.max_bytes),
         outcome_content_id: ?rsql.Positive,
         digest: ?[32]u8,
+        byte_length: ?u64,
+        private: ?bool,
         report: ?Bounded(outcome_code.max_report_bytes),
         stopped: bool,
         quiet: bool,
@@ -783,10 +858,12 @@ pub const DeliverChildEnding = struct {
     text: []const u8 = &.{},
     receiver: target_session.Result = null,
     message: content_domain.Import = undefined,
+    message_saving: *input_domain.Saving = undefined,
     skills: skills_domain.SavingBound = .{},
 
     pub fn step(t: *DeliverChildEnding, r: *transition.Round(DeliverChildEnding), ran: ?rounds.At) !transition.Next(DeliverChildEnding) {
         const at = ran orelse {
+            t.message_saving = r.scratch(input_domain.Saving);
             t.key = childEndingKey(&t.key_buffer, t.input.turn_id);
             r.read(owed_ending_facts, .{ .turn_id = t.input.turn_id }, &t.input.ending.owed);
             return .{ .round = .owed };
@@ -811,13 +888,21 @@ pub const DeliverChildEnding = struct {
                 const parent = if (t.receiver) |*row| row else return error.CorruptStore;
                 if (parent.archive_state != .active) return finish(r);
                 const found = &t.input.ending.owed.?;
-                const content_id: u64, const content_digest: [32]u8 = switch (t.outcome) {
-                    .completed => |answer| .{ @intCast(answer), found.digest orelse return error.CorruptStore },
-                    else => .{ try content_domain.importBytes(r, &t.message, t.text), content_string.digest(t.text) },
+                const input: input_domain.Input = switch (t.outcome) {
+                    .completed => |answer| completed: {
+                        if (found.private orelse return error.CorruptStore) return error.CorruptStore;
+                        const reference: ContentReference = .{ .length = found.byte_length orelse return error.CorruptStore, .digest = found.digest orelse return error.CorruptStore };
+                        t.message = .{ .length = reference.length, .digest = reference.digest, .private = false, .found = .{ .content_id = .of(@intCast(answer)) } };
+                        break :completed .{ .text = .{ .retained = .{ .content_id = @intCast(answer), .reference = reference } } };
+                    },
+                    else => .{ .text = .{ .bytes = t.text } },
                 };
-                const digest = sentDigest("rui/core/child_ending/v1", &content_digest);
+                const digest = sentDigest("rui/core/child_ending/v1", &t.message.digest);
                 // An owed ending cannot be refused; unreadable skills leave it unbound.
-                const admission_id = try admitFromSession(r, &found.child, &parent.session, t.key, content_id, &digest, null, &.{ .accepted = true });
+                const admission_id = try admitFromSession(r, &found.child, &parent.session, t.key, input.reference(), &digest, null, &.{ .accepted = true });
+                t.message_saving.init(input, try messageProducer(t.key));
+                t.message_saving.foundText(t.message);
+                try t.message_saving.saveText(r, r.faults());
                 t.skills = .{ .admission_id = admission_id, .bound = boundOf(t.input.captured) };
             },
             .skill => try t.skills.save(r, r.faults()),
@@ -917,6 +1002,7 @@ pub const StartAgent = struct {
     /// The created Session's settings, once applied.
     applied: ?*const configuration_domain.Applied = null,
     message: content_domain.Import = undefined,
+    message_saving: *input_domain.Saving = undefined,
     outcome: content_domain.Import = undefined,
     rows: content_domain.Pair = .{ .first = null, .second = null },
     /// The task's answer, whose fields its command write reads in place.
@@ -949,7 +1035,12 @@ pub const StartAgent = struct {
 
     // The steps that run a round's work are noinline, so none sits under
     // another on the engine thread's chain.
+    const Scratch = struct { creation: configuration_domain.ConfigurationReads, message: input_domain.Saving };
+
     noinline fn start(t: *StartAgent, r: *transition.Round(StartAgent)) !transition.Next(StartAgent) {
+        const scratch = r.scratch(Scratch);
+        t.creation = &scratch.creation;
+        t.message_saving = &scratch.message;
         const binding = t.input.binding;
         const configuration = t.input.configuration;
         t.key = std.fmt.bufPrint(&t.key_buffer, "rui.core/start_agent/{d}", .{binding.action_id}) catch unreachable;
@@ -960,7 +1051,6 @@ pub const StartAgent = struct {
         configuration.parent.state = .value;
         try configuration.parent.value.set(t.input.caller);
         // Over 4.6 KB, so held where the Store owns it, as a configure does.
-        t.creation = r.configurationReads();
         t.creation.* = .{ .next = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } } };
         t.creation.attach_parent = t.input.attached;
         configuration_domain.prepareConfiguration(r, t.input.tools.host_tool_set, "", configuration, t.creation);
@@ -1056,10 +1146,12 @@ pub const StartAgent = struct {
         content_domain.foundPair(&t.rows, &t.message, &t.outcome);
         if (r.faults().content_import) return error.InjectedContentImportFailure;
         const task = t.input.task;
-        const text_id = try content_domain.importBytes(r, &t.message, task);
         const digest = sentDigest("rui/core/start_agent/v1", &content_string.digest(task));
         t.answer = .{ .accepted = true, .revision = applied.revision, .created = true };
-        t.admission_id = try admitFromSession(r, &t.facts.?.session, &applied.head, t.key, text_id, &digest, applied, &t.answer);
+        t.admission_id = try admitFromSession(r, &t.facts.?.session, &applied.head, t.key, .{ .text = .{ .length = task.len, .digest = content_string.digest(task) } }, &digest, applied, &t.answer);
+        t.message_saving.init(.{ .text = .{ .bytes = task } }, try messageProducer(t.key));
+        t.message_saving.foundText(t.message);
+        try t.message_saving.saveText(r, r.faults());
         t.later = .{ .skills = .{ .admission_id = t.admission_id, .bound = boundOf(t.input.captured) } };
         return t.saveSkills(r);
     }
@@ -1730,7 +1822,7 @@ pub const StopSession = struct {
         if (rejection) |code| {
             t.answer = .{ .accepted = false };
             try t.answer.code.set(@tagName(code));
-            try queueCommand(r, key, kind, session, &t.input.digest, null, null, &t.answer);
+            try queueCommand(r, key, if (t.input.archive) .session_archive else .session_stop, session, &t.input.digest, null, null, &t.answer);
             if (r.faults().before_commit) return error.InjectedCommitFailure;
             t.reply = .{ .rejected = .{ .replayed = false, .code = code } };
             return .commit;
@@ -1740,7 +1832,7 @@ pub const StopSession = struct {
         const head = &found.session;
         const positions = try r.positions(head.*);
         t.answer = .{ .accepted = true };
-        try queueCommand(r, key, kind, session, &t.input.digest, null, null, &t.answer);
+        try queueCommand(r, key, if (t.input.archive) .session_archive else .session_stop, session, &t.input.digest, null, null, &t.answer);
         const selection = SessionStopSelection{ .selected_turn_id = if (t.turn) |open| open.turn_id.get() else null, .admission_cutoff = found.admission_cutoff };
         const stop_position = try positions.take(1);
         r.write(insert_stop, .{ .key = key, .session = head.*, .selected_turn_id = selection.selected_turn_id, .admission_cutoff = selection.admission_cutoff, .position = stop_position, .parent_caused = found.owed_cause != null });
@@ -2529,8 +2621,8 @@ pub const stop_cutoff = rsql.Read(.{
 });
 
 const insert_command = rsql.Write(.{
-    .sql = "INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq) " ++
-        "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+    .sql = "INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq,input_part_count,input_reference_length,input_reference_digest) " ++
+        "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
     .Args = struct {
         key: []const u8,
         kind: u8,
@@ -2543,6 +2635,9 @@ const insert_command = rsql.Write(.{
         revision: u64,
         created: bool,
         command_seq: u64,
+        input_part_count: ?u32,
+        input_reference_length: ?u64,
+        input_reference_digest: ?[32]u8,
     },
     // A replay was classified first, so the key is free.
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
@@ -2551,7 +2646,16 @@ const insert_command = rsql.Write(.{
 /// Queues saving the command `key` with its `answer`, which, like `key`
 /// and `target`, must outlive the round; `digest` is copied. noinline:
 /// its locals stay off configure's frame on the engine's deepest chain.
-pub noinline fn queueCommand(
+pub const NonMessageKind = enum { configure, session_stop, session_archive, session_pin, model_interruption, permission_decision };
+
+pub noinline fn queueCommand(a: anytype, key: []const u8, kind: NonMessageKind, target: []const u8, digest: *const [32]u8, primary_content_id: ?u64, secondary_content_id: ?u64, answer: *const StoredAnswer) !void {
+    const command_kind: cli_value.CommandKind = switch (kind) {
+        inline else => |tag| @field(cli_value.CommandKind, @tagName(tag)),
+    };
+    try queueSavedCommand(a, key, command_kind, target, digest, primary_content_id, secondary_content_id, null, answer);
+}
+
+noinline fn queueSavedCommand(
     a: anytype,
     key: []const u8,
     kind: cli_value.CommandKind,
@@ -2559,6 +2663,7 @@ pub noinline fn queueCommand(
     digest: *const [32]u8,
     primary_content_id: ?u64,
     secondary_content_id: ?u64,
+    reference: ?input_domain.Reference,
     answer: *const StoredAnswer,
 ) !void {
     a.write(insert_command, .{
@@ -2573,6 +2678,12 @@ pub noinline fn queueCommand(
         .revision = answer.revision,
         .created = answer.created,
         .command_seq = try a.identity(.command_seq),
+        .input_part_count = if (reference) |value| input_domain.referenceCount(value) else null,
+        .input_reference_length = if (reference) |value| switch (value) {
+            .text => |text| text.length,
+            .parts => null,
+        } else null,
+        .input_reference_digest = if (reference) |value| input_domain.referenceDigest(value) else null,
     });
 }
 
@@ -2589,14 +2700,14 @@ const recovery_range_sql =
 /// that excluded it while no Turn did, and the metadata of its text and
 /// of its answer, with its Session's creation time for its progress.
 const message_observation = rsql.Read(.{
-    .sql = "SELECT m.session_ref,m.content_id,m.admission_id,m.command_key,m.turn_id,t.operation_id,o.attempt_ordinal," ++
+    .sql = "SELECT m.session_ref," ++ input_domain.messageTextIdSql("authored") ++ " AS content_id," ++ sourced_input.consistentSql("m", "authored") ++ " AS consistent,m.admission_id,m.command_key,m.turn_id,t.operation_id,o.attempt_ordinal," ++
         "t.outcome_code,t.outcome_content_id,CASE WHEN m.turn_id IS NULL THEN (" ++
         "SELECT stopped.command_key FROM session_stop stopped JOIN core_command stop_command " ++
         "ON stop_command.command_key=stopped.command_key WHERE stopped.session_ref=m.session_ref " ++
         "AND m.admission_id<=stopped.admission_cutoff ORDER BY stop_command.command_seq LIMIT 1) END AS excluding_stop," ++
         "input.byte_length AS input_length,input.digest AS input_digest,answer.byte_length AS answer_length,answer.digest AS answer_digest," ++
         "s.created_at,m.admitted_at,EXISTS(SELECT 1 FROM action_operation a @index(action_operation_indeterminate) WHERE " ++ recovery_range_sql ++ ") AS has_recovery " ++
-        "FROM message_admission m JOIN content input ON input.content_id=m.content_id JOIN session s ON s.session_ref=m.session_ref " ++
+        "FROM message_admission m LEFT JOIN core_command authored ON authored.command_key=m.command_key LEFT JOIN content input ON input.content_id=" ++ input_domain.messageTextIdSql("authored") ++ " JOIN session s ON s.session_ref=m.session_ref " ++
         "LEFT JOIN turn t ON t.turn_id=m.turn_id " ++
         "LEFT JOIN model_operation o ON o.operation_id=t.operation_id " ++
         "LEFT JOIN content answer ON answer.content_id=t.outcome_content_id " ++
@@ -2604,7 +2715,8 @@ const message_observation = rsql.Read(.{
     .Args = struct { key: []const u8 },
     .Row = struct {
         session_ref: Bounded(session_id.max_reference_bytes),
-        content_id: rsql.Positive,
+        content_id: ?rsql.Positive,
+        consistent: bool,
         admission_id: rsql.Positive,
         command_key: Bounded(128),
         turn_id: ?rsql.Positive,
@@ -2613,8 +2725,8 @@ const message_observation = rsql.Read(.{
         outcome_code: ?Bounded(outcome_code.max_bytes),
         outcome_content_id: ?rsql.Positive,
         excluding_stop: ?Bounded(128),
-        input_length: u64,
-        input_digest: [32]u8,
+        input_length: ?u64,
+        input_digest: ?[32]u8,
         answer_length: ?u64,
         answer_digest: ?[32]u8,
         created_at: rsql.Positive,
@@ -2664,10 +2776,13 @@ pub fn observeCommand(a: anytype, key: []const u8, observation: *CommandObservat
             observation.kind = .{ .message = null };
             if (!command.accepted) return;
             const row = message orelse return error.CorruptStore;
-            const content_id = command.primary_content_id orelse return error.CorruptStore;
-            if (!row.session_ref.eql(command.target.slice()) or row.content_id.get() != content_id) return error.CorruptStore;
+            if (!row.consistent or !row.session_ref.eql(command.target.slice()) or command.primary_content_id != null) return error.CorruptStore;
+            if (row.content_id == null) {
+                try input_domain.verify(a, try Bounded(idempotency_key.max_bytes).from(key));
+                return error.InputPartsNotSupported;
+            }
             const queue = try messageQueue(&row);
-            observation.kind.message = .{ .content = .{ .length = row.input_length, .digest = row.input_digest }, .queue = queue, .admitted_at = row.admitted_at.get() };
+            observation.kind.message = .{ .content = .{ .length = row.input_length orelse return error.CorruptStore, .digest = row.input_digest orelse return error.CorruptStore }, .queue = queue, .admitted_at = row.admitted_at.get() };
             if (row.has_recovery) try readRecovery(a, key, &observation.kind.message.?.recovery);
             switch (queue.state) {
                 .queued, .processing => observation.kind.message.?.work = try readMessageWork(a, &work, command.target.slice(), row.created_at.get(), queue.state),
@@ -2855,7 +2970,6 @@ pub fn projectMessage(row: anytype, excluding_stop: ?[]const u8) !MessageProject
     var projection: MessageProjection = .{
         .admission_id = row.admission_id.get(),
         .command_key = row.command_key,
-        .content_id = @intCast(row.content_id.get()),
         .state = .pending,
     };
     const turn_id = row.turn_id orelse {

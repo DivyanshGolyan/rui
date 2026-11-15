@@ -339,6 +339,7 @@ test "provider interpretation retries clean close but not incomplete framing or 
 
 pub fn preparationFailureCode(err: anyerror) []const u8 {
     return switch (err) {
+        error.InputPartsNotSupported => @import("failure_class.zig").ordered_input_not_supported,
         error.ResourceExceeded => "resource_exceeded",
         error.ContinuationUnavailable => "continuation_unavailable",
         error.EncodingDrift => "encoding_drift",
@@ -912,6 +913,7 @@ pub const Preparation = struct {
                     // A skill a Message bound reads as its own user message
                     // right after it, as Codex sends one.
                     .user, .instruction, .skill => {
+                        if (entry.kind == .user and entry.content == null) return error.InputPartsNotSupported;
                         var handles: u8 = 0;
                         if (entry.content) |content| {
                             self.handles[0] = .{ .content = content };

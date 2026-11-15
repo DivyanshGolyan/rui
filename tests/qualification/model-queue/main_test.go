@@ -164,7 +164,8 @@ INSERT INTO model_operation VALUES(1,1,'k7m2qx','provider_http_422');`,
 		t.Run(test.name, func(t *testing.T) {
 			store := t.TempDir()
 			deadline := measurement.NewDeadline(measurement.TeardownAllowance)
-			_, err := sql(deadline, sqliteBinary, store, `CREATE TABLE message_admission(admission_id INTEGER PRIMARY KEY,command_key TEXT,session_ref TEXT,turn_id INTEGER);
+			_, err := sql(deadline, sqliteBinary, store, `CREATE TABLE input_part(input_part_id INTEGER PRIMARY KEY,command_key TEXT,command_kind INTEGER,part_count INTEGER,ordinal INTEGER,content_id INTEGER,part_kind INTEGER);
+CREATE TABLE message_admission(admission_id INTEGER PRIMARY KEY,command_key TEXT,session_ref TEXT,turn_id INTEGER);
 CREATE TABLE turn(turn_id INTEGER PRIMARY KEY,session_ref TEXT,operation_id INTEGER,outcome_code TEXT);
 CREATE TABLE model_operation(operation_id INTEGER PRIMARY KEY,turn_id INTEGER,session_ref TEXT,resolution_code TEXT);
 CREATE TABLE core_command(command_key TEXT,kind INTEGER,target TEXT);
@@ -278,14 +279,14 @@ func TestPopulateFreezesSessionOffer(t *testing.T) {
 			store := t.TempDir()
 			deadline := measurement.NewDeadline(measurement.TeardownAllowance)
 			_, err := sql(deadline, sqliteBinary, store, fmt.Sprintf(`
-CREATE TABLE content(content_id INTEGER PRIMARY KEY,byte_length INTEGER);
-INSERT INTO content VALUES(1,1);
+CREATE TABLE content(content_id INTEGER PRIMARY KEY,byte_length INTEGER,digest BLOB);
+INSERT INTO content VALUES(1,1,zeroblob(32));
 CREATE TABLE tool_set(tool_set_id INTEGER PRIMARY KEY);
 INSERT INTO tool_set VALUES(7),(11);
 CREATE TABLE session(session_ref TEXT PRIMARY KEY,tool_set_id INTEGER NOT NULL REFERENCES tool_set(tool_set_id),loaded_tool_set_id INTEGER REFERENCES tool_set(tool_set_id),next_position INTEGER);
 INSERT INTO session VALUES('k7m2qx',7,%s,1);
-CREATE TABLE core_command(command_key TEXT PRIMARY KEY,kind INTEGER,target TEXT,input_digest BLOB,primary_content_id INTEGER,secondary_content_id INTEGER,accepted INTEGER,code TEXT,revision INTEGER,created INTEGER,command_seq INTEGER);
-INSERT INTO core_command VALUES('template-configure',1,'k7m2qx',zeroblob(32),NULL,NULL,1,'',1,1,1);
+CREATE TABLE core_command(command_key TEXT PRIMARY KEY,kind INTEGER,target TEXT,input_digest BLOB,primary_content_id INTEGER,secondary_content_id INTEGER,accepted INTEGER,code TEXT,revision INTEGER,created INTEGER,command_seq INTEGER,input_part_count INTEGER,input_reference_length INTEGER,input_reference_digest BLOB);
+INSERT INTO core_command VALUES('template-configure',1,'k7m2qx',zeroblob(32),NULL,NULL,1,'',1,1,1,NULL,NULL,NULL);
 CREATE TABLE message_admission(admission_id INTEGER PRIMARY KEY,session_ref TEXT,command_key TEXT,content_id INTEGER,admission_position INTEGER,turn_id INTEGER,admitted_at INTEGER);
 CREATE TABLE turn(turn_id INTEGER PRIMARY KEY,session_ref TEXT,first_admission_id INTEGER,input_cutoff INTEGER,operation_id INTEGER,outcome_code TEXT,outcome_content_id INTEGER,outcome_position INTEGER,outcome_at INTEGER);
 CREATE TABLE model_operation(operation_id INTEGER PRIMARY KEY,turn_id INTEGER,session_ref TEXT,settings_revision INTEGER,input_cutoff INTEGER,admission_position INTEGER,attempt_ordinal INTEGER,retry_due_at_ms INTEGER,resolution_code TEXT,output_reservation INTEGER,resolved_at INTEGER,tool_set_id INTEGER NOT NULL REFERENCES tool_set(tool_set_id),context_window INTEGER NOT NULL CHECK(context_window BETWEEN 0 AND 4294967295));

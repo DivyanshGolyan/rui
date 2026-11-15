@@ -387,6 +387,7 @@ noinline fn readCurrent(a: *ReadAccess, session_ref: []const u8, profile: cli_va
     const permission_mode = try configuration_domain.permissionMode(current.permission_mode);
     const now_ms = std.math.cast(u64, try store_core.readUnixMilliseconds(a.store.io)) orelse return error.IntegerOutOfRange;
     const work = try facts.work.work(current.created_at, now_ms);
+    if (facts.first_row) |*found| try report_domain.verifyFirstMessage(a, found);
     const first_message = if (facts.first_row) |*found| try report_domain.firstMessage(found, admission) else null;
     const selected = if (facts.active.row) |*row| row else if (facts.queued.row) |*row| row else null;
     const values: session_report.Current = .{

@@ -3,6 +3,8 @@
 
 const replay_recipe = @import("../../replay_recipe.zig");
 const std = @import("std");
+const input_domain = @import("input.zig");
+const sourced_input = @import("sourced_input.zig");
 const activity_read = @import("../../activity_read.zig");
 const workspace_path = @import("../../workspace_path.zig");
 const store_path = @import("../../store_path.zig");
@@ -183,6 +185,7 @@ pub const HistoricalView = struct {
     active_tool_group_source_id: ?u64 = null,
     active_tool_group_count: u64 = 0,
     outputs_validated: bool = false,
+    compound_inputs: bool = false,
     output_frontier: ?u64 = null,
     // The selected base's Operation, found with the frontier; zero for none.
     selected_base: u64 = 0,
@@ -406,6 +409,7 @@ pub const HistoricalView = struct {
         std.debug.assert(self.active);
         if (self.settled == out) {
             self.settled = null;
+            if (self.compound_inputs) try self.store.queue().run(verifyHistoricalInputsHeld, .{ self.store, self });
             return;
         }
         try self.allocatePage();
@@ -802,6 +806,13 @@ const historical_settings = rsql.Read(.{
         operation_effort.effectiveSql("o") ++ " AS reasoning_effort,(" ++ operation_effort.emittedSql("o") ++ ") AS effort_update,s.codec,s.codec_options IS NULL AS plain_codec,o.purpose," ++
         "(SELECT first.reasoning_effort FROM model_operation first JOIN session_revision first_revision ON first_revision.session_ref=first.session_ref AND first_revision.revision=first.settings_revision " ++
         "WHERE first.session_ref=o.session_ref AND first_revision.model=r.model ORDER BY first.admission_position LIMIT 1) AS starting_effort," ++ skills_domain.sourcesConsistentSql("o.session_ref", "catalog_required.position<o.admission_position") ++ " AS catalogs_consistent," ++
+        "NOT EXISTS(SELECT 1 FROM conversation_entry required LEFT JOIN message_admission source ON source.admission_id=required.source_admission_id " ++
+        "LEFT JOIN core_command authored ON authored.command_key=source.command_key WHERE required.session_ref=o.session_ref AND required.entry_kind=1 " ++
+        "AND required.session_position<o.admission_position AND (required.content_id IS NOT NULL OR source.session_ref IS NULL OR source.session_ref<>required.session_ref " ++
+        "OR source.turn_id IS NULL OR source.turn_id<>required.turn_id OR NOT (" ++ sourced_input.consistentSql("source", "authored") ++ "))) AS inputs_consistent," ++
+        "EXISTS(SELECT 1 FROM conversation_entry compound_entry JOIN message_admission compound_source ON compound_source.admission_id=compound_entry.source_admission_id " ++
+        "JOIN core_command compound_command ON compound_command.command_key=compound_source.command_key WHERE compound_entry.session_ref=o.session_ref " ++
+        "AND compound_entry.entry_kind=1 AND compound_entry.session_position<o.admission_position AND compound_command.input_reference_length IS NULL) AS compound_inputs," ++
         "instructions.byte_length AS instructions_length,instructions.digest AS instructions_digest,instructions.private AS instructions_private," ++
         pageBytesSql("instructions", "instructions_bytes") ++ "," ++
         "output_schema.byte_length AS output_schema_length,output_schema.digest AS output_schema_digest,output_schema.private AS output_schema_private " ++
@@ -830,6 +841,8 @@ const historical_settings = rsql.Read(.{
         purpose: u8,
         starting_effort: ?model_capability.ReasoningEffort,
         catalogs_consistent: bool,
+        inputs_consistent: bool,
+        compound_inputs: bool,
         instructions_length: u64,
         instructions_digest: [32]u8,
         instructions_private: bool,
@@ -851,7 +864,45 @@ fn settingsOf(a: *ReadAccess, view: *HistoricalView, out: *HistoricalSettings) !
     var read: SettingsRead = .init(view, out);
     read.queue(a);
     try store_access.runNamed(a, .{.{ model_settlement_domain.attempt_standing, error.OperationReadFailed }}, error.CorruptStore);
-    return read.settle();
+    try read.settle();
+    if (view.compound_inputs) try verifyHistoricalInputs(a, view);
+}
+
+// This walk deliberately has no compaction floor: a frozen request must
+// validate every original User source before selection can omit whole units.
+const next_compound_input = rsql.Read(.{
+    .sql = "SELECT e.session_position,m.command_key FROM model_operation o " ++
+        "JOIN conversation_entry e ON e.session_ref=o.session_ref " ++
+        "JOIN message_admission m ON m.admission_id=e.source_admission_id " ++
+        "JOIN core_command c ON c.command_key=m.command_key " ++
+        "WHERE o.operation_id=?1 AND e.entry_kind=1 AND e.session_position>?2 " ++
+        "AND e.session_position<o.admission_position AND c.input_reference_length IS NULL " ++
+        "ORDER BY e.session_position LIMIT 1",
+    .Args = struct { operation: u64, after: u64 },
+    .Row = struct { session_position: rsql.Positive, command_key: Bounded(128) },
+    .cardinality = .optional,
+});
+
+fn verifyHistoricalInputs(a: *ReadAccess, view: *HistoricalView) !void {
+    var after: u64 = 0;
+    while (true) {
+        var next: next_compound_input.Result = null;
+        a.read(next_compound_input, .{ .operation = view.binding.operation_id, .after = after }, &next);
+        try store_access.runNamed(a, .{}, error.CorruptStore);
+        const row = next orelse return;
+        if (row.session_position.get() <= after) return error.CorruptStore;
+        try input_domain.verify(a, row.command_key);
+        after = row.session_position.get();
+    }
+}
+
+fn verifyHistoricalInputsHeld(self: *Store, view: *HistoricalView) !void {
+    const entry = try store_core.enter(self, .none);
+    defer entry.release();
+    _ = try entry.finish(Ordinary.attempt_binding, model_settlement_domain.readAttemptKind(&entry, view.binding));
+    var access: ReadAccess = .open(&entry);
+    defer access.deinit();
+    return entry.finish(error{}, verifyHistoricalInputs(&access, view));
 }
 
 /// Where an admission starts the request of the Attempt it admits: the
@@ -1002,7 +1053,8 @@ pub const SettingsRead = struct {
         const view = read.view;
         const out = read.out;
         const page = view.page.?;
-        if (!row.catalogs_consistent) return error.CorruptStore;
+        if (!row.catalogs_consistent or !row.inputs_consistent) return error.CorruptStore;
+        view.compound_inputs = row.compound_inputs;
         page.keep(.batch, row.instructions_content_id, &row.instructions_bytes);
         if (row.member_count > tool_defs.max_tools or row.provider_count > row.member_count) return error.CorruptStore;
         view.tool_set_id = row.tool_set_id.get();
@@ -1431,11 +1483,12 @@ fn entryAfter(a: *ReadAccess, view: *HistoricalView, after_position: u64) !?*con
 /// admission, the first `HistoricalView.entry_batch` of them in position
 /// order.
 const historical_entries = rsql.Read(.{
-    .sql = "SELECT e.session_position,CASE WHEN e.entry_kind=4 THEN 5 ELSE e.entry_kind END AS entry_kind,e.content_id," ++ historical_content_columns_sql ++ ",NULL AS model,NULL AS provider,NULL AS item_kind,NULL AS item_id_digest,(e.source_catalog_position IS NULL OR " ++ skills_domain.instructionConsistentSql("e") ++ ") AS consistent," ++
+    .sql = "SELECT e.session_position,CASE WHEN e.entry_kind=4 THEN 5 ELSE e.entry_kind END AS entry_kind,CASE WHEN e.entry_kind=1 THEN " ++ input_domain.messageTextIdSql("authored") ++ " ELSE e.content_id END AS content_id," ++ historical_content_columns_sql ++ ",NULL AS model,NULL AS provider,NULL AS item_kind,NULL AS item_id_digest,(e.source_catalog_position IS NULL OR " ++ skills_domain.instructionConsistentSql("e") ++ ") AND (e.entry_kind<>1 OR (e.content_id IS NULL AND source.session_ref=e.session_ref AND source.turn_id=e.turn_id AND " ++ sourced_input.consistentSql("source", "authored") ++ ")) AS consistent," ++
         "(SELECT m.sender_session_ref FROM message_admission m WHERE e.entry_kind=1 AND m.admission_id=e.source_admission_id) AS sender,NULL AS effort," ++
         "NULL AS tool_set_id,NULL AS declares," ++ pageBytesSql("content", "bytes") ++ " " ++
         "FROM model_operation current JOIN conversation_entry e ON e.session_ref=current.session_ref " ++
-        "LEFT JOIN content ON content.content_id=e.content_id " ++
+        "LEFT JOIN message_admission source ON source.admission_id=e.source_admission_id LEFT JOIN core_command authored ON authored.command_key=source.command_key " ++
+        "LEFT JOIN content ON content.content_id=CASE WHEN e.entry_kind=1 THEN " ++ input_domain.messageTextIdSql("authored") ++ " ELSE e.content_id END " ++
         "WHERE current.operation_id=?1 AND e.session_position>?2 AND e.session_position<current.admission_position " ++
         "AND e.entry_kind IN (1,2,4) AND (e.entry_kind=2 OR e.session_position>?3 OR e.session_position=?4" ++
         " OR " ++ history_floor_domain.firstMessageSkillSql("e", "?4") ++ ") UNION ALL " ++
@@ -2153,6 +2206,7 @@ fn historicalEntry(view: *HistoricalView, row: *const historical_entries.Row) er
         requested_model = model;
     } else {
         if (row.consistent != true) return error.CorruptStore;
+        if (kind == .user and row.content_id == null) return .{ .position = row.session_position.get(), .kind = .user, .sender = row.sender, .content = null };
         const content_id = row.content_id orelse return error.CorruptStore;
         // A missing content row leaves its columns NULL.
         content = .{

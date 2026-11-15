@@ -32,6 +32,7 @@ pub const Cause = struct {
 /// refusal sends the person where that provider raises its limit, and to
 /// Settings otherwise. No other cause depends on it.
 pub fn cause(code: []const u8, provider: ?Provider) Cause {
+    if (std.mem.eql(u8, code, failure_class.ordered_input_not_supported)) return .{ .words = "This Host cannot send this input yet; no provider request was sent" };
     if (std.mem.eql(u8, code, "malformed_provider_output")) return .{ .words = "Model reply unreadable", .key = "ctrl+r retries" };
     return switch (failure_class.of(code)) {
         .policy => .{ .words = "Refused by the provider" },
@@ -136,4 +137,13 @@ test "a provider changes only a quota refusal's place, and only when it names on
         }
     }
     try std.testing.expect(seen.eql(.full));
+}
+
+test "unsupported ordered input is local and has no retry advice" {
+    const local = cause(failure_class.ordered_input_not_supported, null);
+    try std.testing.expectEqualStrings("This Host cannot send this input yet; no provider request was sent", local.words);
+    try std.testing.expect(local.key == null and local.place == null);
+    try std.testing.expectEqualStrings("Provider refused the request", cause("provider_http_400", null).words);
+    try std.testing.expect(cause("provider_http_400", null).key != null);
+    try std.testing.expectEqualStrings("Something went wrong", cause("CorruptStore", null).words);
 }

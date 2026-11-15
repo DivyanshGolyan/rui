@@ -261,6 +261,19 @@ C covers the historical view fixed at step 1.
 Acceptance at step 3 makes the base usable; it does not expand coverage to include M.
 The [Codex recipe](#response-owned-compaction) specifies which covered host inputs and output items the provider request retains.
 
+#### Ordered Message input
+
+Historical Message inputs derive from the canonical ordered parts described in [Message input custody](store.md#message-input-custody).
+Existing frozen cutoffs exclude later Messages.
+Validate admitted original facts before applying history floors, so a floor cannot hide missing or changed parts.
+Ordinary compaction preserves original Message references under the existing history policy.
+Explicit overflow floors may remove a whole Message with its parts and skills. They never strip an Image alone or replace it with Text.
+
+This stage retains Image inputs but does not lower compound input into a provider request.
+Preparation returns `local_ordered_input_not_supported` before transfer when the historical input needs unsupported representation, including multiple Text parts.
+Presentation states that no provider request was sent and offers no retry hint for this local failure.
+Canonical corruption still fences the Store. Provider HTTP refusals retain their existing classification.
+
 #### Adapter historical reads
 
 Core supplies an Operation-bound read-only view for request preparation.
@@ -754,6 +767,11 @@ Extend existing owners and their gates; replace obsolete wait wrappers and fixed
 ### Context, provider output and compaction
 
 #### Historical inputs and settings
+
+Message custody evidence includes the `ordered input` Store tests for image-only and mixed originals, exact replay, saved refusals, partial-import rollback, corruption, cutoff exclusion, and reopened bytes.
+The migration regression checks accepted legacy originals, explicit old-refusal absence, rollback, and the fresh-versus-migrated row oracle.
+Required MySQL evidence uses the existing native migration catalog and physical-column comparison, plus the ordered-input migration inspection/reopen/replay test. SQLite results do not cover MySQL.
+
 
 | Contract | Canonical checks | Limits and exceptions |
 | --- | --- | --- |

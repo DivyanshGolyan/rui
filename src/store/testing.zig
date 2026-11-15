@@ -4,6 +4,7 @@
 //! fixtures they arrange and read rows through.
 
 const std = @import("std");
+const input_domain = @import("domain/input.zig");
 const platform = @import("../store_path.zig");
 const tool_defs = @import("../tools.zig");
 const named_scratch = @import("../named_scratch.zig");
@@ -837,7 +838,9 @@ pub fn answerTestTurn(
 pub fn setHistoryFloorForTesting(storage: *Store, operation: u64, text: []const u8, level: u64) !void {
     if (!@import("builtin").is_test) @compileError("test-only Store fixture");
     const digest = protocol.contentDigest(text);
-    try exec(storage, "UPDATE model_operation SET history_floor=(SELECT e.session_position FROM conversation_entry e JOIN content c ON c.content_id=e.content_id " ++
+    try exec(storage, "UPDATE model_operation SET history_floor=(SELECT e.session_position FROM conversation_entry e " ++
+        "LEFT JOIN message_admission m ON m.admission_id=e.source_admission_id LEFT JOIN core_command authored ON authored.command_key=m.command_key " ++
+        "JOIN content c ON c.content_id=CASE WHEN e.entry_kind=1 THEN " ++ input_domain.messageTextIdSql("authored") ++ " ELSE e.content_id END " ++
         "WHERE e.session_ref=model_operation.session_ref AND c.digest=?2 AND c.private=0),history_level=?3,history_dropped=0 WHERE operation_id=?1", .{ operation, Blob{ .bytes = &digest }, level });
 }
 

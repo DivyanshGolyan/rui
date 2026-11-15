@@ -28,23 +28,26 @@ INSERT INTO session(session_ref,workspace,provider,codec,codec_options,prefix_se
 ('d8mv7p','/home/user/rui-pr6d','codex','openai-responses/1',NULL,NULL,'model-a',1,4,1,NULL,1,NULL,NULL,NULL,NULL,1793781720,6,1,X'4f734373106b18b4300a06683393f27fe72fcb98f82b72cb0a3b98950e714433',1),
 ('brhkcj','/home/user/rui-pr6d','codex','openai-responses/1',NULL,NULL,'model-a',1,2,0,NULL,1,NULL,NULL,NULL,NULL,1793781720,6,2,X'4f734373106b18b4300a06683393f27fe72fcb98f82b72cb0a3b98950e714433',1),
 ('rhvzwc','/home/user/rui-pr6d','codex','openai-responses/1',NULL,NULL,'model-a',1,4,1,NULL,1,NULL,NULL,NULL,NULL,1793781720,2,3,X'4f734373106b18b4300a06683393f27fe72fcb98f82b72cb0a3b98950e714433',1);
-INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq) VALUES
-('fixture-answer-config',1,'d8mv7p',X'da30d53055d72b570beed083a96a9fbff59605a11f6606d8c06009c43a705489',NULL,NULL,1,'',1,1,1),
-('fixture-answer-key',2,'d8mv7p',X'f1c556d56340cf43f947a5c7efa143b121b78165d59292dc801d9331b8e7206a',2,NULL,1,'',0,0,2),
-('fixture-ask-config',1,'brhkcj',X'cec44ce76850ac8d1faa17c7e708d732723b13fde5c482502faa9fd93f8581ac',NULL,NULL,1,'',1,1,3),
-('fixture-ask-message',2,'brhkcj',X'95937f206811b07f694d1973bece7e5a13bddb2f45fc92bfa330b713a8043aa3',6,NULL,1,'',0,0,4),
-('fixture-allow',5,'brhkcj',X'7cf72581b6f2592ba788fe2b2306da74e37d8ac8f2b115d67e5143d20eae18e9',NULL,NULL,1,'',0,0,5),
-('fixture-stop-config',1,'rhvzwc',X'da30d53055d72b570beed083a96a9fbff59605a11f6606d8c06009c43a705489',NULL,NULL,1,'',1,1,6),
-('fixture-stop',3,'rhvzwc',X'd3a4ebf602e078b77bf4e4ccc2b6ab98d0c70d556138a870ca01f9a655dca65f',NULL,NULL,1,'',0,0,7),
-('fixture-interrupt',4,'d8mv7p',X'f36b025999732c650e4e9c3ff7505e214dfcfd0c0e8cf3ef162d75d9f32d6129',NULL,NULL,0,'operation_resolved',0,0,8),
-('fixture-rejected',2,'k7m2qx',X'cc0e17dc4472ec1578e9a655c97150feecee8729a14928bc7382c9a61005e1b9',NULL,NULL,0,'unknown_session',0,0,9);
+INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq,input_part_count,input_reference_length,input_reference_digest) VALUES
+('fixture-answer-config',1,'d8mv7p',X'da30d53055d72b570beed083a96a9fbff59605a11f6606d8c06009c43a705489',NULL,NULL,1,'',1,1,1,NULL,NULL,NULL),
+('fixture-answer-key',2,'d8mv7p',X'f1c556d56340cf43f947a5c7efa143b121b78165d59292dc801d9331b8e7206a',NULL,NULL,1,'',0,0,2,1,5,X'295e577a7a0c2608c470cb327496d5b7f60b8f53b5ebf48f6878d2cdd614e333'),
+('fixture-ask-config',1,'brhkcj',X'cec44ce76850ac8d1faa17c7e708d732723b13fde5c482502faa9fd93f8581ac',NULL,NULL,1,'',1,1,3,NULL,NULL,NULL),
+('fixture-ask-message',2,'brhkcj',X'95937f206811b07f694d1973bece7e5a13bddb2f45fc92bfa330b713a8043aa3',NULL,NULL,1,'',0,0,4,1,7,X'b3d406f1800f595b26a2be8c410f6205a4578cec458ca5219d7b4343b4c3d8d4'),
+('fixture-allow',5,'brhkcj',X'7cf72581b6f2592ba788fe2b2306da74e37d8ac8f2b115d67e5143d20eae18e9',NULL,NULL,1,'',0,0,5,NULL,NULL,NULL),
+('fixture-stop-config',1,'rhvzwc',X'da30d53055d72b570beed083a96a9fbff59605a11f6606d8c06009c43a705489',NULL,NULL,1,'',1,1,6,NULL,NULL,NULL),
+('fixture-stop',3,'rhvzwc',X'd3a4ebf602e078b77bf4e4ccc2b6ab98d0c70d556138a870ca01f9a655dca65f',NULL,NULL,1,'',0,0,7,NULL,NULL,NULL),
+('fixture-interrupt',4,'d8mv7p',X'f36b025999732c650e4e9c3ff7505e214dfcfd0c0e8cf3ef162d75d9f32d6129',NULL,NULL,0,'operation_resolved',0,0,8,NULL,NULL,NULL),
+('fixture-rejected',2,'k7m2qx',X'cc0e17dc4472ec1578e9a655c97150feecee8729a14928bc7382c9a61005e1b9',NULL,NULL,0,'unknown_session',0,0,9,0,NULL,NULL);
+INSERT INTO input_part(input_part_id,command_key,command_kind,part_count,ordinal,content_id,part_kind) VALUES
+(1,'fixture-answer-key',2,1,0,2,1),
+(2,'fixture-ask-message',2,1,0,6,1);
 INSERT INTO session_revision(session_ref,revision,command_key,workspace,provider,model,instructions_content_id,instructions_updated,tool_set_id,permission_mode,output_schema_content_id,compaction_trigger,output_reservation,reasoning_effort,label) VALUES
 ('brhkcj',1,'fixture-ask-config','/home/user/rui-pr6d','codex','model-a',1,1,2,0,NULL,NULL,NULL,NULL,NULL),
 ('d8mv7p',1,'fixture-answer-config','/home/user/rui-pr6d','codex','model-a',1,1,4,1,NULL,NULL,NULL,NULL,NULL),
 ('rhvzwc',1,'fixture-stop-config','/home/user/rui-pr6d','codex','model-a',1,1,4,1,NULL,NULL,NULL,NULL,NULL);
 INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at,sender_session_ref,sender_position) VALUES
-(1,'d8mv7p','fixture-answer-key',2,1,1,1793781720,NULL,NULL),
-(2,'brhkcj','fixture-ask-message',6,1,2,1793781720,NULL,NULL);
+(1,'d8mv7p','fixture-answer-key',NULL,1,1,1793781720,NULL,NULL),
+(2,'brhkcj','fixture-ask-message',NULL,1,2,1793781720,NULL,NULL);
 INSERT INTO turn(turn_id,session_ref,first_admission_id,input_cutoff,operation_id,outcome_code,outcome_content_id,outcome_position,outcome_at,continuation_operation_id) VALUES
 (1,'d8mv7p',1,1,1,'completed',5,5,1793781720,NULL),
 (2,'brhkcj',2,2,2,NULL,NULL,NULL,NULL,NULL);
@@ -56,8 +59,8 @@ INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,i
 (1,1,'d8mv7p',1,1,3,0,115200,0,NULL,1,1,0,NULL,NULL,'answer',5,NULL,X'01000000000000',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,1793781720,4,128000),
 (2,2,'brhkcj',1,2,3,0,115200,0,NULL,2,1,0,NULL,NULL,'tool_proposals',NULL,NULL,X'01000000000000',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,1793781720,2,128000);
 INSERT INTO conversation_entry(session_ref,entry_ordinal,session_position,entry_kind,turn_id,source_admission_id,source_revision,source_operation_id,source_item_ordinal,content_id,recorded_at) VALUES
-('brhkcj',1,2,1,2,2,NULL,NULL,NULL,6,1793781720),
-('d8mv7p',1,2,1,1,1,NULL,NULL,NULL,2,1793781720),
+('brhkcj',1,2,1,2,2,NULL,NULL,NULL,NULL,1793781720),
+('d8mv7p',1,2,1,1,1,NULL,NULL,NULL,NULL,1793781720),
 ('d8mv7p',2,4,3,1,NULL,NULL,1,0,5,1793781720);
 INSERT INTO model_output_item(operation_id,item_ordinal,session_ref,session_position,item_kind,message_content_id,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,phase,extras_content_id,part_count,description,call_failed) VALUES
 (1,0,'d8mv7p',4,2,5,1,X'39dbe3cba52908fdb3610df812d007a7fc134eea8803b34a97e9aa229d815fae',0,0,4,1,NULL,0),

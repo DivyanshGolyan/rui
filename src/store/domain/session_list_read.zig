@@ -263,7 +263,7 @@ const list_row = rsql.Read(.{
 /// `list_row` of a Session with no first Message.
 const list_row_bare = rsql.Read(.{
     .sql = "SELECT " ++ settings_columns ++ "NULL AS first_admission,NULL AS first_position,NULL AS first_admitted_at,NULL AS first_sender," ++
-        "NULL AS first_length,NULL AS first_digest,NULL AS first_private FROM session" ++ last_line_joins ++ " WHERE session.session_ref=?1",
+        "NULL AS first_length,NULL AS first_digest,NULL AS first_private,NULL AS first_consistent,NULL AS first_key FROM session" ++ last_line_joins ++ " WHERE session.session_ref=?1",
     .Args = struct { session: []const u8, first_action: ?u64 },
     .Row = ListRow,
     .cardinality = .each,
@@ -291,10 +291,12 @@ const ListRow = struct {
     first_admission: ?rsql.Positive,
     first_position: ?rsql.Positive,
     first_admitted_at: ?rsql.Positive,
+    first_key: ?Bounded(128),
     first_sender: ?SessionText,
     first_length: ?u64,
     first_digest: ?[32]u8,
     first_private: ?bool,
+    first_consistent: ?bool,
 };
 
 /// The page head and its rows. Each row's first admission and work take
@@ -328,6 +330,15 @@ const ShownRow = struct { reference: *const change_ring.Id, first: u64, work: *c
 /// Reads each shown row's `list_row` in one round and visits it as it
 /// steps. The row it decodes is in report scratch (`ListRow`).
 noinline fn readRowSettings(a: *ReadAccess, rows: []const ShownRow, now_ms: u64, visitor: anytype) !void {
+    // Finish compound certificates before callbacks step the settings rows.
+    // One first Message at a time keeps this independent of page size.
+    for (rows) |row| {
+        if (row.first == 0) continue;
+        var first: report_domain.first_message.Result = null;
+        a.read(report_domain.first_message, .{ .session = row.reference, .first = row.first }, &first);
+        try runList(a);
+        try report_domain.verifyFirstMessage(a, &(first orelse return error.CorruptStore));
+    }
     var read: RowsRead(@TypeOf(visitor)) = .{ .read_version = .{ .instance = a.store.instance, .generation = a.store.commitGeneration() }, .decoded = a.store.reportScratch(ListRow), .rows = rows, .now_ms = now_ms, .visitor = visitor };
     for (rows) |row| {
         // Creation time only dates idle work, which has no Action. Its real
