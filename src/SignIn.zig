@@ -185,7 +185,7 @@ const Hit = struct { row: u16, start: u16, end: u16, action: core.Action };
 const Drawn = struct {
     attempt: u64 = 0,
     page: std.meta.Tag(core.Page) = .account,
-    focused: ?core.Action = null,
+    focused: ?struct { control: core.Control, action: core.Action } = null,
     copy: ?core.Code = null,
     hits: []const Hit = &.{},
 };
@@ -700,9 +700,15 @@ fn formEditable(self: *const Self) bool {
     return self.state.page == .api and self.task.thread == null and self.drawn.page == .api and self.drawn.attempt == self.state.attempt;
 }
 
+fn focusedAction(self: *const Self) ?core.Action {
+    if (self.drawn.attempt != self.state.attempt or self.drawn.page != std.meta.activeTag(self.state.page)) return null;
+    const focused = self.drawn.focused orelse return null;
+    return if (focused.control == self.state.focus) focused.action else null;
+}
 fn activeField(self: *const Self) ?core.Field {
-    if (!self.formEditable() or self.drawn.focused == null or self.drawn.focused.? != .field) return null;
-    return self.drawn.focused.?.field;
+    if (!self.formEditable()) return null;
+    const action = self.focusedAction() orelse return null;
+    return if (action == .field) action.field else null;
 }
 
 fn freeze(self: *Self, attempt: core.Attempt, action: core.Action) !bool {
@@ -870,6 +876,7 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     if (input == .tick) return self.advance(ctx);
     defer ctx.consumeEvent();
+    const focused_action = self.focusedAction();
     if (input == .focus_out and self.paste != .none) {
         if (self.paste == .field) try self.formEvent(self.paste.field, input, false);
         self.paste = .ignore;
@@ -877,7 +884,7 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
         return;
     }
     if (input == .paste_start) {
-        self.paste = if (self.activeField()) |field| .{ .field = field } else if (self.state.page == .browser and self.state.focus == .callback) .callback else .ignore;
+        self.paste = if (self.activeField()) |field| .{ .field = field } else if (focused_action != null and focused_action.? == .callback) .callback else .ignore;
         if (self.paste == .field) try self.formEvent(self.paste.field, input, true);
         return;
     }
@@ -890,7 +897,9 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
     if (self.paste != .none) {
         if (input == .key_press) switch (self.paste) {
             .field => |field| try self.formEvent(field, input, true),
-            .callback => if (input.key_press.text) |text| self.editAddress(.{ .append = text }),
+            .callback => if (focused_action != null and focused_action.? == .callback) {
+                if (input.key_press.text) |text| self.editAddress(.{ .append = text });
+            },
             else => {},
         };
         ctx.redraw = true;
@@ -931,7 +940,7 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
         ctx.redraw = true;
         return;
     }
-    if (self.state.page == .browser and self.drawn.focused != null and self.drawn.focused.? == .callback) {
+    if (focused_action != null and focused_action.? == .callback) {
         if (key.matchExact(vaxis.Key.enter, .{})) self.editAddress(.confirm) else if (key.matchExact(vaxis.Key.backspace, .{})) self.editAddress(.erase) else if (key.text) |text| self.editAddress(.{ .append = text });
         ctx.redraw = true;
         return;
@@ -940,7 +949,7 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
         _ = self.state.step(.{ .move = key.matchExact(vaxis.Key.down, .{}) or key.matchExact(vaxis.Key.right, .{}) });
         ctx.redraw = true;
     } else if (key.matchExact(vaxis.Key.enter, .{})) {
-        if (self.drawn.focused) |action| try self.activateDrawn(ctx, action);
+        if (focused_action) |action| try self.activateDrawn(ctx, action);
     } else if (key.matchExact('c', .{}) and self.drawn.copy != null) {
         try self.activateDrawn(ctx, .{ .copy = self.drawn.copy.? });
     }
@@ -1105,7 +1114,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         field.* = .{ .label = row.label, .value = row.value, .selectable = row.control != null };
         if (row.control == self.state.focus) {
             selected = i;
-            self.drawn.focused = row.action;
+            self.drawn.focused = if (row.action) |action| .{ .control = row.control.?, .action = action } else null;
         }
     }
     const height: u16 = @intCast(@min(size.height, rows.items.len + 3));
@@ -1152,7 +1161,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         }
     }
     self.drawn.hits = hits.items;
-    if (self.drawn.focused != null and self.drawn.focused.? == .copy and self.drawn.copy == null) self.drawn.focused = null;
+    if (self.drawn.focused != null and self.drawn.focused.?.action == .copy and self.drawn.copy == null) self.drawn.focused = null;
     const children = try a.alloc(vxfw.SubSurface, 1);
     children[0] = .{ .origin = origin, .surface = child };
     return .{ .size = size, .widget = self.widget(), .buffer = &.{}, .children = children };
@@ -1356,6 +1365,82 @@ test "Sign-in guided fields keep edits focus caret masking and paste authority" 
         try std.testing.expect(std.mem.indexOf(u8, text, "secret") == null);
         try std.testing.expect(surface.children[0].surface.cursor != null);
     }
+}
+
+test "Sign-in keyboard activation and editing require the committed focused control" {
+    const Input = struct {
+        fn send(page: *Self, ctx: *vxfw.EventContext, bytes: []const u8) !void {
+            var events: @import("testing/app_events.zig").Events = .init(bytes);
+            while (events.next()) |input| try page.widget().handleEvent(ctx, input);
+        }
+    };
+    for ([_]core.State{ .{}, .{ .page = .method, .focus = .browser } }) |initial| {
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        var page: Self = .{ .state = initial };
+        defer page.closeForm();
+        _ = try testingDraw(&page, ctx.alloc, 90, 28);
+        try Input.send(&page, &ctx, "\t\r");
+        try std.testing.expectEqual(std.meta.activeTag(initial.page), std.meta.activeTag(page.state.page));
+        try std.testing.expectEqual(@as(u64, 0), page.state.attempt);
+        try std.testing.expect(page.task.thread == null);
+        _ = try testingDraw(&page, ctx.alloc, 90, 28);
+        try Input.send(&page, &ctx, "\r");
+        try std.testing.expectEqual(@as(std.meta.Tag(core.Page), if (initial.page == .account) .api else .device), std.meta.activeTag(page.state.page));
+    }
+    for (std.enums.values(core.Field)) |field| {
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        var page: Self = .{ .state = .{ .page = .api, .focus = switch (field) {
+            .base => .base,
+            .key => .key,
+            .model => .model,
+        } } };
+        defer page.closeForm();
+        const form = try page.ensureForm();
+        _ = form.key.set("sk-before", "sk-before".len);
+        _ = form.base.set("https://before.example/v1", "https://before.example/v1".len);
+        _ = form.model.set("model-before", "model-before".len);
+        _ = try testingDraw(&page, ctx.alloc, 90, 28);
+        try Input.send(&page, &ctx, "\t\rchanged\x1b[200~pasted\x1b[201~");
+        try std.testing.expect(page.state.page == .api and page.state.attempt == 0 and page.frozen == null);
+        try std.testing.expectEqualStrings("sk-before", form.key.text());
+        try std.testing.expectEqualStrings("https://before.example/v1", form.base.text());
+        try std.testing.expectEqualStrings("model-before", form.model.text());
+        _ = try testingDraw(&page, ctx.alloc, 90, 28);
+        try Input.send(&page, &ctx, if (field == .model) "\r" else "Z");
+        switch (field) {
+            .base => try std.testing.expectEqualStrings("sk-beforeZ", form.key.text()),
+            .key => try std.testing.expectEqualStrings("model-beforeZ", form.model.text()),
+            .model => try std.testing.expect(page.state.page == .saving and page.frozen != null),
+        }
+    }
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    var page: Self = .{ .state = .{ .page = .browser, .focus = .callback } };
+    page.browser = try pages.Mapped(Browser).map();
+    defer _ = page.closeBrowser();
+    const browser = page.browser.?.value;
+    browser.init();
+    browser.edit(.{ .append = "before" });
+    _ = try testingDraw(&page, ctx.alloc, 90, 28);
+    try Input.send(&page, &ctx, "\t\rchanged\x1b[200~pasted\x1b[201~");
+    try std.testing.expectEqualStrings("before", browser.entry[0..browser.len]);
+    try std.testing.expectEqual(@as(usize, 0), browser.confirmed);
+    page.state.focus = .callback;
+    _ = try testingDraw(&page, ctx.alloc, 90, 28);
+    try Input.send(&page, &ctx, "\x1b[200~");
+    page.state.focus = .open_page;
+    try Input.send(&page, &ctx, "pasted\x1b[201~");
+    try std.testing.expectEqualStrings("before", browser.entry[0..browser.len]);
+    page.state.focus = .callback;
+    _ = try testingDraw(&page, ctx.alloc, 90, 28);
+    try Input.send(&page, &ctx, "Z\r");
+    try std.testing.expectEqualStrings("beforeZ\n", browser.entry[0..browser.len]);
+    try std.testing.expectEqual(browser.len, browser.confirmed);
 }
 
 test "Sign-in queued edits cannot change frozen fields before redraw or worker join" {
