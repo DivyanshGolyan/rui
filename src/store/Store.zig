@@ -25,6 +25,8 @@ const command_input = @import("../command_input.zig");
 const retry_policy = @import("../retry_policy.zig");
 const change_ring = @import("../change_ring.zig");
 const action_domain = @import("domain/action.zig");
+const action_control_domain = @import("domain/action_control.zig");
+const action_read_domain = @import("domain/action_read.zig");
 const command_domain = @import("domain/command.zig");
 const configuration_domain = @import("domain/configuration.zig");
 const skills_domain = @import("domain/skills.zig");
@@ -853,6 +855,20 @@ pub const Store = struct {
         return self.noteControl(transition.apply(self, command_domain.DecidePermission, .{ .command = command }, faults) catch .infrastructure_failure);
     }
 
+    pub fn controlAction(self: *Store, operation: @import("../action_control.zig").Kind, command: *const command_input.ActionControlCommand, capacity: action_control_domain.CapacityView, faults: Faults) !@import("../action_control.zig").Reply {
+        EntryTrace.fromControl(faults.control_trace).mark(.requested);
+        return self.queue().write(controlActionHeld, .{ self, operation, command, capacity, faults });
+    }
+
+    fn controlActionHeld(self: *Store, operation: @import("../action_control.zig").Kind, command: *const command_input.ActionControlCommand, capacity: action_control_domain.CapacityView, faults: Faults) !@import("../action_control.zig").Reply {
+        const entry = enter(self, .fromControl(faults.control_trace)) catch return .infrastructure_failure;
+        defer entry.release();
+        const Control = action_control_domain.Control;
+        var control: Control = .{ .input = .{ .command = command, .capacity = capacity, .kind = operation, .scratch = self.reportScratch(Control.Scratch) } };
+        const result = entry.finishTransaction(Control.Ordinary, faults, transition.run(&entry, Control, &control, faults)) catch @import("../action_control.zig").Reply.infrastructure_failure;
+        return self.noteControl(result);
+    }
+
     /// Tier 1: atomics only, with no holder or connection access.
     fn unchangedSession(self: *const Store, since: ?change_ring.SessionToken) ?change_ring.SessionToken {
         const token = since orelse return null;
@@ -1093,6 +1109,18 @@ pub const Store = struct {
         };
     }
 
+    pub fn readAction(self: *Store, request: *const @import("../action_read.zig").Request, out: *@import("../action_read.zig").Read) !void {
+        return self.queue().run(readActionHeld, .{ self, request, out });
+    }
+
+    fn readActionHeld(self: *Store, request: *const @import("../action_read.zig").Request, out: *@import("../action_read.zig").Read) !void {
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: ReadAccess = .open(&entry);
+        defer access.deinit();
+        return entry.finish(Ordinary.action_read, action_read_domain.actionRead(&access, request, out));
+    }
+
     pub fn actionArguments(self: *Store, session_ref: []const u8, action_id: u64) !ContentReference {
         return self.actionContent(session_ref, action_id, .arguments);
     }
@@ -1174,19 +1202,21 @@ pub const Store = struct {
 
     pub fn admitNextActionAttempt(
         self: *Store,
+        capacity: action_domain.Capacity,
         timeout_ms: u64,
         faults: Faults,
     ) !?ActionAttemptAdmission {
-        return self.queue().write(admitNextActionAttemptHeld, .{ self, timeout_ms, faults });
+        return self.queue().write(admitNextActionAttemptHeld, .{ self, capacity, timeout_ms, faults });
     }
 
     fn admitNextActionAttemptHeld(
         self: *Store,
+        capacity: action_domain.Capacity,
         timeout_ms: u64,
         faults: Faults,
     ) !?ActionAttemptAdmission {
         if (timeout_ms == 0 or timeout_ms > std.math.maxInt(i64)) return error.InvalidActionTimeout;
-        return transition.apply(self, action_domain.AdmitNextAttempt, .{ .io = self.io, .timeout_ms = timeout_ms }, faults);
+        return transition.apply(self, action_domain.AdmitNextAttempt, .{ .io = self.io, .timeout_ms = timeout_ms, .capacity = capacity }, faults);
     }
 
     /// Admit a selected Rui-run Action; selection is rechecked under the writer.
@@ -1315,42 +1345,38 @@ pub const Store = struct {
     }
 
     /// Owed stops, ending Messages and ancestor feed hops precede calls.
-    pub fn nextCoreWork(self: *Store) !?CoreWork {
-        return self.nextCoreWorkForHost(true);
-    }
-
     /// Which of the dispatch loop's commit-driven scans would find work,
     /// in one round; `paused` is whether new Turns are held.
-    pub fn dispatchWork(self: *Store, paused: bool, include_mcp: bool) !DispatchWork {
-        return self.queue().run(dispatchWorkHeld, .{ self, paused, include_mcp });
+    pub fn dispatchWork(self: *Store, paused: bool, capacity: action_domain.Capacity) !DispatchWork {
+        return self.queue().run(dispatchWorkHeld, .{ self, paused, capacity });
     }
 
-    fn dispatchWorkHeld(self: *Store, paused: bool, include_mcp: bool) !DispatchWork {
+    fn dispatchWorkHeld(self: *Store, paused: bool, capacity: action_domain.Capacity) !DispatchWork {
         const survey = self.identities().survey;
         const asked: @FieldType(Survey, "asked") = if (paused) .paused else .running;
         self.identities().survey.kept = .none;
         self.identities().survey.asked = asked;
-        self.identities().survey.include_mcp = include_mcp;
+        self.identities().survey.capacity = capacity;
         // Nothing committed since the survey ran, right after its COMMIT.
-        if (survey.kept == .ready and survey.asked == asked and survey.include_mcp == include_mcp and !self.isFenced())
+        if (survey.kept == .ready and survey.asked == asked and std.meta.eql(survey.capacity, capacity) and !self.isFenced())
             return .{ .core = survey.core, .mcp = survey.mcp, .bash = survey.bash, .message = survey.message, .tool_continuation = survey.tool_continuation, .retry = survey.retry };
         const entry = try enter(self, .none);
         defer entry.release();
         var access: store_access.Access(.survey, error{}) = .open(&entry);
         defer access.deinit();
-        return entry.finish(Ordinary.none, model_admission_domain.dispatchWork(&access, paused, include_mcp));
+        return entry.finish(Ordinary.none, model_admission_domain.dispatchWork(&access, paused, capacity));
     }
 
-    pub fn nextCoreWorkForHost(self: *Store, include_mcp: bool) !?CoreWork {
-        return self.queue().run(nextCoreWorkHeld, .{ self, include_mcp });
+    pub fn nextCoreWork(self: *Store, capacity: action_domain.Capacity) !?CoreWork {
+        return self.queue().run(nextCoreWorkHeld, .{ self, capacity });
     }
 
-    fn nextCoreWorkHeld(self: *Store, include_mcp: bool) !?CoreWork {
+    fn nextCoreWorkHeld(self: *Store, capacity: action_domain.Capacity) !?CoreWork {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: ReadAccess = .open(&entry);
         defer access.deinit();
-        return entry.finish(Ordinary.none, action_domain.nextCoreWork(&access, include_mcp));
+        return entry.finish(Ordinary.none, action_domain.nextCoreWork(&access, capacity));
     }
 
     /// Runs the `message_agent` call `binding` names with its checked
@@ -1432,18 +1458,18 @@ pub const Store = struct {
         return transition.apply(self, command_domain.ResolveCoreCall, .{ .binding = binding, .code = code, .result = result }, faults);
     }
 
-    pub fn nextAction(self: *Store, comptime runner: tool_record.Runner) !?ReadyAction {
+    pub fn nextAction(self: *Store, comptime runner: tool_record.Runner, capacity: action_domain.Capacity) !?ReadyAction {
         if (runner != .bash and runner != .mcp) @compileError("only Action runners can select Actions");
-        return self.queue().run(nextActionHeld, .{ self, runner });
+        return self.queue().run(nextActionHeld, .{ self, runner, capacity });
     }
-    fn nextActionHeld(self: *Store, runner: tool_record.Runner) !?ReadyAction {
+    fn nextActionHeld(self: *Store, runner: tool_record.Runner, capacity: action_domain.Capacity) !?ReadyAction {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: ReadAccess = .open(&entry);
         defer access.deinit();
         return entry.finish(Ordinary.none, switch (runner) {
-            .bash => action_domain.nextAction(&access, .bash),
-            .mcp => action_domain.nextAction(&access, .mcp),
+            .bash => action_domain.nextAction(&access, .bash, capacity),
+            .mcp => action_domain.nextAction(&access, .mcp, capacity),
             .core, .provider => unreachable,
         });
     }
@@ -1800,8 +1826,7 @@ comptime {
     // The settlement batch keeps the request's offered names and borrows
     // existing content identities for withdrawn names. Binding transient
     // history arguments avoids retaining a second copy of every call name.
-    // Its 19032 bytes are below the previous 19240-byte resident ceiling;
-    // configuration reads reuse saved_tools for parent names and use 15624,
+    // Configuration reads reuse saved_tools for parent names and use 15624,
     // with what validation and application keep between their rounds.
     // Exact, so a change to either size is a decision.
     if (@sizeOf(configuration_domain.ConfigurationReads) != 15624 or scratch_bytes != 19032)
@@ -1849,6 +1874,7 @@ pub const Ordinary = struct {
     const content = error{ContentNotFound};
     const public_content = error{ ContentNotFound, RangeOutOfBounds };
     pub const action = error{ActionNotFound};
+    pub const action_read = action || error{InvalidCursor};
     const result = error{ ResultNotFound, ResultNotReady, ResultFailed };
     pub const attempt_binding = error{ StaleAttemptBinding, SupersededByControl };
     pub const historical_entry = error{HistoricalPending};
@@ -2099,7 +2125,7 @@ pub noinline fn commitWithSurvey(self: *Store, writer: anytype, follow: anytype)
     defer reads.deinit();
     if (follow) |after| after.queue(&reads);
     var survey: model_admission_domain.DispatchSurvey = .{};
-    if (surveyed) survey.queue(&reads, kept.asked == .paused, kept.include_mcp);
+    if (surveyed) survey.queue(&reads, kept.asked == .paused, kept.capacity);
     if (reads.failure != null) {
         self.engine.dropTail();
         return writer.passCommit(null);
@@ -2387,8 +2413,8 @@ const Survey = packed struct(u16) {
     message: bool = false,
     tool_continuation: bool = false,
     retry: bool = false,
-    include_mcp: bool = true,
-    _: u5 = 0,
+    capacity: action_domain.Capacity = .{ .credit = .none, .mcp = false },
+    _: u3 = 0,
 };
 
 const Admitted = struct {

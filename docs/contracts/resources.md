@@ -33,7 +33,7 @@ Discovery uses bounded storage queries, not per-Session resident tasks.
 The writer rechecks after writes; accepted live-effect controls publish their required process-local signal.
 No SQLite watcher is required.
 The retry scans use a due-time index that excludes future deadlines, and run at most once per second.
-A scan that found nothing runs again only after a commit, a relevant slot or ordinary-custody availability change, or the earliest scheduled retry falling due by the wall clock, the clock the Store admits by; the admission scan reads that due time in its own round, and an idle Host sends the Store no query.
+A scan that found nothing runs again only after a commit, a slot change or the earliest scheduled retry falling due by the wall clock, the clock the Store admits by; the admission scan reads that due time in its own round, and an idle Host sends the Store no query.
 After a commit, one read round says which kinds of dispatch work the Store holds (core and MCP Actions, Bash, waiting Messages, tool continuations), and only those kinds' scans run; the answer is a hint, since each admission reads its own facts again, and a kind it wrongly names costs one empty round.
 That round also reads whether any open Turn's Attempt is unresolved with a retry state; while none is, neither retry scan runs, since a commit is the only thing that makes one.
 Missed ticks do not queue.
@@ -95,7 +95,7 @@ On Linux with glibc, the execution loop calls `malloc_trim(0)` once each time it
 
 | Boundary | Selected value and scope |
 | --- | --- |
-| Active Capacity | Startup default 100 shared model/Bash/MCP/Edit executions and cleanup, the product default for every start path; adjustable with `--set execution.activeCapacity=N`, no independent hard maximum. A running Host keeps its startup value. MCP also retains its separate 16-call limit and 4 MiB answer-buffer bound per call. |
+| Active Capacity | Startup default 100 shared model, Bash, MCP, and Edit executions and cleanup, the product default for every start path; adjustable with `--set execution.activeCapacity=N`, no independent hard maximum. A running Host keeps its startup value. MCP also retains its independent 16-call limit and 4 MiB answer-buffer bound per call. |
 | Shared scratch | Startup default 8 GiB logical owned bytes, including pending growth and overlapping copies; no allowance-sized allocation/reservation. |
 | History memo | At most 1 GiB of [memo](model-io.md#history-memo) file bytes in the scratch directory, additional to shared scratch; one fixed-size index entry per unit of Active Capacity. |
 | Session list page | Eight rows. The worst-case row is derived at compile time from its field bounds and must fit 32 KiB; the derived page bound covers the capture. |

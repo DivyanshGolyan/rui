@@ -5,6 +5,8 @@
 //! only what an earlier round's rows name.
 
 const std = @import("std");
+const tool_fulfillment = @import("tool_fulfillment.zig");
+const sourced_input = @import("sourced_input.zig");
 const command_reply = @import("../../command_reply.zig");
 const word_search = @import("../../word_search.zig");
 const pages = @import("../../os/pages.zig");
@@ -166,27 +168,40 @@ fn runRows(a: *ReadAccess) !void {
     return store_access.runNamed(a, read_failures, error.CorruptStore);
 }
 
-const public_tool_groups_sql = "WITH tool_groups AS (SELECT op.operation_id,max(coalesce(tool_call.acceptance_position,action.acceptance_position)) AS position " ++
+const public_tool_groups_sql = "WITH tool_groups AS (SELECT op.operation_id,max(" ++ tool_fulfillment.positionSql("tool_call", "action") ++ ") AS position " ++
     "FROM model_operation op JOIN model_tool_call tool_call ON tool_call.operation_id=op.operation_id " ++
     "LEFT JOIN action_operation action ON action.parent_operation_id=tool_call.operation_id AND action.call_ordinal=tool_call.call_ordinal " ++
     "WHERE op.session_ref=?1 AND " ++ store_schema.resolutionIs("op.resolution_code", .tool_proposals) ++ " GROUP BY op.operation_id " ++
     "HAVING count(*)=(SELECT count(*) FROM model_output_item item WHERE item.operation_id=op.operation_id AND item.item_kind=3) " ++
-    "AND count(coalesce(tool_call.acceptance_position,action.acceptance_position))=count(*) " ++
-    "AND count(coalesce(tool_call.rejection_content_id,action.resolution_content_id))=count(*)), ";
+    "AND count(" ++ tool_fulfillment.positionSql("tool_call", "action") ++ ")=count(*) " ++
+    "AND count(" ++ tool_fulfillment.contentSql("tool_call", "action") ++ ")=count(*)), ";
 
 /// An Activity source row `last`, a rejected call or a resolved Action of
 /// `operation`, is where that Operation's tool group completes: every call
 /// has its accepted result, one per call item, and none was accepted later.
 /// It reads only that Operation's calls, so a seek by acceptance position
 /// finds a group's results without grouping the Session's history.
-fn toolGroupCompletesAtLast(comptime operation: []const u8) []const u8 {
+fn toolGroupCompletesAtLast(comptime operation: []const u8, comptime position: []const u8) []const u8 {
     return "EXISTS(SELECT 1 FROM model_operation op WHERE op.operation_id=" ++ operation ++ " AND op.session_ref=?1 AND " ++
         store_schema.resolutionIs("op.resolution_code", .tool_proposals) ++ ") " ++
         "AND (SELECT count(*) FROM model_tool_call c WHERE c.operation_id=" ++ operation ++ ")=" ++
         "(SELECT count(*) FROM model_output_item item WHERE item.operation_id=" ++ operation ++ " AND item.item_kind=3) " ++
         "AND NOT EXISTS(SELECT 1 FROM model_tool_call c LEFT JOIN action_operation a ON a.parent_operation_id=c.operation_id AND a.call_ordinal=c.call_ordinal " ++
-        "WHERE c.operation_id=" ++ operation ++ " AND (coalesce(c.acceptance_position,a.acceptance_position) IS NULL " ++
-        "OR coalesce(c.rejection_content_id,a.resolution_content_id) IS NULL OR coalesce(c.acceptance_position,a.acceptance_position)>last.acceptance_position))";
+        "WHERE c.operation_id=" ++ operation ++ " AND (" ++ tool_fulfillment.positionSql("c", "a") ++ " IS NULL " ++
+        "OR " ++ tool_fulfillment.contentSql("c", "a") ++ " IS NULL OR " ++ tool_fulfillment.positionSql("c", "a") ++ ">" ++ position ++ "))";
+}
+
+fn activityToolSources(comptime range: fn (comptime []const u8, comptime []const u8) []const u8, comptime kinds: []const u8, comptime order: []const u8) []const u8 {
+    const enabled = "(" ++ kinds ++ "/32)%2=1";
+    return "SELECT last.acceptance_position AS position,tool_call.call_ordinal+1 AS ordinal,5 AS kind FROM model_tool_call last @index(model_tool_call_acceptance) " ++
+        "JOIN model_tool_call tool_call ON tool_call.operation_id=last.operation_id WHERE last.session_ref=?1 AND " ++ enabled ++ " AND " ++
+        range("last.acceptance_position", "tool_call.call_ordinal+1") ++ " AND " ++ toolGroupCompletesAtLast("last.operation_id", "last.acceptance_position") ++
+        " UNION ALL SELECT last.acceptance_position,tool_call.call_ordinal+1,5 FROM action_operation last @index(action_operation_acceptance) " ++
+        "JOIN model_tool_call tool_call ON tool_call.operation_id=last.parent_operation_id WHERE last.session_ref=?1 AND last.background_position IS NULL AND " ++ enabled ++ " AND " ++
+        range("last.acceptance_position", "tool_call.call_ordinal+1") ++ " AND " ++ toolGroupCompletesAtLast("last.parent_operation_id", "last.acceptance_position") ++
+        " UNION ALL SELECT last.background_position,tool_call.call_ordinal+1,5 FROM action_operation last @index(action_operation_background) " ++
+        "JOIN model_tool_call tool_call ON tool_call.operation_id=last.parent_operation_id WHERE last.session_ref=?1 AND last.background_position IS NOT NULL AND " ++ enabled ++ " AND " ++
+        range("last.background_position", "tool_call.call_ordinal+1") ++ " AND " ++ toolGroupCompletesAtLast("last.parent_operation_id", "last.background_position") ++ order;
 }
 
 /// Each Activity source, as (position, ordinal, kind, id) rows matching
@@ -210,7 +225,7 @@ fn activitySources(comptime range: fn (comptime []const u8, comptime []const u8)
     };
     const on = Kinds.on;
     return .{
-        "SELECT admission_position AS position,0 AS ordinal,1 AS kind,admission_id AS id FROM message_admission @index(message_admission_person) " ++
+        "SELECT admission_position AS position,0 AS ordinal,1 AS kind,admission_id AS id FROM message_admission @index(message_admission_position) " ++
             "WHERE session_ref=?1 AND sender_session_ref IS NULL AND " ++ on(1) ++ " AND " ++ Kinds.off(11) ++ " AND " ++ range("admission_position", "0") ++
             " UNION ALL SELECT admission_position,0,CASE WHEN sender_session_ref IS NULL THEN 1 ELSE 11 END,admission_id FROM message_admission @index(message_admission_position) " ++
             "WHERE session_ref=?1 AND " ++ on(11) ++ " AND (sender_session_ref IS NOT NULL OR " ++ on(1) ++ ") AND " ++ range("admission_position", "0") ++
@@ -221,12 +236,7 @@ fn activitySources(comptime range: fn (comptime []const u8, comptime []const u8)
         // A tool group's results sit at its last acceptance, one per call,
         // ordered by call. Each `last` names its acceptance index, as
         // `call_candidates_sql`.
-        "SELECT last.acceptance_position AS position,tool_call.call_ordinal+1 AS ordinal,5 AS kind,NULL AS id FROM model_tool_call last @index(model_tool_call_acceptance) " ++
-            "JOIN model_tool_call tool_call ON tool_call.operation_id=last.operation_id WHERE last.session_ref=?1 AND " ++ on(5) ++ " AND " ++
-            range("last.acceptance_position", "tool_call.call_ordinal+1") ++ " AND " ++ toolGroupCompletesAtLast("last.operation_id") ++
-            " UNION ALL SELECT last.acceptance_position,tool_call.call_ordinal+1,5,NULL FROM action_operation last @index(action_operation_acceptance) " ++
-            "JOIN model_tool_call tool_call ON tool_call.operation_id=last.parent_operation_id WHERE last.session_ref=?1 AND " ++ on(5) ++ " AND " ++
-            range("last.acceptance_position", "tool_call.call_ordinal+1") ++ " AND " ++ toolGroupCompletesAtLast("last.parent_operation_id") ++
+        "SELECT position,ordinal,kind,NULL AS id FROM tool_completions" ++
             " UNION ALL SELECT outcome_position,0,6,turn_id FROM turn @index(turn_outcome_position) WHERE session_ref=?1 AND outcome_code IS NOT NULL AND " ++ on(6) ++ " AND " ++ range("outcome_position", "0") ++
             " UNION ALL SELECT position,0,7,NULL FROM session_stop @index(session_stop_position) WHERE session_ref=?1 AND " ++ on(7) ++ " AND " ++ range("position", "0") ++ order,
         "SELECT sender_position AS position,0 AS ordinal,8 AS kind,admission_id AS id FROM message_admission WHERE sender_session_ref=?1 AND " ++ on(8) ++ " AND " ++ range("sender_position", "0") ++
@@ -295,10 +305,10 @@ fn anyActivityPosition(comptime position: []const u8, comptime ordinal: []const 
 const activity_item = blk: {
     const sources = activitySources(anyActivityPosition, all_activity_kinds, "");
     break :blk rsql.Read(.{
-        .sql = std.fmt.comptimePrint("WITH entries AS ({s}), completions AS ({s}), others AS ({s}), changes AS ({s}), " ++
+        .sql = std.fmt.comptimePrint("WITH tool_completions AS ({s}), entries AS ({s}), completions AS ({s}), others AS ({s}), changes AS ({s}), " ++
             "activity AS (SELECT position,ordinal,kind,id FROM entries UNION ALL SELECT position,ordinal,kind,id FROM completions UNION ALL SELECT position,ordinal,kind,id FROM others " ++
             "UNION ALL SELECT position,ordinal,kind,id FROM changes) " ++
-            "SELECT kind,id FROM activity WHERE position=?3 AND ordinal=?4 AND position<=?2", .{ sources[0], sources[1], sources[2], sources[3] }),
+            "SELECT kind,id FROM activity WHERE position=?3 AND ordinal=?4 AND position<=?2", .{ activityToolSources(anyActivityPosition, all_activity_kinds, ""), sources[0], sources[1], sources[2], sources[3] }),
         .Args = struct { session: []const u8, end: u64, position: u64, ordinal: u64 },
         .Row = struct { kind: u8, id: ?rsql.Positive },
         .cardinality = .optional,
@@ -324,8 +334,8 @@ fn ActivityPage(comptime forward: bool) type {
     const order = if (forward) " ORDER BY 1,2 LIMIT 17" else " ORDER BY 1 DESC,2 DESC LIMIT 17";
     const sources = activitySources(if (forward) Range.after else Range.before, if (forward) "?5" else "?4", order);
     return rsql.Read(.{
-        .sql = std.fmt.comptimePrint("WITH entries AS ({s}), completions AS ({s}), others AS ({s}), changes AS ({s}) SELECT position,ordinal FROM entries " ++
-            "UNION ALL SELECT position,ordinal FROM completions UNION ALL SELECT position,ordinal FROM others UNION ALL SELECT position,ordinal FROM changes{s}", .{ sources[0], sources[1], sources[2], sources[3], order }),
+        .sql = std.fmt.comptimePrint("WITH tool_completions AS ({s}), entries AS ({s}), completions AS ({s}), others AS ({s}), changes AS ({s}) SELECT position,ordinal FROM entries " ++
+            "UNION ALL SELECT position,ordinal FROM completions UNION ALL SELECT position,ordinal FROM others UNION ALL SELECT position,ordinal FROM changes{s}", .{ activityToolSources(if (forward) Range.after else Range.before, if (forward) "?5" else "?4", order), sources[0], sources[1], sources[2], sources[3], order }),
         .Args = if (forward) struct { session: []const u8, end: u64, position: u64, ordinal: u64, kinds: u64 } else struct { session: []const u8, position: u64, ordinal: u64, kinds: u64 },
         .Row = ActivityPageRow,
         .cardinality = .each,
@@ -353,7 +363,7 @@ pub const queued = rsql.Read(.{
     .sql = "SELECT m.admission_id,m.admission_position," ++
         "EXISTS(SELECT 1 FROM conversation_entry e WHERE e.source_admission_id=m.admission_id AND e.session_position<=?2) OR " ++
         "EXISTS(SELECT 1 FROM session_stop s WHERE s.session_ref=?1 AND s.admission_cutoff>=m.admission_id AND s.position<=?2) AS taken " ++
-        "FROM message_admission m @index(message_admission_person) WHERE m.session_ref=?1 AND m.sender_session_ref IS NULL " ++
+        "FROM message_admission m @index(message_admission_person) WHERE m.session_ref=?1 AND " ++ sourced_input.personSql("m") ++ " " ++
         "AND m.admission_position<=?2 ORDER BY m.admission_position DESC",
     .Args = struct { session: []const u8, position: u64 },
     .Row = struct { admission_id: rsql.Positive, admission_position: rsql.Positive, taken: bool },
@@ -484,7 +494,7 @@ const public_page = rsql.Read(.{
     .sql = public_tool_groups_sql ++
         "public AS (SELECT e.session_position AS position,0 AS ordinal,e.entry_kind AS kind,e.content_id " ++
         "FROM conversation_entry e WHERE e.session_ref=?1 AND e.entry_kind IN (1,3) AND e.session_position<=?2 " ++
-        "UNION ALL SELECT tool_groups.position,tool_call.call_ordinal+1,4,coalesce(tool_call.rejection_content_id,action.resolution_content_id) " ++
+        "UNION ALL SELECT tool_groups.position,tool_call.call_ordinal+1,4," ++ tool_fulfillment.contentSql("tool_call", "action") ++ " " ++
         "FROM tool_groups JOIN model_tool_call tool_call ON tool_call.operation_id=tool_groups.operation_id " ++
         "LEFT JOIN action_operation action ON action.parent_operation_id=tool_call.operation_id AND action.call_ordinal=tool_call.call_ordinal " ++
         "WHERE tool_groups.position<=?2 " ++
@@ -588,7 +598,7 @@ noinline fn readPublicRows(a: *ReadAccess, session: []const u8, rows: []const pu
             read.* = .{ .reads = .{ .hosted = .{ .position = item.position, .presentation = &item.presentation.? } } };
             read.reads.hosted.queue(a, session);
         } else {
-            read.* = .{ .reads = .{ .content = .{ .position = item.position, .ordinal = item.ordinal, .sender = &item.sender } } };
+            read.* = .{ .reads = .{ .content = .{ .position = item.position, .ordinal = item.ordinal, .sender = &item.sender, .source_action = &item.source_action } } };
             read.reads.content.queue(a, session);
         }
     }
@@ -702,7 +712,7 @@ pub fn publicEntryRead(comptime columns: []const u8, comptime also: []const u8, 
 /// assistant provenance agrees with it.
 pub fn publicEntryColumns(comptime also: []const u8) []const u8 {
     return "CASE WHEN " ++ also ++ "(c.content_id IS NOT NULL AND c.private=0 AND t.session_ref=e.session_ref AND " ++
-        "((e.entry_kind=1 AND m.session_ref=e.session_ref AND m.turn_id=e.turn_id AND m.content_id=e.content_id) OR " ++
+        "((e.entry_kind=1 AND m.session_ref=e.session_ref AND m.turn_id=e.turn_id AND m.content_id=e.content_id AND " ++ sourced_input.consistentSql("m") ++ ") OR " ++
         "(e.entry_kind=3 AND o.purpose=0 AND o.session_ref=e.session_ref AND o.turn_id=e.turn_id " ++
         "AND item.item_kind=2 AND item.message_content_id=e.content_id AND item.session_ref=e.session_ref " ++
         "AND item.session_position=e.session_position AND item.attempt_ordinal=o.attempt_ordinal " ++
@@ -723,9 +733,9 @@ pub const public_entry_joins = "LEFT JOIN turn t ON t.turn_id=e.turn_id " ++
 /// cursors and bytes.
 const public_entry = rsql.Read(.{
     .sql = publicEntryRead("e.content_id,CASE WHEN e.entry_kind=1 THEN m.admitted_at END AS admitted_at," ++
-        "CASE WHEN e.entry_kind=1 THEN m.sender_session_ref END AS sender,e.recorded_at", "", "WHERE e.session_ref=?1 AND e.session_position=?2 AND e.entry_kind IN(1,3)"),
+        "CASE WHEN e.entry_kind=1 THEN m.sender_session_ref END AS sender,CASE WHEN e.entry_kind=1 THEN m.final_action_id END AS final_action_id,e.recorded_at", "", "WHERE e.session_ref=?1 AND e.session_position=?2 AND e.entry_kind IN(1,3)"),
     .Args = struct { session: []const u8, position: u64 },
-    .Row = struct { content_id: rsql.Positive, admitted_at: ?rsql.Positive, sender: ?SessionText, recorded_at: rsql.Positive, consistent: bool },
+    .Row = struct { content_id: rsql.Positive, admitted_at: ?rsql.Positive, sender: ?SessionText, final_action_id: ?rsql.Positive, recorded_at: rsql.Positive, consistent: bool },
     .cardinality = .each,
 });
 
@@ -735,31 +745,31 @@ const public_tool_result = rsql.Read(.{
     // Only an Operation with an acceptance at the position can complete
     // there. Each arm names its acceptance index, as `call_candidates_sql`.
     .sql = "WITH last AS (SELECT operation_id FROM model_tool_call @index(model_tool_call_acceptance) WHERE session_ref=?1 AND acceptance_position=?2 " ++
-        "UNION ALL SELECT parent_operation_id FROM action_operation @index(action_operation_acceptance) WHERE session_ref=?1 AND acceptance_position=?2) " ++
-        "SELECT coalesce(tool_call.rejection_content_id,action.resolution_content_id) AS content_id,NOT EXISTS(SELECT 1 FROM model_tool_call linked " ++
+        "UNION ALL SELECT parent_operation_id FROM action_operation @index(action_operation_acceptance) WHERE session_ref=?1 AND acceptance_position=?2 AND background_position IS NULL UNION ALL SELECT parent_operation_id FROM action_operation @index(action_operation_background) WHERE session_ref=?1 AND background_position=?2) " ++
+        "SELECT " ++ tool_fulfillment.contentSql("tool_call", "action") ++ " AS content_id,NOT EXISTS(SELECT 1 FROM model_tool_call linked " ++
         "LEFT JOIN model_output_item item ON item.operation_id=linked.operation_id AND item.item_ordinal=linked.item_ordinal LEFT JOIN turn t ON t.turn_id=op.turn_id " ++
         "LEFT JOIN content rejection ON rejection.content_id=linked.rejection_content_id " ++
         "LEFT JOIN action_operation a ON a.parent_operation_id=linked.operation_id AND a.call_ordinal=linked.call_ordinal " ++
-        "LEFT JOIN content result ON result.content_id=a.resolution_content_id " ++
+        "LEFT JOIN content result ON result.content_id=" ++ tool_fulfillment.actionContentSql("a") ++ " " ++
         "WHERE linked.operation_id=op.operation_id AND CASE WHEN item.item_kind=3 AND item.session_ref=op.session_ref AND t.session_ref=op.session_ref " ++
         "AND item.attempt_ordinal=op.attempt_ordinal AND " ++
         "((linked.rejection_code IS NOT NULL AND a.action_id IS NULL AND rejection.private=0) OR (linked.rejection_code IS NULL AND a.action_id IS NOT NULL AND a.session_ref=op.session_ref AND result.private=0)) THEN 0 ELSE 1 END=1) AS consistent,op.operation_id," ++
         // A rejected call is accepted when its Operation resolves; an
         // Action call when the Action does. The last acceptance is the
         // one at the greatest position: times order nothing.
-        "(SELECT coalesce(a.resolved_at,op.resolved_at) FROM model_tool_call c LEFT JOIN action_operation a ON a.parent_operation_id=c.operation_id AND a.call_ordinal=c.call_ordinal " ++
-        "WHERE c.operation_id=op.operation_id ORDER BY coalesce(c.acceptance_position,a.acceptance_position) DESC LIMIT 1) AS at " ++
+        "(SELECT " ++ tool_fulfillment.timeSql("a", "op") ++ " FROM model_tool_call c LEFT JOIN action_operation a ON a.parent_operation_id=c.operation_id AND a.call_ordinal=c.call_ordinal " ++
+        "WHERE c.operation_id=op.operation_id ORDER BY " ++ tool_fulfillment.positionSql("c", "a") ++ " DESC LIMIT 1) AS at " ++
         "FROM last CROSS JOIN model_operation op ON op.operation_id=last.operation_id " ++
         "JOIN model_tool_call tool_call ON tool_call.operation_id=op.operation_id " ++
         "LEFT JOIN action_operation action ON action.parent_operation_id=tool_call.operation_id AND action.call_ordinal=tool_call.call_ordinal " ++
         "WHERE op.session_ref=?1 AND " ++ store_schema.resolutionIs("op.resolution_code", .tool_proposals) ++ " AND tool_call.call_ordinal+1=?3 " ++
-        "AND (SELECT max(coalesce(c.acceptance_position,a.acceptance_position)) FROM model_tool_call c " ++
+        "AND (SELECT max(" ++ tool_fulfillment.positionSql("c", "a") ++ ") FROM model_tool_call c " ++
         "LEFT JOIN action_operation a ON a.parent_operation_id=c.operation_id AND a.call_ordinal=c.call_ordinal WHERE c.operation_id=op.operation_id)=?2 " ++
         "AND (SELECT count(*) FROM model_tool_call c WHERE c.operation_id=op.operation_id)=" ++
         "(SELECT count(*) FROM model_output_item item WHERE item.operation_id=op.operation_id AND item.item_kind=3) " ++
         "AND NOT EXISTS (SELECT 1 FROM model_tool_call c LEFT JOIN action_operation a " ++
         "ON a.parent_operation_id=c.operation_id AND a.call_ordinal=c.call_ordinal WHERE c.operation_id=op.operation_id " ++
-        "AND (coalesce(c.acceptance_position,a.acceptance_position) IS NULL OR coalesce(c.rejection_content_id,a.resolution_content_id) IS NULL))",
+        "AND (" ++ tool_fulfillment.positionSql("c", "a") ++ " IS NULL OR " ++ tool_fulfillment.contentSql("c", "a") ++ " IS NULL))",
     .Args = struct { session: []const u8, position: u64, ordinal: u64 },
     .Row = struct { content_id: rsql.Positive, consistent: bool, operation_id: rsql.Positive, at: rsql.Positive },
     .cardinality = .each,
@@ -784,6 +794,7 @@ const PublicContentRead = struct {
     ordinal: u64,
     /// Where an entry's sender goes, for a caller that shows it.
     sender: ?*?activity_facts.NamedPeer = null,
+    source_action: ?*?u64 = null,
     content: PublicContent = undefined,
     missing: missing_assistant_entry.Result = null,
     metadata: content_metadata.Row = undefined,
@@ -806,7 +817,15 @@ const PublicContentRead = struct {
         if (!row.consistent) return error.CorruptStore;
         if (@TypeOf(row.*) == public_entry.Row) {
             read.content = .{ .id = @intCast(row.content_id.get()), .metadata = undefined, .tool_operation = null, .admitted_at = if (row.admitted_at) |second| second.get() else null, .at = row.recorded_at.get() };
-            if (read.sender) |sender| sender.* = if (row.sender) |session| .{ .session = session } else null;
+            const provenance = try sourced_input.provenance(row.sender, if (row.final_action_id) |id| id.get() else null);
+            if (read.sender) |sender| sender.* = switch (provenance) {
+                .peer => |session| .{ .session = session },
+                else => null,
+            };
+            if (read.source_action) |source_action| source_action.* = switch (provenance) {
+                .tool_final => |id| id,
+                else => null,
+            };
         } else {
             read.content = .{ .id = @intCast(row.content_id.get()), .metadata = undefined, .tool_operation = row.operation_id.get(), .admitted_at = null, .at = row.at.get() };
         }
@@ -846,7 +865,7 @@ fn publicConversationContent(a: *ReadAccess, session: []const u8, position: u64,
 
 /// A call's line and outcome, with the item that proposed it.
 const stored_presentation = rsql.Read(.{
-    .sql = "SELECT tool_call.description,coalesce(tool_call.rejection_code,a.resolution_code) AS code,a.authorized,item.session_ref,item.session_position " ++
+    .sql = "SELECT tool_call.description," ++ tool_fulfillment.codeSql("tool_call", "a") ++ " AS code,a.authorized,item.session_ref,item.session_position " ++
         "FROM model_tool_call tool_call LEFT JOIN action_operation a ON a.parent_operation_id=tool_call.operation_id AND a.call_ordinal=tool_call.call_ordinal " ++
         "LEFT JOIN model_output_item item ON item.operation_id=tool_call.operation_id AND item.item_ordinal=tool_call.item_ordinal " ++
         "WHERE tool_call.operation_id=?1 AND tool_call.call_ordinal=?2",
@@ -1244,16 +1263,16 @@ const ItemAt = struct { position: u64, ordinal: u64 };
 /// acceptance read names its acceptance index: the Full results' indexes
 /// hold the same rows, keyed by Operation first, and SQLite would walk
 /// the Session's whole range of one of them.
-const call_candidates_sql = "ops AS (SELECT parent_operation_id AS operation_id FROM action_operation WHERE session_ref=?1 AND acceptance_position IS NULL " ++
+const call_candidates_sql = "ops AS (SELECT parent_operation_id AS operation_id FROM action_operation WHERE session_ref=?1 AND acceptance_position IS NULL AND background_position IS NULL " ++
     "UNION SELECT operation_id FROM model_tool_call @index(model_tool_call_acceptance) WHERE session_ref=?1 AND acceptance_position>=?2 " ++
-    "UNION SELECT parent_operation_id FROM action_operation @index(action_operation_acceptance) WHERE session_ref=?1 AND acceptance_position>=?2), " ++
-    "tool_groups AS (SELECT op.operation_id,max(coalesce(tool_call.acceptance_position,action.acceptance_position)) AS position " ++
+    "UNION SELECT parent_operation_id FROM action_operation @index(action_operation_acceptance) WHERE session_ref=?1 AND acceptance_position>=?2 AND background_position IS NULL UNION SELECT parent_operation_id FROM action_operation @index(action_operation_background) WHERE session_ref=?1 AND background_position>=?2), " ++
+    "tool_groups AS (SELECT op.operation_id,max(" ++ tool_fulfillment.positionSql("tool_call", "action") ++ ") AS position " ++
     "FROM ops CROSS JOIN model_operation op ON op.operation_id=ops.operation_id JOIN model_tool_call tool_call ON tool_call.operation_id=op.operation_id " ++
     "LEFT JOIN action_operation action ON action.parent_operation_id=tool_call.operation_id AND action.call_ordinal=tool_call.call_ordinal " ++
     "WHERE op.session_ref=?1 AND " ++ store_schema.resolutionIs("op.resolution_code", .tool_proposals) ++ " GROUP BY op.operation_id " ++
     "HAVING count(*)=(SELECT count(*) FROM model_output_item item WHERE item.operation_id=op.operation_id AND item.item_kind=3) " ++
-    "AND count(coalesce(tool_call.acceptance_position,action.acceptance_position))=count(*) " ++
-    "AND count(coalesce(tool_call.rejection_content_id,action.resolution_content_id))=count(*)), " ++
+    "AND count(" ++ tool_fulfillment.positionSql("tool_call", "action") ++ ")=count(*) " ++
+    "AND count(" ++ tool_fulfillment.contentSql("tool_call", "action") ++ ")=count(*)), " ++
     "candidates AS (SELECT op.operation_id,tool_call.call_ordinal,tool_groups.position FROM ops CROSS JOIN model_operation op ON op.operation_id=ops.operation_id " ++
     "LEFT JOIN model_tool_call tool_call ON tool_call.operation_id=op.operation_id " ++
     "LEFT JOIN tool_groups ON tool_groups.operation_id=op.operation_id WHERE op.session_ref=?1 AND " ++ store_schema.resolutionIs("op.resolution_code", .tool_proposals) ++ " " ++
@@ -1398,22 +1417,23 @@ const activity_message = rsql.Read(.{
     .sql = "SELECT m.command_key,m.turn_id,m.content_id," ++
         "EXISTS(SELECT 1 FROM conversation_entry e WHERE e.session_ref=m.session_ref AND e.source_admission_id=m.admission_id AND e.session_position<=?2) AS applied," ++
         "EXISTS(SELECT 1 FROM session_stop s WHERE s.session_ref=m.session_ref AND s.admission_cutoff>=m.admission_id AND s.position<=?2) AS excluded," ++
-        "c.kind=2 AND c.accepted=1 AND c.target=m.session_ref AND c.primary_content_id=m.content_id " ++
+        sourced_input.consistentSql("m") ++ " " ++
         "AND (m.turn_id IS NULL OR (t.session_ref=m.session_ref AND EXISTS(SELECT 1 FROM conversation_entry e " ++
         "WHERE e.source_admission_id=m.admission_id AND e.session_ref=m.session_ref AND e.turn_id=m.turn_id AND e.content_id=m.content_id))) AS consistent," ++
-        "m.admitted_at,m.sender_session_ref FROM message_admission m " ++
+        "m.admitted_at," ++ sourced_input.provenanceColumns("m") ++ " FROM message_admission m " ++
         "LEFT JOIN core_command c ON c.command_key=m.command_key LEFT JOIN turn t ON t.turn_id=m.turn_id " ++
         "WHERE m.session_ref=?1 AND m.admission_id=?3",
     .Args = struct { session: []const u8, end: u64, admission: u64 },
     .Row = struct {
-        command_key: Bounded(idempotency_key.max_bytes),
+        command_key: ?Bounded(idempotency_key.max_bytes),
         turn_id: ?rsql.Positive,
         content_id: rsql.Positive,
         applied: bool,
         excluded: bool,
         consistent: bool,
         admitted_at: rsql.Positive,
-        sender_session_ref: ?SessionText,
+        sender: ?SessionText,
+        final_action_id: ?rsql.Positive,
     },
     .cardinality = .each,
 });
@@ -1576,16 +1596,16 @@ const turn_outcome = rsql.Read(.{
 /// A stop at position ?2, with whether its command and selected Turn
 /// agree with it.
 const session_stop = rsql.Read(.{
-    .sql = "SELECT s.command_key,s.selected_turn_id,s.admission_cutoff,t.outcome_position," ++
+    .sql = "SELECT s.command_key,s.selected_turn_id,s.admission_cutoff," ++ sourced_input.stopCompletedSql("s", "t", "?3") ++ " AS completed," ++
         "(c.kind=3 OR (c.kind=6 AND EXISTS(SELECT 1 FROM session_archive_command archived WHERE archived.command_key=c.command_key AND archived.archived=1))) " ++
         "AND c.accepted=1 AND c.target=s.session_ref AND (s.selected_turn_id IS NULL OR t.session_ref=s.session_ref) AS consistent,s.stopped_at " ++
         "FROM session_stop s LEFT JOIN core_command c ON c.command_key=s.command_key LEFT JOIN turn t ON t.turn_id=s.selected_turn_id WHERE s.session_ref=?1 AND s.position=?2",
-    .Args = struct { session: []const u8, position: u64 },
+    .Args = struct { session: []const u8, position: u64, end: u64 },
     .Row = struct {
         command_key: Bounded(idempotency_key.max_bytes),
         selected_turn_id: ?rsql.Positive,
         admission_cutoff: u64,
-        outcome_position: ?rsql.Positive,
+        completed: bool,
         consistent: bool,
         stopped_at: rsql.Positive,
     },
@@ -1638,11 +1658,15 @@ const MessageRead = struct {
     fn keep(read: *MessageRead, row: *const activity_message.Row) error{CorruptStore}!void {
         if (!row.consistent) return error.CorruptStore;
         const message = read.message;
-        message.key = row.command_key;
         message.turn = null;
         message.state = if (row.applied) .applied else if (row.excluded) .excluded else .queued;
         message.admitted_at = row.admitted_at.get();
-        message.sender = if (row.sender_session_ref) |sender| .{ .session = sender } else null;
+        const provenance = try sourced_input.provenance(row.sender, if (row.final_action_id) |id| id.get() else null);
+        message.source = switch (provenance) {
+            .person => .{ .person = row.command_key orelse return error.CorruptStore },
+            .peer => |sender| .{ .peer = .{ .key = row.command_key orelse return error.CorruptStore, .sender = .{ .session = sender } } },
+            .tool_final => |id| if (row.command_key == null) .{ .tool_final = id } else return error.CorruptStore,
+        };
         if (row.applied) message.turn = (row.turn_id orelse return error.CorruptStore).get();
         read.content_id = row.content_id.get();
     }
@@ -1732,8 +1756,7 @@ const OutcomeRead = struct {
     }
 };
 
-/// A Session stop (kind 7) and whether its Turn has finished by `end`,
-/// read into `stop`.
+/// Read into `stop`.
 const StopRead = struct {
     position: u64,
     end: u64,
@@ -1742,7 +1765,7 @@ const StopRead = struct {
     count: RowCount = .{},
 
     fn queue(read: *StopRead, a: *ReadAccess, session: []const u8) void {
-        readFirst(a, session_stop, .{ .session = session, .position = read.position }, read);
+        readFirst(a, session_stop, .{ .session = session, .position = read.position, .end = read.end }, read);
     }
 
     pub fn visit(read: *StopRead, row: *const session_stop.Row) bool {
@@ -1752,8 +1775,7 @@ const StopRead = struct {
     fn keep(read: *StopRead, row: *const session_stop.Row) error{CorruptStore}!void {
         if (!row.consistent) return error.CorruptStore;
         const turn: ?u64 = if (row.selected_turn_id) |id| id.get() else null;
-        const outcome_position: ?u64 = if (row.outcome_position) |at| at.get() else null;
-        read.stop.* = .{ .key = row.command_key, .turn = turn, .cutoff = row.admission_cutoff, .completion = if (turn == null or (outcome_position != null and outcome_position.? <= read.end)) .completed else .pending };
+        read.stop.* = .{ .key = row.command_key, .turn = turn, .cutoff = row.admission_cutoff, .completion = if (row.completed) .completed else .pending };
         read.at = row.stopped_at.get();
     }
 };
@@ -1809,9 +1831,12 @@ const ItemRead = struct {
                     if (kind == 2) message.entry.queue(a, session);
                 } else {
                     a.read(content_metadata, .{ .content_id = message.read.content_id }, &message.metadata);
-                    if (message.read.message.sender) |*sender| {
-                        message.label = .{ .peer = sender };
-                        message.label.queue(a);
+                    switch (message.read.message.source) {
+                        .peer => |*peer| {
+                            message.label = .{ .peer = &peer.sender };
+                            message.label.queue(a);
+                        },
+                        else => {},
                     }
                     if (kind == 2) message.entry.queueMetadata(a);
                 }
@@ -1898,13 +1923,13 @@ const ItemRead = struct {
                     if (!try message.read.count.found()) return error.CorruptStore;
                     // A source names a person's Message or a received one
                     // by its sender; the row read must agree.
-                    if (kind != 2 and (kind == 11) != (message.read.message.sender != null)) return error.CorruptStore;
+                    if (kind != 2 and (kind == 11) != (message.read.message.source == .peer)) return error.CorruptStore;
                     if (kind == 2) try message.entry.found();
                     return;
                 }
                 const content = try content_domain.publicMetadata(&message.metadata);
                 message.read.message.content = .{ .length = content.length, .digest = content.digest };
-                if (message.read.message.sender != null) try message.label.found();
+                if (message.read.message.source == .peer) try message.label.found();
                 item.at = message.read.message.admitted_at;
                 if (kind == 2) {
                     if (message.read.message.state != .applied) return error.CorruptStore;

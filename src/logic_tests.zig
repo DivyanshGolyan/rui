@@ -6,6 +6,9 @@ const core_boundary = @import("core_boundary.zig");
 /// each one listed here and runs its tests, and selector tests require each
 /// to select test-logic. Add entries in alphabetical order by path, ignoring case.
 const cores = .{
+    .{ "action_control.zig", @import("action_control.zig") },
+    .{ "action_read.zig", @import("action_read.zig") },
+    .{ "action_receipt.zig", @import("action_receipt.zig") },
     .{ "action_text.zig", @import("action_text.zig") },
     .{ "ActionConsent.zig", @import("ActionConsent.zig") },
     .{ "activity_facts.zig", @import("activity_facts.zig") },
@@ -139,6 +142,7 @@ const cores = .{
     .{ "TerminalText.zig", @import("TerminalText.zig") },
     .{ "theme.zig", @import("theme.zig") },
     .{ "tool_name.zig", @import("tool_name.zig") },
+    .{ "tool_execution.zig", @import("tool_execution.zig") },
     .{ "tool_fold.zig", @import("tool_fold.zig") },
     .{ "tool_presentation.zig", @import("tool_presentation.zig") },
     .{ "tool_proposal.zig", @import("tool_proposal.zig") },

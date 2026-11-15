@@ -44,7 +44,7 @@ function report(work: CurrentReport["work"], parent: string | null = null): Curr
 			reasoning_effort: "high", reasoning_effort_override: null,
 		},
 		pending_messages: "9007199254740993", work,
-		peers: { from_person_at: null }, first_message: null, selected_message: null,
+		peers: { from_person_at: null }, first_message: null, selected_message: null, selected_source_action: null,
 		recent_messages: [], actions: { count: "0", unresolved: [], resolved: [] },
 		rejected_calls: { count: "0", items: [] }, actionable_permissions: [],
 		execution: { status: "partial", dispatch_fenced: false, custody_occupied: "0", scratch_used_bytes: "0", unavailable: ["structured_output"] },
@@ -216,4 +216,40 @@ test("create parent is a create-only relation in the shared wire spec", async ()
     // @ts-expect-error parent cannot change on an existing Session
     const invalid: SessionUpdate = { parent: "p4rent" };
     void invalid;
+});
+
+
+test("Action controls retain exact ids, keyed selection and bounded read cursors", async () => {
+	const requests: { path: string; body: unknown }[] = [];
+	const action = "9007199254740993";
+	const position = "9007199254740994";
+	const link: Link = { async exchange(path, build) {
+		requests.push({ path, body: JSON.parse(build("store")) });
+		if (path === "/v1/read-action") return Buffer.from(JSON.stringify({
+			version: WIRE_VERSION, type: "action_read", session: "session", action,
+			state: "attempted", background_position: position, stop_selected: false, final: null,
+		}));
+		return Buffer.from(JSON.stringify({ answer: {
+			status: "accepted", replayed: true,
+			action_selection: { kind: path.endsWith("action-background") ? "background" : "stop", position },
+		} }));
+	} };
+	const session = new Session(link, "session");
+	assert.equal((await session.readAction(action, "16383")).background_position, position);
+	assert.deepEqual(await session.backgroundAction(action, { idempotencyKey: "promote-once" }), { kind: "background", position });
+	assert.deepEqual(await session.stopAction(action, { idempotencyKey: "stop-once" }), { kind: "stop", position });
+	assert.deepEqual(requests, [
+		{ path: "/v1/read-action", body: { version: WIRE_VERSION, kind: "read_action", store: "store", session: "session", action, offset: "16383" } },
+		{ path: "/v1/control/action-background", body: { version: WIRE_VERSION, kind: "action_background", store: "store", key: "promote-once", session: "session", action } },
+		{ path: "/v1/control/action-stop", body: { version: WIRE_VERSION, kind: "action_stop", store: "store", key: "stop-once", session: "session", action } },
+	]);
+});
+
+test("Action resource refusal is a saved rejection, not a fabricated background selection", async () => {
+	const link: Link = { async exchange() {
+		return Buffer.from(JSON.stringify({ answer: { status: "rejected", replayed: false, code: "background_unavailable" } }));
+	} };
+	const session = new Session(link, "session");
+	await assert.rejects(session.backgroundAction("7", { idempotencyKey: "refused" }),
+		(error: unknown) => error instanceof RuiRequestError && error.code === "background_unavailable");
 });

@@ -220,7 +220,7 @@ test "Current, activity pages and Message progress report one work through an ap
             try pageWorkAgrees(&storage, mixed.value, action_id + 1);
 
             // Once it runs, the Session is in Bash with one approval outstanding.
-            _ = (try storage.admitNextActionAttempt(300_000, .{})).?;
+            _ = (try storage.admitNextActionAttempt(.{ .credit = .background, .mcp = true }, 300_000, .{})).?;
             const running = try testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024);
             defer std.testing.allocator.free(running);
             var bash = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, running, .{});
@@ -327,7 +327,7 @@ test "Current, activity pages and Message progress report one work in each state
             try allow.key.set("one-work-allow");
             try allow.session.set(bash.slice());
             try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
-            const action = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
+            const action = (try storage.admitNextActionAttempt(.{ .credit = .background, .mcp = true }, 300_000, .{})).?.permit.binding;
             _ = try expectOneWork(&storage, &tmp, bash.slice(), "bash");
             try expectProgress(&storage, "one-work-bash-message", .in_flight);
             var stop = try completeSessionStop("one-work-stop", bash.slice());
@@ -367,7 +367,7 @@ test "Full reports every closed Action resolution without fencing" {
             try allow.key.set("shutdown-report-allow");
             try allow.session.set(session.slice());
             try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
-            const action_binding = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
+            const action_binding = (try storage.admitNextActionAttempt(.{ .credit = .background, .mcp = true }, 300_000, .{})).?.permit.binding;
             var input: ActionExecutionInput = undefined;
             try storage.readActionExecutionInput(.bash, action_binding, &input);
             try std.testing.expectEqual(@as(u64, 1234), input.timeout_ms);

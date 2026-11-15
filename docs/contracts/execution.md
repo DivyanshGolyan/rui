@@ -62,13 +62,49 @@ It recommends 40–60 characters and excludes status, safety, and success claims
 These are wording guidance, not prose-quality validation.
 Observed state and outcomes come from core facts, never the model's description.
 
-Each call rejection or Action Resolution owns its canonical result content and Conversation acceptance position; siblings settle independently and never rewrite one another.
-Once every Tool Call has exactly one outcome, the next model Operation may start without another user message.
-Its frozen core-owned historical view joins each original call to that outcome and derives one provider `function_call_output` with the exact call ID in original call order.
+Each call has exactly one original fulfillment: its rejection, accepted background receipt, or Action Resolution.
+Each owns canonical result content and a Conversation acceptance position. Siblings fulfill independently and never rewrite one another.
+Once every Tool Call has one fulfillment, the next model Operation may start without another user message.
+Its frozen core-owned historical view joins each original call to that fulfillment and derives one provider `function_call_output` with the exact call ID in original call order.
 The complete group precedes input selected at the same boundary.
 No copied Tool Result, result batch or publication marker is durable authority.
 Physical completion order cannot reorder provider input.
 Call rejection, Action denial, failure, cancellation and uncertainty all produce results.
+
+#### Foreground and background Actions
+
+Tool calls begin in the foreground. Native callers can promote an existing Action to background execution.
+Provider-hosted tools remain owned by the provider and cannot be promoted.
+
+Foreground calls block the original continuation until their rejection or sole Resolution.
+Background acceptance fulfills that same call with an accepted receipt naming its Action, not a running-process claim.
+Permission may still wait, and authorized work may still wait for capacity.
+Acceptance never grants permission, creates another Action or resets an Attempt, launch, timeout or deadline.
+`rui action background --session ID --action N` promotes an existing foreground invocation without replacing its executor.
+If terminal acceptance commits first, promotion selects that final instead. Otherwise the receipt remains the original fulfillment even after final settlement.
+A refusal changes neither the original fulfillment nor execution authority.
+
+An Action belongs to its Session after its causal model Operation and Turn finish.
+A later background Resolution admits a new tool-final input in the same transaction, referencing the sole Resolution content without copying its payload or outcome.
+This source cannot receive a command answer or bind a skill. The adapter identifies it as tool output data, not a person or peer instruction.
+The original tool call receives no second `function_call_output`.
+The final acceptance position and source admission determine the new input's frozen boundary, never the earlier background receipt position.
+A stop selecting the source suppresses later delivery permanently, including after fresh Session work. Truthful terminal evidence remains saved and readable.
+Bash cancellation and MCP effect certainty retain their existing runner-owned rules.
+
+The existing custody pool counts model, Bash, MCP and cleanup owners together.
+Dispatch of background work requires two genuinely free custody records and reserves one atomically while checking that one remains free.
+Promotion of an attempted Action requires one genuinely free record but never releases, detaches or reserves its existing token.
+Capacity one refuses background acceptance or promotion. A pending background Action may wait.
+Detached cleanup still occupies capacity. An ordinary finite consumer may take the remaining credit after the background reservation.
+This conservative policy does not promise a permanently idle record or unlimited fairness.
+
+`rui action read --session ID --action N [--offset N]` returns status and one bounded, repeatable final-result window without waiting or consuming it.
+Attempted status does not establish that a process runs or that a remote request was sent.
+`rui action stop` saves a stop selection, not a claim that the effect has ended.
+Native keyed controls retain their existing Owner authority.
+The existing exact call-ID and argument reads remain proposal inspection, separate from result/status reads.
+These Actions add no intermediate publication, JavaScript runtime, inbox, durable execution restoration or execution checkpoint.
 
 #### Authorizing exact actions
 
@@ -546,6 +582,20 @@ Model replacement follows the retry policy above and may incur duplicate cost.
 
 
 ## Required evidence
+
+### Background Action lifecycle
+
+`async-actions-integration` drives the public CLI against a local model endpoint and a gated native Bash producer.
+The fsynced launch record and PID establish one physical launch through foreground blocking, promotion, the original answer and final delivery.
+The fixture also separates background acceptance from permission to launch, proves capacity-one refusal leaves the caller unchanged, and uses native read and stop controls against an approval-waiting invocation.
+The endpoint captures a single original-call receipt and one later tool-data input, not a second output for the original call ID.
+
+Store conformance cases in `store/tests/async_actions.zig` cover immutable fulfillment, promotion refusal, source-stop suppression, exact replay, native stop selection, complete siblings, frozen busy-model boundaries, attached-tree versus standalone stop, and recovery without effect replay.
+`rsql.zig`'s conditional sourced-input projection cases hold Session markers, nullable sender absence and every source-table tie to the same write authority as ordinary input insertion.
+The native migration tests compare fresh and migrated catalogs and rows on SQLite and MySQL.
+The final-source negative control removes only the new exact reference and must fail the same Session/Action/content acceptance gate with every other foreign key enabled.
+Custody tests cover reserve-and-headroom interleavings, detached cleanup and rollback without reusable stale tokens.
+Source inspection, the transition prototype and Python SQLite probes are design evidence, not substitutes for these native and public gates.
 
 
 ### Execution, retries and permission

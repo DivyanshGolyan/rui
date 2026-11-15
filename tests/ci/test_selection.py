@@ -2338,6 +2338,7 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
     def test_parts_are_disjoint_and_cover_the_unchanged_full_gate(self):
         expected = {
             "admission_integration.sh release", "dispatch_integration.py release",
+            "async_actions_integration.py release",
             "bash_owner_integration.py release", "bash_integration.py release",
             "peer_integration.py release", "bash_environment_integration.py release",
             "sender_identity_integration.py release",

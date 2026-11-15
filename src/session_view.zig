@@ -511,6 +511,7 @@ test "a long user Message shows two non-blank lines and what it hides" {
 fn toolState(code: protocol.ToolPresentation.Code) struct { glyph: []const u8, suffix: []const u8, style: Style } {
     const state: struct { mark: marks.Mark, suffix: []const u8 } = switch (code) {
         .unresolved => .{ .mark = .active, .suffix = "" },
+        .background => .{ .mark = .finished, .suffix = " · accepted in background" },
         .pending_permission => .{ .mark = .needs_you, .suffix = "" },
         .succeeded => .{ .mark = .finished, .suffix = "" },
         .denied => .{ .mark = .stopped, .suffix = " · denied" },
@@ -1231,9 +1232,12 @@ pub fn message(requests: client.Requests, store: []const u8, session: []const u8
     if (messageLabel(value.state, labels)) |text| {
         try print(sink, "{s}{s}{s}\n", .{ Style.quiet.code(colour), text, Style.normal.code(colour) });
     }
-    if (value.sender) |sender| return peerLine(sink, .inbound, sender, value.admitted_at);
+    switch (value.source) {
+        .peer => |peer| return peerLine(sink, .inbound, peer.sender, value.admitted_at),
+        .tool_final => |action| try print(sink, "Tool final · Action {d}\n", .{action}),
+        .person => try userPrefix(sink, colour, value.admitted_at),
+    }
     const block: Collapsed = .{ .source = .activity, .position = item.position, .ordinal = item.ordinal, .content = value.content, .row = item.value == .user };
-    try userPrefix(sink, colour, value.admitted_at);
     var body: UserBody(@TypeOf(sink)) = undefined;
     try body.init(sink, value.content.length, false);
     try content(requests, store, session, item, value.content, &body);
@@ -1559,7 +1563,7 @@ pub fn showsAtAdmission(position: u64, value: protocol.ActivityItem.Message, que
 
 test "a waiting Message shows at its Admission only when nothing holds it and nothing older waits" {
     const body: protocol.ActivityItem.Content = .{ .length = 1, .digest = @splat(0) };
-    const waiting: protocol.ActivityItem.Message = .{ .admission = 12, .key = .{}, .turn = null, .state = .queued, .content = body, .admitted_at = 1, .sender = null };
+    const waiting: protocol.ActivityItem.Message = .{ .admission = 12, .source = .{ .person = .{} }, .turn = null, .state = .queued, .content = body, .admitted_at = 1 };
     const alone: protocol.Queued = .{ .count = 1, .oldest_position = 30, .newest_admission = 12, .newest_position = 30 };
     // A pending Session can wait long before it takes the Message, as after
     // Ctrl-R recovery: the conversation shows it at once, as on an idle send.
@@ -1592,7 +1596,7 @@ pub fn tight(value: protocol.ActivityItem.Value) bool {
         .tool_result => |result| result.presentation.code == .succeeded,
         .hosted_call => |presentation| presentation.code == .succeeded,
         .sent => true,
-        .admission, .received, .user => |message_| message_.sender != null,
+        .admission, .received, .user => |message_| message_.source == .peer,
         .assistant, .call, .turn_ended, .stop, .send_failed, .approval_requested, .session_changed, .compacted, .model_call => false,
     };
 }
@@ -1617,7 +1621,7 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
         },
         .received => |value| try message(requests, store, session, item, value, .none, sink, colour),
         .user => |value| {
-            if (value.sender != null) return false;
+            if (value.source == .peer) return false;
             try message(requests, store, session, item, value, .none, sink, colour);
         },
         .assistant => |assistant| {

@@ -45,6 +45,7 @@ fi
 cases() {
     run_case execution admission sh "$directory/admission_integration.sh" "$release_safe"
     run_case execution dispatch python3 "$directory/dispatch_integration.py" "$release_safe"
+    run_case execution async-actions python3 "$directory/async_actions_integration.py" "$release_safe"
     run_case execution bash-owner python3 "$directory/bash_owner_integration.py" "$release_safe"
     run_case execution bash python3 "$directory/bash_integration.py" "$release_safe"
     run_case execution peer python3 "$directory/peer_integration.py" "$release_safe"

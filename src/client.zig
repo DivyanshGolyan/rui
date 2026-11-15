@@ -240,6 +240,18 @@ pub const Requests = struct {
         return readReportResponse(self, fd, sink, reply_buffer);
     }
 
+    pub fn readAction(self: Requests, store_path: []const u8, session: []const u8, action_id: u64, offset: u64, sink: anytype, reply_buffer: *ReplyBuffer) !protocol_reply.ReportReply {
+        reply_buffer.len = 0;
+        try self.check();
+        if (!protocol.validSessionId(session) or action_id == 0 or action_id > std.math.maxInt(i64) or offset > protocol.max_sqlite_content_bytes) return error.InvalidTarget;
+        const paths = try platform.resolveClientPaths(self.io, store_path);
+        var body: protocol.RequestBuffer = .{};
+        try body.appendShape(protocol.read_action_request, .{ paths.store.slice(), session, action_id, offset });
+        const fd = try openRead(self, &paths, "/v1/read-action", body.slice());
+        defer closeSocket(self.io, fd);
+        return readReportResponse(self, fd, sink, reply_buffer);
+    }
+
     pub fn readActionArguments(self: Requests, store_path: []const u8, session: []const u8, action_id: u64, destination: std.Io.File, reply_buffer: *ReplyBuffer) !protocol_reply.ResultReply {
         return readActionContent(self, store_path, session, action_id, protocol.read_action_arguments_request, "/v1/read-action-arguments", destination, reply_buffer);
     }
@@ -503,6 +515,8 @@ pub const ModelInterruptionInput = struct {
     turn_id: u64,
     operation_id: u64,
 };
+
+pub const ActionControlInput = struct { store: []const u8, session: []const u8, action_id: u64 };
 
 pub const PermissionDecisionInput = struct {
     store: []const u8,
@@ -1750,6 +1764,8 @@ fn readCapturedBinding(io: std.Io, file: *std.Io.File) !struct { saved: protocol
             .turn = protocol_reply.decimalId(fields.target.?.turn, true) catch return error.InvalidRequestRecord,
             .operation = protocol_reply.decimalId(fields.target.?.operation, true) catch return error.InvalidRequestRecord,
         } },
+        .action_background => .{ .action_background = protocol_reply.decimalId(fields.action orelse return error.InvalidRequestRecord, false) catch return error.InvalidRequestRecord },
+        .action_stop => .{ .action_stop = protocol_reply.decimalId(fields.action orelse return error.InvalidRequestRecord, false) catch return error.InvalidRequestRecord },
         .permission_decision => .{ .permission_decision = .{
             .action = protocol_reply.decimalId(fields.action orelse return error.InvalidRequestRecord, true) catch return error.InvalidRequestRecord,
             .decision = std.meta.stringToEnum(protocol.PermissionDecision, (fields.decision orelse return error.InvalidRequestRecord).slice()) orelse return error.InvalidRequestRecord,
@@ -1762,7 +1778,7 @@ fn readCapturedBinding(io: std.Io, file: *std.Io.File) !struct { saved: protocol
         (kind != .configure and fields.reload_skills != null) or
         (kind != .session_pin and fields.pinned != null) or
         (kind != .message and (fields.text != null or fields.sender != null or fields.sender_handle != null)) or (kind != .model_interruption and fields.target != null) or
-        (kind != .permission_decision and (fields.action != null or fields.decision != null))) return error.InvalidRequestRecord;
+        (kind != .permission_decision and fields.decision != null) or (kind != .permission_decision and kind != .action_background and kind != .action_stop and fields.action != null)) return error.InvalidRequestRecord;
     return .{ .saved = saved, .target = target };
 }
 
@@ -1932,6 +1948,19 @@ fn writeModelInterruptionCapture(
     location: CaptureTarget.Location,
 ) !CapturedRecord {
     return runCapture(io, paths.store.slice(), &location, input.session, .model_interruption, null, Capture.writeRequest, .{ protocol.model_interruption_request, .{ paths.store.slice(), location.key, input.session, input.turn_id, input.operation_id } });
+}
+
+pub fn captureActionControl(io: std.Io, input: ActionControlInput, kind: @import("action_control.zig").Kind, target: CaptureTarget) !CapturedRecord {
+    const paths = try platform.resolveClientPaths(io, input.store);
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var key_buffer: [36]u8 = undefined;
+    const location = try target.resolve(io, &path_buffer, &key_buffer);
+    try protocol_reply.validateIdentityInputs(location.key, input.session);
+    if (input.action_id == 0 or input.action_id > std.math.maxInt(i64)) return error.InvalidTarget;
+    return switch (kind) {
+        .background => runCapture(io, paths.store.slice(), &location, input.session, .action_background, null, Capture.writeRequest, .{ protocol.action_background_request, .{ paths.store.slice(), location.key, input.session, input.action_id } }),
+        .stop => runCapture(io, paths.store.slice(), &location, input.session, .action_stop, null, Capture.writeRequest, .{ protocol.action_stop_request, .{ paths.store.slice(), location.key, input.session, input.action_id } }),
+    };
 }
 
 pub fn capturePermissionDecision(io: std.Io, input: PermissionDecisionInput, target: CaptureTarget) !CapturedRecord {
@@ -3264,6 +3293,8 @@ test "client capture rejects noncanonical Session references before publication"
                 .session_pin => captureSessionPin(io, .{ .store = root, .session = session, .pinned = true }, target),
                 .model_interruption => captureModelInterruption(io, .{ .store = root, .session = session, .turn_id = 1, .operation_id = 1 }, target),
                 .permission_decision => capturePermissionDecision(io, .{ .store = root, .session = session, .action_id = 1 }, target),
+                .action_background => captureActionControl(io, .{ .store = root, .session = session, .action_id = 1 }, .background, target),
+                .action_stop => captureActionControl(io, .{ .store = root, .session = session, .action_id = 1 }, .stop, target),
             };
             if (result) |record| {
                 var unexpected = record;
@@ -3304,6 +3335,7 @@ test "client recovery rejects noncanonical Session references without retransmis
                     .session_pin => ",\"pinned\":true}",
                     .model_interruption => ",\"turn\":\"1\",\"operation\":\"1\"}}",
                     .permission_decision => ",\"action\":\"1\",\"decision\":\"deny\"}",
+                    .action_background, .action_stop => ",\"action\":\"1\"}",
                 });
                 const file = try tmp.dir.createFile(io, handle ++ ".json", .{});
                 try file.writeStreamingAll(io, body.slice());

@@ -11,14 +11,15 @@
 
 A **Session stop** selects current work once.
 Its saved selection prevents that work from advancing; it does not close the reusable Session.
-The transaction binds the core idempotency key, Session reference, active Turn (if any), queued admission cutoff and admission answer with stop authority.
+The transaction binds the core idempotency key, Session reference, active Turn (if any), queued admission cutoff, highest owned Action ID and admission answer with stop authority.
 The saved fact excludes unselected input through that cutoff, including between failure and successor admission.
 Input after the cutoff is not selected by this stop.
 Earlier committed results remain unchanged.
 
 Acknowledgment confirms that Rui saved the stop intent and selection, not that the selected work has finished.
-With no active Turn, the queued-input exclusion commit completes the stop.
-Otherwise completion requires the selected Turn's terminal outcome and atomic occupancy release, including every selected Action's terminal outcome and complete derived Tool Result coverage.
+The stop selects every existing Session-owned Action through its saved Action cutoff, including background Actions whose causal Turns already ended.
+Completion requires the selected Turn, if any, and every selected Action to become terminal.
+The existing owed-stop mechanism propagates this selection through the attached tree. Unattached Sessions keep their independent lifetimes.
 
 Stop completion follows no future work and proves neither remote provider termination nor the end of billing.
 Model transport may still retain custody for local cleanup.
@@ -101,7 +102,7 @@ Actions have no independent interruption command.
 Session stop instead interrupts unresolved model work with causal stop provenance.
 Neither path accepts partial/late continuation or retries interrupted work.
 
-Persist an accepted Session stop as its command key, Session, optional selected Turn and admission cutoff; derive excluded messages from those facts.
+Persist an accepted Session stop as its command key, Session, optional selected Turn, admission cutoff and Action cutoff; derive excluded messages from those facts.
 Persist every exact-interruption target, including rejected targets, as Session, Turn and Operation under its core command.
 An interrupted model Operation carries the causing command key if and only if its Resolution is `Interrupted`.
 Do not add a selected Operation or completion flag to a stop, a stop identifier, a second Turn-outcome identity, per-message stop flags or a uniqueness constraint that would prevent independent stops from selecting the same Turn.

@@ -41,7 +41,7 @@ pub const ItemJson = struct {
     const call_details = .{ ",\"description\":", H{ .optional_string = activity_read.CallText.max_description_bytes }, ",\"tool\":", H{ .optional_string = activity_read.CallText.max_tool_bytes }, ",\"server\":", H{ .optional_string = activity_read.CallText.max_server_bytes } };
     pub const value_shapes = struct {
         /// Holes: admission, key, turn, state, admitted at, sender, content.
-        const message = .{ "{\"admission\":\"", H.decimal, "\",\"key\":", H{ .string = protocol.max_key_bytes }, ",\"turn\":", H.optional_id, ",\"state\":\"", H{ .tag = @FieldType(Item.Message, "state") }, "\",\"admitted_at\":\"", H.decimal, "\",\"sender\":", H{ .optional_json = NamedPeerJson }, ",\"content\":", H{ .json = ContentJson }, "}" };
+        const message = .{ "{\"admission\":\"", H.decimal, "\",\"key\":", H{ .optional_string = protocol.max_key_bytes }, ",\"turn\":", H.optional_id, ",\"state\":\"", H{ .tag = @FieldType(Item.Message, "state") }, "\",\"admitted_at\":\"", H.decimal, "\",\"sender\":", H{ .optional_json = NamedPeerJson }, ",\"source_action\":", H.optional_id, ",\"content\":", H{ .json = ContentJson }, "}" };
         pub const admission = message;
         pub const user = message;
         pub const received = message;
@@ -87,15 +87,31 @@ pub const ItemJson = struct {
             inline else => |_, kind| try writeShape(out, head(kind), .{ item.position, item.ordinal, item.at }),
         }
         switch (item.value) {
-            inline .admission, .user, .received => |message, tag| {
+            inline .admission, .user, .received => |*message, tag| {
                 const name = @tagName(tag);
                 try writeShape(out, @field(value_shapes, name), .{
-                    message.admission,   message.key.slice(),                    message.turn,                            message.state,
-                    message.admitted_at, NamedPeerJson.optional(message.sender), ContentJson{ .value = message.content },
+                    message.admission,
+                    switch (message.source) {
+                        .person => |*key| key.slice(),
+                        .peer => |*peer| peer.key.slice(),
+                        .tool_final => null,
+                    },
+                    message.turn,
+                    message.state,
+                    message.admitted_at,
+                    switch (message.source) {
+                        .peer => |*peer| NamedPeerJson.optional(&peer.sender),
+                        else => NamedPeerJson.optional(null),
+                    },
+                    switch (message.source) {
+                        .tool_final => |action| action,
+                        else => null,
+                    },
+                    ContentJson{ .value = message.content },
                 });
             },
-            .sent => |sent| try writeShape(out, value_shapes.sent, .{ sent.admission, sent.admitted_at, NamedPeerJson{ .value = sent.target }, ContentJson{ .value = sent.content } }),
-            .send_failed => |failed| try writeShape(out, value_shapes.send_failed, .{ failed.key.slice(), NamedPeerJson.optional(failed.target), failed.code.slice() }),
+            .sent => |*sent| try writeShape(out, value_shapes.sent, .{ sent.admission, sent.admitted_at, NamedPeerJson{ .value = &sent.target }, ContentJson{ .value = sent.content } }),
+            .send_failed => |*failed| try writeShape(out, value_shapes.send_failed, .{ failed.key.slice(), NamedPeerJson.optional(if (failed.target) |*target| target else null), failed.code.slice() }),
             .approval_requested => |request| try writeShape(out, value_shapes.approval_requested, .{ request.session.slice(), request.action, request.operation, request.call_ordinal, optionalText(&request.description), optionalText(&request.tool), optionalText(&request.server) }),
             .session_changed => |change| try writeShape(out, value_shapes.session_changed, .{ change.revision, change.field, if (change.provider_text) |text| text.slice() else null }),
             .compacted => |compacted| try writeShape(out, value_shapes.compacted, .{ compacted.operation, compacted.dropped }),

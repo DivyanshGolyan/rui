@@ -210,7 +210,7 @@ test "a person's Message next to a position is a one-row page of admission rows,
     try received.session.set(session.slice());
     const peers = try store_core.activityPageForTesting(&storage, received);
     try std.testing.expect(peers.count == 1 and peers.items[0].value == .received);
-    try std.testing.expectEqualStrings(peer.slice(), peers.items[0].value.received.sender.?.session.slice());
+    try std.testing.expectEqualStrings(peer.slice(), peers.items[0].value.received.source.peer.sender.session.slice());
     // Both kinds read the one admission source, each row once, by its sender.
     received.kinds = .initMany(&.{ .admission, .received });
     const both = try store_core.activityPageForTesting(&storage, received);

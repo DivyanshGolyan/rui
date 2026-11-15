@@ -181,7 +181,7 @@ pub fn forEachEngine(comptime run: anytype) !void {
         if (engine != .mysql or try mysql_testing.available()) {
             var case: Case = .{ .engine = engine };
             run(&case) catch |err| {
-                std.debug.print("conformance test failed on engine {s}\n", .{@tagName(engine)});
+                std.debug.print("conformance test failed on engine {s}: {s}\n", .{ @tagName(engine), @errorName(err) });
                 return err;
             };
             if (engine == .mysql) {
@@ -238,6 +238,7 @@ pub fn stageEndingMessageUpgrade(storage: *Store, keep_pending_forward: bool) !v
     };
     // K10 is the 66 -> 67 transition, even after later formats append steps.
     const from: u32 = 66;
+    try dropActionLifecycle(storage);
     try dropPinOrganization(storage);
     try dropObligationFrontier(storage);
     // Reconstruct the historical row width from its owning CREATE, not a
@@ -301,6 +302,74 @@ pub fn stageEndingMessageUpgrade(storage: *Store, keep_pending_forward: bool) !v
             for (step.mysql) |sql| try Native.exec(storage, sql);
         }
         try Native.exec(storage, comptime std.fmt.comptimePrint("UPDATE store_meta SET meta_value='{d}' WHERE meta_key='format'", .{schema.schema_version}));
+        try mysql_testing.restoreTouchOracleForTesting(storage, &.{ "message_admission", "session_stop", "action_operation" });
+    }
+}
+
+fn dropActionLifecycle(storage: *Store) !void {
+    const schema = @import("schema.zig");
+    const Native = struct {
+        fn exec(store: *Store, sql: [:0]const u8) !void {
+            if (store.engine == .mysql) return mysql_testing.rawExec(store, sql);
+            return sqlite.exec(store.sqliteDatabase(), sql);
+        }
+    };
+    try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM action_control_command", .{}));
+    try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM action_operation WHERE background_position IS NOT NULL", .{}));
+    try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM message_admission WHERE final_action_id IS NOT NULL", .{}));
+    try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM core_command WHERE kind IN (8,9)", .{}));
+    try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM session_stop WHERE action_cutoff<>0", .{}));
+    try Native.exec(storage, if (storage.engine == .mysql) "SET FOREIGN_KEY_CHECKS=0" else "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
+    defer Native.exec(storage, if (storage.engine == .mysql) "SET FOREIGN_KEY_CHECKS=1" else "PRAGMA foreign_keys=ON;PRAGMA legacy_alter_table=OFF") catch unreachable;
+    const names = .{ "message_admission", "session_stop", "action_operation", "core_command" };
+    inline for (names) |name| {
+        try Native.exec(storage, "CREATE TABLE upgrade_action_lifecycle_" ++ name ++ " AS SELECT * FROM " ++ name);
+    }
+    try Native.exec(storage, "DROP TABLE action_control_command");
+    inline for (names) |name| try Native.exec(storage, "DROP TABLE " ++ name);
+    inline for (names) |name| {
+        const old_sqlite = comptime parentTable(pin_parent_sqlite_ddl, name);
+        const columns = comptime blk: {
+            @setEvalBranchQuota(100 * old_sqlite.len);
+            var result: []const u8 = "";
+            for (schema.tables) |table| {
+                if (!std.mem.eql(u8, table.name, name)) continue;
+                for (table.columns) |column| {
+                    if (std.mem.indexOf(u8, old_sqlite, "\n " ++ column.name ++ " ") != null) {
+                        result = result ++ (if (result.len == 0) "" else ",") ++ column.name;
+                    }
+                }
+            }
+            break :blk result;
+        };
+        const ddl = if (storage.engine == .mysql) comptime parentTable(pin_parent_mysql_ddl, name) else old_sqlite;
+        try Native.exec(storage, ddl);
+        try Native.exec(storage, "INSERT INTO " ++ name ++ "(" ++ columns ++ ") SELECT " ++ columns ++ " FROM upgrade_action_lifecycle_" ++ name);
+        try Native.exec(storage, "DROP TABLE upgrade_action_lifecycle_" ++ name);
+    }
+    const ddl = if (storage.engine == .mysql) pin_parent_mysql_ddl else pin_parent_sqlite_ddl;
+    var statements = std.mem.splitSequence(u8, ddl, ";\n");
+    while (statements.next()) |statement| {
+        inline for (names) |name| {
+            if (std.mem.startsWith(u8, statement, "ALTER TABLE " ++ name ++ " ") or
+                ((std.mem.startsWith(u8, statement, "CREATE INDEX ") or std.mem.startsWith(u8, statement, "CREATE UNIQUE INDEX ")) and
+                    std.mem.indexOf(u8, statement, " ON " ++ name ++ "(") != null))
+            {
+                const text = try std.testing.allocator.dupeSentinel(u8, statement, 0);
+                defer std.testing.allocator.free(text);
+                try Native.exec(storage, text);
+            }
+        }
+    }
+}
+
+fn parentTable(comptime ddl: []const u8, comptime name: []const u8) [:0]const u8 {
+    comptime {
+        @setEvalBranchQuota(10 * ddl.len + 1000);
+        const prefix = "CREATE TABLE " ++ name ++ "(";
+        const start = std.mem.indexOf(u8, ddl, prefix) orelse @compileError("PIN parent fixture has no table " ++ name);
+        const end = std.mem.indexOfPos(u8, ddl, start, ";\n") orelse @compileError("PIN parent fixture has no statement end for " ++ name);
+        return (ddl[start..end] ++ "\x00")[0 .. end - start :0];
     }
 }
 
@@ -434,6 +503,10 @@ pub fn fixtureTextError(comptime text: []const u8) ?[]const u8 {
     }
 }
 
+// Exact canonical parent75 output; test-only migration boundary, not runtime compatibility.
+pub const pin_parent_sqlite_ddl: [:0]const u8 = @embedFile("migration_pin_parent.sqlite.sql");
+pub const pin_parent_mysql_ddl: [:0]const u8 = @embedFile("migration_pin_parent.mysql.sql");
+
 /// The Store at `schema.migration_baseline`, which the migration tests of
 /// each engine move to the current schema: its DDL as SQLite and MySQL ran
 /// it then, and rows a Store at the baseline held, written as fixture text
@@ -539,6 +612,51 @@ pub fn queryU64(storage: *Store, comptime sql: [:0]const u8, args: anytype) !u64
     _ = fixtureText(sql);
     if (storage.engine == .mysql) return mysql_testing.queryU64(storage, sql, args);
     return sqliteQueryU64(storage.sqliteDatabase(), sql, args);
+}
+
+pub fn expectSqliteObligationProjection(comptime sql: [:0]const u8, comptime ddl_text: [:0]const u8, comptime cases: anytype) !void {
+    var raw: ?*sqlite.c.sqlite3 = null;
+    if (sqlite.c.sqlite3_open(":memory:", &raw) != sqlite.c.SQLITE_OK) {
+        if (raw) |opened| _ = sqlite.c.sqlite3_close(opened);
+        return error.StoreOpenFailed;
+    }
+    const local = raw.?;
+    defer {
+        const closed = sqlite.c.sqlite3_close(local);
+        if (closed != sqlite.c.SQLITE_OK) std.log.err("obligation parity SQLite close failed: {d}", .{closed});
+    }
+    try sqlite.exec(local, ddl_text);
+    try sqlite.exec(local, "INSERT INTO session(session_ref,obligation_since) VALUES('aaaaaa',NULL),('bbbbbb',80)");
+    const statement = try sqlite.prepare(local, sql);
+    defer _ = sqlite.c.sqlite3_finalize(statement);
+    inline for (cases) |case| {
+        const saved = if (case.saved) |n| std.fmt.comptimePrint("{d}", .{n}) else "NULL";
+        const key = if (case.missing) "zzzzzz" else "aaaaaa";
+        try sqlite.exec(local, "UPDATE session SET obligation_since=" ++ saved ++ " WHERE session_ref='aaaaaa'");
+        try std.testing.expectEqual(sqlite.c.SQLITE_OK, sqlite.c.sqlite3_reset(statement));
+        try std.testing.expectEqual(sqlite.c.SQLITE_OK, sqlite.c.sqlite3_clear_bindings(statement));
+        try std.testing.expectEqual(sqlite.c.SQLITE_OK, sqlite.c.sqlite3_bind_text(statement, 1, key.ptr, @intCast(key.len), null));
+        const bound = if (case.owed) |n| sqlite.c.sqlite3_bind_int64(statement, 2, @intCast(n)) else sqlite.c.sqlite3_bind_null(statement, 2);
+        try std.testing.expectEqual(sqlite.c.SQLITE_OK, bound);
+        const other_bound = if (case.other) |n| sqlite.c.sqlite3_bind_int64(statement, 3, @intCast(n)) else sqlite.c.sqlite3_bind_null(statement, 3);
+        try std.testing.expectEqual(sqlite.c.SQLITE_OK, other_bound);
+        const local_result = sqlite.c.sqlite3_step(statement);
+        if (case.refused) {
+            try std.testing.expectEqual(sqlite.c.SQLITE_CONSTRAINT, local_result & 0xff);
+        } else {
+            try std.testing.expectEqual(sqlite.c.SQLITE_DONE, local_result);
+            try std.testing.expectEqual(case.rows, @as(u64, @intCast(sqlite.c.sqlite3_changes64(local))));
+        }
+        const check = try sqlite.prepare(local, "SELECT obligation_since FROM session ORDER BY session_ref");
+        defer _ = sqlite.c.sqlite3_finalize(check);
+        try std.testing.expectEqual(sqlite.c.SQLITE_ROW, sqlite.c.sqlite3_step(check));
+        if (case.expected) |n| {
+            try std.testing.expectEqual(n, @as(u64, @intCast(sqlite.c.sqlite3_column_int64(check, 0))));
+        } else try std.testing.expectEqual(sqlite.c.SQLITE_NULL, sqlite.c.sqlite3_column_type(check, 0));
+        try std.testing.expectEqual(sqlite.c.SQLITE_ROW, sqlite.c.sqlite3_step(check));
+        try std.testing.expectEqual(@as(i64, 80), sqlite.c.sqlite3_column_int64(check, 0));
+        try std.testing.expectEqual(sqlite.c.SQLITE_DONE, sqlite.c.sqlite3_step(check));
+    }
 }
 
 /// `exec` on a SQLite connection, for any SQLite text: the raw SQL of

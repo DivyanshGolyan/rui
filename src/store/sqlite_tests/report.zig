@@ -191,14 +191,14 @@ test "canonical report and Action read failures fence later commands" {
                 } else |err| err,
                 .arguments => if (storage.actionArguments(allocated_session_2.slice(), try store_testing.sqlite_only.queryU64(&storage, "SELECT min(action_id) FROM action_operation", .{}))) |_| {} else |err| err,
                 .execution => blk: {
-                    const action = (try storage.admitNextActionAttempt(300_000, .{})).?;
+                    const action = (try storage.admitNextActionAttempt(.{ .credit = .background, .mcp = true }, 300_000, .{})).?;
                     var input: ActionExecutionInput = undefined;
                     break :blk storage.readActionExecutionInput(.bash, action.permit.binding, &input);
                 },
             };
             try std.testing.expectError(error.CorruptStore, result);
             try std.testing.expect(storage.isFenced());
-            try std.testing.expectError(error.StoreFenced, storage.admitNextActionAttempt(300_000, .{}));
+            try std.testing.expectError(error.StoreFenced, storage.admitNextActionAttempt(.{ .credit = .background, .mcp = true }, 300_000, .{}));
         }
     }
 }

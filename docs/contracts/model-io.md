@@ -17,7 +17,7 @@ Each model Operation owns one immutable **Model Request Manifest** binding its p
 References/digests identify canonical content; runtime facts retain their original rendering references.
 Session facts and Operation admission share one committed per-Session order on their owning records, without a duplicate payload log.
 The Operation's admission position fixes its historical boundary.
-Accepted model output, call rejection and Action Resolution become available at their acceptance positions, not a producing Operation's earlier admission position.
+Accepted model output, call rejection and Action fulfillment and Resolution become available at their acceptance positions, not a producing Operation's earlier admission position.
 Historical visibility does not bypass pending-input applicability, expose an incomplete Tool Result group or change Conversation/tool-call order.
 
 If the transport answer exceeds 4 MiB, retain the received JSON prefix through the optional scratch path with a larger-than-limit note, not a claim that the complete answer was saved.
@@ -269,7 +269,7 @@ The view provides:
 
 - historical settings, applicable host inputs and accepted model results;
 - complete model output in provider order, including private objects with no Conversation projection;
-- each Tool Call's sole rejection or Action Resolution, complete terminal coverage at the manifest boundary, and derived Tool Results streamed in call order;
+- each Tool Call's sole fulfillment, complete fulfillment coverage at the manifest boundary, and derived Tool Results streamed in call order;
 - a compaction anchor identifying its producing Operation and item ordinal, with traversal from that item through the end of the same output.
 
 Core owns visibility, source relationships and structural coverage.

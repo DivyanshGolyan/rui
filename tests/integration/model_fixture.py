@@ -413,6 +413,8 @@ class SuccessHandler(http.server.BaseHTTPRequestHandler):
         if isinstance(payload, tuple):
             payload, release = payload
             hold(self.server, release, "success fixture response")
+        if callable(payload):
+            payload = payload(json.loads(body))
         headers = {"X-Request-Id": f"request-{len(self.server.requests)}", "OpenAI-Model": "model-a-served"}
         status = 200
         spec = payload if isinstance(payload, ResponseSpec) else None

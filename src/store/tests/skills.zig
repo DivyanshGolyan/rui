@@ -67,7 +67,7 @@ test "skills start_agent imports six distinct contents atomically and retries af
                     .encoded_arguments = "{}",
                     .decoded_arguments = "{}",
                 }});
-                const action = (try storage.nextCoreWork()).?.action;
+                const action = (try storage.nextCoreWork(.{ .credit = .background, .mcp = true })).?.action;
                 const baseline = try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{});
                 const parent_position = (try store_core.readSessionForTesting(&storage, parent.slice())).?.next_position;
                 const task = "A distinct child task captured after its parent existed";
@@ -361,7 +361,7 @@ test "skills reload out of memory in configure or the skill tool rolls back with
             const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             const calls = [_]TestingCall{.{ .item_id = "reload-item", .name = "skill", .encoded_call_id = "reload-call", .decoded_call_id = "reload-call", .encoded_arguments = "{\\\"operation\\\":\\\"reload\\\"}", .decoded_arguments = "{\"operation\":\"reload\"}" }};
             try settleCallsForTesting(&storage, &tmp, model, "reload-oom-calls", &calls);
-            const input = (try storage.nextCoreWork()).?.action;
+            const input = (try storage.nextCoreWork(.{ .credit = .background, .mcp = true })).?.action;
             const tool: skills_fixture_domain.Capture = .{ .reload = .{ .entries = entries } };
             fail_index = 0;
             while (true) : (fail_index += 1) {
@@ -403,7 +403,7 @@ test "skills peer refusal persists authenticated activity diagnostic and keyed r
             try submitTestMessage(&storage, &tmp, "skills-peer-input", "skills-peer-input", sender.slice(), "Invoke a skill for my peer");
             const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             try settleTwoActionsForTesting(&storage, &tmp, model, "skills-peer-call");
-            const action = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
+            const action = (try storage.admitNextActionAttempt(.{ .credit = .background, .mcp = true }, 300_000, .{})).?.permit.binding;
             var input: ActionExecutionInput = undefined;
             try storage.readActionExecutionInput(.bash, action, &input);
             var command: wire_request.MessageCommand = .{ .session = receiver, .text = .{ .state = .value, .digest = protocol.contentDigest("") }, .sender = .{}, .sender_handle = input.sender_handle };
@@ -473,7 +473,7 @@ test "inline skills a peer Session's Message may list the recipient's skills" {
             try submitTestMessage(&storage, &tmp, "skills-peer-accept-input", "skills-peer-accept-input", sender.slice(), "Ask my peer to use its skill");
             const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             try settleTwoActionsForTesting(&storage, &tmp, model, "skills-peer-accept-call");
-            const action = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
+            const action = (try storage.admitNextActionAttempt(.{ .credit = .background, .mcp = true }, 300_000, .{})).?.permit.binding;
             var input: ActionExecutionInput = undefined;
             try storage.readActionExecutionInput(.bash, action, &input);
             const authored = "check the flaky tests";
@@ -497,8 +497,8 @@ test "inline skills a peer Session's Message may list the recipient's skills" {
                 .admission, .received => |message| message,
                 else => return error.TestUnexpectedResult,
             };
-            try std.testing.expectEqualStrings("skills-peer-accept", received.key.slice());
-            try std.testing.expectEqualStrings(sender.slice(), received.sender.?.session.slice());
+            try std.testing.expectEqualStrings("skills-peer-accept", received.source.peer.key.slice());
+            try std.testing.expectEqualStrings(sender.slice(), received.source.peer.sender.session.slice());
             // The Message is the text the peer sent; the skill is saved after it.
             try std.testing.expectEqualSlices(u8, &protocol.contentDigest(authored), &received.content.digest);
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_skill k JOIN message_admission m ON m.admission_id=k.admission_id JOIN content c ON c.content_id=k.content_id WHERE m.command_key='skills-peer-accept' AND k.position=1 AND k.name='demo' AND c.digest=?1", .{store_testing.Blob{ .bytes = &protocol.contentDigest(body) }}));
@@ -967,7 +967,7 @@ test "find_tools and the skill tool leave a call whose Session owes a stop to th
                 .{ .item_id = "invoke", .name = "skill", .encoded_call_id = "invoke", .decoded_call_id = "invoke", .encoded_arguments = "{\\\"operation\\\":\\\"reload\\\"}", .decoded_arguments = "{\"operation\":\"reload\"}" },
             };
             try settleCallsForTesting(&storage, &tmp, model, "owed-calls", &calls);
-            const find = (try storage.nextCoreWork()).?.action;
+            const find = (try storage.nextCoreWork(.{ .credit = .background, .mcp = true })).?.action;
             try std.testing.expect(find.tool == .find_tools);
             var skill = find.binding;
             skill.action_id = try store_testing.queryU64(&storage, "SELECT action_id FROM action_operation WHERE parent_operation_id=?1 AND action_id<>?2", .{ find.binding.parent_operation_id, find.binding.action_id });
@@ -1021,7 +1021,7 @@ test "the skill tool resolves an invocation or a failed capture with its text, a
                 .{ .captured = &invocation, .code = "succeeded", .text = "the skill's own text" },
                 .{ .captured = &failed, .code = "failed", .text = "Rui could not read the skill's file." },
             }) |expected| {
-                const pending = (try storage.nextCoreWork()).?.action;
+                const pending = (try storage.nextCoreWork(.{ .credit = .background, .mcp = true })).?.action;
                 // An injected fault rolls back the result and resolution.
                 for ([_]struct { Faults, anyerror }{
                     .{ .{ .content_import = true }, error.InjectedContentImportFailure },

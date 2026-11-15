@@ -4,6 +4,7 @@ const bash = @import("bash.zig");
 const codecs = @import("codecs.zig");
 const execution = @import("execution.zig");
 const failure_class = @import("failure_class.zig");
+const ActionCapacity = @import("tool_execution.zig").Capacity;
 const execution_turn = @import("execution_turn.zig");
 const failed_responses = @import("failed_responses.zig");
 const model_adapter = @import("model_adapter.zig");
@@ -694,6 +695,10 @@ const NativeTurn = struct {
         return self.host.store.controlGeneration();
     }
 
+    pub fn actionCapacity(self: *const NativeTurn) ActionCapacity {
+        return hostActionCapacity(self.host, !self.mcp.full());
+    }
+
     pub fn slotChanges(self: *const NativeTurn) u64 {
         return self.host.slot_changes;
     }
@@ -726,14 +731,6 @@ const NativeTurn = struct {
 
     pub fn providerConfigured(self: *const NativeTurn) bool {
         return self.host.providers.any();
-    }
-
-    pub fn custodyAvailable(self: *const NativeTurn) bool {
-        return self.host.custody.occupied() < self.host.custody.records.len;
-    }
-
-    pub fn includeMcp(self: *const NativeTurn) bool {
-        return mcpAdmissionAvailable(self.host, self.mcp);
     }
 
     pub fn freeSlots(self: *const NativeTurn) usize {
@@ -845,8 +842,8 @@ const NativeTurn = struct {
         };
     }
 
-    pub fn scanWork(self: *NativeTurn, paused: bool, include_mcp: bool) error{Fence}!execution_turn.Work {
-        const found = self.host.store.dispatchWork(paused, include_mcp) catch |err| {
+    pub fn scanWork(self: *NativeTurn, paused: bool, capacity: ActionCapacity) error{Fence}!execution_turn.Work {
+        const found = self.host.store.dispatchWork(paused, capacity) catch |err| {
             fenceDispatch(self.host, "dispatch work read", err);
             self.fenced = true;
             return error.Fence;
@@ -1330,12 +1327,12 @@ fn advanceBash(host: *Host, slots: []ExecutionSlot, workspace: *Workspace) bool 
 /// a call this stops short of is simply run again. The arguments are read
 /// whole onto the heap, so its frame stays small: every Store call may run
 /// other threads' queued writes on this stack.
-fn mcpAdmissionAvailable(host: *const Host, mcp: *const server_mcp.Calls) bool {
-    return host.custody.occupied() < host.custody.records.len and !mcp.full();
+fn hostActionCapacity(host: *const Host, mcp_available: bool) ActionCapacity {
+    return .fromFree(host.custody.records.len - host.custody.occupied(), mcp_available);
 }
 
 noinline fn runNextCoreAction(host: *Host, mcp: *server_mcp.Calls) execution_turn.Admission {
-    const work = (host.store.nextCoreWorkForHost(mcpAdmissionAvailable(host, mcp)) catch |err| {
+    const work = (host.store.nextCoreWork(hostActionCapacity(host, !mcp.full())) catch |err| {
         fenceDispatch(host, "core tool selection", err);
         return .retry_later;
     }) orelse return .no_work;
@@ -1578,8 +1575,12 @@ fn admitBashAttempt(
     slot: *ExecutionSlot,
     workspace: *Workspace,
 ) AdmissionProgress {
-    const token = host.custody.reserve() orelse return .no_work;
-    var admission = host.store.admitNextActionAttempt(host.bash_timeout_ms, host.hooks.storeFaults(.attempt_admission)) catch |err| {
+    const selected = (host.store.nextAction(.bash, hostActionCapacity(host, false)) catch |err| {
+        fenceDispatch(host, "Bash Action selection", err);
+        return .retry_later;
+    }) orelse return .no_work;
+    const token = (if (selected.background) host.custody.reserveLeaving(1) else host.custody.reserve()) orelse return .no_work;
+    var admission = host.store.admitActionAttempt(selected, host.bash_timeout_ms, host.hooks.storeFaults(.attempt_admission)) catch |err| {
         host.custody.releaseUnused(token) catch unreachable;
         fenceDispatch(host, "Bash Attempt admission", err);
         return .retry_later;
@@ -4524,7 +4525,7 @@ test "Host resolves MCP calls without Bash admission and continues the Turn" {
         .encoded_arguments = "{}",
         .decoded_arguments = "{}",
     }});
-    try std.testing.expect((try storage.admitNextActionAttempt(300_000, .{})) == null);
+    try std.testing.expect((try storage.admitNextActionAttempt(.{ .credit = .background, .mcp = true }, 300_000, .{})) == null);
     {
         const pending = try store_module.testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, .current);
         defer std.testing.allocator.free(pending);
@@ -4594,7 +4595,7 @@ test "a skill tool reload under heap exhaustion runs again later without fencing
         .encoded_arguments = "{\\\"operation\\\":\\\"reload\\\"}",
         .decoded_arguments = "{\"operation\":\"reload\"}",
     }});
-    const input = (try storage.nextCoreWork()).?.action;
+    const input = (try storage.nextCoreWork(.{ .credit = .background, .mcp = true })).?.action;
     var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage };
     // Each allocation in turn fails, the settlement's held write included,
     // until the call settles: the call waits, and nothing fences.

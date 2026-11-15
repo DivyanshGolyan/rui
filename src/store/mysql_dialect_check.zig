@@ -1072,6 +1072,10 @@ test "schema 75 MySQL pin migration handles fresh and historically upgraded kind
     defer mutex.unlock(io);
     _ = connection() orelse return if (state == .absent) error.SkipZigTest else error.MysqlUnavailable;
     defer restore("USE " ++ database);
+    const parent_database = "rui_pin_parent_catalog";
+    try setup("DROP DATABASE IF EXISTS " ++ parent_database ++ ";CREATE DATABASE " ++ parent_database);
+    defer restore("DROP DATABASE IF EXISTS " ++ parent_database);
+    try load(parent_database, store_testing.pin_parent_mysql_ddl, false);
     inline for (.{ false, true }) |historical| {
         try setup("DROP DATABASE IF EXISTS " ++ migrated_database ++ ";CREATE DATABASE " ++ migrated_database);
         if (historical) {
@@ -1081,10 +1085,10 @@ test "schema 75 MySQL pin migration handles fresh and historically upgraded kind
                 if (step.from < 74) try load(migrated_database, schema.mysqlMigration(step.from), false);
             }
         } else {
-            const objects = comptime schema.objects(.mysql);
+            const objects = comptime statements(store_testing.pin_parent_mysql_ddl);
             for (objects) |object| {
-                if (std.mem.eql(u8, object.name, "session_pin") or std.mem.eql(u8, object.name, "session_pin_command")) continue;
-                const text = try std.mem.replaceOwned(u8, std.testing.allocator, object.sql, "kind BETWEEN 1 AND 7", "kind BETWEEN 1 AND 6");
+                if (std.mem.startsWith(u8, object, "CREATE TABLE session_pin(") or std.mem.startsWith(u8, object, "CREATE TABLE session_pin_command(")) continue;
+                const text = try std.mem.replaceOwned(u8, std.testing.allocator, object, "kind BETWEEN 1 AND 7", "kind BETWEEN 1 AND 6");
                 defer std.testing.allocator.free(text);
                 try load(migrated_database, text, false);
             }
@@ -1095,7 +1099,7 @@ test "schema 75 MySQL pin migration handles fresh and historically upgraded kind
         try load(migrated_database, "CREATE TEMPORARY TABLE original_pin_stops AS SELECT * FROM session_stop", false);
         defer restore("DROP TEMPORARY TABLE " ++ migrated_database ++ ".original_pin_stops");
         try load(migrated_database, schema.mysqlMigration(74), false);
-        try expectCatalog(migrated_database);
+        try expectSameResults(&comptime shapeQueries(migrated_database), &comptime shapeQueries(parent_database));
         try expectSameResults(&.{
             "SELECT * FROM core_command ORDER BY command_seq",
             "SELECT * FROM session_stop ORDER BY command_key",
@@ -1112,9 +1116,57 @@ test "schema 75 MySQL pin migration handles fresh and historically upgraded kind
             "SELECT count(*) FROM session_pin WHERE command_key IS NULL",
             "SELECT pinned FROM session_pin_command WHERE command_key='pin-upgrade'",
         }, &.{ "SELECT 1", "SELECT 1" });
+        try load(migrated_database, "CREATE TEMPORARY TABLE original_populated_pin_commands AS SELECT * FROM core_command", false);
+        defer restore("DROP TEMPORARY TABLE " ++ migrated_database ++ ".original_populated_pin_commands");
+        try load(migrated_database, "CREATE TEMPORARY TABLE original_populated_pin AS SELECT * FROM session_pin", false);
+        defer restore("DROP TEMPORARY TABLE " ++ migrated_database ++ ".original_populated_pin");
+        try load(migrated_database, "CREATE TEMPORARY TABLE original_populated_pin_requests AS SELECT * FROM session_pin_command", false);
+        defer restore("DROP TEMPORARY TABLE " ++ migrated_database ++ ".original_populated_pin_requests");
+        try load(migrated_database, schema.mysqlMigrationFrom(75).?, false);
+        try expectCatalog(migrated_database);
+        try expectSameResults(&.{
+            "SELECT * FROM core_command ORDER BY command_seq",
+            "SELECT * FROM session_pin ORDER BY session_ref",
+            "SELECT * FROM session_pin_command ORDER BY command_key",
+        }, &.{
+            "SELECT * FROM original_populated_pin_commands ORDER BY command_seq",
+            "SELECT * FROM original_populated_pin ORDER BY session_ref",
+            "SELECT * FROM original_populated_pin_requests ORDER BY command_key",
+        });
         done.migrations += 1;
         writeRecord();
     }
+}
+
+test "schema 76 preserves populated PIN parent commands and organization on MySQL" {
+    const io = std.testing.io;
+    mutex.lockUncancelable(io);
+    defer mutex.unlock(io);
+    _ = connection() orelse return if (state == .absent) error.SkipZigTest else error.MysqlUnavailable;
+    defer restore("USE " ++ database);
+    const name = "rui_async_pin_parent";
+    try setup("DROP DATABASE IF EXISTS " ++ name ++ ";CREATE DATABASE " ++ name);
+    defer restore("DROP DATABASE IF EXISTS " ++ name);
+    try load(name, store_testing.pin_parent_mysql_ddl, false);
+    try load(name, store_testing.expected_mysql_rows, true);
+    try load(name, "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) VALUES('pin-kept',7,'d8mv7p',UNHEX(REPEAT('00',32)),1,'',0,0,101),('pin-cleared',7,'brhkcj',UNHEX(REPEAT('00',32)),1,'',0,0,102);INSERT INTO session_pin_command(command_key,pinned) VALUES('pin-kept',1),('pin-cleared',1);INSERT INTO session_pin(session_ref,command_key) VALUES('d8mv7p','pin-kept'),('brhkcj','pin-cleared');UPDATE session_pin SET command_key=NULL WHERE session_ref='brhkcj'", false);
+    try load(name, "CREATE TEMPORARY TABLE async_original_pin_commands AS SELECT * FROM core_command;CREATE TEMPORARY TABLE async_original_pin AS SELECT * FROM session_pin;CREATE TEMPORARY TABLE async_original_pin_requests AS SELECT * FROM session_pin_command", false);
+    defer restore("DROP TEMPORARY TABLE IF EXISTS " ++ name ++ ".async_original_pin_commands," ++ name ++ ".async_original_pin," ++ name ++ ".async_original_pin_requests");
+    try load(name, schema.mysqlMigrationFrom(75).?, false);
+    try expectCatalog(name);
+    try expectSameResults(&.{
+        "SELECT * FROM core_command ORDER BY command_seq",
+        "SELECT * FROM session_pin ORDER BY session_ref",
+        "SELECT * FROM session_pin_command ORDER BY command_key",
+        "SELECT count(*) FROM session_stop WHERE action_cutoff<>0",
+    }, &.{
+        "SELECT * FROM async_original_pin_commands ORDER BY command_seq",
+        "SELECT * FROM async_original_pin ORDER BY session_ref",
+        "SELECT * FROM async_original_pin_requests ORDER BY command_key",
+        "SELECT 0",
+    });
+    done.migrations += 1;
+    writeRecord();
 }
 
 test "schema 75 MySQL pin migration refuses absent and ambiguous kind checks before DDL" {
@@ -1141,5 +1193,139 @@ test "schema 75 MySQL pin migration refuses absent and ambiguous kind checks bef
             "SELECT count(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA='" ++ migrated_database ++ "' AND TABLE_NAME IN ('session_pin','session_pin_command')",
             "SELECT count(*) FROM information_schema.TABLE_CONSTRAINTS WHERE TABLE_SCHEMA='" ++ migrated_database ++ "' AND TABLE_NAME='core_command' AND CONSTRAINT_TYPE='CHECK'",
         }, &.{ "SELECT 0", if (ambiguous) "SELECT 3" else "SELECT 1" });
+    }
+}
+
+test "schema 76 command kind migration resolves actual catalog name and fails closed on missing or duplicate semantics" {
+    const io = std.testing.io;
+    mutex.lockUncancelable(io);
+    defer mutex.unlock(io);
+    _ = connection() orelse return if (state == .absent) error.SkipZigTest else error.MysqlUnavailable;
+    defer restore("USE " ++ database);
+    const name = "rui_async_kind_check";
+    const step = schema.migrations[75 - schema.migration_baseline];
+    inline for ([_][]const u8{ "core_command_chk_1", "historically_renamed_kind" }) |constraint| {
+        try setup("DROP DATABASE IF EXISTS " ++ name ++ ";CREATE DATABASE " ++ name);
+        try load(name, "CREATE TABLE core_command(kind BIGINT NOT NULL,CONSTRAINT `" ++ constraint ++ "` CHECK(kind BETWEEN 1 AND 7)) ENGINE=InnoDB", false);
+        inline for (step.mysql[0..5]) |sql| try load(name, sql, false);
+        try load(name, "INSERT INTO core_command(kind) VALUES(8),(9)", false);
+        const invalid = try run("INSERT INTO core_command(kind) VALUES(10)") orelse return error.KindConstraintNotEnforced;
+        try std.testing.expectEqual(@as(u16, 3819), invalid.code);
+    }
+    inline for ([_]bool{ false, true }) |duplicate| {
+        try setup("DROP DATABASE IF EXISTS " ++ name ++ ";CREATE DATABASE " ++ name);
+        try load(name, "CREATE TABLE core_command(kind BIGINT NOT NULL) ENGINE=InnoDB", false);
+        if (duplicate) try load(name, "ALTER TABLE core_command ADD CONSTRAINT one_kind CHECK(kind BETWEEN 1 AND 7), ADD CONSTRAINT two_kind CHECK(kind BETWEEN 1 AND 7)", false);
+        try load(name, "SET @rui_kind_check='stale';SET @rui_kind_alter='ALTER TABLE core_command ADD COLUMN stale_fallthrough BIGINT';PREPARE rui_kind_statement FROM @rui_kind_alter", false);
+        const text = comptime blk: {
+            var result: []const u8 = "";
+            for (step.mysql[0..5]) |sql| result = result ++ sql ++ ";\n";
+            break :blk result;
+        };
+        _ = try run(text) orelse return error.AmbiguousKindMigrationAccepted;
+        var observed: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer observed.deinit();
+        try writeResult("SELECT count(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='" ++ name ++ "' AND TABLE_NAME='core_command' AND COLUMN_NAME='stale_fallthrough'", &observed.writer);
+        try std.testing.expectEqualStrings("\n 1:0", observed.written());
+    }
+    try setup("DROP DATABASE " ++ name);
+    done.migrations += 1;
+    writeRecord();
+}
+
+fn finalSourceReferenceGate() !void {
+    for ([_][]const u8{
+        "INSERT INTO message_admission(admission_id,session_ref,content_id,admission_position,admitted_at,final_action_id) VALUES(100,'d8mv7p',1,100,1793781721,1)",
+        "INSERT INTO message_admission(admission_id,session_ref,content_id,admission_position,admitted_at,final_action_id) VALUES(100,'brhkcj',2,100,1793781721,1)",
+        "INSERT INTO message_admission(admission_id,session_ref,content_id,admission_position,admitted_at,final_action_id) VALUES(100,'brhkcj',1,100,1793781721,2)",
+    }) |sql| {
+        const refusal = try run(sql) orelse return error.FinalSourceReferenceNotEnforced;
+        if (refusal.code != 1452) return error.WrongFinalSourceRefusal;
+    }
+}
+
+test "schema 76 MySQL final source enforces exact reference and rejects only-new-reference-removed control" {
+    const io = std.testing.io;
+    mutex.lockUncancelable(io);
+    defer mutex.unlock(io);
+    _ = connection() orelse return if (state == .absent) error.SkipZigTest else error.MysqlUnavailable;
+    defer restore("USE " ++ database);
+    inline for ([_]bool{ false, true }) |migrated| {
+        const name = "rui_async_final_reference";
+        try setup("DROP DATABASE IF EXISTS " ++ name ++ ";CREATE DATABASE " ++ name);
+        defer restore("DROP DATABASE IF EXISTS " ++ name);
+        if (migrated) {
+            try load(name, store_testing.baseline_mysql_ddl, false);
+            try load(name, store_testing.baseline_rows, true);
+            try load(name, schema.mysqlMigrationFrom(schema.migration_baseline).?, false);
+        } else {
+            try load(name, schema.ddl(.mysql), false);
+            try load(name, store_testing.expected_mysql_rows, true);
+        }
+        try load(name, "UPDATE action_operation SET resolution_code='failed',resolution_content_id=1,acceptance_position=10,resolved_at=1793781721 WHERE action_id=1", false);
+        try finalSourceReferenceGate();
+        try load(name, "INSERT INTO message_admission(admission_id,session_ref,content_id,admission_position,admitted_at,final_action_id) VALUES(100,'brhkcj',1,100,1793781721,1)", false);
+        try load(name, "DELETE FROM message_admission WHERE admission_id=100", false);
+        try load(name, "SET @rui_final_fk=(SELECT constraint_name FROM information_schema.KEY_COLUMN_USAGE WHERE table_schema=DATABASE() AND table_name='message_admission' AND column_name='final_action_id' AND referenced_table_name='action_operation');SET @rui_final_drop=CONCAT('ALTER TABLE message_admission DROP FOREIGN KEY `',REPLACE(@rui_final_fk,'`','``'),'`');PREPARE rui_final_statement FROM @rui_final_drop;EXECUTE rui_final_statement;DEALLOCATE PREPARE rui_final_statement", false);
+        try std.testing.expectError(error.FinalSourceReferenceNotEnforced, finalSourceReferenceGate());
+    }
+    done.migrations += 1;
+    writeRecord();
+}
+
+test "obligation projection MySQL row counts match SQLite for null changed unchanged missing and refused values" {
+    const Projection = rsql.ObligationProjection(.{
+        .sql = "SELECT session_ref,obligation_since AS saved_since,?2 AS owed_since FROM session WHERE session_ref=?1 UNION ALL " ++
+            "SELECT session_ref,obligation_since AS saved_since,?3 AS owed_since FROM session WHERE session_ref=?1",
+        .Args = struct { session: []const u8, owed: ?u64, other: ?u64 },
+    });
+    const io = std.testing.io;
+    mutex.lockUncancelable(io);
+    defer mutex.unlock(io);
+    _ = connection() orelse return if (state == .absent) error.SkipZigTest else error.MysqlUnavailable;
+    const name = "rui_obligation_projection_parity";
+    try setup("DROP DATABASE IF EXISTS " ++ name ++ ";CREATE DATABASE " ++ name ++ ";USE " ++ name);
+    defer restore("DROP DATABASE IF EXISTS " ++ name);
+    defer restore("USE " ++ database);
+    const ddl_text = "CREATE TABLE session(session_ref VARCHAR(6) PRIMARY KEY,obligation_since BIGINT CHECK(obligation_since IS NULL OR obligation_since>0))";
+    try setup(ddl_text);
+    try setup("INSERT INTO session(session_ref,obligation_since) VALUES('aaaaaa',NULL),('bbbbbb',80)");
+    try setup(comptime statements(prepareQuery(Projection.mysql.prepared()))[0]);
+    defer restore("DEALLOCATE PREPARE rui_dialect_check");
+    try std.testing.expectEqualDeep(@as([]const rsql.Slot, &.{ .{ .argument = 1 }, .{ .argument = 0 }, .{ .argument = 2 }, .{ .argument = 0 } }), Projection.mysql.slots);
+
+    const Case = struct { saved: ?u64, owed: ?u64, other: ?u64 = null, missing: bool = false, rows: u64, expected: ?u64, refused: bool = false };
+    const cases = [_]Case{
+        .{ .saved = null, .owed = null, .rows = 0, .expected = null },
+        .{ .saved = null, .owed = 17, .rows = 1, .expected = 17 },
+        .{ .saved = 17, .owed = 17, .rows = 0, .expected = 17 },
+        .{ .saved = 17, .owed = 31, .other = 9, .rows = 1, .expected = 9 },
+        .{ .saved = null, .owed = null, .other = 17, .rows = 1, .expected = 17 },
+        .{ .saved = 9, .owed = null, .rows = 1, .expected = null },
+        .{ .saved = 17, .owed = 99, .missing = true, .rows = 0, .expected = 17 },
+        .{ .saved = 17, .owed = 0, .rows = 0, .expected = 17, .refused = true },
+    };
+    try store_testing.expectSqliteObligationProjection(Projection.sql, ddl_text, cases);
+    inline for (cases) |case| {
+        const saved = if (case.saved) |n| std.fmt.comptimePrint("{d}", .{n}) else "NULL";
+        const owed = if (case.owed) |n| std.fmt.comptimePrint("{d}", .{n}) else "NULL";
+        const other = if (case.other) |n| std.fmt.comptimePrint("{d}", .{n}) else "NULL";
+        const key = if (case.missing) "zzzzzz" else "aaaaaa";
+        try setup("UPDATE session SET obligation_since=" ++ saved ++ " WHERE session_ref='aaaaaa'");
+        try setup("SET @rui_projection_key='" ++ key ++ "',@rui_projection_owed=" ++ owed ++ ",@rui_projection_other=" ++ other);
+        if (case.refused) {
+            const refusal = (try run("EXECUTE rui_dialect_check USING @rui_projection_owed,@rui_projection_key,@rui_projection_other,@rui_projection_key")) orelse return error.MissingProjectionRefusal;
+            try std.testing.expectEqual(@as(u16, 3819), refusal.code);
+        } else {
+            var counted: std.Io.Writer.Allocating = .init(std.testing.allocator);
+            defer counted.deinit();
+            try writeResult("EXECUTE rui_dialect_check USING @rui_projection_owed,@rui_projection_key,@rui_projection_other,@rui_projection_key;SELECT ROW_COUNT()", &counted.writer);
+            try std.testing.expectEqualStrings(std.fmt.comptimePrint("\n 1:{d}", .{case.rows}), counted.written());
+        }
+        var retained: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer retained.deinit();
+        try writeResult("SELECT session_ref,obligation_since FROM session ORDER BY session_ref", &retained.writer);
+        const expected = if (case.expected) |n| std.fmt.comptimePrint(" {d}:{d}", .{ std.fmt.comptimePrint("{d}", .{n}).len, n }) else " null";
+        try std.testing.expectEqualStrings("\n 6:aaaaaa" ++ expected ++ "\n 6:bbbbbb 2:80", retained.written());
     }
 }

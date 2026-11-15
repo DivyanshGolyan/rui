@@ -54,6 +54,7 @@ pub const Current = struct {
     first_message: ?session_list.FirstMessage,
     /// The selected Message's key.
     selected_message: ?[]const u8,
+    selected_source_action: ?u64 = null,
     /// The active Turn's Actions and rejected calls.
     actions: u64,
     rejected_calls: u64,
@@ -75,7 +76,7 @@ pub const Row = union(List) {
 };
 
 /// A Message of a terminal Turn.
-pub const Recent = struct { turn: u64, message: []const u8, outcome: []const u8 };
+pub const Recent = struct { turn: u64, message: ?[]const u8, source_action: ?u64 = null, outcome: []const u8 };
 
 pub const Authorization = enum { core, pending, bypass, allow_once };
 
@@ -192,7 +193,8 @@ pub const Application = enum { applied, pending, excluded };
 
 pub const Message = struct {
     admission: u64,
-    command_key: []const u8,
+    command_key: ?[]const u8,
+    source_action: ?u64 = null,
     content: Text,
     application: union(Application) {
         /// The Turn that took it, and that Turn's outcome once it has one.

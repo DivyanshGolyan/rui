@@ -2,6 +2,8 @@
 //! facts, context estimates and retries.
 
 const std = @import("std");
+const tool_fulfillment = @import("tool_fulfillment.zig");
+const sourced_input = @import("sourced_input.zig");
 const replay_recipe = @import("../../replay_recipe.zig");
 const attempt = @import("../../attempt.zig");
 const outcome_code = @import("../../outcome_code.zig");
@@ -60,9 +62,8 @@ const complete_tool_results_sql =
     " ON tool_call.operation_id=item.operation_id AND tool_call.session_ref=item.session_ref AND tool_call.item_ordinal=item.item_ordinal " ++
     " LEFT JOIN action_operation action ON action.parent_operation_id=tool_call.operation_id " ++
     " AND action.session_ref=tool_call.session_ref AND action.call_ordinal=tool_call.call_ordinal" ++
-    " WHERE item.operation_id=current.operation_id AND item.item_ordinal>=0 AND item.session_ref=current.session_ref AND item.item_kind=3 AND (" ++
-    " tool_call.operation_id IS NULL OR (tool_call.rejection_code IS NULL AND (action.action_id IS NULL OR action.resolution_code IS NULL))" ++
-    ")" ++
+    " WHERE item.operation_id=current.operation_id AND item.item_ordinal>=0 AND item.session_ref=current.session_ref AND item.item_kind=3 " ++
+    "AND tool_call.rejection_code IS NULL AND " ++ tool_fulfillment.actionPositionSql("action") ++ " IS NULL" ++
     ")";
 /// Whether the Turn's `current` Operation lets it continue once input arrives.
 const continues_with_input_sql =
@@ -96,6 +97,7 @@ const Selection = struct {
     first_admission: rsql.Positive,
     cutoff: rsql.Positive,
     selected: u64,
+    consistent: bool,
     /// The skills the selected Messages bound, each projected after its Message.
     skills: u64,
     turn_id: ?rsql.Positive,
@@ -114,6 +116,7 @@ fn RunnableSelection(comptime eligibility: []const u8) type {
     return rsql.Read(.{
         .sql = "WITH candidate AS (" ++ runnableCandidateSql(eligibility) ++ ") " ++
             "SELECT " ++ rsql.session_head_columns ++ ",min(m.admission_id) AS first_admission,max(m.admission_id) AS cutoff,count(*) AS selected," ++
+            "min(CASE WHEN " ++ sourced_input.consistentSql("m") ++ " THEN 1 ELSE 0 END) AS consistent," ++
             "coalesce(sum((SELECT count(*) FROM message_skill k WHERE k.admission_id=m.admission_id)),0) AS skills," ++
             "(SELECT active.turn_id FROM turn active JOIN model_operation current ON current.operation_id=active.operation_id " ++
             "WHERE active.session_ref=m.session_ref AND active.outcome_code IS NULL " ++
@@ -139,7 +142,7 @@ pub const runnable_selection_sql = runnable_selection.sql;
 // continues_without_input inside continues_with_input. It also trusts the stored
 // column, which `disagreeing_continuation` fences.
 pub const tool_continuation_selection = rsql.Read(.{
-    .sql = "SELECT " ++ rsql.session_head_columns ++ ",active.first_admission_id AS first_admission,active.input_cutoff AS cutoff,0 AS selected,0 AS skills,active.turn_id " ++
+    .sql = "SELECT " ++ rsql.session_head_columns ++ ",active.first_admission_id AS first_admission,active.input_cutoff AS cutoff,0 AS selected,1 AS consistent,0 AS skills,active.turn_id " ++
         "FROM turn active @index(turn_tool_continuation) JOIN session s ON s.session_ref=active.session_ref " ++
         "WHERE active.outcome_code IS NULL AND active.continuation_operation_id=active.operation_id AND " ++ "@served(s.provider)" ++
         " AND NOT EXISTS(SELECT 1 FROM message_admission m " ++
@@ -366,27 +369,30 @@ fn latestUsageSql(comptime session: []const u8, comptime provider: []const u8, c
 /// Operation admitted at `result_admission`, in the Session `session`.
 fn uncoveredBytesSql(comptime session: []const u8, comptime usage_position: []const u8, comptime frontier: []const u8, comptime result_admission: []const u8) []const u8 {
     const later = "max(" ++ usage_position ++ "," ++ frontier ++ ")";
-    return "(SELECT coalesce(sum(c.byte_length),0) FROM conversation_entry e JOIN content c ON c.content_id=e.content_id " ++
-        "WHERE e.session_ref=" ++ session ++ " AND e.entry_kind IN (1,2,4) AND e.session_position>" ++ usage_position ++ ") + " ++
+    const terms = .{
+        "(SELECT coalesce(sum(c.byte_length),0) FROM conversation_entry e JOIN content c ON c.content_id=e.content_id " ++
+            "WHERE e.session_ref=" ++ session ++ " AND e.entry_kind IN (1,2,4) AND e.session_position>" ++ usage_position ++ ")",
         "(SELECT coalesce(sum(" ++ history_floor_domain.item_bytes_sql ++ "),0) FROM model_output_item i " ++
-        "WHERE i.session_ref=" ++ session ++ " AND i.session_position>=max(" ++ usage_position ++ "+1,coalesce((SELECT max(anchor.session_position) " ++
-        "FROM model_operation b @index(model_operation_compaction_bases) JOIN model_output_item anchor ON anchor.operation_id=b.operation_id AND anchor.session_ref=b.session_ref " ++
-        "WHERE b.session_ref=" ++ session ++ " AND b.purpose=1 AND " ++ store_schema.resolutionIs("b.resolution_code", .compacted) ++ " AND b.admission_position=" ++ frontier ++ " AND anchor.item_kind=4),0))) + " ++
+            "WHERE i.session_ref=" ++ session ++ " AND i.session_position>=max(" ++ usage_position ++ "+1,coalesce((SELECT max(anchor.session_position) " ++
+            "FROM model_operation b @index(model_operation_compaction_bases) JOIN model_output_item anchor ON anchor.operation_id=b.operation_id AND anchor.session_ref=b.session_ref " ++
+            "WHERE b.session_ref=" ++ session ++ " AND b.purpose=1 AND " ++ store_schema.resolutionIs("b.resolution_code", .compacted) ++ " AND b.admission_position=" ++ frontier ++ " AND anchor.item_kind=4),0)))",
         "(SELECT coalesce(sum(c.byte_length),0) FROM model_operation o @index(model_operation_context_history) " ++
-        "CROSS JOIN model_tool_call tool_call ON tool_call.operation_id=o.operation_id AND tool_call.session_ref=o.session_ref " ++
-        "JOIN content c ON c.content_id=tool_call.rejection_content_id WHERE o.session_ref=" ++ session ++ " AND o.admission_position>=" ++ result_admission ++ " " ++
-        "AND " ++ store_schema.oneOf("o.resolution_code", &accepted_resolutions) ++ " AND tool_call.acceptance_position>" ++ later ++ ") + " ++
-        "(SELECT coalesce(sum(c.byte_length),0) FROM action_operation a JOIN content c ON c.content_id=a.resolution_content_id " ++
-        "WHERE a.session_ref=" ++ session ++ " AND a.acceptance_position>" ++ later ++ ") + " ++
+            "CROSS JOIN model_tool_call tool_call ON tool_call.operation_id=o.operation_id AND tool_call.session_ref=o.session_ref " ++
+            "JOIN content c ON c.content_id=tool_call.rejection_content_id WHERE o.session_ref=" ++ session ++ " AND o.admission_position>=" ++ result_admission ++ " " ++
+            "AND " ++ store_schema.oneOf("o.resolution_code", &accepted_resolutions) ++ " AND tool_call.acceptance_position>" ++ later ++ ")",
+        "(SELECT coalesce(sum(c.byte_length),0) FROM action_operation a JOIN content c ON c.content_id=" ++ tool_fulfillment.actionContentSql("a") ++ " " ++
+            "WHERE a.session_ref=" ++ session ++ " AND " ++ tool_fulfillment.actionPositionSql("a") ++ ">" ++ later ++ ")",
         "(SELECT coalesce(sum(c.byte_length),0) FROM message_admission m JOIN content c ON c.content_id=m.content_id " ++
-        "WHERE m.session_ref=" ++ session ++ " AND " ++ runnable_eligibility_sql ++ ") + " ++
+            "WHERE m.session_ref=" ++ session ++ " AND " ++ runnable_eligibility_sql ++ ")",
         "(SELECT coalesce(sum(c.byte_length),0) FROM message_admission m JOIN message_skill k ON k.admission_id=m.admission_id " ++
-        "JOIN content c ON c.content_id=k.content_id WHERE m.session_ref=" ++ session ++ " AND " ++ runnable_eligibility_sql ++ ") + " ++
+            "JOIN content c ON c.content_id=k.content_id WHERE m.session_ref=" ++ session ++ " AND " ++ runnable_eligibility_sql ++ ")",
         "(SELECT coalesce(sum(c.byte_length),0) FROM session_revision r JOIN content c ON c.content_id=r.instructions_content_id " ++
-        "WHERE r.session_ref=" ++ session ++ " AND r.revision>coalesce((SELECT max(e.source_revision) FROM conversation_entry e WHERE e.session_ref=" ++ session ++ "),1) " ++
-        "AND r.instructions_updated=1) + " ++
+            "WHERE r.session_ref=" ++ session ++ " AND r.revision>coalesce((SELECT max(e.source_revision) FROM conversation_entry e WHERE e.session_ref=" ++ session ++ "),1) " ++
+            "AND r.instructions_updated=1)",
         "(SELECT coalesce(sum(c.byte_length),0) FROM session_revision r JOIN content c ON c.content_id=r.instructions_content_id " ++
-        "WHERE r.session_ref=" ++ session ++ " AND r.revision=1 AND " ++ usage_position ++ "=0)";
+            "WHERE r.session_ref=" ++ session ++ " AND r.revision=1 AND " ++ usage_position ++ "=0)",
+    };
+    return "((" ++ terms[0] ++ " + " ++ terms[1] ++ ") + (" ++ terms[2] ++ " + " ++ terms[3] ++ ")) + ((" ++ terms[4] ++ " + " ++ terms[5] ++ ") + (" ++ terms[6] ++ " + " ++ terms[7] ++ "))";
 }
 
 /// The raw newest base, before model compatibility is decided by Recipe.select.
@@ -934,7 +940,7 @@ pub const AdmitModel = struct {
     fn decide(t: *AdmitModel, r: *transition.Round(AdmitModel)) !transition.Next(AdmitModel) {
         // With nothing selected, its caller runs `CheckIdle`.
         const selection = &(t.found orelse return .{ .done = null });
-        if (selection.cutoff.get() < selection.first_admission.get()) return error.CorruptStore;
+        if (!selection.consistent or selection.cutoff.get() < selection.first_admission.get()) return error.CorruptStore;
         const session_ref: []const u8 = &selection.session.ref;
         const first_admission = selection.first_admission.get();
         if (!t.facts_found.get()) return error.CorruptStore;
@@ -1145,8 +1151,8 @@ pub const DispatchSurvey = struct {
     /// The statement whose failed step names the read's failure.
     pub const named = .{.{ blocked_operation, error.CallReadFailed }};
 
-    pub fn queue(survey: *DispatchSurvey, reader: anytype, paused: bool, include_mcp: bool) void {
-        survey.actions.queue(reader, include_mcp);
+    pub fn queue(survey: *DispatchSurvey, reader: anytype, paused: bool, capacity: action_domain.Capacity) void {
+        survey.actions.queue(reader, capacity);
         queueSelection(reader, if (paused) .open_turn_message else .message, &survey.message);
         queueSelection(reader, .tool_continuation, &survey.continuation);
         survey.idle.queue(reader);
@@ -1181,9 +1187,9 @@ pub const DispatchSurvey = struct {
 
 /// Reads `DispatchWork`: `DispatchSurvey`'s round, then the blocked
 /// calls' outcomes when the idle checks ask for them.
-pub fn dispatchWork(reader: anytype, paused: bool, include_mcp: bool) !DispatchWork {
+pub fn dispatchWork(reader: anytype, paused: bool, capacity: action_domain.Capacity) !DispatchWork {
     var survey: DispatchSurvey = .{};
-    survey.queue(reader, paused, include_mcp);
+    survey.queue(reader, paused, capacity);
     try store_access.runNamed(reader, DispatchSurvey.named, error.TurnReadFailed);
     if (try survey.unsettled()) try validateBlockedToolCalls(reader);
     return survey.found();

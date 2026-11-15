@@ -448,6 +448,7 @@ const Intake = struct {
                         .session_pin => protocol.max_session_pin_request_bytes,
                         .model_interruption => protocol.max_model_interruption_request_bytes,
                         .permission_decision => protocol.max_permission_decision_request_bytes,
+                        .action_background, .action_stop => protocol.max_action_control_request_bytes,
                         else => std.math.maxInt(u64),
                     };
                     if (self.header.content_length > limit) return error.RequestTooLarge;
@@ -1624,6 +1625,9 @@ const Route = enum {
     session_pin,
     model_interruption,
     permission_decision,
+    action_background,
+    action_stop,
+    read_action,
     observe,
     read_result,
     read_action_call_id,
@@ -1640,7 +1644,7 @@ const Route = enum {
     unsupported_control,
 
     fn isControl(self: Route) bool {
-        return self == .host_stop or self == .host_pause or self == .session_stop or self == .session_archive or self == .session_pin or self == .model_interruption or self == .permission_decision or self == .unsupported_control;
+        return self == .host_stop or self == .host_pause or self == .session_stop or self == .session_archive or self == .session_pin or self == .model_interruption or self == .permission_decision or self == .action_background or self == .action_stop or self == .unsupported_control;
     }
 
     /// Answered on the listener from atomics and fixed values alone,
@@ -1912,6 +1916,29 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             if (header.drop == .after_commit and result != .infrastructure_failure) return;
             try fd.json(host_reply.httpStatus(result), protocol.max_response_bytes, host_reply.renderPermissionDecisionReply, .{ host_reply.PermissionTarget{ .session = command.session, .action_id = command.action_id, .decision = command.decision }, result });
             fd.timing = timing;
+        },
+        .action_background, .action_stop => |*command| {
+            const kind: @import("action_control.zig").Kind = if (request.* == .action_background) .background else .stop;
+            var timing = ControlTiming.init(host, command.key, @tagName(kind.commandKind()), accepted_at_ns);
+            const result = host.store.controlAction(kind, command, host.actionCapacity(), host.hooks.storeFaults(.{ .control = timing.storeTrace() })) catch .infrastructure_failure;
+            if (result == .infrastructure_failure) fenceDispatch(host, "Action control save", error.CanonicalStoreFailure);
+            if (result == .accepted) publishControlHint(host, command.key.slice());
+            if (header.drop == .after_commit and result != .infrastructure_failure) return;
+            try fd.json(host_reply.httpStatus(result), protocol.action_control_reply.max_bytes, host_reply.renderActionControlReply, .{ kind, command.session.slice(), command.action_id, result });
+            fd.timing = timing;
+        },
+        .read_action => |*command| {
+            const value = try createUnfilled(host.allocator, @import("action_read.zig").Read);
+            defer host.allocator.destroy(value);
+            host.store.readAction(command, value) catch |err| switch (err) {
+                error.ActionNotFound => return respondStatic(fd, 404, .action_unavailable, "action_not_found"),
+                error.InvalidCursor => return respondStatic(fd, 400, .action_unavailable, "invalid_cursor"),
+                else => {
+                    fenceDispatch(host, "Action status observation", err);
+                    return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
+                },
+            };
+            try fd.json(200, protocol.action_read_reply.max_bytes, host_reply.renderActionRead, .{value});
         },
         .observe_command => |*command| {
             var observation: store_module.Observed = undefined;
@@ -2215,6 +2242,8 @@ const HeaderReader = struct {
             .observe
         else if (std.mem.eql(u8, path, "/v1/read-result"))
             .read_result
+        else if (std.mem.eql(u8, path, "/v1/read-action"))
+            .read_action
         else if (std.mem.eql(u8, path, "/v1/read-action-call-id"))
             .read_action_call_id
         else if (std.mem.eql(u8, path, "/v1/read-action-arguments"))
@@ -2430,7 +2459,7 @@ test "mutation decoder validates every actual producer and preserved domain answ
                         try std.testing.expectEqual(.pending, value.completion);
                     },
                     .session_pin => |value| try std.testing.expect(!value.pinned),
-                    .model_interruption, .permission_decision => {},
+                    .model_interruption, .permission_decision, .action_background, .action_stop => {},
                 };
             }
         }
@@ -3557,6 +3586,8 @@ test "retired reserved exchanges cannot block their successors while workers are
                 .session_pin => "control/session-pin",
                 .model_interruption => "control/model-interruption",
                 .permission_decision => "control/permission-decision",
+                .action_background => "control/action-background",
+                .action_stop => "control/action-stop",
                 .unsupported_control => "control/unknown",
                 else => unreachable,
             };

@@ -111,7 +111,7 @@ Proposal metadata grants no authorization: a later approval still binds the fres
 
 ### Public Session activity
 
-Session activity is a separate projection of eleven row kinds, not Conversation repurposed as an inventory: a person's or script's Message admission (`admission`), another Session's Message admission (`received`, which always names its `sender`), applied User entry, assistant text, immutable Tool Call, complete-group Tool Result, hosted call, terminal Turn outcome, accepted Session stop, sent Message and refused send.
+Session activity is a separate projection of eleven row kinds, not Conversation repurposed as an inventory: a person's or script's Message admission or a tool-final input (`admission`, whose `source_action` identifies tool data and whose command key is null), another Session's Message admission (`received`, which always names its `sender`), applied User entry, assistant text, immutable Tool Call, complete-group Tool Result, hosted call, terminal Turn outcome, accepted Session stop, sent Message and refused send.
 `received` mirrors `sent` on the receiving side; it split from `admission` on 2026-11-03 so a page can list a person's Messages alone (design thread on Rui's core and plug-in points).
 Admission, stop, send, refusal and every terminal outcome claim the existing Session sequence in their owning transaction, and each also records its commit time there.
 No copied log or second frontier exists; this schema change follows the [Store format policy](store.md#store-format-and-upgrades).
@@ -244,7 +244,7 @@ Single-model admission reads and complete-catalog model-list reads share this se
 304 responses, failed refreshes and failed publication preserve the previously committed source; restart reads that same authority without waiting for discovery.
 
 Each row has position/ordinal, `at`, and one closed tagged `value`.
-`at` is the Host Unix second the row's owning fact committed: the admission for Message admission and sent Message rows, which is the same time on both rows of one Message; the Conversation entry for User and assistant rows; the producing Operation's resolution for a Tool Call; the group's last acceptance, the one at its greatest position, for a Tool Result (an Action's resolution, or the producing Operation's for a rejected call); and the fact itself for a Turn outcome, Session stop and refused send.
+`at` is the Host Unix second the row's owning fact committed: the admission for Message admission and sent Message rows, which is the same time on both rows of one Message; the Conversation entry for User and assistant rows; the producing Operation's resolution for a Tool Call; the group's last original fulfillment acceptance, the one at its greatest position, for a Tool Result (an accepted background receipt, an Action's resolution, or the producing Operation's rejected call); and the fact itself for a Turn outcome, Session stop and refused send.
 Times come from the Host wall clock: they order nothing, and they can repeat or step back across clock changes.
 Message facts include original key/admission, exact content reference and queued/applied/excluded state, with Turn binding visible only after its application position.
 A `turn_ended` row names how its Turn ended: `done`, `context_full`, `provider_refused`, `provider_unavailable`, `stopped`, `interrupted` or `failed`, beside the saved `code` it was judged from and the content of a done Turn's answer or a failed one's report.

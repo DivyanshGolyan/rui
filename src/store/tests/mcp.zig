@@ -143,7 +143,7 @@ test "saved MCP call lines survive all work reads pending, running and completed
                     .decoded_arguments = args,
                 }});
                 try reads(&storage, &tmp, session.slice(), "pending", text);
-                const action = (try storage.nextAction(.mcp)).?;
+                const action = (try storage.nextAction(.mcp, .{ .credit = .background, .mcp = true })).?;
                 const binding = (try storage.admitActionAttempt(action, 600_000, .{})).?.permit.binding;
                 try reads(&storage, &tmp, session.slice(), "bash", text);
                 _ = try storage.settleActionAttempt(binding, .succeeded, "done", .{});
@@ -263,7 +263,7 @@ test "MCP read-only ordering uses frozen offers and admits read waves between wr
                 for (pattern.waves) |width| {
                     const end = start + width;
                     for (start..end) |index| {
-                        const next = try storage.nextAction(.mcp);
+                        const next = try storage.nextAction(.mcp, .{ .credit = .background, .mcp = true });
                         try std.testing.expect(next != null);
                         const selected = next.?;
                         try std.testing.expectEqual(ready[index].action_id, selected.action_id);
@@ -274,14 +274,14 @@ test "MCP read-only ordering uses frozen offers and admits read waves between wr
                             try std.testing.expect((try storage.admitActionAttempt(blocked, 1234, .{})) == null);
                         }
                     }
-                    try std.testing.expect((try storage.nextAction(.mcp)) == null);
+                    try std.testing.expect((try storage.nextAction(.mcp, .{ .credit = .background, .mcp = true })) == null);
                     for (start..end) |index| {
                         try std.testing.expectEqual(ActionSettlement.effect, try storage.settleActionAttempt(bindings[index], .succeeded, "done", .{}));
-                        if (index + 1 < end) try std.testing.expect((try storage.nextAction(.mcp)) == null);
+                        if (index + 1 < end) try std.testing.expect((try storage.nextAction(.mcp, .{ .credit = .background, .mcp = true })) == null);
                     }
                     start = end;
                 }
-                try std.testing.expect((try storage.nextAction(.mcp)) == null);
+                try std.testing.expect((try storage.nextAction(.mcp, .{ .credit = .background, .mcp = true })) == null);
             }
         }
     }.run);

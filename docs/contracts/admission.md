@@ -94,7 +94,7 @@ Message acceptance identifies one immutable admission to the Session queue; it n
 The [processing boundary](conversation.md#conversation-entries-and-pending-messages) establishes the message's result binding once.
 Distinct messages processed in one Turn share its result.
 
-Every state-changing caller command to core requires a stable core idempotency key: configuration, message submission, Session stop, Session archive, Permission Decision and exact Model Interruption.
+Every state-changing caller command to core requires a stable core idempotency key: configuration, message submission, Session stop, Session archive, Permission Decision, exact Model Interruption, Action background selection and Action stop.
 Once committed, its inputs, admission-time selection and original admission answer never change; retries recover that decision rather than select new work.
 This gives callers one lost-reply recovery rule across intervening work and crashes.
 Reads and waits observe current facts without retained command identities.
@@ -188,7 +188,8 @@ Supported metadata for CLI consumers is:
 | Common | Key; absent, accepted or rejected admission; kind, original Session and rejection code when present; CLI `request inspect` adds top-level `as_of`, its Unix seconds at render as a canonical decimal string |
 | Configure | Accepted revision and created flag |
 | Message | Required Host-derived `state`; input text length/digest reference; `queue` admission and `admitted_at`; optional `binding` Turn/Operation/Attempt; nonterminal `work` with Session work `state` and nullable `first_action`; optional retained `recovery`; terminal result status/code or answer text reference |
-| Session stop | Original selected nullable Turn, admission cutoff and pending/completed semantic completion |
+| Session stop | Original selected nullable Turn, admission and Action cutoffs, and pending/completed semantic completion |
+| Action background / Action stop | Original Session and Action, saved background/final/stop selection and its position |
 | Model Interruption / Permission Decision | Original Session/Turn/Operation or Action/decision, including retained rejected targets |
 
 **Unchanged observations.**

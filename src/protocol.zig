@@ -143,6 +143,9 @@ pub const Kind = enum {
     session_pin,
     model_interruption,
     permission_decision,
+    action_background,
+    action_stop,
+    read_action,
     observe_command,
     read_result,
     read_action_call_id,
@@ -325,18 +328,18 @@ pub const NamedPeer = activity_facts.NamedPeer;
 
 /// A NamedPeer as JSON.
 pub const NamedPeerJson = struct {
-    value: NamedPeer,
+    value: *const NamedPeer,
 
     pub const openapi_name = "NamedPeer";
     pub const json_shape = .{ "{\"session\":", Hole{ .string = max_session_bytes }, ",\"label\":", Hole{ .optional_string = max_label_bytes }, "}" };
     pub const max_json_bytes = shapeBytes(json_shape);
 
-    pub fn optional(value: ?NamedPeer) ?NamedPeerJson {
+    pub fn optional(value: ?*const NamedPeer) ?NamedPeerJson {
         return if (value) |peer| .{ .value = peer } else null;
     }
 
     pub fn writeJson(self: *const NamedPeerJson, out: *std.Io.Writer) !void {
-        const peer = &self.value;
+        const peer = self.value;
         try writeShape(out, json_shape, .{ peer.session.slice(), if (peer.label.len == 0) null else peer.label.slice() });
     }
 };
@@ -667,6 +670,9 @@ fn RequestOf(comptime Custody: type) type {
         session_pin: SessionPinCommand,
         model_interruption: ModelInterruptionCommand,
         permission_decision: PermissionDecisionCommand,
+        action_background: command_input.ActionControlCommand,
+        action_stop: command_input.ActionControlCommand,
+        read_action: @import("action_read.zig").Request,
         observe_command: ObserveCommand,
         read_result: ReadResult,
         read_action_call_id: ReadActionArguments,
@@ -685,7 +691,7 @@ fn RequestOf(comptime Custody: type) type {
             switch (self.*) {
                 .configure => |*command| try command.removeTemporaryContent(io),
                 .message => |*command| try command.removeTemporaryContent(io),
-                .host_info, .host_stop, .host_pause, .session_stop, .session_archive, .session_pin, .model_interruption, .permission_decision, .observe_command, .read_result, .read_action_call_id, .read_action_arguments, .inspect_session, .list_sessions, .conversation_page, .conversation_content, .activity_page, .activity_search, .activity_content, .skill_suggestions, .model_list => {},
+                .host_info, .host_stop, .host_pause, .session_stop, .session_archive, .session_pin, .model_interruption, .permission_decision, .action_background, .action_stop, .read_action, .observe_command, .read_result, .read_action_call_id, .read_action_arguments, .inspect_session, .list_sessions, .conversation_page, .conversation_content, .activity_page, .activity_search, .activity_content, .skill_suggestions, .model_list => {},
             }
         }
 
@@ -796,6 +802,18 @@ fn ParserOf(comptime Custody: type) type {
                 .permission_decision => {
                     out.* = .{ .permission_decision = .{ .store = store } };
                     try self.parsePermissionDecision(&out.permission_decision, &members);
+                },
+                .action_background => {
+                    out.* = .{ .action_background = .{ .store = store } };
+                    try self.parseActionControl(&out.action_background, &members);
+                },
+                .action_stop => {
+                    out.* = .{ .action_stop = .{ .store = store } };
+                    try self.parseActionControl(&out.action_stop, &members);
+                },
+                .read_action => {
+                    out.* = .{ .read_action = .{ .store = store } };
+                    try self.parseReadAction(&out.read_action, &members);
                 },
                 .observe_command => {
                     out.* = .{ .observe_command = .{ .store = store } };
@@ -1273,6 +1291,28 @@ fn ParserOf(comptime Custody: type) type {
                 },
             };
             try require(Field, seen, &.{ .key, .session, .action, .decision });
+        }
+
+        fn parseActionControl(self: *Parser, out: *command_input.ActionControlCommand, members: *Members) !void {
+            const Field = enum { key, session, action };
+            var seen: std.enums.EnumSet(Field) = .empty;
+            while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
+                .key => try self.readCommandKey(&out.key),
+                .session => try self.readSmallString(&out.session),
+                .action => out.action_id = try self.readCanonicalU64(),
+            };
+            try require(Field, seen, &.{ .key, .session, .action });
+        }
+
+        fn parseReadAction(self: *Parser, out: *@import("action_read.zig").Request, members: *Members) !void {
+            const Field = enum { session, action, offset };
+            var seen: std.enums.EnumSet(Field) = .empty;
+            while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
+                .session => try self.readSmallString(&out.session),
+                .action => out.action_id = try self.readCanonicalU64(),
+                .offset => out.offset = try self.readCanonicalU64(),
+            };
+            try require(Field, seen, &.{ .session, .action });
         }
 
         fn parseReadActionArguments(self: *Parser, out: *ReadActionArguments, members: *Members) !void {
@@ -2011,6 +2051,9 @@ pub const session_pin_request = struct {
 pub const model_interruption_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"model_interruption\",\"store\":", store_hole, ",\"key\":", key_hole, ",\"target\":{\"session\":", session_hole, ",\"turn\":\"", Hole.decimal, "\",\"operation\":\"", Hole.decimal, "\"}}" };
 /// Holes: Store, key, Session, Action, decision.
 pub const permission_decision_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"permission_decision\",\"store\":", store_hole, ",\"key\":", key_hole, ",\"session\":", session_hole, ",\"action\":\"", Hole.decimal, "\",\"decision\":\"", Hole{ .tag = PermissionDecision }, "\"}" };
+pub const action_background_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"action_background\",\"store\":", store_hole, ",\"key\":", key_hole, ",\"session\":", session_hole, ",\"action\":\"", Hole.decimal, "\"}" };
+pub const action_stop_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"action_stop\",\"store\":", store_hole, ",\"key\":", key_hole, ",\"session\":", session_hole, ",\"action\":\"", Hole.decimal, "\"}" };
+pub const read_action_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"read_action\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"action\":\"", Hole.decimal, "\",\"offset\":\"", Hole.decimal, "\"}" };
 /// Holes: Store, key.
 pub const observe_command_request = struct {
     pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"observe_command\",\"store\":", store_hole, ",\"key\":", key_hole };
@@ -2121,7 +2164,8 @@ pub const max_session_archive_request_bytes = shapeBytes(session_archive_request
 pub const max_session_pin_request_bytes = shapeBytes(session_pin_request.all);
 pub const max_model_interruption_request_bytes = shapeBytes(model_interruption_request);
 pub const max_permission_decision_request_bytes = shapeBytes(permission_decision_request);
-pub const max_control_request_bytes = maxShapeBytes(.{ session_stop_request, session_archive_request.all, session_pin_request.all, model_interruption_request, permission_decision_request });
+pub const max_action_control_request_bytes = maxShapeBytes(.{ action_background_request, action_stop_request });
+pub const max_control_request_bytes = maxShapeBytes(.{ session_stop_request, session_archive_request.all, session_pin_request.all, model_interruption_request, permission_decision_request, action_background_request, action_stop_request });
 pub const max_observe_command_request_bytes = shapeBytes(observe_command_request.all);
 pub const max_host_info_request_bytes = shapeBytes(host_info_request);
 pub const max_host_stop_request_bytes = shapeBytes(host_stop_request);
@@ -2141,6 +2185,7 @@ pub const max_activity_content_request_bytes = shapeBytes(activity_content_reque
 pub const max_client_request_bytes = @max(max_inspect_session_request_bytes, maxShapeBytes(.{
     observe_command_request.all,   host_info_request,                 host_stop_request,
     host_pause_request,            read_result_request,               list_sessions_request.all,
+    action_background_request,     action_stop_request,               read_action_request,
     read_action_arguments_request, read_action_call_id_request,       conversation_content_request.all,
     conversation_page_request,     activity_search_request.all,       activity_page_request.all,
     activity_content_request,      skill_suggestions_session_request, skill_suggestions_workspace_request,
@@ -2185,7 +2230,7 @@ pub const message_reply = struct {
 pub const session_stop_reply = struct {
     const head = "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"session_stop_reply\",\"answer\":{\"status\":";
     /// Holes: replayed, Session, selected Turn, admission cutoff, completion.
-    pub const accepted = .{ head ++ "\"accepted\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"selection\":{\"turn\":", Hole.optional_id, ",\"admission_cutoff\":\"", Hole.decimal, "\"}},\"completion\":{\"status\":\"", Hole{ .tag = SessionStopCompletion }, "\"}}" };
+    pub const accepted = .{ head ++ "\"accepted\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"selection\":{\"turn\":", Hole.optional_id, ",\"admission_cutoff\":\"", Hole.decimal, "\",\"action_cutoff\":\"", Hole.decimal, "\"}},\"completion\":{\"status\":\"", Hole{ .tag = SessionStopCompletion }, "\"}}" };
     /// Holes: replayed, Session, code.
     pub const rejected = .{ head ++ "\"rejected\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"code\":\"", Hole{ .tag = SessionStopRejection }, "\"},\"completion\":{\"status\":\"unavailable\"}}" };
     /// Hole: Session.
@@ -2236,6 +2281,22 @@ pub const permission_decision_reply = struct {
     /// Holes: Session, Action, decision.
     pub const conflict = .{head ++ "\"conflict\",\"replayed\":false"} ++ target ++ .{",\"code\":\"idempotency_key_conflict\"}}"};
     pub const max_bytes = maxShapeBytes(.{ accepted, rejected, conflict });
+};
+
+pub const action_control_reply = struct {
+    const head = "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"action_control_reply\",\"answer\":{\"status\":";
+    const target = .{ ",\"session\":", session_hole, ",\"action\":\"", Hole.decimal, "\",\"operation\":\"", Hole{ .tag = @import("action_control.zig").Kind }, "\"" };
+    pub const selection = .{ ",\"action_selection\":{\"kind\":\"", Hole{ .tag = @FieldType(@import("action_control.zig").Selection, "kind") }, "\",\"position\":\"", Hole.decimal, "\"}" };
+    pub const accepted = .{ head ++ "\"accepted\",\"replayed\":", Hole.boolean } ++ target ++ selection ++ .{"}}"};
+    pub const rejected = .{ head ++ "\"rejected\",\"replayed\":", Hole.boolean } ++ target ++ .{ ",\"code\":\"", Hole{ .tag = @import("action_control.zig").Rejection }, "\"}}" };
+    pub const conflict = .{head ++ "\"conflict\",\"replayed\":false"} ++ target ++ .{",\"code\":\"idempotency_key_conflict\"}}"};
+    pub const max_bytes = maxShapeBytes(.{ accepted, rejected, conflict });
+};
+
+pub const action_read_reply = struct {
+    pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"action_read\",\"session\":", session_hole, ",\"action\":\"", Hole.decimal, "\",\"state\":\"", Hole{ .tag = @import("action_read.zig").State }, "\",\"background_position\":", Hole.optional_id, ",\"stop_selected\":", Hole.boolean, ",\"final\":" };
+    pub const final = .{ "{\"position\":\"", Hole.decimal, "\",\"code\":", Hole{ .string = max_code_bytes }, ",\"content\":{\"bytes\":\"", Hole.decimal, "\",\"sha256\":\"", Hole{ .hex = 32 }, "\"},\"window\":{\"offset\":\"", Hole.decimal, "\",\"next\":\"", Hole.decimal, "\",\"more\":", Hole.boolean, ",\"text\":", Hole{ .string = content_window_bytes }, "}}" };
+    pub const max_bytes = shapeBytes(head) + @max(shapeBytes(final), "null".len) + 1;
 };
 
 /// One saved indeterminate Action, newest first within its bound Turn.
@@ -2323,7 +2384,7 @@ pub const command_observation_reply = struct {
         failed_state ++ input ++ queue ++ binding ++ failed ++ recovery,
     };
     /// Holes: selected Turn, admission cutoff, completion.
-    pub const session_stop = .{ ",\"selection\":{\"turn\":", Hole.optional_id, ",\"admission_cutoff\":\"", Hole.decimal, "\"},\"completion\":{\"status\":\"", Hole{ .tag = SessionStopCompletion }, "\"}" };
+    pub const session_stop = .{ ",\"selection\":{\"turn\":", Hole.optional_id, ",\"admission_cutoff\":\"", Hole.decimal, "\",\"action_cutoff\":\"", Hole.decimal, "\"},\"completion\":{\"status\":\"", Hole{ .tag = SessionStopCompletion }, "\"}" };
     /// Holes: pinned.
     pub const session_pin = .{ ",\"pinned\":", Hole.boolean };
     /// Holes: archived, completion.
@@ -2332,6 +2393,8 @@ pub const command_observation_reply = struct {
     pub const model_interruption = .{",\"interruption_target\":"} ++ model_interruption_target_shape;
     /// Holes: Action, decision.
     pub const permission_decision = .{ ",\"permission_target\":{\"action\":\"", Hole.decimal, "\",\"decision\":\"", Hole{ .tag = PermissionDecision }, "\"}" };
+    pub const action_target = .{ ",\"action_target\":{\"action\":\"", Hole.decimal, "\"}" };
+    pub const action_selection = action_control_reply.selection;
     pub const tail = .{"}}"};
 
     /// The largest observation of this kind.
@@ -2345,6 +2408,7 @@ pub const command_observation_reply = struct {
             .session_pin => shapeBytes(session_pin),
             .model_interruption => shapeBytes(model_interruption),
             .permission_decision => shapeBytes(permission_decision),
+            .action_background, .action_stop => shapeBytes(action_target) + shapeBytes(action_selection),
         };
         return shapeBytes(head(kind)) + shapeBytes(code) + body + shapeBytes(tail);
     }
@@ -2364,7 +2428,7 @@ pub const max_control_error_response_bytes = shapeBytes(error_reply);
 
 pub const max_mutation_response_bytes = @max(
     @max(@max(configuration_reply.max_bytes, message_reply.max_bytes), @max(session_stop_reply.max_bytes, model_interruption_reply.max_bytes)),
-    @max(session_pin_reply.max_bytes, @max(session_archive_reply.max_bytes, @max(permission_decision_reply.max_bytes, max_control_error_response_bytes))),
+    @max(session_pin_reply.max_bytes, @max(session_archive_reply.max_bytes, @max(action_control_reply.max_bytes, @max(permission_decision_reply.max_bytes, max_control_error_response_bytes)))),
 );
 
 /// Holes: Store, instance, Active and intake capacity, descriptor limit
@@ -2416,7 +2480,7 @@ pub const conversation_page_reply = struct {
     /// A Hosted Call item, which has no content. Holes: position, ordinal.
     pub const hosted_call = .{ "{\"position\":\"", Hole.decimal, "\",\"ordinal\":\"", Hole.decimal, "\",\"kind\":\"hosted_call\"" };
     /// A User item's admission. Holes: second, sending peer.
-    pub const admission = .{ ",\"admitted_at\":\"", Hole.decimal, "\",\"sender\":", Hole{ .optional_json = NamedPeerJson } };
+    pub const admission = .{ ",\"admitted_at\":\"", Hole.decimal, "\",\"sender\":", Hole{ .optional_json = NamedPeerJson }, ",\"source_action\":", Hole.optional_id };
     /// A Tool Result or Hosted Call item's presentation. Hole: it.
     pub const presentation = .{ ",\"presentation\":", Hole{ .json = ToolPresentationJson } };
     pub const item_end = .{"}"};

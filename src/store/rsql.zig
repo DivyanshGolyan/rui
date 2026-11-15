@@ -511,6 +511,8 @@ pub fn ObligationProjection(comptime spec: ObligationProjectionSpec) type {
     const projected = "SELECT session_ref,min(saved_since) AS saved_since,min(owed_since) AS owed_since FROM (" ++ spec.sql ++ ") obligation_values GROUP BY session_ref";
     const text = "UPDATE session SET obligation_since=(SELECT owed_since FROM (" ++ projected ++ ") obligation_new WHERE obligation_new.session_ref=session.session_ref) " ++
         "WHERE session_ref IN (SELECT session_ref FROM (" ++ projected ++ ") obligation_changed WHERE @distinct(owed_since,saved_since))";
+    const mysql_text = "UPDATE session JOIN (" ++ projected ++ ") obligation_new ON obligation_new.session_ref=session.session_ref " ++
+        "SET session.obligation_since=obligation_new.owed_since WHERE @distinct(obligation_new.owed_since,obligation_new.saved_since)";
     return struct {
         pub const kind: StatementKind = .write;
         pub const made_from = spec;
@@ -518,7 +520,7 @@ pub fn ObligationProjection(comptime spec: ObligationProjectionSpec) type {
         pub const expect: Expect = .{ .at_most = std.math.maxInt(u32) };
         pub const guarded = true;
         pub const sql = renderStatement(text, fieldCount(Args));
-        pub const mysql: Template = mysqlTemplate(text);
+        pub const mysql: Template = mysqlTemplate(mysql_text);
         pub const uses_now = R.uses_now;
         // Access already holds the changed domain heads. The projection's
         // owner streams ancestor hints in the same batch, without new heads.
@@ -1582,9 +1584,6 @@ fn rowError(comptime core: Core, comptime Row: type) ?[]const u8 {
 ///   column a lone marker, or NULL (written, or by leaving the column out)
 ///   where the column is nullable, and gives each SessionHead as one
 ///   Session column's value;
-/// - as an INSERT ... SELECT, writes to a table whose one Session column
-///   is session_ref, NOT NULL, and copies it from a table its SELECT reads
-///   (`copyError`);
 /// - as an UPDATE, ties the table it writes (`tiedRefs`), which it can do
 ///   only by the top-level WHERE conjunct `c=@session(?k)` for that
 ///   table's first Session column `c`, and assigns no Session column. In
@@ -1635,10 +1634,15 @@ fn sessionError(comptime parsed: Parsed, comptime Args: type) ?[]const u8 {
         const refusal: ?[]const u8 = switch (parsed.statement) {
             .select => unreachable,
             .insert => |insert| switch (insert.values) {
-                .row => |row| insertSessionError(table, columns, insert.columns, row, named.len),
+                .row => |row| insertSessionError(table, columns, insert.columns, row, named.len, "VALUES row"),
                 .select => |select| copy: {
-                    if (columns.len != 1 or !std.mem.eql(u8, columns[0], "session_ref") or schema.isNullable(table, "session_ref"))
-                        break :copy "rsql: an INSERT ... SELECT copies one Session's row; " ++ table ++ " names its Sessions otherwise";
+                    if (columns.len > 1) {
+                        var row: [select.first.results.len]Expr = undefined;
+                        for (select.first.results, &row) |result, *value| value.* = result.value;
+                        break :copy insertSessionError(table, columns, insert.columns, &row, named.len, "SELECT row");
+                    }
+                    if (!std.mem.eql(u8, columns[0], "session_ref") or schema.isNullable(table, "session_ref"))
+                        break :copy "rsql: an INSERT ... SELECT copies one non-null Session column";
                     const at = (sessionSlot(insert.columns, "session_ref") catch break :copy copied_message) orelse break :copy copied_message;
                     break :copy copyError(parsed.queries, select, at, insert.columns.len);
                 },
@@ -1719,12 +1723,13 @@ fn insertSessionError(
     comptime listed: []const []const u8,
     comptime row: []const Expr,
     comptime heads: usize,
+    comptime row_name: []const u8,
 ) ?[]const u8 {
     comptime {
         if (row.len != listed.len) return "rsql: an INSERT gives one value per column";
         var placed: []const usize = &.{};
         for (columns) |column| {
-            const inserted = "rsql: an INSERT names its Session as the " ++ column ++ " value of its VALUES row";
+            const inserted = "rsql: an INSERT names its Session as the " ++ column ++ " value of its " ++ row_name;
             const slot = sessionSlot(listed, column) catch return inserted;
             if (slot) |at| switch (row[at]) {
                 .session => |k| {
@@ -3411,7 +3416,7 @@ test "a Message's write names its two Sessions, each on its own column" {
     try std.testing.expectEqualStrings("rsql: an INSERT names each of its Sessions with its own SessionHead", comptime statementError(.write, columns ++ "VALUES(?1,@session(?2),?3,?4,?5,@now,@session(?2),?5)", Person, void).?);
     try std.testing.expectEqualStrings("rsql: an INSERT gives each SessionHead as a Session column's value", comptime statementError(.write, columns ++ "VALUES(?1,@session(?2),?3,@session(?4),?5,@now,NULL,NULL)", struct { id: u64, session: SessionHead, key: []const u8, sender: SessionHead, position: u64 }, void).?);
     try std.testing.expectEqualStrings("rsql: a write to message_admission names each of its Sessions at most once, and one at least, as @session(?k)", comptime statementError(.write, columns ++ "VALUES(?1,?2,?3,?4,?5,@now,NULL,NULL)", struct { id: u64, session: []const u8, key: []const u8, content_id: u64, position: u64 }, void).?);
-    try std.testing.expectEqualStrings("rsql: an INSERT ... SELECT copies one Session's row; message_admission names its Sessions otherwise", comptime statementError(.write, "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admitted_at) SELECT ?1,session_ref,?3,?4,@now FROM session WHERE session_ref=@session(?2)", struct { id: u64, session: SessionHead, key: []const u8, content_id: u64 }, void).?);
+    try std.testing.expectEqualStrings("rsql: an INSERT names its Session as the session_ref value of its SELECT row", comptime statementError(.write, "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admitted_at) SELECT ?1,session_ref,?3,?4,@now FROM session WHERE session_ref=@session(?2)", struct { id: u64, session: SessionHead, key: []const u8, content_id: u64 }, void).?);
 
     // An update names the admission's own Session, and never moves either.
     const Update = struct { turn_id: u64, session: SessionHead };
@@ -3895,7 +3900,7 @@ test "a copy's other refusals come from the rule that owns each" {
     // 10. A compound source, 5a's failing input.
     try std.testing.expectEqualStrings("rsql: a write holds no compound SELECT", comptime writeError(messagesCopy("session_ref", tied ++ " UNION ALL SELECT 'zzzzzz',1,1,1,?2,1,NULL,NULL,1,1"), MessagesCopy, counted_copy).?);
     // 13. A target with two Session columns.
-    try std.testing.expectEqualStrings("rsql: an INSERT ... SELECT copies one Session's row; message_admission names its Sessions otherwise", comptime writeError(
+    try std.testing.expectEqualStrings("rsql: an INSERT names its Session as the session_ref value of its SELECT row", comptime writeError(
         "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admitted_at) SELECT ?1,session_ref,?3,?4,@now FROM message_admission WHERE session_ref=@session(?2)",
         struct { id: u64, session: SessionHead, key: []const u8, content_id: u64 },
         counted_copy,
@@ -3994,4 +3999,17 @@ test "a real-column index keeps its SQLite spelling and does not add MySQL slots
     try std.testing.expectEqualStrings("SELECT revision FROM session_revision INDEXED BY session_revision_instructions WHERE session_ref=?1 AND instructions_content_id=?2", S.sql);
     try std.testing.expectEqualStrings("SELECT revision FROM session_revision FORCE INDEX (session_revision_instructions) WHERE session_ref=? AND instructions_content_id=?", comptime S.mysql.prepared());
     try std.testing.expectEqualDeep(@as([]const Slot, &.{ .{ .argument = 0 }, .{ .argument = 1 } }), S.mysql.slots);
+}
+
+test "a conditional sourced input projection names each Session and ties every source" {
+    const Args = struct { id: u64, session: SessionHead, position: u64, action: u64 };
+    const prefix = "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at,final_action_id) ";
+    const from = " FROM action_operation action WHERE action.session_ref=@session(?2) AND action.action_id=?4 LIMIT 1";
+    const legal = prefix ++ "SELECT ?1,@session(?2),NULL,action.resolution_content_id,?3,@now,action.action_id" ++ from;
+    try std.testing.expectEqual(@as(?[]const u8, null), comptime writeError(legal, Args, .{ .at_most = 1 }));
+    try std.testing.expectEqualStrings("rsql: an INSERT names its Session as the session_ref value of its SELECT row", comptime writeError(prefix ++ "SELECT ?1,action.session_ref,NULL,action.resolution_content_id,?3,@now,action.action_id" ++ from, Args, .{ .at_most = 1 }).?);
+    try std.testing.expectEqualStrings(comptime untiedMessage("action_operation", "action"), comptime writeError(prefix ++ "SELECT ?1,@session(?2),NULL,action.resolution_content_id,?3,@now,action.action_id FROM action_operation action WHERE action.action_id=?4 LIMIT 1", Args, .{ .at_most = 1 }).?);
+    const with_sender = "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at,final_action_id,sender_session_ref,sender_position) ";
+    try std.testing.expectEqualStrings("rsql: an INSERT names each of its Sessions with its own SessionHead", comptime writeError(with_sender ++ "SELECT ?1,@session(?2),NULL,action.resolution_content_id,?3,@now,action.action_id,@session(?2),?3" ++ from, Args, .{ .at_most = 1 }).?);
+    try std.testing.expectEqualStrings("rsql: an INSERT names its Session as the sender_session_ref value of its SELECT row", comptime writeError(with_sender ++ "SELECT ?1,@session(?2),NULL,action.resolution_content_id,?3,@now,action.action_id,action.session_ref,?3" ++ from, Args, .{ .at_most = 1 }).?);
 }

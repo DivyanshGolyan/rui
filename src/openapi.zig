@@ -173,6 +173,29 @@ pub const routes = [_]Route{
         .conflict = jsonReply(.{protocol.permission_decision_reply.conflict}),
     },
     .{
+        .path = protocol.CommandKind.action_background.route(),
+        .kind = .action_background,
+        .summary = "Changes waiting for the same Session-owned Action to background. Retried by key; capacity refusal leaves its invocation unchanged.",
+        .variants = &.{variant(protocol.action_background_request, .{})},
+        .reply = jsonReply(.{ protocol.action_control_reply.accepted, protocol.action_control_reply.rejected }),
+        .conflict = jsonReply(.{protocol.action_control_reply.conflict}),
+    },
+    .{
+        .path = protocol.CommandKind.action_stop.route(),
+        .kind = .action_stop,
+        .summary = "Selects a stop of one Session-owned Action. Retried by key. Acceptance does not prove that an attempted remote effect did not run.",
+        .variants = &.{variant(protocol.action_stop_request, .{})},
+        .reply = jsonReply(.{ protocol.action_control_reply.accepted, protocol.action_control_reply.rejected }),
+        .conflict = jsonReply(.{protocol.action_control_reply.conflict}),
+    },
+    .{
+        .path = "/v1/read-action",
+        .kind = .read_action,
+        .summary = "Reads one Session-owned Action's status and one bounded final-result window without waiting or consuming it.",
+        .variants = &.{variant(protocol.read_action_request, .{})},
+        .reply = jsonReply(.{ protocol.action_read_reply.head ++ .{"null}"}, protocol.action_read_reply.head ++ protocol.action_read_reply.final ++ .{"}"} }),
+    },
+    .{
         .path = "/v1/observe-command",
         .kind = .observe_command,
         .summary = "What became of the command sent with this key.",
@@ -498,6 +521,7 @@ fn observationSchema(d: *Document) anyerror!Value {
             .session_pin => .{ .{}, o.session_pin },
             .model_interruption => .{ .{}, o.model_interruption },
             .permission_decision => .{ .{}, o.permission_decision },
+            .action_background, .action_stop => .{ o.action_target, o.action_target ++ o.action_selection },
         };
         var variants: [2 * bodies.len]Value = undefined;
         inline for (bodies, 0..) |body, at| {
@@ -1732,7 +1756,7 @@ test "replies the Host renders conform to their schemas" {
 
     out.clearRetainingCapacity();
     var facts: protocol.ActivityFacts = .{ .end = 9, .count = 2 };
-    facts.items[0] = .{ .position = 1, .at = 7, .value = .{ .admission = .{ .admission = 1, .key = .{}, .turn = null, .state = .queued, .content = .{ .length = 3, .digest = @splat(1) }, .admitted_at = 7 } } };
+    facts.items[0] = .{ .position = 1, .at = 7, .value = .{ .admission = .{ .admission = 1, .source = .{ .person = .{} }, .turn = null, .state = .queued, .content = .{ .length = 3, .digest = @splat(1) }, .admitted_at = 7 } } };
     facts.items[1] = .{ .position = 2, .ordinal = 1, .at = 8, .value = .{ .turn_ended = .{ .session = .{ .bytes = "k7m2qx".*, .len = 6 }, .turn = 1, .operation = 1, .ending = @fromBackingInt(@intCast(0)), .code = .{}, .content = null } } };
     facts.work.work.state = .{ .failed = .{ .since = 3, .code = .{}, .resets_at = 4 } };
     try activity_reply.writePage(&out.writer, &facts);

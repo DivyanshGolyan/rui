@@ -30,7 +30,7 @@ fn narrowedChild(storage: *store.Store, tmp: *std.testing.TmpDir, parent: protoc
     try testing.submitTestMessage(storage, tmp, "refresh-child-input", "refresh-child-input", parent.slice(), "start child");
     const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     try store.settleCallsForTesting(storage, tmp, model, "refresh-child-call", &.{.{ .item_id = "child", .name = "start_agent", .encoded_call_id = "child", .decoded_call_id = "child", .encoded_arguments = "{}", .decoded_arguments = "{}" }});
-    const action = (try storage.nextCoreWork()).?.action;
+    const action = (try storage.nextCoreWork(.{ .credit = .background, .mcp = true })).?.action;
     var cwd: [protocol.max_workspace_bytes]u8 = undefined;
     var spec = try testing.completeConfiguration("unused", "", try testing.canonicalCwd(std.testing.io, &cwd), "model-a");
     spec.configuration.workspace = .{};
@@ -342,7 +342,7 @@ test "MCP parent creation narrows configured intent and saves no derived offer a
                     },
                     .start_agent => child: {
                         try store.settleCallsForTesting(&storage, &tmp, model, "parent-intent-call", &.{.{ .item_id = "child", .name = "start_agent", .encoded_call_id = "child", .decoded_call_id = "child", .encoded_arguments = "{}", .decoded_arguments = "{}" }});
-                        const action = (try storage.nextCoreWork()).?.action;
+                        const action = (try storage.nextCoreWork(.{ .credit = .background, .mcp = true })).?.action;
                         const Capture = struct {
                             child: protocol.Bounded(protocol.max_session_bytes) = .{},
                             fn call(context: *anyopaque, admission: store.Store.MessageAdmission) void {
@@ -431,7 +431,7 @@ test "MCP find_tools expands loaded intent without losing or inventing unavailab
                 try testing.submitTestMessage(&storage, &tmp, "load-intent-start", "load-intent-start", session.slice(), "find");
                 const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
                 try store.settleCallsForTesting(&storage, &tmp, model, "load-intent-call", &.{.{ .item_id = "find", .name = "find_tools", .encoded_call_id = "find", .decoded_call_id = "find", .encoded_arguments = "{\\\"words\\\":\\\"fetch_b\\\"}", .decoded_arguments = "{\"words\":\"fetch_b\"}" }});
-                const input = (try storage.nextCoreWork()).?.action;
+                const input = (try storage.nextCoreWork(.{ .credit = .background, .mcp = true })).?.action;
                 try @import("find_tools.zig").run(&storage, arena.allocator(), &input, .{});
                 try std.testing.expectEqual(a_loaded, try intended(&storage, session.slice(), "fetch_a", true));
                 try std.testing.expect(try intended(&storage, session.slice(), "fetch_b", true));

@@ -27,7 +27,8 @@ const projection_sql = path_sql[0 .. path_sql.len - 1] ++ "," ++
     "obligation_inputs(session_ref,since) AS (" ++
     // Match MySQL's functional active-Turn index, as well as SQLite's predicate.
     "SELECT p.session_ref,(SELECT admitted_at FROM message_admission WHERE admission_id=(SELECT t.first_admission_id FROM turn t WHERE t.session_ref=p.session_ref AND t.outcome_code IS NULL AND (CASE WHEN t.outcome_code IS NULL THEN t.session_ref END)=p.session_ref)) FROM obligation_path p UNION " ++
-    "SELECT p.session_ref,(SELECT min(m.admitted_at) FROM message_admission m @index(message_admission_session_order) WHERE m.session_ref=p.session_ref AND m.turn_id IS NULL AND m.admission_id>coalesce((SELECT admission_cutoff FROM session_stop WHERE session_ref=p.session_ref ORDER BY admission_cutoff DESC LIMIT 1),0)) FROM obligation_path p),obligation_publications(session_ref,since) AS (" ++
+    "SELECT p.session_ref,(SELECT min(m.admitted_at) FROM message_admission m @index(message_admission_session_order) WHERE m.session_ref=p.session_ref AND m.turn_id IS NULL AND m.admission_id>coalesce((SELECT admission_cutoff FROM session_stop WHERE session_ref=p.session_ref ORDER BY admission_cutoff DESC LIMIT 1),0)) FROM obligation_path p UNION " ++
+    "SELECT p.session_ref,(SELECT min(origin.admitted_at) FROM action_operation action JOIN model_operation operation ON operation.operation_id=action.parent_operation_id JOIN turn causal_turn ON causal_turn.turn_id=operation.turn_id JOIN message_admission origin ON origin.admission_id=causal_turn.first_admission_id WHERE action.session_ref=p.session_ref AND action.background_position IS NOT NULL AND action.resolution_code IS NULL) FROM obligation_path p),obligation_publications(session_ref,since) AS (" ++
     "SELECT p.session_ref,(SELECT min(m.admitted_at) FROM session_forward f @index(session_forward_feed) LEFT JOIN action_operation a ON f.kind=1 AND a.action_id=f.source_id LEFT JOIN model_operation op ON op.operation_id=a.parent_operation_id JOIN turn t ON t.turn_id=CASE WHEN f.kind=2 THEN f.source_id ELSE op.turn_id END JOIN message_admission m ON m.admission_id=t.first_admission_id WHERE f.target_ref=p.session_ref AND f.position IS NULL) FROM obligation_path p UNION " ++
     "SELECT p.session_ref,(SELECT min(m.admitted_at) FROM session_forward f @index(session_forward_owed_message) JOIN turn t ON t.turn_id=f.source_id JOIN message_admission m ON m.admission_id=t.first_admission_id WHERE f.target_ref=p.session_ref AND f.message_delivered=0) FROM obligation_path p),obligation_seeds(session_ref,since) AS (SELECT session_ref,since FROM obligation_inputs UNION SELECT session_ref,since FROM obligation_publications UNION " ++
     // Only unaffected children contribute saved values: every path member is
@@ -63,4 +64,15 @@ pub fn reconcile(a: anytype, changed: []const rsql.SessionHead) void {
 pub fn hint(a: anytype, row: *const ancestors.Row) bool {
     a.obligationTouch(row.session);
     return true;
+}
+
+test "obligation projection renders one grouped MySQL frontier with the original four bindings" {
+    const rendered = comptime update.mysql.prepared();
+    try std.testing.expect(std.mem.startsWith(u8, rendered, "UPDATE session JOIN (SELECT session_ref,min(saved_since) AS saved_since,min(owed_since) AS owed_since FROM (WITH RECURSIVE obligation_walk("));
+    try std.testing.expect(std.mem.endsWith(u8, rendered, "SET session.obligation_since=obligation_new.owed_since WHERE (NOT (obligation_new.owed_since <=> obligation_new.saved_since))"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, rendered, "WITH RECURSIVE obligation_walk("));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, rendered, "GROUP BY session_ref"));
+    try std.testing.expectEqualDeep(@as([]const rsql.Slot, &.{ .{ .argument = 0 }, .{ .argument = 1 }, .{ .argument = 2 }, .{ .argument = 3 } }), update.mysql.slots);
+    try std.testing.expectEqual(@as(usize, 0), update.session_fields.len);
+    try std.testing.expect(update.guarded);
 }

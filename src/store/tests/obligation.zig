@@ -174,7 +174,7 @@ test "descendant changes invalidate ancestor tokens without invalidating standal
                         .encoded_arguments = "{}",
                         .decoded_arguments = "{}",
                     }});
-                    const action = (try storage.nextCoreWork()).?.action;
+                    const action = (try storage.nextCoreWork(.{ .credit = .background, .mcp = true })).?.action;
                     var spec = try testingAgentSpec(&.{}, "ask");
                     try std.testing.expect(try storage.startAgent(action.binding, root.slice(), "independent work", false, &spec, null, .{}) == .started);
                     const sessions = try TestingListing.read(&storage, &tmp, .{});
@@ -302,7 +302,7 @@ test "obligation frontier spans ending feed and Message transfers in either orde
                             var stop = try completeSessionStop("owed-stop", if (ending == .quiet) parent.slice() else child.slice());
                             try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
                             if (ending == .quiet) {
-                                const owed = (try storage.nextCoreWork()).?.stop;
+                                const owed = (try storage.nextCoreWork(.{ .credit = .background, .mcp = true })).?.stop;
                                 var child_stop: protocol.SessionStopCommand = .{ .key = owed.key, .session = child };
                                 try std.testing.expect(storage.stopOwedSession(&child_stop, .{}) == .accepted);
                             }

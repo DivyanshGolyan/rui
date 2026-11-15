@@ -124,11 +124,13 @@ pub const ValidatedOutput = model_settlement_domain.ValidatedOutput;
 test {
     _ = @import("store/domain/action.zig");
     _ = @import("store/domain/history_floor.zig");
+    _ = @import("store/domain/sourced_input.zig");
     _ = @import("store/tests.zig");
     _ = @import("store/tests/access.zig");
     _ = @import("store/tests/access_rules.zig");
     _ = @import("store/tests/action.zig");
     _ = @import("store/tests/activity.zig");
+    _ = @import("store/tests/async_actions.zig");
     _ = @import("store/tests/agent.zig");
     _ = @import("store/tests/compaction.zig");
     _ = @import("store/tests/configuration.zig");
@@ -203,3 +205,5 @@ test {
     _ = @import("store/mysql_session_tests.zig");
     _ = @import("store/wire/mysql_connection.zig");
 }
+
+pub const ActionCapacityView = @import("store/domain/action_control.zig").CapacityView;

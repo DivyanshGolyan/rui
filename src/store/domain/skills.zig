@@ -473,7 +473,7 @@ pub const SettleTool = struct {
             .outcome => {
                 if (r.faults().content_import) return error.InjectedContentImportFailure;
                 const outcome_id = try content.importBytes(r, &t.outcome, t.bytes);
-                try action_domain.queueResolution(r, t.input.binding, t.facts.?.session, if (t.succeeded) .succeeded else .failed, outcome_id);
+                try action_domain.queueResolution(r, t.input.binding, t.facts.?.session, t.facts.?.background, if (t.succeeded) .succeeded else .failed, outcome_id);
                 if (r.faults().before_commit) return error.InjectedCommitFailure;
                 return .commit;
             },

@@ -80,6 +80,10 @@ FIXTURES = {
     "admission-debug-integration": ((I + "admission_integration.sh",), (), ()),
     "dispatch-integration": ((I + "dispatch_integration.py",), (), ("src/model_adapter.zig", *MODEL)),
     "dispatch-debug-integration": ((I + "dispatch_integration.py",), (), ()),
+    "async-actions-integration": ((I + "async_actions_integration.py",), (),
+                                  (*BASH, "src/tool_execution.zig", "src/action_tools.zig", "src/execution_turn.zig",
+                                   "src/store/domain/action.zig", "src/store/domain/action_control.zig",
+                                   "src/store/domain/sourced_input.zig", "src/store/domain/model_settlement.zig")),
     "bash-integration": ((I + "bash_integration.py",), (), BASH),
     "bash-owner-integration": ((I + "bash_owner_integration.py",), (), BASH),
     "bash-lifecycle-integration": ((I + "bash_lifecycle_integration.py",), (), BASH),
@@ -686,7 +690,7 @@ STACK_FRAMES = ("src/*", "build.zig", "build.zig.zon", "tests/ci/stack_frames.py
 
 CHECK_COVERS = {
     "test", "test-native", "test-store", "test-h2", "test-pg", "admission-integration", "dispatch-integration",
-    "bash-owner-integration", "bash-lifecycle-integration", "bash-recovery-integration",
+    "bash-owner-integration", "bash-lifecycle-integration", "bash-recovery-integration", "async-actions-integration",
     "bash-integration", "bash-environment-integration", "codex-integration", "control-integration",
     "host-status-integration", "host-launch-integration", "host-stop-integration",
     "descriptor-capacity-integration", "request-wait-integration",

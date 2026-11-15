@@ -3,6 +3,8 @@
 
 const replay_recipe = @import("../../replay_recipe.zig");
 const std = @import("std");
+const tool_fulfillment = @import("tool_fulfillment.zig");
+const sourced_input = @import("sourced_input.zig");
 const activity_read = @import("../../activity_read.zig");
 const workspace_path = @import("../../workspace_path.zig");
 const store_path = @import("../../store_path.zig");
@@ -114,8 +116,8 @@ pub const HistoricalEntry = struct {
     kind: HistoricalEntryKind,
     content: ?HistoricalContent = null,
     requested_model: ?Bounded(model_capability.max_model_bytes) = null,
-    // A User entry's peer sender, in this view's Store.
-    sender: ?Bounded(session_id.max_reference_bytes) = null,
+    /// A user-role entry's authority, distinct from its provider role.
+    source: ?sourced_input.Provenance = null,
     /// An Operation entry's frozen effort.
     effort: ?model_capability.ReasoningEffort = null,
     /// An Operation entry's frozen tool set, and whether its boundary
@@ -1431,10 +1433,11 @@ fn entryAfter(a: *ReadAccess, view: *HistoricalView, after_position: u64) !?*con
 /// admission, the first `HistoricalView.entry_batch` of them in position
 /// order.
 const historical_entries = rsql.Read(.{
-    .sql = "SELECT e.session_position,CASE WHEN e.entry_kind=4 THEN 5 ELSE e.entry_kind END AS entry_kind,e.content_id," ++ historical_content_columns_sql ++ ",NULL AS model,NULL AS provider,NULL AS item_kind,NULL AS item_id_digest,(e.source_catalog_position IS NULL OR " ++ skills_domain.instructionConsistentSql("e") ++ ") AS consistent," ++
-        "(SELECT m.sender_session_ref FROM message_admission m WHERE e.entry_kind=1 AND m.admission_id=e.source_admission_id) AS sender,NULL AS effort," ++
+    .sql = "SELECT e.session_position,CASE WHEN e.entry_kind=4 THEN 5 ELSE e.entry_kind END AS entry_kind,e.content_id," ++ historical_content_columns_sql ++ ",NULL AS model,NULL AS provider,NULL AS item_kind,NULL AS item_id_digest,(e.source_catalog_position IS NULL OR " ++ skills_domain.instructionConsistentSql("e") ++ ") AND (e.entry_kind!=1 OR " ++ sourced_input.consistentSql("m") ++ ") AS consistent," ++
+        sourced_input.provenanceColumns("m") ++ ",NULL AS effort," ++
         "NULL AS tool_set_id,NULL AS declares," ++ pageBytesSql("content", "bytes") ++ " " ++
         "FROM model_operation current JOIN conversation_entry e ON e.session_ref=current.session_ref " ++
+        "LEFT JOIN message_admission m ON e.entry_kind=1 AND m.admission_id=e.source_admission_id " ++
         "LEFT JOIN content ON content.content_id=e.content_id " ++
         "WHERE current.operation_id=?1 AND e.session_position>?2 AND e.session_position<current.admission_position " ++
         "AND e.entry_kind IN (1,2,4) AND (e.entry_kind=2 OR e.session_position>?3 OR e.session_position=?4" ++
@@ -1445,7 +1448,7 @@ const historical_entries = rsql.Read(.{
         "AND owner.attempt_ordinal=item.attempt_ordinal AND owner.admission_position<item.session_position " ++
         "AND owner.admission_position<current.admission_position AND " ++
         "(item.item_kind!=3 OR " ++ store_schema.resolutionIs("owner.resolution_code", .tool_proposals) ++ ") AND " ++
-        "((" ++ store_schema.resolutionIs("owner.resolution_code", .tool_proposals) ++ ")=EXISTS(SELECT 1 FROM model_tool_call tool_call WHERE tool_call.operation_id=owner.operation_id)),NULL,NULL,NULL,NULL,NULL " ++
+        "((" ++ store_schema.resolutionIs("owner.resolution_code", .tool_proposals) ++ ")=EXISTS(SELECT 1 FROM model_tool_call tool_call WHERE tool_call.operation_id=owner.operation_id)),NULL,NULL,NULL,NULL,NULL,NULL " ++
         "FROM model_operation current JOIN model_output_item item ON item.session_ref=current.session_ref " ++
         "LEFT JOIN model_operation owner ON owner.operation_id=item.operation_id " ++
         "LEFT JOIN turn owner_turn ON owner_turn.turn_id=owner.turn_id " ++
@@ -1455,7 +1458,7 @@ const historical_entries = rsql.Read(.{
         // Every earlier Operation of the Session above the floor, whatever
         // its outcome: its request carried its own boundary, so later ones do too.
         // With each, its tool set and whether it declares any tool.
-        "SELECT earlier.admission_position,4,NULL,NULL,NULL,NULL,revision.model,NULL,NULL,NULL,NULL,NULL," ++ operation_effort.effectiveSql("earlier") ++ ",earlier.tool_set_id," ++
+        "SELECT earlier.admission_position,4,NULL,NULL,NULL,NULL,revision.model,NULL,NULL,NULL,NULL,NULL,NULL," ++ operation_effort.effectiveSql("earlier") ++ ",earlier.tool_set_id," ++
         "EXISTS(SELECT 1 FROM " ++ declared_members_from ++ " WHERE " ++ declared_members_where("earlier.tool_set_id", "earlier.admission_position", "?6") ++ "),NULL " ++
         "FROM model_operation current JOIN model_operation earlier ON earlier.session_ref=current.session_ref " ++
         "JOIN session_revision revision ON revision.session_ref=earlier.session_ref AND revision.revision=earlier.settings_revision " ++
@@ -1476,6 +1479,7 @@ const historical_entries = rsql.Read(.{
         item_id_digest: ?[32]u8,
         consistent: ?bool,
         sender: ?Bounded(session_id.max_reference_bytes),
+        final_action_id: ?rsql.Positive,
         effort: ?model_capability.ReasoningEffort,
         tool_set_id: ?rsql.Positive,
         declares: ?bool,
@@ -2167,7 +2171,7 @@ fn historicalEntry(view: *HistoricalView, row: *const historical_entries.Row) er
         .position = row.session_position.get(),
         .kind = kind,
         .requested_model = requested_model,
-        .sender = row.sender,
+        .source = if (kind == .user) try sourced_input.provenance(row.sender, if (row.final_action_id) |action| action.get() else null) else null,
         .content = content,
     };
 }
@@ -2219,14 +2223,14 @@ const group_sources = rsql.Read(.{
 const group_calls = rsql.Read(.{
     .sql = "WITH sources AS (SELECT source.operation_id " ++ group_sources_from ++ ") " ++
         "SELECT sources.operation_id AS source,proposed.call_ordinal AS ordinal,item.item_ordinal,item.item_kind," ++
-        "coalesce(tool_call.acceptance_position,action.acceptance_position) AS accepted_position," ++
-        "CASE WHEN tool_call.rejection_code IS NOT NULL OR (action.resolution_code IS NOT NULL AND " ++
+        "" ++ tool_fulfillment.positionSql("tool_call", "action") ++ " AS accepted_position," ++
+        "CASE WHEN tool_call.rejection_code IS NOT NULL OR (" ++ tool_fulfillment.actionCompleteSql("action") ++ " AND " ++
         "action.session_ref=op.session_ref AND action.tool_kind=tool_call.action_kind) THEN 1 ELSE 0 END AS outcome_consistent," ++
         "result.private AS result_private," ++ reads_domain.proposal_columns ++ " " ++
         "FROM sources JOIN model_tool_call proposed ON proposed.operation_id=sources.operation_id " ++
         "LEFT JOIN model_output_item item ON item.operation_id=proposed.operation_id AND item.item_ordinal=proposed.item_ordinal " ++
         reads_domain.proposal_joins ++
-        "LEFT JOIN content result ON result.content_id=coalesce(tool_call.rejection_content_id,action.resolution_content_id) " ++
+        "LEFT JOIN content result ON result.content_id=" ++ tool_fulfillment.contentSql("tool_call", "action") ++ " " ++
         "WHERE sources.operation_id>?2 OR proposed.call_ordinal>=?4 " ++
         // Ordered by the page's sources, so MySQL reads the calls from
         // them and never walks every Session's calls in key order.
@@ -2639,9 +2643,9 @@ const group_results = rsql.Read(.{
         "CROSS JOIN model_tool_call tool_call ON tool_call.operation_id=source.operation_id LEFT JOIN action_operation action " ++
         "ON action.parent_operation_id=tool_call.operation_id AND action.call_ordinal=tool_call.call_ordinal " ++
         "LEFT JOIN content call_id ON call_id.content_id=tool_call.call_id_content_id " ++
-        "LEFT JOIN content output ON output.content_id=coalesce(tool_call.rejection_content_id,action.resolution_content_id) " ++
+        "LEFT JOIN content output ON output.content_id=" ++ tool_fulfillment.contentSql("tool_call", "action") ++ " " ++
         "WHERE current.operation_id=?1 AND " ++ store_schema.resolutionIs("source.resolution_code", .tool_proposals) ++ " " ++
-        "AND coalesce(tool_call.acceptance_position,action.acceptance_position)<current.admission_position " ++
+        "AND " ++ tool_fulfillment.positionSql("tool_call", "action") ++ "<current.admission_position " ++
         "AND tool_call.call_ordinal>=?3 ORDER BY tool_call.call_ordinal LIMIT " ++ std.fmt.comptimePrint("{d}", .{Page.result_batch}),
     .Args = struct { operation: u64, source: u64, from: u64 },
     .Row = struct {

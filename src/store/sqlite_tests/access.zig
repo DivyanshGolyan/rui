@@ -267,7 +267,7 @@ test "every transition dates its fact from the Host clock" {
     try allow.key.set("dated-allow");
     try allow.session.set(session.slice());
     try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
-    const action = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
+    const action = (try storage.admitNextActionAttempt(.{ .credit = .background, .mcp = true }, 300_000, .{})).?.permit.binding;
     var stop = try completeSessionStop("dated-stop", session.slice());
     try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
     try std.testing.expectEqual(ActionSettlement.session_stop, try storage.settleActionAttempt(action, .succeeded, "Bash succeeded.", .{}));

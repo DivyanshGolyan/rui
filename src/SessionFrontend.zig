@@ -7149,7 +7149,7 @@ test "failed reply stale pre-admission scan must not authorize a fresh Ctrl-R af
                     const reference: protocol.ActivityItem.Content = .{ .length = text.len, .digest = protocol.contentDigest(text) };
                     var facts: protocol.ActivityFacts = .{ .end = 3, .direction = .backward, .count = 1, .queued = .{ .count = 1, .oldest_position = 3, .newest_admission = 37, .newest_position = 3 }, .work = .{ .revision = 2, .work = .{ .state = .{ .pending = .{ .since = 2 } } } } };
                     try facts.work.workspace.set("/");
-                    facts.items[0] = .{ .position = if (position == 0) 3 else 1, .at = 1, .value = .{ .admission = .{ .admission = if (position == 0) 37 else 1, .key = .{}, .turn = null, .state = .queued, .content = reference, .admitted_at = 1 } } };
+                    facts.items[0] = .{ .position = if (position == 0) 3 else 1, .at = 1, .value = .{ .admission = .{ .admission = if (position == 0) 37 else 1, .source = .{ .person = .{} }, .turn = null, .state = .queued, .content = reference, .admitted_at = 1 } } };
                     try activity_reply.writePage(&out, &facts);
                 } else {
                     try std.testing.expectStringStartsWith(request[0..used], "POST /v1/activity-content ");
@@ -8150,7 +8150,7 @@ test "failed reply retry reader keeps every read failure at the shared settlemen
                     var facts: protocol.ActivityFacts = .{ .end = 3, .direction = .backward, .count = 1, .work = .{ .revision = 1, .work = .{ .state = .{ .idle = .{ .since = 1 } } } } };
                     try facts.work.workspace.set("/");
                     const reference: protocol.ActivityItem.Content = .{ .length = text.len + @intFromBool(host.fault == .length), .digest = protocol.contentDigest(text) };
-                    facts.items[0] = .{ .position = if (stage == .head) 3 else 2, .at = 1, .value = .{ .admission = .{ .admission = 2, .key = .{}, .turn = null, .state = .queued, .content = reference, .admitted_at = 1 } } };
+                    facts.items[0] = .{ .position = if (stage == .head) 3 else 2, .at = 1, .value = .{ .admission = .{ .admission = 2, .source = .{ .person = .{} }, .turn = null, .state = .queued, .content = reference, .admitted_at = 1 } } };
                     if (stage == .head) {
                         var ending: protocol.ActivityItem.TurnEnded = .{ .session = .{ .bytes = "k7m2qx".*, .len = 6 }, .turn = 1, .operation = 1, .ending = .failed, .code = .{}, .content = null };
                         try ending.code.set("malformed_provider_output");
@@ -8401,7 +8401,7 @@ test "SessionFrontend fixed and growing end replay cycles count arrivals once ac
             const content: protocol.ActivityItem.Content = .{ .length = 0, .digest = protocol.contentDigest("") };
             for (facts.items[0..facts.count], 0..) |*item, i| {
                 const position = if (facts.direction == .backward) last - i else first + i;
-                item.* = .{ .position = position, .ordinal = 0, .at = 1, .value = if (position == 1) .{ .admission = .{ .admission = 1, .key = .{}, .turn = null, .state = .queued, .content = content, .admitted_at = 1 } } else .{ .sent = .{ .admission = position, .admitted_at = 1, .target = peer, .content = content } } };
+                item.* = .{ .position = position, .ordinal = 0, .at = 1, .value = if (position == 1) .{ .admission = .{ .admission = 1, .source = .{ .person = .{} }, .turn = null, .state = .queued, .content = content, .admitted_at = 1 } } else .{ .sent = .{ .admission = position, .admitted_at = 1, .target = peer, .content = content } } };
             }
             const job = frontend.freeze(.activity);
             frontend.reading.feed_read = read;
@@ -8560,7 +8560,7 @@ test "SessionFrontend huge person source keeps the following short answer bottom
     var facts: protocol.ActivityFacts = .{ .end = 2, .direction = .backward, .count = 2, .work = .{ .revision = 1, .work = .{ .state = .{ .idle = .{ .since = 1 } } } } };
     try facts.work.workspace.set("/");
     facts.items[0] = .{ .position = 2, .ordinal = 0, .at = 1, .value = .{ .assistant = .{ .content = answer_reference, .final = true } } };
-    facts.items[1] = .{ .position = 1, .ordinal = 0, .at = 1, .value = .{ .user = .{ .admission = 1, .key = .{}, .turn = 1, .state = .applied, .content = person_reference, .admitted_at = 1 } } };
+    facts.items[1] = .{ .position = 1, .ordinal = 0, .at = 1, .value = .{ .user = .{ .admission = 1, .source = .{ .person = .{} }, .turn = 1, .state = .applied, .content = person_reference, .admitted_at = 1 } } };
     var buffer: [4096]u8 = undefined;
     var page = std.Io.Writer.fixed(&buffer);
     try activity_reply.writePage(&page, &facts);
