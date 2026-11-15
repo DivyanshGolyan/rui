@@ -6,6 +6,7 @@ const core_boundary = @import("core_boundary.zig");
 /// each one listed here and runs its tests, and selector tests require each
 /// to select test-logic. Add entries in alphabetical order by path, ignoring case.
 const cores = .{
+    .{ "action_read.zig", @import("action_read.zig") },
     .{ "action_text.zig", @import("action_text.zig") },
     .{ "ActionConsent.zig", @import("ActionConsent.zig") },
     .{ "activity_facts.zig", @import("activity_facts.zig") },
