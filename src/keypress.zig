@@ -25,6 +25,8 @@ const chords = std.enums.EnumArray(Key, []const Chord).init(.{
     .ctrl_r = &.{.{ .code = 'r', .mods = .{ .ctrl = true } }},
     .ctrl_x = &.{.{ .code = 'x', .mods = .{ .ctrl = true } }},
     .alt_a = &.{.{ .code = 'a', .mods = .{ .alt = true } }},
+    .alt_up = &.{.{ .code = vaxis.Key.up, .mods = .{ .alt = true } }},
+    .alt_down = &.{.{ .code = vaxis.Key.down, .mods = .{ .alt = true } }},
     // Terminals in the alternate screen also deliver mouse wheel and
     // trackpad scrolling as these arrow keys.
     .up = &.{.{ .code = vaxis.Key.up }},
@@ -178,4 +180,38 @@ test "a choice takes its arrows and Enter, the screen's keys and typing, and ref
     // An arrow the screen binds is the screen's action, as the list's Right is.
     try std.testing.expectEqual(Selection(Name){ .action = .right }, selectKey(keymap.every, .{ .codepoint = vaxis.Key.right }));
     try std.testing.expectEqual(Selection(Name){ .action = .left }, selectKey(keymap.every, .{ .codepoint = vaxis.Key.left }));
+}
+
+test "Option session navigation decodes exact Alt arrows without losing modifiers" {
+    const Events = @import("testing/app_events.zig").Events;
+    for ([_]struct { bytes: []const u8, name: []const u8 }{
+        .{ .bytes = "\x1b[1;3A", .name = "alt_up" },
+        .{ .bytes = "\x1b[1;3B", .name = "alt_down" },
+        .{ .bytes = "\x1b[1;3:1A", .name = "alt_up" },
+        .{ .bytes = "\x1b[1;3:1B", .name = "alt_down" },
+    }) |case| {
+        var events: Events = .init(case.bytes);
+        const event = events.next().?;
+        try std.testing.expect(event == .key_press);
+        const name = named(event.key_press);
+        try std.testing.expect(name != null);
+        try std.testing.expectEqualStrings(case.name, @tagName(name.?));
+        try std.testing.expect(events.next() == null);
+    }
+}
+
+test "Option session navigation rejects additional chord modifiers" {
+    for ([_]u21{ vaxis.Key.up, vaxis.Key.down }) |code| {
+        for ([_]vaxis.Key.Modifiers{
+            .{ .alt = true, .shift = true },
+            .{ .alt = true, .ctrl = true },
+            .{ .alt = true, .super = true },
+            .{ .alt = true, .meta = true },
+            .{ .alt = true, .hyper = true },
+        }) |mods| {
+            const key: vaxis.Key = .{ .codepoint = code, .mods = mods };
+            try std.testing.expect(named(key) == null);
+            try std.testing.expect(classify(key) == .chord);
+        }
+    }
 }

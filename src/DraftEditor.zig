@@ -258,7 +258,7 @@ fn edit(self: *Editor, key_name: Key) ?KeyOutcome {
         .ctrl_d => if (bytes.len == 0) null else self.act(.delete_next),
         .left => self.act(.left),
         .right => self.act(.right),
-        .escape, .ctrl_c, .ctrl_g, .ctrl_n, .ctrl_o, .ctrl_p, .ctrl_r, .ctrl_x, .alt_a, .shift_up, .shift_down, .page_up, .page_down, .ctrl_end => null,
+        .escape, .ctrl_c, .ctrl_g, .ctrl_n, .ctrl_o, .ctrl_p, .ctrl_r, .ctrl_x, .alt_a, .alt_up, .alt_down, .shift_up, .shift_down, .page_up, .page_down, .ctrl_end => null,
     };
 }
 
@@ -598,7 +598,7 @@ test "an unbound Alt or Meta chord never inserts its bare character" {
     // Super/Meta bits. Each is dropped, keeping the draft
     // around it, rather than adding ".".
     // Enter with Alt and another modifier is still a dropped chord.
-    for ([_][]const u8{ "\x1b\xff", "\x1b.", "\x1b ", "\x1bx", "\x1b[46;3u", "\x1b[46;3;46u", "\x1b[32;3u", "\x1b[46;9u", "\x1b[46;33u", "\x1b[13;4u", "\x1b[13;4;13u", "\x1b[13:13;4u", "\x1b[13;7u", "\x1b[13;9u", "\x1b[1;3A", "\x1b\x00", "\x1b\x01", "\x1b\x12", "\x1b[28;3u", "\x1b[97;7u", "\x1b[27;3;46~", "\x1b[27;3;32~", "\x1b[27;9;46~", "\x1b[27;4;13~" }) |chord| {
+    for ([_][]const u8{ "\x1b\xff", "\x1b.", "\x1b ", "\x1bx", "\x1b[46;3u", "\x1b[46;3;46u", "\x1b[32;3u", "\x1b[46;9u", "\x1b[46;33u", "\x1b[13;4u", "\x1b[13;4;13u", "\x1b[13:13;4u", "\x1b[13;7u", "\x1b[13;9u", "\x1b[1;4A", "\x1b\x00", "\x1b\x01", "\x1b\x12", "\x1b[28;3u", "\x1b[97;7u", "\x1b[27;3;46~", "\x1b[27;3;32~", "\x1b[27;9;46~", "\x1b[27;4;13~" }) |chord| {
         var editor: Editor = .init(&storage);
         var stream: Typing = .{};
         _ = stream.send(&editor, "o");
@@ -900,5 +900,20 @@ test "Shift held with a binding's key is never that binding, whatever text the k
         // Shift-Enter is the one bound Shift chord here: it adds a line.
         const expected: []const u8 = if (std.mem.eql(u8, chord, "\x1b[13;2;13u")) "ok\n" else "ok";
         try std.testing.expectEqualStrings(expected, editor.text());
+    }
+}
+
+test "Option arrows leave a draft intact and return its screen navigation key" {
+    for ([_]struct { bytes: []const u8, key: keymap.Key }{
+        .{ .bytes = "\x1b[1;3A", .key = .alt_up },
+        .{ .bytes = "\x1b[1;3B", .key = .alt_down },
+    }) |case| {
+        var storage: [64]u8 = undefined;
+        var editor: Editor = .init(&storage);
+        var stream: Typing = .{};
+        _ = stream.send(&editor, "own draft\x1b[D");
+        try std.testing.expectEqual(KeyOutcome{ .action = case.key }, stream.send(&editor, case.bytes));
+        try std.testing.expectEqualStrings("own draft", editor.text());
+        try std.testing.expectEqual(@as(usize, 8), editor.cursor());
     }
 }

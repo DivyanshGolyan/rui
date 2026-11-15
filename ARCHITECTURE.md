@@ -2525,6 +2525,12 @@ Arrows, Home and End keep whole-list navigation, including the pinned New Sessio
 The core owns selection, opening admission and pending/uncertain creation; the shell applies its effects.
 The core holds the terminal’s size, and shared screen composition accepts the actual bottom widget: the overview’s status/footer, not a manufactured editor.
 Without an open chat, the overview’s list uses the full width at every terminal size, with no empty compose pane. The wide list beside an open chat or its settings retains its existing row navigation and pointer spans, without an input of its own.
+Option/Alt-Up and Option/Alt-Down immediately switch to the previous or next Session in the list's projected order, even while typing, at every width.
+The destination's input gets focus; each draft, caret and rejection state stays attached to its own Session, and switching sends nothing.
+Opening another Session uses the existing one-step Follow return: Esc can return to the chat just left before it returns to the overview.
+The shortcut uses the existing opening and departure admission, including pending-creation, unresolved-original, Action, command and Upgrade guards; sign-in, Settings and marked paste keep their input custody.
+It skips New Session, Archived and Settings, clamps at the first and last Session, and anchors to the open Session rather than a separately highlighted row; if that Session is absent from the projected list it does nothing.
+Without an open Session it moves from a selected Session, or opens the last/first Session for Up/Down from a control row; an empty list does nothing.
 At 100 columns and wider, keys go to the list or to the chat beside it, one at a time (`app_input`'s list focus).
 Left on an empty chat draft gives keys to the list and leaves the chat open and drawn; a draft with text, even with the caret at its start, takes Left as an edit.
 Below 100 columns no list sits beside the chat, so Left on an empty draft leaves the chat as Esc does; Esc and Ctrl-G leave the chat at every width.
@@ -2703,7 +2709,7 @@ Option/Command-Backspace may be consumed by the terminal; only supported receive
 No Host input policy, completion or configurable keymap is added, and recalling sent Messages keeps no history of its own.
 
 An incomplete CSI or SS3 sequence also times out and ends the caller, rather than treating its delayed tail as Message text; bare ESC alone may expire without rejecting the draft.
-Each screen has one key table over the keys in `src/keymap.zig`: Esc, Ctrl-C, Ctrl-D, Ctrl-G, Ctrl-N, Ctrl-O, Ctrl-P, Ctrl-R, Ctrl-X, Up, Down, Left, Right, Shift-Up, Shift-Down, PgUp, PgDn, Home, End and Ctrl-End.
+Each screen has one key table over the keys in `src/keymap.zig`: Esc, Ctrl-C, Ctrl-D, Ctrl-G, Ctrl-N, Ctrl-O, Ctrl-P, Ctrl-R, Ctrl-X, Alt-A, Alt-Up, Alt-Down, Up, Down, Left, Right, Shift-Up, Shift-Down, PgUp, PgDn, Home, End and Ctrl-End.
 The editor edits with such a key while the draft gives it a use (Left and Right always; Up and Down with a draft line in that direction; Home, End and Ctrl-D with any draft) and otherwise returns the screen's action for it, or nothing where the table binds nothing; a choice drawn in place of the draft takes the arrows its screen leaves unbound.
 A rejected draft changes no key's meaning.
 In a conversation Esc and Ctrl-G return to the latest view and, from there, to the overview, and Ctrl-X stops the Session as on the overview. End on an empty draft and Ctrl-End return to the latest view and stay in the conversation; End with a draft still edits its current line.
