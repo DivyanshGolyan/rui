@@ -106,12 +106,12 @@ class PlanFixture:
         self.git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '--allow-empty', '-qm', 'fixture')
         return self.git('rev-parse', 'HEAD')
 
-    def run(self, base=None, candidate=None, event='pull_request', draft=False, promotion=False, compile_only=False):
+    def run(self, base=None, candidate=None, event='pull_request', draft=False, promotion=False, compile_only=False, branch_head=''):
         self.output = self.root / 'output'
         self.output.write_text('')
         script = step_script(job(CHECK.read_text(), 'plan'), 'Select existing targets')
         env = dict(os.environ, PYTHONDONTWRITEBYTECODE='1', BASE=base or self.base, DRAFT=str(draft).lower(), EVENT_NAME=event,
-                   PROMOTION=str(promotion).lower(), COMPILE_ONLY=str(compile_only).lower(),
+                   PROMOTION=str(promotion).lower(), COMPILE_ONLY=str(compile_only).lower(), BRANCH_HEAD=branch_head,
                    GITHUB_REF_NAME='5/merge', CANDIDATE_REF=candidate or self.git('rev-parse', 'HEAD'),
                    GITHUB_OUTPUT=str(self.output), GITHUB_STEP_SUMMARY=str(self.root / 'summary'))
         return subprocess.run(['bash', '-c', script], cwd=self.repo, env=env,
@@ -255,7 +255,7 @@ class AdmissionTest(unittest.TestCase):
     def test_documentation_linux_requires_exact_skips_and_controls(self):
         script = step_script(job(CHECK.read_text(), 'linux'), 'Require every selected Linux part')
         env = dict(DRAFT_RUN='false', CHANGE_KIND='documentation', PLAN_RESULT='success', POLICY_RESULT='skipped',
-                   TARGETS='[]', SPLIT='false', CODEGEN='false', BUILD_RESULT='skipped',
+                   TARGETS='[]', COMPILE_TARGETS='[]', SPLIT='false', CODEGEN='false', BUILD_RESULT='skipped',
                    UNIT_RESULT='skipped', CODEGEN_RESULT='skipped', NATIVE_RESULT='skipped',
                    TYPECHECK='false', TYPECHECK_RESULT='skipped', COMPILE_ONLY='false')
 
@@ -278,7 +278,7 @@ class AdmissionTest(unittest.TestCase):
 
     def test_linux_legacy_default_cannot_admit_an_explicit_unknown_kind(self):
         script = step_script(job(CHECK.read_text(), 'linux'), 'Require every selected Linux part')
-        env = dict(DRAFT_RUN='false', PLAN_RESULT='success', POLICY_RESULT='success', TARGETS='[]', SPLIT='false',
+        env = dict(DRAFT_RUN='false', PLAN_RESULT='success', POLICY_RESULT='success', TARGETS='[]', COMPILE_TARGETS='[]', SPLIT='false',
                    CODEGEN='false', BUILD_RESULT='skipped', UNIT_RESULT='skipped',
                    CODEGEN_RESULT='skipped', NATIVE_RESULT='skipped', TYPECHECK='false', TYPECHECK_RESULT='skipped',
                    COMPILE_ONLY='false')
@@ -473,7 +473,11 @@ class CandidatePlanTest(unittest.TestCase):
                                (source.replace('.digest = 0x', '.digest = 0x1', 1), 'true')):
             with self.subTest(upgrade=upgrade), PlanFixture() as fixture:
                 fixture.write(schema, after)
-                self.assertEqual(fixture.plan(self, candidate=fixture.commit())['upgrade'], upgrade)
+                output = fixture.plan(self, candidate=fixture.commit())
+                self.assertEqual(output['upgrade'], upgrade)
+                self.assertEqual(set(json.loads(output['linux_compile_targets'])) - set(json.loads(output['targets'])), {'test'})
+                self.assertIn('test-store', json.loads(output['targets']))
+                self.assertNotIn('test', json.loads(output['targets']))
 
     def assert_documentation_plan(self, output):
         self.assertEqual(output['change_kind'], 'documentation')
@@ -647,6 +651,51 @@ def plan(selection, *, event_name, draft, promotion, change_kind, compile_only):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             # Even falsely relabelling the draft's event as ready cannot admit its skipped policy.
             self.assertNotEqual(self.aggregate(workflow, 'admission', admission, draft, results).returncode, 0)
+
+    def test_main_merge_obligation_requires_compile_without_running_unselected_units(self):
+        workflow = CHECK.read_text()
+        linux = step_script(job(workflow, 'linux'), 'Require every selected Linux part')
+        with PlanFixture() as fixture:
+            fixture.git('checkout', '-qb', 'feature')
+            fixture.write('README.md', 'Feature documentation.\n')
+            fixture.commit()
+            fixture.git('checkout', '-q', 'main')
+            fixture.write('src/history_memo.zig', 'const new_main = true;\n')
+            main = fixture.commit()
+            fixture.git('checkout', '-q', 'feature')
+            fixture.git('-c', 'user.name=t', '-c', 'user.email=t@t', 'merge', '--no-ff', '-qm', 'integrate main', 'main')
+            branch = fixture.git('rev-parse', 'HEAD')
+            fixture.git('checkout', '-qb', 'candidate', 'main')
+            fixture.git('-c', 'user.name=t', '-c', 'user.email=t@t', 'merge', '--no-ff', '-qm', 'candidate merge', 'feature')
+            candidate = fixture.git('rev-parse', 'HEAD')
+            self.assertEqual(fixture.git('rev-parse', 'HEAD^1'), main)
+            self.assertEqual(fixture.git('rev-parse', 'HEAD^2'), branch)
+            output = fixture.plan(self, base=main, candidate=candidate, branch_head=branch)
+            self.assertEqual(output['candidate_ref'], candidate)
+            self.assertEqual(output['change_kind'], 'normal')
+            self.assertEqual(json.loads(output['targets']), [])
+            self.assertEqual(json.loads(output['linux_compile_targets']), ['test'])
+            self.assertEqual(output['linux_matrix'], '{"include": []}')
+            self.assertEqual(output['linux_split'], 'false')
+            results = dict(plan='success', policy='success', linux_build='success',
+                           linux_build_unit='skipped', linux_codegen='skipped',
+                           linux_suites='skipped', macos_typecheck='skipped')
+            self.assertEqual(self.aggregate(workflow, 'linux', linux, output, results).returncode, 0)
+            for status in ('skipped', 'failure', 'cancelled', ''):
+                with self.subTest(status=status):
+                    self.assertNotEqual(self.aggregate(workflow, 'linux', linux, output,
+                        dict(results, linux_build=status)).returncode, 0)
+            self.assertNotEqual(self.aggregate(workflow, 'linux', linux, output,
+                dict(results, linux_suites='success')).returncode, 0)
+
+    def test_linux_producer_and_restore_share_compile_identity_not_execution_targets(self):
+        workflow = CHECK.read_text()
+        for name in ('linux_build', 'linux_build_unit'):
+            self.assertIn('TARGETS: ${{ needs.plan.outputs.linux_compile_targets }}', job(workflow, name))
+        suites = job(workflow, 'linux_suites')
+        restore = suites.split('- name: Use the verified producer artifact or compile locally', 1)[1].split('      - ', 1)[0]
+        self.assertIn('TARGETS: ${{ needs.plan.outputs.linux_compile_targets }}', restore)
+        self.assertIn('TARGETS: ${{ toJSON(matrix.targets) }}', suites)
 
     def test_compile_only_plan_flows_through_the_real_linux_aggregate(self):
         workflow = CHECK.read_text()

@@ -5,24 +5,31 @@
 
 ## Publish and merge
 
-Before publishing, run the focused checks in [Evidence](../../CODING_STANDARDS.md#evidence).
+Before publishing, establish or reuse the relevant focused evidence in [Evidence](../../CODING_STANDARDS.md#evidence).
 A PR description has a Summary, the Evidence it was checked with, and its Merge danger.
 The description lists every behavior change in the diff, small ones included, so the summary and the diff agree.
 PRs changing `src/` carry a [Shape section](../../CODING_STANDARDS.md#shape-before-code), and the plan job refuses them without it.
 Every PR commit states its actual test commands and results.
-Open every PR with `python3 tests/ci/open_pr.py open --title TITLE --body-file FILE`, which lists open PRs sharing its files and opens it as a draft.
-Draft CI runs only the plan (candidate, whitespace and selection checks) and cheap aggregates; local `prepush.py` owns development feedback.
-The opener comments `@codex review`; Codex reviews drafts only on request.
-Push fixes to the draft and comment `@codex review` after every push.
-Codex is clean when its latest `codex-review-state:v1` summary names the PR's current head and reports no unresolved findings.
+Open every PR with `python3 tests/ci/open_pr.py open --title TITLE --body-file FILE`, which reports overlapping work and opens it ready for review.
+Selected CI and the opener's `@codex review` request start together on the published candidate.
+Use `python3 tests/ci/open_pr.py ready` for an older draft once its published head matches the clean committed checkout.
+New PRs need no draft conversion, so the same unchanged candidate does not run heavy checks twice merely to become ready.
+Codex is clean when its latest `codex-review-state:v1` summary names the reviewed head and reports no unresolved findings.
 A "no major issues" receipt alone is not clean, and an earlier review thread stays open until its author resolves it.
-After a fix push, the PR's author resolves each earlier review thread that push answered, so the state can turn clean without anyone else stepping in.
-Once Codex is clean on the current head, the PR's author runs `python3 tests/ci/open_pr.py ready` to start the full selected suite; it refuses while the PR's head on GitHub differs from the committed checkout or changes are uncommitted.
-A critical-path PR (a dependency root, the front of a stack, or a fix for a red `main`) runs `ready` right after opening instead, so CI runs beside Codex rather than after it.
-After readiness, a fix whose diff since Codex's clean review changes only test files or blocks (`tests/**/test_*.py`, integration fixtures and their data, `*_test.zig`/test-only Zig roots, or `test "..."` blocks in source) merges once `admission` is green, without another Codex review.
+After a fix push, resolve each earlier thread that the fix answered.
+Keep clean Codex evidence through unchanged semantics as permitted below; request `@codex review` when a production or operational change invalidates it.
+A fix whose diff since Codex's clean review changes only test files or blocks (`tests/**/test_*.py`, integration fixtures and their data, `*_test.zig`/test-only Zig roots, or `test "..."` blocks in source) merges once `admission` is green, without another Codex review.
+Documentation-only edits that preserve the reviewed contract also reuse the clean review, with the semantic comparison recorded in the PR.
 Two more changes merge on green `admission` without another Codex review: a commit that only applies the Store format renumber `tests/ci/schema_number.py` computes, and a pure revert of the one merged PR that broke `main`.
 Any other non-test change, including CI, build, release or other operational scripts (the rest of `tests/ci/`, workflows and `build.zig`), needs Codex clean on the new head again.
-Performance changes include A/B numbers, and TUI changes include a plain-PTY capture using [verify-rui](../../.claude/skills/verify-rui/SKILL.md).
+Performance changes include A/B numbers.
+Every UI PR embeds actual-implementation screenshots or a screen recording in its PR description before it is merge-ready.
+Use [verify-rui](../../.claude/skills/verify-rui/SKILL.md) for the independent plain-PTY journey; reuse its raw captures to render media where possible.
+For interaction changes, show the sequence with a recording or labelled screenshots; include meaningful before/after layout views when available.
+State the source revision, terminal surface and limits, retain raw capture provenance, and exclude secrets.
+Upload through native `gh pr edit PR --attach '/absolute/image.png#Alt text'` (see `gh pr edit --help` for body placement and video), then read back the description and verify the uploaded media is viewable.
+If upload partially fails, inspect the updated body before retrying.
+A comment, local path or artifact pointer alone does not meet the description requirement; visual evidence does not replace behavior assertions or hosted acceptance.
 Keep published commits unchanged so their CI evidence retains its SHA.
 
 Green means the required `admission` check completed successfully for the PR's current head; it need not be rerun after `main` moves.
@@ -36,7 +43,7 @@ The admin bypass in [the main ruleset](../../.github/main-ruleset.json) is a las
 Use it only when every red or missing check is a macOS job that GitHub never assigned a runner, every check that ran passed, and an infra-retry also failed to get a runner; state why in the merge commit or a PR comment.
 
 Merge `origin/main` into a PR only when it conflicts with `main`; [Conflict alert](../../.github/workflows/conflict-alert.yml) comments on each PR a move of `main` leaves conflicting.
-After that merge, run `python3 tests/ci/prepush.py` and wait for the new head's CI.
+After that merge, refresh local evidence invalidated by integration and wait for the new head's CI, including its required all-unit compile.
 A PR that merely trails `main` merges as it is.
 
 ## Concurrent PRs
@@ -51,8 +58,9 @@ A change that renames, removes or changes the signature of a name other files us
 Before landing one, run `python3 tests/ci/pr_overlap.py` again and search open PRs' diffs for each changed signature, which it does not detect.
 Fix each dependent PR on its branch, with its owner's lane told, or wait until it lands.
 #1180's `screen_build` rename cost four TUI PRs a merge of `main` and a fresh CI run each.
-PRs run independently only when they touch different files.
-Work sharing a file with an open PR stacks on that PR, including across lanes.
+PRs sharing source, API or operational ownership stack on that dependency, including across lanes.
+Documentation-only overlap does not require stacking when the owners compare the changed sections, confirm there is no semantic dependency or contradictory contract, and record that comparison before publication and merge.
+Keep sole-writer worktrees and actual source/API dependency order; a textual non-conflict alone does not establish semantic independence.
 Land a stack in order.
 Only its front PR takes `origin/main`.
 When a PR lands, GitHub deletes its branch and retargets the next PR in the stack to `main`.
