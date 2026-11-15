@@ -10,7 +10,7 @@ const List = @import("widgets/List.zig");
 pub const Segment = overview_view.Segment;
 /// What a press on a row means, as the screen's core takes it.
 pub const Target = overview_view.Click;
-pub const Region = struct { start: u16, end: u16, target: Target };
+pub const Region = struct { start: u16, end: u16, target: Target, selected: bool = false };
 pub const Row = struct {
     segments: []const Segment,
     heading: bool = false,
@@ -108,7 +108,7 @@ const Frame = struct {
         for (built.regions, regions) |region, *dest| {
             const id: u32 = @intCast(self.targets.items.len);
             try self.targets.append(arena, .{ .id = id, .target = region.target });
-            dest.* = .{ .start = region.start, .end = region.end, .target = id };
+            dest.* = .{ .start = region.start, .end = region.end, .target = id, .selected = region.selected };
         }
         const lines = try arena.alloc(List.Line, built.height);
         lines[0] = segments;
