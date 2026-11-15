@@ -5522,8 +5522,12 @@ test "Host launch chosen usable bindings attach before startup document admissio
             // including privileged test runners that bypass read mode bits.
             .unreadable => try directory.createDir(io, "host.json", .fromMode(0o700)),
             else => {
-                const file = try directory.createFile(io, "host.json", .{ .permissions = .fromMode(if (document == .insecure) 0o644 else 0o600) });
+                const file = try directory.createFile(io, "host.json", .{ .permissions = .fromMode(0o600) });
                 defer file.close(io);
+                // Creation respects the runner's private umask; establish the
+                // refused mode explicitly before testing source admission.
+                if (document == .insecure) try file.setPermissions(io, .fromMode(0o644));
+                try std.testing.expectEqual(@as(u16, if (document == .insecure) 0o644 else 0o600), (try file.stat(io)).permissions.toMode() & 0o777);
                 try file.writeStreamingAll(io, switch (document) {
                     .custom => "{\"providers\":{\"openai\":{\"endpoint\":\"https://custom.example/responses\"},\"codex\":{},\"chatgpt\":{}}}",
                     .malformed => "{",
