@@ -418,7 +418,7 @@ test "last line follows ended Turns and pending approvals with bounded public te
 
             // first_action still owns the line when work is Bash, not approval:
             // the allowed Action runs beside two still-awaiting decisions.
-            const running = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
+            const running = (try storage.admitNextActionAttempt(.{ .credit = .foreground, .mcp = true }, 300_000, .{})).?.permit.binding;
             try std.testing.expectEqual(oldest_action, running.action_id);
             try expect(&storage, &tmp, session.slice(), middle_position, "Newer approval", middle_action);
             {

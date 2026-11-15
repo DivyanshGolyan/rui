@@ -1661,6 +1661,8 @@ pub const CommandObservation = struct {
     completion: ?protocol.SessionStopCompletion = null,
     interruption_target: ?struct { session: protocol.Bounded(protocol.max_session_bytes), turn: u64, operation: u64 } = null,
     permission_target: ?struct { action: u64, decision: protocol.PermissionDecision } = null,
+    action_target: ?u64 = null,
+    action_selection: ?@import("action_control.zig").Selection = null,
 
     pub const ContentReference = mutation_answer.ContentReference;
 
@@ -1739,6 +1741,8 @@ pub const CommandObservation = struct {
             try writer.print(",\"turn\":\"{d}\",\"operation\":\"{d}\"}}", .{ target.turn, target.operation });
         }
         if (self.permission_target) |target| try writer.print(",\"permission_target\":{{\"action\":\"{d}\",\"decision\":\"{s}\"}}", .{ target.action, @tagName(target.decision) });
+        if (self.action_target) |action| try writer.print(",\"action_target\":{{\"action\":\"{d}\"}}", .{action});
+        if (self.action_selection) |selection| try writer.print(",\"action_selection\":{{\"kind\":\"{s}\",\"position\":\"{d}\"}}", .{ @tagName(selection.kind), selection.position });
         try writer.writeByte('}');
     }
 
@@ -1780,6 +1784,8 @@ pub const CommandObservation = struct {
             completion: OmittableJson(struct { status: JsonEnum(@typeInfo(@FieldType(CommandObservation, "completion")).optional.child) }) = .{},
             interruption_target: OmittableJson(struct { session: JsonString(protocol.max_session_bytes), turn: JsonString(20), operation: JsonString(20) }) = .{},
             permission_target: OmittableJson(struct { action: JsonString(20), decision: JsonEnum(protocol.PermissionDecision) }) = .{},
+            action_target: OmittableJson(struct { action: JsonString(20) }) = .{},
+            action_selection: OmittableJson(struct { kind: JsonEnum(@FieldType(@import("action_control.zig").Selection, "kind")), position: JsonString(20) }) = .{},
         };
         const Since = struct {
             value: ?JsonString(SessionToken.max_bytes),
@@ -1833,6 +1839,8 @@ pub const CommandObservation = struct {
         if (facts.completion.value) |value| observed.completion = value.status.value;
         if (facts.interruption_target.value) |value| observed.interruption_target = .{ .session = value.session.value, .turn = try decimalId(value.turn, true), .operation = try decimalId(value.operation, true) };
         if (facts.permission_target.value) |value| observed.permission_target = .{ .action = try decimalId(value.action, true), .decision = value.decision.value };
+        if (facts.action_target.value) |value| observed.action_target = try decimalId(value.action, false);
+        if (facts.action_selection.value) |value| observed.action_selection = .{ .kind = value.kind.value, .position = try decimalId(value.position, false) };
         try observed.validate();
         if (since) |token| {
             const target = observed.target orelse return error.InvalidObservation;
@@ -1850,7 +1858,7 @@ pub const CommandObservation = struct {
 
     fn validate(self: *const CommandObservation) !void {
         if (self.status == .absent) {
-            inline for (.{ "kind", "target", "code", "revision", "created", "input", "state", "queue", "binding", "result", "work", "recovery", "selection", "archived", "pinned", "completion", "interruption_target", "permission_target" }) |name| if (@field(self, name) != null) return error.InvalidObservation;
+            inline for (.{ "kind", "target", "code", "revision", "created", "input", "state", "queue", "binding", "result", "work", "recovery", "selection", "archived", "pinned", "completion", "interruption_target", "permission_target", "action_target", "action_selection" }) |name| if (@field(self, name) != null) return error.InvalidObservation;
             return;
         }
         const kind = self.kind orelse return error.InvalidObservation;
@@ -1866,6 +1874,8 @@ pub const CommandObservation = struct {
             (self.pinned != null) != (accepted and kind == .session_pin) or
             (self.completion != null) != (accepted and (kind == .session_stop or kind == .session_archive))) return error.InvalidObservation;
         if ((self.interruption_target != null) != (kind == .model_interruption) or (self.permission_target != null) != (kind == .permission_decision)) return error.InvalidObservation;
+        if ((self.action_target != null) != (kind == .action_background) or
+            (self.action_selection != null) != (accepted and kind == .action_background)) return error.InvalidObservation;
         if (self.interruption_target) |target| if (!target.session.eql(self.target.?.slice())) return error.RequestBindingMismatch;
         if (kind != .message) {
             if (self.state != null or self.input != null or self.queue != null or self.binding != null or self.result != null or self.work != null or self.recovery != null) return error.InvalidObservation;
@@ -3276,6 +3286,7 @@ test "keyed observation validates every operation shape and binding" {
         .{ "session_pin", ",\"pinned\":false", "" },
         .{ "model_interruption", ",\"interruption_target\":{\"session\":\"k7m2qx\",\"turn\":\"3\",\"operation\":\"7\"}", ",\"interruption_target\":{\"session\":\"k7m2qx\",\"turn\":\"0\",\"operation\":\"0\"}" },
         .{ "permission_decision", ",\"permission_target\":{\"action\":\"29\",\"decision\":\"allow_once\"}", ",\"permission_target\":{\"action\":\"0\",\"decision\":\"deny\"}" },
+        .{ "action_background", ",\"action_target\":{\"action\":\"29\"},\"action_selection\":{\"kind\":\"background\",\"position\":\"31\"}", ",\"action_target\":{\"action\":\"29\"}" },
     }) |case| {
         const accepted = prefix ++ "\"kind\":\"" ++ case[0] ++ "\",\"status\":\"accepted\"" ++ case[1] ++ "}}";
         const observed = try CommandObservation.parse(.{ .status = 200, .body = accepted }, "k");

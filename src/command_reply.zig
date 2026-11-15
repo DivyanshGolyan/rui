@@ -78,6 +78,7 @@ pub const CommandObservation = struct {
         model_interruption: ModelInterruptionTarget,
         permission_decision: struct { action_id: u64, decision: mutation_answer.PermissionDecision },
         session_pin: ?mutation_answer.SessionPinObservation,
+        action_background: @import("action_control.zig").Observation,
     } = .{ .configure = .{} },
 
     /// The Host's one ordered Message-state rule. Clients consume this value.

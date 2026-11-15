@@ -324,6 +324,17 @@ pub const CustodyPool = struct {
         return null;
     }
 
+    pub fn reserveLeaving(self: *CustodyPool, minimum_free: usize) ?CustodyToken {
+        const token = self.reserve() orelse return null;
+        return self.keepReservation(token, minimum_free);
+    }
+
+    fn keepReservation(self: *CustodyPool, token: CustodyToken, minimum_free: usize) ?CustodyToken {
+        if (self.records.len - self.occupied() >= minimum_free) return token;
+        self.releaseUnused(token) catch unreachable;
+        return null;
+    }
+
     /// Consumes a model or Action dispatch permit into the reserved record
     /// and returns the permit's binding.
     pub fn attach(
@@ -1050,4 +1061,73 @@ test "model prepared routes preserve one shot handoff across rejection and reuse
             try pool.releaseUnused(reused);
         }
     }
+}
+
+test "background custody reservations retain headroom in both last-two contender orders" {
+    for ([_]bool{ false, true }) |reverse| {
+        var records: [2]CustodyRecord = @splat(.{});
+        var pool = CustodyPool.initialize(&records);
+        const one = pool.reserve().?;
+        const two = pool.reserve().?;
+        const first = if (reverse) two else one;
+        const second = if (reverse) one else two;
+        try std.testing.expect(pool.keepReservation(first, 1) == null);
+        const kept = pool.keepReservation(second, 1).?;
+        try pool.checkReserved(kept);
+        try std.testing.expectEqual(@as(usize, 1), pool.occupied());
+        try pool.releaseUnused(kept);
+        try std.testing.expectEqual(@as(usize, 0), pool.occupied());
+    }
+}
+
+test "background custody refusal rolls back before finite work and stale-token reuse" {
+    var records: [2]CustodyRecord = @splat(.{});
+    var pool = CustodyPool.initialize(&records);
+    const background = pool.reserve().?;
+    const finite = pool.reserve().?;
+    try std.testing.expect(pool.keepReservation(background, 1) == null);
+    try pool.checkReserved(finite);
+    try std.testing.expect(pool.reserveLeaving(1) == null);
+    try pool.releaseUnused(finite);
+    const fresh = pool.reserveLeaving(1).?;
+    try std.testing.expectError(error.StaleCustody, pool.checkReserved(background));
+    try pool.checkReserved(fresh);
+    try pool.releaseUnused(fresh);
+    const first = pool.reserve().?;
+    const last = pool.reserve().?;
+    try std.testing.expect(pool.reserve() == null);
+    try pool.releaseUnused(first);
+    try pool.releaseUnused(last);
+}
+
+test "background custody headroom includes detached cleanup and permits finite consumers" {
+    var records: [2]CustodyRecord = @splat(.{});
+    var pool = CustodyPool.initialize(&records);
+    const retained = pool.reserve().?;
+    var permit = attempt.ActionDispatchPermit{ .binding = .{ .turn_id = 1, .parent_operation_id = 2, .action_id = 3 } };
+    const binding = try pool.attach(retained, &permit);
+    try pool.detach(retained);
+    try std.testing.expect(pool.reserveLeaving(1) == null);
+    try pool.checkDetached(retained, .{ .action = binding });
+    try pool.cleanupComplete(retained);
+    const background = pool.reserveLeaving(1).?;
+    const finite = pool.reserve().?;
+    try pool.checkReserved(background);
+    try pool.checkReserved(finite);
+    try pool.releaseUnused(finite);
+    try pool.releaseUnused(background);
+}
+
+test "background custody capacity one refuses without consuming launch authority" {
+    var records: [1]CustodyRecord = @splat(.{});
+    var pool = CustodyPool.initialize(&records);
+    try std.testing.expect(pool.reserveLeaving(1) == null);
+    try std.testing.expectEqual(@as(usize, 0), pool.occupied());
+    const finite = pool.reserve().?;
+    var permit = attempt.ActionDispatchPermit{ .binding = .{ .turn_id = 1, .parent_operation_id = 2, .action_id = 3 } };
+    const binding = try pool.attach(finite, &permit);
+    try pool.consumeLaunchAuthority(finite, .{ .action = binding });
+    try std.testing.expectError(error.DispatchPermitConsumed, pool.consumeLaunchAuthority(finite, .{ .action = binding }));
+    try pool.detach(finite);
+    try pool.cleanupComplete(finite);
 }

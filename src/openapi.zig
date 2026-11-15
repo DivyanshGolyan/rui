@@ -173,6 +173,14 @@ pub const routes = [_]Route{
         .conflict = jsonReply(.{protocol.permission_decision_reply.conflict}),
     },
     .{
+        .path = protocol.CommandKind.action_background.route(),
+        .kind = .action_background,
+        .summary = "Promotes the same Action to Session-owned background work and returns its immutable call receipt selection. Completion is read explicitly with read-action; no final input or model wake is delivered. Retried by its key.",
+        .variants = &.{variant(protocol.action_background_request, .{})},
+        .reply = jsonReply(.{ protocol.action_background_reply.accepted, protocol.action_background_reply.rejected }),
+        .conflict = jsonReply(.{protocol.action_background_reply.conflict}),
+    },
+    .{
         .path = "/v1/read-action",
         .kind = .read_action,
         .summary = "Reads one Session-owned Action's status and one bounded final-result window without waiting or consuming it.",
@@ -505,6 +513,7 @@ fn observationSchema(d: *Document) anyerror!Value {
             .session_pin => .{ .{}, o.session_pin },
             .model_interruption => .{ .{}, o.model_interruption },
             .permission_decision => .{ .{}, o.permission_decision },
+            .action_background => .{ o.action_target, o.action_target ++ o.action_selection },
         };
         var variants: [2 * bodies.len]Value = undefined;
         inline for (bodies, 0..) |body, at| {
@@ -1868,7 +1877,7 @@ test "statuses, media types and required headers match what the Host sends" {
     var document: Document = .init(arena.allocator());
     const built = try document.build();
     const paths = built.object.get("paths").?.object;
-    const mutations = [_]protocol.CommandKind{ .configure, .message, .session_stop, .session_archive, .session_pin, .model_interruption, .permission_decision };
+    const mutations = [_]protocol.CommandKind{ .configure, .message, .session_stop, .session_archive, .session_pin, .model_interruption, .permission_decision, .action_background };
     for (mutations) |kind| {
         const responses = paths.get(kind.route()).?.object.get("post").?.object.get("responses").?.object;
         try std.testing.expect(responses.contains("409"));

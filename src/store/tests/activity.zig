@@ -567,7 +567,7 @@ test "the Current report's resolved and rejected calls carry their group's publi
             try allow.key.set("publication-allow");
             try allow.session.set(session.slice());
             try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
-            const action = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
+            const action = (try storage.admitNextActionAttempt(.{ .credit = .foreground, .mcp = true }, 300_000, .{})).?.permit.binding;
             _ = try storage.settleActionAttempt(action, .succeeded, "Bash succeeded.", .{});
             const group = try store_testing.queryU64(&storage, "SELECT max(acceptance_position) FROM action_operation", .{});
             try std.testing.expect(group > try store_testing.queryU64(&storage, "SELECT acceptance_position FROM model_tool_call WHERE rejection_code IS NOT NULL", .{}));
@@ -948,7 +948,7 @@ test "call and forwarded approval rows expose saved identity description and ori
                     try std.testing.expectEqualDeep(call.tool, approval.tool);
                     try std.testing.expectEqualDeep(call.server, approval.server);
                     try expectActivityArguments(&storage, child, own.items[1], arguments);
-                    try std.testing.expect(try storage.deliverSessionForward((try storage.nextCoreWork()).?.forward, .{}));
+                    try std.testing.expect(try storage.deliverSessionForward((try storage.nextCoreWork(.{ .credit = .foreground, .mcp = true })).?.forward, .{}));
                     const forwarded = try store_core.activityPageForTesting(&storage, .{ .session = parent, .kinds = .initOne(.approval_requested) });
                     try std.testing.expectEqual(@as(usize, 1), forwarded.count);
                     try std.testing.expectEqualDeep(approval, forwarded.items[0].value.approval_requested);

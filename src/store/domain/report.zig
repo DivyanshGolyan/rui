@@ -366,12 +366,10 @@ const active_proposer = rsql.Read(.{
 const active_tool_calls = reads_domain.ToolOutcome("", "SELECT DISTINCT operation.operation_id," ++
     reads_domain.expectedCallsSql("operation.operation_id") ++ " " ++ active_proposers_sql, struct { session: []const u8 }, false);
 
-/// The active Turn's Actions, as main counted them.
 const action_count = rsql.Read(.{
-    .sql = "SELECT count(*) AS actions FROM turn active @index(turn_one_active_per_session) " ++
-        "CROSS JOIN model_operation operation @index(model_operation_turn_history) ON operation.turn_id=active.turn_id " ++
-        "CROSS JOIN action_operation action ON action.parent_operation_id=operation.operation_id " ++
-        "WHERE active.session_ref=?1 AND active.outcome_code IS NULL",
+    .sql = "SELECT count(*) AS actions FROM action_operation action " ++
+        "JOIN model_operation operation ON operation.operation_id=action.parent_operation_id JOIN turn active ON active.turn_id=operation.turn_id " ++
+        "WHERE action.session_ref=?1 AND (active.outcome_code IS NULL OR (" ++ action_domain.unresolvedSql("action", "operation", "active") ++ "))",
     .Args = struct { session: []const u8 },
     .Row = struct { actions: u64 },
     .cardinality = .each,
@@ -462,7 +460,10 @@ fn WorkLatest(comptime Args: type, comptime session: []const u8) type {
             "coalesce(o.resolution_code,o.last_failure_code) AS operation_code,o.retry_due_at_ms,o.attempt_ordinal,o.attempt_at,o.retry_scheduled_at,o.resolved_at," ++
             "(SELECT @payload(content) FROM content WHERE content_id=o.resolution_content_id AND byte_length<=" ++ std.fmt.comptimePrint("{d}", .{Quota.max_bytes}) ++
             " AND t.outcome_code NOT IN ('completed','cancelled')) AS diagnostic," ++
-            "(SELECT stopped_at FROM session_stop @index(session_stop_turn) WHERE selected_turn_id=t.turn_id ORDER BY position LIMIT 1) AS stopped_at " ++
+            "(SELECT stopped_at FROM session_stop @index(session_stop_turn) WHERE selected_turn_id=t.turn_id ORDER BY position LIMIT 1) AS stopped_at," ++
+            "(SELECT min(approval.action_id) FROM action_operation approval JOIN model_operation source_operation ON source_operation.operation_id=approval.parent_operation_id " ++
+            "JOIN turn source_turn ON source_turn.turn_id=source_operation.turn_id WHERE approval.session_ref=t.session_ref AND approval.authorized=0 AND " ++
+            action_domain.unresolvedSql("approval", "source_operation", "source_turn") ++ ") AS first_action " ++
             "FROM turn t @index(turn_session_latest) JOIN model_operation o ON o.operation_id=t.operation_id " ++
             "WHERE t.session_ref=" ++ session ++ " ORDER BY t.turn_id DESC LIMIT 1",
         .Args = Args,
@@ -491,6 +492,7 @@ const WorkLatestRow = struct {
     /// no reset time, as on main.
     diagnostic: ?rsql.Blob(Quota.max_bytes),
     stopped_at: ?rsql.Positive,
+    first_action: ?rsql.Positive,
 };
 
 /// One aggregate over an active Turn's Operation's Actions, bounded by
@@ -757,6 +759,7 @@ pub const WorkRead = struct {
     }
 
     fn keepLatest(w: *WorkRead, row: *const WorkLatestRow) error{CorruptStore}!void {
+        w.inputs.first_action = optional(row.first_action);
         var turn: session_work.Inputs.Turn = .{
             .turn_id = row.turn_id.get(),
             .operation_id = row.operation_id.get(),
@@ -2096,6 +2099,16 @@ pub const full_results = rsql.Page(.{
             .joins = "LEFT JOIN model_tool_call tool_call ON tool_call.operation_id=action.parent_operation_id AND tool_call.call_ordinal=action.call_ordinal " ++
                 "LEFT JOIN content call_id_content ON call_id_content.content_id=tool_call.call_id_content_id " ++
                 "LEFT JOIN content result ON result.content_id=action.resolution_content_id",
+        },
+        .{
+            .on = .{ .index = "action_operation_background_results" },
+            .alias = "action",
+            .columns = "action.call_ordinal,tool_call.call_id_content_id AS call_id,call_id_content.byte_length AS call_id_length," ++
+                "call_id_content.digest AS call_id_digest,'background' AS code,action.background_content_id AS result_id," ++
+                "result.byte_length AS result_length,result.digest AS result_digest",
+            .joins = "LEFT JOIN model_tool_call tool_call ON tool_call.operation_id=action.parent_operation_id AND tool_call.call_ordinal=action.call_ordinal " ++
+                "LEFT JOIN content call_id_content ON call_id_content.content_id=tool_call.call_id_content_id " ++
+                "LEFT JOIN content result ON result.content_id=action.background_content_id",
         },
     },
     .Row = struct {

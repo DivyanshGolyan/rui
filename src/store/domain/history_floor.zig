@@ -23,6 +23,7 @@ const output_item = @import("../../output_item.zig");
 const model_capability = @import("../../model_capability.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
 const rsql = @import("../rsql.zig");
+const tool_fulfillment = @import("tool_fulfillment.zig");
 const store_schema = @import("../schema.zig");
 
 pub const levels = 3;
@@ -159,7 +160,7 @@ const units = rsql.Read(.{
         "JOIN content ON content.content_id=e.content_id " ++
         "WHERE current.operation_id=?1 AND e.session_position<?2 AND e.session_position>?3 AND e.entry_kind=1 AND e.session_position!=?4 UNION ALL " ++
         "SELECT o.admission_position,(SELECT coalesce(sum(" ++ item_bytes_sql ++ "),0) FROM model_output_item i WHERE i.operation_id=o.operation_id)+" ++
-        "coalesce((SELECT sum(result.byte_length) FROM action_operation a JOIN content result ON result.content_id=a.resolution_content_id " ++
+        "coalesce((SELECT sum(result.byte_length) FROM action_operation a JOIN content result ON result.content_id=" ++ tool_fulfillment.actionContentSql("a") ++ " " ++
         "WHERE a.parent_operation_id=o.operation_id),0) FROM model_operation current " ++
         "JOIN model_operation o @index(model_operation_context_history) ON o.session_ref=current.session_ref " ++
         "WHERE current.operation_id=?1 AND o.admission_position<?2 AND o.admission_position>?3 AND o.admission_position>?5 AND " ++

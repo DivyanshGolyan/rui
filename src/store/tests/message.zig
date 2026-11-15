@@ -200,7 +200,7 @@ test "a peer sender is resolved from its Action handle and exact replays survive
             try submitTestMessage(&storage, &tmp, "sender-seed", "sender-seed", sender, "send a report");
             const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             try settleTwoActionsForTesting(&storage, &tmp, model, "sender-calls");
-            const action = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
+            const action = (try storage.admitNextActionAttempt(.{ .credit = .foreground, .mcp = true }, 300_000, .{})).?.permit.binding;
             var input: ActionExecutionInput = undefined;
             try storage.readActionExecutionInput(.bash, action, &input);
             const handle = input.sender_handle;
@@ -373,7 +373,7 @@ test "refused peer creation activity keeps invalid targets absent" {
             try submitTestMessage(&storage, &tmp, "creation-refusal-seed", "creation-refusal-seed", sender.slice(), "start another Session");
             const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             try settleTwoActionsForTesting(&storage, &tmp, model, "creation-refusal-calls");
-            const action = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
+            const action = (try storage.admitNextActionAttempt(.{ .credit = .foreground, .mcp = true }, 300_000, .{})).?.permit.binding;
             var input: ActionExecutionInput = undefined;
             try storage.readActionExecutionInput(.bash, action, &input);
             const before = try store_core.activityPageForTesting(&storage, .{ .session = sender });

@@ -115,6 +115,8 @@ pub const Inputs = struct {
     created_at: u64,
     /// The Session's latest Turn and its current Operation, if any.
     latest: ?Turn = null,
+    /// The Session-wide oldest eligible approval, independent of the latest Operation.
+    first_action: ?u64 = null,
     /// Without an active Turn: the oldest eligible queued Message. Ignored
     /// beside an active Turn.
     oldest_pending: ?Pending = null,
@@ -207,7 +209,10 @@ pub fn derive(inputs: Inputs) error{CorruptStore}!Work {
 }
 
 fn deriveOwn(inputs: Inputs) error{CorruptStore}!Work {
-    const latest = inputs.latest orelse return .{ .state = settled(inputs, null) orelse .{ .idle = .{ .since = inputs.created_at } } };
+    const latest = inputs.latest orelse {
+        if (inputs.first_action != null) return error.CorruptStore;
+        return .{ .state = settled(inputs, null) orelse .{ .idle = .{ .since = inputs.created_at } } };
+    };
     const actions = latest.actions;
     if (actions.unresolved > actions.total or actions.awaiting + actions.running > actions.unresolved or
         (actions.awaiting == 0) != (actions.first_awaiting == null) or
@@ -216,7 +221,7 @@ fn deriveOwn(inputs: Inputs) error{CorruptStore}!Work {
     // Only an active Turn's tool proposals own Actions.
     const proposed = latest.op == .resolved and latest.op.resolved.resolution == .tool_proposals;
     if (actions.total != 0 and (latest.terminal != null or !proposed)) return error.CorruptStore;
-    var work: Work = .{ .state = undefined, .turn = latest.turn_id, .operation = latest.operation_id, .first_action = actions.first_awaiting };
+    var work: Work = .{ .state = undefined, .turn = latest.turn_id, .operation = latest.operation_id, .first_action = inputs.first_action };
     if (latest.terminal) |terminal| {
         if (latest.op != .resolved) return error.CorruptStore;
         work.state = settled(inputs, terminal) orelse switch (terminal.outcome) {
@@ -404,7 +409,7 @@ test "a proposal group is Bash, approval or pending by its Actions" {
         .created_at = 1,
         .latest = activeTurn(proposals(340), running),
     });
-    try std.testing.expectEqual(@as(?u64, 41), (try derive(.{ .now_ms = 0, .created_at = 1, .latest = activeTurn(proposals(340), running) })).first_action);
+    try std.testing.expectEqual(@as(?u64, 41), (try derive(.{ .now_ms = 0, .created_at = 1, .latest = activeTurn(proposals(340), running), .first_action = 41 })).first_action);
     var undescribed = running;
     undescribed.oldest_running.?.description = null;
     try expectState(.{ .bash = .{ .since = 350, .call = 2, .description = null, .running = 2, .approvals = 1 } }, .{
@@ -619,4 +624,27 @@ test "saved MCP call lines survive pending, running and completed Actions at eve
             });
         }
     }
+}
+
+test "Session approval target belongs to Session inputs through continuation terminal and decisions" {
+    const continuation = activeTurn(.{ .in_flight = .{ .attempt_at = 300 } }, .{});
+    const ended = endedTurn(.completed, "completed");
+    const foreground = activeTurn(proposals(340), .{ .total = 1, .unresolved = 1, .awaiting = 1, .first_awaiting = 52 });
+    for ([_]Inputs.Turn{ continuation, ended, foreground }) |turn| {
+        const state_only = try derive(.{ .created_at = 1, .now_ms = 0, .latest = turn });
+        const background = try derive(.{ .created_at = 1, .now_ms = 0, .latest = turn, .first_action = 41 });
+        try std.testing.expectEqual(@as(?u64, 41), background.first_action);
+        try std.testing.expectEqual(state_only.state, background.state);
+        try std.testing.expectEqual(@as(?u64, null), state_only.first_action);
+    }
+    const allowed = try derive(.{ .created_at = 1, .now_ms = 0, .latest = foreground, .first_action = 52 });
+    try std.testing.expectEqual(@as(?u64, 52), allowed.first_action);
+    const denied = try derive(.{ .created_at = 1, .now_ms = 0, .latest = ended, .first_action = null });
+    try std.testing.expectEqual(@as(?u64, null), denied.first_action);
+    var stopped = foreground;
+    stopped.stopped_at = 400;
+    const selected_stop = try derive(.{ .created_at = 1, .now_ms = 0, .latest = stopped, .first_action = null });
+    try std.testing.expectEqual(@as(?u64, null), selected_stop.first_action);
+    try std.testing.expect(selected_stop.state == .stopping);
+    try std.testing.expectError(error.CorruptStore, derive(.{ .created_at = 1, .now_ms = 0, .first_action = 41 }));
 }

@@ -46,6 +46,7 @@ pub const Command = enum {
     request_list,
     action_inspect,
     action_read,
+    action_background,
     action_allow,
     action_deny,
     action_read_call_id,
@@ -93,6 +94,7 @@ pub const Command = enum {
             .request_read_result => .{ .resource = .request, .name = "read-result", .description = "Stream the originally bound saved answer, skill refusal or reload acknowledgement, without waiting or substituting newer Session work. Use HANDLE or --store and --key.", .options = destination ++ key, .positional = "HANDLE", .positional_conflicts = saved_identity, .requires = &.{&.{ "", "key", "key-hex" }} },
             .request_list => .{ .resource = .request, .name = "list", .description = "Enumerate local generated captures as JSON. This is not Store history or guaranteed correlation after all output from concurrent calls is lost." },
             .action_inspect => .{ .resource = .action, .name = "inspect", .description = "Read the exact saved Action proposal before allowing or denying it. Inspection grants nothing.", .options = destination ++ session ++ action, .requires = need_action },
+            .action_background => .{ .resource = .action, .name = "background", .description = "Release the original tool call with an immutable receipt and let this same Action continue under its Session. Read completion with action read; no automatic final input or model wake is delivered.", .options = destination ++ session ++ action ++ capture, .mutation = true, .requires = need_action },
             .action_allow => .{ .resource = .action, .name = "allow", .description = "Admit permission to run this exact inspected Action once; the Host revalidates its target.", .options = destination ++ session ++ action ++ capture, .mutation = true, .requires = need_action },
             .action_deny => .{ .resource = .action, .name = "deny", .description = "Admit denial of this exact inspected Action.", .options = destination ++ session ++ action ++ capture, .mutation = true, .requires = need_action },
             .action_read => .{ .resource = .action, .name = "read", .description = "Read an Action's status and one final-result window; --offset continues at a returned byte cursor. Does not wait or consume.", .options = destination ++ session ++ action ++ &[_]Option{numeric("offset", "BYTES", 0, @import("content_string.zig").max_bytes, .count_malformed)}, .requires = need_action },
@@ -712,7 +714,7 @@ test "Session IDs in positional argv name the missing selector flag" {
     _ = try expectRefusal(.session_send, &.{ "--to", "k7m2qx", "v948er" }, .message_not_stdin, "v948er");
     _ = try expectRefusal(.session_send, &.{ "--record", "--to", "v948er" }, .session_id_needs_to, "v948er");
     _ = try expectRefusal(.session_send, &.{"message text"}, .message_not_stdin, "message text");
-    inline for (.{ Command.session_inspect, Command.session_stop, Command.session_archive, Command.session_unarchive, Command.session_pin, Command.session_unpin, Command.session_interrupt_model, Command.session_read_conversation, Command.action_allow, Command.action_deny }) |command| {
+    inline for (.{ Command.session_inspect, Command.session_stop, Command.session_archive, Command.session_unarchive, Command.session_pin, Command.session_unpin, Command.session_interrupt_model, Command.session_read_conversation, Command.action_allow, Command.action_deny, Command.action_background }) |command| {
         _ = try expectRefusal(command, &.{"v948er"}, .session_id_needs_session, "v948er");
     }
 }

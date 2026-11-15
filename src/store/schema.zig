@@ -20,7 +20,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 75;
+pub const schema_version: u32 = 76;
 
 pub const IdentityMismatch = struct {
     saved_selector: Bounded(store_path.max_bytes) = .{},
@@ -62,6 +62,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 73, .digest = 0x515b60c7f5df332d },
     .{ .schema_version = 74, .digest = 0xda8e267adbfcef45 },
     .{ .schema_version = 75, .digest = 0xcea5bf4db0d3978d },
+    .{ .schema_version = 76, .digest = 0x0000000000000000 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -721,6 +722,39 @@ pub const migrations = [_]Migration{
             "CREATE TABLE session_pin_command(\n command_key VARCHAR(128) NOT NULL,\n pinned TINYINT NOT NULL,\n PRIMARY KEY(command_key),\n FOREIGN KEY(command_key) REFERENCES core_command(command_key),\n CHECK(pinned IN (0,1))\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
         },
     },
+    .{
+        .from = 75,
+        .sqlite = &.{
+            "ALTER TABLE core_command RENAME TO core_command_before_76",
+            "CREATE TABLE core_command(\n command_key TEXT NOT NULL UNIQUE CHECK(length(CAST(command_key AS BLOB))<=128),\n kind INTEGER NOT NULL CHECK(kind BETWEEN 1 AND 8),\n target TEXT NOT NULL CHECK(length(CAST(target AS BLOB))<=128),\n input_digest BLOB NOT NULL CHECK(length(input_digest)=32),\n primary_content_id INTEGER REFERENCES content(content_id),\n secondary_content_id INTEGER REFERENCES content(content_id),\n accepted INTEGER NOT NULL CHECK(accepted IN (0,1)),\n code TEXT NOT NULL CHECK(length(CAST(code AS BLOB))<=96),\n revision INTEGER NOT NULL CHECK(revision>=0),\n created INTEGER NOT NULL CHECK(created IN (0,1)),\n command_seq INTEGER PRIMARY KEY NOT NULL CHECK(command_seq>0)\n) STRICT",
+            "INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq) SELECT command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq FROM core_command_before_76",
+            "DROP TABLE core_command_before_76",
+            "CREATE INDEX core_command_target_order ON core_command(target,kind,command_seq)",
+            "ALTER TABLE action_operation ADD COLUMN background_content_id INTEGER REFERENCES content(content_id)",
+            "ALTER TABLE action_operation ADD COLUMN background_position INTEGER CHECK((background_content_id IS NULL AND background_position IS NULL) OR (background_content_id IS NOT NULL AND background_position IS NOT NULL AND background_position>0 AND (acceptance_position IS NULL OR background_position<acceptance_position)))",
+            "ALTER TABLE action_operation ADD COLUMN background_at INTEGER CHECK((background_position IS NULL AND background_at IS NULL) OR (background_position IS NOT NULL AND background_at IS NOT NULL AND background_at>0))",
+            "DROP INDEX action_operation_session_results",
+            "CREATE INDEX action_operation_session_results ON action_operation(session_ref,parent_operation_id,acceptance_position) WHERE acceptance_position IS NOT NULL AND background_position IS NULL",
+            "CREATE INDEX action_operation_background ON action_operation(session_ref,background_position)",
+            "CREATE INDEX action_operation_background_results ON action_operation(session_ref,parent_operation_id,background_position) WHERE background_position IS NOT NULL",
+            "ALTER TABLE session_stop ADD COLUMN action_cutoff INTEGER NOT NULL DEFAULT 0 CHECK(action_cutoff>=0)",
+            "CREATE TABLE action_control_command(\n command_key TEXT PRIMARY KEY NOT NULL REFERENCES core_command(command_key),\n action_id TEXT NOT NULL CHECK(length(CAST(action_id AS BLOB)) BETWEEN 1 AND 20 AND (action_id NOT GLOB '*[^0-9]*' AND length(action_id)=length(CAST(action_id AS BLOB)))),\n selected_action_id INTEGER REFERENCES action_operation(action_id),\n selection TEXT CHECK(selection IS NULL OR (selection='background' OR selection='final')),\n selection_position INTEGER CHECK(selection_position>0),\n CHECK((selected_action_id IS NULL AND selection IS NULL AND selection_position IS NULL) OR (selected_action_id IS NOT NULL AND selection IS NOT NULL AND selection_position IS NOT NULL))\n) STRICT, WITHOUT ROWID",
+        },
+        .mysql = &.{
+            "SET @rui_background_kind_ddl=NULL",
+            "SET @rui_background_kind_ddl=(SELECT CONCAT('ALTER TABLE core_command DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`, ADD CHECK(kind BETWEEN 1 AND 8)') FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.TABLE_NAME='core_command' AND tc.CONSTRAINT_TYPE='CHECK' AND LOWER(TRIM(REPLACE(REPLACE(REPLACE(cc.CHECK_CLAUSE,'`',''),'(',''),')','')))='kind between 1 and 7')",
+            "PREPARE rui_background_kind FROM @rui_background_kind_ddl",
+            "EXECUTE rui_background_kind",
+            "DEALLOCATE PREPARE rui_background_kind",
+            "SET @rui_background_kind_ddl=NULL",
+            "ALTER TABLE action_operation ADD COLUMN background_content_id BIGINT AFTER approval_position, ADD COLUMN background_position BIGINT CHECK((background_content_id IS NULL AND background_position IS NULL) OR (background_content_id IS NOT NULL AND background_position IS NOT NULL AND background_position>0 AND (acceptance_position IS NULL OR background_position<acceptance_position))) AFTER background_content_id, ADD COLUMN background_at BIGINT CHECK((background_position IS NULL AND background_at IS NULL) OR (background_position IS NOT NULL AND background_at IS NOT NULL AND background_at>0)) AFTER background_position, ADD FOREIGN KEY(background_content_id) REFERENCES content(content_id)",
+            "ALTER TABLE action_operation DROP INDEX action_operation_session_results, MODIFY action_operation_session_results_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN acceptance_position IS NOT NULL AND background_position IS NULL THEN session_ref END) STORED, ADD INDEX action_operation_session_results(action_operation_session_results_lead,parent_operation_id,acceptance_position)",
+            "CREATE INDEX action_operation_background ON action_operation(session_ref,background_position)",
+            "ALTER TABLE action_operation ADD COLUMN action_operation_background_results_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN background_position IS NOT NULL THEN session_ref END) STORED, ADD INDEX action_operation_background_results(action_operation_background_results_lead,parent_operation_id,background_position)",
+            "ALTER TABLE session_stop ADD COLUMN action_cutoff BIGINT NOT NULL DEFAULT 0 CHECK(action_cutoff>=0) AFTER parent_caused",
+            "CREATE TABLE action_control_command(\n command_key VARCHAR(128) NOT NULL,\n action_id TEXT NOT NULL,\n selected_action_id BIGINT,\n selection VARCHAR(10),\n selection_position BIGINT,\n PRIMARY KEY(command_key),\n FOREIGN KEY(command_key) REFERENCES core_command(command_key),\n FOREIGN KEY(selected_action_id) REFERENCES action_operation(action_id),\n CHECK(OCTET_LENGTH(action_id) BETWEEN 1 AND 20 AND (NOT REGEXP_LIKE(action_id,'[^0-9]','c'))),\n CHECK(selection IS NULL OR (selection='background' OR selection='final')),\n CHECK(selection_position>0),\n CHECK((selected_action_id IS NULL AND selection IS NULL AND selection_position IS NULL) OR (selected_action_id IS NOT NULL AND selection IS NOT NULL AND selection_position IS NOT NULL))\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
+        },
+    },
 };
 
 comptime {
@@ -1199,7 +1233,7 @@ pub const tables = [_]Table{
         .name = "core_command",
         .columns = &.{
             .{ .name = "command_key", .type = .{ .text = .{ .max = 128 } } },
-            .{ .name = "kind", .type = .int, .check = "kind BETWEEN 1 AND 7" },
+            .{ .name = "kind", .type = .int, .check = "kind BETWEEN 1 AND 8" },
             .{ .name = "target", .type = .{ .text = .{ .max = 128 } } },
             .{ .name = "input_digest", .type = .{ .bytes = .{ .min = 32, .max = 32 } } },
             .{ .name = "primary_content_id", .type = .int, .nullable = true },
@@ -1362,6 +1396,7 @@ pub const tables = [_]Table{
             .{ .name = "stopped_at", .type = .int, .check = "stopped_at>0" },
             // Causal provenance, independent of which Command recorded the stop.
             .{ .name = "parent_caused", .type = .flag, .default = "0" },
+            .{ .name = "action_cutoff", .type = .int, .default = "0", .check = "action_cutoff>=0" },
         },
         .primary_key = &.{"command_key"},
         .foreign_keys = &.{
@@ -1756,6 +1791,9 @@ pub const tables = [_]Table{
             // insert under an `ask` revision and never changed. Stored
             // because the feed seeks it and no index can see the revision.
             .{ .name = "approval_position", .type = .int, .nullable = true, .check = "approval_position IS NULL OR approval_position>0" },
+            .{ .name = "background_content_id", .type = .int, .nullable = true },
+            .{ .name = "background_position", .type = .int, .nullable = true, .check = "(background_content_id IS NULL AND background_position IS NULL) OR (background_content_id IS NOT NULL AND background_position IS NOT NULL AND background_position>0 AND (acceptance_position IS NULL OR background_position<acceptance_position))" },
+            .{ .name = "background_at", .type = .int, .nullable = true, .check = "(background_position IS NULL AND background_at IS NULL) OR (background_position IS NOT NULL AND background_at IS NOT NULL AND background_at>0)" },
         },
         .primary_key = &.{"action_id"},
         .uniques = &.{&.{ "parent_operation_id", "call_ordinal" }},
@@ -1763,6 +1801,7 @@ pub const tables = [_]Table{
             references("parent_operation_id", "model_operation", &.{"operation_id"}),
             references("session_ref", "session", session_reference),
             references("resolution_content_id", "content", content_reference),
+            references("background_content_id", "content", content_reference),
             .{ .columns = &.{ "parent_operation_id", "session_ref" }, .references = "model_operation", .referenced = &.{ "operation_id", "session_ref" } },
             .{ .columns = &.{ "parent_operation_id", "call_ordinal", "tool_kind" }, .references = "model_tool_call", .referenced = &.{ "operation_id", "call_ordinal", "action_kind" } },
             .{ .columns = &.{ "session_ref", "permission_revision" }, .references = "session_revision", .referenced = &.{ "session_ref", "revision" } },
@@ -1786,6 +1825,23 @@ pub const tables = [_]Table{
         },
         .primary_key = &.{"command_key"},
         .foreign_keys = &.{references("command_key", "core_command", command_reference)},
+        .without_rowid = true,
+    },
+    .{
+        .name = "action_control_command",
+        .columns = &.{
+            .{ .name = "command_key", .type = .{ .text = null } },
+            .{ .name = "action_id", .type = .{ .text = .{ .min = 1, .max = 20 } }, .check = "@charset(action_id,'0-9')" },
+            .{ .name = "selected_action_id", .type = .int, .nullable = true },
+            .{ .name = "selection", .type = .{ .tag = &.{ "background", "final" } }, .nullable = true },
+            .{ .name = "selection_position", .type = .int, .nullable = true, .check = "selection_position>0" },
+        },
+        .primary_key = &.{"command_key"},
+        .foreign_keys = &.{
+            references("command_key", "core_command", command_reference),
+            references("selected_action_id", "action_operation", &.{"action_id"}),
+        },
+        .checks = &.{"(selected_action_id IS NULL AND selection IS NULL AND selection_position IS NULL) OR (selected_action_id IS NOT NULL AND selection IS NOT NULL AND selection_position IS NOT NULL)"},
         .without_rowid = true,
     },
 };
@@ -1824,7 +1880,7 @@ pub const indexes = [_]Index{
     .{ .name = "action_operation_acceptance", .table = "action_operation", .columns = &.{ "session_ref", "acceptance_position" } },
     // Results walk it (`report.full_results`): the predicate holds exactly
     // for a resolved Action (action_operation's CHECK).
-    .{ .name = "action_operation_session_results", .table = "action_operation", .columns = &.{ "session_ref", "parent_operation_id", "acceptance_position" }, .where = "acceptance_position IS NOT NULL" },
+    .{ .name = "action_operation_session_results", .table = "action_operation", .columns = &.{ "session_ref", "parent_operation_id", "acceptance_position" }, .where = "acceptance_position IS NOT NULL AND background_position IS NULL" },
     .{ .name = "action_operation_approval", .table = "action_operation", .columns = &.{ "session_ref", "approval_position" }, .where = "approval_position IS NOT NULL" },
     .{ .name = "action_operation_executable", .table = "action_operation", .columns = &.{"action_id"}, .where = "authorized=1 AND resolution_code IS NULL AND attempt_ordinal=0" },
     .{ .name = "action_operation_unresolved_attempt", .table = "action_operation", .columns = &.{"action_id"}, .where = "resolution_code IS NULL AND attempt_ordinal=1" },
@@ -1838,6 +1894,8 @@ pub const indexes = [_]Index{
     .{ .name = "model_operation_retry_due", .table = "model_operation", .columns = &.{ "retry_due_at_ms", "operation_id" }, .where = "resolution_code IS NULL AND " ++ retry_allowance_open_sql },
     .{ .name = "model_operation_retry_exhausted", .table = "model_operation", .columns = &.{"operation_id"}, .where = retry_exhausted_sql },
     .{ .name = "model_operation_session_history", .table = "model_operation", .columns = &.{ "session_ref", "operation_id" } },
+    .{ .name = "action_operation_background", .table = "action_operation", .columns = &.{ "session_ref", "background_position" } },
+    .{ .name = "action_operation_background_results", .table = "action_operation", .columns = &.{ "session_ref", "parent_operation_id", "background_position" }, .where = "background_position IS NOT NULL" },
     .{ .name = "model_operation_turn_history", .table = "model_operation", .columns = &.{ "turn_id", "operation_id" } },
     // Every Operation by admission, whatever its outcome: request history
     // places each earlier Operation's effort boundary (codec /2).

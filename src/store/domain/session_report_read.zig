@@ -5,6 +5,7 @@
 //! plain values too (`report.readFull`).
 
 const std = @import("std");
+const tool_fulfillment = @import("tool_fulfillment.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
 const built_in_tool = @import("../../built_in_tool.zig");
 const cli_value = @import("../../cli_value.zig");
@@ -136,15 +137,15 @@ const recent_messages = rsql.Read(.{
 const unresolved_actions = rsql.Read(.{
     .sql = "SELECT a.action_id,a.parent_operation_id,a.call_ordinal,a.permission_revision,a.authorized,revision.permission_mode,@payload(call_name) AS tool_name," ++
         "call_id.byte_length AS call_id_length,call_id.digest AS call_id_digest,arguments.byte_length AS arguments_length,arguments.digest AS arguments_digest," ++
-        "call_name.digest AS name_digest," ++ action_domain.mcpServerSql("a", "operation") ++ " AS server,tool_call.description FROM turn active @index(turn_one_active_per_session) " ++
-        "CROSS JOIN action_operation a ON a.parent_operation_id=active.operation_id " ++
-        "CROSS JOIN model_operation operation ON operation.operation_id=a.parent_operation_id " ++
+        "call_name.digest AS name_digest," ++ action_domain.mcpServerSql("a", "operation") ++ " AS server,tool_call.description FROM action_operation a " ++
+        "JOIN model_operation operation ON operation.operation_id=a.parent_operation_id " ++
+        "JOIN turn active ON active.turn_id=operation.turn_id " ++
         "CROSS JOIN session_revision revision ON revision.session_ref=a.session_ref AND revision.revision=a.permission_revision " ++
         "CROSS JOIN model_tool_call tool_call ON tool_call.operation_id=a.parent_operation_id AND tool_call.call_ordinal=a.call_ordinal " ++
         "CROSS JOIN content call_id ON call_id.content_id=tool_call.call_id_content_id " ++
         "CROSS JOIN content arguments ON arguments.content_id=tool_call.arguments_content_id " ++
         "CROSS JOIN content call_name ON call_name.content_id=tool_call.name_content_id " ++
-        "WHERE active.session_ref=?1 AND active.outcome_code IS NULL AND a.resolution_code IS NULL ORDER BY a.action_id",
+        "WHERE a.session_ref=?1 AND " ++ action_domain.unresolvedSql("a", "operation", "active") ++ " ORDER BY a.action_id",
     .Args = struct { session: []const u8 },
     .Row = struct {
         action_id: rsql.Positive,
@@ -179,8 +180,8 @@ const Description = Bounded(tool_presentation.max_description_bytes);
 /// Action resolved (`action_operation`'s), main's terminal calls, so this
 /// counts what main counted.
 const publications_sql = "WITH publications AS (SELECT operation.operation_id," ++
-    "CASE WHEN count(*)=count(coalesce(sibling.acceptance_position,sibling_action.acceptance_position)) " ++
-    "THEN max(coalesce(sibling.acceptance_position,sibling_action.acceptance_position)) END AS publication " ++
+    "CASE WHEN count(*)=count(" ++ tool_fulfillment.positionSql("sibling", "sibling_action") ++ ") " ++
+    "THEN max(" ++ tool_fulfillment.positionSql("sibling", "sibling_action") ++ ") END AS publication " ++
     "FROM turn active @index(turn_one_active_per_session) " ++
     "CROSS JOIN model_operation operation @index(model_operation_turn_history) ON operation.turn_id=active.turn_id " ++
     "CROSS JOIN model_tool_call sibling ON sibling.operation_id=operation.operation_id " ++
@@ -252,12 +253,10 @@ const rejected_calls = rsql.Read(.{
     .cardinality = .each,
 });
 
-/// The active Turn's current Operation's Actions awaiting permission.
 const actionable_permissions = rsql.Read(.{
-    .sql = "SELECT action.action_id,action.permission_revision FROM turn active @index(turn_one_active_per_session) " ++
-        "JOIN action_operation action ON action.parent_operation_id=active.operation_id " ++
-        "WHERE active.session_ref=?1 AND active.outcome_code IS NULL " ++
-        "AND action.resolution_code IS NULL AND action.authorized=0 ORDER BY action.action_id",
+    .sql = "SELECT action.action_id,action.permission_revision FROM action_operation action " ++
+        "JOIN model_operation operation ON operation.operation_id=action.parent_operation_id JOIN turn active ON active.turn_id=operation.turn_id " ++
+        "WHERE action.session_ref=?1 AND action.authorized=0 AND " ++ action_domain.unresolvedSql("action", "operation", "active") ++ " ORDER BY action.action_id",
     .Args = struct { session: []const u8 },
     .Row = struct { action_id: rsql.Positive, permission_revision: rsql.Positive },
     .cardinality = .each,
