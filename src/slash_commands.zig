@@ -3,6 +3,7 @@
 const std = @import("std");
 const model_catalog = @import("model_catalog.zig");
 const cli_args = @import("cli_args.zig");
+const skill_suggestions = @import("skill_suggestions.zig");
 const model_capability = @import("model_capability.zig");
 const TerminalText = @import("TerminalText.zig");
 const ReasoningEffort = model_capability.ReasoningEffort;
@@ -217,6 +218,14 @@ pub fn Commands(comptime N: type, comptime commands: std.enums.EnumFieldStruct(N
             break :blk texts;
         };
 
+        const listed_count = blk: {
+            var count = 0;
+            for (std.enums.values(Name)) |name| if (table.get(name).listed) {
+                count += 1;
+            };
+            break :blk count;
+        };
+
         /// Align fixed choice words after the widest listed command name.
         pub const description_column = blk: {
             var widest = 0;
@@ -387,8 +396,8 @@ pub const List = struct {
     /// commands keep theirs while typing narrows them.
     column: ?usize = null,
 
-    /// More than any screen's commands or options.
-    pub const capacity = 36;
+    /// All conversation commands and one complete skill preview.
+    pub const capacity = conversation.listed_count + skill_suggestions.capacity;
 
     fn add(self: *List, entry: Entry) void {
         std.debug.assert(std.mem.startsWith(u8, entry.word, self.typed));
