@@ -22,7 +22,7 @@ import (
 // Share context prose; envelope fields and history expectations stay independent.
 func testRequestEnvelope(session string) string {
 	return `{"model":"gpt-6-luna","parallel_tool_calls":true,"store":false,"stream":true,"include":["reasoning.encrypted_content"],"reasoning":{"effort":"medium"},"instructions":` +
-		measurement.JSONString(measurement.ModelInstructions("/workspace", session)) + `,"tools":[],"text":{"verbosity":"low"},`
+		measurement.JSONString(measurement.ModelInstructions("/workspace", session, "gpt-6-luna")) + `,"tools":[],"text":{"verbosity":"low"},`
 }
 
 func TestRequestIDSelectsLatestUserTurnFromGrowingHistory(t *testing.T) {

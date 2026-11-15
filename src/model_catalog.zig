@@ -1,5 +1,35 @@
 //! Model facts only, not account availability or per-Adapter limits.
 const std = @import("std");
+/// Reviewed instruction bodies follow the running binary, not saved settings.
+pub const BuiltinInstructions = enum {
+    generic,
+    luna,
+    terra,
+    sol,
+    astra,
+
+    pub fn bytes(self: BuiltinInstructions) []const u8 {
+        return switch (self) {
+            .generic => "",
+            .luna => @embedFile("model_instructions/luna.txt"),
+            .terra, .astra => @embedFile("model_instructions/terra-astra.txt"),
+            .sol => @embedFile("model_instructions/sol.txt"),
+        };
+    }
+};
+
+/// Exact requested identity, independent of provider or catalog availability.
+pub fn builtinInstructions(model: []const u8) BuiltinInstructions {
+    const reviewed = .{
+        .{ "gpt-6-luna", BuiltinInstructions.luna },
+        .{ "gpt-6.1-terra", BuiltinInstructions.terra },
+        .{ "gpt-6.1-sol", BuiltinInstructions.sol },
+        .{ "gpt-6-astra", BuiltinInstructions.astra },
+    };
+    inline for (reviewed) |entry| if (std.mem.eql(u8, model, entry[0])) return entry[1];
+    return .generic;
+}
+
 /// Local identifier syntax admits 1 to this many printable ASCII bytes.
 pub const max_model_bytes = 256;
 
@@ -154,5 +184,22 @@ test "model catalog chat facts cover exact types modalities and whole non-chat f
             try std.testing.expect(!canChat(entry.id));
         }
         try std.testing.expect(represented);
+    }
+}
+
+test "built-in instructions select only four exact requested model identities" {
+    const cases = .{
+        .{ "gpt-6-luna", BuiltinInstructions.luna, @embedFile("model_instructions/luna.txt") },
+        .{ "gpt-6.1-terra", BuiltinInstructions.terra, @embedFile("model_instructions/terra-astra.txt") },
+        .{ "gpt-6.1-sol", BuiltinInstructions.sol, @embedFile("model_instructions/sol.txt") },
+        .{ "gpt-6-astra", BuiltinInstructions.astra, @embedFile("model_instructions/terra-astra.txt") },
+    };
+    inline for (cases) |case| {
+        try std.testing.expectEqual(case[1], builtinInstructions(case[0]));
+        try std.testing.expectEqualStrings(case[2], builtinInstructions(case[0]).bytes());
+    }
+    for ([_][]const u8{ "", "gpt-6-sol", "gpt-6-terra", "gpt-6.1-luna", "GPT-6-LUNA", "openai/gpt-6-luna", "gpt-6-luna-extra", "gpt-6-lun", "gpt-6.1-sol-extra", "gpt-6-astra-2026", "future-chat" }) |model| {
+        try std.testing.expectEqual(BuiltinInstructions.generic, builtinInstructions(model));
+        try std.testing.expectEqualStrings("", builtinInstructions(model).bytes());
     }
 }

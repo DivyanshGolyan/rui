@@ -767,7 +767,7 @@ An omitted update preserves the override.
 Explicit `null` resets it to provider/model policy, spelled `default` in the CLI.
 Triggers are positive token counts; output reservation is nonnegative extra heuristic headroom, not a provider output limit.
 Current inspection shows effective values and whether each value is a Session override.
-Current inspection also reports `context_estimate`: the estimated tokens the next model call starts from (eligible accepted usage, uncovered bytes / 4 and output reservation), read by the same facts purpose selection reads, when that selection would compare it with the trigger.
+Current inspection also reports `context_estimate`: the estimated tokens the next model call starts from (eligible accepted usage, estimated bytes / 4 and output reservation), read by the same facts purpose selection reads, when that selection would compare it with the trigger.
 It is null without a trigger and when the next call's purpose does not depend on it: a Session's first call, the call after a compaction, a recovery compaction and context unchanged since the last compaction.
 So whenever it is shown, it reaches the trigger exactly when a model call admitted at that moment compacts, and the Session line's `0% left` means that.
 When non-null, chat info’s Context field shows it beside the trigger, and the conversation’s Session line shows the share of the trigger it leaves.
@@ -797,6 +797,9 @@ An explicit count does not claim a model capacity or entitlement.
 A stored null threshold uses a fixed 115,200-token safety threshold independent of the catalog; new specs cannot save a null threshold.
 The CLI resolves `--compaction-trigger default` to a concrete token count before capture.
 Pressure uses eligible usage from the latest accepted same-binding output plus estimates for appended input and extra reservation; without same-recipe usage it estimates retained context.
+Without an eligible usage anchor, add the selected built-in instruction body's UTF-8 byte length to uncovered bytes before the four-bytes-per-token estimate.
+Eligible provider usage already covers those instructions, so it does not add them again.
+The estimate cannot distinguish old built-in wording after a binary upgrade because no built-in version is stored.
 The threshold fires at equality.
 Admission reads its Session's facts with its selection, inside the Store hold and before its transaction, and does not read the appended bytes: where only their count decides the purpose it writes an assistant call whose first write is a guard that the count is under the policy's limit, and a failed guard rolls back and admits the compaction instead.
 On a network Store the admitted Attempt's request starts in the same message: its settings read follows COMMIT, whole or not at all, and a request whose settings did not ride reads them in a round of its own.
@@ -1090,13 +1093,18 @@ Render the frozen baseline once as top-level `instructions`; render later applic
 This follows the first-party managed Responses builder; it does not by itself prove the live backend accepts Rui's complete recipe.
 A reasoning summary is optional visible explanation, not the private reasoning needed for continuation.
 
-The adapter prefixes top-level `instructions` with Rui's local coding-agent role and the immutable Session Workspace from the Operation-bound historical settings, followed by the saved baseline under `Session instructions:`.
+The adapter prefixes top-level `instructions` with Rui's local coding-agent role and the immutable Session Workspace from the Operation-bound historical settings, followed by the exact requested model's built-in guidance and the saved baseline under `Session instructions:`.
 Render Workspace as a JSON string literal labeled as path data, with its quotes and escapes preserved after decoding the outer request.
 Directory-name newlines must remain escaped path content rather than instruction-section boundaries; Bash still receives the exact saved path.
 This runtime context does not modify saved Session instructions or append Conversation entries.
 Replay reads neither the Host's cwd nor the caller's current directory.
 Tool definitions own filesystem/cwd behavior and timeout selection; timeout results own the effective budget and recovery guidance.
-Static prompt text is an adapter rule, not a copied per-Operation setting.
+Static prompt text follows the running binary, not a copied per-Operation setting.
+The model catalog selects built-in guidance for the four exact, case-sensitive IDs `gpt-6-luna`, `gpt-6.1-terra`, `gpt-6.1-sol`, and `gpt-6-astra`, independently of provider.
+Other IDs use the shared Rui frame and authored instructions without a specialized body; spelling similarity, namespaces and aliases do not borrow another model's guidance or change the requested ID.
+Each call composes from its Operation's frozen model and authored history.
+A deliberate binary upgrade may therefore change built-in wording on reconstruction or retry without changing saved instructions or Conversation.
+[Source provenance](src/model_instructions/README.md) records the pinned Codex literals and explicit Rui compatibility edits.
 
 Accept completed items in provider output order, not token-delta arrival order.
 `response.output_item.done` supplies complete items, including final encrypted content; an added item can still be incomplete and establishes only index/kind/ID agreement with its done item, not content agreement.

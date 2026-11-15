@@ -81,10 +81,30 @@ var modelContextParts = func() []string {
 
 // ModelInstructions independently encodes known inputs, never the observed request.
 // session is the exact Store-allocated Session ID. Store paths are not model facts.
-func ModelInstructions(workspace, session string) string {
+func ModelInstructions(workspace, session, model string) string {
 	workspace = JSONString(workspace)
 	return modelContextParts[0] + workspace[1:len(workspace)-1] + modelContextParts[1] +
-		session + modelContextParts[2]
+		session + modelContextParts[2] + builtinInstructions(model) + modelContextParts[3]
+}
+
+func builtinInstructions(model string) string {
+	name := ""
+	switch model {
+	case "gpt-6-luna":
+		name = "luna"
+	case "gpt-6.1-terra", "gpt-6-astra":
+		name = "terra-astra"
+	case "gpt-6.1-sol":
+		name = "sol"
+	default:
+		return ""
+	}
+	_, source, _, _ := runtime.Caller(0)
+	text, err := os.ReadFile(filepath.Join(filepath.Dir(source), "../../../src/model_instructions", name+".txt"))
+	if err != nil {
+		panic(err)
+	}
+	return string(text)
 }
 
 // InstructionsSession reads the Session ID from the slot after the escaped

@@ -1067,3 +1067,54 @@ test "each compaction that succeeds is one compacted row, with the entries its f
         }
     }.run);
 }
+
+test "built-in instructions contribute to unanchored pressure but not eligible usage" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            const cases = .{
+                .{ "model-a", "model-a", @as(usize, 0) },
+                .{ "gpt-6-luna", "gpt-6-luna", @embedFile("../../model_instructions/luna.txt").len },
+                .{ "gpt-6.1-terra", "gpt-6.1-terra", @embedFile("../../model_instructions/terra-astra.txt").len },
+                .{ "gpt-6.1-sol", "gpt-6.1-sol", @embedFile("../../model_instructions/sol.txt").len },
+                .{ "gpt-6-astra", "gpt-6-astra", @embedFile("../../model_instructions/terra-astra.txt").len },
+                .{ "gpt-6-luna", "gpt-6.1-sol", @embedFile("../../model_instructions/sol.txt").len },
+                .{ "gpt-6.1-sol", "model-a", @as(usize, 0) },
+            };
+            inline for (cases) |models| {
+                for ([_]bool{ false, true }) |usage| {
+                    var tmp = std.testing.tmpDir(.{});
+                    defer tmp.cleanup();
+                    var storage: Store = undefined;
+                    try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                    defer storage.close() catch unreachable;
+                    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+                    const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+                    var initial = try completeConfiguration("config", "", workspace, models[0]);
+                    try initial.configuration.compaction_trigger.value.set("1000");
+                    const created = try storage.configure(&initial, .{});
+                    try std.testing.expect(created == .accepted);
+                    const session = created.accepted.session;
+                    try submitTestMessage(&storage, &tmp, "one", "one", session.slice(), "seed");
+                    const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                    try submitTestMessage(&storage, &tmp, "two", "two", session.slice(), "");
+                    try settleCallsForTestingWithFaults(&storage, &tmp, first, "output", &.{}, .{}, if (usage) "{\"input_tokens\":0,\"output_tokens\":0}" else null);
+                    if (!std.mem.eql(u8, models[0], models[1])) {
+                        var patch: wire_request.ConfigureCommand = .{};
+                        try patch.key.set("switch");
+                        try patch.session.set(session.slice());
+                        patch.configuration.model.state = .value;
+                        try patch.configuration.model.value.set(models[1]);
+                        patch.configuration.reasoning_effort.state = .value;
+                        try patch.configuration.reasoning_effort.value.set("low");
+                        try std.testing.expect(try storage.configure(&patch, .{}) == .accepted);
+                    }
+                    const anchored = usage and std.mem.eql(u8, models[0], models[1]);
+                    const expected: u64 = if (anchored) 0 else (4 + models[2]) / 4;
+                    try std.testing.expectEqual(@as(?u64, expected), try testingContextEstimate(&storage, &tmp, session.slice()));
+                    const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                    try std.testing.expectEqual(if (expected >= 1000) ModelOperationKind.compaction else ModelOperationKind.assistant_response, try storage.modelOperationKind(next));
+                }
+            }
+        }
+    }.run);
+}

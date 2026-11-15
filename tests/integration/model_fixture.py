@@ -21,13 +21,26 @@ ROOT = pathlib.Path.cwd()
 MODEL_CONTEXT_PARTS = (pathlib.Path(__file__).resolve().parents[2] / "src" / "model_instructions.txt").read_text().split("{}")
 
 
-def model_instructions(workspace, baseline="", *, store, session):
+def builtin_instructions(model):
+    names = {
+        "gpt-6-luna": "luna",
+        "gpt-6.1-terra": "terra-astra",
+        "gpt-6.1-sol": "sol",
+        "gpt-6-astra": "terra-astra",
+    }
+    name = names.get(model)
+    if name is None:
+        return ""
+    return (pathlib.Path(__file__).resolve().parents[2] / "src" / "model_instructions" / (name + ".txt")).read_text()
+
+
+def model_instructions(workspace, baseline="", *, store, session, model="model-a"):
     """Shared prose with independently encoded, caller-supplied fixture facts."""
     parts = MODEL_CONTEXT_PARTS
     workspace = json.dumps(str(workspace), ensure_ascii=False)[1:-1]
     assert len(session) == 6 and all(c in "0123456789abcdefghjkmnpqrstvwxyz" for c in session), session
-    prefix, address, suffix = parts
-    return prefix + workspace + address + session + suffix + baseline
+    prefix, address, middle, suffix = parts
+    return prefix + workspace + address + session + middle + builtin_instructions(model) + suffix + baseline
 
 
 def instructions_session(instructions):

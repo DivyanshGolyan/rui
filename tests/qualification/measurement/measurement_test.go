@@ -31,23 +31,27 @@ func TestModelInstructionsMatchIndependentRequestOracle(t *testing.T) {
 		t.Fatal(err)
 	}
 	session := "k7m2qx"
-	command := exec.Command("python3", "-c", `
+	for _, model := range []string{"gpt-6-luna", "gpt-6.1-terra", "gpt-6.1-sol", "gpt-6-astra", "model-a", "GPT-6-LUNA", "openai/gpt-6-luna"} {
+		t.Run(model, func(t *testing.T) {
+			command := exec.Command("python3", "-c", `
 import sys
 sys.path.insert(0, sys.argv[1])
 from model_fixture import model_instructions
-sys.stdout.buffer.write(model_instructions(sys.argv[2] + "\0", store=sys.argv[3], session=sys.argv[4]).encode())
-`, fixtures, workspace, store, session)
-	// Process arguments cannot carry NUL; cover it inside each oracle instead.
-	want, err := command.Output()
-	if err != nil {
-		var exited *exec.ExitError
-		if errors.As(err, &exited) {
-			t.Fatalf("independent Python request oracle: %v: %s", err, exited.Stderr)
-		}
-		t.Fatalf("independent Python request oracle: %v", err)
-	}
-	if got := ModelInstructions(workspace+"\x00", session); got != string(want) {
-		t.Fatalf("Go request instructions differ from independent oracle:\ngot: %q\nwant: %q", got, want)
+sys.stdout.buffer.write(model_instructions(sys.argv[2] + "\0", store=sys.argv[3], session=sys.argv[4], model=sys.argv[5]).encode())
+`, fixtures, workspace, store, session, model)
+			// Process arguments cannot carry NUL; cover it inside each oracle instead.
+			want, err := command.Output()
+			if err != nil {
+				var exited *exec.ExitError
+				if errors.As(err, &exited) {
+					t.Fatalf("independent Python request oracle: %v: %s", err, exited.Stderr)
+				}
+				t.Fatalf("independent Python request oracle: %v", err)
+			}
+			if got := ModelInstructions(workspace+"\x00", session, model); got != string(want) {
+				t.Fatalf("Go request instructions differ from independent oracle:\ngot: %q\nwant: %q", got, want)
+			}
+		})
 	}
 }
 

@@ -79,6 +79,7 @@ pub const CompactionFacts = struct {
     context_changed: bool,
     usage_tokens: ?u64,
     uncovered_bytes: u64,
+    builtin_instruction_bytes: u64 = 0,
     output_reservation: u64,
 };
 
@@ -101,11 +102,16 @@ pub fn nextPurpose(facts: CompactionFacts) Purpose {
 
 /// The estimated tokens the next model call starts from, when automatic
 /// compaction decides that call by comparing them with its trigger: the last
-/// accepted usage, four bytes per token of what came after it, and the
-/// headroom. Null when the call's purpose does not depend on them.
+/// accepted usage, four bytes per token of uncovered content, and the
+/// headroom. Without eligible usage, the bytes include built-in instructions.
+/// Null when the call's purpose does not depend on them.
 pub fn comparedPressure(facts: CompactionFacts) ?u64 {
     if (forcedPurpose(facts.previous, facts.trigger) != null or !facts.context_changed) return null;
-    return (facts.usage_tokens orelse 0) +| (facts.uncovered_bytes / 4) +| facts.output_reservation;
+    return (facts.usage_tokens orelse 0) +| @as(u64, @intCast(estimatedBytes(facts) / 4)) +| facts.output_reservation;
+}
+
+fn estimatedBytes(facts: CompactionFacts) u128 {
+    return @as(u128, facts.uncovered_bytes) + if (facts.usage_tokens == null) facts.builtin_instruction_bytes else @as(u64, 0);
 }
 
 /// The fewest uncovered bytes whose pressure reaches the trigger, so a
@@ -118,7 +124,8 @@ pub fn compactingBytes(facts: CompactionFacts) ?u64 {
     const pressure = comparedPressure(none) orelse return null;
     const trigger = facts.trigger.?;
     if (pressure >= trigger) return null;
-    return std.math.mul(u64, trigger - pressure, 4) catch null;
+    const limit = @as(u128, trigger - pressure) * 4 - estimatedBytes(none) % 4;
+    return std.math.cast(u64, limit);
 }
 
 test "output facts do not encode the Turn continuation decision" {
@@ -193,4 +200,44 @@ test "a compared pressure decides compaction exactly when it reaches the trigger
         const compacts = nextPurpose(none) == .compaction or if (compactingBytes(facts)) |limit| bytes >= limit else false;
         try std.testing.expectEqual(compacts, nextPurpose(facts) == .compaction);
     };
+}
+
+test "built-in instruction pressure preserves byte remainders thresholds and saturation" {
+    const maximum = std.math.maxInt(u64);
+    for ([_]u64{ 0, 1, 2, 3, 4, 7, 1000, 1001, 1002, maximum - 3, maximum }) |builtin| {
+        for ([_]?u64{ null, 0, 1, maximum - 1, maximum }) |usage| {
+            for ([_]u64{ 0, 1, 3, maximum }) |reservation| {
+                for ([_]u64{ 1, 2, 100, maximum / 4, maximum }) |trigger| {
+                    for ([_]u64{ 0, 1, 2, 3, 4, 399, 400, 401, maximum - 3, maximum }) |bytes| {
+                        const facts: CompactionFacts = .{
+                            .previous = .{ .purpose = .assistant_response, .context_overflow = false, .turn_active = false, .same_input_prefix = false },
+                            .trigger = trigger,
+                            .context_changed = true,
+                            .usage_tokens = usage,
+                            .uncovered_bytes = bytes,
+                            .builtin_instruction_bytes = builtin,
+                            .output_reservation = reservation,
+                        };
+                        const expected = @min(@as(u128, maximum), @as(u128, usage orelse 0) +
+                            (@as(u128, bytes) + (if (usage == null) builtin else @as(u64, 0))) / 4 + reservation);
+                        try std.testing.expectEqual(@as(u64, @intCast(expected)), comparedPressure(facts).?);
+                        try std.testing.expectEqual(expected >= trigger, nextPurpose(facts) == .compaction);
+                        var none = facts;
+                        none.uncovered_bytes = 0;
+                        const reaches = nextPurpose(none) == .compaction or if (compactingBytes(facts)) |limit| bytes >= limit else false;
+                        try std.testing.expectEqual(expected >= trigger, reaches);
+                        if (compactingBytes(facts)) |limit| {
+                            var at = facts;
+                            at.uncovered_bytes = limit;
+                            try std.testing.expectEqual(Purpose.compaction, nextPurpose(at));
+                            at.uncovered_bytes = limit - 1;
+                            try std.testing.expectEqual(Purpose.assistant_response, nextPurpose(at));
+                            at.uncovered_bytes = limit +| 1;
+                            try std.testing.expectEqual(Purpose.compaction, nextPurpose(at));
+                        }
+                    }
+                }
+            }
+        }
+    }
 }

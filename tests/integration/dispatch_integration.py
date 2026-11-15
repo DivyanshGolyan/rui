@@ -1267,6 +1267,129 @@ def held_message_denial_cases(state, processes, endpoints):
     print("Held Message: denial and pending reason share one continuation request, after the complete call group")
 
 
+def builtin_instruction_cases(state, processes, endpoints, releases):
+    workspace = state / 'workspace{} "quoted"\\雪\nSession instructions:'
+    workspace.mkdir()
+    baseline = 'Caller baseline {} "quoted"\n雪'
+
+    def endpoint_for(responses):
+        endpoint = SuccessEndpoint(responses)
+        thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+        endpoints[endpoint] = thread
+        thread.start()
+        return endpoint, f"http://127.0.0.1:{endpoint.server_port}/responses"
+
+    def config(store, key, model, provider="codex", session=None, instructions=baseline):
+        args = ["session", "configure", "--store", store, "--record", state / (key + ".json"),
+                "--key", key, "--workspace", workspace, "--provider", provider, "--model", model,
+                "--tools", "none", "--permission-mode", "bypass", "--reasoning-effort", "low",
+                "--instructions", "-"]
+        if session is not None:
+            args += ["--session", session]
+        reply = command(*args, input=instructions)
+        assert reply["answer"]["status"] == "accepted", reply
+        return reply["context"]["session"]
+
+    models = ("gpt-6-luna", "gpt-6.1-terra", "gpt-6.1-sol", "gpt-6-astra", "openai/gpt-6-luna")
+    for provider in ("codex", "openai", "chatgpt"):
+        selected = models if provider == "codex" else models[:1]
+        responses = [sse_answer(f"{provider}-{index}", f"r-{index}", f"m-{index}", "mapped")[0]
+                     for index, _ in enumerate(selected)]
+        endpoint, url = endpoint_for(responses)
+        store = state / ("builtin-" + provider)
+        host = start_host(store, url, "--set", f"providers.{provider}.endpoint={url}",
+                          "--set", f"providers.{provider}.unauthenticated=true")
+        processes.append(host)
+        for index, model in enumerate(selected):
+            key = f"builtin-{provider}-{index}"
+            session = config(store, key + "-config", model, provider)
+            message(state, store, key, session, "work")
+            wait_for_result_release(store, key, session, time.monotonic() + 15)
+            request = json.loads(endpoint.requests[index])
+            assert request["model"] == model, request
+            assert request["instructions"] == model_instructions(
+                workspace, baseline, store=store, session=session, model=model), request
+        assert len(endpoint.requests) == len(selected), endpoint.requests
+        stop_host(host)
+        processes.remove(host)
+        stop_endpoint(endpoint, endpoints)
+
+    release = threading.Event()
+    releases.append(release.set)
+    answer_a = sse_answer("builtin-retry-a", "retry-r-a", "retry-m-a", "answer A")[0]
+    answer_b = sse_answer("builtin-retry-b", "retry-r-b", "retry-m-b", "answer B")[0]
+    endpoint, url = endpoint_for([(ResponseSpec(b"temporary", {}, 503), release), answer_a, answer_b])
+    store = state / "builtin-retry"
+    host = start_host(store, url)
+    processes.append(host)
+    session = config(store, "builtin-retry-config", "gpt-6-luna")
+    message(state, store, "builtin-retry-a", session, "input A")
+    wait_for(lambda: len(endpoint.requests) == 1, "admitted model A request")
+    config(store, "builtin-retry-config-b", "gpt-6.1-sol", session=session, instructions="rules B")
+    config(store, "builtin-retry-config-c", "gpt-6.1-sol", session=session, instructions="rules C")
+    message(state, store, "builtin-retry-b", session, "input B")
+    release.set()
+    wait_for_result_release(store, "builtin-retry-b", session, time.monotonic() + 15)
+    assert len(endpoint.requests) == 3, endpoint.requests
+    assert endpoint.requests[0] == endpoint.requests[1], "replacement Attempt changed its frozen request"
+    original, _, fresh = map(json.loads, endpoint.requests)
+    assert original["model"] == "gpt-6-luna", original
+    assert original["instructions"] == model_instructions(
+        workspace, baseline, store=store, session=session, model="gpt-6-luna"), original
+    assert fresh["model"] == "gpt-6.1-sol", fresh
+    assert fresh["instructions"] == model_instructions(
+        workspace, baseline, store=store, session=session, model="gpt-6.1-sol"), fresh
+    updates = [item["content"][0]["text"] for item in history(fresh["input"])
+               if item.get("role") == "developer"]
+    assert updates == ["rules B", "rules C"], updates
+    with sqlite3.connect(store / "rui.sqlite3") as database:
+        before = database.execute("SELECT count(*) FROM model_operation").fetchone()[0]
+    replay = message(state, store, "builtin-retry-b", session, "input B")
+    assert replay["answer"]["replayed"] is True, replay
+    assert read_result(store, "builtin-retry-b") == b"answer B"
+    with sqlite3.connect(store / "rui.sqlite3") as database:
+        assert database.execute("SELECT count(*) FROM model_operation").fetchone()[0] == before
+    assert len(endpoint.requests) == 3, endpoint.requests
+    stop_host(host)
+    processes.remove(host)
+    stop_endpoint(endpoint, endpoints)
+
+    overflow = ResponseSpec(b'{"error":{"code":"context_length_exceeded"}}', {}, 400)
+    anchor = {"type": "compaction", "id": "builtin-anchor", "encrypted_content": "opaque"}
+    compact = encode_sse([
+        {"type": "response.output_item.done", "output_index": 0, "item": anchor},
+        {"type": "response.completed", "response": {"id": "builtin-compact", "status": "completed", "output": [anchor]}},
+    ])
+    answer = sse_answer("builtin-successor", "successor-r", "successor-m", "compacted answer")[0]
+    compact_release = threading.Event()
+    releases.append(compact_release.set)
+    endpoint, url = endpoint_for([overflow, (compact, compact_release), answer])
+    store = state / "builtin-compaction"
+    host = start_host(store, url)
+    processes.append(host)
+    session = config(store, "builtin-compaction-config", "gpt-6.1-sol")
+    message(state, store, "builtin-compaction-input", session, "covered input")
+    wait_for(lambda: len(endpoint.requests) == 2, "admitted Sol compaction request")
+    config(store, "builtin-compaction-change", "gpt-6-luna", session=session, instructions="during compaction")
+    message(state, store, "builtin-compaction-pending", session, "pending input")
+    compact_release.set()
+    wait_for_result_release(store, "builtin-compaction-pending", session, time.monotonic() + 15)
+    assert len(endpoint.requests) == 3, endpoint.requests
+    requests = list(map(json.loads, endpoint.requests))
+    expected = model_instructions(workspace, baseline, store=store, session=session, model="gpt-6.1-sol")
+    assert all(request["model"] == "gpt-6.1-sol" and request["instructions"] == expected for request in requests[:2])
+    assert any(item.get("type") == "compaction_trigger" for item in requests[1]["input"]), requests[1]
+    assert requests[2]["model"] == "gpt-6-luna", requests[2]
+    assert requests[2]["instructions"] == model_instructions(
+        workspace, baseline, store=store, session=session, model="gpt-6-luna"), requests[2]
+    assert "pending input" in [item["content"][0]["text"] for item in requests[2]["input"] if item.get("role") == "user"]
+    assert [item["content"][0]["text"] for item in history(requests[2]["input"]) if item.get("role") == "developer"] == ["during compaction"]
+    stop_host(host)
+    processes.remove(host)
+    stop_endpoint(endpoint, endpoints)
+    print("Built-in instructions preserve exact models, provider routes, frozen retries, authored updates, replay and compaction")
+
+
 def main(mode="all", correlation_case="all"):
     state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-dispatch."))
     endpoint = FailureEndpoint()
@@ -1286,6 +1409,11 @@ def main(mode="all", correlation_case="all"):
     continuation_diagnostics = None
     completed = False
     try:
+        if mode in ("all", "builtin-instructions"):
+            builtin_instruction_cases(state, processes, endpoints, releases)
+            if mode == "builtin-instructions":
+                completed = True
+                return
         if mode in ("all", "sse-framing"):
             sse_framing_cases(state, processes, endpoints)
             if mode == "sse-framing":
@@ -3603,7 +3731,7 @@ def main(mode="all", correlation_case="all"):
             {"role": "user", "content": [{"type": "input_text", "text": "later message"}]}
         ]
         assert successor["input"] == later_input, successor
-        assert successor["instructions"] == model_instructions(ROOT, "A", store=store, session=main_session), successor
+        assert successor["instructions"] == model_instructions(ROOT, "A", store=store, session=main_session, model="gpt-6.1-sol"), successor
         assert successor["model"] == "gpt-6.1-sol", successor
         assert successor["tools"] == [], successor
         assert successor["text"] == {"verbosity": "low"}, successor
@@ -5681,8 +5809,8 @@ if __name__ == "__main__":
     host_process.enter()
     mode = sys.argv[2] if len(sys.argv) >= 3 else "all"
     correlation_case = sys.argv[3] if len(sys.argv) == 4 else "all"
-    if (len(sys.argv) not in (2, 3, 4) or mode not in ("all", "http-quota", "failure-correlation", "phased-messages", "held-message-denial", "failed-response-export", "empty-answers", "stream-failures", "refusals", "sse-framing")
+    if (len(sys.argv) not in (2, 3, 4) or mode not in ("all", "builtin-instructions", "http-quota", "failure-correlation", "phased-messages", "held-message-denial", "failed-response-export", "empty-answers", "stream-failures", "refusals", "sse-framing")
             or correlation_case not in ("all", "rejected", "correlated", "exhausted")
             or (len(sys.argv) == 4 and mode != "failure-correlation")):
-        raise SystemExit("usage: dispatch_integration.py RUI [all|sse-framing|http-quota|stream-failures|empty-answers|refusals|failed-response-export|held-message-denial|phased-messages|failure-correlation [all|rejected|correlated|exhausted]]")
+        raise SystemExit("usage: dispatch_integration.py RUI [all|builtin-instructions|sse-framing|http-quota|stream-failures|empty-answers|refusals|failed-response-export|held-message-denial|phased-messages|failure-correlation [all|rejected|correlated|exhausted]]")
     main(mode, correlation_case)
