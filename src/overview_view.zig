@@ -2788,11 +2788,13 @@ const new_session_name = "New Session";
 fn pinGap(state: *const State) ?usize {
     const order = state.order.items;
     if (order.len < 2 or state.rows.items[order[0]].pin_order == null or state.rows.items[order[order.len - 1]].pin_order != null) return null;
-    return std.sort.partitionPoint(u32, order, state, struct {
-        fn pinned(current: *const State, index: u32) bool {
-            return current.rows.items[index].pin_order != null;
-        }
-    }.pinned);
+    var low: usize = 1;
+    var high = order.len - 1;
+    while (low < high) {
+        const mid = low + (high - low) / 2;
+        if (state.rows.items[order[mid]].pin_order != null) low = mid + 1 else high = mid;
+    }
+    return low;
 }
 
 pub fn listLength(state: *const State) usize {
@@ -6429,8 +6431,8 @@ test "approval rows require no command reads across waiting Action and conversat
 }
 
 test "session list has exactly one noninteractive gap only between both pin groups" {
-    for (0..5) |n| for (0..n + 1) |pins| {
-        var rows: [4]Listed = undefined;
+    for (0..9) |n| for (0..n + 1) |pins| {
+        var rows: [8]Listed = undefined;
         for (rows[0..n], 0..) |*row, i| {
             var ref = "aaaaaa".*;
             ref[5] += @intCast(i);
