@@ -1334,23 +1334,24 @@ pub const Store = struct {
 
     /// Which of the dispatch loop's commit-driven scans would find work,
     /// in one round; `paused` is whether new Turns are held.
-    pub fn dispatchWork(self: *Store, paused: bool) !DispatchWork {
-        return self.queue().run(dispatchWorkHeld, .{ self, paused });
+    pub fn dispatchWork(self: *Store, paused: bool, include_mcp: bool) !DispatchWork {
+        return self.queue().run(dispatchWorkHeld, .{ self, paused, include_mcp });
     }
 
-    fn dispatchWorkHeld(self: *Store, paused: bool) !DispatchWork {
+    fn dispatchWorkHeld(self: *Store, paused: bool, include_mcp: bool) !DispatchWork {
         const survey = self.identities().survey;
         const asked: @FieldType(Survey, "asked") = if (paused) .paused else .running;
         self.identities().survey.kept = .none;
         self.identities().survey.asked = asked;
+        self.identities().survey.include_mcp = include_mcp;
         // Nothing committed since the survey ran, right after its COMMIT.
-        if (survey.kept == .ready and survey.asked == asked and !self.isFenced())
+        if (survey.kept == .ready and survey.asked == asked and survey.include_mcp == include_mcp and !self.isFenced())
             return .{ .core = survey.core, .mcp = survey.mcp, .bash = survey.bash, .message = survey.message, .tool_continuation = survey.tool_continuation, .retry = survey.retry };
         const entry = try enter(self, .none);
         defer entry.release();
         var access: store_access.Access(.survey, error{}) = .open(&entry);
         defer access.deinit();
-        return entry.finish(Ordinary.none, model_admission_domain.dispatchWork(&access, paused));
+        return entry.finish(Ordinary.none, model_admission_domain.dispatchWork(&access, paused, include_mcp));
     }
 
     pub fn nextCoreWorkForHost(self: *Store, include_mcp: bool) !?CoreWork {
@@ -2112,7 +2113,7 @@ pub noinline fn commitWithSurvey(self: *Store, writer: anytype, follow: anytype)
     defer reads.deinit();
     if (follow) |after| after.queue(&reads);
     var survey: model_admission_domain.DispatchSurvey = .{};
-    if (surveyed) survey.queue(&reads, kept.asked == .paused);
+    if (surveyed) survey.queue(&reads, kept.asked == .paused, kept.include_mcp);
     if (reads.failure != null) {
         self.engine.dropTail();
         return writer.passCommit(null);
@@ -2400,7 +2401,8 @@ const Survey = packed struct(u16) {
     message: bool = false,
     tool_continuation: bool = false,
     retry: bool = false,
-    _: u6 = 0,
+    include_mcp: bool = true,
+    _: u5 = 0,
 };
 
 const Admitted = struct {

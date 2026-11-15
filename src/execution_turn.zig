@@ -19,11 +19,7 @@ pub const Outcome = union(enum) {
     terminate,
 };
 
-/// The Bash, message and tool-continuation scans read Store rows, which move
-/// the commit generation, and execution slots (free count, open shared
-/// preparations), which move the slot change count; the message scan also
-/// reads whether new Turns are held, which a resume moves.
-const AdmissionKey = struct { generation: u64, slot_changes: u64, paused: bool };
+const AdmissionKey = struct { generation: u64, slot_changes: u64, paused: bool, custody_available: bool, include_mcp: bool };
 
 /// Which commit-driven scans would find work, as one Store round read it
 /// (`Store.dispatchWork`). A hint: each scan still selects for itself.
@@ -38,9 +34,7 @@ pub const Work = struct {
     retry: bool = true,
 };
 
-/// `Work` reads only Store rows, which a commit moves, and whether new
-/// Turns are held, which picks the message selection.
-const WorkKey = struct { generation: u64, paused: bool };
+const WorkKey = struct { generation: u64, paused: bool, include_mcp: bool };
 
 /// The retry scans read Store rows, which a commit moves, and skip the
 /// Operations execution slots hold, which a slot change moves. A scheduled
@@ -77,15 +71,8 @@ pub const State = struct {
     /// An Action loses custody unsettled only once dispatch is fenced or the
     /// Host shuts down, so uncertain Actions come only from an earlier Host.
     uncertain_action_scan_exhausted: bool = false,
-    /// Admission facts before the last pass whose Bash, message and
-    /// tool-continuation scans all found nothing. Those scans read only
-    /// Store rows and slots, so they rerun only once a commit or slot change
-    /// moves the key. The retry scans keep keys of their own (`idle_retry`).
     idle_admission: ?AdmissionKey = null,
-    /// The commit generation of the last slot-free core work scan that found nothing.
-    idle_core_generation: ?u64 = null,
-    /// The last work read and the facts before it. It stands until a
-    /// commit or a pause moves the key, so slot changes reuse it.
+    idle_core: ?WorkKey = null,
     work: ?struct { key: WorkKey, found: Work } = null,
     retained_cleanup_at: ?std.Io.Clock.Timestamp = null,
     capacity_was_full: bool = false,
@@ -129,17 +116,19 @@ noinline fn admitWork(state: *State, context: anytype, now: std.Io.Clock.Timesta
         .generation = context.commitGeneration(),
         .slot_changes = context.slotChanges(),
         .paused = context.turnsPaused(),
+        .custody_available = context.custodyAvailable(),
+        .include_mcp = context.includeMcp(),
     };
     const retry_key: RetryKey = .{ .generation = admission_key.generation, .slot_changes = admission_key.slot_changes };
     const scanned = if (state.idle_admission) |previous| std.meta.eql(previous, admission_key) else false;
-    const core_due = state.idle_core_generation != admission_key.generation;
+    const work_key: WorkKey = .{ .generation = admission_key.generation, .paused = admission_key.paused, .include_mcp = admission_key.include_mcp };
+    const core_due = if (state.idle_core) |kept| !std.meta.eql(kept, work_key) else true;
     // One round says which of the scans below would find work, so a commit
     // costs that round rather than an empty scan of each kind.
-    const work_key: WorkKey = .{ .generation = admission_key.generation, .paused = admission_key.paused };
     const work_stands = if (state.work) |kept| std.meta.eql(kept.key, work_key) else false;
     if (!work_stands and (core_due or !scanned)) {
         state.work = null;
-        state.work = .{ .key = work_key, .found = try context.scanWork(admission_key.paused) };
+        state.work = .{ .key = work_key, .found = try context.scanWork(admission_key.paused, admission_key.include_mcp) };
     }
     const work: Work = if (state.work) |kept| kept.found else .{};
     // No commit since that round read no Attempt for the retry scans, so
@@ -163,19 +152,17 @@ noinline fn admitWork(state: *State, context: anytype, now: std.Io.Clock.Timesta
         }
     }
     var found_nothing = true;
-    // Core calls, owed stops and MCP admission take no execution slot.
-    // Their shared empty scan reruns only once a commit moves the generation.
     if (core_due) {
         if (!work.core and !work.mcp) {
-            state.idle_core_generation = admission_key.generation;
+            state.idle_core = work_key;
         } else switch (context.runCoreAction()) {
             .admitted => {
-                state.idle_core_generation = null;
+                state.idle_core = null;
                 state.idle_admission = null;
                 return true;
             },
-            .retry_later => state.idle_core_generation = null,
-            .no_work => state.idle_core_generation = admission_key.generation,
+            .retry_later => state.idle_core = null,
+            .no_work => state.idle_core = work_key,
         }
     }
     for (state.preference, 0..) |kind, index| {
@@ -300,6 +287,8 @@ const Recording = struct {
     fenced: bool = false,
     provider: bool = true,
     free: usize = 1,
+    custody_free: ?usize = null,
+    mcp_open: bool = true,
     bash_prep_open: bool = true,
     model_prep_open: bool = true,
     slot_changes: u64 = 0,
@@ -312,6 +301,8 @@ const Recording = struct {
     bash: bool = false,
     mcp_available: bool = false,
     mcp_runs: usize = 0,
+    mcp_completion: bool = false,
+    mcp_completions: usize = 0,
     recover_action: bool = false,
     recover_retry: bool = false,
     recover_action_fence: bool = false,
@@ -326,6 +317,7 @@ const Recording = struct {
     work_fence: bool = false,
     work_scans: usize = 0,
     work_paused: ?bool = null,
+    release_during_scan: bool = false,
     new_admission: Admission = .no_work,
     continuation_admission: Admission = .no_work,
     completions_available: usize = 0,
@@ -399,6 +391,11 @@ const Recording = struct {
         self.record(.live_bash);
         self.live_bash_now[self.live_bash_count] = self.now_ns;
         self.live_bash_count += 1;
+        if (self.mcp_completion) {
+            self.mcp_completion = false;
+            self.mcp_completions += 1;
+            return true;
+        }
         return false;
     }
 
@@ -429,8 +426,16 @@ const Recording = struct {
         return self.slot_changes;
     }
 
+    fn custodyAvailable(self: *const Recording) bool {
+        return (self.custody_free orelse self.free) != 0;
+    }
+
+    fn includeMcp(self: *const Recording) bool {
+        return self.custodyAvailable() and self.mcp_open;
+    }
+
     fn freeSlots(self: *const Recording) usize {
-        return self.free;
+        return @min(self.free, self.custody_free orelse self.free);
     }
 
     fn bashPreparationOpen(self: *const Recording) bool {
@@ -462,7 +467,7 @@ const Recording = struct {
     }
 
     fn runCoreAction(self: *Recording) Admission {
-        if (self.mcp_available) {
+        if (self.mcp_available and self.includeMcp()) {
             self.mcp_available = false;
             self.mcp_runs += 1;
             return .admitted;
@@ -481,11 +486,17 @@ const Recording = struct {
         return self.retry_admission;
     }
 
-    fn scanWork(self: *Recording, paused: bool) error{Fence}!Work {
+    fn scanWork(self: *Recording, paused: bool, include_mcp: bool) error{Fence}!Work {
         self.work_scans += 1;
         self.work_paused = paused;
         if (self.work_fence) return error.Fence;
-        return self.work;
+        var found = self.work;
+        found.mcp = found.mcp and include_mcp;
+        if (self.release_during_scan) {
+            self.custody_free = 1;
+            self.release_during_scan = false;
+        }
+        return found;
     }
 
     fn scheduledRetry(self: *const Recording) ScheduledRetry {
@@ -1115,25 +1126,26 @@ test "a work read that fails ends the turn before any scan" {
     try std.testing.expectEqual(@as(usize, 0), context.count(.admit_new));
 }
 
-test "MCP resolution runs before execution slot admission even at capacity" {
+test "MCP completion progresses at full ordinary custody without admitting another call" {
     var state: State = .{};
-    var context: Recording = .{ .free = 0, .provider = false, .mcp_available = true };
-    const outcome = run(&state, &context);
-    try std.testing.expect(outcome == .continue_immediately);
-    try std.testing.expectEqual(@as(usize, 1), context.mcp_runs);
+    var context: Recording = .{ .free = 1, .custody_free = 0, .provider = false, .mcp_completion = true, .mcp_available = true, .work = .{ .core = false, .mcp = true, .bash = false, .message = false, .tool_continuation = false, .retry = false } };
+    try std.testing.expect(run(&state, &context) == .continue_immediately);
+    try std.testing.expectEqual(@as(usize, 1), context.mcp_completions);
+    try std.testing.expectEqual(@as(usize, 0), context.mcp_runs);
+    try std.testing.expectEqual(@as(usize, 0), context.count(.run_core));
 }
 
-test "MCP and core calls both run at capacity through shared core work" {
+test "MCP completion and core calls both progress at full ordinary custody" {
     var state: State = .{};
-    var context: Recording = .{ .free = 0, .provider = false, .mcp_available = true, .core_admission = .admitted };
+    var context: Recording = .{ .free = 1, .custody_free = 0, .provider = false, .mcp_completion = true, .mcp_available = true, .core_admission = .admitted };
     try std.testing.expect(run(&state, &context) == .continue_immediately);
-    try std.testing.expectEqual(@as(usize, 1), context.mcp_runs);
-    try std.testing.expect(run(&state, &context) == .continue_immediately);
+    try std.testing.expectEqual(@as(usize, 1), context.mcp_completions);
+    try std.testing.expectEqual(@as(usize, 0), context.mcp_runs);
     try std.testing.expectEqual(@as(usize, 1), context.count(.run_core));
 }
 
 test "an empty MCP core work scan waits for a commit before admission resumes" {
-    var context = Recording{ .free = 0, .provider = false, .generation_advance = 0, .auto_advance = 0 };
+    var context = Recording{ .free = 1, .provider = false, .generation_advance = 0, .auto_advance = 0 };
     var state: State = .{};
     _ = run(&state, &context);
     try std.testing.expectEqual(@as(usize, 1), context.count(.run_core));
@@ -1149,4 +1161,52 @@ test "an empty MCP core work scan waits for a commit before admission resumes" {
     context.mcp_available = true;
     try std.testing.expect(run(&state, &context) == .continue_immediately);
     try std.testing.expectEqual(@as(usize, 2), context.mcp_runs);
+}
+
+test "ordinary custody and MCP local availability invalidate only affected dispatch caches" {
+    var context: Recording = .{ .free = 1, .custody_free = 0, .generation_advance = 0, .auto_advance = 0, .provider = false, .work = .{ .core = false, .mcp = true, .bash = false, .message = false, .tool_continuation = false, .retry = false } };
+    var state: State = .{};
+    for (0..2) |_| try std.testing.expect(run(&state, &context) == .wait);
+    try std.testing.expectEqual(@as(usize, 1), context.work_scans);
+    try std.testing.expectEqual(@as(usize, 0), context.count(.run_core));
+    context.custody_free = 1;
+    context.mcp_available = true;
+    try std.testing.expect(run(&state, &context) == .continue_immediately);
+    try std.testing.expectEqual(@as(usize, 1), context.mcp_runs);
+    context.mcp_open = false;
+    context.mcp_available = true;
+    try std.testing.expect(run(&state, &context) == .wait);
+    const scans = context.work_scans;
+    _ = run(&state, &context);
+    try std.testing.expectEqual(scans, context.work_scans);
+    context.mcp_open = true;
+    try std.testing.expect(run(&state, &context) == .continue_immediately);
+    try std.testing.expectEqual(@as(usize, 2), context.mcp_runs);
+    try std.testing.expectEqual(@as(u64, 0), context.generation);
+    try std.testing.expectEqual(@as(u64, 0), context.slot_changes);
+}
+
+test "ordinary custody release admits finite work while MCP remains locally full" {
+    var context: Recording = .{ .free = 1, .custody_free = 0, .mcp_open = false, .generation_advance = 0, .auto_advance = 0, .new_admission = .admitted, .work = .{ .core = false, .mcp = false, .bash = false, .message = true, .tool_continuation = false, .retry = false } };
+    var state: State = .{};
+    for (0..2) |_| try std.testing.expect(run(&state, &context) == .wait);
+    try std.testing.expectEqual(@as(usize, 0), context.count(.admit_new));
+    try std.testing.expect(!context.includeMcp());
+    context.custody_free = 1;
+    try std.testing.expect(!context.includeMcp());
+    try std.testing.expect(run(&state, &context) == .continue_immediately);
+    try std.testing.expectEqual(@as(usize, 1), context.count(.admit_new));
+    try std.testing.expectEqual(@as(usize, 1), context.work_scans);
+    try std.testing.expectEqual(@as(u64, 0), context.generation);
+    try std.testing.expectEqual(@as(u64, 0), context.slot_changes);
+}
+
+test "ordinary custody snapshot is not relabeled after cleanup during its scan" {
+    var context: Recording = .{ .free = 1, .custody_free = 0, .generation_advance = 0, .auto_advance = 0, .provider = false, .release_during_scan = true, .mcp_available = true, .work = .{ .core = false, .mcp = true, .bash = false, .message = false, .tool_continuation = false, .retry = false } };
+    var state: State = .{};
+    try std.testing.expect(run(&state, &context) == .wait);
+    try std.testing.expectEqual(@as(usize, 0), context.mcp_runs);
+    try std.testing.expect(run(&state, &context) == .continue_immediately);
+    try std.testing.expectEqual(@as(usize, 2), context.work_scans);
+    try std.testing.expectEqual(@as(usize, 1), context.mcp_runs);
 }
