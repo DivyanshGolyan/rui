@@ -818,7 +818,7 @@ def prove_native_background(state):
         ]
         endpoint = fixture.SuccessEndpoint(responses)
         thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
-        host = None
+        host = session = pid = None
         evidence = {"case": name, "capacity": capacity}
         try:
             thread.start()
@@ -925,8 +925,11 @@ def prove_native_background(state):
             evidence.update(action=identity, pid=pid, launches=1, final=metadata, requests=len(endpoint.requests))
             outcomes.append(evidence)
         finally:
+            failed = sys.exception() is not None
             dispose_all(
                 gate.release,
+                lambda: fixture.command("session", "stop", "--store", store, "--session", session, "--key", "dispose", "--record", case / "dispose.json") if failed and session is not None and host.poll() is None else None,
+                lambda: fixture.wait_for(lambda: not process_exists(pid), "owned producer disposal", timeout=5) if pid is not None else None,
                 lambda: dispose_owner_case(host, endpoint, thread),
                 lambda: (case / "witness.json").write_text(json.dumps(evidence, ensure_ascii=False, indent=2) + "\n"),
             )
