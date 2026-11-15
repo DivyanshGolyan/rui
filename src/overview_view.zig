@@ -387,9 +387,6 @@ pub const Event = union(enum) {
     /// A memory read ended.
     memory: Memory,
 
-    /// A needs-you row's command read ended.
-    command: CommandText,
-
     /// Where the run app settings started stands now.
     upgrade: upgrade_status.Run,
     conversed: Conversed,
@@ -598,27 +595,6 @@ pub const Conversed = struct { reference: Reference, work: Kind, input: Conversa
 
 pub const Read = struct { reference: Reference, position: u64, admission: u64 };
 
-/// A needs-you row's waiting Action, whose command the shell reads with
-/// `read_action_arguments`.
-pub const CommandRead = struct { reference: Reference, action: u64 };
-pub const Commands = struct {
-    items: [max_first_line_reads]CommandRead = undefined,
-    len: usize = 0,
-
-    pub fn slice(self: *const Commands) []const CommandRead {
-        return self.items[0..self.len];
-    }
-};
-
-/// A command read's answer: the Action's command, or null when the read
-/// failed or its tool has no command to show.
-pub const CommandText = struct {
-    reference: Reference,
-    action: u64,
-    text: ?[]const u8,
-
-    unanswered: bool = false,
-};
 pub const Reads = struct {
     items: [max_first_line_reads]Read = undefined,
     len: usize = 0,
@@ -634,9 +610,6 @@ pub const Effect = union(enum) {
     list: ?Token,
     read_first_lines: Reads,
 
-    /// Read the commands of these needs-you rows' waiting Actions, and
-    /// answer each with `command`.
-    read_commands: Commands,
     /// Copied prospective configuration; the model bytes do not borrow state.
     create: ?Default,
     open: Reference,
@@ -789,18 +762,9 @@ pub const Row = struct {
     last_line: ?session_list.SavedLastLine = null,
     line: Line = .unread,
 
-    /// The command of the Action `first_action` names, while the row
-    /// needs you.
-    command: Line = .unread,
-
     /// The one accepted presentation value, whatever read supplied it.
     fn work(self: *const Row) session_work.Work {
         return .{ .state = self.state, .turn = self.turn, .operation = self.operation, .first_action = self.first_action };
-    }
-
-    /// An Action awaits a decision: alone, or beside running Bash.
-    pub fn needsYou(self: *const Row) bool {
-        return needsDecision(&self.state);
     }
 };
 
@@ -1581,7 +1545,6 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
             }
         },
         .memory => |memory| state.memory = memory,
-        .command => |answer| try commandRead(state, answer),
         .upgrade => |run| {
             // The shell reports only the run Upgrade asked for.
             state.upgrade.stand(run);
@@ -1748,7 +1711,6 @@ fn listPage(state: *State, page: Page, effects: *Effects) error{OutOfMemory}!voi
     state.listing = false;
     state.upgrade.reobserved();
     try readFirstLines(state, effects);
-    readCommands(state, effects);
 }
 
 /// Drain the current shell traversal without accepting any of its token or
@@ -1847,7 +1809,6 @@ fn settleRow(state: *const State, row: *Row, read: session_list.Snapshot) void {
     if (row.read_version) |known| {
         if (std.mem.eql(u8, &known.instance, &read.read_version.instance) and read.read_version.generation <= known.generation) return;
     }
-    if (row.first_action != read.work.first_action) row.command = .unread;
     row.read_version = read.read_version;
     row.state = read.work.state.asOf(state.now_ms);
     row.turn = read.work.turn;
@@ -1994,41 +1955,6 @@ fn readFirstLines(state: *State, effects: *Effects) error{OutOfMemory}!void {
         reads.len += 1;
     }
     if (reads.len != 0) effects.add(.{ .read_first_lines = reads });
-}
-
-/// Asks for the commands of up to eight needs-you rows not yet read. The
-/// open conversation's row waits: that conversation reads its Action, and
-/// a second read could meet the failure the conversation must report.
-fn readCommands(state: *State, effects: *Effects) void {
-    var reads: Commands = .{};
-    for (state.order.items) |at| {
-        if (reads.len == reads.items.len) break;
-        const row = &state.rows.items[at];
-        if (!row.needsYou() or row.command != .unread) continue;
-        if (state.conversing) |open| if (std.mem.eql(u8, &open, &row.reference)) continue;
-        const action = row.first_action orelse continue;
-        row.command = .requested;
-        reads.items[reads.len] = .{ .reference = row.reference, .action = action };
-        reads.len += 1;
-    }
-    if (reads.len != 0) effects.add(.{ .read_commands = reads });
-}
-
-/// Keeps a command's first line for the row still waiting on that Action.
-fn commandRead(state: *State, answer: CommandText) error{OutOfMemory}!void {
-    const at = lookup(state.by_reference.items, answer.reference) orelse return;
-    const row = &state.rows.items[at];
-    if (row.command != .requested or row.first_action != answer.action) return;
-    if (answer.unanswered) {
-        row.command = .unread;
-        return;
-    }
-    const bytes = answer.text orelse {
-        row.command = .unavailable;
-        return;
-    };
-    try state.lines.append(state.gpa, session_line.cut(max_line_bytes, session_line.firstLine(bytes)));
-    row.command = .{ .read = @intCast(state.lines.items.len - 1) };
 }
 
 fn firstLine(state: *State, result: FirstLine) error{OutOfMemory}!void {
@@ -2310,15 +2236,15 @@ fn changeArchiveView(state: *State, filter: ArchiveFilter, effects: *Effects) er
     try retainRows(state);
     state.pending.items.len = 0;
     // Only the active conversation can survive this membership reset.
-    // Keep its at-most-two cached lines, not the old listing's population.
-    var saved: [2]Bounded(max_line_bytes) = undefined;
+    // Keep its cached first line, not the old listing's population.
+    var saved: [1]Bounded(max_line_bytes) = undefined;
     var saved_count: usize = 0;
     for (state.rows.items) |*row| {
-        inline for (.{ &row.line, &row.command }) |line| if (line.* == .read) {
-            saved[saved_count] = state.lines.items[line.read];
-            line.* = .{ .read = @intCast(saved_count) };
+        if (row.line == .read) {
+            saved[saved_count] = state.lines.items[row.line.read];
+            row.line = .{ .read = @intCast(saved_count) };
             saved_count += 1;
-        };
+        }
     }
     state.lines.items.len = saved_count;
     @memcpy(state.lines.items, saved[0..saved_count]);
@@ -3172,14 +3098,6 @@ fn submit(state: *State) !Effects {
     return step(state, .{ .input = .{ .key = .enter } });
 }
 
-/// One needs-you row's command read.
-fn commandReadOf(ref: *const [6]u8, action: u64) Effect {
-    var reads: Commands = .{};
-    reads.items[0] = .{ .reference = ref.*, .action = action };
-    reads.len = 1;
-    return .{ .read_commands = reads };
-}
-
 fn expectEffects(expected: []const Effect, actual: Effects) !void {
     const effects = actual.slice();
     try std.testing.expectEqual(expected.len, effects.len);
@@ -3204,13 +3122,6 @@ fn expectEffects(expected: []const Effect, actual: Effects) !void {
             .archive => |request| {
                 try std.testing.expectEqualStrings(&request.reference, &got.archive.reference);
                 try std.testing.expectEqual(request.archived, got.archive.archived);
-            },
-            .read_commands => |reads| {
-                try std.testing.expectEqual(reads.len, got.read_commands.len);
-                for (reads.slice(), got.read_commands.slice()) |x, y| {
-                    try std.testing.expectEqualStrings(&x.reference, &y.reference);
-                    try std.testing.expectEqual(x.action, y.action);
-                }
             },
             .list_models, .cancel_upgrade, .open_settings, .focus_chat, .new_session, .exit => {},
             .create => |binding| {
@@ -3656,67 +3567,6 @@ test "the band names the provider of the newest sign-in or key failure" {
     try std.testing.expectEqualStrings("Sign-in expired. Run rui auth login chatgpt --device-code.", std.mem.trim(u8, sixty, " "));
     const forty = try segmentText(arena.allocator(), try headerSegments(arena.allocator(), &device, 40, .{}));
     try std.testing.expectEqualStrings("ChatGPT (device code) sign-in expired.", std.mem.trim(u8, forty, " "));
-}
-
-test "a needs-you row reads its waiting Action's command once, and again only when the Action changes" {
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var state = try testState();
-    defer state.deinit();
-    _ = try step(&state, .{ .tick = test_now_s * 1000 });
-    const asking = session("a5k1ng", .{ .approval = ago(120) }, .{ .label = "Fix flaky store test", .turn = 3, .first_action = 41 });
-    const working = session("w00001", .{ .working = ago(40) }, .{ .label = "Working", .turn = 2 });
-    const listed = try respond(&state, .full, testToken(1), &.{ asking, working });
-    // One read, for the row that needs you; none for the working row.
-    var asked: ?Commands = null;
-    for (listed.slice()) |effect| if (effect == .read_commands) {
-        asked = effect.read_commands;
-    };
-    try std.testing.expectEqual(@as(usize, 1), asked.?.len);
-    try std.testing.expectEqualStrings("a5k1ng", &asked.?.items[0].reference);
-    try std.testing.expectEqual(@as(u64, 41), asked.?.items[0].action);
-    // Until it answers, the row says nothing in its detail column.
-    try expectRow(try rowOf(a, &state, "Fix flaky store test", 100, .{}), 100, &.{ .{ "?", .attention }, .{ "Fix flaky store test", .normal }, .{ "2m", .quiet } });
-    // A command's first line shows, in the row's normal ink.
-    _ = try step(&state, .{ .command = .{ .reference = "a5k1ng".*, .action = 41, .text = "zig build test-store\n-Dfilter=retry" } });
-    state.selected = .new_session;
-    try expectRow(try rowOf(a, &state, "Fix flaky store test", 100, .{}), 100, &.{ .{ "?", .attention }, .{ "Fix flaky store test", .normal }, .{ "2m", .quiet } });
-    // The same Action listed again asks nothing.
-    for ((try refresh(&state, .changed, testToken(2), &.{asking})).slice()) |effect| try std.testing.expect(effect != .read_commands);
-    // A later Action asks again; an answer for the earlier one is dropped.
-    var next = asking;
-    next.first_action = 42;
-    var again: ?Commands = null;
-    for ((try refresh(&state, .changed, testToken(3), &.{next})).slice()) |effect| if (effect == .read_commands) {
-        again = effect.read_commands;
-    };
-    try std.testing.expectEqual(@as(u64, 42), again.?.items[0].action);
-    _ = try step(&state, .{ .command = .{ .reference = "a5k1ng".*, .action = 41, .text = "stale" } });
-    try expectRow(try rowOf(a, &state, "Fix flaky store test", 100, .{}), 100, &.{ .{ "?", .attention }, .{ "Fix flaky store test", .normal }, .{ "2m", .quiet } });
-    // No answer asks again at the next listing.
-    _ = try step(&state, .{ .command = .{ .reference = "a5k1ng".*, .action = 42, .text = null, .unanswered = true } });
-    var retried: ?Commands = null;
-    for ((try refresh(&state, .changed, testToken(4), &.{next})).slice()) |effect| if (effect == .read_commands) {
-        retried = effect.read_commands;
-    };
-    try std.testing.expectEqual(@as(u64, 42), retried.?.items[0].action);
-    // A tool with no command to show keeps the mark and title only, and
-    // is not asked again.
-    _ = try step(&state, .{ .command = .{ .reference = "a5k1ng".*, .action = 42, .text = null } });
-    for ((try refresh(&state, .changed, testToken(5), &.{next})).slice()) |effect| try std.testing.expect(effect != .read_commands);
-    try expectRow(try rowOf(a, &state, "Fix flaky store test", 100, .{}), 100, &.{ .{ "?", .attention }, .{ "Fix flaky store test", .normal }, .{ "2m", .quiet } });
-    // While its conversation is open, that conversation alone reads the
-    // Action; the row asks once the conversation returns.
-    next.first_action = 43;
-    _ = try step(&state, .{ .conversation = "a5k1ng".* });
-    for ((try refresh(&state, .changed, testToken(6), &.{next})).slice()) |effect| try std.testing.expect(effect != .read_commands);
-    _ = try step(&state, .{ .conversation = null });
-    var returned: ?Commands = null;
-    for ((try refresh(&state, .changed, testToken(7), &.{next})).slice()) |effect| if (effect == .read_commands) {
-        returned = effect.read_commands;
-    };
-    try std.testing.expectEqual(@as(u64, 43), returned.?.items[0].action);
 }
 
 /// Your Sessions at work and waiting, beside others' work and ends.
@@ -5426,7 +5276,6 @@ test "overview one-line rows at 40 and 140 columns cover every work state" {
         if (index == 7) listed.last_line = .{ .position = 1, .text = "All tests pass." };
         var state = try opened(&.{listed});
         defer state.deinit();
-        if (index == 5) _ = try step(&state, .{ .command = .{ .reference = listed.reference, .action = 7, .text = "Allow: echo yes" } });
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         const first = try rowSegments(arena.allocator(), &state, 0, width, .{}, 0);
@@ -6537,5 +6386,24 @@ test "session list state ages are compact stable against redraw and reset on sta
         const changed = try segmentText(arena.allocator(), try rowSegments(arena.allocator(), &state, 0, 46, .{}, 0));
         try std.testing.expectEqualStrings("1s ", changed[changed.len - 3 ..]);
         try std.testing.expectEqual(now, state.now_ms);
+    };
+}
+
+test "approval rows require no command reads across waiting Action and conversation changes" {
+    const states = [_]WorkState{
+        .{ .approval = ago(10) },
+        .{ .bash = .{ .since = test_now_s - 10, .call = 0, .description = null, .running = 1, .approvals = 1 } },
+    };
+    for (states) |work| for ([_]?Reference{ null, "asking".*, "other1".* }) |open| {
+        var state = try testState();
+        defer state.deinit();
+        _ = try step(&state, .{ .tick = test_now_s * 1000 });
+        state.conversing = open;
+        var waiting = session("asking", work, .{ .label = "Waiting", .first_action = 41 });
+        try expectEffects(&.{}, try respond(&state, .full, testToken(1), &.{waiting}));
+        waiting.first_action = 42;
+        try expectEffects(&.{}, try refresh(&state, .changed, testToken(2), &.{waiting}));
+        state.conversing = null;
+        try expectEffects(&.{}, try refresh(&state, .not_modified, testToken(2), &.{}));
     };
 }

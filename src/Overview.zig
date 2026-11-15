@@ -51,7 +51,6 @@ const Follow = @import("session_follow.zig").Follow;
 const TerminalText = @import("TerminalText.zig");
 const keymap = @import("keymap.zig");
 const keypress = @import("keypress.zig");
-const session_view = @import("session_view.zig");
 const model_capability = @import("model_capability.zig");
 const new_session_selection = @import("new_session_selection.zig");
 const preferences = @import("preferences.zig");
@@ -178,10 +177,6 @@ pub const Operations = struct {
     list: *const fn (*Self, client.Requests, protocol_reply.SessionListCursor, *protocol_reply.SessionListPage) anyerror!?protocol_reply.ReadFailure,
     /// The first line of a Session's first Message, read into `buffer`.
     first_line: *const fn (*Self, client.Requests, []const u8, u64, []u8) anyerror!protocol_reply.ActivityPrefixReply,
-    /// The leading bytes of the command a waiting Action would run, read
-    /// into `buffer`; null when the read is refused or its tool has no
-    /// command to show.
-    action_command: *const fn (*Self, client.Requests, []const u8, u64, []u8) anyerror!?[]const u8,
     /// Write the request's fate into the Reply, and return the error that
     /// ends the overview after a canonical Store failure.
     create: *const fn (*Self, client.Requests, configure_input.ConfigureInput, *Reply) anyerror!void,
@@ -194,7 +189,7 @@ pub const Operations = struct {
     open: *const fn (*Self, *vxfw.EventContext) anyerror!void,
 };
 
-pub const client_operations: Operations = .{ .host = hostFacts, .start_host = startHost, .list = listPage, .first_line = firstLine, .action_command = actionCommand, .create = createSession, .stop = stopSession, .archive = archiveSession, .pin = pinSession, .models = listModels, .open = openSession };
+pub const client_operations: Operations = .{ .host = hostFacts, .start_host = startHost, .list = listPage, .first_line = firstLine, .create = createSession, .stop = stopSession, .archive = archiveSession, .pin = pinSession, .models = listModels, .open = openSession };
 
 /// A conversation the person left from. Until the terminal is restored it
 /// holds its borrowers; `frontend` is null when it never started.
@@ -361,7 +356,6 @@ const Job = union(enum) {
     /// The traversal's next page.
     list,
     lines: view.Reads,
-    commands: view.Commands,
     /// A value snapshot, independent of later preference reads or key presses.
     create: CreationSnapshot,
     stop: view.Reference,
@@ -376,7 +370,7 @@ const Job = union(enum) {
     /// retire early. Both archive and restore are the same mutation job.
     fn quiescence(self: Job) Quiescence {
         return switch (self) {
-            .host, .list, .lines, .commands, .models => .cancel_read,
+            .host, .list, .lines, .models => .cancel_read,
             .start_host, .create, .stop, .archive, .pin, .defaults => .settle_effect,
         };
     }
@@ -403,8 +397,6 @@ const Answer = union(enum) {
     start_host: struct { read: HostRead, launch: HostLaunch },
     page: protocol_reply.SessionListPage,
     lines: [view.max_first_line_reads]Line,
-    /// Each command read's leading bytes, null when it has none to show.
-    commands: [view.max_first_line_reads]Command,
     /// A start's, stop's or archive's.
     reply: Reply,
     menu: model_picker.Menu,
@@ -427,8 +419,6 @@ const max_jobs = 10 + view.max_requests;
 const background_wait_ms = 200;
 
 const Line = struct { bytes: [view.max_line_read_bytes]u8 = undefined, result: enum { line, refused, unanswered } = .unanswered, len: usize = 0 };
-
-const Command = struct { bytes: [view.max_line_read_bytes]u8 = undefined, text: ?[]const u8 = null, answered: bool = false };
 
 /// A command's output: one byte past what the core takes tells it was cut.
 /// Stops a running command when App ends on a signal.
@@ -1353,7 +1343,6 @@ fn eventResult(self: *Self, value: view.Event) !EventResult {
             self.queue(.list);
         },
         .read_first_lines => |reads| self.queue(.{ .lines = reads }),
-        .read_commands => |reads| self.queue(.{ .commands = reads }),
         .create => |binding| self.queue(.{ .create = self.creationSnapshot(binding) }),
         .stop => |reference| self.queue(.{ .stop = reference }),
         .cancel_upgrade => self.upgrade_job.cancel(),
@@ -1465,13 +1454,6 @@ fn runJob(self: *Self, context: client.ReadContext) !void {
                 },
             };
         },
-        .commands => |reads| {
-            self.answer = .{ .commands = @splat(.{}) };
-            for (reads.slice(), self.answer.commands[0..reads.len]) |read, *command| {
-                command.text = try self.ops.action_command(self, requests, &read.reference, read.action, &command.bytes);
-                command.answered = true;
-            }
-        },
         .create => |*snapshot| {
             var compaction_buffer: [20]u8 = undefined;
             const input = self.creationInput(snapshot, &compaction_buffer) catch |err| {
@@ -1573,10 +1555,6 @@ fn deliver(self: *Self, outcome: anyerror!void) !?Next {
         .lines => |reads| for (reads.slice(), answer.lines[0..reads.len]) |read, *line| {
             const result: view.FirstLine = .{ .reference = read.reference, .admission = read.admission, .line = if (line.result == .line) line.bytes[0..line.len] else null, .unanswered = line.result == .unanswered };
             if (try self.event(.{ .first_line = result })) |next| return next;
-        },
-        // A batch that failed partway leaves the rest unanswered.
-        .commands => |reads| for (reads.slice(), answer.commands[0..reads.len]) |read, *command| {
-            if (try self.event(.{ .command = .{ .reference = read.reference, .action = read.action, .text = command.text, .unanswered = !command.answered } })) |next| return next;
         },
         .create => {
             if (answer.reply.outcome == .accepted) self.started = answer.reply.session;
@@ -2056,26 +2034,6 @@ fn firstLine(self: *Self, requests: client.Requests, session: []const u8, positi
     return requests.readActivityPrefix(self.options.store, session, position, buffer);
 }
 
-/// The leading bytes of a waiting Bash Action's command, read as the
-/// conversation reads an Action: its tool first, then its arguments. Null
-/// for any other tool, an Action resolved since the listing, or a refused
-/// read.
-fn actionCommand(self: *Self, requests: client.Requests, session: []const u8, action: u64, buffer: []u8) !?[]const u8 {
-    const io = self.init.io;
-    const file = self.scratch.?;
-    const tool = try session_view.actionTool(requests, self.options.store, session, action, file) orelse return null;
-    // Action reads write at the descriptor's streaming offset.
-    try io.vtable.fileSeekTo(io.userdata, file, 0);
-    try file.setLength(io, 0);
-    var reply: client.ReplyBuffer = .{};
-    const result = try requests.readActionArguments(self.options.store, session, action, file, &reply);
-    if (result == .command) {
-        try protocol_reply.checkCanonicalFailure(result.command);
-        return null;
-    }
-    return session_view.bashCommand(io, file, &tool, buffer);
-}
-
 fn createSession(self: *Self, requests: client.Requests, input: configure_input.ConfigureInput, reply: *Reply) !void {
     const io = self.init.io;
     var captured = client.captureConfigure(io, input, .{ .generated = self.options.directory }).get() catch |err| {
@@ -2209,13 +2167,6 @@ const fake_operations: Operations = .{
             return .{ .line = buffer[0..text.len] };
         }
     }.firstLine,
-    .action_command = struct {
-        fn actionCommand(_: *Self, _: client.Requests, _: []const u8, _: u64, buffer: []u8) !?[]const u8 {
-            const text = "zig build test-store";
-            @memcpy(buffer[0..text.len], text);
-            return buffer[0..text.len];
-        }
-    }.actionCommand,
     .create = struct {
         fn create(_: *Self, _: client.Requests, settings: configure_input.ConfigureInput, reply: *Reply) !void {
             Seen.now.creates += 1;
@@ -5755,7 +5706,7 @@ test "pinned New Session remains above the end marker and responds to clicks and
         _ = try rig.press("\x1b[F\x1b[A");
         const selected = rig.overview.state.selected.session;
         for (0..2) |_| {
-            var shown = try rig.shown(width, 11);
+            var shown = try rig.shown(width, 9);
             defer shown.deinit();
             try std.testing.expect(std.mem.startsWith(u8, try shown.line(0), "  + New Session"));
             try std.testing.expect(std.mem.indexOf(u8, try shown.line(1), "Archived") != null);
@@ -5765,12 +5716,12 @@ test "pinned New Session remains above the end marker and responds to clicks and
             } else return error.SelectedSessionMissing;
             try std.testing.expectEqual(@as(u16, 1), span.height);
         }
-        try std.testing.expect(try rig.click(3, 0, width, 11) == null);
+        try std.testing.expect(try rig.click(3, 0, width, 9) == null);
         try std.testing.expectEqual(view.Selection.new_session, rig.overview.state.selected);
         try std.testing.expectEqual(@as(usize, 0), Seen.now.conversations);
         try std.testing.expect(try rig.press("\r") == null);
         try std.testing.expectEqual(@as(usize, 0), Seen.now.conversations);
-        try std.testing.expect(try rig.click(3, 0, width, 11) == null);
+        try std.testing.expect(try rig.click(3, 0, width, 9) == null);
         try std.testing.expect(rig.overview.state.creating());
         try std.testing.expect(try rig.settle() == null);
         try std.testing.expectEqual(@as(usize, 1), Seen.now.creates);
@@ -6941,22 +6892,6 @@ const key_encodings = std.enums.EnumArray(keymap.Key, []const []const u8).init(.
     .end = &.{ "\x1b[F", "\x1bOF", "\x1b[4~", "\x1b[8~", "\x1b[1;1F" },
     .ctrl_end = &.{ "\x1b[1;5F", "\x1b[4;5~" },
 });
-test "a command read shows the bytes its operation returned" {
-    const rig = try openListed();
-    defer rig.close();
-    const overview = rig.overview;
-    const row = &overview.state.rows.items[0];
-    row.command = .requested;
-    row.first_action = 7;
-    var reads: view.Commands = .{};
-    reads.items[0] = .{ .reference = row.reference, .action = 7 };
-    reads.len = 1;
-    overview.queue(.{ .commands = reads });
-    try std.testing.expect(try rig.settle() == null);
-    const shown = &overview.state.rows.items[0];
-    try std.testing.expectEqualStrings("zig build test-store", overview.state.lines.items[shown.command.read].slice());
-}
-
 test "empty creation captures fresh effort and permission at admitted Enter or click before its worker runs" {
     for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |click| {
         var tmp = std.testing.tmpDir(.{});
