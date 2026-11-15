@@ -290,6 +290,12 @@ test "production turn preserves skipped continuation preference through actual S
                 pub fn freeSlots(_: *@This()) usize {
                     return 1;
                 }
+                pub fn custodyAvailable(self: *@This()) bool {
+                    return self.freeSlots() != 0;
+                }
+                pub fn includeMcp(_: *@This()) bool {
+                    return false;
+                }
                 pub fn providerConfigured(_: *@This()) bool {
                     return true;
                 }
@@ -316,8 +322,8 @@ test "production turn preserves skipped continuation preference through actual S
                     self.action = admission.permit.consume() catch unreachable;
                     return .admitted;
                 }
-                pub fn scanWork(self: *@This(), paused: bool) error{Fence}!turn.Work {
-                    const found = self.storage.dispatchWork(paused, true) catch |err| {
+                pub fn scanWork(self: *@This(), paused: bool, include_mcp: bool) error{Fence}!turn.Work {
+                    const found = self.storage.dispatchWork(paused, include_mcp) catch |err| {
                         self.failure = err;
                         return error.Fence;
                     };
