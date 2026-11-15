@@ -128,6 +128,8 @@ pub const Action = enum {
     next,
     select_previous,
     select_next,
+    previous_session,
+    next_session,
     first,
     last,
     clear,
@@ -151,6 +153,8 @@ pub const keys: keymap.Keymap(Action) = .init(.{
     .ctrl_r = null,
     .ctrl_x = .stop,
     .alt_a = .archive,
+    .alt_up = .previous_session,
+    .alt_down = .next_session,
     .up = .previous,
     .down = .next,
     .left = null,
@@ -2117,12 +2121,33 @@ fn listInput(state: *State, delivery: InputDelivery, effects: *Effects) error{Ou
             .archive => archiveIntent(state, .selected_archive, effects),
             .select_previous => select(state, .previous),
             .select_next => select(state, .next),
+            .previous_session => try adjacentSession(state, .previous, effects),
+            .next_session => try adjacentSession(state, .next, effects),
             else => {
                 state.notice = null;
                 select(state, action);
             },
         },
     }
+}
+
+/// A list selection cannot move the open chat's navigation anchor.
+fn adjacentSession(state: *State, direction: Action, effects: *Effects) error{OutOfMemory}!void {
+    const order = state.order.items;
+    if (order.len == 0) return;
+    const anchor = if (state.conversing) |open|
+        position(state, open) orelse return
+    else if (state.selected == .session)
+        position(state, state.selected.session)
+    else
+        null;
+    const target = if (anchor) |at| switch (direction) {
+        .previous => at -| 1,
+        .next => @min(at + 1, order.len - 1),
+        else => unreachable,
+    } else if (direction == .previous) order.len - 1 else 0;
+    state.selected = .{ .session = state.rows.items[order[target]].reference };
+    try enter(state, effects);
 }
 
 fn enter(state: *State, effects: *Effects) error{OutOfMemory}!void {
@@ -6407,6 +6432,10 @@ test "semantic list admission owns covered Settings paste creation and Upgrade p
                         try std.testing.expect(std.meta.eql(before_notice, state.notice));
                         try std.testing.expectEqual(Selection.archived, state.selected);
                     },
+                    .previous_session, .next_session => {
+                        try std.testing.expect(std.meta.eql(before_notice, state.notice));
+                        try std.testing.expectEqual(Selection.new_session, state.selected);
+                    },
                     .clear => try expectNotice(&state, null),
                     .stop, .archive => try expectNotice(&state, if (phase.held) upgrade_recovery else no_selection),
                     .previous, .next, .first, .last, .select_previous, .select_next => {
@@ -6472,4 +6501,91 @@ test "the shared row fitter handles no description cells without allocating or u
         try std.testing.expectEqualStrings("", shown.bytes);
         try std.testing.expectEqual(@as(usize, 0), shown.cells);
     }
+}
+
+test "Option session navigation opens adjacent projected chats anchored to conversation" {
+    for ([_]u16{ 46, 140 }) |width| for ([_]Action{ .previous_session, .next_session }) |action| {
+        var state = try opened(&mixed);
+        defer state.deinit();
+        _ = try step(&state, .{ .resized = .{ .width = width, .height = 30 } });
+        for (0..state.order.items.len) |at| {
+            const open = state.rows.items[state.order.items[at]].reference;
+            _ = try step(&state, .{ .conversation = open });
+            state.selected = .settings;
+            const target = if (action == .previous_session) at -| 1 else @min(at + 1, state.order.items.len - 1);
+            const reference = state.rows.items[state.order.items[target]].reference;
+            const effects = try step(&state, .{ .input = .{ .key = .{ .action = action } } });
+            var navigations: usize = 0;
+            for (effects.slice()) |effect| switch (effect) {
+                .focus_chat => {
+                    try std.testing.expectEqual(at, target);
+                    navigations += 1;
+                },
+                .open => |actual| {
+                    try std.testing.expect(target != at);
+                    try std.testing.expectEqual(reference, actual);
+                    navigations += 1;
+                },
+                .create, .new_session, .open_settings => return error.UnexpectedNavigation,
+                else => {},
+            };
+            try std.testing.expectEqual(@as(usize, 1), navigations);
+            try std.testing.expectEqual(Selection{ .session = reference }, state.selected);
+            try std.testing.expectEqual(@as(?Reference, open), state.conversing);
+        }
+        _ = try step(&state, .{ .conversation = "zzzzzz".* });
+        try expectEffects(&.{}, try step(&state, .{ .input = .{ .key = .{ .action = action } } }));
+    };
+}
+
+test "Option session navigation retains populated creation and Upgrade admission guards" {
+    for ([_]Action{ .previous_session, .next_session }) |action| for ([_]enum { pending, uncertain, upgrade }{ .pending, .uncertain, .upgrade }) |guard| {
+        var state = try opened(&mixed);
+        defer state.deinit();
+        if (guard != .upgrade) {
+            state.selected = .new_session;
+            _ = try submit(&state);
+            if (guard == .uncertain) _ = try step(&state, .{ .created = .{ .unconfirmed = "saved-create" } });
+        } else state.upgrade = .{ .after = .blocked };
+        const open = state.rows.items[state.order.items[1]].reference;
+        _ = try step(&state, .{ .conversation = open });
+        const before = state.selected;
+        const effects = try step(&state, .{ .input = .{ .key = .{ .action = action } } });
+        for (effects.slice()) |effect| try std.testing.expect(effect != .open and effect != .create and effect != .open_settings);
+        try std.testing.expectEqual(@as(?Reference, open), state.conversing);
+        if (guard != .upgrade) try std.testing.expectEqual(before, state.selected) else try expectNotice(&state, upgrade_recovery);
+    };
+}
+
+test "Option session navigation skips paired New Session Archived and Settings controls" {
+    for ([_]u16{ 46, 140 }) |width| for ([_]Action{ .previous_session, .next_session }) |action| for ([_]Selection{ .new_session, .archived, .settings }) |control| for ([_]bool{ false, true }) |chat_open| {
+        var state = try opened(&mixed);
+        defer state.deinit();
+        _ = try step(&state, .{ .resized = .{ .width = width, .height = 30 } });
+        const anchor: usize = state.order.items.len / 2;
+        if (chat_open) _ = try step(&state, .{ .conversation = state.rows.items[state.order.items[anchor]].reference });
+        state.selected = control;
+        const target = if (chat_open) (if (action == .previous_session) anchor - 1 else anchor + 1) else (if (action == .previous_session) state.order.items.len - 1 else 0);
+        const expected = state.rows.items[state.order.items[target]].reference;
+        const effects = try step(&state, .{ .input = .{ .key = .{ .action = action } } });
+        var opens: usize = 0;
+        for (effects.slice()) |effect| switch (effect) {
+            .open => |reference| {
+                try std.testing.expectEqual(expected, reference);
+                opens += 1;
+            },
+            .create, .new_session, .open_settings => return error.UnexpectedNavigation,
+            else => {},
+        };
+        try std.testing.expectEqual(@as(usize, 1), opens);
+        try std.testing.expectEqual(Selection{ .session = expected }, state.selected);
+    };
+    for ([_]Action{ .previous_session, .next_session }) |action| for ([_]Selection{ .new_session, .archived, .settings }) |control| {
+        var empty = try opened(&.{});
+        defer empty.deinit();
+        empty.selected = control;
+        const effects = try step(&empty, .{ .input = .{ .key = .{ .action = action } } });
+        try expectEffects(&.{}, effects);
+        try std.testing.expectEqual(control, empty.selected);
+    };
 }
