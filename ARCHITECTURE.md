@@ -2485,6 +2485,9 @@ At most one automatic start runs per overview: a failed start or a second crash 
 
 The overview refreshes about once a second with `session list` `since`, keeping its rows and replacing those reported changed.
 The overview has no slash-command parser or view command surface; the former `/sessions` archive-view commands and counts-line view-name click are removed.
+The pinned `+ New Session` row always draws a quiet `Archived` at its right end wherever the list is visible, including the conversation sidebar and empty Stores or archives. `OverviewLines.NewSession` draws the same control and press regions in both layouts; no Store existence query or listing availability fact is needed.
+On that row Right selects `Archived` and Left selects `New Session`; Enter or a click on `Archived` toggles the existing archived view, and Esc there returns to the usual list. A click elsewhere on the row remains New Session.
+New Session from a conversation follows the frontend’s existing new-chat departure policy, preserving retained drafts and refusing unsafe departures before retiring the frontend. After ordinary retirement, the same Configure creation owner opens the new focused chat.
 Alt-A puts away the selected Session through the existing archive owner, stopping its work first when required. Shell archive/list/unarchive commands remain available, and `/archive` and `/unarchive` in an open chat retain their existing Session-local behavior.
 A row remains visible with archive progress until the server reports it archived.
 Archived rows and exact conversations show their archive state.
@@ -2515,8 +2518,8 @@ One line map, `listItem` in `src/overview_view.zig`, names each list line for dr
 Each drawn row keeps that name, so a click means what the person saw even when the list changed since the frame, and a Session gone by then opens nothing.
 The Sessions list, a panel and the model picker are three widgets in the list's place; the screen shows the one the core names (`State.listArea`), and only the Sessions hear a press.
 Ctrl-X sends an ordinary `session stop` for the selected row, with the same capture and recovery as the CLI command.
-List input reaches `overview_view.step` as a semantic action from the list's one key table (Right is `open_session` there), Enter or ignored input; clicks carry the Session, New Session or Settings identity drawn in the frame.
-Enter on a Session row opens it, and Right does the same on a Session row and nothing on New Session or Settings; on the row of the chat already open, either one, or a click on that row, returns keys to that chat's input instead, keeping its draft and anything it presents, such as Chat Info, and sends the Host nothing.
+List input reaches `overview_view.step` as a semantic action from the list's one key table (Right is `open_session` there), Enter, semantic Left or ignored input; clicks carry the Session, New Session, Archived or Settings identity drawn in the frame.
+Enter on a Session row opens it, and Right does the same on a Session row, selects Archived on New Session, and does nothing on Settings; on the row of the chat already open, either one, or a click on that row, returns keys to that chat's input instead, keeping its draft and anything it presents, such as Chat Info, and sends the Host nothing.
 Printable keys and bracketed paste are ignored: no editor, hidden draft, frozen-editor state, command list, skill cache or duplicate footer focus exists on the overview.
 Arrows, Home and End keep whole-list navigation, including the pinned New Session and Settings rows; Settings is the penultimate row immediately before the footer.
 The core owns selection, opening admission and pending/uncertain creation; the shell applies its effects.
