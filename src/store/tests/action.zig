@@ -713,25 +713,6 @@ const NativePromotion = struct {
             return err;
         };
         try std.testing.expectEqual(expected, page.work.work.first_action);
-        const report_file = try tmp.dir.createFile(std.testing.io, "native-promotion-report", .{ .read = true });
-        defer report_file.close(std.testing.io);
-        try report_file.writePositionalAll(std.testing.io, bytes, 0);
-        const report_read = @import("../../protocol_reply.zig").CurrentReply.decode(std.testing.io, report_file, session, .{ .report = .{ .bytes = bytes.len } }) catch |err| {
-            std.debug.print("native promotion Current decode: {s} present={any}\n", .{ @errorName(err), present });
-            return err;
-        };
-        try std.testing.expect(report_read == .current);
-        try std.testing.expectEqual(expected, report_read.current.first_action);
-        var rendered: std.Io.Writer.Allocating = .init(std.testing.allocator);
-        defer rendered.deinit();
-        try @import("../../host_reply.zig").renderActivityPage(.{ .writer = &rendered.writer }, &page);
-        const parsed = try std.testing.allocator.create(@import("../../protocol_reply.zig").ActivityPage);
-        defer std.testing.allocator.destroy(parsed);
-        parsed.* = @import("../../protocol_reply.zig").ActivityPage.parse(rendered.written(), .{}) catch |err| {
-            std.debug.print("native promotion Activity decode: {s} present={any}\n", .{ @errorName(err), present });
-            return err;
-        };
-        try std.testing.expectEqual(expected, parsed.facts.work.work.first_action);
     }
 };
 

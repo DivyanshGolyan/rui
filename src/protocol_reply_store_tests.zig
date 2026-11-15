@@ -153,3 +153,89 @@ test "Session settings Current report and typed Settings round trip every settin
     try std.testing.expectEqualStrings(&std.fmt.bytesToHex(protocol.contentDigest("Every setting instructions."), .lower), current.instructions.sha256.slice());
     try std.testing.expectEqualStrings(&std.fmt.bytesToHex(protocol.contentDigest("{}"), .lower), current.output_schema.?.sha256.slice());
 }
+
+const PromotedApproval = struct {
+    fn expect(storage: *store.Store, tmp: *std.testing.TmpDir, session: []const u8, action: u64, present: bool) !void {
+        const bytes = try store.testingSessionReportWithProfile(storage, tmp, session, 1024 * 1024, .current);
+        defer std.testing.allocator.free(bytes);
+        const expected: ?u64 = if (present) action else null;
+        var request: protocol.ActivityPage = .{};
+        try request.session.set(session);
+        const page = try @import("store/Store.zig").activityPageForTesting(storage, request);
+        const report_file = try tmp.dir.createFile(std.testing.io, "native-promotion-report", .{ .read = true });
+        defer report_file.close(std.testing.io);
+        try report_file.writePositionalAll(std.testing.io, bytes, 0);
+        const report_read = protocol_reply.CurrentReply.decode(std.testing.io, report_file, session, .{ .report = .{ .bytes = bytes.len } }) catch |err| {
+            std.debug.print("native promotion Current decode: {s} present={any}\n", .{ @errorName(err), present });
+            return err;
+        };
+        try std.testing.expect(report_read == .current);
+        try std.testing.expectEqual(expected, report_read.current.first_action);
+        var rendered: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer rendered.deinit();
+        try @import("host_reply.zig").renderActivityPage(.{ .writer = &rendered.writer }, &page);
+        const parsed = try std.testing.allocator.create(protocol_reply.ActivityPage);
+        defer std.testing.allocator.destroy(parsed);
+        parsed.* = protocol_reply.ActivityPage.parse(rendered.written(), .{}) catch |err| {
+            std.debug.print("native promotion Activity decode: {s} present={any}\n", .{ @errorName(err), present });
+            return err;
+        };
+        try std.testing.expectEqual(expected, parsed.facts.work.work.first_action);
+    }
+};
+
+test "client decoders retain promoted old Turn approval before and after continuation" {
+    for ([_]enum { allow, deny, stop }{ .allow, .deny, .stop }) |choice| {
+        const io = std.testing.io;
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: store.Store = undefined;
+        try store.testing.testingSqliteStore(&storage, &tmp, io);
+        defer storage.close() catch unreachable;
+        var workspace_buffer: [@import("workspace_path.zig").max_bytes]u8 = undefined;
+        const workspace = try store.testingCanonicalCwd(io, &workspace_buffer);
+        var configure = try store.testingCompleteConfiguration("configure", "", workspace, "model-a");
+        try configure.configuration.permission_mode.value.set("ask");
+        const session = (try storage.configure(&configure, .{})).accepted.session;
+        try store.testingSubmitMessage(&storage, &tmp, "input", "task", session.slice(), "Run the tool.");
+        const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        const arguments = "{\"description\":\"Held tool\",\"cmd\":\"true\"}";
+        const encoded = try std.json.Stringify.valueAlloc(std.testing.allocator, arguments, .{});
+        defer std.testing.allocator.free(encoded);
+        try store.settleCallsForTesting(&storage, &tmp, model, "calls", &.{.{
+            .item_id = "call-item",
+            .name = "bash",
+            .encoded_call_id = "call-id",
+            .decoded_call_id = "call-id",
+            .encoded_arguments = encoded[1 .. encoded.len - 1],
+            .decoded_arguments = arguments,
+        }});
+        const action = try store.testing.queryU64(&storage, "SELECT action_id FROM action_operation WHERE parent_operation_id=?1", .{model.operation_id});
+        const free: usize = 2;
+        var promote: @import("command_input.zig").ActionBackgroundCommand = .{ .action_id = action, .session = session };
+        try promote.key.set("promote");
+        try std.testing.expect(storage.backgroundAction(&promote, .{ .total = 2, .context = &free, .freeFn = struct {
+            fn read(context: *const anyopaque) usize {
+                return @as(*const usize, @ptrCast(@alignCast(context))).*;
+            }
+        }.read }, .{}) == .accepted);
+        const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        try PromotedApproval.expect(&storage, &tmp, session.slice(), action, true);
+        try store.settleAnswerItemsForTesting(&storage, &tmp, continuation, &.{"{\"type\":\"message\",\"id\":\"answer-item\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"Done.\"}]}"}, "Done.");
+        try PromotedApproval.expect(&storage, &tmp, session.slice(), action, true);
+        if (choice == .stop) {
+            var stop = try store.testingCompleteSessionStop("stop-pending", session.slice());
+            try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+        } else {
+            var decision: protocol.PermissionDecisionCommand = .{ .session = session, .action_id = action, .decision = if (choice == .allow) .allow_once else .deny };
+            try decision.key.set("decide-old-turn");
+            try std.testing.expect(storage.decidePermission(&decision, .{}) == .accepted);
+            if (choice == .allow) {
+                const selected = (try storage.nextAction(.bash, .fromFree(2, true))).?;
+                const binding = (try storage.admitActionAttempt(selected, 30_000, .{})).?.permit.binding;
+                _ = try storage.settleActionAttempt(binding, .succeeded, "Approved after Turn ended", .{});
+            }
+        }
+        try PromotedApproval.expect(&storage, &tmp, session.slice(), action, false);
+    }
+}
