@@ -272,10 +272,16 @@ fn adoptInserted(a: anytype, value: *Import) void {
 /// with a Host identity and a zeroed payload of the right length, which
 /// the Access records.
 pub fn importSlot(a: anytype, value: *Import) !ContentSlot {
-    adoptInserted(a, value);
+    return acquireSlot(a, value, .tracked);
+}
+
+/// Tracked imports may share lookups made before writes. Sequential imports
+/// look up after each preceding insert and need no resident identity table.
+fn acquireSlot(a: anytype, value: *Import, policy: enum { tracked, sequential }) !ContentSlot {
+    if (policy == .tracked) adoptInserted(a, value);
     if (value.found) |row| return .{ .id = @intCast(row.content_id.get()), .existing = true };
     const id = try insertRow(a, value);
-    a.recordInserted(&value.digest, value.length, value.private, id);
+    if (policy == .tracked) a.recordInserted(&value.digest, value.length, value.private, id);
     value.found = .{ .content_id = .of(id) };
     return .{ .id = @intCast(id), .existing = false };
 }
@@ -428,11 +434,7 @@ pub fn importSealed(a: anytype, io: std.Io, field: *const content_custody.Conten
 /// The range never closes or refunds the capture's custody.
 pub fn importRange(a: anytype, io: std.Io, range: content_custody.Range, value: *Import, faults: Faults) !u64 {
     std.debug.assert(!value.private and value.length == range.length and std.mem.eql(u8, &value.digest, &range.digest));
-    const slot: ContentSlot = if (value.found) |row|
-        .{ .id = @intCast(row.content_id.get()), .existing = true }
-    else
-        .{ .id = @intCast(try insertRow(a, value)), .existing = false };
-    value.found = .{ .content_id = .of(@intCast(slot.id)) };
+    const slot = try acquireSlot(a, value, .sequential);
     return importRangeSlot(a, io, range, slot, faults);
 }
 

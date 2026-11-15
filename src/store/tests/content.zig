@@ -476,3 +476,90 @@ test "sealed Content range failures roll back raw rows and leave descriptor cust
         }
     }.run);
 }
+
+/// Each lookup follows the preceding insert in the same transaction, like
+/// ordered input saving. The fixture retains only its current borrowed range.
+const ImportSequence = struct {
+    const transition = @import("../transition.zig");
+    const capture = @import("../../InputCapture.zig");
+    pub const rounds = transition.rounds(.{ .lookup = .{.paged} });
+    pub const round_budget = 1;
+    pub const commit: transition.Commit = .transaction;
+    pub const begin: ?rounds.At = .lookup;
+    pub const Input = capture.Loan;
+    pub const Result = u64;
+    pub const Ordinary = error{};
+    pub const Declined = error{};
+    pub const Guards = error{};
+
+    input: Input,
+    cursor: ?capture.Cursor = null,
+    part: capture.Part = undefined,
+    value: content_domain.Import = undefined,
+    imported: u64 = 0,
+
+    pub fn step(self: *ImportSequence, r: *transition.Round(ImportSequence), ran: ?rounds.At) !transition.Next(ImportSequence) {
+        if (ran != null) {
+            _ = try content_domain.importRange(r, std.testing.io, self.part.range, &self.value, .{});
+            self.imported += 1;
+        } else self.cursor = self.input.cursor();
+        self.part = (try self.cursor.?.next()) orelse return .commit;
+        self.value = .{ .length = self.part.range.length, .digest = self.part.range.digest, .private = false };
+        content_domain.lookup(r, &self.value);
+        return .{ .round = .lookup };
+    }
+
+    pub fn committed(self: *const ImportSequence) Result {
+        return self.imported;
+    }
+};
+
+test "sequential Content ranges exceed the small import memo and deduplicate within one transaction" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            const capture_type = @import("../../InputCapture.zig");
+            const transition = @import("../transition.zig");
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var used: std.atomic.Value(u64) = .init(0);
+            var capture: capture_type = undefined;
+            {
+                const spool = try tmp.dir.createFile(std.testing.io, "sequence-spool", .{ .read = true });
+                errdefer spool.close(std.testing.io);
+                const index = try tmp.dir.createFile(std.testing.io, "sequence-index", .{ .read = true });
+                errdefer index.close(std.testing.io);
+                try tmp.dir.deleteFile(std.testing.io, "sequence-spool");
+                try tmp.dir.deleteFile(std.testing.io, "sequence-index");
+                capture.init(std.testing.io, spool, index, .{ .used = &used, .limit = 8192 });
+            }
+            defer capture.close();
+            const bytes = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 0, 7 };
+            for (bytes) |byte| {
+                try capture.begin(.text, 1);
+                var allowance: usize = 1;
+                try std.testing.expectEqual(@as(usize, 1), try capture.append(&.{byte}, &allowance, false));
+                try capture.end();
+            }
+            const loan = try capture.seal();
+            const before = try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{});
+            const charged = used.load(.acquire);
+            try std.testing.expectEqual(@as(u64, bytes.len), try transition.apply(&storage, ImportSequence, loan, .{}));
+            try std.testing.expectEqual(before + 8, try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
+            try std.testing.expectEqual(charged, used.load(.acquire));
+            capture.close();
+            try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+            for (0..8) |index| {
+                const expected = [_]u8{@intCast(index)};
+                var reader: ContentReader = undefined;
+                reader.open(try storage.openContent(.{ .length = 1, .digest = protocol.contentDigest(&expected) }));
+                defer reader.close();
+                var actual: [1]u8 = undefined;
+                try std.testing.expectEqual(@as(usize, 1), try reader.read(0, &actual));
+                try std.testing.expectEqualSlices(u8, &expected, &actual);
+            }
+        }
+    }.run);
+}
