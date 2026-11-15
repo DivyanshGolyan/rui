@@ -2,7 +2,7 @@
 
 This is the L3 design note before the slot-ownership replacement.
 The replacement is not implemented or qualified by this note.
-[Architecture](../ARCHITECTURE.md#capacity-ownership) remains the runtime contract.
+[Architecture](contracts/resources.md#capacity-ownership) remains the runtime contract.
 
 ## The audit found duplicate authority, not a reproduced race
 

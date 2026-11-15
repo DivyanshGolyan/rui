@@ -1,6 +1,6 @@
 # Optional output retention: prior art
 
-Inspected 2026-09-12. This is source research for [Choose optional tool-output retention budgets and bookkeeping](https://github.com/DivyanshGolyan/rui/issues/146), not an accepted policy, implementation or runtime qualification. Current behavior remains in [shared scratch ownership](../ARCHITECTURE.md#shared-scratch-ownership).
+Inspected 2026-09-12. This is source research for [Choose optional tool-output retention budgets and bookkeeping](https://github.com/DivyanshGolyan/rui/issues/146), not an accepted policy, implementation or runtime qualification. Current behavior remains in [shared scratch ownership](../docs/contracts/resources.md#shared-scratch-ownership).
 
 The subsequent [user decision](https://github.com/DivyanshGolyan/rui/issues/146#issuecomment-5643175874) supersedes the initial recommendation below; this note preserves the source evidence and its limits.
 

@@ -1,0 +1,918 @@
+# Session UI and terminal lifetime
+
+[Architecture](../../ARCHITECTURE.md) owns shared guarantees, terminology, and the source map.
+[Verification](../../VERIFICATION.md) owns global evidence rules and gates.
+
+## Accepted contract
+
+### Human entry and authentication
+
+On a terminal, bare `rui` (optionally `--store`, `--provider`, `--model`) opens the **Session overview** of unarchived Sessions in the Store; each row shows its Workspace.
+The overview is Rui's primary terminal surface: a client view over Session listing and host information, not a Host entity, registry or report.
+It neither creates nor resumes a Session.
+It captures canonical cwd before starting/attaching the selected Host (default Active Capacity 100), and resolves only a locally usable supported provider for Sessions it may start; an unavailable or ambiguous choice opens the app with ChatGPT and API key choices on the input row, without creating a Session.
+The same screen opens from app settings Sign-in; it drives the credential owners on a cancellable UI worker, shows a clickable sign-in link or masked key entry, and keeps failures on that row in plain words.
+Its ChatGPT choice is selected first and signs in through the browser, with a device code as the option (Divyansh chose this on 2026-11-13, "one ChatGPT sign-in, two ways to log in"): Enter reuses a usable browser sign-in, else a usable device-code sign-in, else begins the browser sign-in through the same login as `rui auth login chatgpt`.
+While it waits the row shows `Sign in at HOST`, linked to the whole address, and a masked entry for the address the browser ended on, which Enter hands to the login as the command line hands it a pasted line; a line that is not that address says so and the wait goes on.
+Tab while it waits, or after it failed with nothing saved, cancels it through the same gate as Esc and begins the device code once the cancelled attempt has settled, even when that attempt ends with a failure of its own.
+The link and the entry live in pages mapped for that attempt alone, wiped and unmapped when it settles; the browser's failure page sends the person back to Rui.
+While it is open it takes every key and click, so nothing behind it opens or navigates.
+Esc leaves it, except the first-run screen, which stays until sign-in gives a default; a screen opened from Settings always returns there.
+Its choice uses the approval row's prompt and background-only selection, including with NO_COLOR; the device row always reads `auth.openai.com/codex/device · CODE`, using the answer view's terminal hyperlink boundary.
+A locally ready sign-in for the chosen row is selected without reinstalling its credential. Credential publication, default saving and Host activation settle once through the same owner on completion or departure, so leaving after publication cannot hide a failed default save.
+After credential publication it saves the provider default through `saveProviderAfterLogin` and uses the existing Host start path before enabling task input.
+The shared `host_launch` result retains startup output, failure context and warnings across activation. Its reporting policy supplies terminal diagnostics after screen restoration and one plain sign-in-row line; only retryable failures offer Enter. Successful activation warnings remain a single overview notice, independently of default-save failure.
+A running Host that does not serve the chosen provider is reported, not restarted.
+When all three selectors are explicit, unreadable future defaults cannot block the overview, even after login fails to save them; otherwise the post-login choice rereads future defaults.
+A ready existing Host retains its actual capacity/capabilities; no model capability prevents opening the overview without restarting it.
+When its Host goes away the overview stays open and says so on one Host line, `■ Host stopped · start`; a click on its start control starts it through the same launch owner. Printable `r` on the overview is ignored.
+A Host that ended without being asked to stop (a crash or SIGKILL) is started once by itself, the line reading `Host starting` meanwhile; a Host stopped by `host-stop` (pause, stop or an Upgrade's swap), by its launcher closing stdin, or by SIGINT, SIGTERM or SIGHUP (Ctrl-C on a foreground `host serve`, closing its terminal, or `kill`) is not, nor while an Upgrade holds the Host.
+The stopping Host leaves a stop record beside its Store lease, which every Host start removes; an unreadable record counts as a stop someone asked for.
+At most one automatic start runs per overview: a failed start or a second crash leaves the line’s start control available, with no retry or backoff.
+
+The overview refreshes about once a second with `session list` `since`, keeping its rows and replacing those reported changed.
+The overview has no slash-command parser or view command surface; the former `/sessions` archive-view commands and counts-line view-name click are removed.
+The pinned `+ New Session` row always draws a quiet `Archived` at its right end wherever the list is visible, including the conversation sidebar and empty Stores or archives. `OverviewLines.NewSession` draws the same control and press regions in both layouts; no Store existence query or listing availability fact is needed.
+On that row Right selects `Archived` and Left selects `New Session`; Enter or a click on `Archived` toggles the existing archived view, and Esc there returns to the usual list. A click elsewhere on the row remains New Session.
+New Session from a conversation follows the frontend’s existing new-chat departure policy, preserving retained drafts and refusing unsafe departures before retiring the frontend. After ordinary retirement, the same Configure creation owner opens the new focused chat.
+Alt-A puts away the selected Session through the existing archive owner, stopping its work first when required. Shell archive/list/unarchive commands remain available, and `/archive` and `/unarchive` in an open chat retain their existing Session-local behavior.
+A row remains visible with archive progress until the server reports it archived.
+Archived rows and exact conversations show their archive state.
+Conversations also expose `/archive` and `/unarchive`; these validated commands and Alt-A forward semantic intents for the exact open Session even when it is absent from the listing.
+The overview core owns their archive/restore request ledger and worker effects; conversation slash commands never run a separate CLI archive mutation.
+Alt-A leaves the draft, caret and retained original unchanged.
+While a conversation is open the refreshes go on without the screen or input, for [desktop notifications](#desktop-notifications).
+Marks hold still: `?` needs you, in the attention colour, `●` active, `◌` queued, dim, `○` idle, `✓` finished, `×` failed, `■` stopped; moving to its group says a row changed.
+The overview's top line is the counts line: the wordmark, then each mark's count where it is not zero, `? 1  ● 2  ◌ 3 · slots 2/2  × 1`, with only `?` and `×` coloured and the model slots only while a Session waits for one.
+Live memory reads `rui 42 MB · tools 1.8 GB`: `rui` is this TUI plus its Host (the TUI alone with no Host), and `tools` the processes below the Host, shown only while one runs.
+It shows quietly on the pinned Settings row, before the version, and as a read-only Memory row on the app Settings page, once the first reading arrives; chat info does not show it.
+Where the whole figure does not fit, `tools` drops first, then the whole figure; the pinned Settings row keeps its label and version first.
+Memory is each process's physical footprint, `phys_footprint` on macOS and `RssAnon + RssShmem + VmSwap` on Linux, summed over the Host's process tree, which one pure core, `process_memory`, walks; a tool that leaves that tree is not counted.
+The counts line replaces the headline and the Host health line; full Host facts remain available through `rui host status`.
+Divyansh chose the counts line and totals-only memory on 2026-11-09 (TUI rework plan, "What changes" O1 to O4 and "Live memory on the overview").
+Only your own Session at work (an active mark under Yours) turns a spinner, `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`, one frame per 200 ms of the monotonic clock, every spinner in step.
+Only a Unicode, colour screen spins, and a row faded while the Host does not answer holds still.
+In both the full Sessions list and the conversation sidebar, a Session with no `from_person_at` dims both complete row lines, including the mark, age and folder, unless it needs the person: it sorts under Needs you or its work failed. Every other state, stopped and stopping included, recedes in a chat the person never wrote in.
+The open empty New Session is yours and stays normal; selection and hover override dim text.
+Quietness is derived by the overview core from the listed facts, never stored or added to the wire.
+The overview wakes for frames only while a spinner is on screen, and each frame writes only the cells that changed.
+Beside its title a row says only what its mark and group leave out: on a needs-you row, the command its waiting Action would run; a retry and its countdown, without the attempt number; the running command; stopping; and a failed row's cause in a few words (`Sign-in expired`, `Out of quota`), else its saved code.
+A needs-you row reads its waiting Action's tool, then its arguments, once per Action, and names a command only for Bash, so another tool's arguments never read as a command; any other tool's row shows its mark and title.
+A narrow screen drops this detail column first and keeps the mark, title and age.
+Divyansh chose marks that hold still on 2026-11-02, replacing the 2026-10-30 pulse on every mark change, and the command and cause on 2026-11-09 (TUI rework plan, "What changes" O6), replacing the starter's name.
+Enter on a row opens that Session's conversation, and so does one click on the row, under Enter's rules; a click on a folded group's `N more` opens the group at its first hidden row, as moving into it does; headings, marks, counts, memory and row words take no click (Divyansh, 2026-11-09, TUI rework plan, "Click targets on the final screens").
+One line map, `listItem` in `src/overview_view.zig`, names each list line for drawing, and `clickOf` says what a click on one names: the Session to open or the group to unfold.
+Each drawn row keeps that name, so a click means what the person saw even when the list changed since the frame, and a Session gone by then opens nothing.
+The Sessions list, a panel and the model picker are three widgets in the list's place; the screen shows the one the core names (`State.listArea`), and only the Sessions hear a press.
+Ctrl-X sends an ordinary `session stop` for the selected row, with the same capture and recovery as the CLI command.
+List input reaches `overview_view.step` as a semantic action from the list's one key table (Right is `open_session` there), Enter, semantic Left or ignored input; clicks carry the Session, New Session, Archived or Settings identity drawn in the frame.
+Enter on a Session row opens it, and Right does the same on a Session row, selects Archived on New Session, and does nothing on Settings; on the row of the chat already open, either one, or a click on that row, returns keys to that chat's input instead, keeping its draft and anything it presents, such as Chat Info, and sends the Host nothing.
+Printable keys and bracketed paste are ignored: no editor, hidden draft, frozen-editor state, command list, skill cache or duplicate footer focus exists on the overview.
+Arrows, Home and End keep whole-list navigation, including the pinned New Session and Settings rows; Settings is the penultimate row immediately before the footer.
+The core owns selection, opening admission and pending/uncertain creation; the shell applies its effects.
+The core holds the terminal’s size, and shared screen composition accepts the actual bottom widget: the overview’s status/footer, not a manufactured editor.
+Without an open chat, the overview’s list uses the full width at every terminal size, with no empty compose pane. The wide list beside an open chat or its settings retains its existing row navigation and pointer spans, without an input of its own.
+Option/Alt-Up and Option/Alt-Down immediately switch to the previous or next Session in the list's projected order, even while typing, at every width.
+The destination's input gets focus; each draft, caret and rejection state stays attached to its own Session, and switching sends nothing.
+Opening another Session uses the existing one-step Follow return: Esc can return to the chat just left before it returns to the overview.
+The shortcut uses the existing opening and departure admission, including pending-creation, unresolved-original, Action, command and Upgrade guards; sign-in, Settings and marked paste keep their input custody.
+It skips New Session, Archived and Settings, clamps at the first and last Session, and anchors to the open Session rather than a separately highlighted row; if that Session is absent from the projected list it does nothing.
+Without an open Session it moves from a selected Session, or opens the last/first Session for Up/Down from a control row; an empty list does nothing.
+At 100 columns and wider, keys go to the list or to the chat beside it, one at a time (`app_input`'s list focus).
+Left on an empty chat draft gives keys to the list and leaves the chat open and drawn; a draft with text, even with the caret at its start, takes Left as an edit.
+Below 100 columns no list sits beside the chat, so Left on an empty draft leaves the chat as Esc does; Esc and Ctrl-G leave the chat at every width.
+While the list has keys, its selected row takes the focused background and the chat's prompt shows a quiet `›` with no caret; while the chat has keys, the open chat's row keeps a dimmed, inactive selection.
+A click on the list gives it keys, and a click in the chat gives keys back to the chat's input, by the same transition as Enter on the open chat's row.
+Divyansh chose this list focus, Left on an empty draft and Esc leaving at every width in November 2026 (PR #1400).
+The rules table says which work states Ctrl-X may stop: pending, working, retrying, Bash and approval.
+Ctrl-X on such a row opens a confirm prompt in the core's state; a second Ctrl-X returns the `stop` effect, Esc only cancels, and any other input cancels before it acts.
+Every creation and stop is an entry in the core's request ledger (`State.requests`) until a definite answer removes it; a full ledger refuses new requests and evicts nothing, and departure prints every entry still left.
+A stop's answer asks for a listing at once, so `■ stopped` follows within one refresh.
+While a stop of a row is in flight or unconfirmed, the row reads `Stopping…` and takes no other stop; Ctrl-X then names the stop's recovery.
+A retry that has fallen due reads as the pending work it became in its words, mark and colour alike.
+Divyansh approved this on 2026-10-31 (front-end plan PR 3, mock CFWmXwCYELhK15T7LnR6ZF).
+One Ctrl-X stops the open Session from the conversation at once, exactly as on the overview; nothing asks, because stopping loses nothing (Divyansh, 2026-11-09).
+The conversation hands each input, as Ctrl-X or another, to the overview that lent it the terminal, with the work the conversation shows in place of a row's, and the overview's core decides it with the same ledger and worker, so a Session not yet listed stops too.
+Esc or Ctrl-G with the prompt open only cancels it, any other input cancels it and acts, and Ctrl-X before the conversation's first read says the Session stops once it opens.
+While a conversation is open the overview's worker starts stops and listing jobs, a stop first, and a start waits for the overview's return.
+Every job's answer is taken there, so a stop's notice shows in the conversation and a stop never waits behind a listing.
+A canonical Store failure in the overview's own step or job, a listing's included, then ends the overview as it does there, with no guidance to resume the Session.
+A canonical Store failure in any overview read or request ends the overview after the terminal is restored.
+Keys are read while output waits for terminal credit, so Ctrl-C still leaves.
+Ctrl-D or Ctrl-C leaves the overview, and the Detached notice names the command that opens it again.
+
+The overview paints its own look; the conversation and the shell keep the terminal's.
+`overview_view` holds the two Khadi skins as data, one palette table each, and `render` names only roles (text colours and grounds).
+The shell asks the terminal for its background with OSC 11, followed by DA1 so that a terminal without OSC 11 ends the wait, and waits at most 200 ms before the first frame; an answer that comes later still applies.
+The core chooses night unless the answer is light.
+Each frame clears every line to the skin's ground, draws its spans in 24-bit colour under `COLORTERM=truecolor` or `24bit` and in the nearest 256-colour entries otherwise, and ends in an SGR reset, so no exit path has colours to restore.
+`NO_COLOR` frames carry no colour at all: the band and the selection are reverse video.
+
+Enter on the pinned `+ New Session` row (Home then Enter), or one click on it, captures Configure only, creates an empty Session with zero Messages and opens that reference through the existing `SessionFrontend`, with its chat input focused.
+The core admits creation and emits its copied provider/model binding. While interpreting that effect, the native owner reads saved preferences once and copies effort and permission mode (or the read failure) into the queued creation snapshot; neither a default-state effort cache nor the worker rereads them. `configure_input.ConfigureInput.completeCreation` completes that snapshot with the Workspace and provider/model; captured Configure and `Requests.sendCaptured` use the existing request ledger.
+No Message or Turn receipt is synthesized. Only sending text from the chat admits a Message.
+The single pure list projection in `overview_view.visible` omits a listed row whose `first_message` is null, except when it names the currently open Session.
+The shared `overview_view.title` names that current empty row `New Session`, using the pinned control’s words rather than its raw reference; first Message admission restores the normal Label/first-line/reference naming precedence.
+The shared row rendering and selected-line projection derive selection from the current conversation, otherwise the overview selection; canonical list membership is still required before a row is drawn.
+Changing model or effort without admitting a Message does not make that row visible after leaving the chat.
+This is presentation only: Configure-created Sessions and their observed metadata stay stored and remain available through CLI list, inspect and resume; leaving does not delete, archive or reconfigure them.
+While that creation is pending, Enter and clicks cannot duplicate it; pending state is derived from the ledger entry.
+One creation settlement handles accepted, rejected and uncertain Configure outcomes: acceptance retains the known reference before opening, rejection reports the failure, and uncertainty retains the capture key for recovery without creating a new intent.
+Successful Host startup and request receipts stay out of normal output; chat info exposes chat settings, `/requests` exposes recovery records, and `rui session inspect` retains full machine-readable inspection.
+A capture failure creates no transmissible intent.
+Non-TTY entry rejects before Store, Host or request mutation.
+Existing explicit Session entry and scripted commands retain their saved permission modes.
+
+Empty-Session creation captures `require_model` on Configure rather than binding to an observed Host instance; the receiving Host and Store own capability admission and replay of that captured outcome.
+Scripted Message commands that create a Session retain their existing capability condition, and low-level configuration without the condition remains available for offline setup.
+Bare `rui` accepts no initial Message operand and has no overview command path, including `/configure` or unknown-command handling.
+The Model field of app settings opens the shared `model_choice.zig` inline field editor and match list, also used by chat info.
+The filter replaces the field’s value at the normal value column; there is no separate `Filter:` row.
+Matches start under the field at the shared panel indent (current mark, one-cell gap, then the model name), shrinking to the number of matches within the viewport.
+Only models below the viewport get a quiet final `↓ N more` row (`v` in ASCII), never an upward overflow hint.
+The compact context-size column follows the longest model name actually shown, not hidden matches or the terminal’s right edge.
+`panel_editor.zig` is the sole shared refusal/recovery transition for the model filter and Rename: refused text remains editable, failures stay on the field, and correction or submission clears the failure through that owner.
+The overview's worker reads the Host's [`/v1/model-list`](inspection.md#public-session-activity), so the screen never blocks on a model list.
+The choice uses a revisioned snapshot and validates it before drawing or handling an event; replacing or releasing a list closes the old choice before it can use retired storage.
+It falls back to the compiled model catalog when no live list is available.
+The short sign-in labels come from provider facts: "ChatGPT" for both `codex` and `chatgpt`, and "API key" (`openai`), so app settings' **Sign-in** row reads "ChatGPT" for either way into ChatGPT; only the longer prose names ("ChatGPT (device code)", "ChatGPT", "OpenAI") tell the ways apart, where that matters.
+Every model list scopes to one sign-in: app settings and a new chat's Model choice list the models of the sign-in new Sessions use, which is the one logged in last, and chat info lists the Session's own, which is fixed for its life; so a person sees one ChatGPT, and a chat that signed in with a device code keeps its models while new chats use the browser (Divyansh chose this on 2026-11-13, "one ChatGPT sign-in, two ways to log in").
+Typing filters by account: `chatgpt` and `codex` both keep a ChatGPT sign-in's rows, either way in, and `api` keeps an API key's; `openai` stays a word of model IDs. `--provider codex` and every command that names a provider keep their meaning.
+Typing filters, Up and Down move, and Enter picks a model through app settings' typed backend.
+An empty match keeps the field's choice open with feedback rather than saving an invalid model.
+Every successful pick saves the default for future Sessions through the same preferences writer as `rui defaults configure`; existing Sessions keep their settings.
+Esc closes the choice before app settings, and leaving without a pick writes nothing.
+A pending or failed save is shown on the Model field; a failed save is not silently retried.
+The prospective binding comes from the launch selectors and saved defaults, without an overview per-start override.
+The admitted creation snapshot supplies saved effort only when the launch uses defaults and has a resolved binding; `ConfigureInput.completeCreation` completes the new empty Session’s captured configuration. Saved permission and effort are copied from the same admission-time preference observation. App Settings reads its saved page values directly; the removed overview footer has no standalone Settings choice or cached creation-effort projection. Per-Session footer choices remain owned by Chat Info.
+A start the Host refuses for want of the start's sign-in (`model_capability_unavailable`) says which sign-in is missing and its login command.
+Scripts use `session start` with stdin.
+A first word naming a former top-level command (for example `configure`, `message` or `recover`) is refused with its resource-first replacement before capture, Host contact or terminal entry.
+
+`rui session resume [--store PATH] ID` re-enters that exact six-character Session ID without changing its settings.
+Noncanonical, unknown or conflicting selectors reject without submission.
+Session hex selectors are unsupported.
+Generated commands retain the bare ID and ordinary shell quoting for other arguments.
+Resume never guesses a Session: to reopen one without its ID, run bare `rui` and press Enter on its row.
+Resume opens the Session inside the overview, so Esc at its latest view shows every Session.
+Resume validates the existing Store before attaching to or starting its Host; it does not create an alternate Store.
+
+Human prospective new-Session provider resolution chooses an explicit supported provider before a saved preference, then a sole locally usable supported provider; otherwise it requests a choice.
+Non-interactive fresh configuration resolves defaults without interactive choice or a client-local credential requirement; with no explicit or saved provider it uses `product_defaults.provider` (`codex`).
+An unavailable saved provider stays selected for repair, never falls back.
+Within the selected provider an explicit valid model wins over its saved pin, then its recommended exact model.
+Codex owns the local identifier syntax: 1–256 printable non-space ASCII bytes, including `=`.
+Syntax validation is the only model check: an ID Rui's [list](cli.md#supported-model-ids) lacks runs with default limits, as the picker offers it from the provider's live list (Divyansh, 2026-11-01, picker plan "Where the list comes from").
+A bad ID fails at the provider’s first request, whose remedy is the Model field in app settings.
+Old pins remain readable and clearable, never substituted.
+The built-in providers are ChatGPT by device code (`codex`), ChatGPT in a browser (`chatgpt`) and OpenAI (`openai`); they share one catalog and the recommended model `gpt-6.1-sol`.
+A person sees one ChatGPT sign-in with two ways to log in: `rui auth login chatgpt` opens the browser, `--device-code` uses a code instead, new Sessions use whichever was logged in last, open Sessions keep theirs, and saved device-code settings carry over (Divyansh chose this on 2026-11-13, "one ChatGPT sign-in, two ways to log in"). The two stay separate providers on the wire, in the Store and in preferences, so `--provider codex` still selects the device-code route.
+Three places still say "codex": the device-code page `auth.openai.com/codex/device` and ChatGPT's own "device code authorization for Codex" setting, which are OpenAI's names, and `--provider codex`, which scripts use to choose the device-code route.
+`rui defaults inspect` shows the prospective choice, each provider's local Rui-owned credential state (`local_credentials` in JSON) and separately the selected Store's actual readable Host capabilities.
+It never refreshes, contacts a provider, creates a Host/Session or imports another CLI's credentials.
+The bare-entry provider chooser can begin the browser or device-code login or defer; explicit `rui auth login chatgpt`, with or without `--device-code`, uses the same publication rule.
+Authentication remains an explicit shell operation, separate from the conversation.
+Denial/expiry leaves preferences unchanged.
+After secure credential installation, explicit `rui auth login PROVIDER` atomically fills its own provider when no provider default exists, and replaces a saved default only when the provider table says it is the other sign-in to the same account, so a browser sign-in replaces a saved `codex` and a device-code sign-in replaces a saved `chatgpt`.
+Replacing keeps the saved model, as any provider change within one account does; every other saved choice stays, even an unsupported one, and existing Sessions keep their binding.
+The receipt says which happened: "New Sessions will use this sign-in." when it filled the default, with "; Sessions already open keep theirs." when it replaced one, and when the default stays on another provider it names `rui defaults configure --provider PROVIDER`.
+A ChatGPT sign-in ends with `Start a conversation with: rui`, or with `rui --provider PROVIDER` when the default stayed on another provider.
+`rui auth logout chatgpt` ends both ways in (Divyansh chose this on 2026-11-13) and settles one outcome for each: ended, already absent, or not ended.
+Its stdout says "Rui: Signed out of ChatGPT." when it ended at least one and could end every one that existed, "Rui: Not signed in to ChatGPT; nothing changed." when neither existed, and names the way it ended, "in the browser" or "with a device code", when the other could not be found, read or changed.
+When ChatGPT did not confirm the browser revocation, that stdout line goes on to say Rui deleted its tokens but ChatGPT did not confirm it ended the browser sign-in, and to disconnect Rui in ChatGPT's settings; the sign-in is ended locally, so this alone exits 0, as before.
+Each way in that could not be ended gets one stderr line, and the command then exits 1: a credential Rui could not read or change says that sign-in is still there and to inspect it, and a credential path Rui could not resolve says it could not end that sign-in and names the variable that sets the path (`RUI_CHATGPT_CREDENTIAL_FILE` or `RUI_CODEX_CREDENTIAL_FILE`, else HOME); none of these stops the other way in from being ended, and only a bad invocation, such as an unusable test issuer, is refused before either is touched.
+Afterwards `rui auth status` reads as if neither was ever signed in, and a running Host refuses new work on either route as it does for any missing sign-in; chats already open show the expired sign-in band naming their own login command on their next request.
+Logout leaves the saved default provider and model as they were; like any unavailable saved provider, it stays selected for repair until the next login.
+`rui auth logout` with any other provider, `codex` included, is an invalid invocation.
+`rui auth status` and the setup report give ChatGPT's two ways in one line each, saying nothing of one that is missing unless both are, in which case one line names `rui auth login chatgpt` and its `--device-code` option; setup's `Provider:` and `Next Session:` lines show a known provider by its prose name, while JSON keeps the raw names.
+Choosing a provider in the bare-entry chooser saves it as the default, never pinning a model and keeping a saved one only within the same account, as any provider change does, and preserving an existing choice even if unsupported.
+Failure of that independent preference save is reported without claiming credential rollback.
+Local usability is not proof of remote acceptance.
+Existing Sessions retain their exact saved binding despite changed preferences, recommendations or credentials.
+
+Setup observes local credential readiness once before a save and supplies that capability to provider/model resolution under the preference lock; a model-only update with no saved provider can choose the sole locally usable provider.
+It resolves edits against the original saved provider/model pair, so replacing a provider with one in another account clears its old model without persisting a recommendation, while a change between the two ChatGPT sign-ins keeps it; Store-only edits preserve stale provider/model values without checking current capability support.
+Local inspection opens a credential snapshot without blocking on a private non-file path.
+Configured and renewal-due credentials are locally usable; renewal due does not require fresh login.
+An opaque token becomes renewal due eight days after its last successful exchange, and a token with known expiry becomes renewal due at that timestamp.
+A pending refresh remains refresh-required and unavailable for prospective selection.
+Inspection performs no refresh or remote call; dispatch retains the authentication owner's refresh rules.
+
+Preference updates express Store/provider keep-or-set and model keep/set/clear intent through the locked application owner.
+Only explicit choices are saved; an absent model inherits the recommendation when a new Session is configured.
+Keep retains a pin for the unchanged provider.
+`rui defaults configure --clear-model` and `/setup --clear-model` remove only the saved model; they are mutually exclusive with `--model`, including when flags are repeated or reversed.
+Clear preserves the saved provider, even an unsupported one, unless an explicit `--provider` replaces it; it never discovers a provider or persists a recommended replacement model.
+Login never sets a model pin; it fills an unset provider or replaces only the other sign-in to its account, keeping that pin.
+Clear must pass the same HOME, syntax, private-file and atomic-publication checks as other edits, without checking an unused Store's availability.
+Store/provider clearing is outside this unit.
+
+During a bare-entry device exchange, the CLI owns SIGINT through credential installation and the prospective preference outcome, then restores the previous handler before continuing fresh-Session selection.
+One-shot login owns the same scoped handler without resetting a chooser's pending cancellation.
+Login preflight inspects the existing atomic credential snapshot without taking the refresh lock; only publication, after winning the cancellation gate, acquires the exclusive credential lock and rereads the current generation.
+Rejected provider-choice input starts neither login nor a Session; incomplete escape/input timeout or terminal cleanup failure remains fatal.
+The device code and post-install future-default failure are written to the verified terminal stdout, independently of redirected stderr.
+Cancellation and the start of credential publication compete at one atomic gate: an interrupt that wins leaves credentials and provider preferences unchanged; once publication wins, a later interrupt cannot claim cancellation or rollback.
+After installation, missing HOME or a failed preference save is reported as a separate future-default failure, not credential rollback.
+No nested conversation login owner is retained.
+
+Interactive input uses the single conversation-first frontend described under [staged persistent input](#staged-persistent-input).
+It captures each exact Message before transmission and observes Host activity without a separate per-prompt follow loop or follow reminders.
+Permission presents one exact Action above an Allow once / Deny choice that a fresh Enter confirms: Bash keeps its description and complete decoded command; MCP shows its frozen tool name and server, its call description when present, and the original JSON arguments.
+Queued chat, typeahead and marked paste authorize nothing.
+The durable decision retains that exact target for Host revalidation.
+One-shot `action inspect` JSON retains the Action ID, opaque call ID and complete arguments, escaping every non-ASCII code point so control and bidirectional characters cannot disguise the proposal on a terminal.
+Chat info changes the exposed Session settings through typed configuration; `rui session configure` retains the full shell interface and immutable Workspace check.
+Instructions require a separate one-shot `session configure --instructions -`; schema input uses a file path rather than terminal stdin.
+Chat info shows Session settings; app settings shows defaults for new Sessions. `/requests` lists this machine’s local recovery handles, `/result KEY` reads an answer, and `/setup` edits only future defaults.
+Explicit operator authentication remains separate from the conversation.
+Re-entry uses Host facts, not local saved-request guesses.
+An unknown Session requires explicit configuration before entry.
+Terminal input and output are required; redirection rejects rather than silently changing semantics.
+Exit, interruption or a disconnected caller never cancels Host work.
+
+**Bounded CLI editor (native terminal-display qualification pending):** The editor owns draft bytes, grapheme cursor and rendering within the frontend's terminal lifetime.
+App owns keyboard and paste decoding for the invocation; draft resets, bank switches and a permission card never replace its input runtime.
+Each chat keeps its own draft bytes, caret, recall anchor and rejection when switching through the list, returning to the overview or following a Session link; a newly opened chat starts empty unless it has a saved draft.
+Only inactive drafts with text or other draft state own storage in this invocation, with exact-length text keyed by the Session reference; taking one transfers it to the active editor, and sending clears that chat's draft.
+The overview has no draft. Quitting forgets per-Session drafts without writing them to the Store or disk, except for the compatible inline-Upgrade handoff described above.
+Terminal replies reach App rather than the editor, and an editor that did not see a paste begin rejects its remainder.
+Its caller supplies storage: up to 65,536 UTF-8 bytes for a Message.
+Validated submission borrows complete bytes; [staged persistent input](#staged-persistent-input) owns sealing, next-draft custody and Admission.
+The editor retains no message history or approval.
+Strict UTF-8 and stateful extended-grapheme segmentation govern edits, including deletion joining previously separate clusters; byte count governs the limit, and uncertain cell widths cannot justify cursor movement.
+Ctrl-D exits only an empty draft; otherwise it deletes the following grapheme or does nothing at the end.
+Marked multiline paste is one Message; ordinary Enter submits when permitted by the submission owner.
+A paste that would exceed the draft's byte limit is rejected whole with a notice, preserving the preceding draft and caret.
+Typed text over the limit, or malformed or unsafe input, rejects the draft at its line end even if later shortened.
+App owns incomplete-input handling; Rui imposes no separate decoder deadlines or byte-fragment ordering contract.
+If cursor placement cannot be established safely, decline the edit explicitly without a request and direct the caller to one-shot `session send --to ID < FILE`.
+The persistent UI uses `vxfw.App` restoration on every exit path and `vaxis.Panic` on a Zig panic.
+Rui does not attest terminal restoration through its exit status; vaxis logs a failed termios restore.
+Only a fresh Enter at an Action's Allow once / Deny choice may decide it; the Host alone validates that exact target.
+Input custody prevents pre-choice typeahead or marked paste from authorizing it while preserving the next draft.
+The provider chooser remains a separate terminal reader, decoding through the same stream and editor.
+Option/Command-Backspace may be consumed by the terminal; only supported received sequences are promised.
+No Host input policy, completion or configurable keymap is added, and recalling sent Messages keeps no history of its own.
+
+An incomplete CSI or SS3 sequence also times out and ends the caller, rather than treating its delayed tail as Message text; bare ESC alone may expire without rejecting the draft.
+Each screen has one key table over the keys in `src/keymap.zig`: Esc, Ctrl-C, Ctrl-D, Ctrl-G, Ctrl-N, Ctrl-O, Ctrl-P, Ctrl-R, Ctrl-X, Alt-A, Alt-Up, Alt-Down, Up, Down, Left, Right, Shift-Up, Shift-Down, PgUp, PgDn, Home, End and Ctrl-End.
+The editor edits with such a key while the draft gives it a use (Left and Right always; Up and Down with a draft line in that direction; Home, End and Ctrl-D with any draft) and otherwise returns the screen's action for it, or nothing where the table binds nothing; a choice drawn in place of the draft takes the arrows its screen leaves unbound.
+A rejected draft changes no key's meaning.
+In a conversation Esc and Ctrl-G return to the latest view and, from there, to the overview, and Ctrl-X stops the Session as on the overview. End on an empty draft and Ctrl-End return to the latest view and stay in the conversation; End with a draft still edits its current line.
+Recalling sent Messages (approved 2026-10-31; keys chosen 2026-11-01): in a conversation Ctrl-P on an empty draft brings back the newest Message the person sent, for editing, and Ctrl-P again goes further back; Ctrl-N goes forward, and past the newest the draft is empty again.
+Up, Down and the wheel keep scrolling, and no history file is kept.
+As built, only Messages without a Session sender come back.
+Each step asks the Host for a one-row activity page of `admission` rows before or after the shown one's position, at the end its first step read, then reads that Message's content alone; the client keeps that position and the draft, never a list or copy of Messages.
+One the draft cannot hold as typed text (over 65,536 bytes, holding a control character, or text the editor refuses to draw, such as a leading standalone combining mark) is passed over with a notice.
+Text that begins with `/` comes back with a second one, so Enter sends it again.
+Steps are read one at a time: presses made while one is read add up and opposite ones cancel.
+Each edit, clear or send of the draft makes it an ordinary one and drops the presses not yet read, and a step shows only on the draft it began from.
+On a typed draft Ctrl-P says to empty the draft first, even while a step is read.
+Ctrl-P past the oldest says `No earlier message.` While an Action's choice holds the input, Ctrl-P and Ctrl-N do nothing and presses not yet read are dropped; a step already read still lands on the draft.
+Ctrl-B and Ctrl-F move the caret a character left and right, as in readline.
+Any Ctrl, Alt, Super, Hyper or Meta chord with no binding, a typed C0 control among them, on a character, a control or a named key such as an arrow, is ignored without a notice as it arrives, leaving the draft unchanged (Divyansh’s decision): ESC followed by a key (Option as Meta, an Esc pressed just before a key, or a chord tmux re-encodes that way) and Kitty Alt chords, even with associated text, never insert the bare key, reject the draft or send it.
+ESC before a key that starts no sequence is Alt on that key as decoded alone: ESC ^H is Alt-Backspace, ESC CR (which arrives as ESC LF under ICRNL) is Alt-Enter, and ESC before a multibyte scalar drops that scalar; a combining mark or joined scalar that arrives after it is ordinary text.
+Alt-Enter adds a line like Shift-Enter and Ctrl-J in every form (ESC CR, ESC LF, Kitty `CSI 13;3u` and `CSI 27;3;13~`) and never sends: Ghostty sends Shift-Enter as ESC CR.
+A bare Esc that expires (80 ms) before Enter is Esc, then Enter, which sends.
+Every binding needs its exact modifiers: a Kitty key that reports Shift is never its unshifted binding, even when its associated text or shifted key equals the base key, so Ctrl-Shift-J does not send and Ctrl-Shift-R does not recover.
+ESC ESC is Esc, and the second ESC starts whatever follows: an Esc just before a marked paste or an arrow keeps that input whole, so an ESC ESC arrow (urxvt Meta-arrow) is Esc then that arrow.
+ESC before P, X, ], ^ or _ begins a terminal string, never typed text.
+A pending ESC before Ctrl-C or Ctrl-D is discarded, so those still interrupt or end input.
+A terminal path can change a key before Rui reads it.
+At an Action's choice any chord is refused, spends freshness and authorizes nothing.
+Shift alone stays text.
+An xterm modifyOtherKeys key (`CSI 27 ; modifier ; code ~`, which Ghostty's legacy table sends for modified Enter without being asked) decodes as the Kitty key with the same modifiers and no associated text, so its bindings mean the same: Shift-Enter adds a line, Ctrl-A moves to the line start, Ctrl-J sends, and an unbound Ctrl, Alt or Super chord is dropped as its Kitty form is.
+Shift with a printable code inserts nothing in this form.
+Ctrl-R recovers in its raw, Kitty and modifyOtherKeys forms alike, never from pasted text; at an Action's choice it is refused, spends freshness and authorizes nothing, and while approval is paused it waits for the Action, keeping the draft.
+libvaxis owns terminal decoding; a sequence it consumes as unknown produces no event for Rui.
+ESC followed by broken UTF-8 arrives as an Alt key with U+FFFD and follows the ordinary unbound-chord path, leaving the draft unchanged.
+A sequence naming a key Rui does not know is still ignored.
+Inside marked paste any ESC other than the end marker rejects the paste, and an end marker beginning at a later ESC, as in ESC ESC `[201~`, still ends it.
+
+The provider chooser remains a shell prompt before App opens.
+It reads one line through the terminal's ordinary canonical input, leaving echo, editing and signals to the terminal.
+After writing the prompt, it drains stdout and discards queued input before accepting a choice.
+It changes no terminal modes and uses no keyboard decoder or bracketed-paste protocol.
+The caller accepts exactly one provider letter or `d`; EOF defers, and any other line keeps the existing invalid-choice wording, changes no preference and asks again.
+Esc followed by Enter is an invalid choice; there is no immediate Esc notice.
+The terminal owns Ctrl-C and its normal interrupted outcome.
+Conversation consent and restoration use App below; hidden API-key input retains its separate unechoed reader and secret cleanup.
+
+The editor does not promise linear total work for arbitrary Unicode editing.
+
+### Desktop notifications
+
+Divyansh decided on 2026-11-10 that Rui tells the terminal about its Sessions only through Mitchell Hashimoto's program status protocol, OSC 7501 (https://www.superlogical.com/rex/docs/build/program-status): Rui writes no OSC 9, OSC 777 or bell, inside tmux or screen too, and the terminal chooses how to show each record and how often to tell the person.
+Records go out whether or not the terminal answered vaxis's program status query; a terminal that does not take them ignores them.
+Rui writes one record per Session, `id=rui/REFERENCE` with `app=rui` and the Session's row title in base64 as `msg`: `working` for pending, working, retrying, stopping and Bash work; `blocked` with `kind=permission` while an Action awaits a decision; `done` for a finish the person has not opened; `error` for a failure; `idle` after a stop, or once the person opens a Session whose outcome the record shows.
+Each record changes when the Session's state does, whether or not the terminal has focus.
+The records come from listings alone, which read in order, so a slower read never sets a record back; the overview's listing jobs keep running while a conversation is open.
+`State.seen` keeps, per Session, the record Rui wants on the terminal (a status and a version that names it) and what the terminal holds of it (no record, the version of a report a frame wrote whole, or unknown after a clear that may have landed); each time the overview steps, `Overview.sendStatuses` reports exactly the Sessions where the two differ.
+A record follows each change a listing reads, and a later finish, failure or wait in the same state is a change: a listing compares what it reads with what the listing before it read, ordered by Turn, then within a Turn by the earliest Action awaiting a decision (`first_action`), with the Turn's finish or failure after every wait in it.
+An outcome the conversation's first read shows as the person opens the Session is one they have seen, even when no listing had read it yet: the conversation hands that read to the overview through its lender, `State.seen` keeps the latest such state, a listing that reads that outcome or an earlier one gives `idle`, and only a later Turn's finish or failure is `done` or `error` again.
+The listing the overview opens on gives a record only to work under way or waiting, so an outcome from before Rui opened never gets one, and a Session at rest gets none until it does something; a Session a full listing no longer shows has its record cleared.
+A new title, from a Label or a first line read later, is a new version, so the record is written again with that name.
+`Attention.report` writes each record and flushes it, and only then does the overview count it as held.
+Each step rereads the preference, so `/setup --notifications off` applies at once; unreadable preferences leave the default, on.
+With notifications off Rui wants no record: while any record of Rui's may be on the terminal it writes one clear (`state=clear:id=rui`, which clears Rui's records and no other program's), and from the frame that carries it until one writes it whole, what the terminal holds of each record is unknown; on again, it writes every record again.
+Leaving clears Rui's records too whenever one may be on the terminal, though the spec lets `done` and `error` outlive the program: a record of a Session no Rui watches would not change again.
+
+### Staged persistent input
+
+Explicitly addressed `rui session resume` and a Session opened from the overview use one conversation-first `SessionFrontend`, without a compatibility alias.
+The overview owns the terminal and lends it to that frontend.
+Per-Session drafts stay with `session_drafts` and the active `SessionInput`; the overview has no composer or prospective draft state.
+The former preview replaces the parallel per-prompt conversation and interactive allow/deny/later loop; one-shot commands, the provider/login chooser and diagnostics retain their own contracts.
+This consolidation changes no Store selection, capture format, backend or Host authorization rule.
+Fresh Sessions use Bash and `bypass`; existing Sessions retain their saved bindings and permission modes.
+The overview’s New Session action creates a fresh empty Session; the first Message is sent only from its chat.
+Explicitly ask-configured Sessions use the same allow-once/deny path, without special fresh-Session behavior.
+
+The frontend's caller owns the terminal and lends it.
+`TerminalApp` installs the SIGINT, SIGTERM and SIGHUP handlers, and the root quits on its next tick once one arrives.
+The conversation runs until the person leaves or a signal arrives, and reports how it stopped: `detached`, `interrupted` or `returned`.
+It returns `returned` only when nothing would be lost or dismissed: no draft, pending Action, sub-view or running command, and no original that is not yet saved (`not_started` or `submitting`).
+The overview then closes the frontend, which joins its reader, and draws again without restoring the terminal or printing a notice.
+A rejected original is released as `/discard` would. An unconfirmed one goes into the overview's request ledger: the overview's status bar names the newest one until the overview ends, `! Not confirmed · rui request recover KEY` (or `! REF: send not confirmed; details on exit` with no saved request), not as a notice the next key clears, and its departure prints the line the conversation's exit would have printed. When that ledger is full, the frontend leaves as Ctrl-C would and prints the line itself.
+It never restores the terminal or prints the Detached notice.
+Its caller restores the terminal, lets the frontend join its borrowers and write the guidance that follows restoration, then prints the notice from that outcome.
+A frontend that stops running never cancels Host work.
+It stops waiting on its own client borrowers: the reader, the Admission wait and a running slash command, which observes the stop as an interruption.
+A Message or Decision the Host received keeps running there; one whose capture or admission is unconfirmed keeps its saved record, and the guidance names its recovery key.
+A command the Host received completes there, and the output it wrote before the stop follows restoration.
+No borrower is joined while the terminal is raw, except the reader of a conversation that returned to the overview: with no command or submission running, it waits at most for the transport's cancellation poll.
+
+One invocation owns two 65,536-byte draft banks with independent grapheme cursors and one same-size command snapshot.
+Each bank's editing mechanism is libvaxis's `vxfw.TextArea`; Rui's `DraftEditor` adapter keeps every key meaning, Tab completion and refusal, and Composer keeps the rules, prompt and hidden-line label around it.
+`keypress.zig` is the one classification of a terminal key that the draft and every choice share; the values it classifies into stay in the `keymap.zig` functional core.
+Submission seals the original bank while the other remains editable through capture and Admission.
+A second Enter cannot create replacement intent while the original is unresolved.
+Only a joined, validated Host acceptance releases the submitted bank.
+A definite rejection remains retained until explicit `/discard`; slash commands are entered as composition text, so replacing that text is the caller's own edit.
+Malformed or oversized completed input clears only the active composition.
+Incomplete input remains fatal after terminal cleanup.
+
+`SessionSubmission` owns this invocation's original intent and the existing Admission `ClientTask`, borrowing the editor's immutable loan without another payload buffer.
+Capture publication, Admission and worker lifetime remain independent facts.
+`SessionInput` validates loan tickets but stores no Admission state.
+`SessionFrontend` selects consent and presents owner facts without sequencing capture, reopen validation, retry identity or release.
+Exit cancels both borrowers; the caller restores the terminal; then the frontend joins both and acknowledges output.
+It retains the pinned saved-record reader for recovery.
+Acceptance or explicit rejected-intent discard releases the original; final invocation cleanup closes any remaining reader.
+Joining alone is not final disposal.
+
+The caller owns the sealed Message or selected Decision before fallible reservation and reserves one key before asynchronous canonical capture.
+If reservation or the first worker launch fails, or initial cancellation wins before capture entry, that intent remains definitely unsent; after restoration the caller says it may be submitted again, without stale accepted guidance or an unpublished recovery handle.
+The original and next draft stay separate until invocation exit.
+Failed or cancelled recovery cannot make an existing uncertain original definitely unsent.
+The submission owner's capture truth survives worker and captured-reader retirement: capture entry makes publication uncertain until confirmed, and confirmed publication is not inferred from a still-open handle.
+Ctrl-R and matching `/recover KEY` retry that original Store, Session, key and complete Message bytes, never the next draft.
+Capture failure precedes send.
+Recovery first opens and validates a published record; only absent publication permits canonical capture of the same reserved intent.
+A pinned captured reader survives send and join.
+Uncertain transmission cannot release the draft or permit discard.
+Each Client borrower has one join and, for streaming activity, one acknowledged 4-KiB delivery window.
+Workers never write the terminal.
+No per-Session draft cache or local work-status database exists.
+
+Deferred recovery names the current submission's reserved key.
+Idle or rejected recovery gestures create no request.
+A request made during Admission may recover that same original if it becomes unconfirmed, but acceptance or discard cannot transfer the request to a later submission.
+
+After restoration and joined Admission settlement, detachment reports any unresolved original with its exact recovery key, even when local cancellation itself succeeds.
+A later fatal observation or failed detach notice reports the last accepted intent through `rui request inspect KEY` for a Message, or `rui request recover KEY` for the same saved Permission Decision admission.
+Explicit `request read-result` reads the Message's saved answer after completion, or the ordinary saved skill-refusal/reload outcome without model work.
+Guidance preserves its exact handle and selectors.
+A current unresolved original takes precedence over that accepted fallback.
+Joined read borrowers transfer structured HTTP status, type and code into one bounded frontend owner, independent of worker reuse.
+Recoverable fill/tool-output preparation presents terminal-safe diagnostics without losing the draft or advancing the failed edge.
+The frontend retains the diagnostic until successful presentation; fatal fallback runs only after quiescence.
+Read errors grant no admission or absence certainty.
+Optional stderr diagnostics are bounded and nonblocking; reporting failure never replaces restoration or the original error.
+
+Opening reads the newest backward Activity page of at most 16 rows, with all kinds for its live facts, and Current when the Session line needs it.
+The joined page paints immediately; earlier rows are fetched by the feed's margin rule, not by a separate opening traversal.
+Forward catch-up starts at the captured end; later appends cannot enter that opening read.
+Current supplies settings and attention, not a pending-input inventory.
+The page's own `queued` facts identify waiting Messages and the newest one's first line; a refused line fails the read like a refused page.
+Applied Messages belong at their user rows, excluded Messages at their stop, and waiting Messages derive their provisional placement from those page facts in either direction.
+
+The conversation frontend is one full-screen libvaxis interface with a composer; there is no inline renderer or renderer selection.
+Interactive entry requires a terminal and refuses `TERM=dumb` with guidance before changing any Host or Session state.
+A User Message is a block: `›` at the margin, dim body text, and its Host-written admission time as `HH:MM` in a right sidenote margin at 60 columns and wider.
+Assistant prose starts at column 0 without speaker labels.
+A Message over 1,024 bytes, 4 non-blank lines or 12 lines from its first to its last non-blank line shows its first two non-blank lines and a dim `┄ N more lines` row; Ctrl-O or a click on its summary opens it whole.
+Tool activity follows the conversation's last line as the activity tail, whose rows `ActivityBlock` alone decides.
+It shows at most the three oldest calls awaiting permanent presentation, oldest first and fewer on short terminals, then `+N more running · info`, `+N · info` on a narrow row, counting every call not drawn; a click on that row opens chat info.
+Each call takes one row, so a retry or the next call replaces a row in place rather than stacking: words that do not fit end in `…` and a running call's clock stays.
+This display bound does not cap execution.
+While work is under way, the conversation says what it is doing now, and says nothing once the work ends.
+Call rows keep their places, in issue order.
+While the work is a running Bash call, that call's own row carries the clock, `• Run zig build test-store · 42s`, found by the call's Operation and ordinal, never by its text.
+Any other work is the conversation's last line: `• Queued · 3s` while the Session waits for a model slot, `• Thinking · 12s` while a model Attempt is in flight, `! Rate limited · retry 2 in 18s` (another retry cause reads `Provider error`) and `Stopping…`; so is a running call whose row is not shown, which reads `Running a command` without a description.
+The time counts from the state's `since`, against the terminal's clock.
+The activity tail remains part of the feed's measured height while scrolled away; inspection and Message panels show their own documents instead.
+The `↓` chip uses a permanently reserved row. Its count names newly rendered Activity entries arriving beyond the scan's starting cursor, not invisible Activity positions or replayed provisional entries.
+When rows run short, the work line and a waiting Message's row keep theirs and call rows give way to the overflow row, which counts them; a running call whose row is not drawn hands its clock to the work line.
+While a permission prompt is open the Action's instructions speak instead.
+An overview row whose work needs the person or explains a wait (approval, a retry, a running command, stopping) says the same words beside its own age column, so it adds only a retry's countdown, and takes its tone; one functional core, `work_line`, holds the wording and tone for both.
+The overview groups its rows as Needs you (waiting on an Action, a Bash call's approval included, whoever started the Session), Yours, Active (thinking, running a tool, retrying or stopping), Idle, Finished, and Stopped or failed; a Session the person spoke in is in Yours unless it needs them.
+A queued row (waiting for a model slot, as a retry that has fallen due does) sits last in Active, or in Yours when it is yours, longest wait first, and shows only its dim `◌`, its title and how long it has waited.
+Each group heading ends in its count, folded rows included, `Active · 3`.
+Divyansh asked for the counts on 2026-11-02 and on 2026-11-09 chose Needs you first and Queued folded into Active (TUI rework plan, "What changes" O5 and "Queued rows inside Active"), replacing the Queued group of 2026-11-02.
+A Message a person or script sends while work is under way waits as the activity tail's last row, `◌ also update docs …`, or `◌ 3 · also update docs …` when more than one waits, with the newest such Message's first line cut to fit, until it shows as its conversation row; a Message a stop excluded shows labelled `! Stopped before it ran · send it again to run it` before `! Session stopped.`.
+Divyansh approved those labels on 2026-10-31 (front-end plan PR 3, mock CFWmXwCYELhK15T7LnR6ZF); the row's `◌` form is the vxfw rework plan's.
+The Host reports how many wait and the newest on each Activity page (`queued`), and the row reads that Message's first line at its Admission position, which holds that Admission alone, never by text; it keeps the line with that Message's admission ID and shows it only while the Host names that Message newest.
+When nothing holds the queue, its oldest waiting Message echoes at its Admission as a provisional row; the remaining Messages wait in the queued strip.
+Forward replay replaces that suffix, so a taken Message appears once at its user row rather than retaining its Admission echo.
+The queued strip keeps its row when space runs short and leaves in the same frame as the Message's applied or excluded row.
+A stop finds excluded Messages by walking Admission-only pages backward from itself, then renders them in admission order; no previous read's queue or drawing state decides placement.
+Every page carries `queued`: the field came with wire version 3, and a frontend and Host on different wire versions refuse each other as incompatible.
+Wire version 10 makes the refused-send target required and nullable under the [public activity contract](inspection.md#public-session-activity); non-null peers keep their canonical ID grammar.
+
+Wire version 14 requires the `chatgpt` provider key, and supports the `chatgpt_plan` route, in `host_info`'s `capabilities.providers`; ordinary clients and Hosts on different wire versions refuse each other.
+Until format 74 the Store saved its wire label, so each wire bump also appended a Store format step (format 72 moved the saved label from 15 to 16); format 74 deletes the label, and a wire bump now needs only the historical Host-info profile below.
+The `model_call` Activity rows shipped in v0.69.x under wire version 13 without a bump, although 13 had already shipped in v0.67.x; a 0.69 client asking a 0.67 Host for those rows therefore failed with `InvalidCursor` instead of refusing the incompatible Host.
+`tests/ci/test_wire_version.py` requires a wire version greater than the newest release's whenever generated `openapi.json` changes, ignoring only `info.version` and documentation-only `description`, `summary`, `example` and `examples` annotations (never named schema entries or literal wire data); wire constraints such as `x-rui-*` bounds remain part of the comparison.
+Upgrade and restart-all control recognize wire 13 as a historical Host-info profile: v0.69.1 may omit `chatgpt`, while v0.69.2 reports it. Historical observation never grants ordinary client readiness; exact-instance shutdown uses the observed Host's own executable before the new build starts it.
+
+Wire version 11 drops wire 10's exclusive `skill` field: a Message's `/name` words bind skills instead. It adds the full report's `skill` Conversation entries with `source_skill_position`, and bounded skill suggestions; different versions, including saved request records, refuse each other.
+
+Wire version 10 adds explicit native skill invocation and idle catalog reload intent, typed capture refusals and reload acknowledgements; different versions refuse each other rather than silently discarding the new intent.
+Wire version 8 later gained the `activity_search` request; a Host built before it answers that request as unknown.
+Wire version 8 dropped the `proposal_page`, `proposal_field` and `person_message` requests, added the Activity page's `kinds`, `limit` and `received` rows, renamed its `outcome` rows to `turn_ended`, each naming its `ending`, and marked a done Turn's answer `final` on its assistant row, after version 7 dropped the page's `read_through` and `beyond_unseen` fields and the `mark_read` request (the "new since you looked" feature, removed 2026-11-03), version 6 added the `label` on the Session a Message row names as sender or target, version 5 added the pages' `hosted_call` items, version 4 added each Message's sender environment, and version 3 added `queued`, so a client and Host of different versions refuse each other at the version check, and a client that finds such a Host says so and how to stop it.
+Normal desktop widths are the design target; narrower terminals wrap the same interface, never omit an approval command or decision label.
+Opening adds no configuration banner or command tutorial.
+Bash bypass mode retains its safety warning.
+Routine capture, reserved keys, proposal fields, resize notices and repeated attention prose stay out of the transcript.
+Unconfirmed or rejected submissions retain actionable notices.
+`/requests` lists recovery handles; reservation does not prove capture or acceptance. Opening chat info does not release the current reserved recovery key.
+
+The interface preserves the shell's previous screen; conversation output does not enter native scrollback or remain after exit, so terminal search covers only the shell.
+This trade-off is accepted for one library-owned renderer.
+The conversation is one continuous Activity feed: `feed_window.Window` owns a contiguous run of keyed rows and page-edge facts; `Feed` owns an anchor, either `end` or `(row key, logical line, wrapped row)`.
+At `end`, the last entry sits just above the input, including in a short conversation.
+PgUp/PgDn, Shift-PgUp/PgDn, Up/Down beyond the draft's lines, wheel and drag move that anchor, never switch documents.
+Prepending, appending and resize preserve the anchored line; scrolling past a loaded edge banks bounded movement until its fill arrives.
+There is no separate history mode, frozen transcript, seam listing or start label.
+Esc, Ctrl-G, clicking the `↓` chip and sending a Message return to `end`, or to a pending Action.
+At the end, Esc or Ctrl-G returns to the overview when nothing would be lost or dismissed: no pending Action, sub-view or running command, and no original still unsaved; a draft keeps the conversation open, and the status line says to clear it first.
+Sending also invalidates a page requested before it.
+
+`feed_reads.nextRead` schedules opening, due scans, pending permission and then eligible fills through one reader.
+A failed historical fill blocks only its captured edge until a user scroll toward that edge or a changed loading demand rearms it; scans and permission reads remain eligible.
+A press or drag selection holds fills, not live scans or permission.
+Opening reads backward with all kinds for live facts, paints at once bottom-aligned, then fills with filtered pages of 16 visible rows toward a three-screen margin above and below.
+A fill applies only while its starting edge still matches; a stale result cannot move the window.
+The live scan owns its cycle progress and work, call and queued facts, independently of the window's high edge.
+A frozen, paginated scan cycle keeps its initial novelty watermark until exhaustion; advancing its page cursor cannot count already-seen replay rows as arrivals.
+The window alone owns the first provisional replay boundary.
+Exactly one forward-attach owner appends scan rows when the window high edge equals the scan's starting cursor; otherwise the scan only counts new rows.
+Settled rows render identically in either direction and across page splits; provisional Message rows may use current page facts, and each forward read replaces the suffix from its first provisional row.
+Applied Messages show at their user row; excluded Messages show at the stop, not their Admission; waiting Messages follow the page's admission and queue facts.
+The activity tail (work, calls and queued Messages) is the last, unkeyed entry.
+The `↓` chip has a permanently reserved row and uses `marks`' arrow; away from `end` it shows `↓`, or `↓ N new` as rows arrive, without changing feed height.
+Jumping to an end whose high edge was evicted starts a fresh opening read and keeps the old frame until it lands.
+
+The window stays within the former 256-KiB text ceiling, with separate entry-count and per-row caps; it trims the side farther from the view and reloads those rows on demand.
+The three-screen margin is a loading target, not an unbounded promise at arbitrary terminal dimensions.
+Each oversized row retains a bounded head, not its tail; its complete saved source remains available through its exact Message target.
+Summary text and targets share one retention decision: each reader row admits at most 16 pairs, with omitted items represented by one final non-actionable aggregate.
+The window admits a complete row with all its targets or rejects it for normal trim-and-retry at its 512-target bound; it never silently drops a visible summary's target.
+Tool open state belongs to the window's set of at most 64 row keys and survives trim and reload; with 64 open, another opening is refused, so no open row is forgotten.
+Inspection, Action and Message pages remain separate bounded documents.
+Ctrl-O opens the lowest collapsed Message the latest frame drew in the feed, as a Message page: it is read from the Store and shows only if its length and digest match.
+When a peer's name is drawn below that Message, Ctrl-O follows it instead, under the same rules and refusals as a click on the name, so every link has a keyboard path.
+The page shows the whole text up to the 256-KiB view, then says how many lines it did not show in full; a saved row's page names its exact raw export.
+Esc, Ctrl-G or Ctrl-O returns to the same view and rows.
+Ctrl-O targets and selection use `(row key, offset)`, not offsets counted from the end; a row reloaded after eviction keeps the same identity.
+A page asked for before a send, Esc, Ctrl-G or a newer Ctrl-O never opens.
+A Message page never shows or decides an Action.
+A click on a tool heading toggles its output directly below it; Ctrl-O toggles the lowest openable tool heading under the same lowest-in-view rule.
+Several tool rows may be open together, and new live output leaves them open.
+The row is replaced in place under the feed anchor: a held view stays on its line, and a view following the end still follows.
+When opened output does not fit the window, rows outside the view and its loading margins leave, as for any arriving row; output that still has no room is refused and changes nothing.
+A toggle reads that one Activity row again; the row renderer shows the saved content under the heading when the row is open, checking its length and digest, and keeps only a bounded display prefix, never closed outputs.
+At most 20 indented rows show, with long logical lines ending in `…` rather than wrapping past that bound, then a quiet `… N more lines` row; a byte-bound cut counts incomplete lines among those not shown.
+The printed prefix keeps at most 8,192 raw bytes and at most 8,192 bytes after terminal-control escaping, before the document escapes invisible clusters.
+Opened headings keep the canonical mark and text in their folded columns; only the selection background changes.
+Code and tool output share one line-level selvedge band owner in `ConversationViewport`: the trusted line marker selects the band, quiet output or heading selection; all blank cells and wrapped rows use that same paint path.
+The entire folded Tool Result uses quiet foreground; NO_COLOR removes the colours and backgrounds, not the indent.
+The fold shows the stored Tool Result literally, including status, stream labels, warnings and capture pointers. No envelope or stdout/stderr parsing changes, omits or styles any of its lines.
+The same display path handles every tool kind and preserves printed text that resembles envelope headers or delimiters, across read-window boundaries.
+Terminal escaping and the row/byte bounds still apply; an empty result opens a blank indented row.
+Opening changes neither the Store nor model-facing text or the wire protocol.
+Internal tool line markers reuse the document's hidden address representation without adding per-byte styling storage, and never become terminal hyperlinks or clipboard text.
+Whether a row is open is one fact with one owner, the window's bounded set of open row keys; a row's text is a function of its Activity row and that fact, so trimming, reloading and replaying a row all draw it the same.
+The set changes only when a toggle's read lands: a failed, cancelled or superseded read (a send, Esc, Ctrl-G or a newer Ctrl-O) leaves the row as it was, and the next toggle retries.
+Neither the set nor any output is saved.
+An open row is marked by its heading's selection background alone; the footer names no close key, because Ctrl-O acts on the lowest openable row in view, which need not be the open one.
+Display eviction does not delete saved work.
+App enables mouse reporting, and wheel events scroll the visible widget.
+Every visible chooseable row or control has a click action matching its keyboard activation, including Session and Settings rows, editable status fields, command and skill choices, model controls and transcript links.
+New Session starts an existing task draft as Enter does; with a blank draft it selects the composer without creating a Session.
+Hover never changes keyboard selection or focus.
+Under the pointer, rows and fields take the hover background, the per-channel midpoint of the selvedge and selection colours, or a monochrome underline, while preserving their foreground; reverse stays the keyboard selection's mark.
+A row that is both selected and hovered keeps the selection look; chips and peer links underline and show the pointer shape.
+Only drawn, clipped action regions take clicks, and their existing paste, consent, stale-content and availability guards still apply.
+Headings, fixed status fields and unkeyed summary aggregates remain inert.
+Rui does not enable alternate scroll mode 1007.
+libvaxis `Window.print` lays out and wraps text: words wrap at spaces, and continuation rows hang under leading spaces and a list or role marker, up to half the width.
+Rui's pinned vaxis patch keeps wide clusters, window-wide words and words crossing a style change off the row edge.
+The feed window keeps retained bytes and styles; Feed draws only visible rows, and the chat Composer owns the draft layout; the overview has no Composer.
+One `vxfw.App` owns terminal input, modes, output and cell allocation for the Root and its screens.
+Switching screens does not restore or lend the terminal.
+Resize keeps the first browsed line in view and preserves draft bytes and logical cursor; an Action restarts from its top.
+Text uses existing width behavior unless a terminal reports Unicode mode 2027 already enabled.
+The renderer neither enables that mode nor requires Kitty graphics or a particular emulator.
+
+The interface has no cell-count ceiling and follows the window size reported to App.
+There is no minimum window size: shrinking to one cell keeps the draft, its logical caret, any held original and a waiting request.
+Widgets clip their content or omit lower-priority rows; a zero-width or zero-height widget draws nothing.
+Growing the window restores the content without a recovery step, and a waiting request remains answerable without a reading gate.
+App uses an ordinary allocator; 32 MiB is a regression target, not a runtime allocation ceiling.
+The regression test uses 49,152 cells, at 24 × 2048 and 192 × 256, and measures peak backing storage for grids, retained graphemes and a rendered Unicode widget surface, including resize allocations and platform page rounding.
+The test fails above 32 MiB; crossing that target does not terminate the app.
+Standalone zero-width output clusters, clusters wider than eight cells and clusters longer than 64 bytes become visible Unicode escapes in the display copy; a run of one repeated scalar is escaped once with its count.
+Unrepresentable input edits are declined explicitly; an unrepresentable marked paste rolls back to the preceding draft and caret.
+Canonical bytes and accepted composer byte offsets remain unchanged; a draft tab displays as one space.
+
+`/requests` renders its selected inspection without changing the draft.
+
+**Chat info.** Alt-I (`\x1bi`), a click on `alt+i info`, or a click on the chat footer’s own Session/model/effort line opens the same chat info panel.
+Clicking that line while info is already open leaves it open, without resetting its choice or consuming the click as a field action.
+The panel sits in a Layer above the chat input on its own ground, never in the feed; opening, editing and closing leave the input's draft unchanged.
+It takes only its natural content height, leaving the latest feed rows visible above it whenever space remains.
+Opening Model adds only the match and overflow rows it needs; filtering gives their space back to the feed.
+If space runs short, the panel takes feed space, not the retained input or its bottom footer.
+Its title is the chat's label, with Effort, Permissions, Tools, Folder and Model below, and Context only while Current supplies a non-null estimate.
+A missing estimate omits the Context row: neither `unknown` nor an invented zero is a context measurement; an actual zero estimate is shown as zero.
+Folder and Context are read-only; Folder shortens HOME to `~` and fits long paths from the left, preserving the true right edge.
+It first keeps a suffix of whole path components with a leading ellipsis; when the basename itself is too wide, it keeps the longest grapheme-aligned basename suffix that fits after that ellipsis.
+It never arbitrarily cuts the right edge or shows an ellipsis alone instead of all the name.
+A blank row separates the fields from Rename, Archive and Copy last answer, even when the actions stack.
+Keys move focus over what is drawn (`chat_info_focus`): Effort, Permissions, Tools and Model, then the actions; Folder and Context take no focus.
+Up and Down move between rows: Down from Model reaches Rename, and Up from the action row returns to Model.
+Left and Right move between Rename, Archive and Copy last answer on their one row, stopping at either end; when the actions stack, each is its own row, Up and Down move between them, and Left and Right do nothing.
+Tab and Shift-Tab step through every focusable item in order and wrap from Copy last answer to Effort and back.
+Enter opens a choice or runs the action; moving focus never opens a choice.
+After a successful copy, Copy last answer reads `Copied` until the next key, a newer reply in the Footer or the notice's expiry; a refused or failed copy keeps `Copy last answer`.
+Divyansh chose arrow and Tab movement and the `Copied` label in November 2026 (PR #1400).
+The panel contributes no internal footer: its one footer substitutes for the normal chat footer after the input’s lower divider on the physical last row, leaving the draft between panel and footer and no blank notice row below it.
+Permissions names `run without asking` and `ask first`; Tools selects from the built-in tool set.
+Model opens that shared inline editor and compact match list for this Session’s provider, with type-to-filter, Up/Down and Enter to save.
+A change applies to subsequent model requests through the existing typed Session configure request; it does not send composer text or change the Session's provider.
+Esc closes only the topmost edit or choice first, then the panel.
+
+`chat_info.zig` owns only the widget and its borrowed typed backend; it never imports `SessionFrontend`.
+`SessionFrontend` supplies inspection facts from its Current capture and submits typed configure edits, Archive and Copy last answer through their existing owners.
+New reads refresh the panel without resetting a choice or reopening a panel that the person closed.
+Pending changes show on their own field until a definite answer; refusal stays on that field rather than consuming the draft or pretending a save succeeded.
+The panel contains no Session IDs, Store paths, recovery records, raw errors or process counters.
+While an original submission is held unresolved or rejected, Alt-D (`\x1bd`) and the footer’s clickable `alt+d details` open its separate repair and identity page.
+That UI-owned repair scratch is independent of the reader’s staging file, so opening details cannot overwrite in-flight feed rows or unshown command recovery output.
+Session-wide detach, stop, archive and original-recovery keys retain their conversation owner while the panel or a nested choice is open; navigation and editing never reach the hidden draft.
+An environment-too-large notice also has clickable `details`; that page, not info, owns the refused capture and its repair instructions.
+Scripts retain `rui session inspect` and `rui session configure` for full inspection and settings not exposed in the panel, including compaction overrides.
+`/status` and `/configure` remain absent from conversation parsing, the slash list and completion; the overview has no slash commands at all.
+The default model is the Model field of app settings, not a second command path.
+
+Complete Action inspection is staged in an independent unlinked file before choice readiness.
+Approval requires every Action row to have been displayed since adoption or the last resize or width-mode change.
+A request starts at its top. If it exceeds the viewport, its last row quietly reports `… N more lines`, with no key hint.
+Ctrl-O and a click on that state row share the conversation’s open dispatcher and reveal the omitted rows in the same request panel, using the already-staged complete document and its existing scroll position.
+They open no second page, retain the choice or draft input row, and never authorize the Action.
+Ordinary scrolling still reaches every request row; a fitting request has no overflow state row.
+Repeated paging, line scrolling or wheel input between frames cannot move past the first unseen row; only rows a delivered frame drew count.
+While approval is paused the input row is the draft, not the choice: typing edits the retained draft, inspection commands remain available, Enter explains that the Action needs a decision and keeps the draft, and returning to the Action requires fresh input.
+Nothing typed while paused can authorize.
+Reading the final page requires fresh input after the completed prompt.
+A preview over 256 KiB cannot authorize an Action in this UI; exact one-shot inspection and decision commands remain available, including in the restored main-screen detach or fatal-renderer notice.
+Marked paste never grants permission.
+Typed chat info configuration and the `/setup` and `/result KEY` commands run on the reader worker once the current read finishes; editing continues, but a Message waits for the command.
+The slash commands’ unchanged CLI owners write complete stdout and stderr to the inspection scratch file.
+Output of up to two lines becomes a notice under the input without the CLI's `Rui: ` prefix, with `rui: ` diagnostics marked `!`; longer output opens as an inspection page under the `Browsing · Esc returns` heading.
+The Session screen stays in place and no command reads terminal input.
+`/discard` and `/recover KEY` answer with a notice; a known command given an argument it does not take shows its usage, as `! Usage: /copy [code|file]`. `slash_commands.zig`'s `draftOf` alone says what a draft is, from its bytes and the complete command grammar: a command line (its first word is exactly a command's name, listed or not), one unfinished `/word` and nothing else, or a Message, which is every other draft, `/review this change` and `//literal` included. The editor's Enter, Esc and Ctrl-G, completion and the list all ask it; none keeps its own test for a leading `/`. Enter runs a command line and sends anything else through ordinary Message admission, unchanged. The Host resolves skill references against the Session's complete saved catalog; a name absent from that catalog stays literal agent text, not an unknown-command notice.
+
+`/new` and `/clear` are identical no-argument navigation commands: retain the old chat, retire its frontend normally, then invoke the same overview New Session transition and captured Configure creation owner. Neither creates a Message or deletes history. Both list as `start a new chat`.
+`/model` is a no-argument request for the same model choice that the footer button opens. Its semantic footer admission and choice preparation are shared; the existing tick/read boundary opens it once Current and the borrowed model source are ready. Choosing a model calls chat info’s existing typed Configure edit and re-reads Current for the footer; no model CLI path or second worker is added.
+The bounded list holds the twelve listed commands plus the loaded skill preview. Suggestion reads, including absent, failed and truncated previews, never decide whether a line is a Message. The Session catalog alone owns skill membership; the complete command grammar, including unlisted `/discard` and `/recover`, takes precedence over same-named leading skills. Mid-Message references remain skills. The draft's first word lists the commands and then the skills its name starts, both read from the caret's word; a later word lists skills alone, and a command line's later words list that command's own choices. `skill_completion.enter` decides what Enter or a click does with the highlighted row: a row runs only where its word ends the draft, so the line run is the line shown, and anywhere else it only fills the word in.
+
+A command list appears when you type "/", built from the same table the command parser uses. /effort and /rename submit the corresponding Session configuration edits. (Divyansh approved this on 2026-10-31, front-end plan row 6.)
+
+`slash_commands.zig` holds the conversation’s table of each command's name, argument shape and plain listed flag; the parser, command runner and list read it. The `/` list shows each listed chat command with its short plain description beside loaded skills. The untitled Palette panel uses the same normal text style for each name and its description; only its border and overflow label are quiet. The highlighted row reverses its full content width, not its border or padding. There are no row badges. Palette descriptions use the same terminal-safe, grapheme-aware ellipsis fitter as overview list rows, with the current terminal capabilities. Choice and option rows remain names only.
+`/requests` and `/result KEY` are listed alongside the other chat commands. Only `/recover KEY` and `/discard` stay unlisted behind the failed-send line (Divyansh, 2026-11-13).
+`/requests` still writes its page of every recovery handle, and while that page shows over an empty draft the list's rows offer what can be done with them, each row the command line it runs, so a pick does what typing it does and no key is typed (Divyansh, 2026-11-02).
+The first row is `/recover KEY` for this conversation's own original only while a retry would go now and could only send a Message: a plain Message whose Admission is unconfirmed, nothing in flight and no Action waiting; never a decision or a Message that carries one.
+Then come each saved Message's `/result KEY`, newest saved first with its local `HH:MM` (bounded by the list’s rows less that one), the original included when it has no `/recover` row.
+A row offers only what applies to it: a saved Message's answer is the one result a page reads, and a conversation's `/recover` retries only its own unconfirmed original, so other saved requests and a rejected original, which `/discard` releases, have no row.
+Up and Down move the highlight, Enter runs the row's line and Tab puts it in the draft; Esc closes the rows until the draft changes, then leaves the page; typing gives their place to the draft's own list.
+Rows that change under an unchanged draft are a new list, which no key acts on until a frame draws it.
+Typed `/recover`, like Ctrl-R, retries nothing while an Action waits.
+The list shows while the draft is one line that starts with one `/`: while it holds no space, a row for each command the word starts; after a command's name, a row for each choice the word being typed starts.
+The choices are fixed words, never free text: `/copy`'s `code` and `file`; `/effort`'s levels, those the Session's model offers, the one in force marked `current` (none before a read names it); and for `/setup` each option, then after an option the lowercase words its shape names, so `--permission-mode` offers `bypass` and `ask`, `--compaction-trigger` offers `default`, and `--reasoning-effort` offers the model's levels and `default`; `/setup`'s saves a default for any model, so it offers every level (Divyansh, 2026-11-02: "every fixed choice").
+A quote or a backslash in the words ends the list: that text is the shell grammar's to read.
+The panel floats immediately above the input without moving it or reserving feed rows. Its total height, including its border, is at most a third of the screen, rounded down, less the input's own row; on tiny screens this budget has a one-row floor only when a row is actually available above the input. Palette owns a draw-local layout for the panel, content and row hit rectangles; `Shown` alone owns selection, visibility and drawn-row pick identity. At widths below seven cells or total budgets below three rows, the panel drops its border and inset to preserve command content. Widths below three cells and zero available height hide it. The border uses ASCII when Unicode is unavailable and stays structural under `NO_COLOR`; border, padding and overflow clicks are consumed without activating a row.
+When more match than fit, the last row says `+N more · type to narrow`, unless the list has only one row, which then shows the highlighted match.
+It goes when nothing matches.
+One row is highlighted, reversed as the Action's choice is: the first, until Up or Down moves it; any edit, a word Enter adds among them, returns it to the first, the rows follow it, and a list that narrows under it (another model, say) highlights its last row.
+Tab adds the rest of the highlighted word, and a space when another word may follow; in a draft no list is for, or over a partial character or a rejected draft, Tab does what it always did.
+A word Tab or Enter adds that the draft cannot hold is refused as a typed one is.
+Enter in a shown list takes the highlighted row: a command with nothing more to say, or a fixed value, runs the line it completes; a command that needs a word (`/effort` or `/rename`) or an option that takes a value only gets its word and the space, so the next list shows.
+So `/copy` alone, taken from the list, copies the answer, and `/copy ` then Enter copies its highlighted choice, `code` first.
+Esc or Ctrl-G, when the latest frame showed a list, closes it; it also clears a draft that is a command line or one unfinished `/word`, and never one that is a Message, whichever word the caret is in.
+Submitting a command consumes its draft whether it is unknown, succeeds or fails; a command refused by a hold keeps its draft.
+`command_input.zig` owns that ending rule for the chat; otherwise Esc and Ctrl-G do what they always did.
+While the list shows, Up and Down move its highlight; otherwise they scroll the conversation.
+The overview has no command list or unknown-command notice: printable `/` and the following text are ignored there.
+Chat-local commands, including `/rename` and `/setup`, keep their existing parser, completion, dispatch and draft-ending behavior.
+There is no `/help` command or `?` shortcut: a question mark is ordinary chat draft text, including on an empty draft, and is ignored on the overview.
+The footer shows the keys available now; the full reference opens from **Settings › Keys**, the last row after Version, on either screen.
+Selecting Keys by Enter or click opens only key names in strong text and their short meanings, in aligned row-major pairs when they fit, or one column otherwise: no title, footer or instructions.
+One `ctrl+x` stops work; it does not require two presses.
+`keymap.list` owns the reference rows, checked against the union of both screens' keymaps so each bound key is listed or explicitly marked as an alias of one listed row, and neither rows nor aliases name unbound keys.
+`keys_panel` derives fields from those rows; `Panel.KeyList` reuses the Panel's cell clipping, without selection or an event handler.
+`AppSettings` owns whether the reference is open; Esc or Ctrl-G closes it back to Settings before any choice, Upgrade cancellation or settings-page close, never leaving a conversation through that first press.
+Conversation commands keep their existing CLI owners and scratch-file output path; no overview command worker or selected-Session command dispatch remains.
+One conversation command runs at a time; a second says `! Wait for /NAME to finish.`
+Short command output uses `slash_commands.resultNotice`; longer output stays in the conversation’s inspection page.
+After `/rename` the next listing, which shows the new label, goes at once.
+`/effort` needs a level: alone it states its usage, and the list offers the levels.
+`/effort LEVEL` submits the reasoning-effort configuration edit and `/rename NAME` submits the label edit with the rest of the line as one value, using the configuration argument decoder, so `/rename "lane four"` and `/rename lane four` both name the Session `lane four`.
+They have the same checks and the same messages, except that a line that does not parse shows the usage of the command typed.
+Once the Session accepts `/effort LEVEL`, LEVEL is also saved as the effort new Sessions start at, as `rui defaults configure --reasoning-effort` saves it.
+
+`/copy` sends the last answer, as its Markdown, to the terminal's clipboard through OSC 52 and `/copy code` sends that answer's last complete fenced block without its final line ending, both streamed with no extra memory; `/copy file` is the fallback, and `Sent to clipboard` shows under the input until the next key (Divyansh approved this on 2026-10-31, front-end plan PR 6a).
+Each reads the newest assistant answer after the current read.
+The reader stages its exact bytes, bound to their length and digest, in the frontend's unlinked scratch file; the UI then writes `ESC ] 52 ; c ;`, the base64 of those bytes a 3 KiB window at a time, and `ESC \`, between frames, so no frame splits the sequence and neither the answer nor its base64 is ever whole in memory.
+The terminal owns the open sequence.
+A write asked for while it is open, such as enabling alternate scroll when a pumped key brings the terminal's report, waits for it to end.
+After a failure or an interruption partway, the next write, or restoration on leaving, sends CAN first, which abandons the sequence rather than setting part of it.
+At most 75,000 bytes go to the clipboard: their base64 is 100,000 bytes, the most hterm's `osc52.sh` sends.
+Over that nothing is written and the notice says `Too large for the clipboard · /copy file`.
+Rui cannot see whether the terminal took the bytes.
+`/copy file` writes the last answer as it arrives to an exclusively created mode 0600 temporary file beside `rui-ID-answer.md` in the directory Rui runs in, then renames it over that name, so an earlier file or a link there is replaced and a link's target is never followed or changed.
+If the read fails the temporary file is removed and the name keeps what it had.
+It says `Saved to ./rui-ID-answer.md`.
+Before the first answer each says `No answer to copy`; `/copy code` on an answer with no complete fenced block says `No code block`. A failed copy says `! Copy unavailable; draft retained.`, or `! This directory is not writable; draft retained.` when `/copy file` cannot write there.
+Non-TTY conversation invocation is refused; one-shot and pipe commands keep their existing contracts.
+
+Approval requires the whole choice on the input row (`› Allow once` and `Deny`, shortened to `Allow` and then `A` and `D` only when narrower than 25 and 20 columns) and its hint under it (`←→ choose · enter confirms`, shortened to `←→ · enter` when it does not fit).
+If required instructions, overflow and input cannot fit, the renderer fails before emitting a clipped prompt and restores terminal configuration.
+
+Peer Messages show as one upright, dim line each, never with `›`: `← Received message from NAME` for a Message from a peer, `→ Messaged NAME` for one this Session sent, and `! Messaged NAME — Failed` for a send its target refused.
+The Message's text never shows: the model reads it, and the person sees only who it came from or went to.
+NAME is the peer's label as the Store holds it when the page is read, so a rename shows on every row; a peer without one shows its ID (`k7m2qx`).
+The Store looks the label up once per peer row; it is not copied into the Message.
+Peer rows group with tool rows: one after a tool row or another peer row follows it with no blank line, and a failed send stands apart as a failed tool row does.
+The line keeps one row and ends in `…` when it does not fit; it is never a collapsed block for Ctrl-O.
+Its admission time goes in the right margin as on a user block; below 60 columns it does not show.
+NAME alone is underlined and links to the peer's Session: the retained text keeps the ID as a hidden `rui-session:` address that takes no cells and is never sent to the terminal as an OSC 8 hyperlink.
+A click on NAME leaves this Session as Esc does and under the same rule (`session_notice.follow`), and also not while an Action waits or a command runs; a refused click says why and changes nothing.
+The overview then opens the peer as it opens any Session and remembers the Session left (`session_follow.Follow.return_to`, an ID, not a live widget): one level, so Esc in the peer reopens it and the next Esc reaches the overview, and following a second link replaces it.
+Reopening reads that Session's history again.
+A link to a Session that no longer opens ends as any failed open does.
+The label is the complete canonical ID, never an abbreviation or separate identity.
+Pages and Message selection retain that same ID, without abbreviation metadata.
+No colour carries meaning: the glyphs do.
+Activity pages preserve both received and sent peer rows while scrolling in either direction.
+
+In a Session's feed, a press followed by a move to another cell starts a drag; the cells it crosses draw reversed, and release copies the shown text once through OSC 52 and clears the highlight; nothing persists.
+Selection resolves keyed rows and offsets: wrapped rows join, and indents, margin times and link addresses are left out; above `TerminalText.clipboard_limit` nothing is copied and the status bar says `Too large for the clipboard · /copy file`, otherwise `Copied N lines`.
+A drag held at the top or bottom row moves the same Feed anchor one row through text it already holds; incoming rows do not move the selection.
+No fill is read in under a press or drag, at either loading edge; it waits for the release. Live scans continue.
+A press or drag ends without copying when the pointer leaves the feed or its content is replaced, since vxfw sends no release then.
+
+Tool markers distinguish observed facts: `•` means unresolved, not proof that execution started; `?` means approval is required; `✓` means succeeded; `!` means failure or uncertainty with an explanation.
+Denied and rejected calls use neutral presentation with explicit outcome wording, distinct from execution failure.
+Glyphs and spacing remain readable without color.
+Each call receives one permanent contextual outcome, with its unchanged label when available, and no permanent start line.
+Settled calls retain their observed outcome in the live region until permanent presentation succeeds.
+Full-group Tool Result publication and original call order remain unchanged, so a settled sibling can remain visible while another is unresolved.
+Reopening reconstructs presentation from saved facts; call identity, not matching description text, correlates updates.
+Redraw preserves the draft and cursor, exact Workspace and command consent, canonical outcomes, uncertainty, and inline tool output access.
+
+Consecutive successful tool outcomes occupy adjacent rows in normal conversation, including across Activity reads.
+Other visible messages, failures and detailed inspection retain block separation.
+Folded opening, live and historical Tool Results show only their saved description, canonical outcome and optional numeric failed exit in the heading.
+They show no stdout/stderr snippets, warning body lines, omission/export notices or automatic inspection-command hints, including after success, timeout or failure.
+Capture and cleanup warnings remain in the unchanged saved result, available in the opened tool row or full raw Conversation export.
+
+Live and historical content share streaming hanging indentation for multiline fields; libvaxis wraps at draw time, so resize reflows without rereading.
+Intentional permission denial is a neutral settled outcome, not a failed Bash execution or a reason to inspect nonexistent output.
+Opened tool rows show saved Tool Results independently of whether a command executed.
+
+A read in progress never suppresses draft and status redraw, because nothing it renders shows before it joins.
+This presentation fact grants no permission authority.
+
+Each read borrows only its own job: inputs frozen at launch and a result the UI applies after join.
+No worker reads or writes frontend state.
+A live read renders its page into scratch; after a successful join, the UI appends it whole and applies its footer, Current and cursor in the same step, so one frame shows them together and none shows part of a page.
+The opening is such a read, so a failed opening draws none of its content.
+Each page carries the Session's work from the same Store read as its items, so a page and its work always agree and no read repeats to pair them: its [Session work](inspection.md#work-state-and-wait-conditions) state, with `since` and that state's facts (a running Bash call's saved description, a waiting retry's due time, cause and ordinal, or a quota failure's saved reset time), the latest Turn and Operation, the first actionable Action, revision and workspace.
+Session listing rows carry the same work value from the same derivation.
+Current is read for chat info and for the Session line: on opening, and again whenever a page's revision or end position differs from the one the line was read with, in the same read as that page, so the line changes with the page that caused it.
+Every input of the estimate (accepted output and usage, Tool Results, queued and admitted Messages, stops, compactions) takes a Session position and every settings change a revision, so the line follows each of them without reading Current on reads where nothing changed.
+A page delivered after a later change, such as another client's decision, still applies whole, and the next page supersedes it; a decision sent from its prompt for an already decided Action is refused by the Store.
+Accepted: decisions bind to the exact Action shown, so a stale prompt can only produce a rejected decision (`action_not_pending`), never one retargeted to another Action.
+A historical fill applies only at its captured window edge; a stale fill never changes the current rows.
+The status bar never says `Sent`: an accepted Message's own row, or its waiting row, is its feedback (TUI rework plan, "drop Sent").
+The Store assigns admission IDs in Session position order, so a page that ends before it, or one read before a later Message's acceptance, does not clear it, and a page delivered before its acceptance joined does.
+
+The composer uses the same `› ` marker as submitted User messages.
+Only a conversation has input at the bottom of the screen: a rule, then the draft, which grows to ten rows or a third of the screen, whichever is fewer, and then scrolls inside itself, keeping the same text first until its caret leaves the shown lines.
+The overview ends in Settings and its list footer, with no editor, model/effort/folder facts or footer buttons. The chat footer is two rows: the composer's lower rule and one `src/widgets/Footer.zig` line.
+While chat info is open, its footer replaces that Footer line on the physical last row; it adds neither a second footer between the panel and input nor a notice row below the footer.
+An empty chat’s footer uses the created Session’s model, effort and folder from `session_chrome.Footer` and the shared chat footer spans; model and effort remain buttons. It has no duplicate overview facts owner.
+A populated chat keeps its existing identity and controls: `Name · model · effort · N% left`, plus an archive state when present; permission settings belong in chat information, not this line.
+Its right side names `alt+i info` and other active keys, including recovery, discard, unarchive and stop when applicable; keys take space before identity. The info hint and the chat’s own Session/model/effort line are clickable and share Alt-I’s panel-opening action; clicking again while info is open is safe and leaves the open choice intact.
+The chat shows `‹` only while `Root.listVisible()` is false; it has no separate width test.
+The empty chat composer shows `Type a task`; approval shows the request and its choices, not a key-help sentence.
+The chat footer shows `ctrl+x stop` only while there is work to stop (Divyansh approved this on 2026-10-31, front-end plan PR 5).
+It shows while Ctrl-X would ask to stop the work the conversation shows, so not while a stop of that work is open.
+The name is the Label, else the first line of the first Message, else the reference, as in overview rows.
+`N% left` is how far Current's `context_estimate` is from the compaction trigger, rounded up, so `0% left` means the next model call compacts; without a trigger it is omitted.
+The chat footer reserves its one-space input gutter even beside the list; the hidden-list variant adds `‹ ` after that gutter.
+Identity fits whole items before its right-aligned keys, marking omitted items with ` · …`; only an oversized name is shortened at a word boundary.
+The overview keeps its own line-fitting policy.
+The ordinary chat footer keeps its previous placement above the bottom single-row state slot, which is blank while idle; chat info suppresses that slot and puts its replacement footer on the physical last row.
+A chat notice occupies that bottom state slot and never replaces identity; it uses the failure colour when it starts with `!`. An unresolved send takes priority there, then the newest local notice, send progress and the overview's state. A transient notice goes after five seconds or the next key; an unresolved send remains. Overview notices keep their own policy.
+The rule names how many draft lines it hides above or below; a conversation drops its Session line when fewer than three rows remain under its status and the rule when fewer than four remain above the line. The overview never shows input at any size.
+Outside chat info, the chat state slot stays below the ordinary footer; conversation text starts at the top of the screen, and its tool rows and live line follow its last line (Divyansh approved this on 2026-10-31, front-end plan PR 3, mock CFWmXwCYELhK15T7LnR6ZF).
+A chat draft wraps between words: spaces at the edge hang past it rather than start a row, a word wider than the line (a URL or a path) breaks after its last `/`, `.`, `-` or similar mark that fits, and between clusters only when it has none; continuation rows align under the text.
+The conversation paints presentation colours from the shared Khadi theme roles: ink for User markers and work under way, quiet for settled outcomes and transient status, attention for permission decisions, and failure for failures.
+Marks come from `src/marks.zig`; CLI reads keep the matching ANSI foreground codes.
+Nonempty `NO_COLOR` disables these presentation colours.
+
+Content cannot select a style, and all escaping, exact permission text and terminal cleanup guarantees remain unchanged.
+
+Historical applied Admissions are suppressed in favor of their User rows; live Admissions display once and their later User projections are suppressed.
+Successful outcome aggregates do not repeat assistant rows.
+Assistant opening, live, history and human keyed-result text use `AnswerRenderer`; User, Tool Result and inspection fields use terminal escaping without Markdown interpretation.
+Inline code uses ink (indigo), without underline; only links underline. Complete bounded fenced code blocks hide their delimiters; in the TUI they show body-colour text on the selvedge band across every row, including blank and wrapped rows. Nonempty `NO_COLOR` removes ink and the band; code lines retain a two-space indent.
+Only output explicitly destined for the viewport emits SGR 40 on each code body line through its newline, then resets it. Plain-terminal and CLI output never emit a background for code: they use the same two-space indent as `NO_COLOR`, even with foreground colour enabled. The viewport strips the SGR and stores code in the unused foreground slot of its existing one-byte style, including the newline of an empty line; no marker text, line allocation or larger retained document is added, and selection copies only the displayed text.
+Code continuations retain their logical line's own leading indentation, clamped only to leave a cell for progress in very narrow windows; layout derives it from retained text with no per-line metadata.
+`display_text` owns viewport cluster normalization and display widths. Table padding measures those same displayed pieces, including bordering-space grapheme context, with the negotiated method carried by the viewport destination. Read jobs freeze that method from the screen; plain-terminal output uses the same width owner with its emitted representation and the CLI's wcwidth method.
+A run of lines beginning with `|` is a table when its second line is a separator. The renderer holds the bounded run until the first non-pipe line or answer end, drops the separator and pipes, and emits two leading spaces and two spaces between display-width-padded columns. The header is quiet, with inline code, strong, emphasis and links retaining their styles. A run exceeding the bound falls back literally without dropping bytes; incomplete and oversized fences keep their existing literal fallback.
+`AnswerRenderer` shows a Markdown link to an `http` or `https` address as its underlined text and a bare web address or local path as itself, each an OSC 8 hyperlink, so the terminal opens it on click and the address is not laid out (Divyansh asked for web links on 2026-11-02 and local paths without sentence semicolons on 2026-11-06).
+Bare local paths start at a prose-token boundary with a single `/` or `~/` and a nonempty path payload; only `~/` needs the process's explicitly borrowed, valid absolute HOME, and neither form resolves the filesystem or interprets line or column suffixes.
+Local links percent-encode the expanded path's bytes into a `file:///` URI, preserving only slashes and URI-unreserved ASCII; malformed UTF-8, controls or bidi controls leave the candidate literal.
+Bare links omit trailing sentence punctuation, including `;` and unmatched final `)`, from the clickable span without changing the visible text or internal punctuation; local filenames also keep trailing `_`, `~` and `*`.
+Other link targets (including Markdown file targets), links inside code or emphasis, Markdown link titles and complete addresses longer than 2,048 bytes after local expansion and encoding stay literal, and `/copy` still sends the original Markdown with every address.
+The conversation view keeps each address in its text as bytes it never draws, just before the text it links, so the address moves with that text through escaping, older pages and eviction.
+Only trusted OSC 8 labels may combine an explicit foreground with underline: the viewport retains that foreground in its existing style byte and uses underline to recognize the link; uncoloured or non-underlined labels keep the dedicated link slot.
+A frame links at most 128 KiB of address bytes across its cells, because the terminal grid copies the address into every cell of a link; text past that bound, or whose address left the view, stays underlined but opens nothing.
+Normal tool presentation shows only the canonical outcome heading, including an optional numeric failed exit.
+A fixed 64-byte first-line scan derives the exit from a complete matching Bash outcome line; it retains no output excerpt, warnings or hints.
+The full stream still drains and authenticates before the heading is shown.
+Tool Result streams validate even when their bytes are not displayed; label-only observation uses admission-certified metadata under the public Session activity contract.
+Fresh Action inspection authenticates all three complete proposal fields.
+Complete Action arguments remain available through fresh inspection; one-shot inspection also exposes the call ID.
+Opening tool output reads just that row again without moving the feed anchor or live scan cursor.
+Older outcome headings remain available by scrolling the feed; capped rows retain access to their full saved content.
+Stream framing, expected length, domain digest and physical EOF must validate before the final content window is delivered.
+A late content, integrity or rendering failure after visible opening/live output is fatal after terminal restoration, without retry or rollback.
+Failure abandons retained renderer text and pending writer bytes; synchronous keyed-result output attempts only an ANSI reset before diagnostics, preserving the original error rather than finishing incomplete content.
+
+Feed reads use existing public Activity and content reads, independently of Admission; there is no history cache or new Host route.
+Content streams retain their length and digest checks before a joined read becomes visible.
+Ordinary preparation failure exposes no row content and retains the draft for an explicit retry.
+Hidden tool output never creates a historical omission notice; normal feed rows remain header-only regardless of tool-result size.
+Raw export streams the exact content without presentation.
+Generated commands use printable hex Store selectors and bare six-character Session IDs without terminal or shell interpretation; decoded Store values retain the existing bounds and validation.
+
+When Current exposes an actionable permission, the frontend reads the selected call's identity from that capture before its complete arguments replace scratch.
+The runner is derived from the name and owner in the Operation's frozen offer, never from argument shape or the Session's latest catalog.
+Current includes the frozen `server` only for unresolved MCP calls; legacy built-in rows omit it.
+Bash displays `? <description>`, then the decoded `$` command through terminal escaping, then `Time limit` only for an explicit timeout and `stdin:` only when the call has one.
+MCP displays `? <saved description>` (at most 200 decoded UTF-8 bytes), `Tool`, `Server` and the original `Arguments` JSON.
+The description is extracted once at settlement from `rui_call_description`: a valid nonblank, single-line UTF-8 string of 1–200 bytes is saved; missing, non-string, blank, multi-line or oversized text falls back to the tool name.
+The terminal and TypeScript feed read the saved line, never re-parse arguments for it.
+The client retains that bounded saved line; it does not interpret the server's schema.
+Raw one-shot `rui action inspect` stays exact.
+A permission request replaces the composer's two rules and input rows with a focused card.
+The draft stays hidden, with its bytes and caret intact, until the request is answered or withdrawn.
+A taller command stays scrollable without an instructional overflow line; Allow once acts even when some command rows are off screen.
+Bash and MCP use the same bounded viewport for the preview, without an approval veto for content outside it.
+The description is the model's label, never a substitute for the command or MCP arguments.
+Every later line of the command, and every line of stdin, starts with the content mark `│`, and every row such a line, the `?` line or the `$` line wraps onto starts with `┆`, so description, command or stdin text can never pass for the `$`, `Time limit` or `stdin:` lines and a wrapped row never reads as a new line.
+Every line of MCP arguments starts with the same content mark and uses terminal escaping, so JSON cannot impersonate the Tool or Server labels.
+Allow once is highlighted for each new request.
+Left and Right select Allow once or Deny, and Enter decides.
+Other typed keys are ignored silently while the card holds focus, with no letter shortcuts or denial reason.
+Esc, Ctrl-C and Ctrl-X keep their normal navigation, exit and stop meanings.
+Marked paste never decides, including when a request changes during the paste.
+Malformed authorization keys are refused, never interpreted as Enter.
+The existing draft returns with its caret when the card closes; typing at the card neither changes nor sends that draft.
+This design follows Divyansh's 2026-11-09 decision to trust the person using the tool, without requiring them to prove they read the command.
+
+`ActionConsent` owns the current request, the request the card last drew and the highlighted choice.
+Adopting a successor clears the drawn request, so a key or click cannot decide a request the card has not drawn.
+`RUI_TEST_ACTION_READY_FD` fires when the card first draws that request.
+Drawing is not a flush receipt: there is no one-frame delay, contiguous-row reading gate or per-key offer spending.
+App owns decoding and terminal I/O; the Session shell routes input to the focused card before the composer.
+A decision consumes the drawn target before starting Admission.
+
+The existing Admission owner captures and sends the Permission Decision through `/v1/control/permission-decision`, pinning Store, Session, Action, decision and reserved key.
+Ctrl-R recovers those exact bytes after uncertain delivery; it cannot create a second effect or retarget another Action.
+Plain Deny sends only that Permission Decision, with no Message or deferred denial on exit.
+The Host revalidates that exact Action at admission, even if an external decision resolved it while displayed.
+Observation continues while a choice is shown: once Current no longer names that Action, because another client decided it or its Turn ended, the choice leaves without a key and the outcome follows in the conversation.
+A definite stale-target rejection remains the original until explicit `/discard`; a subsequent distinct Action receives its own fresh presentation.
+The next draft and cursor survive choice and recovery.
+Tool outcomes start folded; opening a row shows bounded escaped saved output in place, and raw Conversation export remains unchanged.
+
+Exact one-shot diagnostics remain available through `rui action inspect`.
+It sends no decision.
+Inspection displays Workspace, complete arguments and executable exact-target one-shot allow/deny commands.
+Shared shell-selector emission preserves exact bytes while keeping controls and bidi bytes out of displayed commands.
+Slash text deliberately replaces normal composition; the original submission remains pinned.
+Inspection does not reserve an Action.
+Ctrl-C leaves and loses the unsent in-memory draft; Ctrl-D also leaves where the current input accepts it.
+Deleted app command names (`/upgrade`, `/login`, `/wait`, `/inspect-action`, `/exit`) follow the ordinary unknown-command path in a chat; the overview ignores slash text, and login uses the explicit one-shot command.
+A pending command or inspection waits for the current observation.
+A read that has delivered no output is cancelled and later repeated; once the UI owns a nonempty window, that read completes first, so output is never replayed.
+Only a successful joined observation advances Current and the activity cursor.
+This shared boundary covers opening, live Activity, permission presentation, feed fills and tool folds; it changes no saved work or intent.
+
+A feed fill is eligible only after successful joined opening establishes its edge; pre-output cancellation for a command or inspection restarts opening without treating an unset edge as exhausted.
+A null cursor before that join is not evidence of exhaustion.
+
+Exit ends input consumption before terminal restoration discards queued suffix bytes.
+Cleanup collects independent reader and Admission outcomes after restoration, cancellation, both joins and output-loan retirement, then selects error precedence.
+An already-consumed substantive failure is not replaced by an external interruption.
+Ordinary feed/tool-output preparation failure remains recoverable while active, but reportable on final exit; rendering failure remains fatal.
+Deliberate exit retires cancelled output without resuming or replaying it.
+An already-started synchronous command is not preemptible; interruption takes effect when it returns.
+
+Exit, Ctrl-C and external INT, TERM or HUP leave through `App.deinit`.
+Signal handlers set a flag; the Root's next tick requests `ctx.quit` without writing from signal context.
+App resets enabled terminal modes, and its TTY owner restores the saved terminal attributes with `TCSAFLUSH`.
+Darwin kernel-maintained `PENDIN` and `FLUSHO` are not saved user configuration.
+If initialization fails after opening the TTY, App releases the TTY and its signal thread before returning the error.
+App opens `/dev/tty`; it requires a controlling terminal and does not fall back to stdin or stdout.
+Restoration follows App's behavior rather than a Rui-specific output deadline or confirmation protocol.
+Vaxis logs a failed termios restore; neither an exit code of zero nor a saved request proves that restoration succeeded.
+The optional detached notice includes an executable resume command with exact Store and Session selectors; changed defaults cannot retarget it.
+Its write remains best effort and nonblocking.
+Capture filesystem work and synchronous command work are not preemptible, so cleanup may still await their return after restoration.
+Cancellation affects local exchanges only and never stops Host work.
+The separate provider reader retains its own drain/flush contract.
+
+Alternate-screen disposal also ends synchronized output, shows the cursor and leaves the alternate screen.
+`vaxis.Panic` attempts restoration before the default Zig panic handler.
+SIGKILL, a fatal native crash or emulator loss cannot execute orderly restoration.
+If the shell is left raw or hidden, run `stty sane; printf '\033[?2026l\033[0m\033[?2004l\033[?25h\033[?1049l'` or the terminal's reset command.
+Host work and captured-request recovery are independent of terminal state; unsent drafts remain invocation-local and are lost on exit or crash.
+
+
+## Required evidence
+
+### Interface and owner checks
+
+| Contract | Canonical checks | Limits and exceptions |
+| --- | --- | --- |
+| Opening and older history: frozen opening, exact pending count without previews, each admitted Message exactly once across older pages, listing and retained copy after eviction | `human_cli_integration.py` | Equal-content Messages included; labels as of their read |
+| [Chat info](#staged-persistent-input) | `SessionFrontend.zig`: `chat info opens from the chat line above the input at 140 and 46 columns and Escape closes only the top choice`, inspection-refresh/late-capture and typed-save/refusal tests; refused-environment tests keep repair details separate. `chat_info.zig` covers fields, choices and actions. Core and real Overview-lender tests check Archive admission across surfaces, ledger capacity, pending/unknown requests, archive states and Host guards; frontend tests cover refusal/retry, hidden exact-answer settlement, all five Configure edits and Copy across admission guards, and fatal archive dispatch errors escaping actual panel activation without publishing pending. Layout regressions must keep the info panel at natural height with completed feed rows visible above it at both widths; opening Model consumes exactly its additional match/overflow rows from the feed, filtering restores them, and neither changes the retained input or bottom footer position. Clicks on the chat’s own Session/model/effort line and on its info hint must enter the same panel as Alt-I, repeated clicks must leave its open choice intact, and Escape closes the topmost choice before the panel. Layout regressions must omit Context for a null estimate while displaying a known zero, keep HOME-relative Folder paths and the true right edge when fitting from the left (whole components normally, longest grapheme-aligned suffix for an oversized basename), and retain the blank row before inline or stacked actions. The panel footer must substitute for the normal chat footer below the input’s lower divider on the physical last row, with no duplicate inside the panel or blank notice slot below it. `human_cli_integration.py` drives permission and effort changes, label display, draft preservation and refreshed context through the panel. Verify-rui `chat-info` and `chat-info-model` states seed a completed short answer and retain a draft, requiring answer lines above the panel at both widths, with no-estimate Context absence and no ordinary `alt+i info` footer; physical tmux steps use Alt-I. Alt-D/clickable details must retain repair/identity access only for a held original, with no IDs or Store paths in info. Focus movement: `chat_info_focus.zig` `'Chat info focus domain follows rows horizontally clamped actions and wrapping tabs'` and `'Chat info stacked focus domain follows the drawn vertical action rows'` cover every focusable item under every move (Up, Down, Left, Right, Tab, Shift-Tab) for both action layouts; `chat_info.zig` `'Chat info routes horizontal and forward reverse Tab without opening choices'`, `'Chat info focus consumes drawn action layout across pending failures and Context visibility'` and `'Chat info copy label follows successful short reply dismissal replacement and failure'`; `session_chrome.zig` `'copy success shares short reply next-key replacement and expiry owner'`; `SessionFrontend.zig` `'App Session copy button feedback follows only its own clipboard completion and refusal'` (the panel's copy, a typed `/copy code` and `/copy` before and after it, no answer and a refused clipboard). List focus beside a wide chat: `SessionFrontend.zig` `'App Session Left on an empty draft alone focuses the list while Esc leaves at every width'` (empty, nonempty and caret-at-start drafts, Left, Esc and Ctrl-G, at 46 and 140); `app_input.zig` `'App input draft list domain distinguishes empty text from a caret at start'`, `'App input list focus routes every list event to its semantic owner and mouse returns focus'`, `'App input list activation routes unchanged to its semantic owner'` and `'App input list activation and chat-pane click share one focus transition that keeps the chat's presentation'` (every layer, width, open chat and focus); `overview_view.zig` `'Overview list activation resumes same or opens other chat at wide and narrow widths'` and `'Overview list Right does not create or open Settings and clicks share resume owner'`; `Overview.zig` `'App overview list activation resumes the open chat without closing its presentation'`; `Root.zig` `'Root resumes the open chat from the list by key or click without closing its presentation'` and `'App root hands list activation unchanged to its one core'`; `Composer.zig` `'Composer inactive prompt uses quiet style and no caret without dimming draft text'`; `GroupedList.zig` `'GroupedList selected row uses the owner's focused or inactive background'`. Verify-rui states `chat-info-archive` (arrow focus along the action row), `chat-info-copied` (`Copied` after a copy), `chat-info-stacked-actions` (Down through stacked actions at 46×30), `focus-chat`, `left-to-list` (Left on an empty draft focuses the list at 140 and leaves at 46), `focus-list-A` (focused list row, quiet `›`, unchanged feed at 140×40) and `list-to-chat` (Right on the open row returns to the retained input). | Frontend regressions cover typed completion without slash parsing, four-phase cancelled-read supersession, independent repair scratch custody, and detach encodings across every topmost choice. `repair details rewrite from byte zero on first repeated and changed held failures` checks the repair owner, Alt-D and details control across repeated rewrites, longer/shorter advice, and held-failure key/state changes. It checks exact file bytes and length, visible guidance and retained original/draft. Repair-page identity tests cover prior read kinds and requests pages, held originals, saved rows, draft presence and each entry point: Esc/Ctrl-G return without inheriting recovery rows or retrying; explicit command cancellation and adopted-Action return retain their existing precedence. Reverting the typed-completion guard must reproduce the empty slash-parse panic. 140×40 and 46×30 panel and open-Model text and PNG captures required; byte replay and tmux frames are not physical-keyboard proof |
+| App settings and chat info Model fields | `model-picker-integration` in `check` and the callers partition: plain-PTY app settings filtering, navigation, one-Enter save, separate effort selection, narrow view, and a chat Model choice that saves within its provider without changing the overview default. `model_choice.zig` tests cover provider scoping, inline value-widget filtering without a separate Filter row, indented compact matches, natural shrinking, one quiet downward overflow row, visible-name size-column fitting, mouse picking and invalidation before events or drawing. `panel_editor.zig` owns the refusal/recovery fault domain shared with Rename; widget tests retain editable text, caret and field-level failures through correction and submission. ASCII owner tests preserve this incoming geometry with ASCII marks, tails and overflow. | Fixture providers and libghostty-vt; no live account, physical terminal or power-loss claim. Loading, list failures and durability-unconfirmed saves remain untested through a PTY. |
+| [One ChatGPT sign-in label](#human-entry-and-authentication) (Divyansh chose this on 2026-11-13) | `provider_name.zig` `'every provider's name reads apart, its sign-in reads the same exactly within its account, and its login is a terminal command'`; `app_settings.zig` `'App settings sign-in and effort choices'` (Sign-in reads ChatGPT for saved `codex` and `chatgpt`, API key for `openai`) and the 99x20/46x20 page test; `model_choice.zig` `'Model choice keeps a chat on its own way into ChatGPT, and either ChatGPT word finds it'` (each sign-in's list keeps its own models; `chatgpt` and `codex` find ChatGPT rows, `api` API-key rows); `model_picker.zig` `'/model terra low api'` and `'a word narrows'`; `model_picker_signin_integration.py` | Every list on screen scopes to one sign-in, so none shows two ChatGPT routes; the sign-in columns in `model_picker_view.zig` are unwired since #1327. Fixture lists only |
+| [Bare entry](#human-entry-and-authentication) overview and empty creation | `overview_view.zig` in `test-logic`: list input has no text domain; New Session Enter/click creates once from a copied default; acceptance opens the returned reference, rejection permits retry, uncertainty keeps its recovery key and blocks duplicate creation, and Host holds/ledger capacity preserve local Settings access. `Overview.zig`: printable ASCII/Unicode, unknown keys, `x`, `r` and bracketed paste are ignored at both widths; accepted empty creation opens a blank focused chat with no Message intent; Configure completion retains saved permissions, effort and model admission without loaded tools. Creation owner tests change saved effort and permission before admission and again after queueing, proving one fresh admitted snapshot remains fixed through the worker; covered, pasted and pending gestures do not sample creation preferences. `overview_clicks_cases.empty_list` drives click and Home/Enter separately: each captures one Configure, creates exactly one Session with zero Messages, and only subsequent chat typing sends a Message. Existing stop, spinner, canonical-failure and `require_model` owners retain their separate checks. | Native PTY and owner tests are not physical-keyboard or Mac display evidence; no new native result is claimed by this inventory. |
+| Mouse and keyboard choice parity | `widgets/List.zig` and `widgets/Panel.zig` send enter, motion, press and leave events over clipped rows, fields, inline choices and column actions; hover preserves keyboard selection and focus and takes the hover style, which the selection overrides. `Overview.zig` `Overview mouse` and `overview_view.zig` list click tests cover empty New Session creation, pinned Settings and Host start/retry availability; chat tests retain palette and model/effort controls. `widget_style.zig` `hover differs` walks every skin and depth: hover differs from ground, bar and selection, and monochrome hover underlines without reverse. `SessionFrontend.zig` `App Session palette` and `App Session status mouse`, plus `PermissionCard.zig`, cover choices, skills, recovery rows, editable/fixed status fields, stale frames, paste and consent guards. `FeedView.zig`, `DocumentView.zig`, `transcript_selection.zig`, `FactsRow.zig`, `StatusRow.zig` and `SessionChrome.zig` check row hover backgrounds, open rows keeping their selection background, full linked-label underlines, wide cells, continuations, retry/new-entry chips and click actions. | Event-driven widget and shell evidence; no physical-terminal mouse claim |
+| Alt-A archive on the overview and exact conversation | `overview_view.zig` `Alt-A` tests cover the shared policy, captured reference, absent listing, busy/approval confirmation, server-only visibility, archived/archiving guards and pending/unknown duplicate suppression. `Overview.zig` and `SessionFrontend.zig` `Alt-A` tests cover unchanged draft bytes, caret/revision and retained original, confirmation precedence and permission-offer spending. `SessionFrontend.zig` conversation slash tests cover shared archive/restore ownership, submitted-line and completion consumption, busy/approval confirmation, mixed-input duplicate suppression, recovery handles and propagated dispatch errors; `Overview.zig` checks the exact unlisted open reference through the worker. | Plain-PTY verify-rui capture required. No live provider needed |
+| Reader failure provenance and Host recovery | `SessionFrontend.zig` drives read/copy/command disconnects and local create/sink/rename failures through the joined worker with discovery reachable or held. Required `ReadContext` callback types bind the joined `ClientTask` result origin; skills tests retry the same prefix through the real adapter after reobservation, retaining the held page. Cancellation, canonical failures and origin reset keep their independent lanes | Injected local filesystem faults and a scripted local peer; error names never decide Host loss in the shell |
+| [Automatic Host start after a crash](#human-entry-and-authentication) | `server_host.zig` `'an asked stop leaves the stop record only when it is what stops the Host, and the next start removes it'` over every phase; `platform.zig` `'the stop record reads asked only when present as a file, and unknown when unreadable'`. `host_restart.zig` in `test-logic`: every combination of previous and next read (up, stopped with each record, held), allowance, Upgrade custody and manual-start availability, and runs of repeated stops, failed automatic and manual starts, Upgrade custody arriving and leaving, and held states. `Overview.zig` `'a Host that stopped unasked starts again once by itself; any other stop waits for a click'` over asked, unasked and unknown records with and without Upgrade custody, and `'the automatic start is spent once per run: a second crash and a failed start leave retry'`. `human_cli_integration.py`: a SIGKILLed Host under an open conversation shows `Host starting`, then the failed start's `r retry` line (the overview's control is click-only); a Host sent SIGTERM, one sent SIGINT and one sent SIGHUP, under an open conversation shows `Host stopped · r start` and is not started. `server.zig` `'SIGINT, SIGTERM and SIGHUP ask the Host to stop once through intake's loop, in every phase'` and `'the Host's stop signals reach its handler until serve restores the previous ones'`; `host_stop_integration.py` `signal_stop`: SIGTERM, SIGINT and SIGHUP, each sent twice, end a `host serve` with `host pause`'s exit status and stop record, and SIGKILL with neither | The integration start fails by design (the started Host refuses an https proxy) so the fixture Host can recover the accepted Message; a successful automatic start and a `host-stop` under a live TUI are unit evidence only. A Host ended by SIGKILL leaves no record and counts as a crash |
+| Overview look: Khadi skins, background query, top lines | `overview_view` in `test-logic`: every colour role has an entry in both skins and its nearest 256-colour entry; whole screens at 80x24 and 200x60 for each skin and depth, played through a model terminal that checks every cell's colour; `NO_COLOR` keeps only bold, dim, reverse and underline (`widget_style.of`), so quiet rows stay dim, the keyboard row reverses and the pointer row underlines; skin choice for a dark, light and missing answer; Indian grouping at 0, 999, 1,000, 1,00,000 and 1,00,00,000; the headline, stable top/list positions through Session completion, failure and Host restarts, reclaimed list space in narrow viewports, and provider alarms over faded stale rows. `Overview.zig` checks that the shell's Host line appears exactly once in overview and chat frames at wide and narrow widths; the list header adds no Host words. `TerminalInput.zig` `'a background answer is a colour report; a malformed one is dropped and keeps the next key'` | The OSC 11 answer and the 200 ms wait are not measured on physical or Mac terminals. Fonts are the terminal's choice |
+| [Overview groups and rows](#staged-persistent-input) | `overview_view.zig` in `test-logic`: `'a Session waiting on an Action leads in Needs you, yours or not, and Yours keeps the rest'`; `'queued rows sit last in their group, longest wait first, after work newest first'`, a due retry among them; `'row segments say each state with its mark, and words only for a cause or a wait's countdown'`; `'row segments drop the detail column on a narrow screen and keep mark, title and age'`; `'a needs-you row reads its waiting Action's command once, and again only when the Action changes'`. `session_view.zig` in `test` `'only a Bash Action names a command for its row, whatever another tool's arguments look like'`, with an MCP Action whose arguments parse as Bash's. verify-rui screenshots of the App overview at 80 and 200 columns, Unicode and ASCII: **pending the App shell wiring** | Values only until the App overview draws them; the row text is checked as segments, not cells on a terminal |
+| [Live memory](#human-entry-and-authentication) | `memory_text.zig` in `test-logic`: `'live memory text covers absent tools rounding and the GiB boundary'` and `'memory fits its widest form: full, then rui alone, then nothing, at every width'`, the one owner of what fits, over widths 0 to 39, Unicode and ASCII, with and without tools and before the first reading. `OverviewLines.zig` in `test`: `'overview Settings memory gets the columns between the label and the version'`; `app_settings.zig`: `'App settings Memory gets the columns from the value column to the edge'` and `'App settings live Memory is optional read-only and independent of saved preferences'`. `Overview.zig`: `'Overview Settings live memory frame uses quiet role in day and night'`, `'App settings live memory follows Overview readings while chat info stays chat-only'` and `'memory counts this TUI alone while no Host runs, at open and after a Host it sampled is gone'`; `chat_info.zig` `'Chat info contains only chat settings and never an app Memory row'`. `process_memory.zig` in `test-logic`: `'rui adds this TUI and its Host, and tools add every process below the Host'`, `'with no tool process, or no Host, tools is null; an unreadable Host leaves rui as the TUI'`, `'a tool that exits mid-walk is left out, and its listed children with it'`, `'a process listed twice, or a cycle a reused pid makes, counts once, and the walk stops at its bound'`, `'totals saturate rather than wrap'`. `host_identity.zig` in `test` `'the live process table reads this process's memory and a child it starts'` | The live reader has run on Linux only. Draft PRs select no macOS job, so the macOS reader (`proc_pid_rusage`, `proc_listchildpids`) first runs in the macOS `check` once the PR is ready for review. macOS and Linux numbers are close, not identical; a tool that leaves the Host's tree is not counted. Memory is sampled with each Host read; the read's cadence is not asserted |
+| Slash command names and app navigation | `slash_commands.zig` owns conversation commands only: removed app names remain outside its grammar, never complete or appear in the slash list; in a chat they use ordinary Message admission; choice/option rows are names only and recovery commands stay unlisted. `Palette.zig` renders conversation `/` rows and quiet fixed choices. The overview has no command table, parser, completion, command output or unknown-command notice. `overview_counts_cases.pinned_settings` sends `/nope` and bracketed paste, then opens Settings as an acknowledgment and checks no draft, request or Session was created. | Existing chat-local commands remain supported; removal of the overview surface does not remove chat `/archive`, `/unarchive`, `/rename` or `/setup`. |
+| Option session navigation | `keypress.zig` `'Option session navigation decodes'`; `app_input.zig` `'Option session navigation routes'`; `overview_view.zig` `'Option session navigation opens'` and `'Option session navigation skips paired'`; `Overview.zig` `'Option session navigation switches'`. Exact Alt modifiers, legacy and Kitty arrow reports, paste/modal custody, projected adjacent order, same-session endpoint focus, absent anchors, narrow/wide routing and real A-B-A draft/caret restoration with destination input focus. Existing whole-domain list-admission tests retain covered, pasted, pending/uncertain-creation and Upgrade guards. | Parser and native-owner evidence is not physical macOS keyboard/terminal qualification. |
+| Settings Keys reference | `keymap.zig` and `overview_view.zig` check the reference against both screen keymaps. `keys_panel.zig` checks every `keymap.list` row, including `tab` and `⇧tab` as next and previous panel/footer field and `←→` as list/chat and info actions, aligned pairs at 140 and a single column at 46, strong keys and absent aliases/help text; `app_settings.zig` checks Enter and click, and `Root.zig` checks topmost-only Esc. PTY cases in `session_chrome_cases.py`, `overview_clicks_cases.py` and `human_cli_integration.py` open Settings then Keys, reject stale help text and return without leaving the conversation; `session_chrome_cases.keys_case` reads its expected rows from `keymap.list` in `src/keymap.zig` and checks each row's exact words and alignment at 140 and 46. verify-rui's `keys` frame covers 140×40 and 46×30, including the panel/footer field and list/chat rows. | A reference-row or stale-help mutation must fail the relevant assertion. Native cases and visual frames must run on the changed binary before claiming terminal evidence. |
+| [App settings Version upgrade](store.md#store-format-and-upgrades) | `upgrade_status.zig` in `test-logic`: `'a run's line: the check, what the restart will do, each step, and a stop'`, `'how a run ended: a notice, or held until another Upgrade when the client cannot go on'`, `'ASCII spells the ellipsis and dot'`. `overview_view.zig`: `Upgrade runs inline` (Esc cancellation and Host hold, without an overview draft), `'every place an Upgrade run can stand decides the hold, Esc and another Upgrade from that one value'`, `'another Upgrade while one runs changes nothing: its progress and Esc stay'`, `'Upgrade is never refused as a Host request: the status bar shows its run at first, while it runs and after a hold'`. `UpgradeJob.zig`: `'the run's status: checking, the release found, each restart step, then how it ended'`, `'a stop asked for shows until the run ends, before the worker starts and while it prepares, and not once it published'`, `'Esc and publication race on one gate: whichever comes first holds'`, `'a cancel before the worker starts ends the run cancelled without checking'`, `'a release already selected but not yet running in the Host is found, so its restart shows'`, `'how a run ends, as the status bar names it'`, `'a check that may not install here names why'`, `'a newer build already selected installs quietly: no older release found, then superseded'`, `'the selected build already current installs quietly: no found release, then up to date'`. `upgrade-integration` on the App overview's status bar: Esc cancels while preparing, then another Version-row activation installs and restarts the Host; Esc after publication changes nothing; Esc during the check cancels it and its `--version` probe is reaped; SIGINT during the check and after publication restore the terminal, the latter printing the publication receipt; a checksum and cleanup dual failure prints its retained path on exit; the Version row with a conversation open starts the same run: Esc cancels while preparing, another Version-row activation installs and restarts the Host, and chat info opens once the conversation has read again; real tmux. `session_upgrade.zig` in `test-logic`: `'an Upgrade holds Host requests from its start until the listing is read under the selected Rui'`, `'a block lasts until another Upgrade, and a listing does not lift it'`, `'an unchanged run reads the listing again, and a conversation's failure blocks'`. `SessionFrontend.zig`: `'app settings starts the overview's run and keeps the original submission; Esc is the run's'`, `'a run quiesces the conversation's Client work, and its end holds Host requests until the conversation reads again'`, `'a conversation is at rest for an Upgrade only with no work running or finished and not yet joined'`, `'an Upgrade hold refuses commands without losing their drafts'`, `'an Upgrade's hold shows no permission card and sends no decision, shown or prepared'`. `Overview.zig`: `'a conversation's Upgrade waits for the conversation's running read, though the overview ticks first'` also checks Version-backend refusal while a chat command is queued or running | A conversation's failure to settle its Client work or to read again after the run is not exercised. That a withdrawn permission card shows again after the hold is not exercised. A failure after publication still reads `nothing changed`; its exit receipt is exact |
+| [Unconfirmed send on the status bar](#staged-persistent-input) | `overview_view.zig` `'an original Esc left unconfirmed is named at once and recovered on departure, until the ledger is full'`: `unconfirmedLine` names the newest unconfirmed send, with its recover key when it has one, and sets no notice. `overview_counts_cases.py` `unconfirmed_status` (the PTY check of `! Not confirmed · ctrl+r retries original`, then `! Not confirmed · rui request recover KEY`, on the status row) | |
+| [Archived on the pinned row](#human-entry-and-authentication) | `overview_view.zig` checks arrows, Enter, clicks and Esc in empty and populated lists and sidebars, always-present controls for empty lists, selection styles and hit columns from 9 to 140 columns. `OverviewLines.zig` presses the drawn word and surrounding cells at 46 and 140 columns in both layouts. `Overview.zig` checks sidebar creation through ordinary frontend departure and Configure dispatch, including draft retention and refusal. verify-rui `archived-row-none`, `archived-row`, `archived-row-chosen`, `archived-view` and `archived-view-esc` cover 140×40 and 46×30. | Removing the control in an empty archive or sidebar must fail the domain and widget tests. Plain-PTY frames are not physical input evidence. |
+| [Overview clicks](#human-entry-and-authentication) | `overview_view.zig` checks Session click/Enter parity, drawn identity and stale removed targets; `GroupedList.zig` retains whole-row viewport, marker, selection and pointer-span behavior. `Overview.zig` checks pinned New Session Enter/click, empty creation admission, full-width overview layout at every size (no empty compose pane), live chat/settings side-list clicks and focus handoff. `overview_clicks_cases.empty_list` checks both creation gestures, one captured Configure per gesture, zero Messages before chat input and only chat input sending a Message. `overview_counts_cases.pinned_settings` requires Settings on the penultimate row above the list footer and no editor/facts; its post-text/paste Settings acknowledgment proves no request or Session. | The overview-specific counts-line view-name target and `overview_counts_cases.view_name` are removed with `/sessions`; no physical terminal mouse-reporting claim. |
+| Editorless overview frames and readiness | `frames.json` start-empty and list top/end states require the list footer and reject `Type a task`; chat-empty requires `Type a task`, model/effort, `code/rui` and `alt+i info`. start-model, start-effort and start-picked first open New Session, then exercise chat footer buttons; overview-printable-ignored replaces slash-overview, and draft-overview command states are removed. `terminal_process_test.test_overview_oracle_requires_list_footer_without_editor` rejects stale editor frames while accepting the list without an editor cursor. `test_verify_rui.test_initial_readiness_accepts_editorless_list_and_legacy_prompt` accepts the editorless list and legacy initial prompt for before captures. | Require 140×40 and 46×30 before/after captures. These Python oracle/readiness checks are not native terminal evidence; regression mutations must fail at the intended assertion, not fixture setup. |
+| Empty Session row projection | `overview_view.zig` empty-Session projection cases cover full/delta metadata, first admission by any sender, the current-open exception, selection reconciliation, archive membership, summary counts and provider bands. `overview_clicks_cases.empty_list` checks retained captured Configure Sessions and zero Messages while abandoned rows disappear. `frames.json` empty-chat-left, empty-chat-model-left and empty-chat-two-left cover leaving, picking a different model then leaving, and two empty chats beside existing conversations. Overview and chat frames use `absent_regex` to reject nameless raw-ID rows with compact ages, including a sidebar row followed by the pane divider. The current-open empty row must instead be selected and named `New Session`; the pure row owner covers both list/metadata arrival orders and first admission. `chat-empty`, `start-model`, `start-effort` and `start-picked` wait for `○ New Session` at 140 columns before further actions or capture, without requiring a hidden sidebar at 46 columns. `test_verify_rui` cases enforce schema validation, shared readiness/saved-capture checks, dynamic IDs, named-row acceptance, both sizes and positive-integer width-scoped wait validation/execution. | Capture 140×40 and 46×30. Dynamic row patterns must reject the supplied stale-row captures, not merely a hard-coded ID; a mutation disabling the shared regex check must fail the owning regression. Pure harness tests do not replace native Store/creation evidence or PTY captures. |
+| Chat footer and state-only empty input | `test -Dtest-filter=SessionChrome`, `test -Dtest-filter=InputArea`, `test -Dtest-filter=Composer`; SessionChrome pins the visible-list gutter and whole-item ellipsis across context values at narrow width; InputArea pins the footer above the unchanged bottom state slot and uses the panel footer as a replacement after the input’s lower divider on the physical last row, omitting the ordinary notice slot rather than adding a footer. `SessionFrontend.zig` `'App Session footer takes list visibility from Root across desktop and phone resizes'` covers both sides of the shell boundary. `human_cli_integration.py session-chrome` checks the unchanged bottom state slot, stable identity and active keys; its `caller-core` row keeps permission mode in the status panel and out of the footer. `overview_counts_cases.unconfirmed_status` checks separate chat state/retry cells before the unchanged overview recovery notice. `frames.json` chat, chat-failed and approval reject placeholder and permission-setting hints | `SessionFrontend.zig` request-overflow tests cover Ctrl-O and a click at both frame sizes with selector and draft inputs, plus fitting requests. `human_cli_integration.py session-chrome` repeats those gestures natively; approval and approval-typing frames retain the quiet overflow count. Native PTY and L2 captures, not physical input; the overview has only its list footer, not a chat editor or facts footer |
+| Quiet Sessions | `test-logic -Dtest-filter="overview quiet rows"`: every work kind, including Bash with approval, crossed with no stop, a pending stop and an unconfirmed stop (each stoppable kind), wrote/never-wrote and selected/not at 46 and 140 columns and every colour depth, asserting every segment on both lines (mark, name, age, detail, folder and padding), with the folder retaining main’s exact muted role on normal rows and adding dim on quiet rows; an awaited decision with a stop stays loud because it still sorts under Needs you; open empty chat exception. Making the rule ignore failed must fail it. `test -Dtest-filter="GroupedList quiet rows"`, `test -Dtest-filter="List preserves each segment foreground"` and widget styles cover dim resolution and selection/hover precedence. `frames.json` quiet states capture a mixed full list and open-chat sidebar. | Pure owner expectations and synthetic PTY cells; not physical-terminal brightness. |
+| Per-chat drafts | `test-logic -Dtest-filter=session_drafts`: whole-snapshot put/take, replacement, stateless empty removal, empty rejection/recall retention, allocation failure, independent Sessions and deinit; `test-logic -Dtest-filter='SessionInput snapshot'`: recall anchor, stale reads, completion and retained submission custody; `test -Dtest-filter='App Session draft'`: A → B → A retains multiline UTF-8 text and caret through back, peer and detached leave paths, including overflow- and malformed-rejected drafts whose Enter still refuses; sending A clears only A. A mutation dropping rejection on restore must fail at the no-send assertion. `frames.json` state `chat-draft-kept` returns through the overview and reopens the saved draft | Frontend tests use App events and an in-memory draft owner; the frame recipe is L2 tmux, not physical input |
+| [Bounded editor](#staged-persistent-input) | `test-logic -Dtest-filter=DraftEditor`, including `'oversized marked paste preserves the draft and caret and accepts the next edit'`; unknown-sequence and ESC/broken-UTF-8 boundary tests; `test -Dtest-filter='session_reads recall'`: a Message the draft refuses, by a control character or a leading standalone mark, newest, middle or oldest, is passed over within one step; libvaxis's TextArea tests pin caret repair equal to a scan from byte 0 and a paste's segmentation near its insertion point; `human_cli_integration.py long-input` and `renderer` | Typed text accepts 65,536 bytes and rejects 65,537 even after Backspace. Oversized marked paste restores the preceding draft and caret, including partial UTF-8 and a joiner merging with the original suffix; the next typed edit and send still work. The overview has no editor/refusal domain and ignores printable/paste input. Chat unbound-input tests check that no notice is posted and the draft is unchanged; a typed question mark remains chat draft text rather than opening an overlay. Unknown sequences produce no event and leave the chat draft usable; ESC before broken UTF-8 follows the ordinary Alt-chord path. Malformed text still rejects. Linux PTY is not Mac display or physical keys |
+| [Lost-reply recovery](admission.md#recovering-a-submission-after-a-lost-reply) in the composer | `human_cli_integration.py`, `zig test src/SessionSubmission.zig -lc --test-filter 'submission bounded'` | Count mutation exchanges, not only provider runs. Removing digest check must fail |
+| Tool activity presentation | `session_view.zig` tool header tests cover every outcome, first-line split and numeric failed exit; `tool_fold.zig` tests cover literal stored envelopes at every read split and the 20-line and 8,192-byte bounds; `SessionFrontend.zig`'s tool row test covers opening in place, closing, reloading open and a send superseding the read through the production reader. `human_cli_integration.py persistent-permission` checks header-only live, reopening and older history, inline output and unchanged canonical/model/raw-export bytes | Native Linux and macOS visual qualification required |
+| Inline tool folds | `SessionFrontend.zig` 'SessionFrontend tool row Ctrl-O opens saved output in place, closes it, and reloads it open'; `ConversationViewport.zig` 'one line band owner covers adjacent code, selected tool, output and plain rows'; `tool_fold.zig` literal-display domain; `feed_window.zig` 'feed_window open keys survive trimming either edge and reloading'; renderer mutations `tool-fold-toggle`, `tool-fold-literal`, `tool-fold-quiet`, `tool-fold-failure` and `tool-fold-rebuild` | Covers key and click on a heading through the production reader, the frame returning to its closed form, a row trimmed away and read again coming back open, a send superseding a toggle's read, stored Bash envelopes and non-Bash text shown literally, twenty stored rows and exact omitted count, empty output, terminal escaping, quiet foreground over the whole output band, heading selection and NO_COLOR. `tool_fold` crosses literal envelope/header/delimiter text, every two-part split, bytewise chunks and independent raw/escaped/line bounds without a decoder; reverting mutations must fail their owning assertions. No full visual terminal qualification implied |
+| [Conversation keys](#human-entry-and-authentication) | `SessionFrontend.zig` in `test`: `'Ctrl-R beside a ready Action refuses its line'` in every encoding; `'Ctrl-R while approval is paused'` keeps the draft and recovers nothing; `'an Esc that expires'` does what a whole Esc does at the Action, from a paused draft and from the settled view; `'every way out of the conversation ends consent'`; `'Esc at the latest view returns to the overview unless unsent text or a choice would be lost'` (standalone frontend without draft custody) and `'Esc hands an unconfirmed original to the overview while it has room, and releases a rejected one'`. The App's per-Session drafts let Esc-with-text return to the overview; `direct-pty` `bare-esc-expiry` reopens the fixture's only Session, checks its identity and restored draft, then submits `abZ`. `overview_view.zig` `'an original Esc left unconfirmed is named at once and recovered on departure, until the ledger is full'`. `human_cli_integration.py` `persistent_input_cases`: Esc after a lost reply shows `! Not confirmed · rui request recover KEY` on the overview, and quitting prints that key's recovery line. | Linux PTY replay, not physical keys |
+| [Copy](#staged-persistent-input) | `human_cli_integration.py copy`: before an answer `/copy` and `/copy code` say `No answer to copy` and write nothing; after one, each writes exactly one `ESC ] 52 ; c ; BASE64 ESC \` of the answer and of its last complete fenced block and the Session line says `Sent to clipboard`; a block of exactly 75,000 bytes is sent, and an answer over that says `Too large for the clipboard · /copy file` and writes nothing; `/copy file` saves the exact answer, mode 0600, and names it, and keeps 0600 over an earlier 0644 file; with the name a link to a 0640 sentinel, it leaves the sentinel's bytes and mode unchanged and replaces the link with a regular 0600 file holding the answer, leaving no temporary file. `SessionTerminal.zig` `'the clipboard takes its bytes as one OSC 52 sequence, whatever their size'`: several windows, a partial group, and CAN before the next write after a short file; `'a clipboard copy interrupted while the terminal is full ends with CAN before leaving's controls'`: a key pumped mid-copy leaves, and restoration, or the next frame when it stays, sends CAN before anything else, with the alternate scroll its report asked for only after it. `AnswerRenderer.zig` `'the last code block is the last complete fenced block'` in `test-logic`, whole and a byte at a time | Linux PTY and libghostty-vt, not a physical terminal's clipboard |
+| Answer code and tables | Focused `AnswerRenderer.zig` tests cover code/strong/emphasis/links inside cells, every feed split, end-of-answer termination, bounded literal overflow without byte loss, CJK display widths and `NO_COLOR`. `ConversationViewport.zig` `'code bands cover blank and wrapped rows'` covers every append split, widths 1–16, clipped continuation rows, retention, prepend, body foreground and colour-disabled backgrounds; `transcript_selection.zig` `'copying code across wrapped and blank band rows'` copies text without presentation markers. `AnswerRenderer.zig` `'plain fenced code never emits a background'` covers every feed split with colour on and off, blank and long lines, EOF fences and escaped source controls; history and answer-adapter tests cover terminal/viewport destinations with both colour settings. The `line-band-owner` reverting mutation must fail the shared band domain; other reverting mutations must fail their intended assertions | Native in-memory rendering, not physical-terminal palette or click handling |
+| Answer links | `AnswerRenderer.zig` in `test-logic`, whole and a byte at a time: a Markdown link shows its text as an OSC 8 link, a bare web address or local `/` or `~/` path shows itself without trailing punctuation (including `;`) or an unopened `)`; local paths cover explicit HOME expansion, bytewise URI encoding, invalid or missing HOME, UTF-8/control/bidi rejection, code/emphasis and Markdown-target exclusion, the 2,048-byte encoded boundary and literal overflow through a token; broken or unsupported links show every byte; `ConversationViewport.zig`: rendered local path cells carry their file URI while the semicolon cell stays unlinked, and cells carry the hidden address at every append split and take no cell for it, through wrapping, escaping, prepended older pages, and eviction that cuts an address leaves its text unlinked; `SessionScreen.zig` `'links stay within the cell memory budget at every frame and over many frames'` | Not a physical terminal's click handling |
+| [Command list and short forms](#staged-persistent-input) | `slash_commands.zig` in `test-logic`: argument shapes, parsing and completion share the conversation table; `/status`, `/configure` and `/help` remain absent. The chat table domain enumerates all twelve listed commands and 0–24 loaded skills with descriptions; collision tests cover every prefix of all fourteen grammar names, including unlisted `/discard` and `/recover`, inline references and noncolliding lookalikes; the frontend dispatch test maps each typed name to its owner. The real Overview model test drives `/model` and the footer picker through one Configure owner and verifies canonical Current and the footer at both widths. Both new/clear handoff and discard/recover tests remain. `TerminalFrame.zig`, `SessionScreen.zig`, `SessionInput.zig` and `DraftEditor.zig` cover list bounds, a fixed input row and Tab completion. `Palette.zig` renders every selected command across widths 0–12 and 80, available heights and total budgets 0–8, Unicode and ASCII under `NO_COLOR`; it checks border cells, full-content selection, command/description style parity, fitting and inert border, padding and overflow clicks. `skill_palette_tests.zig` checks the same panel for skill descriptions. `SessionFrontend.zig`'s `App Session palette` tests check the screen-derived border-inclusive budget, tiny one-row floor, input anchoring and unchanged feed allocation, plus command, value, skill and requests clicks with stale-draft, paste and consent guards. `SessionFrontend.zig` covers `/effort`, local-command dispatch and command cancellation only when the latest frame drew its list. `human_cli_integration.py` retains effort/rename, argument failure, quoting and command-list coverage. `slash_commands.zig`'s draft domain reads every grammar name alone, with arguments, shortened, lengthened, inline and behind `//` as a command line, an unfinished word or a Message. `skill_completion.zig` checks at every caret of each draft that every row starts the word its list was built for and runs only a command line ending in that row. `SessionFrontend.zig`'s draft domain presses Enter, Esc and Ctrl-G on command, word and Message drafts with and without a drawn list. `SessionFrontend.zig` also exercises whole-line paste and Message holds with absent, pending, failed, complete, truncated and replaced previews, including genuinely unknown names. `session_skills.zig` binds from the full catalog beyond a truncated preview. `frames.json` retains draft-chat-choice-escape and draft-chat-misused; overview draft-command states and slash-overview are removed in favor of overview-printable-ignored. | Linux PTY and libghostty-vt recipes at 140×40 and 46×30, not physical input. |
+| Departure and consent values | `session_departure`, `session_consent` and `ActionConsent` in `test-logic`. `Action consent` tests cover the last-drawn request ID, default Allow once, arrows, plain Deny, ignored typing and marked paste across request replacement. | Treating a successor as already drawn must fail the exact-request regression. No reading gate, per-key spending, reason row or flush receipt. These are value tests, not native consent evidence. |
+| [Exact Action consent](execution.md#authorizing-exact-actions) | `terminal-restoration-integration -- app-consent` drives App, Root and ActionConsent under the controlling-PTY launcher with Enter after a draw, with and without request replacement before dispatch, and modifier-zero Enter. `RUI_TEST_ACTION_READY_FD` fires when the card first draws a request. | The oracle checks the exact Action and choice; replacement and malformed Enter must yield no decision. Production screen wiring is a separate obligation. |
+| App allocation regression target | `TerminalApp.zig` `'App memory'`: 49,152-cell Unicode surfaces at 24 × 2048 and 192 × 256, resize high-water, and repeated replacements of text, links and link params. | Peak page-rounded backing storage stays below 32 MiB; measurement forwards all allocator operations. These are test sizes, not a geometry ceiling. Not process RSS or a runtime allocation ceiling. |
+| First-run and settings Sign-in | `sign_in.zig` in `test-logic` for the browser by default with a device code as the option (Divyansh chose this on 2026-11-13): every stage and event written out by hand, including Tab and Esc while the browser waits, a failure arriving after Tab's cancel, and Enter reusing a usable browser or else device-code sign-in. `test` filters `Sign-in` and `App settings Sign-in row`: the browser attempt on the loopback fixture issuer (its link, a stray line, a long pasted answer's failure, then Tab to the device code), Tab cancelling through the gate before the device code begins, Esc while the browser waits, the paste source moving confirmed lines across reads and wiping them, each browser failure in plain words, and the browser row, entry, failure and footer fitting at 46 columns and wide; choice and background-only approval parity with and without colour, readiness for every provider (including the defaultless ambiguous choice), device wait/failure/retry and a gated code publication after the Connecting frame (one redraw without waiting for resize), masked and invalid key input, paste/overflow, Escape over every stage, joined credential/default/Host outcomes on both completion and departure, structured launch refusal/timeout/warnings/provider mismatch and truthful retry hints, input routing above settings, and visible focus after completion. `human_cli_integration.py provider-lines` checks no-TTY refusal, unchanged scripted start errors, both choices, device back, masked key installation/default save and terminal restoration. `verify-rui frames` captures `first-run`, `first-run-browser`, `first-run-codex`, `first-run-key` at 140 and 46 columns. Mutations that must fail: Tab that does not cancel the browser login, a paste source that does not wipe what it moved, Enter that ignores a usable device-code sign-in. | Device fixtures do not exchange live credentials, and the browser fixture's token service refuses, so no browser sign-in is saved through the screen in tests; after publication it shares the device code's path. Cell links and tmux captures are not physical-terminal click evidence. |
+| Frames, paging, history | `human_cli_integration.py renderer`, `SessionScreen` tests, `stagePage` tests | Hosted Apple Silicon required. Physical terminals unverified, SIGKILL cleanup not promised |
+| App terminal restoration | `terminal-restoration-integration -- app-init` checks initialization OOM; `-- app-signals` checks INT, TERM and HUP through App and Root, plus repeated closed-master hangups. A long-lived fixture session leader gives Rui its controlling PTY as a foreground child. Retained-master cases inspect saved terminal attributes and reset sequences after exit. | Linux and macOS. Reader EOF and HUP share the successful quit outcome; callback EOF and other read errors remain failures. A closed master permits no restoration claim. Production hangup must also leave the Host and Sessions running. App attempts restoration on every exit path; vaxis logs failed termios restoration. A successful exit is not a restoration receipt, and `TerminalRestoreFailed` is not a persistent-UI exit outcome. Darwin excludes only termios `PENDIN`/`FLUSHO` and flag `FWASWRITTEN` |
+| Detach notice | `'detached notice'`, `terminal-restoration-integration -- notice` | None |
+| Composer readiness waits | `human_cli_integration.py terminal-waits` | Withheld composer is not readiness. 15 s readiness, 10 s exit, no renewal. Named selections are partial evidence |
+| Fixture disposal | `host_process.dispose_all` in `host_process_test.py` | Body failure stays primary; failed cleanup after success fails |
