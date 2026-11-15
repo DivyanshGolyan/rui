@@ -510,6 +510,51 @@ pub fn queryU64(storage: *Store, comptime sql: [:0]const u8, args: anytype) !u64
     return sqliteQueryU64(storage.sqliteDatabase(), sql, args);
 }
 
+pub fn expectSqliteObligationProjection(comptime sql: [:0]const u8, comptime ddl_text: [:0]const u8, comptime cases: anytype) !void {
+    var raw: ?*sqlite.c.sqlite3 = null;
+    if (sqlite.c.sqlite3_open(":memory:", &raw) != sqlite.c.SQLITE_OK) {
+        if (raw) |opened| _ = sqlite.c.sqlite3_close(opened);
+        return error.StoreOpenFailed;
+    }
+    const local = raw.?;
+    defer {
+        const closed = sqlite.c.sqlite3_close(local);
+        if (closed != sqlite.c.SQLITE_OK) std.log.err("obligation parity SQLite close failed: {d}", .{closed});
+    }
+    try sqlite.exec(local, ddl_text);
+    try sqlite.exec(local, "INSERT INTO session(session_ref,obligation_since) VALUES('aaaaaa',NULL),('bbbbbb',80)");
+    const statement = try sqlite.prepare(local, sql);
+    defer _ = sqlite.c.sqlite3_finalize(statement);
+    inline for (cases) |case| {
+        const saved = if (case.saved) |n| std.fmt.comptimePrint("{d}", .{n}) else "NULL";
+        const key = if (case.missing) "zzzzzz" else "aaaaaa";
+        try sqlite.exec(local, "UPDATE session SET obligation_since=" ++ saved ++ " WHERE session_ref='aaaaaa'");
+        try std.testing.expectEqual(sqlite.c.SQLITE_OK, sqlite.c.sqlite3_reset(statement));
+        try std.testing.expectEqual(sqlite.c.SQLITE_OK, sqlite.c.sqlite3_clear_bindings(statement));
+        try std.testing.expectEqual(sqlite.c.SQLITE_OK, sqlite.c.sqlite3_bind_text(statement, 1, key.ptr, @intCast(key.len), null));
+        const bound = if (case.owed) |n| sqlite.c.sqlite3_bind_int64(statement, 2, @intCast(n)) else sqlite.c.sqlite3_bind_null(statement, 2);
+        try std.testing.expectEqual(sqlite.c.SQLITE_OK, bound);
+        const other_bound = if (case.other) |n| sqlite.c.sqlite3_bind_int64(statement, 3, @intCast(n)) else sqlite.c.sqlite3_bind_null(statement, 3);
+        try std.testing.expectEqual(sqlite.c.SQLITE_OK, other_bound);
+        const local_result = sqlite.c.sqlite3_step(statement);
+        if (case.refused) {
+            try std.testing.expectEqual(sqlite.c.SQLITE_CONSTRAINT, local_result & 0xff);
+        } else {
+            try std.testing.expectEqual(sqlite.c.SQLITE_DONE, local_result);
+            try std.testing.expectEqual(case.rows, @as(u64, @intCast(sqlite.c.sqlite3_changes64(local))));
+        }
+        const check = try sqlite.prepare(local, "SELECT obligation_since FROM session ORDER BY session_ref");
+        defer _ = sqlite.c.sqlite3_finalize(check);
+        try std.testing.expectEqual(sqlite.c.SQLITE_ROW, sqlite.c.sqlite3_step(check));
+        if (case.expected) |n| {
+            try std.testing.expectEqual(n, @as(u64, @intCast(sqlite.c.sqlite3_column_int64(check, 0))));
+        } else try std.testing.expectEqual(sqlite.c.SQLITE_NULL, sqlite.c.sqlite3_column_type(check, 0));
+        try std.testing.expectEqual(sqlite.c.SQLITE_ROW, sqlite.c.sqlite3_step(check));
+        try std.testing.expectEqual(@as(i64, 80), sqlite.c.sqlite3_column_int64(check, 0));
+        try std.testing.expectEqual(sqlite.c.SQLITE_DONE, sqlite.c.sqlite3_step(check));
+    }
+}
+
 /// `exec` on a SQLite connection, for any SQLite text: the raw SQL of
 /// sqlite_tests.zig and sqlite_tests/.
 pub fn sqliteExec(database: *sqlite.c.sqlite3, sql: [:0]const u8, args: anytype) !void {

@@ -1159,22 +1159,8 @@ test "obligation projection MySQL row counts match SQLite for null changed uncha
     defer restore("DEALLOCATE PREPARE rui_dialect_check");
     try std.testing.expectEqualDeep(@as([]const rsql.Slot, &.{ .{ .argument = 1 }, .{ .argument = 0 }, .{ .argument = 2 }, .{ .argument = 0 } }), Projection.mysql.slots);
 
-    var raw: ?*sqlite.c.sqlite3 = null;
-    if (sqlite.c.sqlite3_open(":memory:", &raw) != sqlite.c.SQLITE_OK) {
-        if (raw) |opened| _ = sqlite.c.sqlite3_close(opened);
-        return error.StoreOpenFailed;
-    }
-    const local = raw.?;
-    defer {
-        const closed = sqlite.c.sqlite3_close(local);
-        if (closed != sqlite.c.SQLITE_OK) std.log.err("obligation parity SQLite close failed: {d}", .{closed});
-    }
-    try sqlite.exec(local, ddl_text);
-    try sqlite.exec(local, "INSERT INTO session(session_ref,obligation_since) VALUES('aaaaaa',NULL),('bbbbbb',80)");
-    const statement = try sqlite.prepare(local, Projection.sql);
-    defer _ = sqlite.c.sqlite3_finalize(statement);
     const Case = struct { saved: ?u64, owed: ?u64, other: ?u64 = null, missing: bool = false, rows: u64, expected: ?u64, refused: bool = false };
-    inline for ([_]Case{
+    const cases = [_]Case{
         .{ .saved = null, .owed = null, .rows = 0, .expected = null },
         .{ .saved = null, .owed = 17, .rows = 1, .expected = 17 },
         .{ .saved = 17, .owed = 17, .rows = 0, .expected = 17 },
@@ -1183,29 +1169,19 @@ test "obligation projection MySQL row counts match SQLite for null changed uncha
         .{ .saved = 9, .owed = null, .rows = 1, .expected = null },
         .{ .saved = 17, .owed = 99, .missing = true, .rows = 0, .expected = 17 },
         .{ .saved = 17, .owed = 0, .rows = 0, .expected = 17, .refused = true },
-    }) |case| {
+    };
+    try store_testing.expectSqliteObligationProjection(Projection.sql, ddl_text, cases);
+    inline for (cases) |case| {
         const saved = if (case.saved) |n| std.fmt.comptimePrint("{d}", .{n}) else "NULL";
         const owed = if (case.owed) |n| std.fmt.comptimePrint("{d}", .{n}) else "NULL";
         const other = if (case.other) |n| std.fmt.comptimePrint("{d}", .{n}) else "NULL";
         const key = if (case.missing) "zzzzzz" else "aaaaaa";
         try setup("UPDATE session SET obligation_since=" ++ saved ++ " WHERE session_ref='aaaaaa'");
-        try sqlite.exec(local, "UPDATE session SET obligation_since=" ++ saved ++ " WHERE session_ref='aaaaaa'");
         try setup("SET @rui_projection_key='" ++ key ++ "',@rui_projection_owed=" ++ owed ++ ",@rui_projection_other=" ++ other);
-        try std.testing.expectEqual(sqlite.c.SQLITE_OK, sqlite.c.sqlite3_reset(statement));
-        try std.testing.expectEqual(sqlite.c.SQLITE_OK, sqlite.c.sqlite3_clear_bindings(statement));
-        try std.testing.expectEqual(sqlite.c.SQLITE_OK, sqlite.c.sqlite3_bind_text(statement, 1, key.ptr, @intCast(key.len), null));
-        const bound = if (case.owed) |n| sqlite.c.sqlite3_bind_int64(statement, 2, @intCast(n)) else sqlite.c.sqlite3_bind_null(statement, 2);
-        try std.testing.expectEqual(sqlite.c.SQLITE_OK, bound);
-        const other_bound = if (case.other) |n| sqlite.c.sqlite3_bind_int64(statement, 3, @intCast(n)) else sqlite.c.sqlite3_bind_null(statement, 3);
-        try std.testing.expectEqual(sqlite.c.SQLITE_OK, other_bound);
-        const local_result = sqlite.c.sqlite3_step(statement);
         if (case.refused) {
-            try std.testing.expectEqual(sqlite.c.SQLITE_CONSTRAINT, local_result & 0xff);
             const refusal = (try run("EXECUTE rui_dialect_check USING @rui_projection_owed,@rui_projection_key,@rui_projection_other,@rui_projection_key")) orelse return error.MissingProjectionRefusal;
             try std.testing.expectEqual(@as(u16, 3819), refusal.code);
         } else {
-            try std.testing.expectEqual(sqlite.c.SQLITE_DONE, local_result);
-            try std.testing.expectEqual(case.rows, @as(u64, @intCast(sqlite.c.sqlite3_changes64(local))));
             var counted: std.Io.Writer.Allocating = .init(std.testing.allocator);
             defer counted.deinit();
             try writeResult("EXECUTE rui_dialect_check USING @rui_projection_owed,@rui_projection_key,@rui_projection_other,@rui_projection_key;SELECT ROW_COUNT()", &counted.writer);
@@ -1216,14 +1192,5 @@ test "obligation projection MySQL row counts match SQLite for null changed uncha
         try writeResult("SELECT session_ref,obligation_since FROM session ORDER BY session_ref", &retained.writer);
         const expected = if (case.expected) |n| std.fmt.comptimePrint(" {d}:{d}", .{ std.fmt.comptimePrint("{d}", .{n}).len, n }) else " null";
         try std.testing.expectEqualStrings("\n 6:aaaaaa" ++ expected ++ "\n 6:bbbbbb 2:80", retained.written());
-        const check = try sqlite.prepare(local, "SELECT obligation_since FROM session ORDER BY session_ref");
-        defer _ = sqlite.c.sqlite3_finalize(check);
-        try std.testing.expectEqual(sqlite.c.SQLITE_ROW, sqlite.c.sqlite3_step(check));
-        if (case.expected) |n| {
-            try std.testing.expectEqual(n, @as(u64, @intCast(sqlite.c.sqlite3_column_int64(check, 0))));
-        } else try std.testing.expectEqual(sqlite.c.SQLITE_NULL, sqlite.c.sqlite3_column_type(check, 0));
-        try std.testing.expectEqual(sqlite.c.SQLITE_ROW, sqlite.c.sqlite3_step(check));
-        try std.testing.expectEqual(@as(i64, 80), sqlite.c.sqlite3_column_int64(check, 0));
-        try std.testing.expectEqual(sqlite.c.SQLITE_DONE, sqlite.c.sqlite3_step(check));
     }
 }
