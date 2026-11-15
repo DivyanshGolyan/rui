@@ -1551,7 +1551,7 @@ while True:
                  (modal + "Opening…", False),
                  ("  + New Session\n  Settings\nenter open", True), (" › Type a task", True)]
         cases.extend((modal.replace(label, ""), False) for label in
-                     ("Sign in to Rui", "ChatGPT", "API key", "Close", "Navigation", "Tab / Shift-Tab"))
+                     ("Sign in to Rui", "ChatGPT", "API key", "Close", "Tab / Shift-Tab"))
 
         def check(predicate, _description, **_kwargs):
             for text, expected in cases:
@@ -1559,6 +1559,50 @@ while True:
                     self.assertEqual(bool(predicate(types.SimpleNamespace(completed=text))), expected)
 
         self.helper["frame_initial_ready"](types.SimpleNamespace(wait=check))
+
+    def test_initial_readiness_accepts_grouped_choices_buttons_and_wrapped_footer(self):
+        modal = ("  Sign in to Rui\n"
+                 "    Choose an account. Credentials stay out\n"
+                 "    of conversations.\n"
+                 "    ChatGPT         Use your subscription\n"
+                 "    API key         OpenAI or a custom Responses API\n\n"
+                 "    [ Close ]\n\n"
+                 "    Tab / Shift-Tab move. Enter chooses.\n"
+                 "    Esc back.\n")
+        cases = [(modal, True), (modal + "Opening…", False)]
+        cases.extend((modal.replace(marker, ""), False) for marker in
+                     ("Sign in to Rui", "ChatGPT", "API key", "[ Close ]", "Tab / Shift-Tab"))
+        cases.append((modal.replace("[ Close ]", "[ Close"), False))
+
+        def check(predicate, _description, **_kwargs):
+            for text, expected in cases:
+                with self.subTest(text=text):
+                    self.assertEqual(bool(predicate(types.SimpleNamespace(completed=text))), expected)
+
+        self.helper["frame_initial_ready"](types.SimpleNamespace(wait=check))
+
+    def test_frame_url_wrap_keeps_every_character_in_readiness_and_saved_capture(self):
+        url = "https://auth.openai.com/codex/device"
+        wrapped = "  Open URL        https://auth.openai.com/cod\n                  ex/device\n  [ Copy code ]\n  ABCD-1234\n"
+        cases = [(wrapped, True), (url + "\n[ Copy code ]\nABCD-1234\n", True),
+                 (wrapped.replace("ex/device", "ex/devic"), False),
+                 (wrapped.replace("ex/device", "xe/device"), False),
+                 (wrapped.replace("[ Copy code ]", "[ Copy\n code ]"), False),
+                 (wrapped.replace("ABCD-1234", "ABCD-123"), False)]
+        state = {"name": "device", "expect": [url, "[ Copy code ]", "ABCD-1234"]}
+        run = types.SimpleNamespace(meta={"sha": "a" * 40})
+        for text, expected in cases:
+            with self.subTest(text=text), tempfile.TemporaryDirectory() as temp:
+                terminal = types.SimpleNamespace(frame=committed(text, columns=46, lines=30))
+
+                def wait(predicate, _description, **_kwargs):
+                    self.assertEqual(bool(predicate(types.SimpleNamespace(completed=text))), expected)
+
+                terminal.wait = wait
+                self.helper["frame_ready"](terminal, state)
+                captured = self.helper["frame_capture"](run, terminal, Path(temp), state, (46, 30), None)
+                self.assertEqual(captured["ok"], expected)
+                self.assertEqual((Path(temp) / captured["files"]["txt"]).read_text(), text)
 
     def test_frame_terminal_receives_initial_size_and_theme(self):
         scenario = {"sizes": ["100x30"], "states": [{"name": "empty", "open": "overview", "steps": [], "theme": "day"}]}

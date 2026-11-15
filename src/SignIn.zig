@@ -777,6 +777,11 @@ fn activateDrawnWithFault(self: *Self, ctx: *vxfw.EventContext, action: core.Act
     if (self.drawn.attempt != self.state.attempt or self.drawn.page != std.meta.activeTag(self.state.page)) return;
     var next = self.state;
     const effect = next.step(.{ .activate = .{ .attempt = self.drawn.attempt, .page = self.drawn.page, .action = action } });
+    if (effect == .cancel and self.task.thread != null and self.gate.load(.acquire) == .publishing) {
+        self.issue = "Finishing publication. Its saved result cannot be cancelled.";
+        ctx.redraw = true;
+        return;
+    }
     const needs_form = next.page == .api and self.form == null;
     if (effect == .start or needs_form) {
         self.stageReceipt(null) catch {
@@ -918,14 +923,7 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
         ctx.quit = true;
         return;
     }
-    if (key.matchExact(vaxis.Key.escape, .{})) {
-        if (self.task.thread != null and self.gate.load(.acquire) == .publishing) {
-            self.issue = "Finishing publication. Its saved result cannot be cancelled.";
-            ctx.redraw = true;
-            return;
-        }
-        return self.activateDrawn(ctx, .back);
-    }
+    if (key.matchExact(vaxis.Key.escape, .{})) return self.activateDrawn(ctx, .back);
     if (key.matchExact(vaxis.Key.tab, .{}) or key.matchExact(vaxis.Key.tab, .{ .shift = true })) {
         _ = self.state.step(.{ .move = !key.mods.shift });
         ctx.redraw = true;
@@ -955,6 +953,10 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
     }
 }
 
+const Button = struct { label: []const u8, control: core.Control, action: ?core.Action };
+fn button(buttons: *std.ArrayList(Button), alloc: std.mem.Allocator, label: []const u8, control: core.Control, action: ?core.Action) !void {
+    try buttons.append(alloc, .{ .label = try std.fmt.allocPrint(alloc, "[ {s} ]", .{label}), .control = control, .action = action });
+}
 const Row = struct { label: []const u8, value: []const u8 = "", control: ?core.Control = null, action: ?core.Action = null, caret: ?u16 = null };
 fn append(rows: *std.ArrayList(Row), alloc: std.mem.Allocator, label: []const u8, value: []const u8, control: ?core.Control, action: ?core.Action) !void {
     try rows.append(alloc, .{ .label = label, .value = value, .control = control, .action = action });
@@ -991,15 +993,15 @@ fn hostCommand(alloc: std.mem.Allocator, operation: []const u8, store: []const u
     @import("TerminalText.zig").writeShellWord(&writer.writer, store) catch return error.OutOfMemory;
     return writer.written();
 }
-fn appendCommand(rows: *std.ArrayList(Row), ctx: vxfw.DrawContext, text: []const u8, pause_: bool, width: u16) !void {
+fn appendWrapped(rows: *std.ArrayList(Row), ctx: vxfw.DrawContext, label: []const u8, text: []const u8, control: core.Control, action: core.Action, width: u16) !void {
     const value_width = width -| Panel.value_column;
     const first = if (value_width > 0) line.fit(ctx, text, value_width).text else "";
-    try append(rows, ctx.arena, if (pause_) "Copy pause cmd" else "Copy start cmd", first, if (pause_) .pause_command else .start_command, .{ .command = text });
+    try append(rows, ctx.arena, label, first, control, action);
     var at = first.len;
     while (at < text.len and value_width > 0) {
         const part = line.fit(ctx, text[at..], value_width).text;
         if (part.len == 0) break;
-        try append(rows, ctx.arena, "", part, null, null);
+        try append(rows, ctx.arena, "", part, null, if (action == .open) action else null);
         at += part.len;
     }
 }
@@ -1011,6 +1013,8 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     if (size.width == 0 or size.height == 0) return .{ .size = size, .widget = self.widget(), .buffer = &.{}, .children = &.{} };
     const width = @min(size.width, 72);
     var rows: std.ArrayList(Row) = .empty;
+    var buttons: std.ArrayList(Button) = .empty;
+    var code_field: ?usize = null;
     const a = ctx.arena;
     const title: []const u8 = switch (self.state.page) {
         .account => "Sign in to Rui",
@@ -1044,10 +1048,9 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const device_link = "https://auth.openai.com/codex/device";
     switch (self.state.page) {
         .account => {
-            try append(&rows, a, "Choose account", "Credentials stay out of conversations.", null, null);
             try append(&rows, a, "ChatGPT", "Use your subscription", .chatgpt, .{ .choose = .chatgpt });
             try append(&rows, a, "API key", "OpenAI or a custom Responses API", .api_key, .{ .choose = .api_key });
-            try append(&rows, a, "Close", "Esc returns", .close, .close);
+            try button(&buttons, a, "Close", .close, .close);
         },
         .method => {
             try append(&rows, a, "Browser", "Recommended. Paste callback if needed.", .browser, .{ .method = .browser });
@@ -1055,7 +1058,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
             const readiness = if (self.init != null and self.ready != null) self.ready.?(self.init.?, self.target.slice()) else core.Readinesses.initFill(.missing);
             const usable: ?core.Provider = if (readiness.get(.chatgpt).usable()) .chatgpt else if (readiness.get(.codex).usable()) .codex else null;
             try append(&rows, a, "Use saved login", if (usable != null) "Reuse this account's local sign-in" else "No usable saved ChatGPT sign-in", .reuse, if (usable) |provider| .{ .reuse = provider } else null);
-            try append(&rows, a, "Back", "Choose account", .back, .back);
+            try button(&buttons, a, "Back", .back, .back);
         },
         .api => {
             if (self.form) |mapped| {
@@ -1066,8 +1069,8 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
                 try appendEditor(&rows, ctx, "API key", &form.key, .key, field_width, if (form.original.reusable()) "Existing source (type to replace)" else "Paste your API key");
                 try appendEditor(&rows, ctx, "Model ID", &form.model, .model, field_width, "Required for custom services");
                 try append(&rows, a, "API", "HTTPS Responses API. Key is not verified remotely.", null, null);
-                try append(&rows, a, "Connect", "Save this Host's endpoint and private key", .connect, .connect);
-                try append(&rows, a, "Back", "Choose account; discard key", .back, .back);
+                try button(&buttons, a, "Connect", .connect, .connect);
+                try button(&buttons, a, "Back", .back, .back);
             }
         },
         .browser => {
@@ -1075,67 +1078,121 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
             const mask = try a.alloc(u8, @min(browser_typed, width -| Panel.value_column -| 1));
             @memset(mask, '*');
             try append(&rows, a, "Paste callback", if (browser_typed != 0) mask else if (browser_stray) "Not the sign-in address. Paste again." else if (browser_checking) "Checking address..." else "Paste final browser address, then Enter", .callback, .callback);
-            try append(&rows, a, "Open browser", "Reopen the sign-in URL", .open_page, if (browser_link.len != 0) .{ .open = browser_link } else null);
-            try append(&rows, a, "Change method", "Cancel and choose browser or device", .switch_method, .switch_method);
-            try append(&rows, a, "Back", "Cancel this attempt", .back, .back);
+            try button(&buttons, a, "Open browser", .open_page, if (browser_link.len != 0) .{ .open = browser_link } else null);
+            try button(&buttons, a, "Change method", .switch_method, .switch_method);
+            try button(&buttons, a, "Back", .back, .back);
         },
         .device => {
-            try append(&rows, a, "Open URL", device_link, .link, .{ .open = device_link });
-            try append(&rows, a, "Copy code (C)", if (code.len != 0) try a.dupe(u8, code.slice()) else "Waiting for code...", .copy_code, if (code.len != 0) .{ .copy = code } else null);
-            try append(&rows, a, "Open browser", "Approve the code in ChatGPT", .open_page, .{ .open = device_link });
-            try append(&rows, a, "Change method", "Cancel and choose another method", .switch_method, .switch_method);
-            try append(&rows, a, "Back", "Cancel this attempt", .back, .back);
+            try appendWrapped(&rows, ctx, "Open URL", device_link, .link, .{ .open = device_link }, width);
+            code_field = rows.items.len;
+            try append(&rows, a, "Code", if (code.len != 0) try a.dupe(u8, code.slice()) else "Waiting for code...", null, null);
+            try button(&buttons, a, "Copy code", .copy_code, if (code.len != 0) .{ .copy = code } else null);
+            try button(&buttons, a, "Open browser", .open_page, .{ .open = device_link });
+            try button(&buttons, a, "Change method", .switch_method, .switch_method);
+            try button(&buttons, a, "Back", .back, .back);
         },
         .stopping => try append(&rows, a, "Please wait", "Joining the cancelled sign-in attempt...", null, null),
-        .saving => try append(&rows, a, "Please wait", "Saving and checking Host activation...", null, null),
+        .saving => {
+            try append(&rows, a, "Please wait", "Saving and checking Host activation...", null, null);
+            try button(&buttons, a, "Back", .back, .back);
+        },
         .failed => |failure| {
             try append(&rows, a, "Result", failureText(failure.failure), null, null);
             if (self.launchSummary()) |report| try append(&rows, a, "Host", report.words(), null, null);
-            try append(&rows, a, "Retry", "Repeat only the unfinished operation", .retry, .retry);
-            try append(&rows, a, "Back", "Choose account or method", .back, .back);
+            try button(&buttons, a, "Retry", .retry, .retry);
+            try button(&buttons, a, "Back", .back, .back);
         },
         .pending => {
             try append(&rows, a, "Saved", "The serving Host may still use old settings.", null, null);
             try append(&rows, a, "Warning", "Pause interrupts ALL Sessions on this Store.", null, null);
-            try appendCommand(&rows, ctx, try hostCommand(a, "pause", self.target.slice()), true, width);
-            try appendCommand(&rows, ctx, try hostCommand(a, "start", self.target.slice()), false, width);
+            const pause_command = try hostCommand(a, "pause", self.target.slice());
+            const start_command = try hostCommand(a, "start", self.target.slice());
+            try appendWrapped(&rows, ctx, "Copy pause cmd", pause_command, .pause_command, .{ .command = pause_command }, width);
+            try appendWrapped(&rows, ctx, "Copy start cmd", start_command, .start_command, .{ .command = start_command }, width);
             if (self.launchSummary()) |report| try append(&rows, a, "Host", report.words(), null, null);
-            try append(&rows, a, "Recheck", "Start if absent; never restart running work", .recheck, .recheck);
-            try append(&rows, a, "Back", "Choose account", .back, .back);
-            try append(&rows, a, "Return", "Return to Settings when available", .close, .close);
+            try append(&rows, a, "Activation", "Recheck starts if absent; never restarts work", null, null);
+            try button(&buttons, a, "Recheck", .recheck, .recheck);
+            try button(&buttons, a, "Back", .back, .back);
+            try button(&buttons, a, "Return", .close, .close);
         },
-        .connected => try append(&rows, a, "Connected", "This terminal is configured for new Sessions.", .close, .close),
+        .connected => {
+            try append(&rows, a, "Connected", "This terminal is configured for new Sessions.", null, null);
+            try button(&buttons, a, "Close", .close, .close);
+        },
     }
     if (self.issue) |issue| try append(&rows, a, "Status", issue, null, null);
-    try append(&rows, a, "Navigation", "Tab / Shift-Tab move. Enter chooses. Esc back.", null, null);
     const fields = try a.alloc(Panel.Field, rows.items.len);
+    const labels = try a.alloc([]const u8, buttons.items.len);
     var selected: usize = 0;
     for (rows.items, fields, 0..) |row, *field, i| {
-        field.* = .{ .label = row.label, .value = row.value, .selectable = row.control != null };
+        field.* = .{ .label = row.label, .value = row.value, .selectable = row.control != null or row.action != null };
         if (row.control == self.state.focus) {
             selected = i;
             self.drawn.focused = if (row.action) |action| .{ .control = row.control.?, .action = action } else null;
         }
     }
-    const height: u16 = @intCast(@min(size.height, rows.items.len + 3));
-    const origin: vxfw.RelativePoint = .{ .row = @intCast((size.height - height) / 2), .col = @intCast((size.width - width) / 2) };
-    var panel: Panel = .{ .title = title, .unicode = self.unicode, .fields = fields, .selected = selected, .ground = self.style, .selection = self.selection_style, .quiet = self.quiet, .rule_style = self.quiet, .scroll = self.scroll };
-    var child = try panel.widget().draw(ctx.withConstraints(.{}, .{ .width = width, .height = height }));
-    child.widget = self.widget();
-    self.scroll = panel.scroll;
-    var hits: std.ArrayList(Hit) = .empty;
-    for (panel.targets) |target_| {
-        const row = rows.items[target_.index];
-        if (row.caret) |caret| {
-            if (target_.index == selected and width > Panel.value_column) child.cursor = .{ .row = target_.row, .col = @min(width - 1, Panel.value_column + caret) };
+    var button_width: usize = 3;
+    for (buttons.items, labels, 0..) |entry, *label, i| {
+        label.* = entry.label;
+        button_width += @as(usize, ctx.stringWidth(entry.label)) + if (i == 0) @as(usize, 0) else 5;
+        if (entry.control == self.state.focus) {
+            selected = rows.items.len + i;
+            self.drawn.focused = if (entry.action) |action| .{ .control = entry.control, .action = action } else null;
         }
-        if (row.action) |action| {
-            if (action == .copy) {
-                if (ctx.stringWidth(action.copy.slice()) > width -| Panel.value_column) continue;
-                self.drawn.copy = action.copy;
-            }
-            if (action == .open) {
-                const linked = @import("ConversationViewport.zig").linkedSegment(row.value, self.style, action.open);
+    }
+    var footer_surface: ?vxfw.Surface = null;
+    if (width > 6) {
+        const footer = try a.create(vxfw.Text);
+        footer.* = .{ .text = if (self.state.page == .device) "Tab / Shift-Tab move. Enter chooses.\nC copies code. Esc back." else "Tab / Shift-Tab move. Enter chooses. Esc back.", .style = self.quiet, .width_basis = .parent };
+        const natural = try footer.draw(ctx.withConstraints(.{}, .{ .width = width - 6 }));
+        if (natural.size.height + 3 <= size.height) footer_surface = natural;
+    }
+    const footer_height = if (footer_surface) |surface| surface.size.height else @as(u16, 0);
+    var panel: Panel = .{
+        .title = title,
+        .subtitle = if (self.state.page == .account) "Choose an account. Credentials stay out of conversations." else null,
+        .unicode = self.unicode,
+        .fields = fields,
+        .actions = labels,
+        .action_gap = 1,
+        .stacked_actions = button_width > width,
+        .natural_height = true,
+        .selected = selected,
+        .ground = self.style,
+        .selection = self.selection_style,
+        .quiet = self.quiet,
+        .rule_style = self.quiet,
+        .scroll = self.scroll,
+    };
+    const panel_surface = try panel.widget().draw(ctx.withConstraints(.{}, .{ .width = width, .height = size.height - footer_height }));
+    const height = panel_surface.size.height + footer_height;
+    const origin: vxfw.RelativePoint = .{ .row = @intCast((size.height - height) / 2), .col = @intCast((size.width - width) / 2) };
+    var child = try vxfw.Surface.init(ctx.cell_arena, self.widget(), .{ .width = width, .height = height });
+    @memset(child.buffer, .{ .style = self.style });
+    @memcpy(child.buffer[0..panel_surface.buffer.len], panel_surface.buffer);
+    child.cursor = panel_surface.cursor;
+    const extra: usize = @intFromBool(footer_surface != null);
+    const parts = try a.alloc(vxfw.SubSurface, panel_surface.children.len + extra);
+    @memcpy(parts[0..panel_surface.children.len], panel_surface.children);
+    if (footer_surface) |surface| parts[parts.len - 1] = .{ .origin = .{ .row = @intCast(panel_surface.size.height), .col = 3 }, .surface = surface };
+    child.children = parts;
+    self.scroll = panel.scroll;
+    if (code_field) |index| if (panel.fieldRow(index) != null and code.len != 0 and ctx.stringWidth(code.slice()) <= width -| Panel.value_column) {
+        self.drawn.copy = code;
+    };
+    var hits: std.ArrayList(Hit) = .empty;
+    var focused_visible = false;
+    for (panel.targets) |target_| {
+        const field = target_.index < rows.items.len;
+        const action_ = if (field) rows.items[target_.index].action else buttons.items[target_.index - rows.items.len].action;
+        if (field) if (rows.items[target_.index].caret) |caret| {
+            if (target_.index == selected and width > Panel.value_column) child.cursor = .{ .row = target_.row, .col = @min(width - 1, Panel.value_column + caret) };
+        };
+        if (action_) |action| {
+            if (action == .copy and self.drawn.copy == null) continue;
+            if (target_.index == selected) focused_visible = true;
+            if (action == .open and field) {
+                const linked = @import("ConversationViewport.zig").linkedSegment(rows.items[target_.index].value, self.style, action.open);
                 for (@min(Panel.value_column, width)..width) |col| child.buffer[@as(usize, target_.row) * width + col].link = linked.link;
             }
             try hits.append(a, .{ .row = @intCast(origin.row + target_.row), .start = @intCast(origin.col + target_.start), .end = @intCast(origin.col + target_.end), .action = action });
@@ -1143,7 +1200,8 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     }
     if (height <= 2) {
         @memset(child.buffer, .{ .style = self.style });
-        const selected_action = rows.items[selected].action;
+        const selected_action = if (selected < rows.items.len) rows.items[selected].action else buttons.items[selected - rows.items.len].action;
+        const selected_label = if (selected < rows.items.len) rows.items[selected].label else buttons.items[selected - rows.items.len].label;
         if (selected_action != null and selected_action.? == .copy and selected_action.?.copy.len <= width) {
             self.drawn.copy = selected_action.?.copy;
             _ = line.paint(ctx, child, try a.dupe(u8, selected_action.?.copy.slice()), 0, 0, self.selection_style, width);
@@ -1154,14 +1212,17 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
             child.cursor = .{ .row = 0, .col = view.caret };
         } else {
             if (self.state.page == .device) self.drawn.copy = null;
-            _ = line.paint(ctx, child, rows.items[selected].label, 0, 0, self.selection_style, width);
+            _ = line.paint(ctx, child, selected_label, 0, 0, self.selection_style, width);
         }
-        if (rows.items[selected].action) |action| {
-            if (action != .copy or self.drawn.copy != null) try hits.append(a, .{ .row = @intCast(origin.row), .start = @intCast(origin.col), .end = @intCast(origin.col + width), .action = action });
+        if (selected_action) |action| {
+            if (action != .copy or self.drawn.copy != null) {
+                try hits.append(a, .{ .row = @intCast(origin.row), .start = @intCast(origin.col), .end = @intCast(origin.col + width), .action = action });
+                focused_visible = true;
+            }
         }
     }
     self.drawn.hits = hits.items;
-    if (self.drawn.focused != null and self.drawn.focused.?.action == .copy and self.drawn.copy == null) self.drawn.focused = null;
+    if (!focused_visible) self.drawn.focused = null;
     const children = try a.alloc(vxfw.SubSurface, 1);
     children[0] = .{ .origin = origin, .surface = child };
     return .{ .size = size, .widget = self.widget(), .buffer = &.{}, .children = children };
@@ -1574,6 +1635,133 @@ test "Sign-in refuses every refused field after tab reverse tab and click until 
     };
 }
 
+test "Sign-in choices subtitle footer and action buttons keep separate drawn keyboard and mouse authority" {
+    const Owner = struct {
+        closed: usize = 0,
+        fn close(raw: *anyopaque, _: *vxfw.EventContext) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.closed += 1;
+        }
+    };
+    for ([_]u16{ 46, 140 }) |width| {
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        var owner: Owner = .{};
+        var page: Self = .{ .userdata = &owner, .on_close = Owner.close };
+        defer page.closeForm();
+        _ = try page.ensureForm();
+        try page.code.set("ABCD-1234");
+        try page.target.set("/synthetic store");
+        const account = try testingDraw(&page, ctx.alloc, width, 30);
+        const text = try testingText(account, ctx.alloc);
+        try std.testing.expectEqual(@as(usize, 3), page.drawn.hits.len);
+        try std.testing.expect(std.mem.indexOf(u8, text, "Choose account") == null and std.mem.indexOf(u8, text, "Navigation") == null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "Choose an account.") != null and std.mem.indexOf(u8, text, "Tab / Shift-Tab") != null);
+        try std.testing.expectEqual(@as(usize, 2), account.children[0].surface.children.len);
+        const button_hit = page.drawn.hits[2];
+        try std.testing.expect(button_hit.action == .close and button_hit.row > page.drawn.hits[1].row + 1);
+        try std.testing.expectEqualStrings("[", account.children[0].surface.readCell(@intCast(button_hit.start - account.children[0].origin.col), @intCast(button_hit.row - account.children[0].origin.row)).char.grapheme);
+        try testingSend(&page, &ctx, "\t\t\r", width, 30);
+        try std.testing.expectEqual(@as(usize, 1), owner.closed);
+        _ = try testingDraw(&page, ctx.alloc, width, 30);
+        for (page.drawn.hits) |hit| if (hit.action == .close) {
+            try page.widget().handleEvent(&ctx, .{ .mouse = .{ .row = @intCast(hit.row), .col = @intCast(hit.start), .button = .left, .type = .press, .mods = .{} } });
+            break;
+        };
+        try std.testing.expectEqual(@as(usize, 2), owner.closed);
+        const Case = struct { page: core.Page, labels: []const []const u8, controls: []const core.Control };
+        const cases = [_]Case{
+            .{ .page = .method, .labels = &.{"[ Back ]"}, .controls = &.{.back} },
+            .{ .page = .api, .labels = &.{ "[ Connect ]", "[ Back ]" }, .controls = &.{ .connect, .back } },
+            .{ .page = .browser, .labels = &.{ "[ Open browser ]", "[ Change method ]", "[ Back ]" }, .controls = &.{ .open_page, .switch_method, .back } },
+            .{ .page = .device, .labels = &.{ "[ Copy code ]", "[ Open browser ]", "[ Change method ]", "[ Back ]" }, .controls = &.{ .copy_code, .open_page, .switch_method, .back } },
+            .{ .page = .{ .saving = .key }, .labels = &.{"[ Back ]"}, .controls = &.{.back} },
+            .{ .page = .{ .failed = .{ .failure = .expired, .retry = .device } }, .labels = &.{ "[ Retry ]", "[ Back ]" }, .controls = &.{ .retry, .back } },
+            .{ .page = .pending, .labels = &.{ "[ Recheck ]", "[ Back ]", "[ Return ]" }, .controls = &.{ .recheck, .back, .close } },
+            .{ .page = .connected, .labels = &.{"[ Close ]"}, .controls = &.{.close} },
+        };
+        for (cases) |case| {
+            page.state.page = case.page;
+            for (case.controls, case.labels) |control, label| {
+                page.state.focus = control;
+                const frame = try testingDraw(&page, ctx.alloc, width, 30);
+                try std.testing.expect(std.mem.indexOf(u8, try testingText(frame, ctx.alloc), label) != null);
+                // Browser reopen is not actionable until its URL has arrived.
+                if (case.page == .browser and control == .open_page) {
+                    try std.testing.expect(page.drawn.focused == null);
+                    continue;
+                }
+                try std.testing.expectEqual(control, page.drawn.focused.?.control);
+                var visible = false;
+                for (page.drawn.hits) |hit| {
+                    try std.testing.expect(hit.row < 30 and hit.start < hit.end and hit.end <= width);
+                    if (std.meta.activeTag(hit.action) == std.meta.activeTag(page.drawn.focused.?.action)) visible = true;
+                }
+                try std.testing.expect(visible);
+                const controls = page.state.controls();
+                const at = std.mem.indexOfScalar(core.Control, controls, control).?;
+                try page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.tab } });
+                try std.testing.expectEqual(controls[(at + 1) % controls.len], page.state.focus);
+                try std.testing.expect(page.focusedAction() == null);
+            }
+        }
+        for ([_]core.Page{ .method, .api, .browser, .device, .{ .failed = .{ .failure = .expired, .retry = .device } }, .pending }) |from| {
+            page.state = .{ .page = from, .focus = .back };
+            _ = try testingDraw(&page, ctx.alloc, width, 30);
+            var clicked = false;
+            for (page.drawn.hits) |hit| if (hit.action == .back) {
+                try page.widget().handleEvent(&ctx, .{ .mouse = .{ .row = @intCast(hit.row), .col = @intCast(hit.start), .button = .left, .type = .press, .mods = .{} } });
+                clicked = true;
+                break;
+            };
+            try std.testing.expect(clicked);
+            try std.testing.expectEqual(if (from == .browser or from == .device) @as(std.meta.Tag(core.Page), .method) else .account, std.meta.activeTag(page.state.page));
+        }
+    }
+}
+
+test "Sign-in device URL is fully readable and linked across narrow rows beside explicit copy buttons" {
+    const url = "https://auth.openai.com/codex/device";
+    for ([_]u16{ 46, 140 }) |width| {
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        var page: Self = .{ .state = .{ .page = .device, .focus = .copy_code } };
+        try page.code.set("ABCD-1234");
+        const frame = try testingDraw(&page, ctx.alloc, width, 30);
+        var readable: std.ArrayList(u8) = .empty;
+        const dialog = frame.children[0].surface;
+        var url_rows: usize = 0;
+        for (0..dialog.size.height) |row| {
+            var linked = false;
+            for (0..dialog.size.width) |col| {
+                const cell = dialog.readCell(@intCast(col), @intCast(row));
+                if (cell.link.uri.len == 0) continue;
+                try std.testing.expectEqualStrings(url, cell.link.uri);
+                if (std.mem.eql(u8, cell.char.grapheme, " ")) continue;
+                try readable.appendSlice(ctx.alloc, cell.char.grapheme);
+                linked = true;
+            }
+            url_rows += @intFromBool(linked);
+        }
+        try std.testing.expectEqualStrings(url, readable.items);
+        try std.testing.expectEqual(@as(usize, if (width == 46) 2 else 1), url_rows);
+        try std.testing.expectEqualStrings("ABCD-1234", page.drawn.copy.?.slice());
+        try std.testing.expect(std.mem.indexOf(u8, try testingText(frame, ctx.alloc), "C copies code. Esc back.") != null);
+        try std.testing.expectEqual(@as(usize, 0), ctx.cmds.items.len);
+        var copied = false;
+        for (page.drawn.hits) |hit| if (hit.action == .copy) {
+            try page.widget().handleEvent(&ctx, .{ .mouse = .{ .row = @intCast(hit.row), .col = @intCast(hit.start), .button = .left, .type = .press, .mods = .{} } });
+            copied = true;
+            break;
+        };
+        try std.testing.expect(copied);
+        try std.testing.expectEqual(@as(usize, 1), ctx.cmds.items.len);
+        try std.testing.expectEqualStrings("ABCD-1234", ctx.cmds.items[0].copy_to_clipboard);
+    }
+}
+
 test "Sign-in exact drawn device code copies only explicitly and never after clipping scrolling or paste" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -1732,6 +1920,18 @@ test "Sign-in whole joined receipt survives screen settlement and departure repo
         page.cancel();
         try std.testing.expectEqual(.publishing, page.gate.load(.acquire));
         var ctx: vxfw.EventContext = .{ .io = init_.io, .alloc = arena.allocator(), .cmds = .empty };
+        page.state.focus = .back;
+        _ = try testingDraw(&page, ctx.alloc, 46, 30);
+        var back_clicked = false;
+        for (page.drawn.hits) |hit| if (hit.action == .back) {
+            try page.widget().handleEvent(&ctx, .{ .mouse = .{ .row = @intCast(hit.row), .col = @intCast(hit.start), .button = .left, .type = .press, .mods = .{} } });
+            back_clicked = true;
+            break;
+        };
+        try std.testing.expect(back_clicked and page.state.page == .saving and page.task.thread != null);
+        try testingSend(&page, &ctx, "\r", 46, 30);
+        try std.testing.expect(page.state.page == .saving and page.gate.load(.acquire) == .publishing and page.task.thread != null);
+        try std.testing.expect(std.mem.indexOf(u8, page.issue.?, "cannot be cancelled") != null);
         if (screen_first) {
             try page.settle(.{ .screen = &ctx });
             try std.testing.expect(page.task.thread == null and page.outcome.? == .published);

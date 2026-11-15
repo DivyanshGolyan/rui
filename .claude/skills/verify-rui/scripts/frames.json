@@ -1065,6 +1065,8 @@
         "Sign in to Rui",
         "ChatGPT",
         "API key",
+        "[ Close ]",
+        "Choose an account.",
         "Tab / Shift-Tab"
       ],
       "absent": [
@@ -1109,8 +1111,9 @@
         "Continue in your browser",
         "127.0.0.1:1",
         "Paste callback",
-        "Open browser",
-        "Change method"
+        "[ Open browser ]",
+        "[ Change method ]",
+        "[ Back ]"
       ],
       "absent": [
         "Provider: [c]",
@@ -1149,10 +1152,13 @@
       ],
       "expect": [
         "Use a device code",
-        "auth.openai.com/codex/device",
+        "https://auth.openai.com/codex/device",
         "BDL9-KI88H",
-        "Copy code (C)",
-        "Open browser"
+        "[ Copy code ]",
+        "[ Open browser ]",
+        "[ Change method ]",
+        "[ Back ]",
+        "C copies code"
       ],
       "absent": [
         "Provider: [c]",
@@ -1190,7 +1196,8 @@
         "API key",
         "Model ID",
         "*********",
-        "Connect"
+        "[ Connect ]",
+        "[ Back ]"
       ],
       "absent": [
         "sk-secret",

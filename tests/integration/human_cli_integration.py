@@ -1922,7 +1922,7 @@ def provider_line_cases():
                         await_screen(master, "Connect with an API key")
                         # Blank key reuses its admitted source, but still stages
                         # an immutable selected-Host pair and proves fresh activation.
-                        sign_in_focus(master, b"\t\t", "API key", "Connect")
+                        sign_in_focus(master, b"\t\t", "API key", "[ Connect ]")
                         os.write(master, b"\r")
                     else:
                         reuse_chatgpt(master)
@@ -1945,13 +1945,13 @@ def provider_line_cases():
                         sign_in_focus(master, b"\x1b[C", "ChatGPT", "API key")
                         os.write(master, b"\r")
                         await_screen(master, "Connect with an API key")
-                        sign_in_focus(master, b"\t\t", "API key", "Connect")
+                        sign_in_focus(master, b"\t\t", "API key", "[ Connect ]")
                         os.write(master, b"\r")
                         read_terminal(master, "Enter one API key")
                         os.write(master, b"sk-screen-secret")
                         masked = read_terminal(master, "****************")
                         assert "sk-screen-secret" not in masked, masked
-                        sign_in_focus(master, b"\t\t", "API key", "Connect")
+                        sign_in_focus(master, b"\t\t", "API key", "[ Connect ]")
                         os.write(master, b"\r")
                         overview_frame(master, overview_title)
                         entry = json.loads((selected_store / "host.json").read_text())["providers"]["openai"]
@@ -1979,7 +1979,7 @@ def provider_line_cases():
                         os.write(master, b"\r")
                         waiting = read_terminal(master, "BDL9-KI88H")
                         assert "auth.openai.com/codex/device" in waiting, waiting
-                        assert "Copy code (C)" in waiting, waiting
+                        assert "[ Copy code ]" in waiting and "C copies code" in waiting, waiting
                         os.write(master, b"\x1b")
                         read_terminal(master, "ChatGPT account", fresh=True)
                     else:
