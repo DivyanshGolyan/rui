@@ -60,6 +60,8 @@ const cores = .{
     .{ "http1/Parser.zig", @import("http1/Parser.zig") },
     .{ "http1/request.zig", @import("http1/request.zig") },
     .{ "idempotency_key.zig", @import("idempotency_key.zig") },
+    .{ "input_media.zig", @import("input_media.zig") },
+    .{ "input_parts.zig", @import("input_parts.zig") },
     .{ "json_ascii.zig", @import("json_ascii.zig") },
     .{ "json_limits.zig", @import("json_limits.zig") },
     .{ "json_scalar.zig", @import("json_scalar.zig") },
