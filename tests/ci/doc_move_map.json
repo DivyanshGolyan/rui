@@ -1,0 +1,1523 @@
+{
+  "base": "94d1881acf691b524de6c2e62b270e9220ac4d88",
+  "segments": [
+    {
+      "source": "ARCHITECTURE.md",
+      "start": 1,
+      "end": 133,
+      "destination": "ARCHITECTURE.md",
+      "heading_shift": 0,
+      "sha256": "8adb05d07aa0ffe267172f5d148eb5f7df6d72b72f6d5669089f36d4a11742a3"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "start": 134,
+      "end": 383,
+      "destination": "docs/contracts/admission.md",
+      "heading_shift": 1,
+      "sha256": "d5388968ab236de390ac05ecac6827bc2eedab79c251578a1ae4732cd50b15c9"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "start": 384,
+      "end": 608,
+      "destination": "docs/contracts/conversation.md",
+      "heading_shift": 1,
+      "sha256": "ce770d3b4066a1d874c4548b6bc0e08a4244a4095a0525a01f18e915d267e8ee"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "start": 609,
+      "end": 1311,
+      "destination": "docs/contracts/model-io.md",
+      "heading_shift": 1,
+      "sha256": "38bfaecbaf38bd973fb1ba98186bb2c07d4cd3c40cb7d9013a8055278fe408a5"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "start": 1312,
+      "end": 1491,
+      "destination": "docs/contracts/execution.md",
+      "heading_shift": 1,
+      "sha256": "77c9e50cb3336bf15805379cb38a86315475bb9937c0fe39f6125795b01024d7"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "start": 1492,
+      "end": 1493,
+      "destination": "docs/contracts/execution.md",
+      "heading_shift": 1,
+      "sha256": "584ab16921d316a5f2efe0ece13fb90fb5bd4100d5ac117cbd132d4824e1ba31"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "start": 1494,
+      "end": 1728,
+      "destination": "docs/contracts/store.md",
+      "heading_shift": 0,
+      "sha256": "93b4c3641991a293981e4115271922089ae1e7cea2606774bd4d353898343106"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "start": 1729,
+      "end": 1891,
+      "destination": "docs/contracts/execution.md",
+      "heading_shift": 0,
+      "sha256": "ae997121598363e1f7f9589543697917339e4bb5722f9914dc171a744f0a90ca"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "start": 1892,
+      "end": 1910,
+      "destination": "docs/contracts/store.md",
+      "heading_shift": 0,
+      "sha256": "888876b04237e2c834f4b21e39f542430dbd595664dcaa63042bfad03d59eaf1"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "start": 1911,
+      "end": 2104,
+      "destination": "docs/contracts/execution.md",
+      "heading_shift": 0,
+      "sha256": "a67c8135992e8cfc12c49ab0e1a74135656542a607b05f05cdfb6d690a5bd3db"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "start": 2105,
+      "end": 2223,
+      "destination": "docs/contracts/sessions.md",
+      "heading_shift": 1,
+      "sha256": "93a6ab8dc32d4e748abd9be77cc221ea8f647bbbc8d31bc72c1ffa669fa90019"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "start": 2224,
+      "end": 2225,
+      "destination": "docs/contracts/inspection.md",
+      "heading_shift": 1,
+      "sha256": "fc893cd5e39aff9f30ec577802a393be964645261043c750d3e969e814b0bc57"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "start": 2226,
+      "end": 2460,
+      "destination": "docs/contracts/cli.md",
+      "heading_shift": 0,
+      "sha256": "21dc0f965d9a2002b720e2d06cb192f06e547e900eb1d4c43b1f1f4b79fd386f"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "start": 2461,
+      "end": 2773,
+      "destination": "docs/contracts/session-ui.md",
+      "heading_shift": -1,
+      "sha256": "d92063dcd1d2e2526ed421a0bce2a0fab70a4410efac8cfe980bcf7b359a6f45"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "start": 2774,
+      "end": 2870,
+      "destination": "docs/contracts/cli.md",
+      "heading_shift": -1,
+      "sha256": "a10727c592f44287445fb1db361c35b624ac37e502806881b0af4a4db27192c5"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "start": 2871,
+      "end": 3419,
+      "destination": "docs/contracts/session-ui.md",
+      "heading_shift": 0,
+      "sha256": "a489d4c3fad3d0ebc2ebde17735cd2d658d74282b30eea0318de6bc091e10e9c"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "start": 3420,
+      "end": 3948,
+      "destination": "docs/contracts/inspection.md",
+      "heading_shift": 0,
+      "sha256": "e294b2aab1b2dce500917e766605d9ab6315117557c59e6727b932594ae93120"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "start": 3949,
+      "end": 4222,
+      "destination": "docs/contracts/host.md",
+      "heading_shift": 1,
+      "sha256": "2e863480602b617f85038882c64a6b3b252e99ac6777b33e72656711e4a505cf"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "start": 4223,
+      "end": 4449,
+      "destination": "docs/contracts/resources.md",
+      "heading_shift": 1,
+      "sha256": "1967116a2893a614c58f49d42da020760191dfabc040d466aa45e0b1a625af05"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "start": 4450,
+      "end": 4541,
+      "destination": "docs/contracts/store.md",
+      "heading_shift": 0,
+      "sha256": "0f3aaf284e1b3cd16625b0776af98a1cc9c59513b83094f59b387664c9e186c7"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "start": 4542,
+      "end": 4666,
+      "destination": "docs/contracts/diagnostics.md",
+      "heading_shift": 0,
+      "sha256": "8cd9a8bec9684204bebe2f919541eda4bec08fd209ad0152f5a5ad53c215076d"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "start": 4667,
+      "end": 4675,
+      "destination": "ARCHITECTURE.md",
+      "heading_shift": 0,
+      "sha256": "8b0eb51c8ca848826dfb9b91b2a232f84de1353d46f1fde72d148ac4094b506f"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "start": 1,
+      "end": 10,
+      "destination": "VERIFICATION.md",
+      "heading_shift": 0,
+      "sha256": "7f3c2561228eb01b47d07197f33e03d8e7c793e7e9d664f9ecf324414b06458a"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "start": 11,
+      "end": 116,
+      "destination": "docs/verification/gates.md",
+      "heading_shift": 0,
+      "sha256": "bb6644633502f17db1940934b658fb041d1105ebac8fe885fed2b986ce1ce42a"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "start": 117,
+      "end": 187,
+      "destination": "docs/verification/release.md",
+      "heading_shift": -1,
+      "sha256": "2ddd6100390df1a124cd8c6595cd926f950183219e76e26afb0aa7f4ade34a36"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "start": 188,
+      "end": 313,
+      "destination": "docs/verification/gates.md",
+      "heading_shift": -1,
+      "sha256": "0a0157e8b123dc1b943c16c2043ad2a8c8e29501cf866f71462ab2baad150402"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "start": 314,
+      "end": 367,
+      "destination": "docs/verification/qualification.md",
+      "heading_shift": -1,
+      "sha256": "b08b26014a38dbe2d69b5ba67fbf87076d254425b7e26d2863575de5a8b77dec"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "start": 368,
+      "end": 399,
+      "destination": "docs/verification/release.md",
+      "heading_shift": -1,
+      "sha256": "478439f9dd3404cdf68b330508c550416e4b9556bbddd386acf76cf33cb943cf"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "start": 400,
+      "end": 409,
+      "destination": "docs/verification/qualification.md",
+      "heading_shift": -1,
+      "sha256": "305196bb7c26d85e7c8f898a07d5fc8f7f597f7db95bcc16fa4f95b0da1c68cc"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "start": 410,
+      "end": 430,
+      "destination": "docs/verification/gates.md",
+      "heading_shift": -1,
+      "sha256": "fafef92df73cca3d78d427d83df0baded4e3bce6654d585910884f460303e2ed"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "start": 431,
+      "end": 492,
+      "destination": "docs/verification/qualification.md",
+      "heading_shift": 0,
+      "sha256": "80864de52d8b8e8c7d73ba3d119e594749897ceface628e5f6eead27a581b9b6"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "start": 493,
+      "end": 501,
+      "destination": "VERIFICATION.md",
+      "heading_shift": 0,
+      "sha256": "aa64561bbba26c112b5ef64773d7736f5d44c7f93b04ab136d59c74c2340942d"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "start": 502,
+      "end": 531,
+      "destination": "docs/contracts/model-io.md",
+      "heading_shift": 1,
+      "sha256": "d9b75229de4ddd9b8ab9a3ec7fb02ec70f503c3c149eb089e347e0353f3efce9"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "start": 532,
+      "end": 543,
+      "destination": "docs/contracts/admission.md",
+      "heading_shift": 1,
+      "sha256": "efb4b881ee35c308490adbe350455bf4b5aa62ee5514107884579039f1844b65"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "start": 544,
+      "end": 582,
+      "destination": "docs/contracts/model-io.md",
+      "heading_shift": 1,
+      "sha256": "b70d9d1c04aa258a6df367ce4be4e2270569a76632a695be48a3f2009f1bdd2c"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "start": 583,
+      "end": 629,
+      "destination": "docs/contracts/execution.md",
+      "heading_shift": 1,
+      "sha256": "8a05279813f2e03d4d2e63f3989ef7651461a9bbd2bf860260dc2f2007dd7f58"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "start": 630,
+      "end": 635,
+      "destination": "docs/contracts/execution.md",
+      "heading_shift": 1,
+      "sha256": "22e802acddc9f50d81029a00f6af52511736abb312843c413c0ba143b1b32f9f"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "start": 636,
+      "end": 641,
+      "destination": "docs/contracts/admission.md",
+      "heading_shift": 1,
+      "sha256": "c025da79c5984ab32f74ee7b35eb11de527a2771036e0c4c0a6d5626e29e6129"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "start": 642,
+      "end": 643,
+      "destination": "docs/contracts/inspection.md",
+      "heading_shift": 1,
+      "sha256": "5718ab57462728df7f10eeb4727a8abb8d6256f42310e3a9931fc8fce693c14b"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "start": 644,
+      "end": 660,
+      "destination": "docs/contracts/sessions.md",
+      "heading_shift": 0,
+      "sha256": "cf36e13185aeceaf85a1398e0e3ebfe42f877a44559c5f64bd3562b58dc67dca"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "start": 661,
+      "end": 665,
+      "destination": "docs/contracts/inspection.md",
+      "heading_shift": 0,
+      "sha256": "ea1c3b04e8cb9f9fb748925aa67c489e12d2a01f15920d9f5f657993ecb1e29e"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "start": 666,
+      "end": 666,
+      "destination": "docs/contracts/session-ui.md",
+      "heading_shift": 0,
+      "sha256": "f3e81d95463e7109089fe25202d93e79b76f7d9e6a6104174e27546ae60f1dea"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "start": 667,
+      "end": 669,
+      "destination": "docs/contracts/inspection.md",
+      "heading_shift": 0,
+      "sha256": "a09890718ef961b7dc58773dafb78b8c8213a2328465e92f314cb0bc57070e98"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "start": 670,
+      "end": 670,
+      "destination": "docs/contracts/cli.md",
+      "heading_shift": 0,
+      "sha256": "b1f12b21241977dfaecc816c5271b7d74e6333ff46b1dac6daa937043a2a3aa6"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "start": 671,
+      "end": 673,
+      "destination": "docs/contracts/inspection.md",
+      "heading_shift": 0,
+      "sha256": "c7da511d55192dff2d8c9a3a00c77e37e63b42e15a3821618f4c5fd857238a72"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "start": 674,
+      "end": 674,
+      "destination": "docs/contracts/cli.md",
+      "heading_shift": 0,
+      "sha256": "52658ac431a618b87d22e8b20f79b503deb16f6e50dfde3ffadc78d340e57adf"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "start": 675,
+      "end": 694,
+      "destination": "docs/contracts/session-ui.md",
+      "heading_shift": 0,
+      "sha256": "785d6147fabb0f9f854dbdb175c4c201ece2657eb8d52bce319fa8656c151db3"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "start": 695,
+      "end": 697,
+      "destination": "docs/contracts/cli.md",
+      "heading_shift": 0,
+      "sha256": "13038da041aa07d9c1e212ba113b8e5480ae66f75494d3dcbb99ec2881f1e246"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "start": 698,
+      "end": 699,
+      "destination": "docs/contracts/model-io.md",
+      "heading_shift": 0,
+      "sha256": "3b2a37bf81a50560e4278db93eef50f5c1b7193cb671c615bd7b18a38d975371"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "start": 700,
+      "end": 704,
+      "destination": "docs/contracts/cli.md",
+      "heading_shift": 0,
+      "sha256": "aef060240012071aa099ce709b59dd17a8cfa943d76c5b82cf2cb11a8e8659e2"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "start": 705,
+      "end": 725,
+      "destination": "docs/contracts/session-ui.md",
+      "heading_shift": 0,
+      "sha256": "6479c351908f2a9bec9c6c17987f95f9c37eed0952aa3d7cbc1e2437feac73cf"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "start": 726,
+      "end": 726,
+      "destination": "docs/contracts/cli.md",
+      "heading_shift": 0,
+      "sha256": "704c4b471b21473f9d51cb806cfe09a0af5d4d2ac0c6645c13064d929ddd01da"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "start": 727,
+      "end": 728,
+      "destination": "docs/contracts/inspection.md",
+      "heading_shift": 0,
+      "sha256": "00a121c4a00dcc5504ab47bcae6334ca3e2440737949fc401e892f0771cf3ee5"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "start": 729,
+      "end": 735,
+      "destination": "docs/contracts/store.md",
+      "heading_shift": 0,
+      "sha256": "bc2bbae7d888437dd4b888538d800d7c8b881f45a748d8c1513b87ff9e16a290"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "start": 736,
+      "end": 738,
+      "destination": "docs/contracts/inspection.md",
+      "heading_shift": 0,
+      "sha256": "e661db3bb596119fbb9df460ed783c92dd7c697b1d795453adcee52d41e5c290"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "start": 739,
+      "end": 739,
+      "destination": "docs/contracts/admission.md",
+      "heading_shift": 0,
+      "sha256": "c27dde9e44b3297b1d566fd155ca395d8cf0103abb3cae4827fb74d9bf0a020c"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "start": 740,
+      "end": 740,
+      "destination": "docs/contracts/inspection.md",
+      "heading_shift": 0,
+      "sha256": "2a54dcaff02e5b0a04e04a57049426ad6dae508cda939735e9e640e356f36249"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "start": 741,
+      "end": 741,
+      "destination": "docs/contracts/admission.md",
+      "heading_shift": 0,
+      "sha256": "c522d350437062efbb032c2f8ae092faece04f10c8b9e0e785f7fe263a6b8303"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "start": 742,
+      "end": 742,
+      "destination": "docs/contracts/inspection.md",
+      "heading_shift": 0,
+      "sha256": "23b4a02f836b30af2bf7b9b5f84b36f0e3c627d1c302cf91f97da67ee82fd3ff"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "start": 743,
+      "end": 743,
+      "destination": "docs/contracts/host.md",
+      "heading_shift": 0,
+      "sha256": "e11d7b633e1de53a89573f7032c97285acba047052689807ac90bb36657e11ff"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "start": 744,
+      "end": 746,
+      "destination": "docs/contracts/inspection.md",
+      "heading_shift": 0,
+      "sha256": "c8cf5cb895d13ccc637c657b597ab14bc4a4efc755ba6d91922049cc22e41867"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "start": 747,
+      "end": 764,
+      "destination": "docs/contracts/inspection.md",
+      "heading_shift": 0,
+      "sha256": "bd1d368f5449d3ddf0a47eec3d40b501e8a03527b053d0178739db9574244592"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "start": 765,
+      "end": 774,
+      "destination": "docs/contracts/resources.md",
+      "heading_shift": 1,
+      "sha256": "cc29d6293e5c276f140f20ccd847f839cb0753064982708e6b9c904f531ec160"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "start": 775,
+      "end": 800,
+      "destination": "docs/contracts/cli.md",
+      "heading_shift": 1,
+      "sha256": "269184f9b0b866f610a801d14bb144049216afa89a3283dd2d7adcd5e15b4fa1"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "start": 801,
+      "end": 870,
+      "destination": "docs/contracts/resources.md",
+      "heading_shift": 1,
+      "sha256": "b62fc9ec50b10a36a61649ac37797c4fac74b3ca087234885d6003fdd8ea99d1"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "start": 871,
+      "end": 900,
+      "destination": "docs/contracts/diagnostics.md",
+      "heading_shift": 1,
+      "sha256": "994f126be21e21ab7889f4d619c18bcad76003ccf395b55719160599541cf092"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "start": 901,
+      "end": 940,
+      "destination": "docs/verification/qualification.md",
+      "heading_shift": 0,
+      "sha256": "9d75a35b5bf7a14d0082cecd7116295d674bfa57947cc3b5c7d1fe4ea63d4e5c"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "start": 941,
+      "end": 946,
+      "destination": "docs/contracts/resources.md",
+      "heading_shift": 1,
+      "sha256": "b4f43b1cc98ee29b672ee32d0462f286e48ca474443bf7282c691f0dc11e8f1e"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "start": 947,
+      "end": 991,
+      "destination": "docs/contracts/conversation.md",
+      "heading_shift": 1,
+      "sha256": "6214f9bd7e24b26ca0c65433698c90dc5443b7325f2a8786564ba7c1c8832b11"
+    }
+  ],
+  "index_edits": [
+    {
+      "source": "ARCHITECTURE.md",
+      "old": "Read sequentially or jump to the owning contract:",
+      "new": "Read the owning contract and its required evidence for the subsystem you change:"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "old": "The sections below define",
+      "new": "The linked subsystem contracts define"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "old": "the gates below and the [contract index](#contract-index)",
+      "new": "the [canonical gates](#canonical-gates) and the [contract index](#contract-index)"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "old": "- [Owners and identities](#owners-and-identities): who owns conversations.\n- [Admission](docs/contracts/admission.md#admission-and-public-requests) and [conversation/settings](docs/contracts/conversation.md#conversation-and-current-settings): configure, submit and recover replies.\n- [Model requests](docs/contracts/model-io.md#model-requests-continuation-and-compaction): freeze inputs, retain output and compact context.\n- [Tools and permission](docs/contracts/execution.md#model-output-tools-and-permission), including [Exact Edit](docs/contracts/execution.md#exact-edit).\n- [Execution and recovery](docs/contracts/execution.md#transactions-execution-and-recovery), then [stops and outcomes](docs/contracts/sessions.md#stops-and-terminal-outcomes).\n- [Inspection and local protocol](docs/contracts/inspection.md#inspection-and-local-protocol): observe, wait and control work.\n- [Host lifetime/platforms](docs/contracts/host.md#platforms-and-server-lifetime) and [resources/storage](docs/contracts/resources.md#resources-storage-and-diagnostics).\n- [Remaining decisions](#remaining-decisions): implementation choices and qualification still outstanding.\n",
+      "new": "- For shared terms or implementation owners, read [Owners and identities](#owners-and-identities).\n- For Session naming, configuration, admission, or lost replies, read [Admission](docs/contracts/admission.md).\n- For Conversation entries, settings, instructions, or skills, read [Conversation and settings](docs/contracts/conversation.md).\n- For frozen model requests, provider history, authentication, or compaction, read [Model requests and provider context](docs/contracts/model-io.md).\n- For tool permission, Exact Edit, Bash, retries, or crash recovery, read [Tools, execution, and recovery](docs/contracts/execution.md).\n- For canonical transactions, Store formats, durability, or content representation, read [Store](docs/contracts/store.md).\n- For stop, archive, interruption, or Turn outcomes, read [Session stops and outcomes](docs/contracts/sessions.md).\n- For CLI grammar, defaults, capture, or command output, read [CLI operations](docs/contracts/cli.md).\n- For sign-in screens, Session overview, composition, choices, or terminal cleanup, read [Session UI](docs/contracts/session-ui.md).\n- For reports, pages, Activity, waits, or local transport, read [Inspection and local protocol](docs/contracts/inspection.md).\n- For platforms, exclusive Host ownership, or shutdown, read [Host lifetime](docs/contracts/host.md).\n- For capacity, memory, scratch, or selection progress, read [Resources](docs/contracts/resources.md).\n- For optional stderr, diagnostic records, or export, read [Diagnostics](docs/contracts/diagnostics.md).\n- For outstanding implementation choices, read [Remaining decisions](#remaining-decisions).\n"
+    }
+  ],
+  "anchors": [
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "rui-architecture",
+      "destination": "ARCHITECTURE.md",
+      "destination_anchor": "rui-architecture"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "supported-guarantees",
+      "destination": "ARCHITECTURE.md",
+      "destination_anchor": "supported-guarantees"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "a-piece-of-work-from-start-to-finish",
+      "destination": "ARCHITECTURE.md",
+      "destination_anchor": "a-piece-of-work-from-start-to-finish"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "owners-and-identities",
+      "destination": "ARCHITECTURE.md",
+      "destination_anchor": "owners-and-identities"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "finding-the-implementation",
+      "destination": "ARCHITECTURE.md",
+      "destination_anchor": "finding-the-implementation"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "admission-and-public-requests",
+      "destination": "docs/contracts/admission.md",
+      "destination_anchor": "admission-and-public-requests"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "names-references-ids-and-idempotency-keys",
+      "destination": "docs/contracts/admission.md",
+      "destination_anchor": "names-references-ids-and-idempotency-keys"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "naming-and-configuring-a-session",
+      "destination": "docs/contracts/admission.md",
+      "destination_anchor": "naming-and-configuring-a-session"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "recovering-a-submission-after-a-lost-reply",
+      "destination": "docs/contracts/admission.md",
+      "destination_anchor": "recovering-a-submission-after-a-lost-reply"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "example-acceptance-and-answer-arrive-separately",
+      "destination": "docs/contracts/admission.md",
+      "destination_anchor": "example-acceptance-and-answer-arrive-separately"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "conversation-and-current-settings",
+      "destination": "docs/contracts/conversation.md",
+      "destination_anchor": "conversation-and-current-settings"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "conversation-entries-and-pending-messages",
+      "destination": "docs/contracts/conversation.md",
+      "destination_anchor": "conversation-entries-and-pending-messages"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "selecting-current-settings",
+      "destination": "docs/contracts/conversation.md",
+      "destination_anchor": "selecting-current-settings"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "skills",
+      "destination": "docs/contracts/conversation.md",
+      "destination_anchor": "skills"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "recording-and-rendering-instruction-updates",
+      "destination": "docs/contracts/conversation.md",
+      "destination_anchor": "recording-and-rendering-instruction-updates"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "text-and-structured-answers",
+      "destination": "docs/contracts/conversation.md",
+      "destination_anchor": "text-and-structured-answers"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "model-requests-continuation-and-compaction",
+      "destination": "docs/contracts/model-io.md",
+      "destination_anchor": "model-requests-continuation-and-compaction"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "operations-and-frozen-requests",
+      "destination": "docs/contracts/model-io.md",
+      "destination_anchor": "operations-and-frozen-requests"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "agent-identity-and-peer-composition",
+      "destination": "docs/contracts/model-io.md",
+      "destination_anchor": "agent-identity-and-peer-composition"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "retaining-accepted-output",
+      "destination": "docs/contracts/model-io.md",
+      "destination_anchor": "retaining-accepted-output"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "choosing-and-validating-compacted-context",
+      "destination": "docs/contracts/model-io.md",
+      "destination_anchor": "choosing-and-validating-compacted-context"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "example-compaction-coverage-and-availability",
+      "destination": "docs/contracts/model-io.md",
+      "destination_anchor": "example-compaction-coverage-and-availability"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "adapter-historical-reads",
+      "destination": "docs/contracts/model-io.md",
+      "destination_anchor": "adapter-historical-reads"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "history-memo",
+      "destination": "docs/contracts/model-io.md",
+      "destination_anchor": "history-memo"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "prefix-seal",
+      "destination": "docs/contracts/model-io.md",
+      "destination_anchor": "prefix-seal"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "effort-inside-the-history",
+      "destination": "docs/contracts/model-io.md",
+      "destination_anchor": "effort-inside-the-history"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "tools-inside-the-history",
+      "destination": "docs/contracts/model-io.md",
+      "destination_anchor": "tools-inside-the-history"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "codex-wire-binding",
+      "destination": "docs/contracts/model-io.md",
+      "destination_anchor": "codex-wire-binding"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "authentication-and-transport-lifetime",
+      "destination": "docs/contracts/model-io.md",
+      "destination_anchor": "authentication-and-transport-lifetime"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "response-owned-compaction",
+      "destination": "docs/contracts/model-io.md",
+      "destination_anchor": "response-owned-compaction"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "model-output-tools-and-permission",
+      "destination": "docs/contracts/execution.md",
+      "destination_anchor": "model-output-tools-and-permission"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "accepting-an-answer-or-tool-calls",
+      "destination": "docs/contracts/execution.md",
+      "destination_anchor": "accepting-an-answer-or-tool-calls"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "authorizing-exact-actions",
+      "destination": "docs/contracts/execution.md",
+      "destination_anchor": "authorizing-exact-actions"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "exact-edit",
+      "destination": "docs/contracts/execution.md",
+      "destination_anchor": "exact-edit"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "proposal-and-line-coordinates",
+      "destination": "docs/contracts/execution.md",
+      "destination_anchor": "proposal-and-line-coordinates"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "preview-and-authorization",
+      "destination": "docs/contracts/execution.md",
+      "destination_anchor": "preview-and-authorization"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "checked-copyback-and-cleanup",
+      "destination": "docs/contracts/execution.md",
+      "destination_anchor": "checked-copyback-and-cleanup"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "transactions-execution-and-recovery",
+      "destination": "docs/contracts/execution.md",
+      "destination_anchor": "transactions-execution-and-recovery"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "canonical-state-and-transactions",
+      "destination": "docs/contracts/store.md",
+      "destination_anchor": "canonical-state-and-transactions"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "store-format-and-upgrades",
+      "destination": "docs/contracts/store.md",
+      "destination_anchor": "store-format-and-upgrades"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "admitting-an-attempt",
+      "destination": "docs/contracts/execution.md",
+      "destination_anchor": "admitting-an-attempt"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "launching-once-and-retaining-cleanup-ownership",
+      "destination": "docs/contracts/execution.md",
+      "destination_anchor": "launching-once-and-retaining-cleanup-ownership"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "effect-interfaces-and-evidence",
+      "destination": "docs/contracts/execution.md",
+      "destination_anchor": "effect-interfaces-and-evidence"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "validating-and-importing-output",
+      "destination": "docs/contracts/execution.md",
+      "destination_anchor": "validating-and-importing-output"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "commit-boundaries-and-crash-recovery",
+      "destination": "docs/contracts/execution.md",
+      "destination_anchor": "commit-boundaries-and-crash-recovery"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "store-durability",
+      "destination": "docs/contracts/store.md",
+      "destination_anchor": "store-durability"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "retries-and-timeouts",
+      "destination": "docs/contracts/execution.md",
+      "destination_anchor": "retries-and-timeouts"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "bash-lifecycle-and-capture",
+      "destination": "docs/contracts/execution.md",
+      "destination_anchor": "bash-lifecycle-and-capture"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "preparing-a-command",
+      "destination": "docs/contracts/execution.md",
+      "destination_anchor": "preparing-a-command"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "bash-environment",
+      "destination": "docs/contracts/execution.md",
+      "destination_anchor": "bash-environment"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "facts-tracked-independently",
+      "destination": "docs/contracts/execution.md",
+      "destination_anchor": "facts-tracked-independently"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "retiring-the-original-process-group",
+      "destination": "docs/contracts/execution.md",
+      "destination_anchor": "retiring-the-original-process-group"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "finishing-output-capture",
+      "destination": "docs/contracts/execution.md",
+      "destination_anchor": "finishing-output-capture"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "releasing-custody",
+      "destination": "docs/contracts/execution.md",
+      "destination_anchor": "releasing-custody"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "when-cleanup-cannot-finish",
+      "destination": "docs/contracts/execution.md",
+      "destination_anchor": "when-cleanup-cannot-finish"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "example-a-crash-between-launch-and-saved-result",
+      "destination": "docs/contracts/execution.md",
+      "destination_anchor": "example-a-crash-between-launch-and-saved-result"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "stops-and-terminal-outcomes",
+      "destination": "docs/contracts/sessions.md",
+      "destination_anchor": "stops-and-terminal-outcomes"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "stopping-selected-work",
+      "destination": "docs/contracts/sessions.md",
+      "destination_anchor": "stopping-selected-work"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "archiving-a-session",
+      "destination": "docs/contracts/sessions.md",
+      "destination_anchor": "archiving-a-session"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "interrupting-one-model-operation",
+      "destination": "docs/contracts/sessions.md",
+      "destination_anchor": "interrupting-one-model-operation"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "failing-and-continuing-a-turn",
+      "destination": "docs/contracts/sessions.md",
+      "destination_anchor": "failing-and-continuing-a-turn"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "reading-message-applicability",
+      "destination": "docs/contracts/sessions.md",
+      "destination_anchor": "reading-message-applicability"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "example-pending-input-after-failure-or-stop",
+      "destination": "docs/contracts/sessions.md",
+      "destination_anchor": "example-pending-input-after-failure-or-stop"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "inspection-and-local-protocol",
+      "destination": "docs/contracts/inspection.md",
+      "destination_anchor": "inspection-and-local-protocol"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "public-operations",
+      "destination": "docs/contracts/cli.md",
+      "destination_anchor": "public-operations"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "cli-modes-and-commands",
+      "destination": "docs/contracts/cli.md",
+      "destination_anchor": "cli-modes-and-commands"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "configuration-and-input",
+      "destination": "docs/contracts/cli.md",
+      "destination_anchor": "configuration-and-input"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "help-and-prerequisites",
+      "destination": "docs/contracts/cli.md",
+      "destination_anchor": "help-and-prerequisites"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "session-listing",
+      "destination": "docs/contracts/cli.md",
+      "destination_anchor": "session-listing"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "store-selection-and-defaults",
+      "destination": "docs/contracts/cli.md",
+      "destination_anchor": "store-selection-and-defaults"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "human-entry-and-authentication",
+      "destination": "docs/contracts/session-ui.md",
+      "destination_anchor": "human-entry-and-authentication"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "desktop-notifications",
+      "destination": "docs/contracts/session-ui.md",
+      "destination_anchor": "desktop-notifications"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "caller-capture-and-recovery",
+      "destination": "docs/contracts/cli.md",
+      "destination_anchor": "caller-capture-and-recovery"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "client-transport-and-observations",
+      "destination": "docs/contracts/cli.md",
+      "destination_anchor": "client-transport-and-observations"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "supported-model-ids",
+      "destination": "docs/contracts/cli.md",
+      "destination_anchor": "supported-model-ids"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "staged-persistent-input",
+      "destination": "docs/contracts/session-ui.md",
+      "destination_anchor": "staged-persistent-input"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "capturing-and-delivering-reports",
+      "destination": "docs/contracts/inspection.md",
+      "destination_anchor": "capturing-and-delivering-reports"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "public-conversation-pages",
+      "destination": "docs/contracts/inspection.md",
+      "destination_anchor": "public-conversation-pages"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "tool-call-proposals",
+      "destination": "docs/contracts/inspection.md",
+      "destination_anchor": "tool-call-proposals"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "public-session-activity",
+      "destination": "docs/contracts/inspection.md",
+      "destination_anchor": "public-session-activity"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "work-state-and-wait-conditions",
+      "destination": "docs/contracts/inspection.md",
+      "destination_anchor": "work-state-and-wait-conditions"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "outcomes-and-observation-errors",
+      "destination": "docs/contracts/inspection.md",
+      "destination_anchor": "outcomes-and-observation-errors"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "wire-format-and-command-output",
+      "destination": "docs/contracts/inspection.md",
+      "destination_anchor": "wire-format-and-command-output"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "connection-capacity-and-control-headroom",
+      "destination": "docs/contracts/inspection.md",
+      "destination_anchor": "connection-capacity-and-control-headroom"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "live-control-notification",
+      "destination": "docs/contracts/inspection.md",
+      "destination_anchor": "live-control-notification"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "ingress-ownership-through-admission",
+      "destination": "docs/contracts/inspection.md",
+      "destination_anchor": "ingress-ownership-through-admission"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "platforms-and-server-lifetime",
+      "destination": "docs/contracts/host.md",
+      "destination_anchor": "platforms-and-server-lifetime"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "platform-capabilities",
+      "destination": "docs/contracts/host.md",
+      "destination_anchor": "platform-capabilities"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "exclusive-store-ownership",
+      "destination": "docs/contracts/host.md",
+      "destination_anchor": "exclusive-store-ownership"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "infrastructure-shutdown",
+      "destination": "docs/contracts/host.md",
+      "destination_anchor": "infrastructure-shutdown"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "resources-storage-and-diagnostics",
+      "destination": "docs/contracts/resources.md",
+      "destination_anchor": "resources-storage-and-diagnostics"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "capacity-and-selection-progress",
+      "destination": "docs/contracts/resources.md",
+      "destination_anchor": "capacity-and-selection-progress"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "capacity-ownership",
+      "destination": "docs/contracts/resources.md",
+      "destination_anchor": "capacity-ownership"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "memory-ownership-and-configured-bounds",
+      "destination": "docs/contracts/resources.md",
+      "destination_anchor": "memory-ownership-and-configured-bounds"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "resident-memory-invariant",
+      "destination": "docs/contracts/resources.md",
+      "destination_anchor": "resident-memory-invariant"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "scratch-tool-output-and-accounting",
+      "destination": "docs/contracts/resources.md",
+      "destination_anchor": "scratch-tool-output-and-accounting"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "shared-scratch-ownership",
+      "destination": "docs/contracts/resources.md",
+      "destination_anchor": "shared-scratch-ownership"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "retained-output-and-its-queue",
+      "destination": "docs/contracts/resources.md",
+      "destination_anchor": "retained-output-and-its-queue"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "tool-excerpts-and-full-output",
+      "destination": "docs/contracts/resources.md",
+      "destination_anchor": "tool-excerpts-and-full-output"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "exhaustion-and-cleanup",
+      "destination": "docs/contracts/resources.md",
+      "destination_anchor": "exhaustion-and-cleanup"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "sqlite-and-representation",
+      "destination": "docs/contracts/store.md",
+      "destination_anchor": "sqlite-and-representation"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "canonical-content-reads-and-retention",
+      "destination": "docs/contracts/store.md",
+      "destination_anchor": "canonical-content-reads-and-retention"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "connection-recovery-and-representation-bounds",
+      "destination": "docs/contracts/store.md",
+      "destination_anchor": "connection-recovery-and-representation-bounds"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "diagnostics",
+      "destination": "docs/contracts/diagnostics.md",
+      "destination_anchor": "diagnostics"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "shared-optional-stderr",
+      "destination": "docs/contracts/diagnostics.md",
+      "destination_anchor": "shared-optional-stderr"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "diagnostic-records-and-export",
+      "destination": "docs/contracts/diagnostics.md",
+      "destination_anchor": "diagnostic-records-and-export"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "anchor": "remaining-decisions",
+      "destination": "ARCHITECTURE.md",
+      "destination_anchor": "remaining-decisions"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "anchor": "verification",
+      "destination": "VERIFICATION.md",
+      "destination_anchor": "verification"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "anchor": "canonical-gates",
+      "destination": "docs/verification/gates.md",
+      "destination_anchor": "canonical-gates"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "anchor": "landing-cadence",
+      "destination": "docs/verification/release.md",
+      "destination_anchor": "landing-cadence"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "anchor": "composed-gates",
+      "destination": "docs/verification/gates.md",
+      "destination_anchor": "composed-gates"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "anchor": "renderer-contracts",
+      "destination": "docs/verification/gates.md",
+      "destination_anchor": "renderer-contracts"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "anchor": "long-witnesses",
+      "destination": "docs/verification/gates.md",
+      "destination_anchor": "long-witnesses"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "anchor": "ci-artifacts-and-caches",
+      "destination": "docs/verification/gates.md",
+      "destination_anchor": "ci-artifacts-and-caches"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "anchor": "listed-flakes",
+      "destination": "docs/verification/gates.md",
+      "destination_anchor": "listed-flakes"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "anchor": "hosted-qualification",
+      "destination": "docs/verification/qualification.md",
+      "destination_anchor": "hosted-qualification"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "anchor": "release-publication",
+      "destination": "docs/verification/release.md",
+      "destination_anchor": "release-publication"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "anchor": "measurement-and-release-evidence",
+      "destination": "docs/verification/qualification.md",
+      "destination_anchor": "measurement-and-release-evidence"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "anchor": "product-tenets",
+      "destination": "docs/verification/gates.md",
+      "destination_anchor": "product-tenets"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "anchor": "platform-qualification",
+      "destination": "docs/verification/qualification.md",
+      "destination_anchor": "platform-qualification"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "anchor": "qualification-workload-and-measurement-boundary",
+      "destination": "docs/verification/qualification.md",
+      "destination_anchor": "qualification-workload-and-measurement-boundary"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "anchor": "contract-index",
+      "destination": "VERIFICATION.md",
+      "destination_anchor": "contract-index"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "anchor": "asynchronous-peer-collaboration",
+      "destination": "docs/contracts/model-io.md",
+      "destination_anchor": "asynchronous-peer-collaboration"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "anchor": "native-behavior-and-failure-cases",
+      "destination": "docs/contracts/model-io.md",
+      "destination_anchor": "native-behavior-and-failure-cases"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "anchor": "per-call-accounting-and-100-agent-acceptance",
+      "destination": "docs/contracts/model-io.md",
+      "destination_anchor": "per-call-accounting-and-100-agent-acceptance"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "anchor": "authority-session-identity-and-admission",
+      "destination": "docs/contracts/admission.md",
+      "destination_anchor": "authority-session-identity-and-admission"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "anchor": "capture-configuration-and-command-identity",
+      "destination": "docs/contracts/admission.md",
+      "destination_anchor": "capture-configuration-and-command-identity"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "anchor": "context-provider-output-and-compaction",
+      "destination": "docs/contracts/model-io.md",
+      "destination_anchor": "context-provider-output-and-compaction"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "anchor": "historical-inputs-and-settings",
+      "destination": "docs/contracts/model-io.md",
+      "destination_anchor": "historical-inputs-and-settings"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "anchor": "provider-validation-and-output-ownership",
+      "destination": "docs/contracts/model-io.md",
+      "destination_anchor": "provider-validation-and-output-ownership"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "anchor": "execution-retries-and-permission",
+      "destination": "docs/contracts/execution.md",
+      "destination_anchor": "execution-retries-and-permission"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "anchor": "settlement-and-recovery-scenarios",
+      "destination": "docs/contracts/execution.md",
+      "destination_anchor": "settlement-and-recovery-scenarios"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "anchor": "runnable-bash-caller-acceptance-audit",
+      "destination": "docs/contracts/execution.md",
+      "destination_anchor": "runnable-bash-caller-acceptance-audit"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "anchor": "bash-lifecycle-scenarios",
+      "destination": "docs/contracts/execution.md",
+      "destination_anchor": "bash-lifecycle-scenarios"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "anchor": "exact-edit",
+      "destination": "docs/contracts/execution.md",
+      "destination_anchor": "exact-edit-1"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "anchor": "submission-recovery",
+      "destination": "docs/contracts/admission.md",
+      "destination_anchor": "submission-recovery"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "anchor": "controls-inspection-and-local-server",
+      "destination": "docs/contracts/inspection.md",
+      "destination_anchor": "controls-inspection-and-local-server"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "anchor": "durable-controls",
+      "destination": "docs/contracts/sessions.md",
+      "destination_anchor": "durable-controls"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "anchor": "control-races-and-acknowledgement",
+      "destination": "docs/contracts/sessions.md",
+      "destination_anchor": "control-races-and-acknowledgement"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "anchor": "inspection-and-waits",
+      "destination": "docs/contracts/inspection.md",
+      "destination_anchor": "inspection-and-waits"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "anchor": "server-ownership-and-connection-capacity",
+      "destination": "docs/contracts/inspection.md",
+      "destination_anchor": "server-ownership-and-connection-capacity"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "anchor": "execution-tracking-and-waiting",
+      "destination": "docs/contracts/resources.md",
+      "destination_anchor": "execution-tracking-and-waiting"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "anchor": "cli-refusal-and-exit-contract",
+      "destination": "docs/contracts/cli.md",
+      "destination_anchor": "cli-refusal-and-exit-contract"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "anchor": "resources-and-accepted-host-qualification-targets",
+      "destination": "docs/contracts/resources.md",
+      "destination_anchor": "resources-and-accepted-host-qualification-targets"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "anchor": "descriptor-startup-capacity",
+      "destination": "docs/contracts/resources.md",
+      "destination_anchor": "descriptor-startup-capacity"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "anchor": "transport",
+      "destination": "docs/contracts/resources.md",
+      "destination_anchor": "transport"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "anchor": "scratch-and-cleanup",
+      "destination": "docs/contracts/resources.md",
+      "destination_anchor": "scratch-and-cleanup"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "anchor": "host-startup-availability",
+      "destination": "docs/contracts/resources.md",
+      "destination_anchor": "host-startup-availability"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "anchor": "canonical-reads-retained-output-and-sqlite",
+      "destination": "docs/contracts/resources.md",
+      "destination_anchor": "canonical-reads-retained-output-and-sqlite"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "anchor": "diagnostics",
+      "destination": "docs/contracts/diagnostics.md",
+      "destination_anchor": "diagnostics-1"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "anchor": "native-owner-observations",
+      "destination": "docs/contracts/diagnostics.md",
+      "destination_anchor": "native-owner-observations"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "anchor": "shared-optional-stderr",
+      "destination": "docs/contracts/diagnostics.md",
+      "destination_anchor": "shared-optional-stderr-1"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "anchor": "diagnostic-records-and-export",
+      "destination": "docs/contracts/diagnostics.md",
+      "destination_anchor": "diagnostic-records-and-export-1"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "anchor": "release-demonstrations",
+      "destination": "docs/verification/qualification.md",
+      "destination_anchor": "release-demonstrations"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "anchor": "memory-explanation-evidence",
+      "destination": "docs/contracts/resources.md",
+      "destination_anchor": "memory-explanation-evidence"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "anchor": "skills",
+      "destination": "docs/contracts/conversation.md",
+      "destination_anchor": "skills-1"
+    },
+    {
+      "source": "VERIFICATION.md",
+      "anchor": "parent-creation-d178",
+      "destination": "docs/contracts/conversation.md",
+      "destination_anchor": "parent-creation-d178"
+    }
+  ]
+}

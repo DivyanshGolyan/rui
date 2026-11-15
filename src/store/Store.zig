@@ -1839,7 +1839,7 @@ fn destroyRing(ring: *change_ring.Ring) void {
 }
 
 /// Expected outcomes of entry points. A canonical read or save
-/// fault fences the Host (ARCHITECTURE.md, "Commit boundaries and crash
+/// fault fences the Host (docs/contracts/execution.md, "Commit boundaries and crash
 /// recovery"), so every other error from an entry point has fenced the
 /// Store before the caller sees it.
 pub const Ordinary = struct {

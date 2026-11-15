@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run a command as a lane's own non-root fixture user; own the pinned Python 3.12 environment.
 
-Fixtures refuse root (VERIFICATION.md, Canonical gates), and cloud containers
+Fixtures refuse root (docs/verification/gates.md, Canonical gates), and cloud containers
 run as root. `.agents/as-fixture-user` runs this module as root:
 
   .agents/as-fixture-user LANE [--ref REF] [--keep NAME]... -- COMMAND...

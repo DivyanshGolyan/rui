@@ -67,7 +67,7 @@ pub const WorkState = union(Kind) {
     pub const Stopped = struct { since: u64, cause: StopCause };
 
     /// Work under way, as a pending Message's progress reports it
-    /// (ARCHITECTURE.md, "Work state and wait conditions"): a retry due in
+    /// (docs/contracts/inspection.md, "Work state and wait conditions"): a retry due in
     /// the future is `in_flight`, a past-due one and approved Bash awaiting
     /// a slot are `runnable`.
     pub const Progress = enum { runnable, in_flight, waiting_for_permission };
@@ -193,7 +193,7 @@ pub const Work = struct {
     first_action: ?u64 = null,
 };
 
-/// Applies the Session work table in ARCHITECTURE.md ("Work state and wait
+/// Applies the Session work table in docs/contracts/inspection.md ("Work state and wait
 /// conditions"), checked in order.
 ///
 /// Inputs no writer produces return `error.CorruptStore`, and the reader
