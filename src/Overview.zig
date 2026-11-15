@@ -1013,7 +1013,7 @@ const SessionRows = struct {
         const self: *const SessionRows = @ptrCast(@alignCast(raw));
         const item = view.listItem(self.state, index).?;
         const built = try view.listSegments(arena, self.state, item, self.width, self.caps, self.frame);
-        return .{ .segments = built.segments, .second = if (item == .row) try view.rowSecondSegments(arena, self.state, item.row, self.width, self.caps) else null, .height = if (item == .row) 2 else 1, .heading = built.heading, .target = view.clickOf(self.state, item), .alternate_target = view.pinClickOf(self.state, item) };
+        return .{ .segments = built.segments, .heading = built.heading, .target = view.clickOf(self.state, item), .alternate_target = view.pinClickOf(self.state, item) };
     }
 };
 
@@ -5763,7 +5763,7 @@ test "pinned New Session remains above the end marker and responds to clicks and
             const span = for (rig.overview.app_sessions.shown_at) |span| {
                 if (span.target) |target| if (target == .open and std.mem.eql(u8, &target.open, &selected)) break span;
             } else return error.SelectedSessionMissing;
-            try std.testing.expectEqual(@as(u16, 2), span.height);
+            try std.testing.expectEqual(@as(u16, 1), span.height);
         }
         try std.testing.expect(try rig.click(3, 0, width, 11) == null);
         try std.testing.expectEqual(view.Selection.new_session, rig.overview.state.selected);
@@ -5868,8 +5868,8 @@ test "chat pinned controls preserve late-listed Sessions and the physical last-r
                 if (listed) {
                     try std.testing.expect(std.mem.indexOf(u8, try shown.line(3), "Fix the flaky test") != null);
                     for (overview.app_sessions.shown_at[1..], 0..) |span, index| {
-                        try std.testing.expectEqual(@as(i17, @intCast(index * 2 + 1)), span.row);
-                        try std.testing.expectEqual(@as(u16, 2), span.height);
+                        try std.testing.expectEqual(@as(i17, @intCast(index + 1)), span.row);
+                        try std.testing.expectEqual(@as(u16, 1), span.height);
                     }
                 }
             }

@@ -330,7 +330,7 @@
     },
     {
       "name": "quiet-overview",
-      "note": "Whole rows, including marks, ages and folders, dim only for never-written finished and working chats; approval stays loud",
+      "note": "Whole rows, including marks, names and state durations, dim only for never-written finished and working chats; approval stays loud",
       "open": "overview",
       "cast": [
         {
@@ -368,18 +368,17 @@
           "wait": "Agent working"
         },
         {
-          "wait": "Thinking"
+          "wait": "⠹ Agent working"
         },
         {
-          "wait": "set -eu"
+          "wait": "? Agent approval"
         }
       ],
       "expect": [
         "You wrote",
         "Agent done",
         "Agent approval",
-        "Agent working",
-        "Thinking"
+        "Agent working"
       ],
       "absent": [
         "No Sessions yet.",
@@ -391,15 +390,7 @@
           "dim": true
         },
         {
-          "text": "The deadline check",
-          "dim": true
-        },
-        {
           "text": "⠹ Agent working",
-          "dim": true
-        },
-        {
-          "text": "Thinking",
           "dim": true
         },
         {
@@ -428,11 +419,11 @@
           "min_columns": 140
         },
         {
-          "wait": "Thinking",
+          "wait": "⠹ Agent working",
           "min_columns": 140
         },
         {
-          "wait": "set -eu",
+          "wait": "? Agent approval",
           "min_columns": 140
         }
       ],
@@ -449,17 +440,7 @@
           "min_columns": 140
         },
         {
-          "text": "The deadline check",
-          "dim": true,
-          "min_columns": 140
-        },
-        {
           "text": "⠹ Agent working",
-          "dim": true,
-          "min_columns": 140
-        },
-        {
-          "text": "Thinking",
           "dim": true,
           "min_columns": 140
         },
@@ -2009,7 +1990,7 @@
     },
     {
       "name": "start-busy",
-      "note": "03-overview-busy: two-line working Sessions",
+      "note": "03-overview-busy: one-line working Sessions",
       "open": "overview",
       "steps": [
         {
@@ -3836,7 +3817,7 @@
     },
     {
       "name": "no-color",
-      "note": "72-no-color: quiet two-line sidebar alongside the chat",
+      "note": "72-no-color: quiet one-line sidebar alongside the chat",
       "open": "Markdown retry",
       "steps": [
         {

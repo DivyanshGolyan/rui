@@ -2901,7 +2901,7 @@ pub fn listItem(state: *const State, line: usize) ?Item {
     return if (line - first < state.order.items.len) .{ .row = line - first } else null;
 }
 
-/// First line: a mark, the whole available name, and an age at the edge.
+/// One Session line: state mark, primary name, and compact state duration.
 pub fn rowSegments(arena: Allocator, state: *const State, at: usize, width: u16, caps: Caps, frame: u64) error{OutOfMemory}![]const Segment {
     var built: Spans = .of(arena, caps, width);
     const row = &state.rows.items[state.order.items[at]];
@@ -2924,7 +2924,7 @@ pub fn rowSegments(arena: Allocator, state: *const State, at: usize, width: u16,
         .archiving => try std.fmt.allocPrint(arena, "[Archiving] {s}", .{named.text}),
     };
     var buffer: [8]u8 = undefined;
-    const age = if (orderClass(state, row) == .queued) "" else ageText(&buffer, (state.now_ms / 1000) -| (&row.state).since());
+    const age = ageText(&buffer, (state.now_ms / 1000) -| shownSince(state, row));
     const end = width -| 1;
     const age_cells = @min(built.measure(age), end -| 3);
     const name_end = end -| age_cells -| @intFromBool(age_cells != 0);
@@ -2938,22 +2938,6 @@ pub fn rowSegments(arena: Allocator, state: *const State, at: usize, width: u16,
     const name_cells = try built.put(3, name, name_room -| built.measure(archived), .{ .colour = if (selected) .strong else .normal, .bold = selected, .dim = quiet });
     _ = try built.put(3 + name_cells, archived, name_room -| name_cells, .{ .colour = .quiet, .dim = quiet });
     _ = try built.put(end -| age_cells, age, age_cells, .{ .colour = .quiet, .dim = quiet });
-    return segmentsOf(arena, try built.finish(), width, .{ .dim = quiet });
-}
-
-/// Second line: terminal-safe detail, then a non-overlapping folder and gap.
-pub fn rowSecondSegments(arena: Allocator, state: *const State, at: usize, width: u16, caps: Caps) error{OutOfMemory}![]const Segment {
-    var built: Spans = .of(arena, caps, width);
-    built.begin();
-    const row = &state.rows.items[state.order.items[at]];
-    const quiet = rowQuiet(state, row);
-    const folder = folderOf(state, row);
-    const end = width -| 1;
-    const folder_cells = @min(built.measure(folder), end -| 3);
-    const folder_start = end -| folder_cells;
-    var buffer: [max_second_line_bytes]u8 = undefined;
-    _ = try built.put(3, secondLine(state, row, &buffer), folder_start -| 1 -| 3, .{ .colour = .quiet, .dim = quiet });
-    _ = try built.putTail(folder_start, folder, folder_cells, .{ .colour = .quiet, .dim = quiet });
     return segmentsOf(arena, try built.finish(), width, .{ .dim = quiet });
 }
 
@@ -3080,72 +3064,6 @@ fn blankCells(arena: Allocator, cells: usize) error{OutOfMemory}![]const u8 {
 fn title(state: *const State, row: *const Row) session_line.Name {
     if (row.first == null) return .{ .text = new_session_name, .hint = false };
     return session_line.name(if (row.label) |*text| text.slice() else null, state.lineOf(row), &row.reference);
-}
-
-/// Maximum scratch space for a row's second line.
-pub const max_second_line_bytes = @max(work_line.max_words_bytes + work_line.max_clock_bytes, session_work.max_code_bytes);
-
-pub fn secondLine(state: *const State, row: *const Row, buffer: *[max_second_line_bytes]u8) []const u8 {
-    if (state.openStop(row.reference) != null) return "Stopping";
-    if (needsDecision(&row.state)) {
-        return switch (row.command) {
-            .read => |index| state.lines.items[index].slice(),
-            else => "",
-        };
-    }
-    const kind = shownKind(state, row);
-    const rule = rules.get(kind);
-    if (rule.says or rule.spins) {
-        var words: [work_line.max_words_bytes]u8 = undefined;
-        const line = workLine(&words, state, row) orelse return "";
-        if (kind == .working) return "Thinking";
-        if (kind == .stopping) return work_line.stopping.words;
-        var clock: [work_line.max_clock_bytes]u8 = undefined;
-        return std.fmt.bufPrint(buffer, "{s}{s}", .{ line.words, work_line.clockText(&clock, line.clock, .row, .unicode) }) catch unreachable;
-    }
-    if (kind == .pending) return "Queued";
-    if (row.last_line) |*last| if (last.text) |*text| return text.slice();
-    return switch ((&row.state).*) {
-        .failed => |*failed| causeOf(failed.code.slice()),
-        .stopped => "Stopped",
-        else => "",
-    };
-}
-
-pub fn folderOf(state: *const State, row: *const Row) []const u8 {
-    const path = std.mem.trimEnd(u8, state.workspaces.items[row.workspace], "/");
-    const start = if (std.mem.lastIndexOfScalar(u8, path, '/')) |slash| slash + 1 else 0;
-    return path[start..];
-}
-
-/// The shared cause words only: destinations remain chat-only, so the
-/// provider, which picks only a destination, is not asked.
-fn causeOf(code: []const u8) []const u8 {
-    return state_marks.cause(code, null).words;
-}
-
-test "overview failure causes share plain words without chat destinations" {
-    const cases = .{
-        .{ "provider_policy", "Refused by the provider" },
-        .{ "provider_quota", "Out of quota" },
-        .{ "provider_plan", "Model not in plan" },
-        .{ "provider_model_unavailable", "Model not served" },
-        .{ "provider_http_401", "Sign-in expired" },
-        .{ "provider_api_key_rejected", "API key rejected" },
-        .{ "ResourceExceeded", "Context full" },
-        .{ "provider_tls_verification_failed", "Provider unreachable" },
-        .{ "retry_exhausted", "Retries ran out" },
-        .{ "cancelled", "Stopped" },
-        .{ "provider_http_500", "Provider refused the request" },
-        .{ "unknown_code", "Something went wrong" },
-        .{ "malformed_provider_output", "Model reply unreadable" },
-    };
-    var seen: std.enums.EnumSet(failure_class.Class) = .empty;
-    inline for (cases) |case| {
-        seen.insert(failure_class.of(case[0]));
-        try std.testing.expectEqualStrings(case[1], causeOf(case[0]));
-    }
-    try std.testing.expect(seen.eql(.full));
 }
 
 /// Compact age: 42s, 7m, 3h, 12d.
@@ -3334,7 +3252,7 @@ const Frame = struct {
         const top = try headerSegments(gpa, state, width, caps);
         var list_count: usize = 0;
         while (listItem(state, list_count) != null) : (list_count += 1) {}
-        const lines = try gpa.alloc([]const Segment, top.len + list_count * 2 + max_notice_rows + 2);
+        const lines = try gpa.alloc([]const Segment, top.len + list_count + max_notice_rows + 2);
         var count: usize = 0;
         var start: usize = 0;
         for (top, 0..) |segment, at| if (std.mem.eql(u8, segment.text, "\n")) {
@@ -3354,9 +3272,6 @@ const Frame = struct {
         var list_at: usize = 0;
         while (listItem(state, list_at)) |item| : (list_at += 1) {
             lines[count] = (try listSegments(gpa, state, item, width, caps, frame)).segments;
-            count += 1;
-            if (item != .row) continue;
-            lines[count] = try rowSecondSegments(gpa, state, item.row, width, caps);
             count += 1;
         }
         const last = count;
@@ -3459,7 +3374,7 @@ const mixed = [_]Listed{
 /// One row of each kind, in Unicode and ASCII.
 const kind_cases = [_]struct { state: WorkState, unicode: []const u8, ascii: []const u8, colour: Colour, stoppable: bool }{
     .{ .state = .{ .idle = ago(7200) }, .unicode = " ○ Write the notes                                                           2h", .ascii = " o Write the notes                                                           2h", .colour = .normal, .stoppable = false },
-    .{ .state = .{ .pending = ago(5) }, .unicode = " ◌ Write the notes", .ascii = " : Write the notes", .colour = .quiet, .stoppable = true },
+    .{ .state = .{ .pending = ago(5) }, .unicode = " ◌ Write the notes                                                           5s", .ascii = " : Write the notes                                                           5s", .colour = .quiet, .stoppable = true },
     .{ .state = .{ .working = ago(40) }, .unicode = " ⠹ Write the notes                                                          40s", .ascii = " * Write the notes                                                          40s", .colour = .ink, .stoppable = true },
     .{ .state = .{ .retrying = .{ .since = test_now_s - 30, .due_at_ms = test_now_s * 1000 + 11_500, .cause = bounded(session_work.max_code_bytes, "provider_temporary_error"), .attempt = 2 } }, .unicode = " ⠹ Write the notes                                                          30s", .ascii = " * Write the notes                                                          30s", .colour = .attention, .stoppable = true },
     .{ .state = .{ .bash = .{ .since = test_now_s - 75, .call = 0, .description = bounded(session_work.max_description_bytes, "Run the logic tests"), .running = 1, .approvals = 0 } }, .unicode = " ⠹ Write the notes                                                           1m", .ascii = " * Write the notes                                                           1m", .colour = .ink, .stoppable = true },
@@ -3499,17 +3414,7 @@ test "every work state follows the rules table, in Unicode and ASCII" {
         defer unselected.deinit();
         // The sender/work domain below owns whole-row dim expectations.
         try std.testing.expectEqual(case.colour, unselected.styleAt(3, 1).?.colour);
-        try std.testing.expectEqual(Colour.quiet, unselected.styleAt(4, 79 - "rui".len).?.colour);
     }
-}
-
-test "a description's controls read escaped in its row's words, as its call row shows them" {
-    const bash: WorkState = .{ .bash = .{ .since = test_now_s - 75, .call = 0, .description = bounded(session_work.max_description_bytes, "Run\t\x1b[2J\u{202e}tests"), .running = 1, .approvals = 0 } };
-    var state = try opened(&.{session("k7m2qx", bash, .{ .label = "Write the notes" })});
-    defer state.deinit();
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    try expectLine(try rowSecondSegments(arena.allocator(), &state, 0, 80, .{}), 80, &.{ "Run\\t\\x1b[2J\\u202etests", "rui" });
 }
 
 test "a retry that has fallen due reads as queued in its group, mark and colour" {
@@ -3521,8 +3426,8 @@ test "a retry that has fallen due reads as queued in its group, mark and colour"
     defer std.testing.allocator.free(text);
     const at = std.mem.indexOf(u8, text, "Write the notes").?;
     const start = std.mem.lastIndexOfScalar(u8, text[0..at], '\n').? + 1;
-    const end = std.mem.indexOfScalarPos(u8, text, at, '\n').?;
-    try std.testing.expectEqualStrings(" ◌ Write the notes", text[start..end]);
+    const end = std.mem.indexOfScalarPos(u8, text, at, '\n') orelse text.len;
+    try std.testing.expectEqualStrings(" ◌ Write the notes                                                           2s", text[start..end]);
     try std.testing.expect(std.mem.indexOf(u8, text, " Active ·") == null);
     var screen = try Frame.of(&state, 80, 24, .{ .depth = .none }, 0);
     defer screen.deinit();
@@ -3636,7 +3541,7 @@ fn expectRow(segments: []const Segment, width: u16, expected: []const struct { [
     try std.testing.expectEqual(@as(usize, width), cells);
 }
 
-test "row segments say each state with its mark, and words only for a cause or a wait's countdown" {
+test "row segments show each state mark name and state duration" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const later: WorkState = .{ .retrying = .{ .since = test_now_s - 30, .due_at_ms = (test_now_s + 18) * 1000, .cause = bounded(session_work.max_code_bytes, "provider_temporary_http_429"), .attempt = 2 } };
@@ -3659,18 +3564,16 @@ test "row segments say each state with its mark, and words only for a cause or a
     try expectRow(try rowOf(a, &state, "Fix flaky store test", 100, .{}), 100, &.{ .{ "?", .attention }, .{ "Fix flaky store test", .normal }, .{ "2m", .quiet } });
     try expectRow(try rowOf(a, &state, "Asking beside Bash", 100, .{}), 100, &.{ .{ "?", .attention }, .{ "Asking beside Bash", .normal }, .{ "1m", .quiet } });
     // Queued: a dim `◌`, the title and the wait, no word.
-    try expectRow(try rowOf(a, &state, "Check install script", 100, .{}), 100, &.{ .{ "◌", .quiet }, .{ "Check install script", .normal } });
-    // A rate limit counts down without the attempt number.
+    try expectRow(try rowOf(a, &state, "Check install script", 100, .{}), 100, &.{ .{ "◌", .quiet }, .{ "Check install script", .normal }, .{ "10s", .quiet } });
+    // Retrying keeps its state duration without a countdown or attempt number.
     try expectRow(try rowOf(a, &state, "Investigate retry storm", 100, .{}), 100, &.{ .{ "⠹", .attention }, .{ "Investigate retry storm", .normal }, .{ "30s", .quiet } });
-    // A failure names its shared cause in the failure colour;
-    // a stop says nothing beyond its mark, and neither names the
-    // Session that started it.
+    // Failure and stop remain distinguishable by mark; neither adds detail.
     try expectRow(try rowOf(a, &state, "Benchmark memory", 100, .{}), 100, &.{ .{ "×", .failure }, .{ "Benchmark memory", .normal }, .{ "20m", .quiet } });
     try expectRow(try rowOf(a, &state, "Odd failure", 100, .{}), 100, &.{ .{ "×", .failure }, .{ "Odd failure", .normal }, .{ "1m", .quiet } });
     try expectRow(try rowOf(a, &state, "Stopped by me", 100, .{}), 100, &.{ .{ "■", .normal }, .{ "Stopped by me", .normal }, .{ "1m", .quiet } });
 }
 
-test "row segments drop the detail column on a narrow screen and keep mark, title and age" {
+test "row segments keep mark title and state duration on a narrow screen" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var state = try opened(&.{
@@ -3928,7 +3831,7 @@ test "ctrl-x stops at once a row its rule lets it stop, and asks nothing" {
         // ctrl-x finds nothing to stop.
         const text = try screenText(&state, 80, 24, .{});
         defer std.testing.allocator.free(text);
-        try std.testing.expect(std.mem.indexOf(u8, text, "Stopping") != null);
+        try std.testing.expectEqual(Kind.stopping, shownKind(&state, state.find("k7m2qx".*).?));
         try std.testing.expect(std.mem.indexOf(u8, text, "ctrl+x yes") == null);
         try expectEffects(&.{}, try press(&state, .stop));
         try expectNotice(&state, "k7m2qx: Stopping");
@@ -4059,23 +3962,22 @@ test "leaving before a stale full or changed listing never undoes a settled stop
         _ = try respond(&state, delta, testToken(2), &.{old});
         _ = try refresh(&state, .not_modified, testToken(3), &.{});
         try std.testing.expectEqualDeep(stopped, state.workOf(state.find(ref).?));
-        var buffer: [max_second_line_bytes]u8 = undefined;
-        try std.testing.expectEqualStrings("Stopped", secondLine(&state, state.find(ref).?, &buffer));
+        try std.testing.expectEqual(Kind.stopped, shownKind(&state, state.find(ref).?));
         try std.testing.expectEqual(@as(u64, test_now_s), shownSince(&state, state.find(ref).?));
         var finished = session(&ref, .{ .finished = ago(0) }, .{ .label = "Same Session", .turn = 8 });
         finished.last_line = .{ .position = 5, .text = "Later listing answer" };
         _ = try refresh(&state, delta, testToken(4), &.{finished});
         try std.testing.expectEqual(Kind.finished, shownKind(&state, state.find(ref).?));
-        try std.testing.expectEqualStrings("Later listing answer", secondLine(&state, state.find(ref).?, &buffer));
+        try std.testing.expectEqualStrings("Later listing answer", state.find(ref).?.last_line.?.text.?.slice());
     }
 }
 
 test "snapshot and listing rows render identical stopped failed and done endings" {
     const ref = "k7m2qx".*;
-    const cases = [_]struct { state: WorkState, text: ?[]const u8, detail: []const u8 }{
-        .{ .state = .{ .stopped = .{ .since = test_now_s - 5, .cause = .stop } }, .text = null, .detail = "Stopped" },
-        .{ .state = .{ .failed = .{ .since = test_now_s - 5, .code = bounded(session_work.max_code_bytes, "malformed_provider_output"), .resets_at = null } }, .text = null, .detail = "Model reply unreadable" },
-        .{ .state = .{ .finished = ago(5) }, .text = "New completed answer", .detail = "New completed answer" },
+    const cases = [_]struct { state: WorkState, text: ?[]const u8 }{
+        .{ .state = .{ .stopped = .{ .since = test_now_s - 5, .cause = .stop } }, .text = null },
+        .{ .state = .{ .failed = .{ .since = test_now_s - 5, .code = bounded(session_work.max_code_bytes, "malformed_provider_output"), .resets_at = null } }, .text = null },
+        .{ .state = .{ .finished = ago(5) }, .text = "New completed answer" },
     };
     for (cases) |case| {
         var initial = session(&ref, .{ .working = ago(10) }, .{ .label = "Same Session", .turn = 7 });
@@ -4086,11 +3988,10 @@ test "snapshot and listing rows render identical stopped failed and done endings
         _ = try step(&state, .{ .tick = state.now_ms + list_interval_ms });
         const line: session_list.SavedLastLine = .{ .position = 4, .text = if (case.text) |text| bounded(session_list.max_last_line_bytes, text) else null };
         _ = try step(&state, .{ .observed = .{ .read_version = testToken(2), .reference = ref, .work = .{ .state = case.state, .turn = 8 }, .last_line = line, .opening = false } });
-        var detail: [max_second_line_bytes]u8 = undefined;
-        try std.testing.expectEqualStrings(case.detail, secondLine(&state, state.find(ref).?, &detail));
+        try std.testing.expectEqualDeep(case.state, state.find(ref).?.state);
         const snapshot = try screenText(&state, 80, 24, .{});
         defer std.testing.allocator.free(snapshot);
-        // Neither row's mark, detail nor age can depend on which read
+        // Neither row's mark, name nor age can depend on which read
         // supplied it. Use the same clock, with no intervening refresh.
         var from_list = try opened(&.{initial});
         defer from_list.deinit();
@@ -4218,27 +4119,6 @@ test "only a Host handshake rebases read revisions and rejects old traversals an
     _ = try respond(&state, .full, next, &.{session(&ref, finished.state, .{})});
     try std.testing.expectEqualDeep(next, state.token.?);
     try std.testing.expectEqualDeep(finished, state.workOf(state.find(ref).?));
-}
-
-test "conversation permissions never borrow another Action's listed command" {
-    const ref = "k7m2qx".*;
-    var state = try opened(&.{session(&ref, .{ .approval = ago(10) }, .{ .first_action = 7 })});
-    defer state.deinit();
-    // The listing's own command read is still valid for its snapshot.
-    _ = try step(&state, .{ .command = .{ .reference = ref, .action = 7, .text = "echo old" } });
-    _ = try step(&state, .{ .conversation = ref });
-    var buffer: [max_second_line_bytes]u8 = undefined;
-    for ([_]?u64{ 7, 8, null }, 0..) |action, i| {
-        const work: session_work.Work = .{ .state = if (action != null) .{ .approval = ago(0) } else .{ .stopped = .{ .since = test_now_s, .cause = .stop } }, .first_action = action };
-        _ = try step(&state, .{ .observed = .{ .read_version = testToken(2 + i), .reference = ref, .work = work, .opening = false } });
-        try std.testing.expectEqualStrings(if (action == 7) "echo old" else if (action == 8) "" else "Stopped", secondLine(&state, state.find(ref).?, &buffer));
-        if (action != @as(?u64, 7)) {
-            _ = try step(&state, .{ .command = .{ .reference = ref, .action = 7, .text = "stale command" } });
-            try std.testing.expectEqualStrings(if (action == 8) "" else "Stopped", secondLine(&state, state.find(ref).?, &buffer));
-        }
-    }
-    _ = try step(&state, .{ .conversation = null });
-    try std.testing.expectEqualStrings("Stopped", secondLine(&state, state.find(ref).?, &buffer));
 }
 
 test "an original Esc left unconfirmed is named at once and recovered on departure, until the ledger is full" {
@@ -4383,7 +4263,7 @@ test "a first line arriving titles its unlabelled row" {
     try std.testing.expectEqualStrings("summarize yesterday's CI failures", state.lineOf(state.find("h8q2mz".*).?).?);
     try std.testing.expectEqual(Line.unavailable, state.find("f6g7h8".*).?.line);
     try std.testing.expectEqual(Line.requested, state.find("p3q4r5".*).?.line);
-    try expectScreenLine(&state, position(&state, "h8q2mz".*).? * 2 + 3, " ✓ summarize yesterday's CI failures                                        12m");
+    try expectScreenLine(&state, position(&state, "h8q2mz".*).? + 3, " ✓ summarize yesterday's CI failures                                        12m");
     // Lines in flight or unreadable are not asked for again, and a refresh
     // that replaces a row keeps the line of its unchanged first Message.
     try expectEffects(&.{}, try refresh(&state, .changed, testToken(2), &.{session("h8q2mz", .{ .working = ago(0) }, .{ .yours = true })}));
@@ -4454,11 +4334,10 @@ test "a row from another Workspace keeps its title at every width" {
     for (40..120) |width| {
         const text = try screenText(&state, @intCast(width), 24, .{});
         defer std.testing.allocator.free(text);
-        // Each title shows at least its first word, and never fewer cells
-        // than the Workspace beside it.
+        // The title remains primary; Workspace detail takes no row space.
         try std.testing.expect(std.mem.indexOf(u8, text, "Profile") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, "Trace") != null);
-        try std.testing.expect(std.mem.indexOf(u8, text, "project") != null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "project") == null);
     }
 }
 
@@ -4787,7 +4666,10 @@ test "a tick moves a retry that fell due to pending" {
     try std.testing.expectEqual(WorkState{ .pending = .{ .since = test_now_s + 12 } }, row.state);
     const text = try screenText(&state, 80, 24, .{});
     defer std.testing.allocator.free(text);
-    try std.testing.expect(std.mem.indexOf(u8, text, " ◌ Audit permission paths\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, " ◌ Audit permission paths") != null);
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expect(std.mem.endsWith(u8, try segmentText(arena.allocator(), try rowOf(arena.allocator(), &state, "Audit permission paths", 80, .{})), "0s "));
 }
 
 fn failedRow(ref: *const [6]u8, seconds_ago: u64, code: []const u8, resets_at: ?u64) Listed {
@@ -4949,7 +4831,7 @@ test "the overview's rows draw twenty mixed rows" {
     for ([_]u16{ 80, 200 }) |width| {
         var shown = try Frame.of(&state, width, 60, .{}, 0);
         defer shown.deinit();
-        try std.testing.expectEqual(@as(usize, mixed.len * 2 + 3), shown.list.len);
+        try std.testing.expectEqual(@as(usize, mixed.len + 3), shown.list.len);
         const text = try shown.text();
         defer std.testing.allocator.free(text);
         for (mixed) |row| if (row.label) |label| try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, label));
@@ -5462,26 +5344,6 @@ test "overview refresh removes selection to next row else New Session and preser
     try std.testing.expectEqual(Selection.new_session, empty.selected);
 }
 
-test "overview second line and folder cover every work state with and without last text" {
-    const expected = [_][]const u8{ "", "Queued", "Thinking", "Provider error · retry in 12s", "Run the logic tests", "Allow: echo yes", "Stopping", "", "Something went wrong", "Stopped" };
-    for (kind_cases, 0..) |case, at| for ([_]?[]const u8{ null, "All tests pass.", "" }) |last_text| {
-        var listed = session("k7m2qx", case.state, .{ .label = "Row", .first_action = 7, .workspace = "/work/rui" });
-        listed.last_line = .{ .position = 42, .text = last_text };
-        var state = try opened(&.{listed});
-        defer state.deinit();
-        if (case.state == .approval) _ = try step(&state, .{ .command = .{ .reference = listed.reference, .action = 7, .text = "Allow: echo yes" } });
-        const row = state.find(listed.reference).?;
-        var buffer: [max_second_line_bytes]u8 = undefined;
-        const fallback = expected[at];
-        const want = if (at == 0 or at >= 7) last_text orelse fallback else fallback;
-        try std.testing.expectEqualStrings(want, secondLine(&state, row, &buffer));
-        try std.testing.expectEqualStrings("rui", folderOf(&state, row));
-        try std.testing.expectEqual(@as(u64, 42), row.last_line.?.position);
-        state.rows.items[state.order.items[0]].last_line = null;
-        try std.testing.expectEqualStrings(fallback, secondLine(&state, state.find(listed.reference).?, &buffer));
-    };
-}
-
 test "overview Listed copies last line into bounded owned rows and refresh replaces it" {
     const protocol = @import("protocol.zig");
     var source: protocol.SessionRow = .{};
@@ -5492,37 +5354,18 @@ test "overview Listed copies last line into bounded owned rows and refresh repla
     defer state.deinit();
     source.last_line.?.text.?.bytes[0] = 'X';
     const row = state.find("k7m2qx".*).?;
-    var buffer: [max_second_line_bytes]u8 = undefined;
-    try std.testing.expectEqualStrings("Done", secondLine(&state, row, &buffer));
-    try std.testing.expectEqualStrings("rui", folderOf(&state, row));
+    try std.testing.expectEqualStrings("Done", row.last_line.?.text.?.slice());
     const longest: [session_list.max_last_line_bytes]u8 = @splat('z');
     source.last_line = .{ .position = 20, .text = bounded(session_list.max_last_line_bytes, &longest) };
     _ = try refresh(&state, .changed, testToken(2), &.{Listed.of(&source)});
-    try std.testing.expectEqualStrings(&longest, secondLine(&state, state.find("k7m2qx".*).?, &buffer));
+    try std.testing.expectEqualStrings(&longest, state.find("k7m2qx".*).?.last_line.?.text.?.slice());
     source.last_line = .{ .position = 20, .text = null };
     _ = try refresh(&state, .changed, testToken(3), &.{Listed.of(&source)});
     try std.testing.expectEqual(@as(u64, 20), state.find("k7m2qx".*).?.last_line.?.position);
-    try std.testing.expectEqualStrings("", secondLine(&state, state.find("k7m2qx".*).?, &buffer));
+    try std.testing.expectEqual(null, state.find("k7m2qx".*).?.last_line.?.text);
     source.last_line = null;
     _ = try refresh(&state, .changed, testToken(4), &.{Listed.of(&source)});
     try std.testing.expectEqual(null, state.find("k7m2qx".*).?.last_line);
-}
-
-test "overview second line queues due retries and uses waiting Bash commands first" {
-    var due = retryRow("dueque", "provider_temporary_error", 10);
-    due.state.retrying.due_at_ms = test_now_s * 1000 - 1;
-    due.workspace = "/other/drift/";
-    due.last_line = .{ .position = 9, .text = "Old answer" };
-    var bash = session("bash01", .{ .bash = .{ .since = test_now_s, .call = 0, .description = bounded(session_work.max_description_bytes, "Running tests"), .running = 1, .approvals = 1 } }, .{ .label = "Bash", .first_action = 7 });
-    bash.last_line = due.last_line;
-    var state = try opened(&.{ due, bash });
-    defer state.deinit();
-    var buffer: [max_second_line_bytes]u8 = undefined;
-    try std.testing.expectEqualStrings("Queued", secondLine(&state, state.find(due.reference).?, &buffer));
-    try std.testing.expectEqualStrings("drift", folderOf(&state, state.find(due.reference).?));
-    try std.testing.expectEqualStrings("", secondLine(&state, state.find(bash.reference).?, &buffer));
-    _ = try step(&state, .{ .command = .{ .reference = bash.reference, .action = 7, .text = "echo allowed" } });
-    try std.testing.expectEqualStrings("echo allowed", secondLine(&state, state.find(bash.reference).?, &buffer));
 }
 
 test "overview quiet rows: a chat never written in recedes unless it needs you, in every kind, stop, selection, width and depth" {
@@ -5568,12 +5411,8 @@ test "overview quiet rows: a chat never written in recedes unless it needs you, 
         try std.testing.expectEqual(selected, first.selected);
         try std.testing.expectEqual(selected, name.bold);
         try std.testing.expectEqual(if (selected) Colour.strong else Colour.normal, name.colour);
-        const second = try rowSecondSegments(arena.allocator(), &state, 0, width, caps);
-        // Quiet rows add dim without replacing the folder's muted role.
-        try std.testing.expectEqual(Style{ .colour = .quiet, .dim = quiet }, try styleOf(second, "rui"));
-        // The mark, name, age, detail, folder and padding all recede together.
+        // The mark, name, state age and padding recede together.
         for (first.segments) |segment| try std.testing.expectEqual(quiet, segment.style.dim);
-        for (second) |segment| try std.testing.expectEqual(quiet, segment.style.dim);
     };
     var empty = try opened(&.{session("newone", .{ .idle = ago(0) }, .{ .first = null })});
     defer empty.deinit();
@@ -5581,9 +5420,7 @@ test "overview quiet rows: a chat never written in recedes unless it needs you, 
     try std.testing.expect(!rowQuiet(&empty, empty.find("newone".*).?));
 }
 
-// PR3: independent layout expectations for the two-line list contract.
-test "overview two-line rows at 40 and 140 columns cover every work state" {
-    const details = [_][]const u8{ "", "Queued", "Thinking", "Provider error · retry in 12s", "Run the logic tests", "Allow: echo yes", "Stopping", "All tests pass.", "Something went wrong", "Stopped" };
+test "overview one-line rows at 40 and 140 columns cover every work state" {
     for (kind_cases, 0..) |case, index| for ([_]u16{ 40, 140 }) |width| {
         var listed = session("k7m2qx", case.state, .{ .label = "A useful Session name", .first_action = 7, .workspace = "/work/drift" });
         if (index == 7) listed.last_line = .{ .position = 1, .text = "All tests pass." };
@@ -5593,27 +5430,23 @@ test "overview two-line rows at 40 and 140 columns cover every work state" {
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         const first = try rowSegments(arena.allocator(), &state, 0, width, .{}, 0);
-        const second = try rowSecondSegments(arena.allocator(), &state, 0, width, .{});
-        try expectLine(first, width, if (index == 1) &.{"◌ A useful Session name"} else &.{ try std.fmt.allocPrint(arena.allocator(), "{s} A useful Session name", .{([_][]const u8{ "○", "◌", "⠹", "⠹", "⠹", "?", "⠹", "✓", "×", "■" })[index]}), age: {
+        try expectLine(first, width, &.{ try std.fmt.allocPrint(arena.allocator(), "{s} A useful Session name", .{([_][]const u8{ "○", "◌", "⠹", "⠹", "⠹", "?", "⠹", "✓", "×", "■" })[index]}), age: {
             var buffer: [8]u8 = undefined;
             break :age try arena.allocator().dupe(u8, ageText(&buffer, (state.now_ms / 1000) -| listed.state.since()));
         } });
-        try expectLine(second, width, if (details[index].len == 0) &.{"drift"} else &.{ details[index], "drift" });
         try std.testing.expectEqual(Colour.strong, (try styleOf(first, "A useful Session name")).colour);
         try std.testing.expect((try styleOf(first, "A useful Session name")).bold);
-        try std.testing.expectEqual(Colour.quiet, (try styleOf(second, "drift")).colour);
         const first_text = try segmentText(arena.allocator(), first);
-        const second_text = try segmentText(arena.allocator(), second);
         try std.testing.expect(std.mem.startsWith(u8, first_text, " "));
-        try std.testing.expect(std.mem.startsWith(u8, second_text, "   "));
         try std.testing.expect(std.mem.endsWith(u8, first_text, " "));
-        try std.testing.expect(std.mem.endsWith(u8, second_text, "drift "));
+        try std.testing.expect(std.mem.indexOf(u8, first_text, "drift") == null);
+        try std.testing.expect(std.mem.indexOf(u8, first_text, "All tests pass.") == null);
         state.selected = .new_session;
         try std.testing.expectEqual(Colour.normal, (try styleOf(try rowSegments(arena.allocator(), &state, 0, width, .{}, 0), "A useful Session name")).colour);
     };
 }
 
-test "overview long name fills to the age and detail never overlaps its folder" {
+test "overview long name truncates while mark and state age remain visible" {
     const name = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij";
     var listed = session("k7m2qx", .{ .finished = ago(19) }, .{ .label = name, .workspace = "/work/drift" });
     listed.last_line = .{ .position = 1, .text = "A very long result that must be cut before the folder starts" };
@@ -5622,9 +5455,7 @@ test "overview long name fills to the age and detail never overlaps its folder" 
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const first = try rowSegments(arena.allocator(), &state, 0, 40, .{}, 0);
-    const second = try rowSecondSegments(arena.allocator(), &state, 0, 40, .{});
     try std.testing.expectEqualStrings(" ✓ abcdefghijklmnopqrstuvwxyzABCDE… 19s ", try segmentText(arena.allocator(), first));
-    try std.testing.expectEqualStrings("   A very long result that must … drift ", try segmentText(arena.allocator(), second));
     // A stale listing does not grey ended names, and unsafe bytes never escape.
     state.list_stale = true;
     const faded = try rowSegments(arena.allocator(), &state, 0, 40, .{}, 0);
@@ -6681,5 +6512,30 @@ test "session list tabs have explicit destinations active no-op and one selectio
         try std.testing.expectEqual(before, state.now_ms);
         try std.testing.expectEqual(@as(usize, 0), state.request_count);
         try std.testing.expectEqual(@as(?Reference, if (sidebar) mixed[0].reference else null), state.conversing);
+    };
+}
+
+test "session list state ages are compact stable against redraw and reset on state transition" {
+    const cases = .{ .{ @as(u64, 120), "2m" }, .{ @as(u64, 18 * 3600), "18h" }, .{ @as(u64, 86400), "1d" }, .{ @as(u64, 3 * 86400), "3d" } };
+    inline for (cases) |case| for (kind_cases) |kind| {
+        var work = kind.state;
+        switch (work) {
+            inline else => |*value| value.since = test_now_s - case[0],
+        }
+        if (work == .retrying) work.retrying.due_at_ms = (test_now_s + 60) * 1000;
+        var state = try opened(&.{session("aaaaaa", work, .{ .label = "A useful session" })});
+        defer state.deinit();
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const first = try segmentText(arena.allocator(), try rowSegments(arena.allocator(), &state, 0, 46, .{}, 0));
+        try std.testing.expect(std.mem.endsWith(u8, first, case[1] ++ " "));
+        const again = try segmentText(arena.allocator(), try rowSegments(arena.allocator(), &state, 0, 46, .{}, 9));
+        try std.testing.expect(std.mem.endsWith(u8, again, case[1] ++ " "));
+        const now = state.now_ms;
+        _ = try step(&state, .{ .conversation = "aaaaaa".* });
+        _ = try step(&state, .{ .observed = .{ .reference = "aaaaaa".*, .read_version = testToken(2), .work = .{ .state = .{ .finished = .{ .since = test_now_s - 1 } } }, .opening = false } });
+        const changed = try segmentText(arena.allocator(), try rowSegments(arena.allocator(), &state, 0, 46, .{}, 0));
+        try std.testing.expectEqualStrings("1s ", changed[changed.len - 3 ..]);
+        try std.testing.expectEqual(now, state.now_ms);
     };
 }
