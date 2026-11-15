@@ -91,12 +91,36 @@ class UpgradeEmptyChatTest(unittest.TestCase):
     def test_hidden_empty_overview_requires_real_list_and_no_editor_or_chat(self):
         frame = "+ New Session\nSettings\nenter open"
         self.assertEqual(frame, self.hidden(frame))
-        for extra in (self.session, "Type a task", "› hidden draft", "alt+i info"):
+        for extra in (self.session, "alt+i info"):
             with self.subTest(extra=extra), self.assertRaises(AssertionError):
+                self.hidden(frame + "\n" + extra)
+        for extra in ("Type a task", "› hidden draft"):
+            with self.subTest(extra=extra), self.assertRaises(NotReady):
                 self.hidden(frame + "\n" + extra)
         for wrong in ("Settings\nenter open", "+ New Session\nenter open", "Notifications"):
             with self.subTest(wrong=wrong), self.assertRaises(NotReady):
                 self.hidden(wrong)
+
+    def test_overview_waits_past_sidebar_controls_for_the_full_list(self):
+        sidebar = "  + New Session                Archived │\n  Settings │ gpt-6-luna · low\n"
+        frames = [sidebar + "│ › Type a task", sidebar + "│ › unsent draft",
+                  "+ New Session                Archived\nSettings\nenter open"]
+        self.screen.observe = Mock(side_effect=frames)
+        self.case.json.side_effect = [copy.deepcopy(self.report), copy.deepcopy(self.listing)]
+        readiness = []
+
+        def committed_frames(observe, description, *, timeout, ready):
+            for _ in frames:
+                frame = observe()
+                readiness.append(ready(frame))
+                if readiness[-1]:
+                    return frame
+            raise NotReady(description)
+
+        with patch.object(self.fixture, "wait_for", side_effect=committed_frames):
+            self.assertEqual(frames[-1], self.screen.empty_overview(self.case, self.session))
+        self.assertEqual(readiness, [False, False, True])
+        self.assertEqual(self.screen.observe.call_count, 3)
 
     def test_hidden_projection_does_not_weaken_stored_identity_or_zero_messages(self):
         frame = "+ New Session\nSettings\nenter open"
