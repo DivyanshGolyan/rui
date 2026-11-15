@@ -582,7 +582,7 @@ const PublicRowRead = struct {
 /// call's presentation; round 3 each presentation's Proposal. Not
 /// inlined, so its per-row state takes no slot in the page's frame.
 noinline fn readPublicRows(a: *ReadAccess, session: []const u8, rows: []const public_page.Row, items: []PublicConversationItem, lower: u64, upper: u64, cursor: ?*PublicContentRead) !void {
-    var reads: [PublicConversationPage.capacity]PublicRowRead = undefined;
+    const reads = a.store.reportScratch([PublicConversationPage.capacity]PublicRowRead);
     var missing: missing_assistant_entry.Result = null;
     if (lower <= upper) a.read(missing_assistant_entry, .{ .session = session, .lower = lower, .upper = upper }, &missing);
     for (items, reads[0..items.len]) |*item, *read| {

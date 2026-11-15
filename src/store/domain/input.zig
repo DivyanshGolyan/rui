@@ -132,15 +132,20 @@ pub const Saving = struct {
         if (self.saved > self.input.count()) return error.ContentChanged;
         switch (self.input) {
             .text => |text| self.value = text.identity(),
-            .parts => {
-                self.selected = try self.cursor.?.next() orelse return error.ContentChanged;
-                const range = self.selected.?.range;
-                self.value = .{ .length = range.length, .digest = range.digest, .private = false };
-            },
+            .parts => try self.selectPart(),
         }
         content.lookup(a, &self.value);
         self.waiting = true;
         return true;
+    }
+
+    // Finish the large cursor decode before the identity lookup can enter
+    // SQLite. selected and value already live in the producer's scratch;
+    // the cursor's temporary return value need not remain on that chain.
+    noinline fn selectPart(self: *Saving) !void {
+        self.selected = try self.cursor.?.next() orelse return error.ContentChanged;
+        const range = self.selected.?.range;
+        self.value = .{ .length = range.length, .digest = range.digest, .private = false };
     }
 
     /// After lookupNext's round. No producer accepts a scalar Content id

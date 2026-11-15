@@ -101,6 +101,7 @@ fn takeEveryIdentityForTesting(storage: *Store) ![std.enums.values(store_core.Id
         "SELECT max(tool_record_id) FROM tool_record",
         "SELECT max(tool_set_id) FROM tool_set",
         "SELECT max(forward_id) FROM session_forward",
+        "SELECT max(input_part_id) FROM input_part",
     };
     var taken: [maxima.len]u64 = undefined;
     const entry = try store_core.enter(storage, .none);
