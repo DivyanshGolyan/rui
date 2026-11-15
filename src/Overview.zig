@@ -668,6 +668,7 @@ fn appKey(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event, delivery:
     const semantic: view.Input = switch (selected) {
         .action => |action| .{ .action = action },
         .enter => .enter,
+        .left => .left,
         else => .ignored,
     };
     try self.appNext(ctx, try self.event(.{ .input = .{
@@ -695,6 +696,10 @@ fn appNext(self: *Self, ctx: *vxfw.EventContext, next: ?Next) !void {
         },
         .open_settings => try self.root.openSettings(ctx),
         .focus_chat => try self.root.focusChat(ctx),
+        .new_session => {
+            try self.root.showMain(ctx);
+            try self.app_session.?.frontend.?.newSession(ctx);
+        },
 
         .open => |reference| {
             try self.root.showMain(ctx);
@@ -989,7 +994,7 @@ const SessionRows = struct {
 
     fn count(raw: *const anyopaque, first: u32) u32 {
         const self: *const SessionRows = @ptrCast(@alignCast(raw));
-        return @intCast(self.state.order.items.len -| (first -| view.firstRowLine(self.state)));
+        return @intCast(self.state.order.items.len -| (first -| view.first_row_line));
     }
 
     fn above(count_: u32, arena: std.mem.Allocator) std.mem.Allocator.Error!@import("widgets/List.zig").Line {
@@ -1080,7 +1085,7 @@ fn appListDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!v
     return self.drawPart(ctx, .list);
 }
 
-/// The overview is a full-width list and footer; a sidebar draws only rows.
+/// Both list layouts share pinned controls; only the overview draws a footer.
 fn drawPart(self: *Self, ctx: vxfw.DrawContext, part: AppScreen.Overview.Part) std.mem.Allocator.Error!vxfw.Surface {
     const size = ctx.max.size();
     self.caps.width = self.attention.vx.caps.unicode;
@@ -1106,15 +1111,13 @@ fn drawPart(self: *Self, ctx: vxfw.DrawContext, part: AppScreen.Overview.Part) s
     self.app_sessions.tail = .{ .widget = self.app_settings_line.widget(), .rows = view.layout(&self.state).settings.len() };
     self.app_sessions.caps = self.caps;
     self.app_header.caps = self.caps;
-    if (view.showsNewSession(&self.state)) {
-        self.app_new_session.caps = self.caps;
-        const header = try ctx.arena.create(@import("widgets/Stack.zig"));
-        header.* = .{ .priority = .top, .children = try ctx.arena.dupe(@import("widgets/Stack.zig").Child, &.{
-            .{ .widget = self.app_new_session.widget() },
-            .{ .widget = self.app_header.widget() },
-        }) };
-        self.app_screen.header = header.widget();
-    } else self.app_screen.header = self.app_header.widget();
+    self.app_new_session.caps = self.caps;
+    const header = try ctx.arena.create(@import("widgets/Stack.zig"));
+    header.* = .{ .priority = .top, .children = try ctx.arena.dupe(@import("widgets/Stack.zig").Child, &.{
+        .{ .widget = self.app_new_session.widget() },
+        .{ .widget = self.app_header.widget() },
+    }) };
+    self.app_screen.header = header.widget();
     defer {
         self.app_sessions.rows = .none;
         self.app_sessions.tail = null;
@@ -1308,7 +1311,7 @@ fn destroy(self: *Self) void {
 const Ending = union(enum) { overview, conversation: Left };
 
 /// What the core asks of the loop: to leave or present a pane under Root.
-const Next = union(enum) { leave, open: view.Reference, open_settings, focus_chat };
+const Next = union(enum) { leave, open: view.Reference, open_settings, focus_chat, new_session };
 
 /// Steps the core with one event and queues the jobs it asks for. Presenting
 /// panes and leaving are the loop's to do.
@@ -1330,6 +1333,7 @@ fn eventResult(self: *Self, value: view.Event) !EventResult {
     for (effects.slice()) |effect| switch (effect) {
         .open_settings => next = .open_settings,
         .focus_chat => next = .focus_chat,
+        .new_session => next = .new_session,
         .list => |since| {
             self.traversal = .init(since);
             self.traversal_archive = self.state.listing_archive.?;
@@ -1704,7 +1708,7 @@ fn quiesceUpgrade(self: *Self) !bool {
                 .leave => return error.InteractiveInterrupted,
                 .open => |reference| self.started = reference,
                 // Only direct list input asks for settings, never a worker answer.
-                .open_settings, .focus_chat => unreachable,
+                .open_settings, .focus_chat, .new_session => unreachable,
             };
         }
     }
@@ -2464,6 +2468,7 @@ test "a blank line on the ground sits under New Session, selected or not, at nar
         var shown = try rig.shown(width, 30);
         defer shown.deinit();
         try std.testing.expect(std.mem.startsWith(u8, try shown.line(0), "  + New Session"));
+        try std.testing.expect(std.mem.indexOf(u8, try shown.line(0), "Archived") != null);
         try std.testing.expectEqual(selection == .new_session, std.meta.eql(highlight, shown.screen.readCell(1, 0).?.style.bg));
         // The gap is blank ground in every column of the list, never part
         // of the New Session row's highlight.
@@ -4504,11 +4509,7 @@ test "overview archive effects preserve server filter, pending visibility, and r
     try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 + 2 * view.list_interval_ms }) == null);
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expectEqual(@as(usize, 0), overview.state.rows.items.len);
-    // Server filter is still listing state, without an overview command UI.
-    overview.state.archive = .archived;
-    overview.state.token = null;
-    overview.state.next_list_ms = 0;
-    try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 + 2 * view.list_interval_ms + 1 }) == null);
+    try std.testing.expect(try rig.press("\x1b[H\x1b[C\r") == null);
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expectEqual(protocol.SessionArchiveFilter.archived, Seen.now.archive_filter);
     try std.testing.expectEqual(@as(usize, 1), overview.state.rows.items.len);
@@ -4522,6 +4523,10 @@ test "overview archive effects preserve server filter, pending visibility, and r
     try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 + 3 * view.list_interval_ms }) == null);
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expectEqual(@as(usize, 0), overview.state.rows.items.len);
+    try std.testing.expect(try rig.press("\x1b") == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqual(protocol.SessionArchiveFilter.active, Seen.now.archive_filter);
+    try std.testing.expectEqual(@as(usize, 1), overview.state.rows.items.len);
 }
 
 test "Alt-A overview archives the selected row in every encoding" {
@@ -5709,6 +5714,7 @@ test "pinned New Session remains above the end marker and responds to clicks and
             var shown = try rig.shown(width, 11);
             defer shown.deinit();
             try std.testing.expect(std.mem.startsWith(u8, try shown.line(0), "  + New Session"));
+            try std.testing.expect(std.mem.indexOf(u8, try shown.line(0), "Archived") != null);
             try std.testing.expect(std.mem.indexOf(u8, try shown.line(1), "↑") != null);
             const span = for (rig.overview.app_sessions.shown_at) |span| {
                 if (span.target) |target| if (target == .open and std.mem.eql(u8, &target.open, &selected)) break span;
@@ -5729,7 +5735,7 @@ test "pinned New Session remains above the end marker and responds to clicks and
     }
 }
 
-test "chat omits New Session at every width and overview restores its pinned control" {
+test "chat sidebar and overview share pinned New Session and Archived controls" {
     const Chat = struct {
         const child: vxfw.Text = .{ .text = "Chat transcript" };
         fn open(overview: *Self, ctx: *vxfw.EventContext) !void {
@@ -5753,7 +5759,8 @@ test "chat omits New Session at every width and overview restores its pinned con
         defer shown.deinit();
         const text = try shown.text();
         try std.testing.expect(std.mem.indexOf(u8, text, "Chat transcript") != null);
-        try std.testing.expect(std.mem.indexOf(u8, text, "+ New Session") == null);
+        try std.testing.expectEqual(width == 140, std.mem.indexOf(u8, text, "+ New Session") != null);
+        try std.testing.expectEqual(width == 140, std.mem.indexOf(u8, text, "Archived") != null);
         if (width == 140) {
             const line = rig.overview.app_sessions.selected.?;
             const target = view.clickOf(&rig.overview.state, view.listItem(&rig.overview.state, line).?).?;
@@ -5768,10 +5775,11 @@ test "chat omits New Session at every width and overview restores its pinned con
         var shown = try rig.shown(width, 20);
         defer shown.deinit();
         try std.testing.expect(std.mem.startsWith(u8, try shown.line(0), "  + New Session"));
+        try std.testing.expect(std.mem.indexOf(u8, try shown.line(0), "Archived") != null);
     }
 }
 
-test "chat omission preserves late-listed Sessions and the physical last-row footer" {
+test "chat pinned controls preserve late-listed Sessions and the physical last-row footer" {
     const Chat = struct {
         var dir: std.Io.Dir = undefined;
         var files: u8 = 0;
@@ -5809,15 +5817,14 @@ test "chat omission preserves late-listed Sessions and the physical last-row foo
         for ([_]vxfw.Size{ .{ .width = 140, .height = 40 }, .{ .width = 46, .height = 30 }, .{ .width = 140, .height = 30 } }) |size| {
             var shown = try rig.shown(size.width, size.height);
             defer shown.deinit();
-            try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "+ New Session") == null);
+            try std.testing.expectEqual(size.width == 140, std.mem.indexOf(u8, try shown.text(), "+ New Session") != null);
             try std.testing.expect(std.mem.indexOf(u8, try shown.line(size.height - 1), "alt+i info") != null);
             if (size.width == 140) {
-                try std.testing.expectEqual(if (listed) listed_references.len else 0, overview.app_sessions.shown_at.len);
+                try std.testing.expectEqual(if (listed) listed_references.len + 1 else 1, overview.app_sessions.shown_at.len);
                 if (listed) {
-                    // No omitted control or spacer may consume the first row.
-                    try std.testing.expect(std.mem.indexOf(u8, try shown.line(0), "Fix the flaky test") != null);
-                    for (overview.app_sessions.shown_at, 0..) |span, index| {
-                        try std.testing.expectEqual(@as(i17, @intCast(index * 2)), span.row);
+                    try std.testing.expect(std.mem.indexOf(u8, try shown.line(2), "Fix the flaky test") != null);
+                    for (overview.app_sessions.shown_at[1..], 0..) |span, index| {
+                        try std.testing.expectEqual(@as(i17, @intCast(index * 2 + 1)), span.row);
                         try std.testing.expectEqual(@as(u16, 2), span.height);
                     }
                 }
@@ -5832,6 +5839,7 @@ test "chat omission preserves late-listed Sessions and the physical last-row foo
         var shown = try rig.shown(width, 30);
         defer shown.deinit();
         try std.testing.expect(std.mem.startsWith(u8, try shown.line(0), "  + New Session"));
+        try std.testing.expect(std.mem.indexOf(u8, try shown.line(0), "Archived") != null);
         const gap = try shown.line(1);
         try std.testing.expect(std.mem.trim(u8, gap, " │").len == 0);
         try std.testing.expect(std.mem.indexOf(u8, try shown.line(2), "Fix the flaky test") != null);
@@ -5851,6 +5859,7 @@ test "pinned New Session wins the last header row over a provider band" {
         var shown = try rig.shown(width, 2);
         defer shown.deinit();
         try std.testing.expect(std.mem.startsWith(u8, try shown.line(0), "  + New Session"));
+        try std.testing.expect(std.mem.indexOf(u8, try shown.line(0), "Archived") != null);
     }
 }
 
@@ -6042,6 +6051,21 @@ test "App settings Model borrow ends on every Overview menu replacement or relea
         try std.testing.expectEqual(AppSettings.SaveState.idle, overview.defaults_save);
         try std.testing.expect(overview.root.input.layer.settingsOpen());
     }
+}
+
+test "the bare arrows move within the pinned row, in CSI and SS3 form: right as the table's open_session, left as a choice key" {
+    for ([_][]const u8{ "\x1b[C", "\x1bOC" }) |right| for ([_][]const u8{ "\x1b[D", "\x1bOD" }) |left| {
+        const rig = try openOverview();
+        defer rig.close();
+        rig.overview.state.selected = .new_session;
+        _ = try rig.press(right);
+        try std.testing.expectEqual(view.Selection.archived, rig.overview.state.selected);
+        _ = try rig.press(left);
+        try std.testing.expectEqual(view.Selection.new_session, rig.overview.state.selected);
+        _ = try rig.press("\x1b[1;5C");
+        _ = try rig.press("\x1b[1;3C");
+        try std.testing.expectEqual(view.Selection.new_session, rig.overview.state.selected);
+    };
 }
 
 test "App settings Model keeps every named app binding live while filter text stays local" {
@@ -7364,8 +7388,7 @@ const EmptySessionOwner = struct {
         const overview = self.rig.overview;
         try self.expectVisible(&.{reference});
         try std.testing.expectEqual(reference, overview.state.conversing.?);
-        try std.testing.expectEqual(@as(?usize, 0), view.selectedLine(&overview.state));
-        try std.testing.expect(!view.showsNewSession(&overview.state));
+        try std.testing.expectEqual(@as(?usize, 1), view.selectedLine(&overview.state));
         for ([_]u16{ 46, 140 }) |width| {
             var shown = try self.rig.shown(width, 24);
             defer shown.deinit();
@@ -7380,9 +7403,9 @@ const EmptySessionOwner = struct {
                 for (0..columns) |col| try text.writer.writeAll(shown.screen.readCell(@intCast(col), @intCast(row)).?.char.grapheme);
                 try text.writer.writeByte('\n');
             }
-            try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text.written(), name));
+            try std.testing.expectEqual(@as(usize, if (std.mem.eql(u8, name, "New Session")) 2 else 1), std.mem.count(u8, text.written(), name));
             try std.testing.expect(std.mem.indexOf(u8, text.written(), &reference) == null);
-            try std.testing.expectEqual(@as(?u32, 0), overview.app_sessions.selected);
+            try std.testing.expectEqual(@as(?u32, 1), overview.app_sessions.selected);
             try std.testing.expect((try view.listSegments(shown.arena.allocator(), &overview.state, .{ .row = 0 }, columns, overview.caps, 0)).selected);
             var bold_name = false;
             for (try view.rowSegments(shown.arena.allocator(), &overview.state, 0, columns, overview.caps, 0)) |segment| {
@@ -7411,6 +7434,61 @@ const EmptySessionOwner = struct {
         }
     }
 };
+
+test "sidebar New Session retires safely or refuses with focused usable chat" {
+    const Held = enum { safe, unsafe_draft, submitting, not_started };
+    for ([_]u16{ 100, 140 }) |width| for ([_]bool{ false, true }) |pointer| for (std.enums.values(Held)) |held| {
+        const fixture = try EmptySessionOwner.create();
+        defer fixture.destroy();
+        const first = try fixture.openNew();
+        const overview = fixture.rig.overview;
+        const frontend = fixture.frontend();
+        _ = frontend.input.append("Retained draft");
+        if (held == .unsafe_draft) frontend.app_hooks.drafts = null;
+        if (held == .submitting or held == .not_started) {
+            frontend.submission.intent = .{ .message = frontend.input.submitText("pending message") };
+            frontend.submission.state = if (held == .submitting) .submitting else .not_started;
+        }
+        {
+            var shown = try fixture.rig.shown(width, 30);
+            shown.deinit();
+        }
+        var ctx = fixture.rig.context();
+        defer ctx.cmds.deinit(std.testing.allocator);
+        try std.testing.expect(try overview.root.focusList(&ctx));
+        if (pointer) {
+            try std.testing.expect(try fixture.rig.click(4, 0, width, 30) == null);
+        } else {
+            try std.testing.expect(try fixture.rig.press("\x1b[H\r") == null);
+        }
+        if (held == .safe) {
+            try std.testing.expect(overview.app_session == null);
+            try std.testing.expect(try fixture.rig.settle() == null);
+            try std.testing.expect(!overview.root.input.list_focused);
+            try std.testing.expectEqual(@as(usize, 2), Seen.now.creates);
+            try std.testing.expect(!std.mem.eql(u8, &first, fixture.frontend().session));
+            try std.testing.expectEqualStrings("", fixture.frontend().input.composition().bytes);
+            const draft = overview.session_drafts.take(std.testing.allocator, &first).?;
+            defer draft.deinit(std.testing.allocator);
+            try std.testing.expectEqualStrings("Retained draft", draft.snapshot.bytes);
+        } else {
+            try std.testing.expect(!overview.root.input.list_focused);
+            try std.testing.expectEqualStrings(&first, fixture.frontend().session);
+            try std.testing.expectEqual(@as(usize, 1), Seen.now.creates);
+            try std.testing.expect(!overview.state.creating());
+            var shown = try fixture.rig.shown(width, 30);
+            defer shown.deinit();
+            try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "Esc returns") != null);
+            if (held == .unsafe_draft) {
+                try std.testing.expect(try fixture.rig.press("X") == null);
+                try std.testing.expectEqualStrings("Retained draftX", fixture.frontend().input.composition().bytes);
+            } else {
+                try std.testing.expect(frontend.submission.intent != null);
+                try std.testing.expectEqualStrings("pending message", try frontend.input.message(frontend.submission.intent.?.message));
+            }
+        }
+    };
+}
 
 test "empty New Session owner opens blank then hides on leave without deleting its canonical row" {
     const fixture = try EmptySessionOwner.create();

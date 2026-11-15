@@ -1175,7 +1175,14 @@ No independent token/account length quota, JWT verification/JWKS/discovery or ge
 
 `rui auth login chatgpt --device-code` (also the unlisted `rui auth login codex`) uses the pinned device-code flow and installs one global account in an owner-only `~/.config/rui/codex.json`, or an absolute path selected by `RUI_CODEX_CREDENTIAL_FILE`.
 `rui host serve --set 'providers.codex={}'` activates the fixed HTTPS subscription endpoint; a development endpoint and credential-free requests can instead be configured through provider settings.
-An explicit `providers` object selects exactly the providers a Host serves; absent that setting, automatic selection serves device-code sign-in even while signed out, browser sign-in with a usable credential, and OpenAI with a usable key; model admission skips Sessions of any other provider, and `host_info` reports each provider's route.
+An explicit `providers` object selects exactly the providers a new Host serves; `providers={}` selects none.
+When `providers` is omitted, every new-Host entry uses automatic selection, including plain `rui`, `host start`, foreground `host serve`, saved `host.json`, and file or framed-stdin settings documents.
+Automatic selection offers device-code sign-in (`codex`) even while signed out, browser sign-in (`chatgpt`) with a usable local credential, and OpenAI (`openai`) with a usable local key.
+Offering the device-code route while signed out does not imply usable credentials or that a model request can succeed before sign-in.
+Divyansh chose automatic omission on November 14, 2026, answering "yes, automatic" to automatic services from sign-ins and API keys versus none until explicit setup (#1461, under #1459).
+This decision supersedes the unresolved omission finding in #1452's body and review; merging #1452 did not itself approve the policy.
+Upgrade replay preserves the previously observed provider selection exactly rather than re-evaluating omitted settings against new defaults or changed local credentials.
+Model admission skips Sessions of any provider the Host does not serve, and `host_info` reports each provider's route.
 Configuration and saved-result inspection need no credential.
 The credential file and stable lock live in the same private directory and reject symlinks, wrong ownership and permissive modes; symlinks above that directory are followed, as macOS's `/var` needs, but the directory itself must not be one.
 They carry a closed versioned format.
@@ -1771,7 +1778,14 @@ Only private report-scratch writes may occur under their owning read transaction
 Core invokes private provider/Bash/Edit interfaces through closed effect-specific inputs and evidence.
 No public provider module or generic dispatch registry is required.
 A provider's wire format is a codec, pinned per Session by name and version, behind one value contract (`src/codec_abi.zig`): plain values, with no calls back into the Host, no file access and no state the Host does not store, so the same contract can later run a codec outside the Host's address space; the built-in codecs are linked in natively.
-To encode a request the shell gives the codec one neutral item at a time, with Rui's text named by handle, and writes the literal and content pieces the codec answers with through its own request cursors under the preparation allowance before it asks for the next item.
+To encode a request the shell gives the codec one neutral item at a time, with canonical content named by handle, and writes the literal, content and raw-image base64 pieces the codec answers with through its own request cursors under the preparation allowance before it asks for the next item.
+The Responses `/1`, `/2` and `/3` input domains extend additively with image-bearing Message or tool-result open, ordered Text or Image parts, and close.
+PNG and JPEG Image parts name raw Content; the codec supplies data-URL MIME framing and `detail:auto`, and the shell reads verified bounded windows through a pinned standard-base64 cursor.
+Source reads and emitted bytes consume the existing preparation allowance; request scratch, cancellation and sealing keep their existing owners.
+An image-bearing tool result uses an actual `function_call_output.output` array under its original `call_id`, never a synthetic user Message.
+Text-only results remain strings, saved MCP JSON stays opaque text, and every old handler, escape, Carry and route dialect keeps its original bytes.
+Only the open resumes and the close ends the new history element; partial image state never enters Carry.
+These codec and raw-byte transforms do not themselves admit or persist typed images, validate media containers, or qualify provider image support.
 The codec's encoder state is a small value of the codec's own type that the shell stores, and it holds the codec's carry.
 Before each history element and `history_end` the shell resumes the codec from its carry, also a value of the codec's type, which the shell kept after the previous element or took from a history memo, so a memo copy and a rebuild continue identically.
 A built-in codec is trusted Host code: a piece naming a handle the item lacks, or more pieces than an item holds, is a Host defect caught by assertion and tested over the codec's whole item domain, not a runtime failure.
@@ -2471,6 +2485,9 @@ At most one automatic start runs per overview: a failed start or a second crash 
 
 The overview refreshes about once a second with `session list` `since`, keeping its rows and replacing those reported changed.
 The overview has no slash-command parser or view command surface; the former `/sessions` archive-view commands and counts-line view-name click are removed.
+The pinned `+ New Session` row always draws a quiet `Archived` at its right end wherever the list is visible, including the conversation sidebar and empty Stores or archives. `OverviewLines.NewSession` draws the same control and press regions in both layouts; no Store existence query or listing availability fact is needed.
+On that row Right selects `Archived` and Left selects `New Session`; Enter or a click on `Archived` toggles the existing archived view, and Esc there returns to the usual list. A click elsewhere on the row remains New Session.
+New Session from a conversation follows the frontend’s existing new-chat departure policy, preserving retained drafts and refusing unsafe departures before retiring the frontend. After ordinary retirement, the same Configure creation owner opens the new focused chat.
 Alt-A puts away the selected Session through the existing archive owner, stopping its work first when required. Shell archive/list/unarchive commands remain available, and `/archive` and `/unarchive` in an open chat retain their existing Session-local behavior.
 A row remains visible with archive progress until the server reports it archived.
 Archived rows and exact conversations show their archive state.
@@ -2501,8 +2518,8 @@ One line map, `listItem` in `src/overview_view.zig`, names each list line for dr
 Each drawn row keeps that name, so a click means what the person saw even when the list changed since the frame, and a Session gone by then opens nothing.
 The Sessions list, a panel and the model picker are three widgets in the list's place; the screen shows the one the core names (`State.listArea`), and only the Sessions hear a press.
 Ctrl-X sends an ordinary `session stop` for the selected row, with the same capture and recovery as the CLI command.
-List input reaches `overview_view.step` as a semantic action from the list's one key table (Right is `open_session` there), Enter or ignored input; clicks carry the Session, New Session or Settings identity drawn in the frame.
-Enter on a Session row opens it, and Right does the same on a Session row and nothing on New Session or Settings; on the row of the chat already open, either one, or a click on that row, returns keys to that chat's input instead, keeping its draft and anything it presents, such as Chat Info, and sends the Host nothing.
+List input reaches `overview_view.step` as a semantic action from the list's one key table (Right is `open_session` there), Enter, semantic Left or ignored input; clicks carry the Session, New Session, Archived or Settings identity drawn in the frame.
+Enter on a Session row opens it, and Right does the same on a Session row, selects Archived on New Session, and does nothing on Settings; on the row of the chat already open, either one, or a click on that row, returns keys to that chat's input instead, keeping its draft and anything it presents, such as Chat Info, and sends the Host nothing.
 Printable keys and bracketed paste are ignored: no editor, hidden draft, frozen-editor state, command list, skill cache or duplicate footer focus exists on the overview.
 Arrows, Home and End keep whole-list navigation, including the pinned New Session and Settings rows; Settings is the penultimate row immediately before the footer.
 The core owns selection, opening admission and pending/uncertain creation; the shell applies its effects.
@@ -2510,8 +2527,9 @@ The core holds the terminal’s size, and shared screen composition accepts the 
 Without an open chat, the overview’s list uses the full width at every terminal size, with no empty compose pane. The wide list beside an open chat or its settings retains its existing row navigation and pointer spans, without an input of its own.
 Option/Alt-Up and Option/Alt-Down immediately switch to the previous or next Session in the list's projected order, even while typing, at every width.
 The destination's input gets focus; each draft, caret and rejection state stays attached to its own Session, and switching sends nothing.
+Opening another Session uses the existing one-step Follow return: Esc can return to the chat just left before it returns to the overview.
 The shortcut uses the existing opening and departure admission, including pending-creation, unresolved-original, Action, command and Upgrade guards; sign-in, Settings and marked paste keep their input custody.
-It skips New Session and Settings, clamps at the first and last Session, and anchors to the open Session rather than a separately highlighted row; if that Session is absent from the projected list it does nothing.
+It skips New Session, Archived and Settings, clamps at the first and last Session, and anchors to the open Session rather than a separately highlighted row; if that Session is absent from the projected list it does nothing.
 Without an open Session it moves from a selected Session, or opens the last/first Session for Up/Down from a control row; an empty list does nothing.
 At 100 columns and wider, keys go to the list or to the chat beside it, one at a time (`app_input`'s list focus).
 Left on an empty chat draft gives keys to the list and leaves the chat open and drawn; a draft with text, even with the caret at its start, takes Left as an edit.

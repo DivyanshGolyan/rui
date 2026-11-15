@@ -228,6 +228,64 @@ pub const RawCursor = struct {
     }
 };
 
+/// RFC 4648 standard alphabet and padding, pinned for raw image pieces.
+/// Source reads and emitted bytes each consume the preparation allowance.
+/// The fixed windows and two-byte carry belong to one request, not each image.
+pub const Base64Cursor = struct {
+    offset: u64,
+    carry_length: u2,
+    encoded_length: usize,
+    encoded_offset: usize,
+    carry: [2]u8 = undefined,
+    raw: [768]u8 = undefined,
+    encoded: [1024]u8 = undefined,
+
+    pub fn init(self: *Base64Cursor) void {
+        self.offset = 0;
+        self.carry_length = 0;
+        self.encoded_length = 0;
+        self.encoded_offset = 0;
+    }
+
+    pub fn advance(self: *Base64Cursor, source: anytype, writer: anytype, bytes_left: *usize) !bool {
+        while (true) {
+            if (self.encoded_offset != self.encoded_length) {
+                const count = @min(bytes_left.*, self.encoded_length - self.encoded_offset);
+                if (count == 0) return false;
+                try writer.write(self.encoded[self.encoded_offset..][0..count]);
+                self.encoded_offset += count;
+                bytes_left.* -= count;
+                continue;
+            }
+            const length = source.contentLength();
+            if (self.offset == length) {
+                if (self.carry_length == 0) return true;
+                const encoded = std.base64.standard.Encoder.encode(&self.encoded, self.carry[0..self.carry_length]);
+                self.encoded_length = encoded.len;
+                self.encoded_offset = 0;
+                self.carry_length = 0;
+                continue;
+            }
+            const prefix: usize = self.carry_length;
+            var wanted: usize = @intCast(@min(length - self.offset, @min(self.raw.len - prefix, bytes_left.*)));
+            wanted = source.maxWindow(self.offset, wanted);
+            if (wanted == 0) return false;
+            @memcpy(self.raw[0..prefix], self.carry[0..prefix]);
+            const count = try source.readContent(self.offset, self.raw[prefix..][0..wanted]);
+            if (count != wanted) return error.ShortCanonicalRead;
+            self.offset += count;
+            bytes_left.* -= count;
+            const complete = (prefix + count) / 3 * 3;
+            const remaining = prefix + count - complete;
+            @memcpy(self.carry[0..remaining], self.raw[complete..][0..remaining]);
+            self.carry_length = @intCast(remaining);
+            const encoded = std.base64.standard.Encoder.encode(&self.encoded, self.raw[0..complete]);
+            self.encoded_length = encoded.len;
+            self.encoded_offset = 0;
+        }
+    }
+};
+
 const TestSink = struct {
     output: std.ArrayList(u8) = .empty,
     calls: usize = 0,
@@ -610,3 +668,75 @@ const ShortCopySource = struct {
         return destination.len;
     }
 };
+
+fn runBase64Case(input: []const u8, expected: []const u8, boundaries: []const u64, allowances: []const usize) !void {
+    var cursor: Base64Cursor = undefined;
+    cursor.init();
+    var sink = TestSink.init(std.testing.allocator);
+    defer sink.deinit();
+    var steps: usize = 0;
+    var work: usize = 0;
+    while (true) {
+        const allowance = allowances[steps % allowances.len];
+        var left = allowance;
+        const done = try cursor.advance(PartitionedSource{ .bytes = input, .boundaries = boundaries }, &sink, &left);
+        try std.testing.expect(left <= allowance);
+        work += allowance - left;
+        steps += 1;
+        try std.testing.expect(steps <= input.len + expected.len + 8);
+        if (done) break;
+        try std.testing.expect(left != allowance);
+    }
+    try std.testing.expectEqualStrings(expected, sink.output.items);
+    try std.testing.expectEqual(input.len + expected.len, work);
+}
+
+test "base64 cursor preserves raw bytes over every split and allowance" {
+    const vectors = .{
+        .{ "", "" },               .{ "f", "Zg==" },                        .{ "fo", "Zm8=" },
+        .{ "foo", "Zm9v" },        .{ "foob", "Zm9vYg==" },                 .{ "fooba", "Zm9vYmE=" },
+        .{ "foobar", "Zm9vYmFy" }, .{ "\x00\xff\x80\x01\xfe", "AP+AAf4=" },
+    };
+    inline for (vectors) |vector| {
+        for (0..vector[0].len + 1) |split| {
+            const boundary = [_]u64{split};
+            for ([_][]const usize{ &.{1}, &.{2}, &.{3}, &.{4}, &.{5}, &.{7}, &.{ 1, 17, 2 } }) |allowances|
+                try runBase64Case(vector[0], vector[1], &boundary, allowances);
+        }
+    }
+}
+
+test "base64 cursor crosses verified windows and PNG boundaries with exact work" {
+    const png = @embedFile("codecs/fixtures/image-input/pixel.png");
+    const expected_png = @embedFile("codecs/fixtures/image-input/pixel.base64");
+    for (0..png.len + 1) |split| {
+        const boundary = [_]u64{split};
+        for ([_][]const usize{ &.{1}, &.{2}, &.{3}, &.{4}, &.{ 1, 17, 2 } }) |allowances|
+            try runBase64Case(png, expected_png, &boundary, allowances);
+    }
+    const octets = @embedFile("codecs/fixtures/image-input/octets.bin");
+    const expected = @embedFile("codecs/fixtures/image-input/octets.base64");
+    var partitions: [128]u64 = undefined;
+    var allowances: [71]usize = undefined;
+    try runBase64Case(octets, expected, seededBoundaries(73, octets.len, &partitions), seededAllowances(999, &allowances, 2048));
+    for ([_][]const usize{ &.{1}, &.{2}, &.{3}, &.{767}, &.{768}, &.{769}, &.{1024}, &.{8192} }) |sequence|
+        try runBase64Case(octets, expected, &.{ 1, 2, 767, 768, 769, 1535, 1536, 1537 }, sequence);
+}
+
+test "base64 cursor fails closed on short reads and sink failure" {
+    var cursor: Base64Cursor = undefined;
+    cursor.init();
+    var sink = TestSink.init(std.testing.allocator);
+    defer sink.deinit();
+    var allowance: usize = 1024;
+    try std.testing.expectError(error.ShortCanonicalRead, cursor.advance(ShortReadSource{ .bytes = "foobar" }, &sink, &allowance));
+    try std.testing.expectEqual(@as(usize, 0), sink.output.items.len);
+    const FailingSink = struct {
+        pub fn write(_: *@This(), _: []const u8) error{Capacity}!void {
+            return error.Capacity;
+        }
+    };
+    var failing: FailingSink = .{};
+    cursor.init();
+    try std.testing.expectError(error.Capacity, cursor.advance(MemorySource{ .bytes = "foobar" }, &failing, &allowance));
+}

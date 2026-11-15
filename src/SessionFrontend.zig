@@ -1837,6 +1837,11 @@ fn slashCommand(self: *Self, text: []const u8) !void {
     }
 }
 
+pub fn newSession(self: *Self, ctx: *vxfw.EventContext) !void {
+    self.newChat();
+    try self.afterInput(ctx);
+}
+
 fn newChat(self: *Self) void {
     if (self.leaving != null) return;
     const action = self.screen.action_view != null or self.live.work.first_action != null or self.reading.prepared_action != null;
