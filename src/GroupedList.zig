@@ -233,8 +233,6 @@ test "GroupedList quiet rows normalize whole lines before selection and hover in
         const first = try view.listSegments(arena.allocator(), &state, .{ .row = 0 }, width, caps, 0);
         const rows: []const Row = &.{.{
             .segments = first.segments,
-            .second = try view.rowSecondSegments(arena.allocator(), &state, 0, width, caps),
-            .height = 2,
             .target = .{ .open = listed.reference },
         }};
         var presses: Pressed = .{};
@@ -246,11 +244,12 @@ test "GroupedList quiet rows normalize whole lines before selection and hover in
             try list.widget().handleEvent(&events, .{ .mouse = .{ .col = 1, .row = row, .button = .none, .type = .motion, .mods = .{} } });
         }
         const surface = try list.widget().draw(ctx);
-        const background: view.Background = if (selected) .selection else if (hover_row != null) .hover else .ground;
+        const hovered = hover_row == 0;
+        const background: view.Background = if (selected) .selection else if (hovered) .hover else .ground;
         const highlight = widget_style.of(caps, .{ .background = background });
         for (surface.children[0].surface.buffer) |cell| {
-            // Includes both lines' visible text, interstitial padding and ends.
-            try std.testing.expectEqual(!wrote and !selected and hover_row == null, cell.style.dim);
+            // Includes the line's visible text, interstitial padding and ends.
+            try std.testing.expectEqual(!wrote and !selected and !hovered, cell.style.dim);
             try std.testing.expectEqual(highlight.bg, cell.style.bg);
             try std.testing.expectEqual(highlight.reverse, cell.style.reverse);
             try std.testing.expectEqual(highlight.ul_style, cell.style.ul_style);
