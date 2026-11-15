@@ -878,7 +878,8 @@ def prove_native_background(state, *, deadline=None):
                 if name == "approval":
                     assert not (workspace / "launches").exists()
                     current = command("session", "inspect", "--store", store, "--session", session)
-                    assert current["work"]["turn"] is None and current["work"]["first_action"] == identity, current
+                    assert current["work"]["latest_outcome"]["code"] == "completed" and current["work"]["first_action"] == identity, current
+                    assert any(item["turn"] == current["work"]["turn"] and item["outcome"] == "completed" for item in current["recent_messages"]), current
                     assert [item["action"] for item in current["actionable_permissions"]] == [identity], current
                     allow(case, store, "allow", session, identity)
                     wait_for(lambda: (workspace / "ready").exists(), "approval after original Turn closed")
