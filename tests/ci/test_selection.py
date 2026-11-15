@@ -385,6 +385,8 @@ class WorkflowEntrypointsTest(unittest.TestCase):
         removed = ("daily-macos.yml", "cold-acceptance.yml",
                    "Daily changed-main macOS", "Scheduled cold acceptance")
         paths = [*Path(".github").rglob("*.y*ml"), Path("VERIFICATION.md"),
+                 *Path("docs/contracts").glob("*.md"),
+                 *Path("docs/verification").glob("*.md"),
                  Path("tests/ci/platform_boundary.py")]
         for name in removed[:2]:
             self.assertFalse(Path(".github/workflows", name).exists(), name)

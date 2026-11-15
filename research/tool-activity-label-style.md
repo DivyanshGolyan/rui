@@ -1,6 +1,6 @@
 # Tool activity label style
 
-Inspected 2026-10-13. This note records the source basis for Rui's accepted label guidance, not implementation evidence. The final agreement requires a description in original Bash arguments, at most 100 decoded UTF-8 bytes, with no backward compatibility. It supersedes the initial 120-byte agreement. The model-generated label stays unchanged across observed states. [Architecture](../ARCHITECTURE.md#model-output-tools-and-permission) owns the accepted contract.
+Inspected 2026-10-13. This note records the source basis for Rui's accepted label guidance, not implementation evidence. The final agreement requires a description in original Bash arguments, at most 100 decoded UTF-8 bytes, with no backward compatibility. It supersedes the initial 120-byte agreement. The model-generated label stays unchanged across observed states. [Architecture](../docs/contracts/execution.md#model-output-tools-and-permission) owns the accepted contract.
 
 ## What the sources recommend
 
@@ -28,7 +28,7 @@ The following adaptations follow from the sources and this scenario:
 - Name what this call does, not the whole investigation or desired eventual outcome. Prefer `Search tests for timeout cases` over `Investigate the issue` or `Use Bash`.
 - Include enough scope to distinguish similar calls. Use a relevant directory, file, test group, or external destination when it helps. Retain meaningful identifier casing. Avoid raw argument dumps and implementation jargon that adds no useful distinction.
 - Describe the operation rather than promise its result. Prefer `Run parser tests` to `Ensure parser tests pass`, and `Search src for retries` to `Find all retry bugs`. A search may find nothing, and a test run may fail.
-- State consequential effects plainly. Use `Delete generated build files`, not `Safely clean everything`. A model-generated description is not evidence of safety, approval, rollback, or absence of side effects. Exact arguments and Rui's permission and outcome facts remain authoritative under [the existing authorization contract](../ARCHITECTURE.md#authorizing-exact-actions).
+- State consequential effects plainly. Use `Delete generated build files`, not `Safely clean everything`. A model-generated description is not evidence of safety, approval, rollback, or absence of side effects. Exact arguments and Rui's permission and outcome facts remain authoritative under [the existing authorization contract](../docs/contracts/execution.md#authorizing-exact-actions).
 - Keep one consistent verb for the same operation. Prefer ordinary words, but preserve a technical term when the user needs it to identify the work. Omit conversational padding such as `I will`, `Please wait`, and `Now`.
 - Use the fewest words that still identify the action and target. The final 100-byte ceiling counts decoded UTF-8 bytes, not JSON spelling, characters, words, or screen columns. It is a Rui constraint, not a source recommendation. None of the cited passages establishes the byte ceiling or the 40–60-character aim. The ceiling is not a preferred length; retain important effects within it.
 

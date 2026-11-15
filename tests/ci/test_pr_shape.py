@@ -35,6 +35,42 @@ class PrShapeTest(unittest.TestCase):
                 with self.subTest(body=body):
                     self.assertIsNone(pr_shape.refusal(["src/cli.zig"], body))
 
+    def test_summary_sketch_replaces_a_separate_shape_heading(self):
+        sketches = (
+            "```text\nSign in\n├─ Browser → Explicit copy\n└─ API key → Connect\n```",
+            "```\nsubmitForm\n  persistPrompt\n  launchAgent\n```",
+            "~~~mermaid\nflowchart LR\n  Input --> Owner\n~~~",
+            "````diff\n-old owner\n+shared owner\n````",
+        )
+        for sketch in sketches:
+            for newline in ("\n", "\r\n"):
+                body = ("## Summary\n\n" + sketch + "\n\n## Evidence\nBefore and after.\n\n"
+                        "## Merge Danger\nTwo-way. Authentication.").replace("\n", newline)
+                with self.subTest(sketch=sketch, newline=newline):
+                    self.assertIsNone(pr_shape.refusal(["src/cli.zig"], body))
+
+    def test_summary_needs_a_nonempty_closed_sketch_in_its_own_section(self):
+        bodies = (
+            "## Summary", "## Summary\nFixed the code.",
+            "## Summary\n```text\n```", "## Summary\n```text\n  \n```",
+            "## Summary\n```text\nInput -> Owner", "## Summary\n~~~text\nInput -> Owner\n```",
+            "## Summary\nGeneric prose.\n## Evidence\n```text\nInput -> Owner\n```",
+            "# Summary\n```text\nInput -> Owner\n```",
+            "Summary\n```text\nInput -> Owner\n```",
+            "```text\n## Summary\n```\n```text\nInput -> Owner\n```",
+        )
+        for body in bodies:
+            with self.subTest(body=body):
+                self.assertRefused(["src/cli.zig"], body)
+
+    def test_indented_section_headings_end_summary_before_other_sketches(self):
+        for indent in (" ", "  ", "   "):
+            for level in ("#", "##"):
+                body = ("## Summary\nGeneric prose only.\n" + indent + level
+                        + " Evidence\n```text\nnot in Summary\n```\n## Merge Danger\nNone.")
+                with self.subTest(indent=indent, level=level):
+                    self.assertRefused(["src/cli.zig"], body)
+
     def test_other_levels_case_and_trailing_text_do_not_count(self):
         for heading in ("# Shape", "### Shape", "#### Shape", "## shape", "## SHAPE",
                         "## ShApE", "##Shape", " ## Shape", "## Shape details", "## Shape:",

@@ -1,14 +1,14 @@
 # Land a change
 
 [AGENTS.md](../../AGENTS.md#authority) owns authorization and the [standing landing grant](../../AGENTS.md#landing).
-[Landing cadence](../../VERIFICATION.md#landing-cadence) owns candidate admission, promotion, releases, strict paths and recovery.
+[Landing cadence](../verification/release.md#landing-cadence) owns candidate admission, promotion, releases, strict paths and recovery.
 
 ## Publish and merge
 
 Before publishing, establish or reuse the relevant focused evidence in [Evidence](../../CODING_STANDARDS.md#evidence).
 A PR description has a Summary, the Evidence it was checked with, and its Merge danger.
 The description lists every behavior change in the diff, small ones included, so the summary and the diff agree.
-PRs changing `src/` carry a [Shape section](../../CODING_STANDARDS.md#shape-before-code), and the plan job refuses them without it.
+PRs changing `src/` follow [Shape before code](../../CODING_STANDARDS.md#shape-before-code); the plan checks the description, and review checks the shape.
 Every PR commit states its actual test commands and results.
 Open every PR with `python3 tests/ci/open_pr.py open --title TITLE --body-file FILE`, which reports overlapping work and opens it ready for review.
 Selected CI and the opener's `@codex review` request start together on the published candidate.
@@ -98,4 +98,4 @@ Whoever dispatches a promotion watches it to the end and reports the result unpr
 A failed step means the promotion is red even while its bisect step keeps the run in progress for up to four hours; report it then.
 A red promotion names, on each `promotion-red` issue it files, the first batch commit where each failed step of that job fails; a suite batch with several causes names only its earliest.
 Fix forward through an ordinary PR, then promote again.
-Recover a red Release as [Release publication](../../VERIFICATION.md#release-publication) says; a red wire recheck there follows publication, not a failed one.
+Recover a red Release as [Release publication](../verification/release.md#release-publication) says; a red wire recheck there follows publication, not a failed one.

@@ -7,7 +7,7 @@
 //! (`chatgpt_plan_wire.zig`), which also keeps the client id it was issued.
 //! The caller supplies the clock reading and the record it read. File
 //! ownership, the cross-process lock, publication and the token exchange
-//! stay in `codex_credentials.zig` and `codex_auth.zig`. See ARCHITECTURE.md,
+//! stay in `codex_credentials.zig` and `codex_auth.zig`. See docs/contracts/model-io.md,
 //! "Authentication and transport lifetime".
 const std = @import("std");
 const json_scalar = @import("json_scalar.zig");

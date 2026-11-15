@@ -105,7 +105,7 @@ import h2.settings
 
 class _ClosingConnection(sqlite3.Connection):
     """Plain sqlite3 only commits at the end of `with`. A Host cannot open a
-    Store that any other connection holds (ARCHITECTURE.md, "Store
+    Store that any other connection holds (docs/contracts/store.md, "Store
     durability"), so every fixture connection closes with its block."""
 
     def __exit__(self, *failure):
