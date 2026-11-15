@@ -986,7 +986,7 @@ const SessionRows = struct {
 
     fn count(raw: *const anyopaque, first: u32) u32 {
         const self: *const SessionRows = @ptrCast(@alignCast(raw));
-        return @intCast(self.state.order.items.len -| (first -| view.first_row_line));
+        return @intCast(view.sessionsFrom(self.state, first));
     }
 
     fn above(count_: u32, arena: std.mem.Allocator) std.mem.Allocator.Error!@import("widgets/List.zig").Line {
@@ -2445,14 +2445,16 @@ test "App overview paints its ground and plain footer" {
     }
 }
 
-test "separate view tabs and a ground gap follow New Session at narrow and wide widths" {
-    var cancellation: client.Cancellation = .{};
-    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
+test "pin separator is ground and inert beside selected controls or Sessions at both widths" {
+    const rig = try openListed();
     defer rig.close();
     const overview = rig.overview;
     try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
     try std.testing.expect(try rig.settle() == null);
-    try std.testing.expect(overview.state.order.items.len != 0);
+    try std.testing.expect(overview.state.order.items.len > 1);
+    // The existing leading Session stays first when pinned; the canonical
+    // prefix now has both groups, so only its boundary gets a separator.
+    overview.state.rows.items[overview.state.order.items[0]].pin_order = 7;
     overview.caps = .{};
     const ground = @import("widget_style.zig").of(overview.caps, .{}).bg;
     const highlight = @import("widget_style.zig").of(overview.caps, .{ .background = .selection }).bg;
@@ -2465,14 +2467,19 @@ test "separate view tabs and a ground gap follow New Session at narrow and wide 
         try std.testing.expect(std.mem.startsWith(u8, try shown.line(0), "  + New Session"));
         try std.testing.expect(std.mem.indexOf(u8, try shown.line(1), "Archived") != null);
         try std.testing.expectEqual(selection == .new_session, std.meta.eql(highlight, shown.screen.readCell(1, 0).?.style.bg));
-        // The gap is blank ground in every column of the list, never part
-        // of the New Session row's highlight.
+        // Only the pin boundary is blank ground, never selected.
         for (0..30) |col| {
-            const cell = shown.screen.readCell(@intCast(col), 2).?;
+            const cell = shown.screen.readCell(@intCast(col), 3).?;
             try std.testing.expect(std.mem.trim(u8, cell.char.grapheme, " ").len == 0);
             try std.testing.expectEqual(ground, cell.style.bg);
         }
-        try std.testing.expect((try shown.line(3)).len != 0);
+        try std.testing.expect((try shown.line(2)).len != 0);
+        const opens = Seen.now.conversations;
+        const pins = Seen.now.pins;
+        try std.testing.expect(try rig.click(4, 3, width, 30) == null);
+        try std.testing.expectEqual(selection, overview.state.selected);
+        try std.testing.expectEqual(opens, Seen.now.conversations);
+        try std.testing.expectEqual(pins, Seen.now.pins);
     };
 }
 
@@ -5815,11 +5822,11 @@ test "chat pinned controls preserve late-listed Sessions and the physical last-r
             try std.testing.expectEqual(size.width == 140, std.mem.indexOf(u8, try shown.text(), "+ New Session") != null);
             try std.testing.expect(std.mem.indexOf(u8, try shown.line(size.height - 1), "alt+i info") != null);
             if (size.width == 140) {
-                try std.testing.expectEqual(if (listed) listed_references.len + 1 else 1, overview.app_sessions.shown_at.len);
+                try std.testing.expectEqual(if (listed) listed_references.len else 1, overview.app_sessions.shown_at.len);
                 if (listed) {
-                    try std.testing.expect(std.mem.indexOf(u8, try shown.line(3), "Fix the flaky test") != null);
-                    for (overview.app_sessions.shown_at[1..], 0..) |span, index| {
-                        try std.testing.expectEqual(@as(i17, @intCast(index + 1)), span.row);
+                    try std.testing.expect(std.mem.indexOf(u8, try shown.line(2), "Fix the flaky test") != null);
+                    for (overview.app_sessions.shown_at, 0..) |span, index| {
+                        try std.testing.expectEqual(@as(i17, @intCast(index)), span.row);
                         try std.testing.expectEqual(@as(u16, 1), span.height);
                     }
                 }
@@ -5835,9 +5842,7 @@ test "chat pinned controls preserve late-listed Sessions and the physical last-r
         defer shown.deinit();
         try std.testing.expect(std.mem.startsWith(u8, try shown.line(0), "  + New Session"));
         try std.testing.expect(std.mem.indexOf(u8, try shown.line(1), "Archived") != null);
-        const gap = try shown.line(2);
-        try std.testing.expect(std.mem.trim(u8, gap, " │").len == 0);
-        try std.testing.expect(std.mem.indexOf(u8, try shown.line(3), "Fix the flaky test") != null);
+        try std.testing.expect(std.mem.indexOf(u8, try shown.line(2), "Fix the flaky test") != null);
     }
 }
 
@@ -7261,7 +7266,7 @@ const EmptySessionOwner = struct {
         const overview = self.rig.overview;
         try self.expectVisible(&.{reference});
         try std.testing.expectEqual(reference, overview.state.conversing.?);
-        try std.testing.expectEqual(@as(?usize, 1), view.selectedLine(&overview.state));
+        try std.testing.expectEqual(@as(?usize, 0), view.selectedLine(&overview.state));
         for ([_]u16{ 46, 140 }) |width| {
             var shown = try self.rig.shown(width, 24);
             defer shown.deinit();
@@ -7278,7 +7283,7 @@ const EmptySessionOwner = struct {
             }
             try std.testing.expectEqual(@as(usize, if (std.mem.eql(u8, name, "New Session")) 2 else 1), std.mem.count(u8, text.written(), name));
             try std.testing.expect(std.mem.indexOf(u8, text.written(), &reference) == null);
-            try std.testing.expectEqual(@as(?u32, 1), overview.app_sessions.selected);
+            try std.testing.expectEqual(@as(?u32, 0), overview.app_sessions.selected);
             try std.testing.expect((try view.listSegments(shown.arena.allocator(), &overview.state, .{ .row = 0 }, columns, overview.caps, 0)).selected);
             var bold_name = false;
             for (try view.rowSegments(shown.arena.allocator(), &overview.state, 0, columns, overview.caps, 0)) |segment| {
