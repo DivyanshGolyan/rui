@@ -926,7 +926,17 @@ def persistent_copy_case():
 
 def provider_prompt(master):
     # First run is now a committed app frame, not a canonical line prompt.
-    return await_screen(master, "› ChatGPT    API key")
+    return await_screen(master, "Sign in to Rui")
+
+
+def chatgpt_method(master):
+    os.write(master, b"\r")
+    return await_screen(master, "ChatGPT account")
+
+
+def reuse_chatgpt(master):
+    chatgpt_method(master)
+    os.write(master, b"\t\t\r")
 
 
 def terminal_bulk(master, command, marker="› ", *, submit=True, draft=None, caret=None, timeout=15):
@@ -1856,7 +1866,7 @@ def provider_line_cases():
             cwd=state, env={**os.environ, "HOME": str(no_tty)}, input="script task",
             capture_output=True, text=True, timeout=5)
         assert scripted.returncode == 6 and "[store_unavailable]" in scripted.stderr, scripted
-        assert "› ChatGPT    API key" not in scripted.stdout and "Provider: [c]" not in scripted.stdout
+        assert "Sign in to Rui" not in scripted.stdout and "Provider: [c]" not in scripted.stdout
         assert not (no_tty / ".config").exists() and not (no_tty / "store").exists()
         for choice in ("codex", "ready-key", "key", "browser", "device", "escape"):
             home = state / choice
@@ -1866,7 +1876,7 @@ def provider_line_cases():
                 codex_fixture.credentials(config / "codex.json")
                 (config / "openai.key").write_text("fixture-provider-choice-key\n")
                 (config / "openai.key").chmod(0o600)
-            selected_store = home / "store" if choice == "key" else store
+            selected_store = home / "store" if choice in ("key", "ready-key") else store
             master, slave = open_pty()
             original = termios.tcgetattr(slave)
             caller = None
@@ -1881,58 +1891,66 @@ def provider_line_cases():
                     provider_prompt(master)
                     key_file = config / "openai.key"
                     key_before = key_file.read_bytes(), key_file.stat().st_mtime_ns
-                    os.write(master, b"\x1b[C\r" if choice == "ready-key" else b"\r")
+                    if choice == "ready-key":
+                        os.write(master, b"\x1b[C\r")
+                        await_screen(master, "Connect with an API key")
+                        # Blank key reuses its admitted source, but still stages
+                        # an immutable selected-Host pair and proves fresh activation.
+                        os.write(master, b"\t\t\r")
+                    else:
+                        reuse_chatgpt(master)
                     overview_frame(master, overview_title)
-                    provider = "openai" if choice == "ready-key" else "codex"
-                    assert f"provider={provider}\n" in (config / "preferences").read_text()
+                    if choice == "codex":
+                        assert "provider=codex\n" in (config / "preferences").read_text()
+                    else:
+                        assert not (config / "preferences").exists()
+                        entry = json.loads((selected_store / "host.json").read_text())["providers"]["openai"]
+                        assert entry["key"].startswith("file:")
                     assert (key_file.read_bytes(), key_file.stat().st_mtime_ns) == key_before
                 else:
                     offered = provider_prompt(master)
                     assert "API key" in offered and "Provider: [c]" not in offered, offered
                     if choice == "key":
                         os.write(master, b"\x1b[C\r")
-                        await_screen(master, "API key")
-                        os.write(master, b"\r")
-                        read_terminal(master, "Invalid API key")
+                        await_screen(master, "Connect with an API key")
+                        os.write(master, b"\t\t\r")
+                        read_terminal(master, "Enter one API key")
                         os.write(master, b"sk-screen-secret")
-                        masked = read_terminal(master, "••••••••••••••••")
+                        masked = read_terminal(master, "****************")
                         assert "sk-screen-secret" not in masked, masked
-                        os.write(master, b"\r")
+                        os.write(master, b"\t\t\r")
                         overview_frame(master, overview_title)
-                        assert (config / "openai.key").read_text() == "sk-screen-secret\n"
-                        assert "provider=openai\n" in (config / "preferences").read_text()
-                        assert stat.S_IMODE((config / "openai.key").stat().st_mode) == 0o600
+                        entry = json.loads((selected_store / "host.json").read_text())["providers"]["openai"]
+                        key_path = pathlib.Path(entry["key"].removeprefix("file:"))
+                        assert key_path.is_relative_to(selected_store)
+                        assert key_path.read_text() == "sk-screen-secret\n"
+                        assert stat.S_IMODE(key_path.stat().st_mode) == 0o600
+                        assert not (config / "openai.key").exists()
+                        assert not (config / "preferences").exists()
                     elif choice == "browser":
-                        # ChatGPT begins in the browser, on the fixture's
-                        # loopback issuer; a pasted line that is no address
-                        # leaves it waiting, and Esc cancels it.
+                        chatgpt_method(master)
                         os.write(master, b"\r")
-                        waiting = read_terminal(master, "Sign in at 127.0.0.1:1")
-                        assert "tab device code · esc back" in waiting, waiting
+                        waiting = read_terminal(master, "127.0.0.1:1")
+                        assert "Change method" in waiting, waiting
                         os.write(master, b"\x1b[200~not-the-address\x1b[201~")
                         os.write(master, b"\r")
                         stray = read_terminal(master, "Not the sign-in address")
                         assert "not-the-address" not in stray, stray
                         os.write(master, b"\x1b")
-                        read_terminal(master, "› ChatGPT    API key", fresh=True)
+                        read_terminal(master, "ChatGPT account", fresh=True)
                     elif choice == "device":
-                        # Tab while the browser waits switches to a code.
-                        os.write(master, b"\r")
-                        read_terminal(master, "Sign in at 127.0.0.1:1")
-                        os.write(master, b"\t")
+                        chatgpt_method(master)
+                        os.write(master, b"\t\r")
                         waiting = read_terminal(master, "BDL9-KI88H")
-                        assert "auth.openai.com/codex/device · BDL9-KI88H" in waiting, waiting
-                        assert "Waiting for ChatGPT" in waiting, waiting
+                        assert "auth.openai.com/codex/device" in waiting, waiting
+                        assert "Copy code (C)" in waiting, waiting
                         os.write(master, b"\x1b")
-                        read_terminal(master, "› ChatGPT    API key", fresh=True)
+                        read_terminal(master, "ChatGPT account", fresh=True)
                     else:
-                        # Choice typing does nothing. Escape from key entry
-                        # returns to a visibly different choice frame before
-                        # Ctrl-C, so it cannot become an Alt+Ctrl-C sequence.
                         os.write(master, b"hello\x1b[C\r")
-                        read_terminal(master, "esc back")
+                        read_terminal(master, "Connect with an API key")
                         os.write(master, b"\x1b")
-                        read_terminal(master, "←→ choose · enter", fresh=True)
+                        read_terminal(master, "Sign in to Rui", fresh=True)
                 os.write(master, b"\x03")
                 output, errors = terminal_exit(caller, master)
                 assert caller.returncode == 0, (choice, caller.returncode, errors)
@@ -1946,11 +1964,11 @@ def provider_line_cases():
             finally:
                 dispose_all(lambda: stop_process(caller, timeout=5) if caller is not None else None,
                             lambda: run(home, "host", "pause", "--store", selected_store)
-                            if choice == "key" and selected_store.exists() else None,
+                            if choice in ("key", "ready-key") and selected_store.exists() else None,
                             lambda: close_pty(master), lambda: close_pty(slave))
         assert endpoint.requests == [], endpoint.requests
         completed = True
-        print("provider screen: no-TTY, choices, browser stray and back, Tab to device and back, invalid/masked key and restored terminal passed", flush=True)
+        print("provider screen: no-TTY, choices, browser stray and back, guided device and back, scoped invalid/masked key and restored terminal passed", flush=True)
     finally:
         dispose_all(lambda: fixture.stop_host(host) if host is not None else None,
                     endpoint.shutdown, endpoint.server_close, lambda: thread.join(timeout=5))
@@ -2327,7 +2345,7 @@ def main(selected="all"):
             raise
         try:
             offered = provider_prompt(master)
-            assert "› ChatGPT    API key" in offered and "API key" in offered, offered
+            assert "Sign in to Rui" in offered and "API key" in offered, offered
             os.write(master, b"\x03")
             terminal_exit(deferred, master)
             assert deferred.wait(timeout=5) == 0
@@ -2342,27 +2360,33 @@ def main(selected="all"):
         malformed.write_text("version=9\n")
         malformed.chmod(0o600)
         master, slave = open_pty()
+        original_mode = termios.tcgetattr(slave)
         try:
             explicit = spawn([str(fixture.RUI), "--store", str(store),
                 "--provider", "codex", "--model", "gpt-6-luna"], cwd=workspace,
                 env={**os.environ, "HOME": str(explicit_home)},
-                stdin=slave, stdout=slave, stderr=slave)
+                stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         except BaseException:
             dispose_all(lambda: close_pty(master), lambda: close_pty(slave))
             raise
         try:
-            assert "› ChatGPT    API key" in provider_prompt(master)
+            assert "Sign in to Rui" in provider_prompt(master)
             # Another client installs a fixture credential while this caller
             # waits for a choice. Its explicit selectors must still bypass the
             # malformed prospective defaults when it rechecks readiness.
             codex_fixture.credentials(explicit_config / "codex.json")
-            welcome = overview_frame(master, lambda frame: "Sign-in saved; couldn't save default" in frame,
-                                     keys=b"\r", timeout=10, ready=False)
+            reuse_chatgpt(master)
+            welcome = overview_frame(master, lambda frame: "Sign-in saved; couldn't save default" in frame, timeout=10, ready=False)
             assert all(noise not in welcome for noise in ("Session:", "Provider:", "Model:", "request:")), welcome
             assert not (explicit_config / "requests").exists(), "the overview captured a request"
             assert malformed.read_text() == "version=9\n"
-            assert overview_store(leave_overview(master)) == str(store.resolve())
-            assert explicit.wait(timeout=5) == 0
+            os.write(master, b"\x04")
+            output, errors = terminal_exit(explicit, master, timeout=10)
+            assert explicit.returncode == 6, (output, errors)
+            assert errors.count(b"Default not saved (UnsupportedPreferencesVersion).\n") == 1, errors
+            assert errors.count(b"[preferences_invalid]") == 1 and b"HOME/.config/rui/preferences" in errors, errors
+            assert b"Overview: rui --store " not in output + errors, (output, errors)
+            assert os_semantics.user_termios(termios.tcgetattr(slave)) == os_semantics.user_termios(original_mode)
         finally:
             dispose_all(lambda: stop_process(explicit, timeout=5),
                         lambda: close_pty(master), lambda: close_pty(slave))
@@ -2370,26 +2394,32 @@ def main(selected="all"):
         # remains usable for creation.
         (explicit_config / "codex.json").unlink()
         master, slave = open_pty()
+        original_mode = termios.tcgetattr(slave)
         try:
             expiring = spawn([str(fixture.RUI), "--store", str(store),
                 "--provider", "codex", "--model", "gpt-6-luna"], cwd=workspace,
                 env={**os.environ, "HOME": str(explicit_home)},
-                stdin=slave, stdout=slave, stderr=slave)
+                stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         except BaseException:
             dispose_all(lambda: close_pty(master), lambda: close_pty(slave))
             raise
         try:
-            assert "› ChatGPT    API key" in provider_prompt(master)
+            assert "Sign in to Rui" in provider_prompt(master)
             credential_file = explicit_config / "codex.json"
             codex_fixture.credentials(credential_file, access="synthetic-opaque-access")
             renewed_at = int(time.time()) - 8 * 24 * 60 * 60 - 1
             credential_file.write_text(credential_file.read_text().replace("expires_at=4102444800", "expires_at=0").replace("refreshed_at=1750000000", f"refreshed_at={renewed_at}"))
             assert defaults(preferences_home, environment={"RUI_CODEX_CREDENTIAL_FILE": str(credential_file)})["local_credentials"]["codex"] == "renewal_due"
-            welcome = overview_frame(master, lambda frame: "Sign-in saved; couldn't save default" in frame,
-                                     keys=b"\r", ready=False)
+            reuse_chatgpt(master)
+            welcome = overview_frame(master, lambda frame: "Sign-in saved; couldn't save default" in frame, ready=False)
             assert "Session:" not in welcome and "Permission:" not in welcome, welcome
-            leave_overview(master)
-            assert expiring.wait(timeout=5) == 0
+            os.write(master, b"\x04")
+            output, errors = terminal_exit(expiring, master, timeout=10)
+            assert expiring.returncode == 6, (output, errors)
+            assert errors.count(b"Default not saved (UnsupportedPreferencesVersion).\n") == 1, errors
+            assert errors.count(b"[preferences_invalid]") == 1 and b"HOME/.config/rui/preferences" in errors, errors
+            assert b"Overview: rui --store " not in output + errors, (output, errors)
+            assert os_semantics.user_termios(termios.tcgetattr(slave)) == os_semantics.user_termios(original_mode)
             assert malformed.read_text() == "version=9\n"
         finally:
             dispose_all(lambda: stop_process(expiring, timeout=5),
@@ -2411,10 +2441,11 @@ def main(selected="all"):
                     dispose_all(lambda: close_pty(master), lambda: close_pty(slave))
                     raise
                 try:
-                    assert "› ChatGPT    API key" in provider_prompt(master)
+                    assert "Sign in to Rui" in provider_prompt(master)
                     defaults(changing_home, "--store", after)
                     codex_fixture.credentials(changing_home / ".config/rui/codex.json")
-                    welcome = overview_frame(master, overview_title, keys=b"\r")
+                    reuse_chatgpt(master)
+                    welcome = overview_frame(master, overview_title)
                     assert all(noise not in welcome for noise in ("Diagnostics:", "request:", "Session:")), welcome
                     assert overview_store(leave_overview(master)) == str(after.resolve())
                     assert not (changing_home / ".config/rui/requests").exists(), "the overview captured a request"

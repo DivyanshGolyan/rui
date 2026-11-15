@@ -162,22 +162,48 @@ pub fn savedEdit(init: std.process.Init, dir: []const u8, path: []const u8, valu
     var memory: std.heap.ArenaAllocator = .init(wiping.allocator());
     defer memory.deinit();
     const gpa = memory.allocator();
+    const target = try savedPath(init, gpa, dir);
+    var directory = try std.Io.Dir.cwd().createDirPathOpen(init.io, std.fs.path.dirname(target).?, .{ .permissions = .fromMode(0o700) });
+    directory.close(init.io);
+    const buffer = try gpa.alloc(u8, hs.max_document_bytes + 1);
+    const Edit = struct {
+        init: std.process.Init,
+        gpa: std.mem.Allocator,
+        path: []const u8,
+        value: ?[]const u8,
+        failure: *start_report.Failure,
+        fn apply(ctx: @This(), current: ?[]const u8) !?[]const u8 {
+            const init_ = ctx.init;
+            return editSaved(init_, ctx.gpa, ctx.path, ctx.value, ctx.failure, current);
+        }
+    };
+    switch (try credentials.editPrivate(target, buffer, Edit{ .init = init, .gpa = gpa, .path = path, .value = value, .failure = failure }, Edit.apply, null)) {
+        .committed => {},
+        .unconfirmed => |cause| return cause,
+    }
+}
+
+fn editSaved(init: std.process.Init, gpa: std.mem.Allocator, path: []const u8, value: ?[]const u8, failure: *start_report.Failure, current: ?[]const u8) !?[]const u8 {
     const settings = try init.gpa.create(hs.Settings);
     defer init.gpa.destroy(settings);
     settings.* = .{};
     defer settings.deinit();
-    var document = try saved(init, gpa, dir, settings, failure);
+    var document: std.json.Value = .{ .object = .{} };
+    if (current) |bytes| {
+        try hs.apply(settings, init.gpa, bytes, .file, checkPreset, failure);
+        document = try parse(gpa, bytes, failure);
+    }
     if (value) |given| {
         try input(init, settings, path, given, failure);
         const all = try complete(gpa, settings, failure);
         const admitted = lookup(all, path) orelse return invalid(failure, "settings", "assignment did not produce a setting");
         // A Store is one Adapter; selecting another replaces the old arm.
         if (std.mem.startsWith(u8, path, "store.")) {
-            const current = lookup(all, "store").?;
+            const selected_store = lookup(all, "store").?;
             if (document.object.getPtr("store")) |old| {
                 if (old.* == .object) {
                     var keys = old.object.iterator();
-                    while (keys.next()) |entry| if (!current.object.contains(entry.key_ptr.*)) {
+                    while (keys.next()) |entry| if (!selected_store.object.contains(entry.key_ptr.*)) {
                         _ = old.object.swapRemove(entry.key_ptr.*);
                         break;
                     };
@@ -210,11 +236,258 @@ pub fn savedEdit(init: std.process.Init, dir: []const u8, path: []const u8, valu
     if (bytes.len > hs.max_document_bytes) return invalid(failure, "settings", "saved document exceeds the document byte bound");
     settings.deinit();
     try hs.apply(settings, init.gpa, bytes, .file, checkPreset, failure);
+    return bytes;
+}
+
+pub const openai_endpoint = @import("provider_name.zig").api_endpoint;
+pub const EndpointEdit = union(enum) { unchanged: []const u8, base: []const u8 };
+pub const ConnectionKey = union(enum) { provided: []const u8, existing: *const ConnectionInfo };
+pub const Connection = struct {
+    endpoint: protocol.Bounded(@import("endpoint_value.zig").max_endpoint_bytes) = .{},
+    key_file: protocol.Bounded(hs.max_path_bytes) = .{},
+};
+pub const ConnectionSave = union(enum) {
+    saved: Connection,
+    uncertain: struct { connection: Connection, cause: anyerror },
+    failed: struct { cause: anyerror, cleanup: ?struct { cause: anyerror, key_file: protocol.Bounded(hs.max_path_bytes) } = null },
+};
+
+/// One immutable key and one paired sparse document per save. Old managed keys
+/// remain because lockless startup readers may still hold an older document.
+/// Each attempt retains at most max_key_bytes+1 bytes and its private lock file.
+/// Uncertain publication retains the key, never a dangling settings reference.
+pub fn saveConnection(init: std.process.Init, dir: []const u8, endpoint_edit: EndpointEdit, key: ConnectionKey, model: []const u8, publish: *const fn () bool) !ConnectionSave {
+    return saveConnectionWithFault(init, dir, endpoint_edit, key, model, publish, .{});
+}
+
+const ConnectionFault = struct { key: ?credentials.PrivateFault = null, document: ?credentials.PrivateFault = null, cleanup: ?anyerror = null, cleanup_sync: ?anyerror = null };
+
+fn saveConnectionWithFault(init: std.process.Init, dir: []const u8, endpoint_edit: EndpointEdit, key: ConnectionKey, model: []const u8, publish: *const fn () bool, fault: ConnectionFault) !ConnectionSave {
+    if (key == .provided and !api_key.valid(key.provided)) return error.InvalidApiKey;
+    var wiping: secret_value.WipingAllocator = .{ .backing = init.gpa };
+    var memory: std.heap.ArenaAllocator = .init(wiping.allocator());
+    defer memory.deinit();
+    const gpa = memory.allocator();
+    const endpoint = switch (endpoint_edit) {
+        .unchanged => |endpoint| endpoint,
+        .base => |base| try @import("endpoint_value.zig").endpointUnder(gpa, base),
+    };
+    try @import("endpoint_value.zig").validateEndpoint(endpoint);
+    try @import("endpoint_value.zig").validateKeyEndpoint(endpoint, null, false);
+    if (!@import("model_capability.zig").validModelSyntax(model)) return error.InvalidModel;
     const target = try savedPath(init, gpa, dir);
     const parent = std.fs.path.dirname(target).?;
-    var directory = try std.Io.Dir.cwd().createDirPathOpen(init.io, parent, .{ .permissions = .fromMode(0o700) });
-    directory.close(init.io);
-    credentials.publishPrivate(target, bytes) catch return invalid(failure, "settings", "host.json requires a writable private Host directory");
+    var directory = try std.Io.Dir.cwd().createDirPathOpen(init.io, parent, .{ .permissions = .fromMode(0o700), .open_options = .{ .iterate = true } });
+    defer directory.close(init.io);
+    var random: [16]u8 = undefined;
+    try std.Io.randomSecure(init.io, &random);
+    const key_file = try std.fmt.allocPrint(gpa, "{s}/.openai-{s}.key", .{ parent, std.fmt.bytesToHex(random, .lower) });
+    var connection: Connection = .{};
+    try connection.endpoint.set(endpoint);
+    try connection.key_file.set(key_file);
+    const Edit = struct {
+        init: std.process.Init,
+        gpa: std.mem.Allocator,
+        endpoint: []const u8,
+        key_file: []const u8,
+        key: ConnectionKey,
+        dir: []const u8,
+        publish: *const fn () bool,
+        staged: bool = false,
+        key_fault: ?credentials.PrivateFault,
+        fn apply(ctx: *@This(), current: ?[]const u8) !?[]const u8 {
+            const settings = try ctx.init.gpa.create(hs.Settings);
+            defer ctx.init.gpa.destroy(settings);
+            settings.* = .{};
+            defer settings.deinit();
+            var failure: start_report.Failure = undefined;
+            var document: std.json.Value = .{ .object = .{} };
+            if (current) |bytes| {
+                try hs.apply(settings, ctx.init.gpa, bytes, .file, checkPreset, &failure);
+                document = try parse(ctx.gpa, bytes, &failure);
+            }
+            // Reuse the starter's own reachability admission before publishing.
+            try checkStart(ctx.init, .{ .dir = ctx.dir }, &failure);
+            const automatic = !document.object.contains("providers");
+            if (ctx.key == .existing) {
+                if (automatic) {
+                    var entry = try defaultApiEntry(ctx.init) orelse return error.ConnectionSuperseded;
+                    try matchConnectionSource(ctx.init, ctx.key.existing, ctx.endpoint, &entry);
+                } else {
+                    try explicitBaseUrl(ctx.init, settings, &failure);
+                    const entry = if (settings.providers.entries.openai) |*entry| entry else return error.ConnectionSuperseded;
+                    try matchConnectionSource(ctx.init, ctx.key.existing, ctx.endpoint, entry);
+                }
+            }
+            if (automatic) try defaultProviders(ctx.init, settings, &failure);
+            const key_bytes = switch (ctx.key) {
+                .provided => |value| value,
+                .existing => existing: {
+                    try resolveProviders(ctx.init, settings, .{}, &failure);
+                    const entry = settings.providers.entries.openai orelse return error.ApiKeyMissing;
+                    if (!api_key.valid(entry.key.value())) return error.ApiKeyMissing;
+                    // The following source edit wipes the resolved value.
+                    break :existing try ctx.gpa.dupe(u8, entry.key.value());
+                },
+            };
+            try text(settings, ctx.init.gpa, "providers.openai.endpoint", ctx.endpoint, &failure);
+            try assign(settings, ctx.init.gpa, "providers.openai.key", try std.fmt.allocPrint(ctx.gpa, "file:{s}", .{ctx.key_file}), &failure);
+            try assign(settings, ctx.init.gpa, "providers.openai.unauthenticated", "false", &failure);
+            const all = try complete(ctx.gpa, settings, &failure);
+            // Automatic routes become explicit together, never just OpenAI.
+            if (!document.object.contains("providers")) {
+                try put(ctx.gpa, &document, "providers", lookup(all, "providers").?);
+            } else try put(ctx.gpa, &document, "providers.openai", lookup(all, "providers.openai").?);
+            const bytes = try encoded(ctx.gpa, document);
+            if (bytes.len > hs.max_document_bytes) return error.SettingsInvalid;
+            settings.deinit();
+            try hs.apply(settings, ctx.init.gpa, bytes, .file, checkPreset, &failure);
+            // A random generated name is never permission to replace a file.
+            if (std.Io.Dir.cwd().statFile(ctx.init.io, ctx.key_file, .{ .follow_symlinks = false })) |_| return error.PathAlreadyExists else |err| switch (err) {
+                error.FileNotFound => {},
+                else => return err,
+            }
+            if (!ctx.publish()) return error.LoginInterrupted;
+            // No startup reader can reference this new name before document rename.
+            if (!try api_key.create(ctx.key_file, key_bytes, &ctx.staged, ctx.key_fault)) {
+                return error.PathAlreadyExists;
+            }
+            return bytes;
+        }
+    };
+    var edit: Edit = .{ .init = init, .gpa = gpa, .endpoint = endpoint, .key_file = key_file, .key = key, .dir = dir, .publish = publish, .key_fault = fault.key };
+    const buffer = try gpa.alloc(u8, hs.max_document_bytes + 1);
+    const publication = credentials.editPrivate(target, buffer, &edit, Edit.apply, fault.document) catch |err| {
+        var cleanup_error: ?anyerror = null;
+        if (edit.staged) {
+            if (fault.cleanup) |cleanup| cleanup_error = cleanup else std.Io.Dir.cwd().deleteFile(init.io, key_file) catch |cleanup| switch (cleanup) {
+                error.FileNotFound => {},
+                else => cleanup_error = cleanup,
+            };
+            if (cleanup_error == null) {
+                if (fault.cleanup_sync) |cause| cleanup_error = cause else credentials.syncPrivateDirectory(directory) catch |cause| {
+                    cleanup_error = cause;
+                };
+            }
+        }
+        if (edit.staged) return .{ .failed = .{ .cause = err, .cleanup = if (cleanup_error) |cause| .{ .cause = cause, .key_file = connection.key_file } else null } };
+        return err;
+    };
+    return switch (publication) {
+        .committed => .{ .saved = connection },
+        .unconfirmed => |cause| .{ .uncertain = .{ .connection = connection, .cause = cause } },
+    };
+}
+
+/// The frozen pair travels through the starter's existing assignment intake.
+/// Only a private file path, never key bytes, is placed in argv.
+pub fn connectionAssignment(init: std.process.Init, gpa: std.mem.Allocator, connection: *const Connection) ![]const u8 {
+    const settings = try init.gpa.create(hs.Settings);
+    defer init.gpa.destroy(settings);
+    settings.* = .{};
+    defer settings.deinit();
+    var failure: start_report.Failure = undefined;
+    try text(settings, init.gpa, "providers.openai.endpoint", connection.endpoint.slice(), &failure);
+    try assign(settings, init.gpa, "providers.openai.key", try std.fmt.allocPrint(gpa, "file:{s}", .{connection.key_file.slice()}), &failure);
+    try assign(settings, init.gpa, "providers.openai.unauthenticated", "false", &failure);
+    const all = try complete(gpa, settings, &failure);
+    return std.fmt.allocPrint(gpa, "providers.openai={s}", .{try encoded(gpa, lookup(all, "providers.openai").?)});
+}
+
+/// Confirms the retained pair through the same saved-document owner. A later
+/// writer wins: recheck never overwrites a different connection. Re-publication
+/// confirms durability after an uncertain rename without another key install.
+pub fn confirmConnection(init: std.process.Init, dir: []const u8, connection: *const Connection) !bool {
+    var wiping: secret_value.WipingAllocator = .{ .backing = init.gpa };
+    var memory: std.heap.ArenaAllocator = .init(wiping.allocator());
+    defer memory.deinit();
+    const gpa = memory.allocator();
+    const Check = struct {
+        init: std.process.Init,
+        connection: *const Connection,
+        matches: bool = false,
+        fn apply(ctx: *@This(), current: ?[]const u8) !?[]const u8 {
+            const bytes = current orelse return null;
+            const settings = try ctx.init.gpa.create(hs.Settings);
+            defer ctx.init.gpa.destroy(settings);
+            settings.* = .{};
+            defer settings.deinit();
+            var failure: start_report.Failure = undefined;
+            try hs.apply(settings, ctx.init.gpa, bytes, .file, checkPreset, &failure);
+            const entry = settings.providers.entries.openai orelse return null;
+            const endpoint = if (entry.endpoint) |*value| value.slice() else openai_endpoint;
+            if (entry.key.source != .file or entry.unauthenticated.value or !std.mem.eql(u8, endpoint, ctx.connection.endpoint.slice()) or !std.mem.eql(u8, entry.key.source.file.slice(), ctx.connection.key_file.slice())) return null;
+            ctx.matches = true;
+            return bytes;
+        }
+    };
+    var check: Check = .{ .init = init, .connection = connection };
+    const result = try credentials.editPrivate(try savedPath(init, gpa, dir), try gpa.alloc(u8, hs.max_document_bytes + 1), &check, Check.apply, null);
+    return check.matches and result == .committed;
+}
+
+pub const ConnectionInfo = struct {
+    endpoint: protocol.Bounded(@import("endpoint_value.zig").max_endpoint_bytes) = .{},
+    readiness: @import("provider_selection.zig").Readiness = .missing,
+    key_source: ?@FieldType(hs.Secret(.provider_saved), "source") = null,
+    unauthenticated: bool = false,
+    pub fn reusable(self: *const @This()) bool {
+        return self.readiness.usable() and !self.unauthenticated and self.key_source != null;
+    }
+    pub fn custom(self: *const @This()) bool {
+        return !std.mem.eql(u8, self.endpoint.slice(), openai_endpoint);
+    }
+};
+
+fn matchConnectionSource(init: std.process.Init, expected: *const ConnectionInfo, endpoint: []const u8, entry: *hs.ProviderEntry(.api_key)) !void {
+    const current_endpoint = if (entry.endpoint) |*value| value.slice() else openai_endpoint;
+    if (!expected.reusable() or entry.unauthenticated.value or !std.mem.eql(u8, expected.endpoint.slice(), endpoint) or !std.mem.eql(u8, current_endpoint, endpoint)) return error.ConnectionSuperseded;
+    try defaultKeySource(init, &entry.key);
+    const source = expected.key_source.?;
+    if (std.meta.activeTag(source) != std.meta.activeTag(entry.key.source)) return error.ConnectionSuperseded;
+    const same = switch (source) {
+        .file => |*file| std.mem.eql(u8, file.slice(), entry.key.source.file.slice()),
+        .env => |*name| std.mem.eql(u8, name.slice(), entry.key.source.env.slice()),
+        .default, .literal => false,
+    };
+    if (!same) return error.ConnectionSuperseded;
+}
+
+fn defaultKeySource(init: std.process.Init, key: *hs.Secret(.provider_saved)) !void {
+    if (key.source != .default) return;
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = api_key.path(init.environ_map, &path_buffer) catch |err| return if (err == error.HomeRequired) error.HomeUnavailable else err;
+    key.source = .{ .file = .{} };
+    try key.source.file.text.set(path);
+}
+
+/// The TUI reads the same effective provider sources as the next bare starter.
+/// This resolves local sources only and never authenticates over the network.
+pub fn inspectConnection(init: std.process.Init, dir: []const u8) !ConnectionInfo {
+    const settings = try init.gpa.create(hs.Settings);
+    defer init.gpa.destroy(settings);
+    settings.* = .{};
+    defer settings.deinit();
+    var problem: cli_args.Refusal = undefined;
+    const parsed = try cli_args.Command.host_serve.definition().parse(&.{}, init.arena.allocator(), &problem);
+    var fixtures: providers.Fixtures = .{};
+    var failure: start_report.Failure = undefined;
+    try fillAt(init, &parsed, dir, settings, &fixtures, &failure);
+    var result: ConnectionInfo = .{};
+    try result.endpoint.set(if (settings.providers.entries.openai) |*entry| if (entry.endpoint) |*value| value.slice() else openai_endpoint else openai_endpoint);
+    if (settings.providers.entries.openai) |*entry| {
+        result.unauthenticated = entry.unauthenticated.value;
+        if (!entry.unauthenticated.value) {
+            try defaultKeySource(init, &entry.key);
+            result.key_source = entry.key.source;
+        }
+    } else return result;
+    resolveProviders(init, settings, fixtures, &failure) catch {
+        result.readiness = .credential_error;
+        return result;
+    };
+    result.readiness = .configured;
+    return result;
 }
 
 pub fn showSaved(init: std.process.Init, dir: []const u8, out: *std.Io.Writer, failure: *start_report.Failure) !void {
@@ -256,20 +529,27 @@ fn defaultProviders(init: std.process.Init, settings: *hs.Settings, failure: *st
         if (usable) serve: {
             const at = "providers." ++ @tagName(provider);
             if (comptime provider.facts().credential == .api_key) {
-                if (init.environ_map.get(providers.openai_base_url_variable)) |base| {
-                    const endpoint = providers.endpointUnder(init.gpa, base) catch |err| {
-                        if (err != error.InvalidBaseUrl) return err;
-                        stderr.diagnostic(@import("host_launch.zig").invalid_base_url ++ "; this Host starts without {s}.\n", .{provider.shown()});
-                        break :serve;
-                    };
-                    defer init.gpa.free(endpoint);
-                    try text(settings, init.gpa, at ++ ".endpoint", endpoint, failure);
-                    break :serve;
-                }
+                @field(settings.providers.entries, @tagName(provider)) = try defaultApiEntry(init) orelse break :serve;
+                break :serve;
             }
             try assign(settings, init.gpa, at, "{}", failure);
         }
     }
+}
+
+fn defaultApiEntry(init: std.process.Init) !?hs.ProviderEntry(.api_key) {
+    var entry: hs.ProviderEntry(.api_key) = .{};
+    if (init.environ_map.get(providers.openai_base_url_variable)) |base| {
+        const endpoint = providers.endpointUnder(init.gpa, base) catch |err| {
+            if (err != error.InvalidBaseUrl) return err;
+            stderr.diagnostic(@import("host_launch.zig").invalid_base_url ++ "; this Host starts without {s}.\n", .{protocol.Provider.openai.shown()});
+            return null;
+        };
+        defer init.gpa.free(endpoint);
+        entry.endpoint = .{};
+        try entry.endpoint.?.text.set(endpoint);
+    }
+    return entry;
 }
 
 /// RUI_OPENAI_BASE_URL moves an explicitly served `openai` that names no
@@ -430,10 +710,7 @@ pub fn resolveProviders(init: std.process.Init, settings: *hs.Settings, fixtures
                     // saved default is the flag Host's environment, so it keeps
                     // that Host's existing diagnostics, causes and exits.
                     if (entry.key.source == .default) {
-                        var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-                        const path = api_key.path(init.environ_map, &path_buffer) catch |err| return if (err == error.HomeRequired) error.HomeUnavailable else err;
-                        entry.key.source = .{ .file = .{} };
-                        try entry.key.source.file.text.set(path);
+                        try defaultKeySource(init, &entry.key);
                         resolve(init, &entry.key) catch |err| {
                             if (err == error.ApiKeyMissing) stderr.diagnostic("rui: no OpenAI API key; save one with `" ++ comptime protocol.Provider.openai.login().? ++ "`, then start the Host again.\n", .{});
                             return err;
@@ -1130,14 +1407,15 @@ test "Host start unset retains exact provider sets and selected Store arms" {
 
 // ---- One detached starter ----------------------------------------------------
 const HostLaunchResult = @import("host_launch.zig").Result;
-extern "c" fn rui_launch_detached_reported(executable: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, argc: usize, startup_read: *c_int, report_read: *c_int) c_int;
+extern "c" fn rui_launch_detached_reported(executable: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, argc: usize, startup_read: *c_int, report_read: *c_int, launched_pid: *c_int, launched_started: *c_ulonglong) c_int;
 pub const Progress = struct { context: *anyopaque, report: *const fn (*anyopaque, []const u8) void };
 /// `settings_file` is an absolute FILE; a pipe document cannot reach a detached child.
 pub const Spawn = struct { dir: []const u8, settings_file: ?[]const u8 = null, assignments: []const []const u8 = &.{} };
 pub const Ops = struct {
     context: ?*anyopaque = null,
     observe: *const fn (?*anyopaque, std.Io, *const platform.Paths, ?i128) @import("protocol_reply.zig").HostStatus = nativeObserve,
-    launch: *const fn (?*anyopaque, [*:0]const u8, [*:null]const ?[*:0]const u8, usize, *c_int, *c_int) c_int = nativeLaunch,
+    launch: *const fn (?*anyopaque, [*:0]const u8, [*:null]const ?[*:0]const u8, usize, *c_int, *c_int, *c_int, *c_ulonglong) c_int = nativeLaunch,
+    verify: *const fn (?*anyopaque, std.Io, *const platform.Paths, c_int, u64, []const u8, ?i128, *@import("protocol_reply.zig").HostInfoFacts) bool = nativeVerify,
     read: *const fn (?*anyopaque, c_int, []u8) isize = nativeRead,
     now: *const fn (?*anyopaque, std.Io) i96 = nativeNow,
     pause: *const fn (?*anyopaque, std.Io, u64) anyerror!void = nativePause,
@@ -1145,8 +1423,19 @@ pub const Ops = struct {
     fn nativeObserve(_: ?*anyopaque, io: std.Io, paths: *const platform.Paths, until: ?i128) @import("protocol_reply.zig").HostStatus {
         return @import("client.zig").hostStatusAt(io, paths, until);
     }
-    fn nativeLaunch(_: ?*anyopaque, executable: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, argc: usize, startup_read: *c_int, report_read: *c_int) c_int {
-        return rui_launch_detached_reported(executable, argv, argc, startup_read, report_read);
+    fn nativeLaunch(_: ?*anyopaque, executable: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, argc: usize, startup_read: *c_int, report_read: *c_int, pid: *c_int, started: *c_ulonglong) c_int {
+        return rui_launch_detached_reported(executable, argv, argc, startup_read, report_read, pid, started);
+    }
+    fn nativeVerify(_: ?*anyopaque, io: std.Io, paths: *const platform.Paths, pid: c_int, started: u64, executable: []const u8, until: ?i128, facts: *@import("protocol_reply.zig").HostInfoFacts) bool {
+        if (pid <= 0 or started == 0) return false;
+        const observed = @import("client.zig").observeHostProcess(io, paths.store.slice(), until) catch return false;
+        if (observed.pid != pid) return false;
+        const identity = @import("host_identity.zig");
+        var snapshot = identity.snapshot(std.heap.c_allocator, observed.pid) catch return false;
+        defer snapshot.deinit(std.heap.c_allocator);
+        if (!identity.matchesLaunch(pid, started, &snapshot, executable)) return false;
+        facts.* = observed.ready;
+        return true;
     }
     fn nativeRead(_: ?*anyopaque, fd: c_int, bytes: []u8) isize {
         return std.c.read(fd, bytes.ptr, bytes.len);
@@ -1465,7 +1754,9 @@ pub noinline fn spawn(init: std.process.Init, typed: Spawn, ops: Ops, progress: 
     }
     var startup_read: c_int = -1;
     var report_read: c_int = -1;
-    const launched = ops.launch(ops.context, argv[0].?, argv.ptr, argc, &startup_read, &report_read);
+    var launched_pid: c_int = 0;
+    var launched_started: c_ulonglong = 0;
+    const launched = ops.launch(ops.context, argv[0].?, argv.ptr, argc, &startup_read, &report_read, &launched_pid, &launched_started);
     defer if (report_read >= 0) {
         _ = std.c.close(report_read);
     };
@@ -1531,7 +1822,9 @@ pub noinline fn spawn(init: std.process.Init, typed: Spawn, ops: Ops, progress: 
                 const lost = refusal != null and refusal.?.code == .store_locked;
                 if (lost) result.startup_len = 0;
                 if (std.mem.indexOf(u8, result.startup(), @import("host_launch.zig").invalid_base_url) != null) result.warning = .invalid_openai_base_url;
-                return launchReady(result, ready, &paths, lost);
+                var facts = ready;
+                const exact = !lost and ops.verify(ops.context, io, &paths, launched_pid, launched_started, executable_buffer[0..length], until, &facts);
+                return launchReady(result, facts, &paths, !exact);
             },
             .incompatible => return launchFailure(result, .incompatible, error.IncompatibleHost, paths.store.slice()),
             .access_failure => return launchFailure(result, .store_access, error.StoreAccessFailed, paths.store.slice()),
@@ -1814,5 +2107,409 @@ test "Host start starter refuses settings that move the Host away from its direc
             try once;
             try saved_result;
         }
+    }
+}
+
+test "Host start guided connection isolates two Stores preserves providers and freezes the pair" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const home = home_buffer[0..try tmp.dir.realPath(io, &home_buffer)];
+    var environment: std.process.Environ.Map = .init(std.testing.allocator);
+    defer environment.deinit();
+    try environment.put("HOME", home);
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const init = initForTest(&arena, &environment);
+    const a = arena.allocator();
+    const first_dir = try std.fs.path.join(a, &.{ home, "first" });
+    const other_dir = try std.fs.path.join(a, &.{ home, "other" });
+    try provider_login.key(init, "global-key-kept");
+    var failure: start_report.Failure = undefined;
+    try savedEdit(init, first_dir, "providers", "{\"codex\":{},\"chatgpt\":{}}", &failure);
+    try savedEdit(init, first_dir, "execution.activeCapacity", "7", &failure);
+    const Gate = struct {
+        fn yes() bool {
+            return true;
+        }
+        fn no() bool {
+            return false;
+        }
+    };
+    const first = try saveConnection(init, first_dir, .{ .base = "https://one.example/v1" }, .{ .provided = "first-private-key" }, "vendor-chat-v1", Gate.yes);
+    try std.testing.expect(first == .saved);
+    try std.testing.expectEqualStrings("https://one.example/v1/responses", first.saved.endpoint.slice());
+    const info = try inspectConnection(init, first_dir);
+    try std.testing.expect(info.custom());
+    try std.testing.expect(info.readiness.usable());
+    const other = try inspectConnection(init, other_dir);
+    try std.testing.expect(!other.custom());
+    try std.testing.expect(other.readiness.usable());
+    var key: api_key.Key = .{};
+    defer key.wipe();
+    var key_path: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    try std.testing.expect(try api_key.read(try api_key.path(&environment, &key_path), &key));
+    try std.testing.expectEqualStrings("global-key-kept", key.slice());
+    try std.testing.expect(try api_key.read(first.saved.key_file.slice(), &key));
+    try std.testing.expectEqualStrings("first-private-key", key.slice());
+    try std.testing.expectEqual(@as(u16, 0o600), (try std.Io.Dir.cwd().statFile(io, first.saved.key_file.slice(), .{})).permissions.toMode() & 0o777);
+    const settings = try std.testing.allocator.create(hs.Settings);
+    defer std.testing.allocator.destroy(settings);
+    settings.* = .{};
+    defer settings.deinit();
+    const parsed = try parseForTest(a, &.{});
+    var fixtures: providers.Fixtures = .{};
+    try fillAt(init, &parsed, first_dir, settings, &fixtures, &failure);
+    try std.testing.expect(settings.providers.entries.codex != null and settings.providers.entries.chatgpt != null);
+    try std.testing.expectEqual(@as(usize, 7), settings.execution.active_capacity.value);
+    try std.testing.expect(!settings.providers.entries.openai.?.unauthenticated.value);
+    try std.testing.expectEqualStrings(first.saved.key_file.slice(), settings.providers.entries.openai.?.key.source.file.slice());
+    try std.testing.expect(try confirmConnection(init, first_dir, &first.saved));
+    const second = try saveConnection(init, first_dir, .{ .base = "https://two.example/api" }, .{ .provided = "second-private-key" }, "other-chat", Gate.yes);
+    try std.testing.expect(second == .saved);
+    try std.testing.expect(!std.mem.eql(u8, first.saved.key_file.slice(), second.saved.key_file.slice()));
+    try std.testing.expect(!try confirmConnection(init, first_dir, &first.saved));
+    try std.testing.expect(try api_key.read(first.saved.key_file.slice(), &key));
+    try std.testing.expectEqualStrings("first-private-key", key.slice());
+    const assignment = try connectionAssignment(init, a, &first.saved);
+    try std.testing.expect(std.mem.indexOf(u8, assignment, "first-private-key") == null);
+    settings.deinit();
+    settings.* = .{};
+    const intent = try readSources(init, .{ .dir = first_dir, .assignments = &.{assignment} }, settings, &failure);
+    try finishSources(init, settings, intent, &failure);
+    try std.testing.expectEqualStrings(first.saved.endpoint.slice(), settings.providers.entries.openai.?.endpoint.?.slice());
+    try std.testing.expectEqualStrings(first.saved.key_file.slice(), settings.providers.entries.openai.?.key.source.file.slice());
+    try std.testing.expectError(error.LoginInterrupted, saveConnection(init, first_dir, .{ .base = "https://cancelled.example" }, .{ .provided = "cancelled-key" }, "valid-chat", Gate.no));
+    try std.testing.expect(try confirmConnection(init, first_dir, &second.saved));
+    for ([_][]const u8{ "", "two words", "bad\nkey" }) |invalid_key| try std.testing.expectError(error.InvalidApiKey, saveConnection(init, first_dir, .{ .base = "https://unused.example" }, .{ .provided = invalid_key }, "valid-chat", Gate.yes));
+    for ([_][]const u8{ "http://host", "https://user@host", "https://host?q=1", "https://host#fragment" }) |base| try std.testing.expectError(error.InvalidBaseUrl, saveConnection(init, first_dir, .{ .base = base }, .{ .provided = "valid-key" }, "valid-chat", Gate.yes));
+    try std.testing.expect(try confirmConnection(init, first_dir, &second.saved));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, ".config/rui/preferences", .{}));
+}
+
+test "Host start guided connection materializes automatic routes and reuses the effective private source" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const home = home_buffer[0..try tmp.dir.realPath(io, &home_buffer)];
+    var environment: std.process.Environ.Map = .init(std.testing.allocator);
+    defer environment.deinit();
+    try environment.put("HOME", home);
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const init = initForTest(&arena, &environment);
+    try environment.put("GUIDED_EXISTING_KEY", "from-environment");
+    const dir = try std.fs.path.join(arena.allocator(), &.{ home, "store" });
+    var failure: start_report.Failure = undefined;
+    const Gate = struct {
+        fn yes() bool {
+            return true;
+        }
+    };
+    const first = try saveConnection(init, dir, .{ .base = "https://example.test" }, .{ .provided = "first-key" }, "custom-chat", Gate.yes);
+    try std.testing.expect(first == .saved);
+    const settings = try std.testing.allocator.create(hs.Settings);
+    defer std.testing.allocator.destroy(settings);
+    settings.* = .{};
+    defer settings.deinit();
+    const document = try saved(init, arena.allocator(), dir, settings, &failure);
+    try std.testing.expect(document.object.contains("providers"));
+    try std.testing.expect(settings.providers.entries.chatgpt == null and settings.providers.entries.codex != null);
+    try savedEdit(init, dir, "providers.openai.key", "env:GUIDED_EXISTING_KEY", &failure);
+    const reuse = try inspectConnection(init, dir);
+    try std.testing.expect(reuse.reusable());
+    const second = try saveConnection(init, dir, .{ .unchanged = first.saved.endpoint.slice() }, .{ .existing = &reuse }, "custom-chat", Gate.yes);
+    try std.testing.expect(second == .saved);
+    var key: api_key.Key = .{};
+    defer key.wipe();
+    try std.testing.expect(try api_key.read(second.saved.key_file.slice(), &key));
+    try std.testing.expectEqualStrings("from-environment", key.slice());
+    // Automatic browser routing is conditional on a usable local credential.
+    // A fresh HOME above has none; this second independent Host does.
+    var browser_path: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const browser = try provider_login.credentialPath(init, .chatgpt, &browser_path, true);
+    const record = try init.gpa.create(credentials.Record);
+    defer init.gpa.destroy(record);
+    record.* = .{ .generation = 0, .account_id = .{}, .id_token = .{}, .access_token = .{}, .refresh_token = .{}, .expires_at = 4_102_444_800, .refreshed_at = 1 };
+    defer std.crypto.secureZero(u8, std.mem.asBytes(record));
+    try record.account_id.set(codex_auth.fixture_account_id);
+    try record.id_token.set(codex_auth.fixture_id_token);
+    try record.access_token.set(codex_auth.fixture_access_token);
+    try record.refresh_token.set("fixture-refresh");
+    const scratch = try init.gpa.create(credentials.Scratch);
+    defer init.gpa.destroy(scratch);
+    try credentials.install(browser, record, null, scratch);
+    const browser_dir = try std.fs.path.join(arena.allocator(), &.{ home, "browser-host" });
+    const third = try saveConnection(init, browser_dir, .{ .base = "https://browser.example/v1" }, .{ .provided = "third-key" }, "custom-chat", Gate.yes);
+    try std.testing.expect(third == .saved);
+    settings.deinit();
+    settings.* = .{};
+    _ = try saved(init, arena.allocator(), browser_dir, settings, &failure);
+    try std.testing.expect(settings.providers.entries.chatgpt != null and settings.providers.entries.codex != null);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, ".config/rui/openai.key", .{}));
+}
+
+test "Host start guided connection distinguishes key sync settings sync and retained cleanup identity" {
+    const Gate = struct {
+        fn yes() bool {
+            return true;
+        }
+    };
+    for ([_]ConnectionFault{
+        .{ .key = .write },
+        .{ .key = .file_sync },
+        .{ .key = .rename },
+        .{ .key = .directory_sync },
+        .{ .document = .write },
+        .{ .document = .file_sync },
+        .{ .document = .rename },
+        .{ .document = .directory_sync },
+        .{ .document = .write, .cleanup = error.AccessDenied },
+        .{ .document = .write, .cleanup_sync = error.DirectorySyncFailed },
+    }) |fault| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const home = home_buffer[0..try tmp.dir.realPath(std.testing.io, &home_buffer)];
+        var environment: std.process.Environ.Map = .init(std.testing.allocator);
+        defer environment.deinit();
+        try environment.put("HOME", home);
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const init = initForTest(&arena, &environment);
+        const dir = try std.fs.path.join(arena.allocator(), &.{ home, "host" });
+        var failure: start_report.Failure = undefined;
+        try savedEdit(init, dir, "execution.activeCapacity", "7", &failure);
+        const saved_path = try savedPath(init, arena.allocator(), dir);
+        var before: [hs.max_document_bytes + 1]u8 = undefined;
+        const old = try arena.allocator().dupe(u8, (try credentials.readPrivate(saved_path, &before)).?);
+        const operation = saveConnectionWithFault(init, dir, .{ .base = "https://custom.example/v1" }, .{ .provided = "private-fixture-key" }, "custom-model", Gate.yes, fault);
+        if (fault.key != null and fault.key != .directory_sync) {
+            try std.testing.expectError(switch (fault.key.?) {
+                .write => error.InjectedCredentialWriteFailure,
+                .file_sync => error.InjectedCredentialFileSyncFailure,
+                .rename => error.InjectedCredentialRenameFailure,
+                .directory_sync => unreachable,
+            }, operation);
+            var intact: [hs.max_document_bytes + 1]u8 = undefined;
+            try std.testing.expectEqualStrings(old, (try credentials.readPrivate(saved_path, &intact)).?);
+            continue;
+        }
+        const result = try operation;
+        var after: [hs.max_document_bytes + 1]u8 = undefined;
+        const document = (try credentials.readPrivate(saved_path, &after)).?;
+        if (fault.document == .directory_sync) {
+            try std.testing.expectEqual(error.InjectedCredentialDirectorySyncFailure, result.uncertain.cause);
+            try std.testing.expect(try api_key.present(result.uncertain.connection.key_file.slice()));
+            try std.testing.expect(std.mem.indexOf(u8, document, result.uncertain.connection.key_file.slice()) != null);
+            try std.testing.expect(try confirmConnection(init, dir, &result.uncertain.connection));
+        } else {
+            try std.testing.expect(result == .failed);
+            try std.testing.expectEqualStrings(old, document);
+            try std.testing.expectEqual(if (fault.key != null) error.InjectedCredentialDirectorySyncFailure else switch (fault.document.?) {
+                .write => error.InjectedCredentialWriteFailure,
+                .file_sync => error.InjectedCredentialFileSyncFailure,
+                .rename => error.InjectedCredentialRenameFailure,
+                .directory_sync => unreachable,
+            }, result.failed.cause);
+            const cleanup_cause: ?anyerror = if (fault.cleanup != null) fault.cleanup else fault.cleanup_sync;
+            if (cleanup_cause) |cause| {
+                try std.testing.expectEqual(cause, result.failed.cleanup.?.cause);
+                const retained = result.failed.cleanup.?.key_file.slice();
+                try std.testing.expect(std.mem.startsWith(u8, retained, dir));
+                try std.testing.expectEqual(fault.cleanup != null, try api_key.present(retained));
+                try std.testing.expect(std.mem.indexOf(u8, document, retained) == null);
+            } else {
+                try std.testing.expect(result.failed.cleanup == null);
+                var directory = try std.Io.Dir.cwd().openDir(init.io, dir, .{ .iterate = true });
+                defer directory.close(init.io);
+                var entries = directory.iterate();
+                while (try entries.next(init.io)) |entry| try std.testing.expect(!std.mem.endsWith(u8, entry.name, ".key"));
+            }
+        }
+        // Neither phase ever touches the global credential owner.
+        var key_path: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        try std.testing.expect(!try api_key.present(try api_key.path(&environment, &key_path)));
+    }
+}
+
+test "Host start guided reuse refuses source-only and auth-only supersession before chosen key resolution or publication" {
+    const Change = enum { source, unauthenticated };
+    const Gate = struct {
+        var calls: usize = 0;
+        fn publish() bool {
+            calls += 1;
+            return true;
+        }
+        fn yes() bool {
+            return true;
+        }
+    };
+    for (std.enums.values(Change)) |change| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const home = path_buffer[0..try tmp.dir.realPath(std.testing.io, &path_buffer)];
+        var env: std.process.Environ.Map = .init(std.testing.allocator);
+        defer env.deinit();
+        try env.put("HOME", home);
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const init = initForTest(&arena, &env);
+        try provider_login.key(init, "global-key-kept");
+        const dir = try std.fs.path.join(arena.allocator(), &.{ home, "host" });
+        const first = try saveConnection(init, dir, .{ .base = "https://first.example/v1" }, .{ .provided = "first-key" }, "custom-model", Gate.yes);
+        const admitted = try inspectConnection(init, dir);
+        try std.testing.expect(admitted.reusable());
+        if (change == .unauthenticated) {
+            var failure: start_report.Failure = undefined;
+            try savedEdit(init, dir, "providers.openai.unauthenticated", "true", &failure);
+        } else {
+            const second = try saveConnection(init, dir, .{ .base = "https://first.example/v1" }, .{ .provided = "second-key" }, "custom-model", Gate.yes);
+            // An attempted resolution of the superseding source would fail.
+            // Supersession must win before even asking that source for bytes.
+            try std.Io.Dir.cwd().deleteFile(init.io, second.saved.key_file.slice());
+        }
+        const target = try savedPath(init, arena.allocator(), dir);
+        var before: [hs.max_document_bytes + 1]u8 = undefined;
+        const bytes = try arena.allocator().dupe(u8, (try credentials.readPrivate(target, &before)).?);
+        Gate.calls = 0;
+        try std.testing.expectError(error.ConnectionSuperseded, saveConnection(init, dir, .{ .unchanged = admitted.endpoint.slice() }, .{ .existing = &admitted }, "custom-model", Gate.publish));
+        try std.testing.expectEqual(@as(usize, 0), Gate.calls);
+        var after: [hs.max_document_bytes + 1]u8 = undefined;
+        try std.testing.expectEqualStrings(bytes, (try credentials.readPrivate(target, &after)).?);
+        var key: api_key.Key = .{};
+        defer key.wipe();
+        try std.testing.expect(try api_key.read(first.saved.key_file.slice(), &key));
+        try std.testing.expectEqualStrings("first-key", key.slice());
+        try std.testing.expect(try api_key.read(try api_key.path(&env, &path_buffer), &key));
+        try std.testing.expectEqualStrings("global-key-kept", key.slice());
+        var directory = try std.Io.Dir.cwd().openDir(init.io, dir, .{ .iterate = true });
+        defer directory.close(init.io);
+        var entries = directory.iterate();
+        var keys: usize = 0;
+        while (try entries.next(init.io)) |entry| if (std.mem.endsWith(u8, entry.name, ".key")) {
+            keys += 1;
+            try std.testing.expectEqualStrings(std.fs.path.basename(first.saved.key_file.slice()), entry.name);
+        };
+        try std.testing.expectEqual(@as(usize, 1), keys);
+    }
+}
+
+test "Host start guided reuse refuses endpoint-only supersession with unchanged file env and default authority" {
+    const Source = enum { file, env, default };
+    const Gate = struct {
+        var calls: usize = 0;
+        fn publish() bool {
+            calls += 1;
+            return true;
+        }
+    };
+    for (std.enums.values(Source)) |source| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const home = home_buffer[0..try tmp.dir.realPath(std.testing.io, &home_buffer)];
+        var env: std.process.Environ.Map = .init(std.testing.allocator);
+        defer env.deinit();
+        try env.put("HOME", home);
+        try env.put("GUIDED_ENDPOINT_KEY", "environment-key");
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const init = initForTest(&arena, &env);
+        try provider_login.key(init, "global-key-kept");
+        var key_path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const key_path = try api_key.path(&env, &key_path_buffer);
+        const dir = try std.fs.path.join(arena.allocator(), &.{ home, "host" });
+        var failure: start_report.Failure = undefined;
+        try savedEdit(init, dir, "providers", "{\"openai\":{}}", &failure);
+        try savedEdit(init, dir, "providers.openai.endpoint", "https://first.example/v1/responses", &failure);
+        switch (source) {
+            .file => try savedEdit(init, dir, "providers.openai.key", try std.fmt.allocPrint(arena.allocator(), "file:{s}", .{key_path}), &failure),
+            .env => try savedEdit(init, dir, "providers.openai.key", "env:GUIDED_ENDPOINT_KEY", &failure),
+            .default => {},
+        }
+        const admitted = try inspectConnection(init, dir);
+        try std.testing.expect(admitted.reusable());
+        try std.testing.expect(!admitted.unauthenticated);
+        // Only the endpoint changes. Source kind, value and auth stay fixed.
+        try savedEdit(init, dir, "providers.openai.endpoint", "https://second.example/v2/responses", &failure);
+        const superseding = try inspectConnection(init, dir);
+        try std.testing.expect(superseding.reusable() and !superseding.unauthenticated);
+        try std.testing.expectEqualStrings("https://second.example/v2/responses", superseding.endpoint.slice());
+        switch (source) {
+            .file, .default => {
+                try std.testing.expectEqualStrings(key_path, admitted.key_source.?.file.slice());
+                try std.testing.expectEqualStrings(key_path, superseding.key_source.?.file.slice());
+            },
+            .env => {
+                try std.testing.expectEqualStrings("GUIDED_ENDPOINT_KEY", admitted.key_source.?.env.slice());
+                try std.testing.expectEqualStrings("GUIDED_ENDPOINT_KEY", superseding.key_source.?.env.slice());
+            },
+        }
+        const target = try savedPath(init, arena.allocator(), dir);
+        var before: [hs.max_document_bytes + 1]u8 = undefined;
+        const bytes = try arena.allocator().dupe(u8, (try credentials.readPrivate(target, &before)).?);
+        // A bypass of just the endpoint comparison must reach a different
+        // source failure, not be masked by a second authority mismatch.
+        if (source == .env) try env.put("GUIDED_ENDPOINT_KEY", "invalid key bytes") else try std.Io.Dir.cwd().deleteFile(init.io, key_path);
+        Gate.calls = 0;
+        try std.testing.expectError(error.ConnectionSuperseded, saveConnection(init, dir, .{ .unchanged = admitted.endpoint.slice() }, .{ .existing = &admitted }, "custom-model", Gate.publish));
+        try std.testing.expectEqual(@as(usize, 0), Gate.calls);
+        var after: [hs.max_document_bytes + 1]u8 = undefined;
+        try std.testing.expectEqualStrings(bytes, (try credentials.readPrivate(target, &after)).?);
+        if (source == .env) {
+            var key: api_key.Key = .{};
+            defer key.wipe();
+            try std.testing.expect(try api_key.read(key_path, &key));
+            try std.testing.expectEqualStrings("global-key-kept", key.slice());
+            try std.testing.expectEqualStrings("invalid key bytes", env.get("GUIDED_ENDPOINT_KEY").?);
+        } else try std.testing.expect(!try api_key.present(key_path));
+        var directory = try std.Io.Dir.cwd().openDir(init.io, dir, .{ .iterate = true });
+        defer directory.close(init.io);
+        var entries = directory.iterate();
+        while (try entries.next(init.io)) |entry| try std.testing.expect(!std.mem.endsWith(u8, entry.name, ".key"));
+    }
+}
+
+test "Host start guided reuse admits equivalent automatic omitted endpoint env base and default file sources" {
+    const Source = enum { automatic, omitted_endpoint, explicit_file };
+    const Gate = struct {
+        fn yes() bool {
+            return true;
+        }
+    };
+    for (std.enums.values(Source)) |source| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const home = home_buffer[0..try tmp.dir.realPath(std.testing.io, &home_buffer)];
+        var env: std.process.Environ.Map = .init(std.testing.allocator);
+        defer env.deinit();
+        try env.put("HOME", home);
+        try env.put(providers.openai_base_url_variable, "https://effective.example/v1");
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const init = initForTest(&arena, &env);
+        try provider_login.key(init, "global-source-key");
+        const dir = try std.fs.path.join(arena.allocator(), &.{ home, "host" });
+        var failure: start_report.Failure = undefined;
+        try savedEdit(init, dir, if (source == .automatic) "execution.activeCapacity" else "providers", if (source == .automatic) "7" else "{\"openai\":{}}", &failure);
+        const admitted = try inspectConnection(init, dir);
+        try std.testing.expect(admitted.reusable());
+        try std.testing.expectEqualStrings("https://effective.example/v1/responses", admitted.endpoint.slice());
+        if (source == .explicit_file) {
+            var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+            try savedEdit(init, dir, "providers.openai.key", try std.fmt.allocPrint(arena.allocator(), "file:{s}", .{try api_key.path(&env, &path_buffer)}), &failure);
+        }
+        const saved_connection = try saveConnection(init, dir, .{ .unchanged = admitted.endpoint.slice() }, .{ .existing = &admitted }, "custom-model", Gate.yes);
+        try std.testing.expect(saved_connection == .saved);
+        try std.testing.expectEqualStrings(admitted.endpoint.slice(), saved_connection.saved.endpoint.slice());
+        var key: api_key.Key = .{};
+        defer key.wipe();
+        try std.testing.expect(try api_key.read(saved_connection.saved.key_file.slice(), &key));
+        try std.testing.expectEqualStrings("global-source-key", key.slice());
     }
 }

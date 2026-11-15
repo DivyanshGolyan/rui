@@ -236,10 +236,7 @@ pub fn step(state: *State, facts: Facts, input: Input) Effects {
     if (input == .mouse and (input.mouse == .click or input.mouse == .list_click or input.mouse == .chat_click) and state.pasting) return .{ .route = .swallow };
     // The sign-in page owns keys and pastes even over settings or a list
     // that had focus before it opened, and no click navigates behind it.
-    if (state.layer == .sign_in) return switch (input) {
-        .mouse => .{ .route = .swallow },
-        else => .{ .route = .sign_in },
-    };
+    if (state.layer == .sign_in) return .{ .route = .sign_in };
     if (input == .key and state.layer == .settings) return settingsKey(state, facts.settings, input.key);
     if (state.layer == .main and input == .mouse and facts.session_open and facts.wide) switch (input.mouse) {
         .list_click => {
@@ -256,6 +253,10 @@ pub fn step(state: *State, facts: Facts, input: Input) Effects {
     // end still reaches this same pane after clearing the stream flag; an
     // editor that accepted the start owns its completion, even with no text.
     const delivery: Effects.Delivery = .{ .under = .main, .pasted = state.pasting };
+    // Chat switching belongs to the list's opening owner even while the
+    // composer has keys. Paste and covering pages retain their own custody.
+    if (!state.pasting and input == .key and (input.key.named == .alt_up or input.key.named == .alt_down))
+        return .{ .route = .{ .overview = delivery } };
     if (state.list_focused) return .{ .route = .{ .overview = delivery } };
 
     return .{ .route = if (facts.session_open) .{ .session = delivery } else .{ .overview = delivery } };
@@ -344,7 +345,7 @@ test "Root input routing over every layer, main pane, settings state and input" 
         .{ .layers = &signing, .events = &keys, .effects = .{ .route = .sign_in } },
         .{ .layers = &signing, .events = &.{.paste_start}, .effects = .{ .route = .sign_in }, .pasting = true },
         .{ .layers = &signing, .events = &.{.paste_end}, .effects = .{ .route = .sign_in }, .pasting = false },
-        .{ .layers = &signing, .events = &.{ .click, .wheel }, .effects = .{ .route = .swallow } },
+        .{ .layers = &signing, .events = &.{ .click, .wheel }, .effects = .{ .route = .sign_in } },
         // Under main and settings, vxfw's path takes the rest.
         .{ .layers = &.{.settings}, .events = &.{.paste_start}, .effects = .{}, .pasting = true },
         .{ .layers = &.{.settings}, .events = &.{.paste_end}, .effects = .{}, .pasting = false },
@@ -595,5 +596,28 @@ test "App input paste completion routes to the same owner for every focus and pa
         const delivery = if (overview) end.route.overview else end.route.session;
         try std.testing.expect(!delivery.pasted and !state.pasting);
         try std.testing.expectEqual(list_focused, state.list_focused);
+    };
+}
+
+test "Option session navigation routes main chords without taking paste or modal custody" {
+    for ([_]keymap.Key{ .alt_up, .alt_down }) |key| for ([_]bool{ false, true }) |wide| for ([_]bool{ false, true }) |open| for ([_]bool{ false, true }) |focused| for ([_]bool{ false, true }) |pasted| for ([_]Layer{ .main, .settings, .{ .sign_in = .{ .over = .main } } }) |layer| {
+        var state: State = .{ .layer = layer, .list_focused = focused, .pasting = pasted };
+        const effects = step(&state, .{ .wide = wide, .session_open = open }, .{ .key = .{ .named = key } });
+        if (layer == .sign_in) {
+            try std.testing.expect(effects.route == .sign_in);
+        } else if (layer == .settings) {
+            if (pasted) try std.testing.expect(effects.route == .swallow) else {
+                try std.testing.expect(effects.route == .overview);
+                try std.testing.expectEqual(Layer.Covered.settings, effects.route.overview.under);
+            }
+        } else if (layer == .main) {
+            if (!pasted or focused or !open) {
+                try std.testing.expect(effects.route == .overview);
+                try std.testing.expectEqual(pasted, effects.route.overview.pasted);
+            } else try std.testing.expect(effects.route == .session);
+        }
+        try std.testing.expectEqual(focused, state.list_focused);
+        try std.testing.expectEqual(pasted, state.pasting);
+        try std.testing.expect(effects.focus == null);
     };
 }

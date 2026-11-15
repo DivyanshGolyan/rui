@@ -46,6 +46,9 @@ pub const Code = enum {
     host_incompatible,
     host_identity_unconfirmed,
     host_restart_failed,
+    sign_in_connection_changed,
+    sign_in_connection_pending,
+    sign_in_report_unavailable,
     upgrade_ineligible,
     upgrade_release_invalid,
     upgrade_preparation_failed,
@@ -292,6 +295,9 @@ fn mapped(err: anyerror) ?Code {
         // Directory owners translate this to a contextual Store/preference
         // cause. An escape without that context retains the internal fallback.
         error.InsecureDirectoryPermissions => .internal_unexpected,
+        error.ConnectionSuperseded => .sign_in_connection_changed,
+        error.ConnectionNotActive => .sign_in_connection_pending,
+        error.SignInReportingUnavailable => .sign_in_report_unavailable,
         error.ApiKeyMissing => .sign_in_required,
         error.HostStopped => .host_stopped,
         error.StoreAlreadyOwned => .store_locked,
@@ -405,6 +411,9 @@ pub fn facts(code: Code) Facts {
         .environment_too_large => .{ .act = .fix, .input = .arguments, .accepted = .{ .grammar = "an inherited environment within the Message byte limit" }, .says = "The inherited environment is too large for a Message.", .next = "Unset or shorten the largest variables, then recover the saved request with rui request recover HANDLE." },
         .internal_unexpected => .{ .act = .report, .input = null, .accepted = .none, .says = "Rui could not complete this operation because of an internal fault.", .next = "Keep the saved request, if any, and report this code with the command to the Rui maintainer." },
         .host_identity_unconfirmed => .{ .act = .operate, .input = null, .accepted = .none, .says = "The Host's exact process/build identity could not be verified.", .next = "Inspect this Store with its owning client. Do not pause a guessed or replacement Host." },
+        .sign_in_connection_changed => .{ .act = .operate, .input = null, .accepted = .none, .says = "The selected Host's connection settings changed after this form was opened.", .next = "Reopen Sign-in to reload the API form, then review its endpoint and key source before connecting." },
+        .sign_in_connection_pending => .{ .act = .operate, .input = null, .accepted = .none, .says = "The connection was saved but is not proven active in the serving Host.", .next = "Follow the selected-Host pause/start recovery in Sign-in; reopen it if needed. Pausing interrupts all Sessions. No Host was restarted." },
+        .sign_in_report_unavailable => .{ .act = .operate, .input = null, .accepted = .none, .says = "Required sign-in diagnostic reporting could not complete.", .next = "Preserve diagnostics already received and any printed private-key cleanup path. Repair temporary storage or terminal output before retrying; receipt delivery is unconfirmed." },
         .host_restart_failed => .{ .act = .operate, .input = null, .accepted = .none, .says = "One or more Hosts could not be restarted or confirmed.", .next = "Follow the per-Host instructions above, then retry rui host restart --all; do not stop a guessed or replacement Host." },
         .upgrade_ineligible => .{ .act = .operate, .input = null, .accepted = .none, .says = "This installation is not eligible for automatic release upgrade.", .next = "Use the standalone release installer for a managed source build, or the application/package owner for an unmanaged binary." },
         .upgrade_release_invalid => .{ .act = .operate, .input = null, .accepted = .none, .says = "Published stable release tag or platform checksums could not be validated.", .next = "Check the published release and supported platform; no installation or Host was changed." },
@@ -831,4 +840,23 @@ test "settings admission has a caller refusal fallback outside startup reporting
 
 test "an escaped replay preflight failure keeps the restart repair" {
     try std.testing.expectEqual(Code.host_restart_failed, of(error.UnsupportedHostConfiguration));
+}
+
+test "guided sign-in native caller outcomes keep truthful repair without reclassifying context-free I/O" {
+    const Case = struct { cause: anyerror, code: Code, repair: []const u8 };
+    for ([_]Case{
+        .{ .cause = error.ConnectionSuperseded, .code = .sign_in_connection_changed, .repair = "reload the API form" },
+        .{ .cause = error.ConnectionNotActive, .code = .sign_in_connection_pending, .repair = "selected-Host pause/start recovery" },
+        .{ .cause = error.SignInReportingUnavailable, .code = .sign_in_report_unavailable, .repair = "receipt delivery is unconfirmed" },
+    }) |case| {
+        try std.testing.expectEqual(case.code, of(case.cause));
+        try std.testing.expectEqual(Act.operate, facts(case.code).act);
+        var bytes: [2048]u8 = undefined;
+        var writer: std.Io.Writer = .fixed(&bytes);
+        try writeLine(&writer, case.code, .{ .not_sent = false });
+        try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), case.repair) != null);
+        for ([_][]const u8{ "ConnectionSuperseded", "ConnectionNotActive", "SignInReportingUnavailable" }) |name| try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), name) == null);
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, writer.buffered(), "\n"));
+    }
+    for ([_]anyerror{ error.NoSpaceLeft, error.WriteFailed, error.AccessDenied, error.SignInReceiptPartlyReported }) |cause| try std.testing.expectEqual(Code.internal_unexpected, of(cause));
 }

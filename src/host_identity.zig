@@ -265,3 +265,7 @@ test "host identity native Unix peer is same effective user and actual process" 
     try std.testing.expectEqual(std.c.getpid(), try peer(pair[0]));
     try std.testing.expectEqual(std.c.getpid(), try peer(pair[1]));
 }
+
+pub fn matchesLaunch(pid: c_int, started: u64, observed: *const Snapshot, executable: []const u8) bool {
+    return pid > 0 and started != 0 and observed.pid == pid and observed.started == started and std.mem.eql(u8, observed.executable, executable);
+}
