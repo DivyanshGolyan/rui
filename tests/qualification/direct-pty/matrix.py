@@ -49,7 +49,7 @@ def inventory():
         row("ctrl-d-nonempty", b"abc\x1b[D\x04Z\r", "abZ"),
         row("backspace-grapheme", "A中é🧑‍🌾\x7fZ\r".encode(), "A中éZ"),
         row("alt-unbound", b"ab\x1bzQ\r", "abQ"),
-        # ARCHITECTURE.md: Alt-Enter (ESC CR, Ghostty Shift-Enter) adds a line.
+        # docs/contracts/session-ui.md: Alt-Enter (ESC CR, Ghostty Shift-Enter) adds a line.
         row("alt-enter", b"ab\x1b\rQ\r", "ab\nQ"),
         row("alt-unicode", "ab\x1béQ\r".encode(), "abQ"),
         row("kitty-alt", b"ab\x1b[122;3uQ\r", "abQ"),

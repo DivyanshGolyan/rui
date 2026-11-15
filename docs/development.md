@@ -44,10 +44,10 @@ zig build test-logic
 The development binary is `zig-out/bin/rui`.
 To use it in place of the installed command, call it by that path.
 
-To choose the checks a change needs, use [the subsystem test selector](../VERIFICATION.md#canonical-gates).
+To choose the checks a change needs, use [the subsystem test selector](verification/gates.md#canonical-gates).
 Build and dependency changes, and release qualification, need more evidence.
 An old test result is not a pass for new code.
-For a build with empty caches, follow the [empty-cache steps](../VERIFICATION.md#canonical-gates).
+For a build with empty caches, follow the [empty-cache steps](verification/gates.md#canonical-gates).
 
 The build uses stock Zig 0.17.1 and the pinned official `translate-c` package for C bindings.
 Compiler objects go in `ZIG_GLOBAL_CACHE_DIR`.
@@ -74,7 +74,7 @@ It uses a deterministic local provider and deletes its temporary project and Sto
 
 The crash happens after Rui has saved the result and cleanup.
 So the walkthrough checks saved-result recovery, not an interrupted command or power loss.
-See [the walkthrough's checks](../VERIFICATION.md#runnable-bash-caller-acceptance-audit).
+See [the walkthrough's checks](contracts/execution.md#runnable-bash-caller-acceptance-audit).
 
 ## What's next
 

@@ -1,6 +1,6 @@
 # Compaction policy and ownership sources
 
-Inspected October 14, 2026. These pinned client sources explain policy ownership and replay choices. They do not prove subscription-server support, account entitlement, or live encrypted-state compatibility. Rui's accepted behavior is in [Architecture](../ARCHITECTURE.md#choosing-and-validating-compacted-context).
+Inspected October 14, 2026. These pinned client sources explain policy ownership and replay choices. They do not prove subscription-server support, account entitlement, or live encrypted-state compatibility. Rui's accepted behavior is in [Architecture](../docs/contracts/model-io.md#choosing-and-validating-compacted-context).
 
 ## Pi 1.0
 
