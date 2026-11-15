@@ -651,10 +651,10 @@ test "message observation validates accepted admission references independently"
                 switch (corruption) {
                     .session => try store_testing.exec(&storage, "UPDATE message_admission SET session_ref=?1 " ++
                         "WHERE command_key='reference-primary-message'", .{other_session.slice()}),
-                    .content => try store_testing.exec(&storage, "UPDATE message_admission SET content_id=?1 " ++
-                        "WHERE command_key='reference-primary-message'", .{try store_testing.queryU64(
+                    .content => try store_testing.exec(&storage, "UPDATE input_part SET content_id=?1 " ++
+                        "WHERE ordinal=0 AND part_kind=1 AND command_key='reference-primary-message'", .{try store_testing.queryU64(
                         &storage,
-                        "SELECT content_id FROM message_admission WHERE command_key='reference-other-message'",
+                        "SELECT content_id FROM input_part WHERE ordinal=0 AND part_kind=1 AND command_key='reference-other-message'",
                         .{},
                     )}),
                 }
@@ -701,7 +701,7 @@ test "message observation rejects an answer attached to processing durable facts
             try std.testing.expect(storage.submitMessageWithModel(&message, null, .{}) == .accepted);
             _ = (try storage.admitNextModelAttempt(.{})).?;
             try store_testing.exec(&storage, "UPDATE turn SET outcome_content_id=(" ++
-                "SELECT content_id FROM message_admission WHERE command_key='corrupt-observation-message')", .{});
+                "SELECT content_id FROM input_part WHERE ordinal=0 AND part_kind=1 AND command_key='corrupt-observation-message')", .{});
 
             try std.testing.expectError(
                 error.CorruptStore,

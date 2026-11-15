@@ -132,7 +132,7 @@ test "searchActivity fences private content substituted into a public message" {
     defer arena_state.deinit();
     const session = try configureTestSession(&storage, "search-corruption");
     try submitTestMessage(&storage, &tmp, "search-corrupt-message", "search-corrupt-message", session.slice(), "secret");
-    try store_testing.sqlite_only.exec(&storage, "UPDATE content SET private=1 WHERE content_id=(SELECT content_id FROM message_admission WHERE command_key='search-corrupt-message')", .{});
+    try store_testing.sqlite_only.exec(&storage, "UPDATE content SET private=1 WHERE content_id=(SELECT content_id FROM input_part WHERE ordinal=0 AND part_kind=1 AND command_key='search-corrupt-message')", .{});
     const result = try arena_state.allocator().create(protocol.ActivitySearchFacts);
     var request: protocol.ActivitySearch = .{ .session = session };
     try request.query.set("secret");
@@ -150,7 +150,7 @@ test "searchActivity verifies canonical content even when its text does not matc
     defer arena_state.deinit();
     const session = try configureTestSession(&storage, "search-digest");
     try submitTestMessage(&storage, &tmp, "search-digest-message", "search-digest-message", session.slice(), "correct");
-    try store_testing.sqlite_only.exec(&storage, "UPDATE content SET payload=CAST('damaged' AS BLOB) WHERE content_id=(SELECT content_id FROM message_admission WHERE command_key='search-digest-message')", .{});
+    try store_testing.sqlite_only.exec(&storage, "UPDATE content SET payload=CAST('damaged' AS BLOB) WHERE content_id=(SELECT content_id FROM input_part WHERE ordinal=0 AND part_kind=1 AND command_key='search-digest-message')", .{});
     const result = try arena_state.allocator().create(protocol.ActivitySearchFacts);
     var request: protocol.ActivitySearch = .{ .session = session };
     try request.query.set("absent");

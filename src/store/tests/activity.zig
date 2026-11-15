@@ -1,3 +1,4 @@
+// Query-cost rows intentionally omit canonical Message source facts.
 //! Activity Store conformance tests.
 
 const shared_fixtures = @import("../tests.zig");
@@ -683,7 +684,7 @@ test "an Activity page costs the same steps after 10 or 10,000 earlier rows, in 
             // before the Turn row exists.
             try store_testing.withoutForeignKeys(&storage, "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at) " ++
                 sequence_to_first_argument ++
-                "SELECT value,?2,value+1000000,?4,?3+4*(value-1),value,1 FROM sequence", .{ history, session.slice(), start, content });
+                "SELECT value,?2,value+1000000,NULL,?3+4*(value-1),value,1 FROM sequence", .{ history, session.slice(), start });
             try store_testing.withoutForeignKeys(&storage, "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,attempt_ordinal,resolution_code,resolved_at,tool_set_id,context_window) " ++
                 sequence_to_first_argument ++
                 "SELECT value,value,?2,1,value,?3+4*(value-1),0,1,'tool_proposals',1,(SELECT coalesce(loaded_tool_set_id,tool_set_id) FROM session WHERE session_ref=?2),?4 FROM sequence", .{ history, session.slice(), start, @import("../../product_defaults.zig").unlisted_context_window });
@@ -747,10 +748,9 @@ test "a one-row page of a person's Messages costs the same steps after 10 or 10,
             const peer = try configureTestSession(&storage, "recall-peer");
             try submitTestMessage(&storage, &tmp, "recall-first", "first", session.slice(), "first");
             const start = try store_testing.queryU64(&storage, "SELECT next_position FROM session WHERE session_ref=?1", .{session.slice()});
-            const content = try store_testing.queryU64(&storage, "SELECT instructions_content_id FROM session WHERE session_ref=?1", .{session.slice()});
             try store_testing.withoutForeignKeys(&storage, "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at,sender_session_ref,sender_position) " ++
                 sequence_to_first_argument ++
-                "SELECT 1000+value,?2,value+1000000,?4,?3+value-1,1,?5,value FROM sequence", .{ history, session.slice(), start, content, peer.slice() });
+                "SELECT 1000+value,?2,value+1000000,NULL,?3+value-1,1,?4,value FROM sequence", .{ history, session.slice(), start, peer.slice() });
             try store_testing.exec(&storage, "UPDATE session SET next_position=next_position+?1 WHERE session_ref=?2", .{ history, session.slice() });
             try store_core.reloadIdentitiesForTesting(&storage);
             var request: protocol.ActivityPage = .{ .direction = .backward, .kinds = .initOne(.admission), .limit = 1 };
@@ -825,11 +825,10 @@ test "a one-row page of a person's Messages costs the same steps past 100 or 10,
             defer storage.close() catch unreachable;
             const session = try configureTestSession(&storage, "waiting-config");
             const start = try store_testing.queryU64(&storage, "SELECT next_position FROM session WHERE session_ref=?1", .{session.slice()});
-            const content = try store_testing.queryU64(&storage, "SELECT instructions_content_id FROM session WHERE session_ref=?1", .{session.slice()});
             // The waiting Messages have no commands.
             try store_testing.withoutForeignKeys(&storage, "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at) " ++
                 sequence_to_first_argument ++
-                "SELECT 1000+value,?2,value+1000000,?4,?3+value-1,1 FROM sequence", .{ history, session.slice(), start, content });
+                "SELECT 1000+value,?2,value+1000000,NULL,?3+value-1,1 FROM sequence", .{ history, session.slice(), start });
             try store_testing.exec(&storage, "UPDATE session SET next_position=next_position+?1 WHERE session_ref=?2", .{ history, session.slice() });
             try store_core.reloadIdentitiesForTesting(&storage);
             try submitTestMessage(&storage, &tmp, "waiting-newest", "newest", session.slice(), "newest");

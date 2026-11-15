@@ -82,7 +82,7 @@ test "a message_agent call runs as one core command: the Message is admitted fro
 
     // The receiver holds one Message from the caller, waiting for a Turn.
     try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE session_ref=?1 AND sender_session_ref=?2 AND turn_id IS NULL", .{ receiver.slice(), caller.slice() }));
-    const text_id = try store_testing.sqlite_only.queryU64(&storage, "SELECT content_id FROM message_admission WHERE session_ref=?1", .{receiver.slice()});
+    const text_id = try store_testing.sqlite_only.queryU64(&storage, "SELECT p.content_id FROM input_part p JOIN message_admission m ON m.command_key=p.command_key WHERE p.ordinal=0 AND p.part_kind=1 AND m.session_ref=?1", .{receiver.slice()});
     try expectContent(&storage, try testingContentReference(&storage, text_id), "report back");
     // Each call resolved with what happened, and the caller's Turn can continue.
     var delivered_buffer: [32]u8 = undefined;
@@ -150,7 +150,7 @@ test "a message_agent call of the longest escaped text is read back past one con
     try std.testing.expect(check == .accepted);
     try std.testing.expectEqualStrings(text, read_text.list.items);
     try std.testing.expectEqual(command_domain.AgentDelivery.delivered, try storage.deliverAgentMessage(input.binding, check.accepted.id.slice(), read_text.list.items, .{}));
-    const text_id = try store_testing.sqlite_only.queryU64(&storage, "SELECT content_id FROM message_admission WHERE session_ref=?1", .{receiver.slice()});
+    const text_id = try store_testing.sqlite_only.queryU64(&storage, "SELECT p.content_id FROM input_part p JOIN message_admission m ON m.command_key=p.command_key WHERE p.ordinal=0 AND p.part_kind=1 AND m.session_ref=?1", .{receiver.slice()});
     var reader: content_domain.ContentReader = undefined;
     reader.open(try storage.openContent(try testingContentReference(&storage, text_id)));
     defer reader.close();
@@ -248,7 +248,7 @@ test "child endings deliver once with their answer and sender; standalone ending
     // The Message is the saved answer itself, not a copy.
     try std.testing.expectEqual(
         try store_testing.sqlite_only.queryU64(&storage, "SELECT outcome_content_id FROM turn WHERE turn_id=?1", .{ending.turn_id}),
-        try store_testing.sqlite_only.queryU64(&storage, "SELECT content_id FROM message_admission WHERE session_ref=?1", .{parent.slice()}),
+        try store_testing.sqlite_only.queryU64(&storage, "SELECT p.content_id FROM input_part p JOIN message_admission m ON m.command_key=p.command_key WHERE p.ordinal=0 AND p.part_kind=1 AND m.session_ref=?1", .{parent.slice()}),
     );
     try expectOnlyForwardsThenIdle(&storage);
     // A standalone Turn has no parent to notify.
@@ -534,7 +534,7 @@ test "a start_agent call creates its agent where its caller works, with the task
     // Each task is its agent's first Message, from the caller, under the
     // call's own command key.
     try std.testing.expectEqual(@as(u64, 2), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE sender_session_ref=?1 AND admission_position=1 AND command_key LIKE 'rui.core/start_agent/%'", .{caller.slice()}));
-    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM message_admission m JOIN session s ON s.session_ref=m.session_ref JOIN content c ON c.content_id=m.content_id WHERE s.parent_ref=?1 AND c.byte_length=14", .{caller.slice()}));
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM message_admission m JOIN session s ON s.session_ref=m.session_ref JOIN input_part p ON p.command_key=m.command_key AND p.ordinal=0 AND p.part_kind=1 JOIN content c ON c.content_id=p.content_id WHERE s.parent_ref=?1 AND c.byte_length=14", .{caller.slice()}));
     // The refusals name the field and start nothing.
     try std.testing.expectEqual(@as(u64, 2), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE resolution_code='succeeded'", .{}));
     try std.testing.expectEqual(@as(u64, 2), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE resolution_code='failed'", .{}));

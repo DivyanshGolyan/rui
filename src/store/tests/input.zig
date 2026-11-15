@@ -281,7 +281,7 @@ test "ordered input rejects replaced valid public Content before its last part o
     }.run);
 }
 
-const TextDoor = enum { activity, conversation, content_bytes, observation, report };
+const TextDoor = enum { activity, conversation, content_bytes, observation, report, list };
 
 fn readTextDoor(storage: *Store, tmp: *std.testing.TmpDir, command: *const wire_request.MessageCommand, position: u64, door: TextDoor) !void {
     switch (door) {
@@ -296,6 +296,11 @@ fn readTextDoor(storage: *Store, tmp: *std.testing.TmpDir, command: *const wire_
         .observation => _ = try testing.observeCommandForTesting(storage, command.key.slice()),
         .report => {
             const bytes = try @import("../tests.zig").testingSessionReport(storage, tmp, command.session.slice(), 1024 * 1024);
+            std.testing.allocator.free(bytes);
+        },
+        .list => {
+            var used = std.atomic.Value(u64).init(0);
+            const bytes = try @import("../tests.zig").testingSessionList(storage, tmp, .{}, &used, 1);
             std.testing.allocator.free(bytes);
         },
     }

@@ -173,8 +173,14 @@ def whole_stream_shape(length):
                 else:
                     # Authenticate the admitted empty User entry independently
                     # of the later assistant entry.
-                    answer = database.execute("SELECT content_id FROM conversation_entry WHERE entry_kind=1").fetchone()[0]
-                    database.execute("UPDATE content SET digest=? WHERE content_id=?", (b"\xff" * 32, answer))
+                    answer = database.execute(
+                        "SELECT p.content_id FROM conversation_entry e "
+                        "JOIN message_admission m ON m.admission_id=e.source_admission_id "
+                        "JOIN input_part p ON p.command_key=m.command_key AND p.ordinal=0 AND p.part_kind=1 "
+                        "WHERE e.entry_kind=1"
+                    ).fetchone()[0]
+                    changed = database.execute("UPDATE content SET digest=? WHERE content_id=?", (b"\xff" * 32, answer))
+                    assert changed.rowcount == 1
             process, fields = start_host(store, provider)
             head, body = request(fields["socket"], store, "/v1/conversation-content", "conversation_content", session, **identity)
             if length <= 4096:

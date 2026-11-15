@@ -197,9 +197,9 @@ test "later idle stop does not reclassify a completed Message" {
             try submitTestMessage(&storage, &tmp, "completed-stop-file", "completed-stop-message", session.slice(), "answer");
             _ = (try storage.admitNextModelAttempt(.{})).?;
             try store_testing.exec(&storage, "UPDATE model_operation SET retry_due_at_ms=NULL,resolution_code='answer',attempt_at=NULL,resolved_at=1," ++
-                "resolution_content_id=(SELECT content_id FROM message_admission WHERE command_key='completed-stop-message')", .{});
-            try store_testing.exec(&storage, "UPDATE turn SET outcome_code='completed',outcome_at=1,outcome_content_id=(SELECT content_id FROM message_admission " ++
-                "WHERE command_key='completed-stop-message'),outcome_position=(SELECT next_position FROM session WHERE session_ref=?1) WHERE session_ref=?1", .{session.slice()});
+                "resolution_content_id=(SELECT content_id FROM input_part WHERE ordinal=0 AND part_kind=1 AND command_key='completed-stop-message')", .{});
+            try store_testing.exec(&storage, "UPDATE turn SET outcome_code='completed',outcome_at=1,outcome_content_id=(SELECT content_id FROM input_part " ++
+                "WHERE ordinal=0 AND part_kind=1 AND command_key='completed-stop-message'),outcome_position=(SELECT next_position FROM session WHERE session_ref=?1) WHERE session_ref=?1", .{session.slice()});
             try store_testing.exec(&storage, "UPDATE session SET next_position=next_position+1 WHERE session_ref=?1", .{session.slice()});
             var stop = try completeSessionStop("completed-stop", session.slice());
             const accepted = storage.stopSession(&stop, .{});

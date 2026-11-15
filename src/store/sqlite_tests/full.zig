@@ -46,14 +46,10 @@ test "Full Message projection work does not multiply Messages by stops" {
             try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=OFF");
 
             for (1..message_count + 1) |index| {
-                const insert = try std.testing.allocator.printSentinel(
-                    "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,turn_id,admitted_at,admission_position) " ++
-                        "VALUES({0},'{1s}','message-{0}',1,NULL,1,{2})",
-                    .{ index, session.slice(), 1000 + index },
-                    0,
-                );
-                defer std.testing.allocator.free(insert);
-                try sqlite.exec(storage.sqliteDatabase(), insert);
+                var key: [32]u8 = undefined;
+                const command = try std.fmt.bufPrint(&key, "message-{d}", .{index});
+                try submitTestMessage(&storage, &tmp, command, command, session.slice(), "input");
+                try store_testing.sqlite_only.exec(&storage, "UPDATE message_admission SET admission_position=?1,admitted_at=1 WHERE command_key=?2", .{ 1000 + index, command });
             }
             for (1..stop_count + 1) |index| {
                 const insert = try std.testing.allocator.printSentinel(
@@ -529,7 +525,7 @@ test "Full history reads a payload's declared bytes: a short one fails, a longer
         defer storage.close() catch unreachable;
         const session = try configureTestSessionAsk(&storage, "payload-config");
         try submitTestMessage(&storage, &tmp, "payload-message", "payload-message", session.slice(), "payload");
-        const id = "(SELECT content_id FROM message_admission WHERE command_key='payload-message')";
+        const id = "(SELECT content_id FROM input_part WHERE ordinal=0 AND part_kind=1 AND command_key='payload-message')";
         if (std.mem.eql(u8, case, "short")) {
             try sqlite.exec(storage.sqliteDatabase(), "PRAGMA ignore_check_constraints=ON; UPDATE content SET payload=CAST('pay' AS BLOB) WHERE content_id=" ++ id ++ "; PRAGMA ignore_check_constraints=OFF");
             try std.testing.expectError(error.ContentReadFailed, testingFullHistory(&storage, &tmp, session.slice(), null));
@@ -560,7 +556,7 @@ test "Full history answers a later row's failure before a kept row's content, wh
         try submitTestMessage(&storage, &tmp, "double-fault-1", "double-fault-1", session.slice(), "second");
         try submitTestMessage(&storage, &tmp, "double-fault-2", "double-fault-2", session.slice(), "third");
         try sqlite.exec(storage.sqliteDatabase(), "PRAGMA ignore_check_constraints=ON; UPDATE content SET payload=CAST('fi' AS BLOB) " ++
-            "WHERE content_id=(SELECT content_id FROM message_admission WHERE command_key='double-fault-0'); PRAGMA ignore_check_constraints=OFF");
+            "WHERE content_id=(SELECT content_id FROM input_part WHERE ordinal=0 AND part_kind=1 AND command_key='double-fault-0'); PRAGMA ignore_check_constraints=OFF");
         if (later_fails) {
             // The third is listed between the first and the second.
             try store_testing.sqlite_only.exec(&storage, "UPDATE message_admission SET admission_position=(SELECT admission_position FROM message_admission WHERE command_key='double-fault-0') " ++

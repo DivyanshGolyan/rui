@@ -1,3 +1,4 @@
+// Query-cost rows intentionally omit canonical Message source facts.
 //! Full Store conformance tests.
 
 const shared_fixtures = @import("../tests.zig");
@@ -303,7 +304,7 @@ test "Full history refuses content whose bytes no longer match their digest" {
                 const text: [2100]u8 = @splat('d');
                 try submitTestMessage(&storage, &tmp, "digest-message", "digest-message", session.slice(), &text);
                 if (fault) {
-                    try store_testing.zeroContent(&storage, "SELECT content_id FROM message_admission WHERE command_key='digest-message'");
+                    try store_testing.zeroContent(&storage, "SELECT content_id FROM input_part WHERE ordinal=0 AND part_kind=1 AND command_key='digest-message'");
                     try std.testing.expectError(error.CorruptStore, testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, .full));
                 } else std.testing.allocator.free(try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, .full));
             }
@@ -559,8 +560,9 @@ test "Full Message projection work does not multiply Messages by stops, in round
             const session = try configureTestSession(&storage, "full-scale-config");
             for (1..message_count + 1) |index| {
                 var key: [32]u8 = undefined;
-                try store_testing.withoutForeignKeys(&storage, "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,turn_id,admitted_at,admission_position) " ++
-                    "VALUES(?1,?2,?3,1,NULL,1,?4)", .{ index, session.slice(), try std.fmt.bufPrint(&key, "message-{d}", .{index}), 1000 + index });
+                const command = try std.fmt.bufPrint(&key, "message-{d}", .{index});
+                try submitTestMessage(&storage, &tmp, command, command, session.slice(), "input");
+                try store_testing.exec(&storage, "UPDATE message_admission SET admission_position=?1,admitted_at=1 WHERE command_key=?2", .{ 1000 + index, command });
             }
             const last_command = try store_testing.queryU64(&storage, "SELECT coalesce(max(command_seq),0) FROM core_command", .{});
             for (1..stop_count + 1) |index| {

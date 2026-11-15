@@ -262,8 +262,8 @@ const list_row = rsql.Read(.{
 
 /// `list_row` of a Session with no first Message.
 const list_row_bare = rsql.Read(.{
-    .sql = "SELECT " ++ settings_columns ++ "NULL AS first_admission,NULL AS first_position,NULL AS first_admitted_at,NULL AS first_sender," ++
-        "NULL AS first_length,NULL AS first_digest,NULL AS first_private,NULL AS first_consistent,NULL AS first_key FROM session" ++ last_line_joins ++ " WHERE session.session_ref=?1",
+    .sql = "SELECT " ++ settings_columns ++ "NULL AS first_admission,NULL AS first_position,NULL AS first_admitted_at,NULL AS first_key,NULL AS first_sender," ++
+        "NULL AS first_length,NULL AS first_digest,NULL AS first_private,NULL AS first_consistent FROM session" ++ last_line_joins ++ " WHERE session.session_ref=?1",
     .Args = struct { session: []const u8, first_action: ?u64 },
     .Row = ListRow,
     .cardinality = .each,
@@ -330,15 +330,6 @@ const ShownRow = struct { reference: *const change_ring.Id, first: u64, work: *c
 /// Reads each shown row's `list_row` in one round and visits it as it
 /// steps. The row it decodes is in report scratch (`ListRow`).
 noinline fn readRowSettings(a: *ReadAccess, rows: []const ShownRow, now_ms: u64, visitor: anytype) !void {
-    // Finish compound certificates before callbacks step the settings rows.
-    // One first Message at a time keeps this independent of page size.
-    for (rows) |row| {
-        if (row.first == 0) continue;
-        var first: report_domain.first_message.Result = null;
-        a.read(report_domain.first_message, .{ .session = row.reference, .first = row.first }, &first);
-        try runList(a);
-        try report_domain.verifyFirstMessage(a, &(first orelse return error.CorruptStore));
-    }
     var read: RowsRead(@TypeOf(visitor)) = .{ .read_version = .{ .instance = a.store.instance, .generation = a.store.commitGeneration() }, .decoded = a.store.reportScratch(ListRow), .rows = rows, .now_ms = now_ms, .visitor = visitor };
     for (rows) |row| {
         // Creation time only dates idle work, which has no Action. Its real
@@ -352,7 +343,12 @@ noinline fn readRowSettings(a: *ReadAccess, rows: []const ShownRow, now_ms: u64,
     const ran = runList(a);
     // A pass stops at a failed step, so a row that failed to be visited
     // did before any later row's step failed: its error is main's first.
-    if (read.failure) |err| return err;
+    if (read.failure) |err| {
+        // A failed projection leaves the last decoded row in report scratch.
+        // Validate its compound certificate outside the stepping callback.
+        if (read.projection_unsupported) try report_domain.verifyFirstMessage(a, read.decoded);
+        return err;
+    }
     try ran;
     if (read.shown != rows.len) return error.CorruptStore;
 }
@@ -368,6 +364,7 @@ fn RowsRead(comptime Visitor: type) type {
         now_ms: u64,
         visitor: Visitor,
         shown: usize = 0,
+        projection_unsupported: bool = false,
         failure: ?(ErrorOf(rowValues) || ErrorOf(@typeInfo(Visitor).pointer.child.row)) = null,
 
         pub fn visit(read: *@This(), row: *const ListRow) bool {
@@ -375,6 +372,7 @@ fn RowsRead(comptime Visitor: type) type {
             var sorted: [tool_name.max_tools][]const u8 = undefined;
             var last_text: Bounded(session_list.max_last_line_bytes) = undefined;
             var values = rowValues(read.rows, read.shown, read.now_ms, row, &sorted, &last_text) catch |err| {
+                read.projection_unsupported = err == error.InputPartsNotSupported;
                 read.failure = err;
                 return false;
             };

@@ -592,10 +592,11 @@ test "runnable discovery measures eligible ineligible and history populations in
                         "output_schema_content_id,revision,next_position,created_at,created_seq,workspace_digest,workspace_key) " ++
                         "VALUES('st0ped','/','codex','openai-responses/1','model-a',1,1,0,NULL,1,1,1,1000000,zeroblob(32),1000000)",
                 );
+                // Query-cost rows intentionally omit canonical Message source facts.
                 const insert = try std.testing.allocator.printSentinel(
                     "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
                         "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,turn_id,admitted_at) " ++
-                        "SELECT value,'st0ped',printf('stopped-%d',value),1,NULL,1 FROM sequence; " ++
+                        "SELECT value,'st0ped',printf('stopped-%d',value),NULL,NULL,1 FROM sequence; " ++
                         "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff,stopped_at) " ++
                         "VALUES('stop','st0ped',NULL,{0},1)",
                     .{ineligible},
@@ -611,7 +612,7 @@ test "runnable discovery measures eligible ineligible and history populations in
                     "SELECT printf('%06d',value),'/','codex','openai-responses/1','model-a',1,1,0,NULL,1,1,1,value+1,zeroblob(32),value+1 FROM sequence; " ++
                     "WITH RECURSIVE sequence(value) AS (VALUES(0) UNION ALL SELECT value+1 FROM sequence WHERE value+1<{0}) " ++
                     "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,turn_id,admitted_at) " ++
-                    "SELECT {1}+value,printf('%06d',value),printf('eligible-%d',value),1,NULL,1 FROM sequence",
+                    "SELECT {1}+value,printf('%06d',value),printf('eligible-%d',value),NULL,NULL,1 FROM sequence",
                 .{ eligible, ineligible + 1 },
                 0,
             );
@@ -621,7 +622,7 @@ test "runnable discovery measures eligible ineligible and history populations in
                 const history_insert = try std.testing.allocator.printSentinel(
                     "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
                         "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,turn_id,admitted_at) " ++
-                        "SELECT {1}+value,'h1st0r',printf('history-%d',value),1,value,1 FROM sequence",
+                        "SELECT {1}+value,'h1st0r',printf('history-%d',value),NULL,value,1 FROM sequence",
                     .{ history, ineligible + eligible },
                     0,
                 );

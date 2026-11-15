@@ -302,8 +302,8 @@ test "a Message's replay whose admission names other content fences the Store" {
             try std.testing.expect(storage.submitMessageWithModel(&first, null, .{}) == .accepted);
             try std.testing.expect(storage.submitMessageWithModel(&second, null, .{}) == .accepted);
             try std.testing.expect(storage.submitMessageWithModel(&first, null, .{}).accepted.replayed);
-            const other = try store_testing.queryU64(&storage, "SELECT content_id FROM message_admission WHERE command_key=?1", .{"replay-content-second"});
-            try store_testing.exec(&storage, "UPDATE message_admission SET content_id=?2 WHERE command_key=?1", .{ "replay-content-first", other });
+            const other = try store_testing.queryU64(&storage, "SELECT content_id FROM input_part WHERE ordinal=0 AND part_kind=1 AND command_key=?1", .{"replay-content-second"});
+            try store_testing.exec(&storage, "UPDATE input_part SET content_id=?2 WHERE command_key=?1 AND ordinal=0 AND part_kind=1", .{ "replay-content-first", other });
             try std.testing.expect(storage.submitMessageWithModel(&first, null, .{}) == .infrastructure_failure);
             try std.testing.expect(storage.isFenced());
         }

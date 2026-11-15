@@ -306,14 +306,17 @@ test "a reference is checked when its row is written, not at commit" {
             try sqlite.exec(database, try std.fmt.bufPrintSentinel(
                 &sql,
                 "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admitted_at) " ++
-                    "SELECT 1000,session_ref,'{s}',instructions_content_id,1 FROM session WHERE session_ref='{s}'",
+                    "SELECT 1000,session_ref,'{s}',NULL,1 FROM session WHERE session_ref='{s}'",
                 .{ command_key, session_ref },
                 0,
             ));
         }
     };
     try std.testing.expectError(error.SqliteExecFailed, Admission.insert(storage.sqliteDatabase(), session.slice(), "later-command"));
-    try store_testing.sqlite_only.exec(&storage, "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) " ++
-        "VALUES('later-command',2,'',zeroblob(32),1,'',0,0,(SELECT max(command_seq)+1 FROM core_command))", .{});
+    try store_testing.sqlite_only.exec(&storage, "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq,input_part_count,input_reference_length,input_reference_digest) " ++
+        "SELECT 'later-command',2,s.session_ref,zeroblob(32),1,'',0,0,(SELECT max(command_seq)+1 FROM core_command),1,c.byte_length,c.digest " ++
+        "FROM session s JOIN content c ON c.content_id=s.instructions_content_id WHERE s.session_ref=?1", .{session.slice()});
+    try store_testing.sqlite_only.exec(&storage, "INSERT INTO input_part(input_part_id,command_key,command_kind,part_count,ordinal,content_id,part_kind) " ++
+        "SELECT (SELECT coalesce(max(input_part_id),0)+1 FROM input_part),'later-command',2,1,0,instructions_content_id,1 FROM session WHERE session_ref=?1", .{session.slice()});
     try Admission.insert(storage.sqliteDatabase(), session.slice(), "later-command");
 }

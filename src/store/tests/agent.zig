@@ -631,7 +631,7 @@ test "child ending Message includes bounded provider report done answer and quie
                 const count = try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE session_ref=?1", .{parent.slice()});
                 try std.testing.expectEqual(@as(u64, if (ending == .quiet) 0 else 1), count);
                 if (ending != .quiet) {
-                    const content_id = try store_testing.queryU64(&storage, "SELECT content_id FROM message_admission WHERE session_ref=?1", .{parent.slice()});
+                    const content_id = try store_testing.queryU64(&storage, "SELECT p.content_id FROM input_part p JOIN message_admission m ON m.command_key=p.command_key WHERE p.ordinal=0 AND p.part_kind=1 AND m.session_ref=?1", .{parent.slice()});
                     if (ending == .done) {
                         try expectContent(&storage, try testingContentReference(&storage, content_id), "saved answer");
                         try std.testing.expectEqual(content_id, try store_testing.queryU64(&storage, "SELECT outcome_content_id FROM turn WHERE turn_id=?1", .{model.turn_id}));

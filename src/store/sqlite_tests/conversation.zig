@@ -113,7 +113,7 @@ fn testingOrdinaryPublicCorruption(route: TestingPublicReadRoute, foreign_turn: 
         try sqlite.bindText(corrupt, 2, session.slice());
         try sqlite.expectDone(corrupt);
     } else {
-        try store_testing.sqlite_only.exec(&storage, "UPDATE content SET private=1 WHERE content_id=(SELECT content_id FROM conversation_entry WHERE session_ref=?1 AND entry_kind=1)", .{session.slice()});
+        try store_testing.sqlite_only.exec(&storage, "UPDATE content SET private=1 WHERE content_id=(SELECT p.content_id FROM conversation_entry e JOIN message_admission m ON m.admission_id=e.source_admission_id JOIN input_part p ON p.command_key=m.command_key AND p.ordinal=0 AND p.part_kind=1 WHERE e.session_ref=?1 AND e.entry_kind=1)", .{session.slice()});
     }
     try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.sqliteDatabase()));
     request.end = valid.end;
@@ -304,8 +304,8 @@ test "public assistant message provenance binds the exact accepted item" {
     const faults = [_][:0]const u8{
         "DELETE FROM conversation_entry WHERE entry_kind=3",
         "UPDATE conversation_entry SET source_item_ordinal=source_item_ordinal+1 WHERE entry_kind=3",
-        "UPDATE conversation_entry SET content_id=(SELECT content_id FROM conversation_entry WHERE entry_kind=1) WHERE entry_kind=3",
-        "UPDATE model_output_item SET message_content_id=(SELECT content_id FROM conversation_entry WHERE entry_kind=1) WHERE item_kind=2",
+        "UPDATE conversation_entry SET content_id=(SELECT p.content_id FROM conversation_entry e JOIN message_admission m ON m.admission_id=e.source_admission_id JOIN input_part p ON p.command_key=m.command_key AND p.ordinal=0 AND p.part_kind=1 WHERE e.entry_kind=1) WHERE entry_kind=3",
+        "UPDATE model_output_item SET message_content_id=(SELECT p.content_id FROM conversation_entry e JOIN message_admission m ON m.admission_id=e.source_admission_id JOIN input_part p ON p.command_key=m.command_key AND p.ordinal=0 AND p.part_kind=1 WHERE e.entry_kind=1) WHERE item_kind=2",
         "UPDATE model_output_item SET attempt_ordinal=attempt_ordinal+1 WHERE item_kind=2",
         "UPDATE content SET private=1 WHERE content_id=(SELECT message_content_id FROM model_output_item WHERE item_kind=2)",
     };

@@ -308,7 +308,7 @@ test "a list row whose first Message is missing is CorruptStore" {
     // The first Turn still names the admission, whose content is gone, so
     // the row's settings read finds no row.
     try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=OFF");
-    try store_testing.sqlite_only.exec(&storage, "DELETE FROM content WHERE content_id IN (SELECT content_id FROM message_admission WHERE session_ref=?1)", .{session.slice()});
+    try store_testing.sqlite_only.exec(&storage, "DELETE FROM content WHERE content_id IN (SELECT p.content_id FROM input_part p JOIN message_admission m ON m.command_key=p.command_key WHERE m.session_ref=?1)", .{session.slice()});
     try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=ON");
     var used = std.atomic.Value(u64).init(0);
     try std.testing.expectError(error.CorruptStore, testingSessionList(&storage, &tmp, .{}, &used, 5));
