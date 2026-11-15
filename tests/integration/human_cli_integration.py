@@ -1932,7 +1932,11 @@ def provider_line_cases():
                     else:
                         assert not (config / "preferences").exists()
                         entry = json.loads((selected_store / "host.json").read_text())["providers"]["openai"]
-                        assert entry["key"].startswith("file:")
+                        assert isinstance(entry["key"], dict) and set(entry["key"]) == {"file"}
+                        key_path = pathlib.Path(entry["key"]["file"])
+                        assert key_path.is_absolute() and key_path.is_relative_to(selected_store)
+                        assert key_path.read_text() == "fixture-provider-choice-key\n"
+                        assert stat.S_IMODE(key_path.stat().st_mode) == 0o600
                     assert (key_file.read_bytes(), key_file.stat().st_mtime_ns) == key_before
                 else:
                     offered = provider_prompt(master)
@@ -1951,8 +1955,9 @@ def provider_line_cases():
                         os.write(master, b"\r")
                         overview_frame(master, overview_title)
                         entry = json.loads((selected_store / "host.json").read_text())["providers"]["openai"]
-                        key_path = pathlib.Path(entry["key"].removeprefix("file:"))
-                        assert key_path.is_relative_to(selected_store)
+                        assert isinstance(entry["key"], dict) and set(entry["key"]) == {"file"}
+                        key_path = pathlib.Path(entry["key"]["file"])
+                        assert key_path.is_absolute() and key_path.is_relative_to(selected_store)
                         assert key_path.read_text() == "sk-screen-secret\n"
                         assert stat.S_IMODE(key_path.stat().st_mode) == 0o600
                         assert not (config / "openai.key").exists()
