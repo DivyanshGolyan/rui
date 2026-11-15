@@ -7,7 +7,10 @@ pub const Format = enum(u8) {
     jpeg = 2,
 
     pub fn mime(self: Format) []const u8 {
-        return switch (self) { .png => "image/png", .jpeg => "image/jpeg" };
+        return switch (self) {
+            .png => "image/png",
+            .jpeg => "image/jpeg",
+        };
     }
 };
 

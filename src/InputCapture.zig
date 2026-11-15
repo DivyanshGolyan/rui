@@ -419,7 +419,6 @@ test "one captured Text retains exact legacy Content identity including empty by
     }
 }
 
-
 test "input cursor verifies its whole certificate before returning the last part" {
     const first = @embedFile("testing/fixtures/input-baseline.jpg");
     const second = @embedFile("testing/fixtures/input-progressive.jpg");

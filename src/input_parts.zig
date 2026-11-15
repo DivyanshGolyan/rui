@@ -34,13 +34,16 @@ pub const Digest = struct {
     pub fn append(self: *Digest, identity: *const Identity) error{TooManyInputParts}!void {
         self.count = std.math.add(u32, self.count, 1) catch return error.TooManyInputParts;
         var hash = self.hash;
-        hash.update(&.{switch (identity.kind) { .text => 1, .image => 2 }});
+        hash.update(&.{switch (identity.kind) {
+            .text => 1,
+            .image => 2,
+        }});
         number(&hash, identity.length);
         hash.update(&identity.digest);
         switch (identity.kind) {
             .text => {},
             .image => |image| {
-                hash.update(&.{@intFromEnum(image.media.format)});
+                hash.update(&.{@backingInt(image.media.format)});
                 number(&hash, image.media.width);
                 number(&hash, image.media.height);
                 hash.update(&.{@intFromBool(image.name != null)});
@@ -93,7 +96,7 @@ pub const Record = struct {
             .text => out[48] = 1,
             .image => |*image| {
                 out[48] = 2;
-                out[49] = @intFromEnum(image.media.format);
+                out[49] = @backingInt(image.media.format);
                 std.mem.writeInt(u32, out[50..54], image.media.width, .big);
                 std.mem.writeInt(u32, out[54..58], image.media.height, .big);
                 if (image.name) |*name| {
