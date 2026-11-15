@@ -117,7 +117,7 @@ pub fn open(storage: *Store, tmp: *std.testing.TmpDir, io: std.Io, options: test
         };
         if (!exists) {
             for (comptime schema.objects(.mysql)) |object| try run(object.sql);
-            try run(try std.fmt.bufPrint(&buffer, "CREATE DATABASE {s}_oracle;CREATE TABLE {s}_oracle.touched_oracle(session_ref VARCHAR(6))", .{ name, name }));
+            try run(try std.fmt.bufPrint(&buffer, "CREATE DATABASE {s}_oracle;CREATE TABLE {s}_oracle.touched_oracle" ++ dialect.touch_oracle_definition, .{ name, name }));
             // Trigger names live in the Store schema; their root definer can
             // write the sibling schema without enlarging the app's grants.
             inline for (comptime sqlite.touchOracleTriggers(.mysql, "ORACLE.touched_oracle")) |sql| {
@@ -2311,4 +2311,33 @@ test "store.mysql live lone single writes guard their shared COMMIT and payload 
     }
     needs_close = false;
     try storage.close();
+}
+
+test "store.mysql touch oracle observes and clears uncommitted entry writes without changing rollback" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try openLive(&storage, &tmp);
+    defer storage.close() catch unreachable;
+    const session = try testing.configureTestSession(&storage, "oracle-uncommitted");
+    const entry = try store_core.enter(&storage, .none);
+    defer entry.release();
+    try storage.begin();
+    defer if (storage.engine.inTransaction()) store_core.rollbackAfterError(&storage, .{}) catch @panic("oracle fixture rollback failed");
+    // The restricted application connection changes canonical rows, deliberately
+    // without a typed touch, while the root oracle observes another connection.
+    var sql: [128]u8 = undefined;
+    const connection_state = &storage.engine.mysql.state.connection;
+    try connection_state.query(try std.fmt.bufPrint(&sql, "UPDATE session SET label='oracle uncommitted' WHERE session_ref='{s}'", .{session.slice()}));
+    try drain(connection_state, null);
+    try std.testing.expect(storage.engine.inTransaction());
+    const missing = storage.untouchedForTesting();
+    try std.testing.expectEqual(true, missing != null);
+    try std.testing.expectEqualStrings(session.slice(), &missing.?);
+    // This is the next queued entry's clear, before the batch's COMMIT.
+    clearTouchOracleForTesting(&storage);
+    try std.testing.expect(storage.engine.inTransaction());
+    try std.testing.expect(storage.untouchedForTesting() == null);
+    try store_core.rollbackAfterError(&storage, .{});
+    try std.testing.expectEqual(@as(u64, 0), try queryU64(&storage, "SELECT count(*) FROM session WHERE label='oracle uncommitted'", .{}));
 }
