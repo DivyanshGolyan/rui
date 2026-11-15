@@ -2645,6 +2645,9 @@ test "request preparation keeps the starting effort at the top and changes it at
         try std.testing.expect(configured == .accepted);
         const session = configured.accepted.session;
         try setup.submit("effort-message", "effort-message", session.slice(), "keep this exact input");
+        const encoded_builtin = try std.json.Stringify.valueAlloc(std.testing.allocator, model_catalog.builtinInstructions(case.model).bytes(), .{});
+        defer std.testing.allocator.free(encoded_builtin);
+        const step_bound = 32768 + preparationTestStepBound(encoded_builtin.len - 2);
         // Ordinary and compaction envelopes must use their admitted effort.
         for (0..2) |purpose| {
             var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
@@ -2665,7 +2668,7 @@ test "request preparation keeps the starting effort at the top and changes it at
             setup.storage.openHistoricalView(binding, &preparation.view);
             try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
             defer if (preparation.state.active) preparation.cancel();
-            const sealed = try drainLivePreparation(&preparation, 1, 1, 32768);
+            const sealed = try drainLivePreparation(&preparation, 1, 1, step_bound);
             var owned = true;
             defer if (owned) sealed.deinit(std.testing.io, preparation.writer.budget);
             const buffer = try std.testing.allocator.alloc(u8, @intCast(sealed.length));
