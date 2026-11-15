@@ -1085,7 +1085,10 @@ test "schema 75 MySQL pin migration handles fresh and historically upgraded kind
             }
             try load(migrated_database, store_testing.expected_mysql_rows, true);
         }
-        try load(migrated_database, "CREATE TEMPORARY TABLE original_pin_commands AS SELECT * FROM core_command;CREATE TEMPORARY TABLE original_pin_stops AS SELECT * FROM session_stop", false);
+        try load(migrated_database, "CREATE TEMPORARY TABLE original_pin_commands AS SELECT * FROM core_command", false);
+        defer restore("DROP TEMPORARY TABLE " ++ migrated_database ++ ".original_pin_commands");
+        try load(migrated_database, "CREATE TEMPORARY TABLE original_pin_stops AS SELECT * FROM session_stop", false);
+        defer restore("DROP TEMPORARY TABLE " ++ migrated_database ++ ".original_pin_stops");
         try load(migrated_database, schema.mysqlMigration(74), false);
         try expectCatalog(migrated_database);
         try expectSameResults(&.{
