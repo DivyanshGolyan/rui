@@ -75,7 +75,7 @@ pub const max_handle_bytes = 36;
 
 const OrderClass = enum { needs_you, working, done, queued };
 
-pub const Selection = union(enum) { new_session, archived, session: Reference, settings };
+pub const Selection = union(enum) { new_session, sessions, archived, session: Reference, settings };
 pub const Mark = state_marks.Mark;
 pub const Colour = overview_style.Colour;
 pub const Background = overview_style.Background;
@@ -136,8 +136,7 @@ pub const Action = enum {
     exit,
     stop,
     archive,
-    /// Right: a Session row opens as Enter opens it; on the pinned New
-    /// Session row it moves to Archived; other rows do nothing.
+    /// Right opens a Session row or moves from the Sessions tab to Archived.
     open_session,
 };
 
@@ -174,8 +173,8 @@ test "keys list covers both screens without unbound or duplicate keys" {
 
 /// Semantic list input: printable text has no editing route. The bare
 /// `left` the key table leaves unbound is a choice's own, as
-/// `keymap.Selection` reads it; it moves only within the pinned New Session
-/// row. Right is the table's `open_session`.
+/// `keymap.Selection` reads it; it moves only between the view tabs.
+/// Right is the table's `open_session`.
 pub const Input = union(enum) { action: Action, enter, left, ignored };
 
 /// The screen and paste context captured when this semantic key arrived.
@@ -421,6 +420,7 @@ pub const Click = union(enum) {
     open: Reference,
     pin: PinRequest,
     new_session,
+    sessions,
     archived,
     settings,
 };
@@ -428,7 +428,7 @@ pub const Click = union(enum) {
 /// What a click on a list item names; an empty slot takes none.
 pub fn clickOf(state: *const State, item: Item) ?Click {
     return switch (item) {
-        .empty, .gap => null,
+        .empty, .views, .gap => null,
         .new_session => .new_session,
         .row => |at| .{ .open = state.rows.items[state.order.items[at]].reference },
     };
@@ -441,7 +441,7 @@ pub fn pinClickOf(state: *const State, item: Item) ?Click {
             const row = state.rows.items[state.order.items[at]];
             break :blk .{ .pin = .{ .reference = row.reference, .pinned = row.pin_order == null } };
         },
-        .empty, .gap, .new_session => null,
+        .empty, .views, .gap, .new_session => null,
     };
 }
 
@@ -1437,7 +1437,8 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
                 state.selected = .new_session;
                 try enter(state, &effects);
             },
-            .archived => try toggleArchiveView(state, &effects),
+            .sessions => try selectView(state, .active, &effects),
+            .archived => try selectView(state, .archived, &effects),
             .settings => {
                 state.selected = .settings;
                 effects.add(.open_settings);
@@ -2152,16 +2153,14 @@ fn listInput(state: *State, delivery: InputDelivery, effects: *Effects) error{Ou
         .ignored => unreachable,
         .enter => try enter(state, effects),
         .left => if (state.selected == .archived) {
-            state.selected = .new_session;
+            state.selected = .sessions;
         },
         .action => |action| switch (action) {
             .exit => unreachable,
             .open_session => switch (state.selected) {
                 .session => try enter(state, effects),
-                .new_session => {
-                    state.selected = .archived;
-                },
-                .archived, .settings => {},
+                .sessions => state.selected = .archived,
+                .new_session, .archived, .settings => {},
             },
             .clear => {
                 state.notice = null;
@@ -2206,7 +2205,8 @@ fn enter(state: *State, effects: *Effects) error{OutOfMemory}!void {
         effects.add(.open_settings);
         return;
     }
-    if (state.selected == .archived) return toggleArchiveView(state, effects);
+    if (state.selected == .sessions) return selectView(state, .active, effects);
+    if (state.selected == .archived) return selectView(state, .archived, effects);
     // Resuming the drawn open chat is navigation, not a new Host intent.
     if (state.selected == .session) if (state.conversing) |open| if (std.mem.eql(u8, &state.selected.session, &open)) {
         effects.add(.focus_chat);
@@ -2218,7 +2218,7 @@ fn enter(state: *State, effects: *Effects) error{OutOfMemory}!void {
         return;
     }
     switch (state.selected) {
-        .settings, .archived => unreachable,
+        .settings, .sessions, .archived => unreachable,
         .session => if (state.selectedRow()) |row| {
             effects.add(.{ .open = row.reference });
         },
@@ -2295,8 +2295,10 @@ fn archiveSession(state: *State, request: ArchiveRequest, effects: *Effects) Int
     return .refused;
 }
 
-fn toggleArchiveView(state: *State, effects: *Effects) error{OutOfMemory}!void {
-    try changeArchiveView(state, if (state.archive == .archived) .active else .archived, effects);
+fn selectView(state: *State, filter: ArchiveFilter, effects: *Effects) error{OutOfMemory}!void {
+    std.debug.assert(filter != .all);
+    try changeArchiveView(state, filter, effects);
+    state.selected = if (filter == .archived) .archived else .sessions;
 }
 
 fn changeArchiveView(state: *State, filter: ArchiveFilter, effects: *Effects) error{OutOfMemory}!void {
@@ -2338,18 +2340,21 @@ const no_selection = "! Select a Session first.";
 fn move(state: *State, action: Action) void {
     const order = state.order.items;
     const current: usize = switch (state.selected) {
-        .new_session, .archived => 0,
-        .session => |ref| if (position(state, ref)) |at| at + 1 else 0,
-        .settings => order.len + 1,
+        .new_session => 0,
+        .sessions, .archived => 1,
+        .session => |ref| if (position(state, ref)) |at| at + 2 else 0,
+        .settings => order.len + 2,
     };
     const target = switch (action) {
         .first => 0,
-        .last => order.len + 1,
-        .next => @min(current + 1, order.len + 1),
+        .last => order.len + 2,
+        .next => @min(current + 1, order.len + 2),
         .previous => current -| 1,
         else => unreachable,
     };
-    state.selected = if (target == 0) .new_session else if (target > order.len) .settings else .{ .session = state.rows.items[order[target - 1]].reference };
+    state.selected = if (target == 0) .new_session else if (target == 1)
+        (if (state.archive == .archived) .archived else .sessions)
+    else if (target > order.len + 1) .settings else .{ .session = state.rows.items[order[target - 2]].reference };
 }
 
 /// Sign-in, quota or rate-limit trouble that stops every Session reaching
@@ -2571,7 +2576,7 @@ fn statusRows(state: *const State) u16 {
 
 /// Provider bands, as `headerSegments` draws them.
 fn topRows(state: *const State) usize {
-    return @as(usize, @intFromBool(band(state) != null)) + 1;
+    return @as(usize, @intFromBool(band(state) != null)) + 2;
 }
 
 /// One line's spans, placed left to right at their columns, its text made
@@ -2848,7 +2853,7 @@ pub fn grouped(buffer: *[32]u8, count: u64) []const u8 {
 }
 
 /// Items use the same words and click meanings whether pinned or scrolled.
-pub const Item = union(enum) { new_session, gap, row: usize, empty };
+pub const Item = union(enum) { new_session, views, gap, row: usize, empty };
 
 const new_session_name = "New Session";
 
@@ -2872,7 +2877,7 @@ pub fn focusedLine(state: *const State, list_focused: bool) ?usize {
     if (!list_focused) return selectedLine(state);
     return switch (state.selected) {
         .session => |ref| if (position(state, ref)) |at| at + first_row_line else null,
-        .new_session, .archived, .settings => null,
+        .new_session, .sessions, .archived, .settings => null,
     };
 }
 
@@ -2881,7 +2886,7 @@ pub fn focusedLine(state: *const State, list_focused: bool) ?usize {
 fn selectedSession(state: *const State) ?Reference {
     return state.conversing orelse switch (state.selected) {
         .session => |ref| ref,
-        .new_session, .archived, .settings => null,
+        .new_session, .sessions, .archived, .settings => null,
     };
 }
 
@@ -2985,14 +2990,16 @@ pub fn headerSegments(arena: Allocator, state: *const State, width: u16, caps: C
     return segmentsOf(arena, try providerBand(&built, trouble, state.now_ms), width, .{});
 }
 
-/// `archived` is where the pinned New Session row draws its Archived, the
-/// columns a press on it takes; null when the row does not draw it.
-pub const ListRow = struct { segments: []const Segment, heading: bool, selected: bool, archived: ?Columns = null };
+/// Control text and its actually drawn tab destinations. Blank cells take no tab press.
+pub const ListRow = struct {
+    segments: []const Segment,
+    heading: bool,
+    selected: bool,
+    sessions: ?Columns = null,
+    archived: ?Columns = null,
+};
 
-/// A drawn span of cells, `start` inclusive, `end` exclusive.
 pub const Columns = struct { start: u16, end: u16 };
-
-const archived_word = "Archived";
 
 pub fn listSegments(arena: Allocator, state: *const State, item: Item, width: u16, caps: Caps, frame: u64) error{OutOfMemory}!ListRow {
     if (item == .row) {
@@ -3000,29 +3007,33 @@ pub fn listSegments(arena: Allocator, state: *const State, item: Item, width: u1
         return .{ .segments = try rowSegments(arena, state, item.row, width, caps, frame), .heading = false, .selected = rowSelected(state, row) };
     }
     var built: Spans = .of(arena, caps, width);
-    var archived: ?Columns = null;
+    var result: ListRow = .{ .segments = &.{}, .heading = item == .empty, .selected = item == .new_session and state.selected == .new_session };
+    built.begin();
     const spans = switch (item) {
         .new_session => new: {
-            built.begin();
-            const start: usize = (width -| 1) -| archived_word.len;
-            const name_room: usize = start -| 1;
-            if (name_room > 2) {
-                _ = try built.put(2, "+", name_room - 2, .{ .colour = .ink });
-                if (name_room > 3) _ = try built.put(3, " " ++ new_session_name, name_room - 3, .{});
-            }
-            const chosen = state.selected == .archived;
-            _ = try built.put(start, archived_word, width -| start, if (chosen)
-                .{ .colour = .strong, .bold = true, .background = .selection }
-            else
-                .{ .colour = .quiet });
-            archived = .{ .start = @intCast(start), .end = width };
+            _ = try built.put(2, "+ " ++ new_session_name, width -| 3, .{});
             break :new try built.finish();
+        },
+        .views => views: {
+            inline for (.{ .{ "Sessions", Selection.sessions, ArchiveFilter.active, &result.sessions }, .{ "Archived", Selection.archived, ArchiveFilter.archived, &result.archived } }, 0..) |tab, index| {
+                const start = 2 + index * 10;
+                const active = state.archive == tab[2];
+                const focused = state.selected == tab[1];
+                const cells = try built.put(start, tab[0], width -| 1 -| start, .{
+                    .colour = if (active or focused) .strong else .quiet,
+                    .bold = active,
+                    .background = if (focused) .selection else .ground,
+                });
+                if (cells != 0) tab[3].* = .{ .start = @intCast(start), .end = @intCast(start + cells) };
+            }
+            break :views try built.finish();
         },
         .gap => &.{},
         .empty => try emptyLine(&built, state),
         .row => unreachable,
     };
-    return .{ .segments = try segmentsOf(arena, spans, width, .{}), .heading = item == .empty, .selected = item == .new_session and state.selected == .new_session, .archived = archived };
+    result.segments = try segmentsOf(arena, spans, width, .{});
+    return result;
 }
 
 /// Enter opens the selected identity; no overview facts or focus domain exist.
@@ -3323,7 +3334,7 @@ const Frame = struct {
         const top = try headerSegments(gpa, state, width, caps);
         var list_count: usize = 0;
         while (listItem(state, list_count) != null) : (list_count += 1) {}
-        const lines = try gpa.alloc([]const Segment, top.len + list_count * 2 + max_notice_rows);
+        const lines = try gpa.alloc([]const Segment, top.len + list_count * 2 + max_notice_rows + 2);
         var count: usize = 0;
         var start: usize = 0;
         for (top, 0..) |segment, at| if (std.mem.eql(u8, segment.text, "\n")) {
@@ -3337,6 +3348,8 @@ const Frame = struct {
         }
         const first = count;
         lines[count] = (try listSegments(gpa, state, .new_session, width, caps, frame)).segments;
+        count += 1;
+        lines[count] = (try listSegments(gpa, state, .views, width, caps, frame)).segments;
         count += 1;
         var list_at: usize = 0;
         while (listItem(state, list_at)) |item| : (list_at += 1) {
@@ -3474,7 +3487,8 @@ test "every work state follows the rules table, in Unicode and ASCII" {
             const text = try screenText(&state, 80, 24, caps);
             defer std.testing.allocator.free(text);
             var lines = std.mem.splitScalar(u8, text, '\n');
-            try std.testing.expectEqualStrings("  + New Session                                                        Archived", lines.next().?);
+            try std.testing.expectEqualStrings("  + New Session", lines.next().?);
+            try std.testing.expectEqualStrings("  Sessions  Archived", lines.next().?);
             try std.testing.expectEqualStrings("", lines.next().?);
             try std.testing.expectEqualStrings(expected, lines.next().?);
         }
@@ -3484,8 +3498,8 @@ test "every work state follows the rules table, in Unicode and ASCII" {
         var unselected = try Frame.of(&state, 80, 24, .{}, 0);
         defer unselected.deinit();
         // The sender/work domain below owns whole-row dim expectations.
-        try std.testing.expectEqual(case.colour, unselected.styleAt(2, 1).?.colour);
-        try std.testing.expectEqual(Colour.quiet, unselected.styleAt(3, 79 - "rui".len).?.colour);
+        try std.testing.expectEqual(case.colour, unselected.styleAt(3, 1).?.colour);
+        try std.testing.expectEqual(Colour.quiet, unselected.styleAt(4, 79 - "rui".len).?.colour);
     }
 }
 
@@ -3513,7 +3527,7 @@ test "a retry that has fallen due reads as queued in its group, mark and colour"
     var screen = try Frame.of(&state, 80, 24, .{ .depth = .none }, 0);
     defer screen.deinit();
     // The core retains the pending mark's role, even without colour.
-    try std.testing.expectEqual(Style{ .colour = .quiet, .dim = true }, screen.styleAt(2, 1).?);
+    try std.testing.expectEqual(Style{ .colour = .quiet, .dim = true }, screen.styleAt(3, 1).?);
 }
 
 test "overview rows draw a flat order without headings" {
@@ -4755,7 +4769,7 @@ test "the overview lists once a second, one listing at a time" {
     var screen = try Frame.of(&state, 80, 24, .{}, 0);
     defer screen.deinit();
     try expectScreenLine(&state, 2, " ? Review PR 412                                                             3m");
-    try std.testing.expectEqual(Colour.attention, screen.styleAt(2, 1).?.colour);
+    try std.testing.expectEqual(Colour.attention, screen.styleAt(3, 1).?.colour);
     _ = try refresh(&state, .not_modified, testToken(1), &.{});
     try expectScreenLine(&state, 0, "  + New Session                                                        Archived");
 }
@@ -5736,99 +5750,6 @@ fn hasEffect(effects: Effects, tag: std.meta.Tag(Effect)) bool {
     return false;
 }
 
-test "pinned row Archived actions in empty and populated full lists and sidebars" {
-    const Start = enum { new_session, archived, chat };
-    const Gesture = enum { right, left, enter, click_new, click_archived, escape };
-    for ([_]bool{ false, true }) |sidebar| for ([_]bool{ false, true }) |populated| for (std.enums.values(Start)) |start| for (std.enums.values(Gesture)) |gesture| {
-        const rows = [_]Listed{session("aaaaaa", .{ .finished = ago(1) }, .{ .label = "Kept", .yours = true })};
-        var state = try opened(if (populated or sidebar or start == .chat) &rows else &.{});
-        defer state.deinit();
-        if (sidebar) _ = try step(&state, .{ .conversation = "aaaaaa".* });
-        state.selected = switch (start) {
-            .new_session => .new_session,
-            .archived => .archived,
-            .chat => .{ .session = "aaaaaa".* },
-        };
-        if (gesture == .escape) {
-            _ = try step(&state, .{ .clicked = .{ .target = .archived } });
-            _ = try respond(&state, .full, testToken(2), &.{});
-            try std.testing.expectEqual(ArchiveFilter.archived, state.archive);
-            var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-            defer arena.deinit();
-            const empty = try listSegments(arena.allocator(), &state, .empty, 46, .{}, 0);
-            _ = try styleOf(empty.segments, "No archived Sessions.");
-        }
-        const effects = try step(&state, switch (gesture) {
-            .right => .{ .input = .{ .key = .{ .action = .open_session } } },
-            .left => .{ .input = .{ .key = .left } },
-            .enter => .{ .input = .{ .key = .enter } },
-            .click_new => .{ .clicked = .{ .target = .new_session } },
-            .click_archived => .{ .clicked = .{ .target = .archived } },
-            .escape => .{ .input = .{ .key = .{ .action = .clear } } },
-        });
-        const create = gesture == .click_new or (gesture == .enter and start == .new_session);
-        const open = (gesture == .right or gesture == .enter) and start == .chat;
-        const archive = gesture == .click_archived or (gesture == .enter and start == .archived);
-        try std.testing.expectEqual(create and !sidebar, hasEffect(effects, .create));
-        try std.testing.expectEqual(create and sidebar, hasEffect(effects, .new_session));
-        try std.testing.expectEqual(open and !sidebar, hasEffect(effects, .open));
-        try std.testing.expectEqual(open and sidebar, hasEffect(effects, .focus_chat));
-        try std.testing.expectEqual(archive or gesture == .escape, hasEffect(effects, .list));
-        try std.testing.expectEqual(if (archive) ArchiveFilter.archived else ArchiveFilter.active, state.archive);
-        if (gesture == .right and start != .chat) try std.testing.expectEqual(Selection.archived, state.selected);
-        if (gesture == .left and start == .archived) try std.testing.expectEqual(Selection.new_session, state.selected);
-    };
-}
-
-test "Archived toggles empty and populated archives in full list and sidebar" {
-    for ([_]bool{ false, true }) |sidebar| for ([_]bool{ false, true }) |some| for ([_]bool{ false, true }) |pointer| {
-        var state = try opened(&.{session("aaaaaa", .{ .finished = ago(1) }, .{ .label = "Active", .yours = true })});
-        defer state.deinit();
-        if (sidebar) _ = try step(&state, .{ .conversation = "aaaaaa".* });
-        state.selected = .new_session;
-        _ = try step(&state, .{ .input = .{ .key = .{ .action = .open_session } } });
-        const gesture: Event = if (pointer) .{ .clicked = .{ .target = .archived } } else .{ .input = .{ .key = .enter } };
-        try std.testing.expect(hasEffect(try step(&state, gesture), .list));
-        const rows = [_]Listed{session("bbbbbb", .{ .stopped = .{ .since = test_now_s, .cause = .stop } }, .{ .label = "Saved", .yours = true, .archive_state = .archived })};
-        _ = try respond(&state, .full, testToken(2), if (some) &rows else &.{});
-        try std.testing.expectEqual(ArchiveFilter.archived, state.archive);
-        try std.testing.expectEqual(@as(usize, @intFromBool(some)), state.order.items.len);
-        state.selected = .archived;
-        try std.testing.expect(hasEffect(try step(&state, gesture), .list));
-        try std.testing.expectEqual(ArchiveFilter.active, state.archive);
-        try std.testing.expectEqual(@as(?Reference, if (sidebar) "aaaaaa".* else null), state.conversing);
-        try std.testing.expectEqual(@as(usize, 0), state.request_count);
-    };
-}
-
-test "pinned row draws Archived quietly at its right end, at every width, in full lists and sidebars" {
-    for ([_]bool{ false, true }) |sidebar| for ([_]bool{ false, true }) |chosen| for ([_]u16{ 9, 12, 20, 24, 25, 46, 140 }) |width| {
-        var state = try opened(&.{});
-        defer state.deinit();
-        if (sidebar) state.conversing = "aaaaaa".*;
-        if (chosen) _ = try step(&state, .{ .input = .{ .key = .{ .action = .open_session } } });
-        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-        defer arena.deinit();
-        const row = try listSegments(arena.allocator(), &state, .new_session, width, .{}, 0);
-        const text = try std.mem.concat(arena.allocator(), u8, blk: {
-            const texts = try arena.allocator().alloc([]const u8, row.segments.len);
-            for (row.segments, texts) |segment, *dest| dest.* = segment.text;
-            break :blk texts;
-        });
-        if (width >= 25) try std.testing.expect(std.mem.startsWith(u8, text, "  + New Session"));
-        if (width >= 13) try std.testing.expect(std.mem.startsWith(u8, text, "  +"));
-        try std.testing.expectEqual(true, std.mem.endsWith(u8, text, "Archived "));
-        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, "Archived"));
-        try std.testing.expect(row.archived != null);
-        try std.testing.expectEqual(!chosen, row.selected);
-        try std.testing.expectEqual((width -| 1) -| 8, row.archived.?.start);
-        try std.testing.expectEqual(width, row.archived.?.end);
-        const style = try styleOf(row.segments, "Archived");
-        try std.testing.expectEqual(if (chosen) Colour.strong else Colour.quiet, style.colour);
-        try std.testing.expectEqual(if (chosen) Background.selection else Background.ground, style.background);
-    };
-}
-
 test "New Session Enter and click create exactly once with a copied default" {
     for ([_]bool{ false, true }) |click| {
         var state = try opened(&.{});
@@ -6500,7 +6421,7 @@ test "semantic list admission owns covered Settings paste creation and Upgrade p
                     .exit => unreachable,
                     .open_session => {
                         try std.testing.expect(std.meta.eql(before_notice, state.notice));
-                        try std.testing.expectEqual(Selection.archived, state.selected);
+                        try std.testing.expectEqual(Selection.new_session, state.selected);
                     },
                     .previous_session, .next_session => {
                         try std.testing.expect(std.meta.eql(before_notice, state.notice));
@@ -6509,7 +6430,7 @@ test "semantic list admission owns covered Settings paste creation and Upgrade p
                     .clear => try expectNotice(&state, null),
                     .stop, .archive => try expectNotice(&state, if (phase.held) upgrade_recovery else no_selection),
                     .previous, .next, .first, .last, .select_previous, .select_next => {
-                        const expected: Selection = if (action == .next or action == .last or action == .select_next) .settings else .new_session;
+                        const expected: Selection = if (action == .last) .settings else if (action == .next or action == .select_next) .sessions else .new_session;
                         try std.testing.expectEqual(expected, state.selected);
                         if (action == .select_previous or action == .select_next) {
                             try std.testing.expect(std.meta.eql(before_notice, state.notice));
@@ -6628,7 +6549,7 @@ test "Option session navigation retains populated creation and Upgrade admission
 }
 
 test "Option session navigation skips paired New Session Archived and Settings controls" {
-    for ([_]u16{ 46, 140 }) |width| for ([_]Action{ .previous_session, .next_session }) |action| for ([_]Selection{ .new_session, .archived, .settings }) |control| for ([_]bool{ false, true }) |chat_open| {
+    for ([_]u16{ 46, 140 }) |width| for ([_]Action{ .previous_session, .next_session }) |action| for ([_]Selection{ .new_session, .sessions, .archived, .settings }) |control| for ([_]bool{ false, true }) |chat_open| {
         var state = try opened(&mixed);
         defer state.deinit();
         _ = try step(&state, .{ .resized = .{ .width = width, .height = 30 } });
@@ -6650,7 +6571,7 @@ test "Option session navigation skips paired New Session Archived and Settings c
         try std.testing.expectEqual(@as(usize, 1), opens);
         try std.testing.expectEqual(Selection{ .session = expected }, state.selected);
     };
-    for ([_]Action{ .previous_session, .next_session }) |action| for ([_]Selection{ .new_session, .archived, .settings }) |control| {
+    for ([_]Action{ .previous_session, .next_session }) |action| for ([_]Selection{ .new_session, .sessions, .archived, .settings }) |control| {
         var empty = try opened(&.{});
         defer empty.deinit();
         empty.selected = control;
@@ -6724,4 +6645,35 @@ test "Session pin captured intent changes no selection or conversation and await
     try std.testing.expect(state.find(target).?.pin_order == null);
     for ([_]Item{ .new_session, .gap, .empty }) |item| try std.testing.expect(pinClickOf(&state, item) == null);
     state.selected = selected;
+}
+
+test "session list tabs have explicit destinations active no-op and one selection owner" {
+    for ([_]bool{ false, true }) |sidebar| for ([_]bool{ false, true }) |some| {
+        var state = try opened(if (some) &mixed else &.{});
+        defer state.deinit();
+        if (sidebar) state.conversing = mixed[0].reference;
+        const before = state.now_ms;
+        try expectEffects(&.{}, try step(&state, .{ .clicked = .{ .target = .sessions } }));
+        try std.testing.expectEqual(Selection.sessions, state.selected);
+        try std.testing.expectEqual(ArchiveFilter.active, state.archive);
+        try expectEffects(&.{}, try step(&state, .{ .input = .{ .key = .enter } }));
+        _ = try step(&state, .{ .input = .{ .key = .{ .action = .open_session } } });
+        try std.testing.expectEqual(Selection.archived, state.selected);
+        try std.testing.expectEqual(ArchiveFilter.active, state.archive);
+        try std.testing.expect(hasEffect(try step(&state, .{ .input = .{ .key = .enter } }), .list));
+        try std.testing.expectEqual(Selection.archived, state.selected);
+        try std.testing.expectEqual(ArchiveFilter.archived, state.archive);
+        _ = try respond(&state, .full, testToken(2), &.{});
+        // Repeated and old-frame clicks still name Archived, never toggle it.
+        try expectEffects(&.{}, try step(&state, .{ .clicked = .{ .target = .archived } }));
+        try expectEffects(&.{}, try step(&state, .{ .input = .{ .key = .enter } }));
+        _ = try step(&state, .{ .input = .{ .key = .left } });
+        try std.testing.expectEqual(Selection.sessions, state.selected);
+        try std.testing.expectEqual(ArchiveFilter.archived, state.archive);
+        try std.testing.expect(hasEffect(try step(&state, .{ .input = .{ .key = .enter } }), .list));
+        try std.testing.expectEqual(ArchiveFilter.active, state.archive);
+        try std.testing.expectEqual(before, state.now_ms);
+        try std.testing.expectEqual(@as(usize, 0), state.request_count);
+        try std.testing.expectEqual(@as(?Reference, if (sidebar) mixed[0].reference else null), state.conversing);
+    };
 }

@@ -455,7 +455,7 @@ app_screen: AppScreen.Overview = undefined,
 /// What can fill the list's place, each its own widget: the screen shows
 /// the one the core names. Only the Sessions hear a press.
 app_sessions: GroupedList = .{},
-app_new_session: OverviewLines.NewSession = undefined,
+app_new_session: OverviewLines.SessionControls = undefined,
 session_drafts: @import("session_drafts.zig").Drafts = .{},
 app_settings_line: OverviewLines.Settings = undefined,
 /// The counts line and its bands, which take the view-name click.
