@@ -716,7 +716,7 @@ class SelectionTest(unittest.TestCase):
         for path in ("src/store/rsql.zig", "src/store/wire/mysql_connection.zig", "src/store/wire/pg.zig"):
             with self.subTest(path=path):
                 builds = [command for name, command in prepush.checks([path], AVAILABLE, "HEAD") if name == "development selection"]
-                self.assertEqual(builds, [["zig", "build", "test-logic", "--summary", "line"]])
+                self.assertEqual(builds, [])
 
     def test_workflow_consumes_mysql_provisioning_and_postgres_condition(self):
         workflow = Path(".github/workflows/check.yml").read_text()
@@ -1016,7 +1016,7 @@ class SelectionTest(unittest.TestCase):
                 actual = 'skipped'
                 if admitted:
                     result = subprocess.run(['bash', '-e', '-c', script], capture_output=True,
-                                            env={**os.environ, 'DRAFT_RUN': 'false', 'TARGETS': targets, 'PLAN_RESULT': plan,
+                                            env={**os.environ, 'DRAFT_RUN': 'false', 'TARGETS': targets, 'COMPILE_TARGETS': targets, 'PLAN_RESULT': plan,
                                                  'POLICY_RESULT': policy, 'BUILD_RESULT': build,
                                                  'NATIVE_RESULT': native, 'TYPECHECK_RESULT': typecheck,
                                                  'TYPECHECK': typecheck_selected,

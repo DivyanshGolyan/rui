@@ -148,8 +148,8 @@ On Host threads:
 
 ## Review
 
-Codex on the draft PR is the code review: comment `@codex review for duplicated authority and braided concerns, and against the PR's Shape section; group symptoms by owner` after every draft push, because it reviews drafts only on request.
-Mark ready once Codex is clean; [Landing](docs/agents/landing.md#publish-and-merge) owns the test-only exception for fixes after readiness.
+Codex is the code review; request `@codex review for duplicated authority and braided concerns, and against the PR's Shape section; group symptoms by owner` when production or operational changes invalidate the previous review.
+[Landing](docs/agents/landing.md#publish-and-merge) owns ready publication, clean review evidence and its reuse exceptions.
 The [Code Review Rules](AGENTS.md#code-review-rules) own how it groups and orders its findings; the rules it applies stay here.
 The author's own reviews are design reviews of the approved design, and a redesign when fixes keep producing new findings.
 Reviewers apply the rules below and the [product tenets](VERIFICATION.md#product-tenets).
@@ -184,35 +184,33 @@ Keep unrelated cleanup separate; exclude personal style, speculative extensibili
 ## Evidence
 
 Use [canonical gates](VERIFICATION.md#canonical-gates) for required commands, focused checks, cache conditions and assembled-versus-independently-merged cadence; confirm commands in `build.zig`.
-This is the one list of local checks.
-Before every push, including review-fix rounds and after merging main, run only these checks:
+This section owns the local feedback policy; [landing](docs/agents/landing.md#publish-and-merge) owns publication and merge gates.
 
-- `python3 tests/ci/prepush.py` (the default), which selects local feedback from the committed diff against the merge base.
-  Use `--plan` to inspect its commands without executing them.
-  It checks whitespace, formatting for changed Zig files, undefined names in changed Python files, and caller-error coverage for changed CLI owners.
-  Whitespace errors in committed lines, a stale `openapi.json` and a stale `clients/ts/src/wire.ts` are fixed in the working tree and still fail the run until the fix is committed.
-  A `src/store/schema.zig` change runs `tests/ci/schema_number.py --check`, which takes the next Store schema number from `origin/main` as it is now, not from the merge base.
-  Source changes run their applicable import, provider, wire, fixture, platform and Store policy tests.
-  CI Python owners run their corresponding test file when one exists; shared or unmapped policy inputs run the policy suite.
-  Client changes run the existing TypeScript check instead of an unrelated Zig build.
-  Other development build targets come from `select_tests.py`.
-  Zig and manifest changes select the macOS type check only when those inputs have build targets of their own.
-  Deleted files still select owner checks, and mixed changes union checks without repeating them.
-  Commands read working-tree contents; unstaged and untracked-only changes do not select checks.
-  When history since the merge base holds a merge of `origin/main`, it also compiles the unit binaries unfiltered with CI's unit producer command, `zig build ci-build -Dci-targets=test -Dci-part=unit`, because a filtered build never analyzes a test the merge brought back.
-  Each run writes a receipt to the checkout's git directory with HEAD's tree, the merge base its diff came from, the mode and each command's exit code; a working tree that differs from HEAD records no tree, so its receipt matches no push.
-  Orb setup installs it as a git pre-push hook that runs `--quick`, everything above except the Zig builds; elsewhere install it once with `python3 tests/ci/prepush.py --install-hook`.
-  The hook runs nothing when the receipt holds the pushed tree and its merge base with `origin/main`, and records at least one command, every one of which passed, so pushing the same tree again does not repeat the checks.
-- `python3 tests/ci/prepush.py --full`, which runs the default checks plus the unfiltered unit compile, `zig build -j1 stack-frames -Dcpu=baseline` and, when `RUI_TEST_MYSQL_SOCKET` and `RUI_TEST_MYSQL_ROOT_PASSWORD` name a reachable MySQL, each selected live need whose own target reads it, with `RUI_TEST_REQUIRE_ENGINES=mysql`.
-  `select_tests.py` reports each live need with the one target that runs only its tests (`live_needs`), such as `test-store` for the Store's dialect check; a need with no such target, such as native `forEachEngine` tests inside the whole native root, never runs here.
-  Without that server it says so, skips only that part and records the skip in the receipt.
-  Every other live need, one with no such target or one needing Postgres or `mysql-wire-integration`'s own Docker server, is recorded as skipped for CI, never as passed.
-- the touched owners' focused tests (`-Dtest-filter`)
-- a mutation that reverts each fix and shows its new test fails
+Use `python3 tests/ci/prepush.py` for cheap changed-file feedback before first publication and after changes invalidate that feedback.
+Its default and installed hook (`--quick`) check committed whitespace, changed Zig formatting and AST, changed Python undefined names, relevant generation and schema numbering, and focused owner-policy tests.
+Shared or unmapped policy inputs leave broad policy tests to CI.
+Use `--plan` to inspect commands; selection uses the committed diff against the merge base, while commands read working-tree contents.
+Commit corrected whitespace and generated artifacts before publishing.
+Deleted inputs still select their owner checks.
+A receipt records the tree, merge base, mode and each command's exit or explicit CI deferral.
+Dirty trees, failed commands and deferred-only runs cover no push.
+A matching receipt reuses local feedback only; it never establishes hosted acceptance or turns a deferred obligation into a pass.
+The hook prints outstanding CI deferrals even when feedback is cached.
+Install it with `python3 tests/ci/prepush.py --install-hook` when setup has not installed it.
 
-A ready PR's Selected run executes the review-phase set on the pushed head; draft CI runs quick checks only.
-Never run a full local suite (`zig build test`, `check`, the review-phase selection or a local mirror of CI) except to diagnose a CI red.
-In Claude Code, `.claude/hooks/block_full_runs.py` refuses those commands unless prefixed with `RUI_CI_RED=<run or issue>`.
+Run the smallest behavioral tests relevant to the changed owners.
+For a high-risk regression, use a targeted negative control when it establishes that the test detects the defect; strict-path regressions retain the intended-assertion requirement below.
+Reuse focused test, runtime, negative-control and independent review evidence when its relevant owner, oracle, inputs and integration context are unchanged.
+Record the evidence's revision or tree and explain relevant changes since it ran.
+Rerun evidence invalidated by semantic changes or the final integration of changed paths, not by a commit, push or review round alone.
+A new TUI interaction still needs the independent plain-PTY journey in [landing](docs/agents/landing.md#publish-and-merge); compilation and CI do not demonstrate it.
+
+Ready CI owns selected broad unit and integration tests, Mac checks, stack frames, live engines, migrations and premerge all-unit compilation obligations ([canonical gates](VERIFICATION.md#canonical-gates)).
+`python3 tests/ci/prepush.py --full` remains an opt-in diagnostic, not a publication toll.
+It adds development targets, Mac typechecking, unfiltered unit compilation, stack frames and selected reachable local MySQL checks.
+UID-global Upgrade remains hosted on an ordinary runner; local output records it as deferred, never passed.
+Use a full composed suite (`zig build test`, `check`, the review-phase selection or a local mirror of CI) only to diagnose a CI red.
+In Claude Code, `.claude/hooks/block_full_runs.py` requires `RUI_CI_RED=<run or issue>` for those commands.
 Live provider checks remain opt-in.
 
 Test meaningful failures and recovery against independent expectations.

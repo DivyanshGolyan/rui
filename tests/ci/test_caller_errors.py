@@ -172,12 +172,13 @@ fn live() anyerror!void { return error.NewCallerError; }
     def test_repository_pending_does_not_grow_from_trusted_base(self):
         self.assertEqual(allowance_growth(), [])
 
-    def test_gate_is_explicitly_wired_before_development_builds(self):
+    def test_gate_is_explicitly_wired_in_local_feedback(self):
         import prepush
         available = set(build_files.steps())
         commands = list(prepush.checks(["src/cli_args.zig"], available, "HEAD"))
         names = [name for name, _ in commands]
-        self.assertLess(names.index("caller errors"), names.index("development selection"))
+        self.assertIn("caller errors", names)
+        self.assertNotIn("development selection", names)
         command = dict(commands)["caller errors"]
         self.assertEqual(command[1:], ["-B", "tests/ci/caller_errors.py"])
         workflow = (ROOT / ".github/workflows/check.yml").read_text()

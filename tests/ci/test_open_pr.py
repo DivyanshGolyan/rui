@@ -8,21 +8,21 @@ import open_pr
 
 
 class OpenPrTest(unittest.TestCase):
-    def test_opens_only_drafts_over_rest(self):
+    def test_opens_ready_over_rest(self):
         args = open_pr.create_args("o/r", "Title", "body.md", "main", "fix-x")
         self.assertEqual(args[:4], ["api", "-X", "POST", "repos/o/r/pulls"])
-        self.assertIn("draft=true", args)
+        self.assertIn("draft=false", args)
         self.assertIn("head=fix-x", args)
         self.assertIn("body=@body.md", args)
 
-    def test_open_requests_codex_review_on_the_created_draft(self):
+    def test_open_requests_codex_review_on_the_ready_candidate(self):
         url = "https://github.com/example/rui/pull/9"
         for comment_error in (None, subprocess.CalledProcessError(1, ["gh", "api"], stderr="denied")):
             with self.subTest(comment_error=comment_error):
                 stdout, stderr = io.StringIO(), io.StringIO()
                 created = '{"number": 9, "html_url": "%s"}' % url
                 with patch("sys.argv", ["open_pr.py", "open", "--title", "Title", "--body-file", "body.md"]), \
-                     patch.object(open_pr, "git", side_effect=["fix-x", "a" * 40, "a" * 40]), \
+                     patch.object(open_pr, "git", side_effect=["fix-x", "a" * 40, "a" * 40, ""]), \
                      patch.object(open_pr, "origin_repo", return_value="example/rui"), \
                      patch.object(open_pr, "gh", return_value=created) as gh, \
                      patch.object(open_pr, "github", side_effect=[comment_error or None]) as github, \
@@ -41,8 +41,8 @@ class OpenPrTest(unittest.TestCase):
                     self.assertNotIn("requested Codex review", stdout.getvalue())
                 else:
                     self.assertEqual(result, 0)
-                    self.assertIn("after each push", stdout.getvalue())
-                    self.assertIn("starts the full suite", stdout.getvalue())
+                    self.assertIn("Selected CI runs beside review", stdout.getvalue())
+                    self.assertIn("clean Codex evidence", stdout.getvalue())
 
     def test_ready_finds_the_pr_over_rest(self):
         head = "c" * 40
@@ -59,6 +59,7 @@ class OpenPrTest(unittest.TestCase):
 
     def test_opens_only_a_pushed_head(self):
         self.assertIsNone(open_pr.open_refusal("a" * 40, "a" * 40))
+        self.assertIn("local changes", open_pr.open_refusal("a" * 40, "a" * 40, dirty=True))
         self.assertIn("no upstream", open_pr.open_refusal("a" * 40, None))
         self.assertIn("Push the branch first", open_pr.open_refusal("a" * 40, "b" * 40))
 

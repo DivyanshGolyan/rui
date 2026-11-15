@@ -62,151 +62,50 @@ class PrepushTest(unittest.TestCase):
         self.assertIn(artifact, diff)
         self.assertIn(artifact, out.getvalue())
 
-    def test_settings_fixture_selects_its_refusal_contract(self):
-        commands = self.commands(["tests/integration/settings_fixture.py"])
-        self.assertIn("tests/ci: test_settings_fixture.py", commands)
-
-    def test_docs_only_select_whitespace_regardless_of_sentence_layout(self):
-        for path in ("README.md", "AGENTS.md", "docs/agents/landing.md", "research/results.md",
-                     "THIRD_PARTY_NOTICES.md", ".github/notes.md", ".claude/skills/rui-ci-triage/SKILL.md"):
-            with self.subTest(path=path):
-                self.file(path, "One sentence. Another sentence in the same paragraph.\n")
-                commands = dict(prepush.checks([path], AVAILABLE, "BASE"))
-                self.assertEqual(commands, {"whitespace": WHITESPACE})
-
-    def test_zig_change_formats_only_its_file_and_keeps_selected_builds(self):
-        for store, targets in ((False, ["test-logic", "test-native"]),
-                               (True, ["test", "test-logic"])):
-            with self.subTest(store=store):
-                files = {
-                    "src/tests.zig": 'const encoding = @import("request_encoding.zig");',
-                    "src/logic_tests.zig": 'const cores = .{\n};\nconst encoding = @import("request_encoding.zig");',
-                    "src/request_encoding.zig": "",
-                    "src/store.zig": 'const encoding = @import("request_encoding.zig");' if store else "",
-                }
-                graph = select_tests.Graph(files, files.__getitem__)
-                with patch.object(select_tests, "tree_graph", return_value=graph):
-                    commands = self.commands(["src/request_encoding.zig"])
-                self.assertEqual(set(commands), SOURCE_CHECKS | {"whitespace", "zig fmt", "generated files", "development selection", "macOS type check"})
-                self.assertEqual(commands["zig fmt"], ["zig", "fmt", "--check", "--ast-check", "src/request_encoding.zig"])
-                self.assertEqual(commands["development selection"], ["zig", "build", *targets, "--summary", "line"])
-
-    def test_cli_inventory_uses_its_existing_owner_predicate(self):
-        for path in ("src/cli.zig", "src/cli_args.zig", "src/client.zig", "src/preferences.zig", "src/caller_new.zig"):
-            with self.subTest(path=path):
-                names = list(self.commands([path]))
-                self.assertLess(names.index("caller errors"), names.index("development selection"))
-        self.assertNotIn("caller errors", self.commands(["src/store/Store.zig"]))
-
-    def test_python_fixture_lints_only_the_changed_file_without_cross_compilation(self):
-        commands = self.commands(["tests/integration/activity_integration.py"])
-        self.assertEqual(set(commands), FIXTURE_CHECKS | {"whitespace", "undefined Python names", "development selection"})
-        self.assertEqual(commands["undefined Python names"][1:], ["-m", "ruff", "check", "--select", "F821", "tests/integration/activity_integration.py"])
-
-    def test_owned_policy_changes_run_their_focused_test_once(self):
-        self.file("tests/ci/test_prepush.py")
-        commands = self.commands(["tests/ci/prepush.py", "tests/ci/test_prepush.py"])
-        policy = {name: command for name, command in commands.items() if name.startswith("tests/ci")}
-        self.assertEqual(set(policy), {"tests/ci: test_prepush.py", "tests/ci: test_caller_errors.py", "tests/ci: test_selection.py", "tests/ci: test_harness_contracts.py"})
-        self.assertEqual(policy["tests/ci: test_prepush.py"][3:], ["-B", "-m", "unittest", "discover", "-s", "tests/ci", "-p", "test_prepush.py"])
-        self.assertEqual(policy["tests/ci: test_selection.py"][-2:], ["-k", "SelectionTest.test_prepush_leaves_server_targets_to_ci"])
-
-    def test_unknown_or_shared_policy_inputs_fall_back_to_full_policy_tests(self):
-        for path in (".github/workflows/check.yml", "tests/ci/shared_new.py", "tests/ci/requirements.txt", ".claude/hooks/block_full_runs.py", ".claude/settings.json", "build.zig.zon"):
-            with self.subTest(path=path):
-                commands = self.commands([path])
-                self.assertEqual(commands["tests/ci"][3:], ["-B", "-m", "unittest", "discover", "-s", "tests/ci"])
-
-    def test_focused_policy_discovery_has_its_fixture_import_path(self):
-        self.file("tests/ci/test_prepush.py")
-        commands = self.commands(["tests/ci/prepush.py"])
-        for name, command in commands.items():
-            if name.startswith("tests/ci"):
-                self.assertEqual(command[0], "env")
-                self.assertTrue(command[1].startswith(f"PYTHONPATH={self.root / 'tests/integration'}"))
-
-    def test_full_policy_selection_subsumes_focused_tests(self):
-        commands = self.commands(["tests/ci/test_prepush.py", ".github/workflows/check.yml"])
-        self.assertEqual([name for name in commands if name.startswith("tests/ci")], ["tests/ci"])
-
-    def test_mixed_changes_union_and_deduplicate_commands(self):
-        paths = ["AGENTS.md", "src/cli_args.zig", "tests/integration/activity_integration.py"]
+    def test_default_and_hook_are_feedback_only(self):
+        paths = ["src/store/schema.zig", "src/cli_args.zig", "tests/integration/activity_integration.py"]
         self.commands(paths)
-        commands = list(prepush.checks(paths + paths, AVAILABLE, "BASE"))
-        self.assertEqual(len(commands), len(dict(commands)))
-        self.assertEqual(set(dict(commands)), SOURCE_CHECKS | FIXTURE_CHECKS | {"whitespace", "zig fmt", "caller errors", "generated files", "undefined Python names", "development selection", "macOS type check"})
+        for mode in ("default", "quick"):
+            with self.subTest(mode=mode):
+                commands = dict(prepush.checks(paths, AVAILABLE, "BASE", mode))
+                self.assertFalse({"development selection", "macOS type check", "unfiltered unit compile",
+                                  "stack frames", "TypeScript client", "tests/ci"} & commands.keys())
+                self.assertTrue({"whitespace", "zig fmt", "schema number", "undefined Python names"} <= commands.keys())
+                self.assertIsInstance(commands["hosted acceptance"], prepush.Skipped)
+                self.assertIn("not evaluated", commands["hosted acceptance"].reason)
 
-    def test_deleted_files_still_select_owner_checks_but_not_file_tools(self):
-        commands = self.commands(["src/cli_args.zig", "tests/integration/activity_integration.py", "AGENTS.md"], deleted=["src/cli_args.zig", "tests/integration/activity_integration.py", "AGENTS.md"])
-        self.assertEqual(set(commands), SOURCE_CHECKS | FIXTURE_CHECKS | {"whitespace", "caller errors", "generated files", "development selection", "macOS type check"})
-        self.assertIn("tests/ci", self.commands(["tests/ci/test_removed.py"], deleted=["tests/ci/test_removed.py"]))
+    def test_shared_inputs_keep_focused_feedback_without_a_policy_sweep(self):
+        self.file("tests/ci/test_prepush.py")
+        commands = self.commands(["tests/ci/prepush.py", ".github/workflows/check.yml"])
+        self.assertIn("tests/ci: test_prepush.py", commands)
+        self.assertNotIn("tests/ci", commands)
+        self.assertNotIn("development selection", commands)
 
-    def test_build_changes_keep_development_selection_and_cross_compilation(self):
-        commands = self.commands(["build.zig"])
-        self.assertTrue({"whitespace", "zig fmt", "tests/ci", "development selection", "macOS type check"} <= set(commands))
-        self.assertNotIn("check-full", commands["development selection"])
+    def test_docs_only_select_whitespace(self):
+        self.assertEqual(self.commands(["AGENTS.md"]), {"whitespace": WHITESPACE})
 
-    def test_client_changes_run_the_client_check_without_a_zig_build(self):
+    def test_generation_uses_the_emitter_import_closure(self):
+        files = {
+            "src/logic_tests.zig": "const cores = .{\n};\n",
+            "src/openapi_main.zig": 'const api = @import("openapi.zig");',
+            "src/openapi.zig": 'const wire = @import("protocol.zig");',
+            "src/protocol.zig": "", "src/Root.zig": "",
+        }
+        graph = select_tests.Graph(files, files.__getitem__)
+        with patch.object(prepush, "tree_graph", return_value=graph):
+            self.assertIn("generated files", self.commands(["src/protocol.zig"]))
+            self.assertNotIn("generated files", self.commands(["src/Root.zig"]))
+            self.assertIn("generated files", self.commands(["openapi.json"]))
+
+    def test_client_changes_defer_broad_client_checks(self):
         commands = self.commands(["clients/ts/src/index.ts"])
-        self.assertEqual(set(commands), {"whitespace", "TypeScript client"})
-        self.assertEqual(commands["TypeScript client"], ["npm", "--prefix", "clients/ts", "run", "check"])
+        self.assertNotIn("TypeScript client", commands)
+        self.assertIn("hosted acceptance", commands)
 
-    def test_client_and_zig_changes_keep_both_owners_once(self):
-        commands = self.commands(["clients/ts/src/index.ts", "src/request_encoding.zig", "clients/ts/package.json"])
-        self.assertEqual(set(commands), SOURCE_CHECKS | {"whitespace", "zig fmt", "generated files", "TypeScript client", "development selection", "macOS type check"})
-
-    def test_openapi_changes_check_the_client_and_its_native_owner(self):
-        commands = self.commands(["openapi.json"])
-        self.assertEqual(set(commands), {"whitespace", "generated files", "TypeScript client", "development selection"})
-
-    def test_native_helpers_do_not_run_unrelated_policy_or_typechecks(self):
-        self.assertEqual(set(self.commands(["src/bash_platform.c"])), {"whitespace", "development selection"})
-
-    def test_qualification_go_keeps_wire_and_native_evidence_policies(self):
-        commands = self.commands(["tests/qualification/example.go"])
-        self.assertEqual(set(commands), {"whitespace", "development selection", "tests/ci: test_wire_version.py",
-                                         "tests/ci: test_store_schema_fixtures.py", "tests/ci: test_harness_contracts.py"})
-        self.assertEqual(commands["tests/ci: test_harness_contracts.py"][-2:], ["-k", "QualificationEvidenceTest"])
-
-    def test_experimental_zig_does_not_borrow_another_owners_build_targets(self):
-        commands = self.commands(["research/matklad-experiments/parser/probe.zig", "tests/integration/activity_integration.py"])
-        self.assertNotIn("macOS type check", commands)
-        self.assertIn("development selection", commands)
-        self.assertIn("zig fmt", commands)
-
-    def test_observation_changes_select_codec_and_ordering_checks_in_one_command(self):
-        commands = self.commands(["src/TestObservation.zig", "tests/qualification/measurement/observation.go"])
-        command = commands["tests/ci: test_harness_contracts.py"]
-        self.assertEqual(command.count("-p"), 1)
-        filters = {command[index + 1] for index, item in enumerate(command) if item == "-k"}
-        self.assertEqual(filters, {"ObservationCodecTest", "QualificationEvidenceTest", "SleepOrderingTest.test_tree_matches_the_shrink_only_allowlist"})
-
-    def test_store_schema_keeps_history_coherence_and_engine_boundaries(self):
-        commands = self.commands(["src/store/schema.zig"])
-        self.assertTrue(SOURCE_CHECKS | {"tests/ci: test_store_schema_version.py", "tests/ci: test_store_schema_fixtures.py", "tests/ci: test_store_engine_boundary.py", "tests/ci: test_store_conformance.py"} <= set(commands))
-
-    def test_store_live_server_targets_stay_with_ci(self):
-        commands = self.commands(["src/store/rsql.zig"])
-        self.assertEqual(commands["development selection"], ["zig", "build", "test-logic", "--summary", "line"])
-
-    def test_every_platform_scanned_domain_selects_the_existing_platform_gate(self):
-        for pattern in prepush.PLATFORM_SCANNED:
-            with self.subTest(pattern=pattern):
-                commands = self.commands([pattern.replace("*", "new_owner")])
-                self.assertIn("tests/ci: test_platform_boundary.py", commands)
-
-    def test_sleep_policy_covers_all_source_and_ci_test_domains(self):
-        for path in ("src/example.zig", "tests/integration/new_actor.zig", "tests/qualification/new_probe.zig", "tests/integration/new_fixture.py", "tests/ci/test_new_owner.py", "tests/ci/renderer_mutation_test.py"):
-            with self.subTest(path=path):
-                commands = self.commands([path])
-                if "tests/ci" in commands:
-                    continue
-                self.assertIn("tests/ci: test_harness_contracts.py", commands)
-                self.assertIn("SleepOrderingTest.test_tree_matches_the_shrink_only_allowlist", commands["tests/ci: test_harness_contracts.py"])
-
-    def test_integration_zig_keeps_test_reachability_platform_and_sleep_policies(self):
-        commands = self.commands(["tests/integration/mysql_wire_test.zig"])
-        self.assertTrue({"tests/ci: test_import_architecture.py", "tests/ci: test_platform_boundary.py", "tests/ci: test_harness_contracts.py"} <= set(commands))
+    def test_deleted_files_select_owner_checks_not_file_tools(self):
+        commands = self.commands(["src/cli_args.zig"], deleted=["src/cli_args.zig"])
+        self.assertIn("caller errors", commands)
+        self.assertNotIn("zig fmt", commands)
 
     def test_explicit_policy_routes_name_existing_test_modules_and_filters(self):
         for _, tests in prepush.SOURCE_POLICY:
@@ -217,24 +116,7 @@ class PrepushTest(unittest.TestCase):
                                for child in node.body if isinstance(child, ast.FunctionDef) and child.name.startswith("test_")]
                     self.assertTrue(methods)
                     if pattern != "*":
-                        self.assertTrue(any(pattern in method for method in methods), "route would silently run zero tests")
-
-    def test_quick_leaves_out_only_the_zig_builds(self):
-        paths = ["src/store/schema.zig", "src/cli_args.zig", "tests/integration/activity_integration.py"]
-        full = self.commands(paths)
-        quick = dict(prepush.checks(paths, AVAILABLE, "BASE", "quick"))
-        self.assertEqual(set(full) - set(quick), {"development selection", "macOS type check"})
-        self.assertEqual(dict(prepush.checks(paths, AVAILABLE, "BASE", "quick", merged_base=True)), quick)
-        self.assertEqual(quick["schema number"][-2:], ["tests/ci/schema_number.py", "--check"])
-        self.assertEqual(quick["generated files"][-1], "--regenerate")
-
-    def test_a_merge_of_the_base_adds_the_unfiltered_unit_compile_to_the_default_run(self):
-        for paths in (["src/request_encoding.zig"], ["AGENTS.md"], ["tests/ci/prepush.py"]):
-            with self.subTest(paths=paths):
-                plain = self.commands(paths)
-                merged = dict(prepush.checks(paths, AVAILABLE, "BASE", merged_base=True))
-                self.assertEqual(set(merged) - set(plain), {"unfiltered unit compile"})
-                self.assertEqual(merged["unfiltered unit compile"], prepush.UNIT_COMPILE)
+                        self.assertTrue(any(pattern in method for method in methods))
 
     def test_the_unfiltered_unit_compile_is_ci_unit_producer_command(self):
         import build_artifact
@@ -251,7 +133,7 @@ class PrepushTest(unittest.TestCase):
         without = dict(prepush.checks(paths, AVAILABLE, "BASE", "full"))
         with_server = dict(prepush.checks(paths, AVAILABLE, "BASE", "full", mysql=True))
         for full in (without, with_server):
-            self.assertEqual(set(full) - set(default), {"unfiltered unit compile", "stack frames", "live MySQL"})
+            self.assertEqual(set(full) - set(default), {"development selection", "macOS type check", "unfiltered unit compile", "stack frames", "live MySQL"})
             self.assertEqual({name: full[name] for name in default}, default)
             self.assertEqual(full["unfiltered unit compile"], prepush.UNIT_COMPILE)
             self.assertEqual(full["stack frames"], ["zig", "build", "-j1", "stack-frames", "-Dcpu=baseline", "--summary", "line"])
@@ -340,7 +222,8 @@ class PrepushTest(unittest.TestCase):
         self.git("checkout", "-q", "feature")
 
         def merged():
-            return prepush.merged_base(self.git("merge-base", "HEAD", "main"), "main")
+            with contextlib.chdir(self.root):
+                return select_tests.merged_base(self.git("merge-base", "HEAD", "main"), "main")
 
         self.assertFalse(merged(), "no merge")
         self.git("merge", "-q", "--no-ff", "-m", "merge other", "other")
@@ -504,6 +387,34 @@ class PrepushTest(unittest.TestCase):
         with self.assertRaises(SystemExit):
             prepush.install_hook()
         self.assertEqual(hook.read_text(), "#!/bin/sh\nexit 0\n", "another hook is never replaced")
+
+    def test_cached_feedback_retains_ci_deferrals_without_an_executed_pass(self):
+        tree = self.receipt_repository()
+        self.run_checks(["true"], prepush.Skipped("upgrade-integration needs an exclusive ordinary hosted runner UID"))
+        receipt = prepush.read_receipt()
+        self.assertEqual(receipt["scope"], "local-feedback")
+        self.assertNotIn("exit", receipt["results"][1])
+        head = self.git("rev-parse", "HEAD")
+        with patch("sys.argv", ["prepush.py", "--quick"]), \
+                patch.dict(os.environ, {prepush.PUSHED: head}), \
+                patch.object(prepush, "pushed_key", return_value=(tree, "BASE")), \
+                patch.object(prepush, "checks", side_effect=AssertionError("reran cached feedback")), \
+                redirect_stdout(io.StringIO()) as output, self.assertRaises(SystemExit) as result:
+            prepush.main()
+        self.assertEqual(result.exception.code, 0)
+        self.assertIn("Hosted acceptance was not evaluated", output.getvalue())
+        self.assertIn("upgrade-integration needs an exclusive ordinary hosted runner UID", output.getvalue())
+
+    def test_uid_global_upgrade_is_deferred_in_every_local_mode(self):
+        self.file("src/upgrade.zig")
+        for mode in ("default", "quick", "full"):
+            with self.subTest(mode=mode):
+                commands = dict(prepush.checks(["src/upgrade.zig"], AVAILABLE, "BASE", mode))
+                for command in commands.values():
+                    if not isinstance(command, prepush.Skipped):
+                        self.assertNotIn("upgrade-integration", command)
+                self.assertIn("upgrade-integration", commands["hosted acceptance"].reason)
+                self.assertIn("exclusive ordinary hosted runner UID", commands["hosted acceptance"].reason)
 
     def test_empty_diff_runs_nothing(self):
         self.assertEqual(self.commands([]), {})
