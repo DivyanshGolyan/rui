@@ -187,13 +187,14 @@ pub const Operations = struct {
     create: *const fn (*Self, client.Requests, configure_input.ConfigureInput, *Reply) anyerror!void,
     stop: *const fn (*Self, client.Requests, client.SessionStopInput, *Reply) anyerror!void,
     archive: *const fn (*Self, client.Requests, client.SessionArchiveInput, *Reply) anyerror!void,
+    pin: *const fn (*Self, client.Requests, client.SessionPinInput, *Reply) anyerror!void,
     /// The Host's `model_list` reply, owned by the allocator.
     models: *const fn (*Self, client.Requests, std.mem.Allocator) anyerror![]u8,
     /// Opens `opened` as a Session widget under Root.
     open: *const fn (*Self, *vxfw.EventContext) anyerror!void,
 };
 
-pub const client_operations: Operations = .{ .host = hostFacts, .start_host = startHost, .list = listPage, .first_line = firstLine, .action_command = actionCommand, .create = createSession, .stop = stopSession, .archive = archiveSession, .models = listModels, .open = openSession };
+pub const client_operations: Operations = .{ .host = hostFacts, .start_host = startHost, .list = listPage, .first_line = firstLine, .action_command = actionCommand, .create = createSession, .stop = stopSession, .archive = archiveSession, .pin = pinSession, .models = listModels, .open = openSession };
 
 /// A conversation the person left from. Until the terminal is restored it
 /// holds its borrowers; `frontend` is null when it never started.
@@ -365,6 +366,7 @@ const Job = union(enum) {
     create: CreationSnapshot,
     stop: view.Reference,
     archive: view.ArchiveRequest,
+    pin: view.PinRequest,
     models,
     defaults: DefaultsEdit,
 
@@ -375,7 +377,7 @@ const Job = union(enum) {
     fn quiescence(self: Job) Quiescence {
         return switch (self) {
             .host, .list, .lines, .commands, .models => .cancel_read,
-            .start_host, .create, .stop, .archive, .defaults => .settle_effect,
+            .start_host, .create, .stop, .archive, .pin, .defaults => .settle_effect,
         };
     }
 
@@ -668,6 +670,7 @@ fn appKey(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event, delivery:
     const semantic: view.Input = switch (selected) {
         .action => |action| .{ .action = action },
         .enter => .enter,
+        .left => .left,
         else => .ignored,
     };
     try self.appNext(ctx, try self.event(.{ .input = .{
@@ -695,6 +698,10 @@ fn appNext(self: *Self, ctx: *vxfw.EventContext, next: ?Next) !void {
         },
         .open_settings => try self.root.openSettings(ctx),
         .focus_chat => try self.root.focusChat(ctx),
+        .new_session => {
+            try self.root.showMain(ctx);
+            try self.app_session.?.frontend.?.newSession(ctx);
+        },
 
         .open => |reference| {
             try self.root.showMain(ctx);
@@ -989,7 +996,7 @@ const SessionRows = struct {
 
     fn count(raw: *const anyopaque, first: u32) u32 {
         const self: *const SessionRows = @ptrCast(@alignCast(raw));
-        return @intCast(self.state.order.items.len -| (first -| view.firstRowLine(self.state)));
+        return @intCast(self.state.order.items.len -| (first -| view.first_row_line));
     }
 
     fn above(count_: u32, arena: std.mem.Allocator) std.mem.Allocator.Error!@import("widgets/List.zig").Line {
@@ -1006,7 +1013,7 @@ const SessionRows = struct {
         const self: *const SessionRows = @ptrCast(@alignCast(raw));
         const item = view.listItem(self.state, index).?;
         const built = try view.listSegments(arena, self.state, item, self.width, self.caps, self.frame);
-        return .{ .segments = built.segments, .second = if (item == .row) try view.rowSecondSegments(arena, self.state, item.row, self.width, self.caps) else null, .height = if (item == .row) 2 else 1, .heading = built.heading, .target = view.clickOf(self.state, item) };
+        return .{ .segments = built.segments, .second = if (item == .row) try view.rowSecondSegments(arena, self.state, item.row, self.width, self.caps) else null, .height = if (item == .row) 2 else 1, .heading = built.heading, .target = view.clickOf(self.state, item), .alternate_target = view.pinClickOf(self.state, item) };
     }
 };
 
@@ -1080,7 +1087,7 @@ fn appListDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!v
     return self.drawPart(ctx, .list);
 }
 
-/// The overview is a full-width list and footer; a sidebar draws only rows.
+/// Both list layouts share pinned controls; only the overview draws a footer.
 fn drawPart(self: *Self, ctx: vxfw.DrawContext, part: AppScreen.Overview.Part) std.mem.Allocator.Error!vxfw.Surface {
     const size = ctx.max.size();
     self.caps.width = self.attention.vx.caps.unicode;
@@ -1106,15 +1113,13 @@ fn drawPart(self: *Self, ctx: vxfw.DrawContext, part: AppScreen.Overview.Part) s
     self.app_sessions.tail = .{ .widget = self.app_settings_line.widget(), .rows = view.layout(&self.state).settings.len() };
     self.app_sessions.caps = self.caps;
     self.app_header.caps = self.caps;
-    if (view.showsNewSession(&self.state)) {
-        self.app_new_session.caps = self.caps;
-        const header = try ctx.arena.create(@import("widgets/Stack.zig"));
-        header.* = .{ .priority = .top, .children = try ctx.arena.dupe(@import("widgets/Stack.zig").Child, &.{
-            .{ .widget = self.app_new_session.widget() },
-            .{ .widget = self.app_header.widget() },
-        }) };
-        self.app_screen.header = header.widget();
-    } else self.app_screen.header = self.app_header.widget();
+    self.app_new_session.caps = self.caps;
+    const header = try ctx.arena.create(@import("widgets/Stack.zig"));
+    header.* = .{ .priority = .top, .children = try ctx.arena.dupe(@import("widgets/Stack.zig").Child, &.{
+        .{ .widget = self.app_new_session.widget() },
+        .{ .widget = self.app_header.widget() },
+    }) };
+    self.app_screen.header = header.widget();
     defer {
         self.app_sessions.rows = .none;
         self.app_sessions.tail = null;
@@ -1308,7 +1313,7 @@ fn destroy(self: *Self) void {
 const Ending = union(enum) { overview, conversation: Left };
 
 /// What the core asks of the loop: to leave or present a pane under Root.
-const Next = union(enum) { leave, open: view.Reference, open_settings, focus_chat };
+const Next = union(enum) { leave, open: view.Reference, open_settings, focus_chat, new_session };
 
 /// Steps the core with one event and queues the jobs it asks for. Presenting
 /// panes and leaving are the loop's to do.
@@ -1316,7 +1321,7 @@ fn event(self: *Self, value: view.Event) !?Next {
     return (try self.eventResult(value)).next;
 }
 
-const EventResult = struct { next: ?Next = null, archive_admission: view.ArchiveAdmission = .refused };
+const EventResult = struct { next: ?Next = null, intent_admission: view.IntentAdmission = .refused };
 
 /// Keep the core's synchronous admission with the jobs this exact step queued.
 fn eventResult(self: *Self, value: view.Event) !EventResult {
@@ -1330,6 +1335,7 @@ fn eventResult(self: *Self, value: view.Event) !EventResult {
     for (effects.slice()) |effect| switch (effect) {
         .open_settings => next = .open_settings,
         .focus_chat => next = .focus_chat,
+        .new_session => next = .new_session,
         .list => |since| {
             self.traversal = .init(since);
             self.traversal_archive = self.state.listing_archive.?;
@@ -1342,12 +1348,13 @@ fn eventResult(self: *Self, value: view.Event) !EventResult {
         .stop => |reference| self.queue(.{ .stop = reference }),
         .cancel_upgrade => self.upgrade_job.cancel(),
         .archive => |request| self.queue(.{ .archive = request }),
+        .pin => |request| self.queue(.{ .pin = request }),
         .list_models => self.queue(.models),
         .open => |reference| next = .{ .open = reference },
-        .exit => return .{ .next = .leave, .archive_admission = effects.archive_admission },
+        .exit => return .{ .next = .leave, .intent_admission = effects.intent_admission },
     };
     self.sendStatuses();
-    return .{ .next = next, .archive_admission = effects.archive_admission };
+    return .{ .next = next, .intent_admission = effects.intent_admission };
 }
 
 /// Brings the terminal's program status records to what the core wants:
@@ -1468,6 +1475,10 @@ fn runJob(self: *Self, context: client.ReadContext) !void {
             self.answer = .{ .reply = .refused("stop_request_failed") };
             try self.ops.stop(self, requests, .{ .store = self.options.store, .session = reference }, &self.answer.reply);
         },
+        .pin => |*request| {
+            self.answer = .{ .reply = .refused("pin_request_failed") };
+            try self.ops.pin(self, requests, .{ .store = self.options.store, .session = &request.reference, .pinned = request.pinned }, &self.answer.reply);
+        },
         .archive => |*request| {
             self.answer = .{ .reply = .refused("archive_request_failed") };
             try self.ops.archive(self, requests, .{ .store = self.options.store, .session = &request.reference, .archived = request.archived }, &self.answer.reply);
@@ -1562,6 +1573,11 @@ fn deliver(self: *Self, outcome: anyerror!void) !?Next {
             return self.event(.{ .created = answer.reply.created() });
         },
         .stop => |reference| return self.event(.{ .stop = .{ .reference = reference, .outcome = answer.reply.stop() } }),
+        .pin => |request| return self.event(.{ .pin = .{ .request = request, .outcome = switch (answer.reply.outcome) {
+            .accepted => .accepted,
+            .failed => .{ .failed = answer.reply.text.slice() },
+            .unconfirmed => .{ .unconfirmed = answer.reply.text.slice() },
+        } } }),
         .archive => |request| {
             const result = answer.reply.archive(request);
             if (self.app_session) |attached| if (attached.frontend) |frontend| {
@@ -1651,13 +1667,13 @@ fn realMs(self: *const Self) u64 {
 /// An input in the opened Session's conversation, whose work shows as
 /// `kind`, stepped as the overview's own: a stop it asks for is sent at
 /// once.
-fn conversed(raw: *anyopaque, kind: view.Kind, input: view.ConversationInput) !view.ArchiveAdmission {
+fn conversed(raw: *anyopaque, kind: view.Kind, input: view.ConversationInput) !view.IntentAdmission {
     const self: *Self = @ptrCast(@alignCast(raw));
     errdefer self.lent_failed = true;
     const result = try self.eventResult(.{ .conversed = .{ .reference = self.opened, .work = kind, .input = input } });
     std.debug.assert(result.next == null);
     try self.dispatch(.lent);
-    return result.archive_admission;
+    return result.intent_admission;
 }
 
 /// A read the opened Session's conversation applied: the outcome it opened
@@ -1704,7 +1720,7 @@ fn quiesceUpgrade(self: *Self) !bool {
                 .leave => return error.InteractiveInterrupted,
                 .open => |reference| self.started = reference,
                 // Only direct list input asks for settings, never a worker answer.
-                .open_settings, .focus_chat => unreachable,
+                .open_settings, .focus_chat, .new_session => unreachable,
             };
         }
     }
@@ -2087,6 +2103,17 @@ fn archiveSession(self: *Self, requests: client.Requests, input: client.SessionA
     return reply.record(requests.sendCaptured(&captured, .{ .map = self.init.environ_map }, &buffer), captured.identity().key.slice());
 }
 
+fn pinSession(self: *Self, requests: client.Requests, input: client.SessionPinInput, reply: *Reply) !void {
+    const io = self.init.io;
+    var captured = client.captureSessionPin(io, input, .{ .generated = self.options.directory }) catch |err| {
+        reply.* = .refused(@errorName(err));
+        return;
+    };
+    defer captured.close(io);
+    var buffer: client.ReplyBuffer = .{};
+    return reply.record(requests.sendCaptured(&captured, .{ .map = self.init.environ_map }, &buffer), captured.identity().key.slice());
+}
+
 const test_now_s: u64 = 1_800_000_000;
 
 /// What the fake operations were asked, for the wiring tests.
@@ -2111,6 +2138,9 @@ const Seen = struct {
     archives: usize = 0,
     archive_session: view.Reference = @splat(0),
     archive_requested: bool = true,
+    pins: usize = 0,
+    pin_session: view.Reference = @splat(0),
+    pin_requested: bool = true,
     archive_filter: protocol.SessionArchiveFilter = .active,
     stopped: view.Reference = @splat(0),
     conversations: usize = 0,
@@ -2209,6 +2239,14 @@ const fake_operations: Operations = .{
             reply.* = .{ .outcome = .accepted, .archive_pending = input.archived };
         }
     }.archive,
+    .pin = struct {
+        fn pin(_: *Self, _: client.Requests, input: client.SessionPinInput, reply: *Reply) !void {
+            Seen.now.pins += 1;
+            Seen.now.pin_session = input.session[0..6].*;
+            Seen.now.pin_requested = input.pinned;
+            reply.* = .{ .outcome = .accepted };
+        }
+    }.pin,
     .models = struct {
         fn models(_: *Self, _: client.Requests, gpa: std.mem.Allocator) ![]u8 {
             Seen.now.model_lists += 1;
@@ -2464,6 +2502,7 @@ test "a blank line on the ground sits under New Session, selected or not, at nar
         var shown = try rig.shown(width, 30);
         defer shown.deinit();
         try std.testing.expect(std.mem.startsWith(u8, try shown.line(0), "  + New Session"));
+        try std.testing.expect(std.mem.indexOf(u8, try shown.line(0), "Archived") != null);
         try std.testing.expectEqual(selection == .new_session, std.meta.eql(highlight, shown.screen.readCell(1, 0).?.style.bg));
         // The gap is blank ground in every column of the list, never part
         // of the New Session row's highlight.
@@ -4504,11 +4543,7 @@ test "overview archive effects preserve server filter, pending visibility, and r
     try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 + 2 * view.list_interval_ms }) == null);
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expectEqual(@as(usize, 0), overview.state.rows.items.len);
-    // Server filter is still listing state, without an overview command UI.
-    overview.state.archive = .archived;
-    overview.state.token = null;
-    overview.state.next_list_ms = 0;
-    try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 + 2 * view.list_interval_ms + 1 }) == null);
+    try std.testing.expect(try rig.press("\x1b[H\x1b[C\r") == null);
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expectEqual(protocol.SessionArchiveFilter.archived, Seen.now.archive_filter);
     try std.testing.expectEqual(@as(usize, 1), overview.state.rows.items.len);
@@ -4522,6 +4557,10 @@ test "overview archive effects preserve server filter, pending visibility, and r
     try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 + 3 * view.list_interval_ms }) == null);
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expectEqual(@as(usize, 0), overview.state.rows.items.len);
+    try std.testing.expect(try rig.press("\x1b") == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqual(protocol.SessionArchiveFilter.active, Seen.now.archive_filter);
+    try std.testing.expectEqual(@as(usize, 1), overview.state.rows.items.len);
 }
 
 test "Alt-A overview archives the selected row in every encoding" {
@@ -5709,6 +5748,7 @@ test "pinned New Session remains above the end marker and responds to clicks and
             var shown = try rig.shown(width, 11);
             defer shown.deinit();
             try std.testing.expect(std.mem.startsWith(u8, try shown.line(0), "  + New Session"));
+            try std.testing.expect(std.mem.indexOf(u8, try shown.line(0), "Archived") != null);
             try std.testing.expect(std.mem.indexOf(u8, try shown.line(1), "↑") != null);
             const span = for (rig.overview.app_sessions.shown_at) |span| {
                 if (span.target) |target| if (target == .open and std.mem.eql(u8, &target.open, &selected)) break span;
@@ -5729,7 +5769,7 @@ test "pinned New Session remains above the end marker and responds to clicks and
     }
 }
 
-test "chat omits New Session at every width and overview restores its pinned control" {
+test "chat sidebar and overview share pinned New Session and Archived controls" {
     const Chat = struct {
         const child: vxfw.Text = .{ .text = "Chat transcript" };
         fn open(overview: *Self, ctx: *vxfw.EventContext) !void {
@@ -5753,7 +5793,8 @@ test "chat omits New Session at every width and overview restores its pinned con
         defer shown.deinit();
         const text = try shown.text();
         try std.testing.expect(std.mem.indexOf(u8, text, "Chat transcript") != null);
-        try std.testing.expect(std.mem.indexOf(u8, text, "+ New Session") == null);
+        try std.testing.expectEqual(width == 140, std.mem.indexOf(u8, text, "+ New Session") != null);
+        try std.testing.expectEqual(width == 140, std.mem.indexOf(u8, text, "Archived") != null);
         if (width == 140) {
             const line = rig.overview.app_sessions.selected.?;
             const target = view.clickOf(&rig.overview.state, view.listItem(&rig.overview.state, line).?).?;
@@ -5768,10 +5809,11 @@ test "chat omits New Session at every width and overview restores its pinned con
         var shown = try rig.shown(width, 20);
         defer shown.deinit();
         try std.testing.expect(std.mem.startsWith(u8, try shown.line(0), "  + New Session"));
+        try std.testing.expect(std.mem.indexOf(u8, try shown.line(0), "Archived") != null);
     }
 }
 
-test "chat omission preserves late-listed Sessions and the physical last-row footer" {
+test "chat pinned controls preserve late-listed Sessions and the physical last-row footer" {
     const Chat = struct {
         var dir: std.Io.Dir = undefined;
         var files: u8 = 0;
@@ -5809,15 +5851,14 @@ test "chat omission preserves late-listed Sessions and the physical last-row foo
         for ([_]vxfw.Size{ .{ .width = 140, .height = 40 }, .{ .width = 46, .height = 30 }, .{ .width = 140, .height = 30 } }) |size| {
             var shown = try rig.shown(size.width, size.height);
             defer shown.deinit();
-            try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "+ New Session") == null);
+            try std.testing.expectEqual(size.width == 140, std.mem.indexOf(u8, try shown.text(), "+ New Session") != null);
             try std.testing.expect(std.mem.indexOf(u8, try shown.line(size.height - 1), "alt+i info") != null);
             if (size.width == 140) {
-                try std.testing.expectEqual(if (listed) listed_references.len else 0, overview.app_sessions.shown_at.len);
+                try std.testing.expectEqual(if (listed) listed_references.len + 1 else 1, overview.app_sessions.shown_at.len);
                 if (listed) {
-                    // No omitted control or spacer may consume the first row.
-                    try std.testing.expect(std.mem.indexOf(u8, try shown.line(0), "Fix the flaky test") != null);
-                    for (overview.app_sessions.shown_at, 0..) |span, index| {
-                        try std.testing.expectEqual(@as(i17, @intCast(index * 2)), span.row);
+                    try std.testing.expect(std.mem.indexOf(u8, try shown.line(2), "Fix the flaky test") != null);
+                    for (overview.app_sessions.shown_at[1..], 0..) |span, index| {
+                        try std.testing.expectEqual(@as(i17, @intCast(index * 2 + 1)), span.row);
                         try std.testing.expectEqual(@as(u16, 2), span.height);
                     }
                 }
@@ -5832,6 +5873,7 @@ test "chat omission preserves late-listed Sessions and the physical last-row foo
         var shown = try rig.shown(width, 30);
         defer shown.deinit();
         try std.testing.expect(std.mem.startsWith(u8, try shown.line(0), "  + New Session"));
+        try std.testing.expect(std.mem.indexOf(u8, try shown.line(0), "Archived") != null);
         const gap = try shown.line(1);
         try std.testing.expect(std.mem.trim(u8, gap, " │").len == 0);
         try std.testing.expect(std.mem.indexOf(u8, try shown.line(2), "Fix the flaky test") != null);
@@ -5851,6 +5893,7 @@ test "pinned New Session wins the last header row over a provider band" {
         var shown = try rig.shown(width, 2);
         defer shown.deinit();
         try std.testing.expect(std.mem.startsWith(u8, try shown.line(0), "  + New Session"));
+        try std.testing.expect(std.mem.indexOf(u8, try shown.line(0), "Archived") != null);
     }
 }
 
@@ -6042,6 +6085,21 @@ test "App settings Model borrow ends on every Overview menu replacement or relea
         try std.testing.expectEqual(AppSettings.SaveState.idle, overview.defaults_save);
         try std.testing.expect(overview.root.input.layer.settingsOpen());
     }
+}
+
+test "the bare arrows move within the pinned row, in CSI and SS3 form: right as the table's open_session, left as a choice key" {
+    for ([_][]const u8{ "\x1b[C", "\x1bOC" }) |right| for ([_][]const u8{ "\x1b[D", "\x1bOD" }) |left| {
+        const rig = try openOverview();
+        defer rig.close();
+        rig.overview.state.selected = .new_session;
+        _ = try rig.press(right);
+        try std.testing.expectEqual(view.Selection.archived, rig.overview.state.selected);
+        _ = try rig.press(left);
+        try std.testing.expectEqual(view.Selection.new_session, rig.overview.state.selected);
+        _ = try rig.press("\x1b[1;5C");
+        _ = try rig.press("\x1b[1;3C");
+        try std.testing.expectEqual(view.Selection.new_session, rig.overview.state.selected);
+    };
 }
 
 test "App settings Model keeps every named app binding live while filter text stays local" {
@@ -6259,14 +6317,14 @@ test "chat info Archive backend forwards exact core ledger admission through the
         const retained = overview.state.requests;
         const backend = frontend.app_info.backend;
         if (full or held != .none or archive != .active) {
-            try std.testing.expectEqual(view.ArchiveAdmission.refused, try backend.archive(backend.context));
+            try std.testing.expectEqual(view.IntentAdmission.refused, try backend.archive(backend.context));
             try std.testing.expectEqual(@import("chat_info.zig").SaveState.idle, backend.state(backend.context));
             try std.testing.expectEqual(before, overview.state.request_count);
             try std.testing.expectEqualDeep(retained[0..before], overview.state.requests[0..before]);
             try std.testing.expectEqual(@as(usize, 0), Seen.now.archives);
             try std.testing.expectEqual(@as(usize, 0), overview.job_count);
         } else {
-            try std.testing.expectEqual(view.ArchiveAdmission.admitted, try backend.archive(backend.context));
+            try std.testing.expectEqual(view.IntentAdmission.admitted, try backend.archive(backend.context));
             try std.testing.expectEqual(@import("chat_info.zig").SaveState.pending, backend.state(backend.context));
             try std.testing.expect(try rig.settle() == null);
             try std.testing.expectEqual(@as(usize, 1), Seen.now.archives);
@@ -6965,6 +7023,8 @@ const key_encodings = std.enums.EnumArray(keymap.Key, []const []const u8).init(.
     .ctrl_r = &.{ "\x12", "\x1b[114;5u", "\x1b[27;5;114~" },
     .ctrl_x = &.{ "\x18", "\x1b[120;5u", "\x1b[27;5;120~" },
     .alt_a = &.{ "\x1ba", "\x1b[97;3u", "\x1b[27;3;97~" },
+    .alt_up = &.{ "\x1b[1;3A", "\x1b[1;3:1A" },
+    .alt_down = &.{ "\x1b[1;3B", "\x1b[1;3:1B" },
     .up = &.{ "\x1b[A", "\x1bOA", "\x1b[1;1A" },
     .down = &.{ "\x1b[B", "\x1bOB", "\x1b[1;1B" },
     .left = &.{ "\x1b[D", "\x1bOD", "\x1b[1;1D" },
@@ -7362,8 +7422,7 @@ const EmptySessionOwner = struct {
         const overview = self.rig.overview;
         try self.expectVisible(&.{reference});
         try std.testing.expectEqual(reference, overview.state.conversing.?);
-        try std.testing.expectEqual(@as(?usize, 0), view.selectedLine(&overview.state));
-        try std.testing.expect(!view.showsNewSession(&overview.state));
+        try std.testing.expectEqual(@as(?usize, 1), view.selectedLine(&overview.state));
         for ([_]u16{ 46, 140 }) |width| {
             var shown = try self.rig.shown(width, 24);
             defer shown.deinit();
@@ -7378,9 +7437,9 @@ const EmptySessionOwner = struct {
                 for (0..columns) |col| try text.writer.writeAll(shown.screen.readCell(@intCast(col), @intCast(row)).?.char.grapheme);
                 try text.writer.writeByte('\n');
             }
-            try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text.written(), name));
+            try std.testing.expectEqual(@as(usize, if (std.mem.eql(u8, name, "New Session")) 2 else 1), std.mem.count(u8, text.written(), name));
             try std.testing.expect(std.mem.indexOf(u8, text.written(), &reference) == null);
-            try std.testing.expectEqual(@as(?u32, 0), overview.app_sessions.selected);
+            try std.testing.expectEqual(@as(?u32, 1), overview.app_sessions.selected);
             try std.testing.expect((try view.listSegments(shown.arena.allocator(), &overview.state, .{ .row = 0 }, columns, overview.caps, 0)).selected);
             var bold_name = false;
             for (try view.rowSegments(shown.arena.allocator(), &overview.state, 0, columns, overview.caps, 0)) |segment| {
@@ -7409,6 +7468,61 @@ const EmptySessionOwner = struct {
         }
     }
 };
+
+test "sidebar New Session retires safely or refuses with focused usable chat" {
+    const Held = enum { safe, unsafe_draft, submitting, not_started };
+    for ([_]u16{ 100, 140 }) |width| for ([_]bool{ false, true }) |pointer| for (std.enums.values(Held)) |held| {
+        const fixture = try EmptySessionOwner.create();
+        defer fixture.destroy();
+        const first = try fixture.openNew();
+        const overview = fixture.rig.overview;
+        const frontend = fixture.frontend();
+        _ = frontend.input.append("Retained draft");
+        if (held == .unsafe_draft) frontend.app_hooks.drafts = null;
+        if (held == .submitting or held == .not_started) {
+            frontend.submission.intent = .{ .message = frontend.input.submitText("pending message") };
+            frontend.submission.state = if (held == .submitting) .submitting else .not_started;
+        }
+        {
+            var shown = try fixture.rig.shown(width, 30);
+            shown.deinit();
+        }
+        var ctx = fixture.rig.context();
+        defer ctx.cmds.deinit(std.testing.allocator);
+        try std.testing.expect(try overview.root.focusList(&ctx));
+        if (pointer) {
+            try std.testing.expect(try fixture.rig.click(4, 0, width, 30) == null);
+        } else {
+            try std.testing.expect(try fixture.rig.press("\x1b[H\r") == null);
+        }
+        if (held == .safe) {
+            try std.testing.expect(overview.app_session == null);
+            try std.testing.expect(try fixture.rig.settle() == null);
+            try std.testing.expect(!overview.root.input.list_focused);
+            try std.testing.expectEqual(@as(usize, 2), Seen.now.creates);
+            try std.testing.expect(!std.mem.eql(u8, &first, fixture.frontend().session));
+            try std.testing.expectEqualStrings("", fixture.frontend().input.composition().bytes);
+            const draft = overview.session_drafts.take(std.testing.allocator, &first).?;
+            defer draft.deinit(std.testing.allocator);
+            try std.testing.expectEqualStrings("Retained draft", draft.snapshot.bytes);
+        } else {
+            try std.testing.expect(!overview.root.input.list_focused);
+            try std.testing.expectEqualStrings(&first, fixture.frontend().session);
+            try std.testing.expectEqual(@as(usize, 1), Seen.now.creates);
+            try std.testing.expect(!overview.state.creating());
+            var shown = try fixture.rig.shown(width, 30);
+            defer shown.deinit();
+            try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "Esc returns") != null);
+            if (held == .unsafe_draft) {
+                try std.testing.expect(try fixture.rig.press("X") == null);
+                try std.testing.expectEqualStrings("Retained draftX", fixture.frontend().input.composition().bytes);
+            } else {
+                try std.testing.expect(frontend.submission.intent != null);
+                try std.testing.expectEqualStrings("pending message", try frontend.input.message(frontend.submission.intent.?.message));
+            }
+        }
+    };
+}
 
 test "empty New Session owner opens blank then hides on leave without deleting its canonical row" {
     const fixture = try EmptySessionOwner.create();
@@ -7978,4 +8092,202 @@ test "App settings live memory follows Overview readings while chat info stays c
     // Neither the per-Session facts nor its frontend bridge carries app memory.
     try std.testing.expect(!@hasField(@import("chat_info.zig").Backend, "memory"));
     try std.testing.expect(!@hasField(SessionFrontend.Lender, "memory"));
+}
+
+test "Option session navigation switches immediately and restores each sessions draft and input focus" {
+    const Files = struct {
+        var dir: std.Io.Dir = undefined;
+        var count: u8 = 0;
+        fn scratch(init: std.process.Init) !std.Io.File {
+            count += 1;
+            return dir.createFile(init.io, &.{'a' + count}, .{ .read = true });
+        }
+    };
+    for ([_]u16{ 46, 140 }) |width| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        Files.dir = tmp.dir;
+        Files.count = 0;
+        var cancellation: client.Cancellation = .{};
+        const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
+        defer rig.close();
+        const overview = rig.overview;
+        Seen.now.listed = 2;
+        _ = try overview.event(.{ .tick = test_now_s * 1000 });
+        _ = try rig.settle();
+        overview.ops.open = openSession;
+        overview.hooks.scratch = Files.scratch;
+        const first = overview.state.rows.items[overview.state.order.items[0]].reference;
+        const second = overview.state.rows.items[overview.state.order.items[1]].reference;
+        _ = try rig.next(.{ .open = first });
+        defer {
+            if (overview.app_session) |left| {
+                left.frontend.?.stop();
+                overview.disposeSession(left);
+                overview.app_session = null;
+            }
+            for (overview.retired.items) |retired| overview.disposeSession(retired.left);
+            overview.retired.deinit(std.testing.allocator);
+        }
+        overview.root.size = .{ .width = width, .height = 30 };
+        var ctx = rig.context();
+        defer ctx.cmds.deinit(std.testing.allocator);
+        for ([_]struct { text: []const u8, chord: []const u8, destination: view.Reference, restored: []const u8, cursor: usize }{
+            .{ .text = "first α\x1b[D", .chord = "\x1b[1;3B", .destination = second, .restored = "", .cursor = 0 },
+            .{ .text = "second\x1b[D", .chord = "\x1b[1;3A", .destination = first, .restored = "first α", .cursor = 6 },
+            .{ .text = "", .chord = "\x1b[1;3B", .destination = second, .restored = "second", .cursor = 5 },
+        }) |case| {
+            const frontend = overview.app_session.?.frontend.?;
+            frontend.reading.opening = false;
+            frontend.poll_at = std.math.maxInt(i96);
+            try app_events.send(&ctx, case.text, overview.root.widget(), frontend.widget());
+            ctx.cmds.clearRetainingCapacity();
+            try app_events.send(&ctx, case.chord, overview.root.widget(), frontend.widget());
+            const destination = overview.app_session.?.frontend.?;
+            try std.testing.expectEqualStrings(&case.destination, destination.session);
+            try std.testing.expectEqualStrings(case.restored, destination.input.composition().bytes);
+            try std.testing.expectEqual(case.cursor, destination.input.composition().cursor);
+            try std.testing.expect(!overview.root.input.list_focused);
+            var focused = false;
+            for (ctx.cmds.items) |command| if (command == .request_focus and command.request_focus.eql(destination.widget())) {
+                focused = true;
+            };
+            try std.testing.expect(focused);
+            try std.testing.expect(!ctx.quit);
+            try std.testing.expectEqual(@as(usize, 0), Seen.now.creates);
+        }
+    }
+}
+
+test "Session pin worker retains captured target and settles organization without opening it" {
+    const rig = try openListed();
+    defer rig.close();
+    const overview = rig.overview;
+    const selected = overview.state.selected;
+    const opens = Seen.now.conversations;
+    for ([_]bool{ true, false }) |pinned| {
+        const request: view.PinRequest = .{ .reference = "b4n8wd".*, .pinned = pinned };
+        const result = try overview.eventResult(.{ .clicked = .{ .target = .{ .pin = request } } });
+        try std.testing.expectEqual(view.IntentAdmission.admitted, result.intent_admission);
+        try std.testing.expectEqual(@as(?Next, null), result.next);
+        try std.testing.expect(try rig.settle() == null);
+        try std.testing.expectEqualStrings(&request.reference, &Seen.now.pin_session);
+        try std.testing.expectEqual(pinned, Seen.now.pin_requested);
+        try std.testing.expectEqual(selected, overview.state.selected);
+        try std.testing.expectEqual(opens, Seen.now.conversations);
+        try std.testing.expect(overview.state.find(request.reference).?.pin_order == null);
+    }
+    try std.testing.expectEqual(@as(usize, 2), Seen.now.pins);
+    try std.testing.expectEqual(@as(usize, 0), Seen.now.creates);
+    try std.testing.expectEqual(@as(usize, 0), Seen.now.archives);
+}
+
+test "Session pin drawn Root gestures preserve composer focus draft and caret across session and controls" {
+    const Find = struct {
+        fn origin(surface: vxfw.Surface, target: vxfw.Widget, at: vxfw.RelativePoint) ?vxfw.RelativePoint {
+            if (surface.widget.eql(target)) return at;
+            for (surface.children) |child| {
+                if (origin(child.surface, target, .{ .row = at.row + child.origin.row, .col = at.col + child.origin.col })) |found| return found;
+            }
+            return null;
+        }
+    };
+    for ([_]bool{ false, true }) |alt| {
+        const fixture = try EmptySessionOwner.create();
+        defer fixture.destroy();
+        const reference = try fixture.openNew();
+        try fixture.chooseModel();
+        const rig = fixture.rig;
+        const overview = rig.overview;
+        const frontend = fixture.frontend();
+        try std.testing.expect(try rig.press("Unsent café\x1b[D\x1b[D") == null);
+        const cursor = frontend.input.composition().cursor;
+        const composer = frontend.app_input.composer.widget();
+        try std.testing.expect(rig.last_focus.?.eql(composer));
+        const selection = overview.state.selected;
+        const conversations = Seen.now.conversations;
+        const creations = Seen.now.creates;
+        const Target = enum { settings, session };
+        for ([_]Target{ .settings, .session }) |target| {
+            var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer arena.deinit();
+            const frame = try overview.root.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 140, .height = 40 }, .cell_size = .{} });
+            var point = Find.origin(frame, switch (target) {
+                .settings => overview.app_settings_line.widget(),
+                .session => overview.app_sessions.widget(),
+            }, .{ .row = 0, .col = 0 }) orelse return error.TestExpectedDrawnTarget;
+            point.col += 4;
+            switch (target) {
+                .settings => point.row += 1,
+                .session => {
+                    point.row += for (overview.app_sessions.shown_at) |span| {
+                        if (span.target) |meaning| {
+                            if (meaning == .open and std.mem.eql(u8, &meaning.open, &reference)) break span.row;
+                        }
+                    } else return error.TestExpectedDrawnSession;
+                },
+            }
+            var ctx = rig.context();
+            defer ctx.cmds.deinit(ctx.alloc);
+            const pins = Seen.now.pins;
+            var mouse: vaxis.Mouse = .{ .col = @intCast(point.col), .row = @intCast(point.row), .button = if (alt) .left else .right, .type = .press, .mods = .{ .alt = alt } };
+            try app_events.mouse(&ctx, frame, mouse);
+            mouse.type = .release;
+            try app_events.mouse(&ctx, frame, mouse);
+            for (ctx.cmds.items) |cmd| switch (cmd) {
+                .set_mouse_shape => {},
+                else => return error.TestUnexpectedCommand,
+            };
+            try std.testing.expect(!ctx.quit);
+            try std.testing.expect(!overview.root.input.list_focused);
+            try std.testing.expect(!overview.root.input.layer.settingsOpen());
+            try std.testing.expect(overview.root.session.?.eql(frontend.widget()));
+            try std.testing.expectEqual(selection, overview.state.selected);
+            try std.testing.expectEqualStrings("Unsent café", frontend.input.composition().bytes);
+            try std.testing.expectEqual(cursor, frontend.input.composition().cursor);
+            try std.testing.expect(frontend.submission.intent == null);
+            try std.testing.expect(try rig.settle() == null);
+            try std.testing.expect(rig.last_focus.?.eql(composer));
+            try std.testing.expectEqual(conversations, Seen.now.conversations);
+            try std.testing.expectEqual(creations, Seen.now.creates);
+            try std.testing.expectEqual(pins + @as(usize, @intFromBool(target == .session)), Seen.now.pins);
+            if (target == .session) {
+                try std.testing.expectEqualStrings(&reference, &Seen.now.pin_session);
+                try std.testing.expect(Seen.now.pin_requested);
+            }
+            try std.testing.expectEqualStrings("Unsent café", frontend.input.composition().bytes);
+            try std.testing.expectEqual(cursor, frontend.input.composition().cursor);
+            try std.testing.expect(!overview.root.input.list_focused);
+            try std.testing.expectEqual(reference, overview.state.conversing.?);
+        }
+    }
+
+    for ([_]bool{ false, true }) |alt| {
+        const rig = try openListed();
+        defer rig.close();
+        const overview = rig.overview;
+        const selection = overview.state.selected;
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const frame = try overview.root.widget().draw(.{ .arena = arena.allocator(), .cell_arena = arena.allocator(), .min = .{}, .max = .{ .width = 140, .height = 40 }, .cell_size = .{} });
+        const point = Find.origin(frame, overview.app_new_session.widget(), .{ .row = 0, .col = 0 }) orelse return error.TestExpectedDrawnNewSession;
+        var ctx = rig.context();
+        defer ctx.cmds.deinit(ctx.alloc);
+        var mouse: vaxis.Mouse = .{ .col = @intCast(point.col + 4), .row = @intCast(point.row), .button = if (alt) .left else .right, .type = .press, .mods = .{ .alt = alt } };
+        try app_events.mouse(&ctx, frame, mouse);
+        mouse.type = .release;
+        try app_events.mouse(&ctx, frame, mouse);
+        for (ctx.cmds.items) |cmd| switch (cmd) {
+            .set_mouse_shape => {},
+            else => return error.TestUnexpectedCommand,
+        };
+        try std.testing.expect(try rig.settle() == null);
+        try std.testing.expectEqual(selection, overview.state.selected);
+        try std.testing.expect(overview.root.session == null);
+        try std.testing.expect(!overview.root.input.layer.settingsOpen());
+        try std.testing.expectEqual(@as(usize, 0), Seen.now.pins);
+        try std.testing.expectEqual(@as(usize, 0), Seen.now.creates);
+        try std.testing.expectEqual(@as(usize, 0), Seen.now.conversations);
+        try std.testing.expect(!ctx.quit);
+    }
 }

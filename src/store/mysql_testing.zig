@@ -118,21 +118,7 @@ pub fn open(storage: *Store, tmp: *std.testing.TmpDir, io: std.Io, options: test
         if (!exists) {
             for (comptime schema.objects(.mysql)) |object| try run(object.sql);
             try run(try std.fmt.bufPrint(&buffer, "CREATE DATABASE {s}_oracle;CREATE TABLE {s}_oracle.touched_oracle(session_ref VARCHAR(6))", .{ name, name }));
-            // Trigger names live in the Store schema; their root definer can
-            // write the sibling schema without enlarging the app's grants.
-            inline for (comptime sqlite.touchOracleTriggers(.mysql, "ORACLE.touched_oracle")) |sql| {
-                var text: std.Io.Writer.Allocating = .init(std.testing.allocator);
-                defer text.deinit();
-                // Some trigger bodies insert twice: replace every qualifier.
-                var rest: []const u8 = sql;
-                while (std.mem.indexOf(u8, rest, "ORACLE")) |offset| {
-                    try text.writer.writeAll(rest[0..offset]);
-                    try text.writer.print("{s}_oracle", .{name});
-                    rest = rest[offset + "ORACLE".len ..];
-                }
-                try text.writer.writeAll(rest);
-                try run(text.written());
-            }
+            try createTouchOracle(name, null);
             try run("CREATE USER IF NOT EXISTS 'rui_conformance'@'localhost' IDENTIFIED BY 'rui_conformance'");
             try run(try std.fmt.bufPrint(&buffer, "GRANT SELECT,INSERT,UPDATE ON {s}.* TO 'rui_conformance'@'localhost'", .{name}));
         }
@@ -143,6 +129,38 @@ pub fn open(storage: *Store, tmp: *std.testing.TmpDir, io: std.Io, options: test
     const config = (try dialect.rootConfig()).?;
     try storage.openTarget(io, .{ .mysql = .{ .address = .{ .unix_socket = config.socket }, .user = "rui_conformance", .password = "rui_conformance", .database = name } }, options.identity orelse path, .{ .served = options.served, .host_tool_set = options.host_tool_set });
     storage.engine.mysql.state.testing_database = name_buffer;
+}
+
+pub fn restoreTouchOracleForTesting(storage: *Store, comptime tables: []const []const u8) !void {
+    mutex.lockUncancelable(storage.io);
+    defer mutex.unlock(storage.io);
+    try use(storage);
+    try createTouchOracle(database(storage), tables);
+}
+
+fn createTouchOracle(name: []const u8, comptime selected: ?[]const []const u8) !void {
+    inline for (comptime sqlite.touchOracleTriggers(.mysql, "ORACLE.touched_oracle")) |sql| {
+        if (selected) |tables| {
+            const keep = comptime blk: {
+                for (tables) |table| {
+                    if (std.mem.indexOf(u8, sql, " ON " ++ table ++ " FOR EACH ROW ") != null) break :blk true;
+                }
+                break :blk false;
+            };
+            if (!keep) continue;
+        }
+        var text: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer text.deinit();
+        // Some trigger bodies insert twice: replace every qualifier.
+        var rest: []const u8 = sql;
+        while (std.mem.indexOf(u8, rest, "ORACLE")) |offset| {
+            try text.writer.writeAll(rest[0..offset]);
+            try text.writer.print("{s}_oracle", .{name});
+            rest = rest[offset + "ORACLE".len ..];
+        }
+        try text.writer.writeAll(rest);
+        try run(text.written());
+    }
 }
 
 fn empty(name: []const u8) !void {

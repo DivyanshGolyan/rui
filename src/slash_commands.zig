@@ -3,6 +3,7 @@
 const std = @import("std");
 const model_catalog = @import("model_catalog.zig");
 const cli_args = @import("cli_args.zig");
+const skill_suggestions = @import("skill_suggestions.zig");
 const model_capability = @import("model_capability.zig");
 const TerminalText = @import("TerminalText.zig");
 const ReasoningEffort = model_capability.ReasoningEffort;
@@ -95,6 +96,7 @@ const ConversationName = enum {
     effort,
     model,
     new,
+    pin,
     recover,
     @"reload-skills",
     rename,
@@ -102,6 +104,7 @@ const ConversationName = enum {
     result,
     setup,
     unarchive,
+    unpin,
 };
 
 /// A conversation's commands.
@@ -113,6 +116,7 @@ pub const conversation = Commands(ConversationName, .{
     .effort = .{ .description = "change effort", .argument = .effort },
     .model = .{ .description = "change model" },
     .new = .{ .description = "start a new chat" },
+    .pin = .{ .description = "pin this chat" },
     .recover = .{ .argument = .{ .required = "KEY" }, .listed = false },
     .@"reload-skills" = .{ .description = "reload skills" },
     .rename = .{ .description = "rename this chat", .argument = .{ .required = "NAME" } },
@@ -120,6 +124,7 @@ pub const conversation = Commands(ConversationName, .{
     .result = .{ .description = "show a saved answer", .argument = .{ .required = "KEY" } },
     .setup = .{ .description = "defaults for new chats", .argument = .{ .options = setup_options } },
     .unarchive = .{ .description = "restore this chat" },
+    .unpin = .{ .description = "unpin this chat" },
 });
 
 /// Whether a draft starts with the one `/` a command or a leading skill
@@ -211,6 +216,14 @@ pub fn Commands(comptime N: type, comptime commands: std.enums.EnumFieldStruct(N
                 });
             }
             break :blk texts;
+        };
+
+        const listed_count = blk: {
+            var count = 0;
+            for (std.enums.values(Name)) |name| if (table.get(name).listed) {
+                count += 1;
+            };
+            break :blk count;
         };
 
         /// Align fixed choice words after the widest listed command name.
@@ -383,8 +396,8 @@ pub const List = struct {
     /// commands keep theirs while typing narrows them.
     column: ?usize = null,
 
-    /// More than any screen's commands or options.
-    pub const capacity = 36;
+    /// All conversation commands and one complete skill preview.
+    pub const capacity = conversation.listed_count + skill_suggestions.capacity;
 
     fn add(self: *List, entry: Entry) void {
         std.debug.assert(std.mem.startsWith(u8, entry.word, self.typed));
@@ -724,7 +737,7 @@ test "a /requests list takes only keys the parser reads back as one word the lis
 test "a draft is a command line, one unfinished slash word, or a Message, by the whole grammar" {
     // Written out, not read from the table: the two recovery actions are
     // grammar although the list leaves them out.
-    const names = [_][]const u8{ "archive", "clear", "copy", "discard", "effort", "model", "new", "recover", "reload-skills", "rename", "requests", "result", "setup", "unarchive" };
+    const names = [_][]const u8{ "archive", "clear", "copy", "discard", "effort", "model", "new", "pin", "recover", "reload-skills", "rename", "requests", "result", "setup", "unarchive", "unpin" };
     try std.testing.expectEqual(std.enums.values(conversation.Name).len, names.len);
     const Draft = conversation.Draft;
     for (names) |name| {
@@ -822,7 +835,7 @@ test "a command admits exactly the arguments its shape names" {
 test "the list names the listed commands a command word starts, and Tab puts the highlighted one in" {
     const Case = struct { draft: []const u8, shown: ?[]const []const u8, first: ?[]const u8 = null };
     const cases = [_]Case{
-        .{ .draft = "/", .shown = &.{ "archive", "clear", "copy ", "effort ", "model", "new", "reload-skills", "rename ", "requests", "result ", "setup ", "unarchive" } },
+        .{ .draft = "/", .shown = &.{ "archive", "clear", "copy ", "effort ", "model", "new", "pin", "reload-skills", "rename ", "requests", "result ", "setup ", "unarchive", "unpin" } },
         .{ .draft = "/c", .shown = &.{ "clear", "copy " }, .first = "lear" },
         .{ .draft = "/cop", .shown = &.{"copy "}, .first = "y " },
         .{ .draft = "/st", .shown = &.{} },
@@ -999,7 +1012,7 @@ test "deleted app commands are unknown in conversation and absent from completio
 }
 
 test "archive commands parse in conversation and reject extra arguments" {
-    for ([_][]const u8{ "/archive", "/unarchive" }) |line| {
+    for ([_][]const u8{ "/archive", "/unarchive", "/pin", "/unpin" }) |line| {
         try std.testing.expect(conversation.parse(line) == .command);
         const extra = try std.fmt.allocPrint(std.testing.allocator, "{s} extra", .{line});
         defer std.testing.allocator.free(extra);
@@ -1010,7 +1023,7 @@ test "archive commands parse in conversation and reject extra arguments" {
 
 test "archive commands retain separate local command identities" {
     inline for (.{conversation}) |screen| {
-        inline for (.{ "archive", "unarchive" }) |name| {
+        inline for (.{ "archive", "unarchive", "pin", "unpin" }) |name| {
             const parsed = screen.parse("/" ++ name);
             try std.testing.expect(parsed == .command);
             try std.testing.expectEqualStrings(name, @tagName(parsed.command.name));

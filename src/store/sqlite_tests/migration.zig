@@ -739,7 +739,7 @@ fn finalSourceReferenceGate(raw: *c.sqlite3) !void {
     }
 }
 
-test "schema 75 final source enforces exact Session Action and sole content on fresh and migrated catalogs" {
+test "schema 76 final source enforces exact Session Action and sole content on fresh and migrated catalogs" {
     for ([_]bool{ false, true }) |migrated| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
@@ -769,7 +769,7 @@ test "schema 75 final source enforces exact Session Action and sole content on f
     }
 }
 
-test "schema 75 exact final source gate rejects only-new-reference-removed negative control" {
+test "schema 76 exact final source gate rejects only-new-reference-removed negative control" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;

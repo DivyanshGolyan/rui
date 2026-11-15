@@ -58,7 +58,7 @@ class PlanTest(unittest.TestCase):
                 linux, mac = expected_targets[name, documentation]
                 expected = dict(
                     change_kind='documentation' if documentation and event == 'pull_request' else 'normal',
-                    draft_run=draft, targets=linux, native_targets=mac,
+                    draft_run=draft, targets=linux, linux_compile_targets=linux, native_targets=mac,
                     linux_matrix=shards(linux, mysql_suites=original['mysql_suites']),
                     macos_matrix=shards(mac, 'macos', mysql_suites=original['mysql_suites']),
                     linux_split=split_build(linux), macos_split=split_build(mac),
@@ -115,6 +115,25 @@ class PlanTest(unittest.TestCase):
                 self.assertEqual(output['quarantine'], 'admission' if retry else 'off')
                 self.assertFalse(output['retry'])
                 self.assertFalse(output['linux_codegen'])
+
+    def test_all_unit_obligation_widens_only_compilation_on_ready_candidates(self):
+        for targets in ([], ['test-native'], ['test-store'], ['test-logic'], ['test'], ['check'], ['check-full']):
+            for required, draft in product((False, True), (False, True)):
+                with self.subTest(targets=targets, required=required, draft=draft):
+                    source = dict(selection(True), targets=targets, unit_compile_required=required)
+                    result = plan(source, event_name='pull_request', draft=draft,
+                                  promotion=False, change_kind=ChangeKind.NORMAL).outputs
+                    execution = [] if draft else targets
+                    compiled = list(execution)
+                    if required and not draft and not {'test', 'check', 'check-full'} & set(targets):
+                        compiled = sorted(set(targets) | {'test'})
+                    self.assertEqual(result['targets'], execution)
+                    self.assertEqual(result['linux_compile_targets'], compiled)
+                    self.assertEqual(result['linux_matrix'], shards(execution, mysql_suites=[]))
+                    self.assertEqual(result['linux_split'], split_build(compiled))
+                    self.assertFalse(result['native'])
+                    self.assertFalse(result['upgrade'])
+                    self.assertEqual(source['targets'], targets)
 
     def test_macos_matrix_and_split_use_the_final_native_selection(self):
         for native, mac_required, expected, split in (

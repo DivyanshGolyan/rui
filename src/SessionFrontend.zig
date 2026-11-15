@@ -383,9 +383,9 @@ fn launch(self: *Self, job: *const Job, worker: Task.Run) !void {
 pub const Lender = struct {
     context: *anyopaque,
     /// Steps the overview with semantic input for this exact conversation.
-    /// Returns whether this event admitted a new archive request; other inputs
+    /// Returns whether this event admitted a new organization request; other inputs
     /// return refused, without changing their own effect semantics.
-    step: *const fn (context: *anyopaque, work: protocol.session_work.Kind, input: overview_view.ConversationInput) anyerror!overview_view.ArchiveAdmission,
+    step: *const fn (context: *anyopaque, work: protocol.session_work.Kind, input: overview_view.ConversationInput) anyerror!overview_view.IntentAdmission,
     /// Runs the overview between the conversation's frames, without the
     /// screen or input: answers its finished job, keeps its listing going,
     /// so another Session's news still notifies, and starts its next stop
@@ -575,7 +575,7 @@ fn infoBackend(self: *Self) ChatInfo.Backend {
             frontend.info_effect = .configure;
             frontend.dirty = true;
         }
-        fn archive(raw: *anyopaque) !overview_view.ArchiveAdmission {
+        fn archive(raw: *anyopaque) !overview_view.IntentAdmission {
             const frontend = owner(raw);
             frontend.infoMaySave() catch return .refused;
             const admission = try frontend.archive();
@@ -1106,8 +1106,9 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     if (self.app_consent.request == null) if (screen.commands) |*shown| {
         self.app_palette.shown = shown;
         self.app_palette.caps = self.app_caps;
-        self.app_palette.style = normal;
-        self.app_palette.quiet = quiet;
+        self.app_palette.style = style.of(self.app_caps, .{ .background = .input_surface });
+        self.app_palette.quiet = style.of(self.app_caps, .{ .colour = .quiet, .background = .input_surface });
+        self.app_palette.max_height = @max(1, ctx.max.height.? / 3 -| 1);
         self.app_palette.hover_style = hover;
         self.app_palette.userdata = self;
         self.app_palette.on_select = appSelectCommand;
@@ -1769,6 +1770,7 @@ const Slash = union(enum) {
     model,
     archive,
     unarchive,
+    pin: bool,
     /// Waits for the reader, then shows its page; Host commands included.
     inspection: Inspection,
     discard,
@@ -1788,6 +1790,8 @@ fn parse(text: []const u8) Slash {
         .model => .model,
         .archive => .archive,
         .unarchive => .unarchive,
+        .pin => .{ .pin = true },
+        .unpin => .{ .pin = false },
         .requests => .{ .inspection = .requests },
         // The table's /copy words are `reads.Copy`'s own names.
         .copy => .{ .inspection = .{ .copy = if (command.argument.len == 0) .answer else std.meta.stringToEnum(reads.Copy, command.argument).? } },
@@ -1804,7 +1808,7 @@ fn slashCommand(self: *Self, text: []const u8) !void {
     // Lender intents have one admission boundary in converse, shared with
     // shortcuts and confirmation. Other commands retain their own hold policy.
     const admitted_elsewhere = switch (parsed) {
-        .archive, .unarchive => true,
+        .archive, .unarchive, .pin => true,
         else => false,
     };
     if (self.upgradeHeld() and !admitted_elsewhere) {
@@ -1816,6 +1820,7 @@ fn slashCommand(self: *Self, text: []const u8) !void {
         .model => self.requestFooterChoice(.model),
         .archive => try self.perform(.archive),
         .unarchive => try self.converse(.unarchive),
+        .pin => |pinned| try self.converse(.{ .pin = pinned }),
         .inspection => self.input.queueCommand(text),
         .discard => {
             self.submission.discardRejected() catch {
@@ -1835,6 +1840,11 @@ fn slashCommand(self: *Self, text: []const u8) !void {
         },
         .unknown => self.unknownCommand(text),
     }
+}
+
+pub fn newSession(self: *Self, ctx: *vxfw.EventContext) !void {
+    self.newChat();
+    try self.afterInput(ctx);
 }
 
 fn newChat(self: *Self) void {
@@ -1924,7 +1934,7 @@ test "a Session lists the skills it saved for the caret's /word, and Tab or Ente
     // A leading slash shares the loaded skills with the listed commands.
     try held.keys("/");
     try Fake.answered(held);
-    try std.testing.expectEqual(@as(usize, 14), held.screen.commands.?.list.count);
+    try std.testing.expectEqual(@as(usize, 16), held.screen.commands.?.list.count);
     try held.keys("re\x1b[B\x1b[B\x1b[B\x1b[B\r");
     try std.testing.expectEqualStrings("/recap ", held.self.input.composition().bytes);
     try std.testing.expect(held.self.submission.view() == null);
@@ -2730,7 +2740,7 @@ fn perform(self: *Self, action: ConversationAction) !void {
 }
 
 /// All archive surfaces use this admission result from the overview owner.
-fn archive(self: *Self) !overview_view.ArchiveAdmission {
+fn archive(self: *Self) !overview_view.IntentAdmission {
     if (self.reading.opening) {
         self.notice = "Archive is available once the Session opens.";
         return .refused;
@@ -2743,11 +2753,11 @@ fn converse(self: *Self, input: overview_view.ConversationInput) !void {
     _ = try self.converseAdmission(input);
 }
 
-fn converseAdmission(self: *Self, input: overview_view.ConversationInput) !overview_view.ArchiveAdmission {
+fn converseAdmission(self: *Self, input: overview_view.ConversationInput) !overview_view.IntentAdmission {
     // The Upgrade's own inputs are no Host requests, so no hold refuses them.
     const host_intent = switch (input) {
         .other, .cancel_upgrade, .upgrade_failed => false,
-        .stop, .archive, .unarchive => true,
+        .stop, .archive, .unarchive, .pin => true,
     };
     if (host_intent and self.hostHeld()) return .refused;
     if (host_intent and self.upgradeHeld()) {
@@ -4644,7 +4654,7 @@ test "Ctrl-R recovers only as Ctrl-R, never with Shift hidden by its reported te
 
 /// An overview that lent the terminal and says nothing under its input.
 const quiet_overview: Lender = .{ .context = undefined, .step = struct {
-    fn step(_: *anyopaque, _: protocol.session_work.Kind, _: overview_view.ConversationInput) !overview_view.ArchiveAdmission {
+    fn step(_: *anyopaque, _: protocol.session_work.Kind, _: overview_view.ConversationInput) !overview_view.IntentAdmission {
         return .refused;
     }
 }.step, .service = struct {
@@ -4676,7 +4686,7 @@ const FakeOverview = struct {
     stops: usize = 0,
     notice: ?[]const u8 = null,
 
-    fn step(raw: *anyopaque, work: protocol.session_work.Kind, input: overview_view.ConversationInput) !overview_view.ArchiveAdmission {
+    fn step(raw: *anyopaque, work: protocol.session_work.Kind, input: overview_view.ConversationInput) !overview_view.IntentAdmission {
         const fake: *FakeOverview = @ptrCast(@alignCast(raw));
         fake.notice = null;
         if (input != .stop) return .refused;
@@ -5136,6 +5146,8 @@ test "upgrade quiescing reobservation and protocol holds refuse a fresh Message 
 const ArchiveOverview = struct {
     state: overview_view.State,
     archives: usize = 0,
+    pins: usize = 0,
+    pin_requested: ?bool = null,
     stops: usize = 0,
     host_inputs: usize = 0,
     cancels: usize = 0,
@@ -5152,11 +5164,11 @@ const ArchiveOverview = struct {
         self.state.deinit();
     }
 
-    fn step(raw: *anyopaque, work: protocol.session_work.Kind, input: overview_view.ConversationInput) !overview_view.ArchiveAdmission {
+    fn step(raw: *anyopaque, work: protocol.session_work.Kind, input: overview_view.ConversationInput) !overview_view.IntentAdmission {
         const self: *ArchiveOverview = @ptrCast(@alignCast(raw));
         switch (input) {
             .other, .cancel_upgrade, .upgrade_failed => {},
-            .stop, .archive, .unarchive => self.host_inputs += 1,
+            .stop, .archive, .unarchive, .pin => self.host_inputs += 1,
         }
         const effects = try overview_view.step(&self.state, .{ .conversed = .{ .reference = "k7m2qx".*, .work = work, .input = input } });
         for (effects.slice()) |effect| switch (effect) {
@@ -5165,11 +5177,16 @@ const ArchiveOverview = struct {
                 self.archived = request.reference;
                 self.requested = request.archived;
             },
+            .pin => |request| {
+                try std.testing.expectEqualStrings("k7m2qx", &request.reference);
+                self.pins += 1;
+                self.pin_requested = request.pinned;
+            },
             .stop => self.stops += 1,
             .cancel_upgrade => self.cancels += 1,
             else => return error.TestUnexpectedEffect,
         };
-        return effects.archive_admission;
+        return effects.intent_admission;
     }
 
     fn line(raw: *anyopaque, work: protocol.session_work.Kind) Lender.Said {
@@ -5390,7 +5407,7 @@ test "Ctrl-X stops at once beside a typed slash archive, and Enter then archives
 
 test "conversation slash archive errors propagate and consume only the submitted line" {
     const Failed = struct {
-        fn step(_: *anyopaque, _: protocol.session_work.Kind, input: overview_view.ConversationInput) !overview_view.ArchiveAdmission {
+        fn step(_: *anyopaque, _: protocol.session_work.Kind, input: overview_view.ConversationInput) !overview_view.IntentAdmission {
             if (input == .archive or input == .unarchive) return error.TestArchiveDispatchFailed;
             return .refused;
         }
@@ -8791,7 +8808,7 @@ test "chat info archive admission refuses full and unresolved ledgers without tr
 
 test "chat info archive owner errors propagate instead of becoming ordinary admission refusals" {
     const Failed = struct {
-        fn step(_: *anyopaque, _: protocol.session_work.Kind, _: overview_view.ConversationInput) !overview_view.ArchiveAdmission {
+        fn step(_: *anyopaque, _: protocol.session_work.Kind, _: overview_view.ConversationInput) !overview_view.IntentAdmission {
             return error.TestArchiveDispatchFailed;
         }
     };
@@ -8858,7 +8875,7 @@ test "chat info Configure and Copy admission either owns work or refuses before 
         const result = if (effect == edits.len) backend.copy_last_answer(backend.context, &ctx) else backend.configure(backend.context, edits[effect]);
         if (hold != .none) {
             try std.testing.expectError(error.Busy, result);
-            try std.testing.expectEqual(overview_view.ArchiveAdmission.refused, try backend.archive(backend.context));
+            try std.testing.expectEqual(overview_view.IntentAdmission.refused, try backend.archive(backend.context));
             try std.testing.expectEqual(before_effect, self.info_effect);
             try std.testing.expectEqualDeep(before_edit, self.info_edit);
             try std.testing.expectEqualDeep(before_command, self.input.queuedCommand());
@@ -9311,6 +9328,52 @@ test "chat info supplies the one bottom footer after the input and both dividers
     };
 }
 
+test "App Session palette total budget stays input anchored without reserving feed rows" {
+    const Find = struct {
+        fn widget(surface: vxfw.Surface, target: vxfw.Widget) ?vxfw.SubSurface {
+            if (surface.widget.eql(target)) return .{ .origin = .{ .row = 0, .col = 0 }, .surface = surface };
+            for (surface.children) |child| {
+                var found = @This().widget(child.surface, target) orelse continue;
+                found.origin.row += child.origin.row;
+                found.origin.col += child.origin.col;
+                return found;
+            }
+            return null;
+        }
+    };
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const before = try held.draw();
+    const input_before = Find.widget(before, held.self.app_input.widget()).?;
+    const feed_before = held.self.app_content.size;
+    try held.keys("/");
+    const after = try held.draw();
+    try std.testing.expectEqual(input_before.origin, Find.widget(after, held.self.app_input.widget()).?.origin);
+    try std.testing.expectEqual(feed_before, held.self.app_content.size);
+    try std.testing.expect(!held.self.app_screen.overlay_reserves_space);
+    held.screen.commands.?.highlight = held.screen.commands.?.list.count - 1;
+    for (1..49) |height| {
+        held.size.height = @intCast(height);
+        const surface = try held.draw();
+        const input = Find.widget(surface, held.self.app_input.widget()).?;
+        const panel = Find.widget(surface, held.self.app_palette.widget()).?;
+        const limit = @max(1, height / 3 -| 1);
+        try std.testing.expectEqual(limit, held.self.app_palette.max_height);
+        try std.testing.expect(panel.surface.size.height <= limit);
+        try std.testing.expectEqual(input.origin.row, panel.origin.row + panel.surface.size.height);
+        if (input.origin.row == 0) {
+            try std.testing.expectEqual(@as(u16, 0), panel.surface.size.height);
+            try std.testing.expectEqual(.hidden, held.screen.commands.?.seen);
+        } else {
+            try std.testing.expect(panel.surface.size.height > 0);
+            try std.testing.expectEqual(.drawn, held.screen.commands.?.seen);
+            const index = held.screen.commands.?.highlight - held.self.app_palette.first;
+            const rect = held.self.app_palette.hover.targets[index];
+            try std.testing.expect(panel.surface.readCell(@intCast(rect.col), @intCast(rect.row)).style.reverse);
+        }
+    }
+}
+
 test "App Session palette clicks follow Enter for command words options and values and retain hover across frames" {
     const Case = struct { draft: []const u8, word: []const u8, after: []const u8, queued: ?[]const u8 = null, notice: ?[]const u8 = null };
     for ([_]Case{
@@ -9331,10 +9394,11 @@ test "App Session palette clicks follow Enter for command words options and valu
         const index = for (shown.list.shown(), 0..) |entry, index| {
             if (std.mem.eql(u8, case.word, entry.word)) break index;
         } else return error.TestExpectedRow;
-        shown.highlight = if (index == 0) shown.list.count - 1 else 0;
+        shown.highlight = @min(index + 1, shown.list.count - 1);
         const selected = shown.highlight;
         _ = try held.draw();
-        const row: i16 = @intCast(index - held.self.app_palette.first);
+        const target = held.self.app_palette.hover.targets[index - held.self.app_palette.first];
+        const row: i16 = @intCast(target.row);
         const widget_ = held.self.app_palette.widget();
         var events = held.context();
         try widget_.handleEvent(&events, .mouse_enter);
@@ -9348,7 +9412,7 @@ test "App Session palette clicks follow Enter for command words options and valu
             try std.testing.expect(!cell.style.reverse);
             try std.testing.expectEqual(held.self.app_palette.hover_style.bg, cell.style.bg);
             try std.testing.expectEqual(held.self.app_palette.hover_style.ul_style, cell.style.ul_style);
-            try std.testing.expect(palette.readCell(2, @intCast(selected - held.self.app_palette.first)).style.reverse);
+            try std.testing.expect(palette.readCell(2, @intCast(held.self.app_palette.hover.targets[selected - held.self.app_palette.first].row)).style.reverse);
         }
         try std.testing.expectEqual(selected, held.screen.commands.?.highlight);
         try std.testing.expectEqualStrings(case.draft, held.self.input.composition().bytes);
@@ -9375,7 +9439,8 @@ test "App Session palette refuses clicks on stale drafts closed lists and during
     _ = try held.draw();
     const widget_ = held.self.app_palette.widget();
     var events = held.context();
-    const click: vxfw.Event = .{ .mouse = .{ .col = 2, .row = 0, .button = .left, .type = .press, .mods = .{} } };
+    const target = held.self.app_palette.hover.targets[0];
+    const click: vxfw.Event = .{ .mouse = .{ .col = @intCast(target.col), .row = @intCast(target.row), .button = .left, .type = .press, .mods = .{} } };
     try held.keys("en"); // The drawn /reload-skills row is not the new /rename row.
     try widget_.handleEvent(&events, click);
     try std.testing.expectEqualStrings("/ren", held.self.input.composition().bytes);
@@ -9416,10 +9481,10 @@ test "App Session palette clicks requests rows with an empty draft as Enter does
     var events = held.context();
     const widget_ = held.self.app_palette.widget();
     try widget_.handleEvent(&events, .mouse_enter);
-    try widget_.handleEvent(&events, .{ .mouse = .{ .col = 2, .row = 1, .button = .none, .type = .motion, .mods = .{} } });
+    try widget_.handleEvent(&events, .{ .mouse = .{ .col = 2, .row = 2, .button = .none, .type = .motion, .mods = .{} } });
     try std.testing.expectEqual(@as(usize, 0), held.screen.commands.?.highlight);
     try widget_.handleEvent(&events, .mouse_leave);
-    try widget_.handleEvent(&events, .{ .mouse = .{ .col = 2, .row = 1, .button = .left, .type = .press, .mods = .{} } });
+    try widget_.handleEvent(&events, .{ .mouse = .{ .col = 2, .row = 2, .button = .left, .type = .press, .mods = .{} } });
     try std.testing.expectEqualStrings("/result " ++ older, held.self.input.queuedCommand().?);
     try std.testing.expectEqualStrings("", held.self.input.composition().bytes);
 }
@@ -9448,13 +9513,13 @@ test "App Session palette clicks replace the caret skill without sending or movi
     const widget_ = held.self.app_palette.widget();
     var events = held.context();
     try widget_.handleEvent(&events, .mouse_enter);
-    try widget_.handleEvent(&events, .{ .mouse = .{ .col = 2, .row = 1, .button = .none, .type = .motion, .mods = .{} } });
+    try widget_.handleEvent(&events, .{ .mouse = .{ .col = 2, .row = 2, .button = .none, .type = .motion, .mods = .{} } });
     _ = try held.draw();
     try std.testing.expectEqual(@as(usize, 0), held.screen.commands.?.highlight);
     try std.testing.expectEqualStrings("please /re now", held.self.input.composition().bytes);
     for (events.cmds.items) |command| try std.testing.expect(command != .request_focus);
     try widget_.handleEvent(&events, .mouse_leave);
-    try widget_.handleEvent(&events, .{ .mouse = .{ .col = 2, .row = 1, .button = .left, .type = .press, .mods = .{} } });
+    try widget_.handleEvent(&events, .{ .mouse = .{ .col = 2, .row = 2, .button = .left, .type = .press, .mods = .{} } });
     try std.testing.expectEqualStrings("please /review now", held.self.input.composition().bytes);
     try std.testing.expectEqual("please /review".len, held.self.input.composition().cursor);
     try std.testing.expectEqual(null, held.self.input.queuedCommand());
@@ -10182,7 +10247,41 @@ test "every listed chat command dispatches to its existing owner" {
         .{ "/requests", Slash{ .inspection = .requests } },           .{ "/result key", Slash{ .inspection = .command } },
         .{ "/reload-skills", Slash{ .inspection = .command } },       .{ "/new", Slash.new_session },
         .{ "/clear", Slash.new_session },                             .{ "/model", Slash.model },
+        .{ "/pin", Slash{ .pin = true } },                            .{ "/unpin", Slash{ .pin = false } },
         .{ "/configurex", Slash.unknown },
     };
     inline for (cases) |case| try std.testing.expectEqualDeep(case[1], parse(case[0]));
+}
+
+test "conversation slash pin and unpin share organization admission without model or command dispatch" {
+    for ([_]bool{ false, true }) |pinned| for ([_]bool{ false, true }) |completion| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        var overview: ArchiveOverview = .{ .state = undefined };
+        try overview.init();
+        defer overview.deinit();
+        held.self.lender = overview.lender();
+        held.self.command = UnusedArchiveCommand.command;
+        UnusedArchiveCommand.calls = 0;
+        const original = held.self.input.submitText("retained original");
+        const line = if (pinned) (if (completion) "/pi" else "/pin") else (if (completion) "/unp" else "/unpin");
+        try sendKeys(&held.self, line);
+        if (completion) try held.settle();
+        try sendKeys(&held.self, "\r");
+        try std.testing.expectEqual(@as(usize, 1), overview.pins);
+        try std.testing.expectEqual(pinned, overview.pin_requested.?);
+        try std.testing.expectEqualStrings("", held.self.input.composition().bytes);
+        try std.testing.expectEqualStrings("retained original", try held.self.input.message(original));
+        try std.testing.expect(held.self.input.queuedCommand() == null);
+        try std.testing.expect(held.self.submission.view() == null);
+        try std.testing.expectEqual(@as(usize, 0), UnusedArchiveCommand.calls);
+        _ = try overview_view.step(&overview.state, .{ .pin = .{ .request = .{ .reference = "k7m2qx".*, .pinned = pinned }, .outcome = .{ .unconfirmed = "saved-pin-handle" } } });
+        try sendKeys(&held.self, if (pinned) "/unpin\r" else "/pin\r");
+        try std.testing.expectEqual(@as(usize, 1), overview.pins);
+        try std.testing.expectEqual(@as(usize, 1), overview.state.request_count);
+        var buffer: [1024]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&buffer);
+        try overview_view.writeDeparture(&overview.state, null, &writer);
+        try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "rui request recover saved-pin-handle") != null);
+    };
 }

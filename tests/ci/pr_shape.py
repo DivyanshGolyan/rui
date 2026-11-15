@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Require a Shape section in PR descriptions for changes to src/."""
+"""Require a Summary sketch or legacy Shape section for changes to src/."""
 import argparse
 import os
 import re
@@ -8,9 +8,30 @@ import sys
 from select_tests import changed_paths
 
 
+def summary_sketch(body):
+    """Whether Summary contains a nonempty, closed Markdown code fence."""
+    summary, content = False, False
+    fence = None
+    for line in body.splitlines():
+        if fence is not None:
+            if re.fullmatch(r" {0,3}" + re.escape(fence[0]) + r"{%d,}[ \t]*" % len(fence), line):
+                if summary and content:
+                    return True
+                fence = None
+            elif line.strip():
+                content = True
+            continue
+        if opened := re.match(r"^ {0,3}(`{3,}|~{3,})", line):
+            fence, content = opened[1], False
+        elif heading := re.fullmatch(r" {0,3}(#{1,2})[ \t]+(.+?)[ \t]*", line):
+            summary = heading[1] == "##" and heading[2] == "Summary"
+    return False
+
+
 def refusal(changed_paths, body) -> str | None:
-    if any(path.startswith("src/") for path in changed_paths) and not re.search(r"^##\s+Shape\s*$", body, re.M):
-        return "PRs changing src/ need a ## Shape section in the description (CODING_STANDARDS.md#shape-before-code)."
+    if any(path.startswith("src/") for path in changed_paths) and not (
+            re.search(r"^##\s+Shape\s*$", body, re.M) or summary_sketch(body)):
+        return "PRs changing src/ need a nonempty fenced sketch in ## Summary or a legacy ## Shape section (CODING_STANDARDS.md#shape-before-code)."
     return None
 
 

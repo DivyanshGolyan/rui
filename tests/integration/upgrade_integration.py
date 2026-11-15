@@ -682,7 +682,9 @@ class TerminalScreen:
                          ready=lambda screen: all(shown(marker, screen) for marker in
                                                   ("+ New Session", "Settings"))
                          and (not ready or shown("enter open", screen))
-                         and "Notifications" not in screen)
+                         and "Notifications" not in screen
+                         and "Type a task" not in screen
+                         and not re.search(r"(?m)(?:^|│)\s*[›>](?: |$)", screen))
         assert "Type a task" not in frame, ("overview has an editor", frame)
         assert not re.search(r"(?m)(?:^|│)\s*[›>](?: |$)", frame), ("overview has a composer", frame)
         return frame

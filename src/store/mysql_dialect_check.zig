@@ -1061,26 +1061,148 @@ test "schema 66 MySQL migration freezes actual effort emission and prior admitte
     };
 }
 
-test "schema 75 command kind migration resolves actual catalog name and fails closed on missing or duplicate semantics" {
+test "schema 75 MySQL pin migration handles fresh and historically upgraded kind checks" {
+    const io = std.testing.io;
+    mutex.lockUncancelable(io);
+    defer mutex.unlock(io);
+    _ = connection() orelse return if (state == .absent) error.SkipZigTest else error.MysqlUnavailable;
+    defer restore("USE " ++ database);
+    const parent_database = "rui_pin_parent_catalog";
+    try setup("DROP DATABASE IF EXISTS " ++ parent_database ++ ";CREATE DATABASE " ++ parent_database);
+    defer restore("DROP DATABASE IF EXISTS " ++ parent_database);
+    try load(parent_database, store_testing.pin_parent_mysql_ddl, false);
+    inline for (.{ false, true }) |historical| {
+        try setup("DROP DATABASE IF EXISTS " ++ migrated_database ++ ";CREATE DATABASE " ++ migrated_database);
+        if (historical) {
+            try load(migrated_database, store_testing.baseline_mysql_ddl, false);
+            try load(migrated_database, store_testing.baseline_rows, true);
+            inline for (schema.migrations) |step| {
+                if (step.from < 74) try load(migrated_database, schema.mysqlMigration(step.from), false);
+            }
+        } else {
+            const objects = comptime statements(store_testing.pin_parent_mysql_ddl);
+            for (objects) |object| {
+                if (std.mem.startsWith(u8, object, "CREATE TABLE session_pin(") or std.mem.startsWith(u8, object, "CREATE TABLE session_pin_command(")) continue;
+                const text = try std.mem.replaceOwned(u8, std.testing.allocator, object, "kind BETWEEN 1 AND 7", "kind BETWEEN 1 AND 6");
+                defer std.testing.allocator.free(text);
+                try load(migrated_database, text, false);
+            }
+            try load(migrated_database, store_testing.expected_mysql_rows, true);
+        }
+        try load(migrated_database, "CREATE TEMPORARY TABLE original_pin_commands AS SELECT * FROM core_command;CREATE TEMPORARY TABLE original_pin_stops AS SELECT * FROM session_stop", false);
+        try load(migrated_database, schema.mysqlMigration(74), false);
+        try expectSameResults(&comptime shapeQueries(migrated_database), &comptime shapeQueries(parent_database));
+        try expectSameResults(&.{
+            "SELECT * FROM core_command ORDER BY command_seq",
+            "SELECT * FROM session_stop ORDER BY command_key",
+            "SELECT count(*) FROM session_pin",
+            "SELECT count(*) FROM session_pin_command",
+        }, &.{
+            "SELECT * FROM original_pin_commands ORDER BY command_seq",
+            "SELECT * FROM original_pin_stops ORDER BY command_key",
+            "SELECT 0",
+            "SELECT 0",
+        });
+        try load(migrated_database, "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) VALUES('pin-upgrade',7,'d8mv7p',UNHEX(REPEAT('00',32)),1,'',0,0,100);INSERT INTO session_pin_command(command_key,pinned) VALUES('pin-upgrade',1);INSERT INTO session_pin(session_ref,command_key) VALUES('d8mv7p','pin-upgrade');UPDATE session_pin SET command_key=NULL WHERE session_ref='d8mv7p'", false);
+        try expectSameResults(&.{
+            "SELECT count(*) FROM session_pin WHERE command_key IS NULL",
+            "SELECT pinned FROM session_pin_command WHERE command_key='pin-upgrade'",
+        }, &.{ "SELECT 1", "SELECT 1" });
+        try load(migrated_database, "CREATE TEMPORARY TABLE original_populated_pin_commands AS SELECT * FROM core_command;CREATE TEMPORARY TABLE original_populated_pin AS SELECT * FROM session_pin;CREATE TEMPORARY TABLE original_populated_pin_requests AS SELECT * FROM session_pin_command", false);
+        try load(migrated_database, schema.mysqlMigrationFrom(75).?, false);
+        try expectCatalog(migrated_database);
+        try expectSameResults(&.{
+            "SELECT * FROM core_command ORDER BY command_seq",
+            "SELECT * FROM session_pin ORDER BY session_ref",
+            "SELECT * FROM session_pin_command ORDER BY command_key",
+        }, &.{
+            "SELECT * FROM original_populated_pin_commands ORDER BY command_seq",
+            "SELECT * FROM original_populated_pin ORDER BY session_ref",
+            "SELECT * FROM original_populated_pin_requests ORDER BY command_key",
+        });
+        done.migrations += 1;
+        writeRecord();
+    }
+}
+
+test "schema 76 preserves populated PIN parent commands and organization on MySQL" {
+    const io = std.testing.io;
+    mutex.lockUncancelable(io);
+    defer mutex.unlock(io);
+    _ = connection() orelse return if (state == .absent) error.SkipZigTest else error.MysqlUnavailable;
+    defer restore("USE " ++ database);
+    const name = "rui_async_pin_parent";
+    try setup("DROP DATABASE IF EXISTS " ++ name ++ ";CREATE DATABASE " ++ name);
+    defer restore("DROP DATABASE IF EXISTS " ++ name);
+    try load(name, store_testing.pin_parent_mysql_ddl, false);
+    try load(name, store_testing.expected_mysql_rows, true);
+    try load(name, "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) VALUES('pin-kept',7,'d8mv7p',UNHEX(REPEAT('00',32)),1,'',0,0,101),('pin-cleared',7,'brhkcj',UNHEX(REPEAT('00',32)),1,'',0,0,102);INSERT INTO session_pin_command(command_key,pinned) VALUES('pin-kept',1),('pin-cleared',1);INSERT INTO session_pin(session_ref,command_key) VALUES('d8mv7p','pin-kept'),('brhkcj','pin-cleared');UPDATE session_pin SET command_key=NULL WHERE session_ref='brhkcj'", false);
+    try load(name, "CREATE TEMPORARY TABLE async_original_pin_commands AS SELECT * FROM core_command;CREATE TEMPORARY TABLE async_original_pin AS SELECT * FROM session_pin;CREATE TEMPORARY TABLE async_original_pin_requests AS SELECT * FROM session_pin_command", false);
+    defer restore("DROP TEMPORARY TABLE IF EXISTS " ++ name ++ ".async_original_pin_commands," ++ name ++ ".async_original_pin," ++ name ++ ".async_original_pin_requests");
+    try load(name, schema.mysqlMigrationFrom(75).?, false);
+    try expectCatalog(name);
+    try expectSameResults(&.{
+        "SELECT * FROM core_command ORDER BY command_seq",
+        "SELECT * FROM session_pin ORDER BY session_ref",
+        "SELECT * FROM session_pin_command ORDER BY command_key",
+        "SELECT count(*) FROM session_stop WHERE action_cutoff<>0",
+    }, &.{
+        "SELECT * FROM async_original_pin_commands ORDER BY command_seq",
+        "SELECT * FROM async_original_pin ORDER BY session_ref",
+        "SELECT * FROM async_original_pin_requests ORDER BY command_key",
+        "SELECT 0",
+    });
+    done.migrations += 1;
+    writeRecord();
+}
+
+test "schema 75 MySQL pin migration refuses absent and ambiguous kind checks before DDL" {
+    const io = std.testing.io;
+    mutex.lockUncancelable(io);
+    defer mutex.unlock(io);
+    _ = connection() orelse return if (state == .absent) error.SkipZigTest else error.MysqlUnavailable;
+    defer restore("USE " ++ database);
+    inline for (.{ false, true }) |ambiguous| {
+        try setup("DROP DATABASE IF EXISTS " ++ migrated_database ++ ";CREATE DATABASE " ++ migrated_database ++ ";USE " ++ migrated_database);
+        try setup("CREATE TABLE core_command(kind BIGINT CHECK(kind BETWEEN 1 AND 7))");
+        if (ambiguous) try setup("ALTER TABLE core_command ADD CHECK(kind BETWEEN 1 AND 6), ADD CHECK(kind BETWEEN 1 AND 6)");
+        const step = schema.migrations[74 - schema.migration_baseline];
+        try setup("SET @rui_pin_kind_ddl='stale DDL must not survive refusal'");
+        try setup(step.mysql[0]);
+        if (ambiguous) {
+            try std.testing.expect(try run(step.mysql[1]) != null);
+        } else {
+            try setup(step.mysql[1]);
+            try std.testing.expect(try run(step.mysql[2]) != null);
+        }
+        try expectSameResults(&.{"SELECT @rui_pin_kind_ddl IS NULL"}, &.{"SELECT 1"});
+        try expectSameResults(&.{
+            "SELECT count(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA='" ++ migrated_database ++ "' AND TABLE_NAME IN ('session_pin','session_pin_command')",
+            "SELECT count(*) FROM information_schema.TABLE_CONSTRAINTS WHERE TABLE_SCHEMA='" ++ migrated_database ++ "' AND TABLE_NAME='core_command' AND CONSTRAINT_TYPE='CHECK'",
+        }, &.{ "SELECT 0", if (ambiguous) "SELECT 3" else "SELECT 1" });
+    }
+}
+
+test "schema 76 command kind migration resolves actual catalog name and fails closed on missing or duplicate semantics" {
     const io = std.testing.io;
     mutex.lockUncancelable(io);
     defer mutex.unlock(io);
     _ = connection() orelse return if (state == .absent) error.SkipZigTest else error.MysqlUnavailable;
     defer restore("USE " ++ database);
     const name = "rui_async_kind_check";
-    const step = schema.migrations[74 - schema.migration_baseline];
+    const step = schema.migrations[75 - schema.migration_baseline];
     inline for ([_][]const u8{ "core_command_chk_1", "historically_renamed_kind" }) |constraint| {
         try setup("DROP DATABASE IF EXISTS " ++ name ++ ";CREATE DATABASE " ++ name);
-        try load(name, "CREATE TABLE core_command(kind BIGINT NOT NULL,CONSTRAINT `" ++ constraint ++ "` CHECK(kind BETWEEN 1 AND 6)) ENGINE=InnoDB", false);
+        try load(name, "CREATE TABLE core_command(kind BIGINT NOT NULL,CONSTRAINT `" ++ constraint ++ "` CHECK(kind BETWEEN 1 AND 7)) ENGINE=InnoDB", false);
         inline for (step.mysql[0..5]) |sql| try load(name, sql, false);
-        try load(name, "INSERT INTO core_command(kind) VALUES(7),(8)", false);
-        const invalid = try run("INSERT INTO core_command(kind) VALUES(9)") orelse return error.KindConstraintNotEnforced;
+        try load(name, "INSERT INTO core_command(kind) VALUES(8),(9)", false);
+        const invalid = try run("INSERT INTO core_command(kind) VALUES(10)") orelse return error.KindConstraintNotEnforced;
         try std.testing.expectEqual(@as(u16, 3819), invalid.code);
     }
     inline for ([_]bool{ false, true }) |duplicate| {
         try setup("DROP DATABASE IF EXISTS " ++ name ++ ";CREATE DATABASE " ++ name);
         try load(name, "CREATE TABLE core_command(kind BIGINT NOT NULL) ENGINE=InnoDB", false);
-        if (duplicate) try load(name, "ALTER TABLE core_command ADD CONSTRAINT one_kind CHECK(kind BETWEEN 1 AND 6), ADD CONSTRAINT two_kind CHECK(kind BETWEEN 1 AND 6)", false);
+        if (duplicate) try load(name, "ALTER TABLE core_command ADD CONSTRAINT one_kind CHECK(kind BETWEEN 1 AND 7), ADD CONSTRAINT two_kind CHECK(kind BETWEEN 1 AND 7)", false);
         try load(name, "SET @rui_kind_check='stale';SET @rui_kind_alter='ALTER TABLE core_command ADD COLUMN stale_fallthrough BIGINT';PREPARE rui_kind_statement FROM @rui_kind_alter", false);
         const text = comptime blk: {
             var result: []const u8 = "";
@@ -1109,7 +1231,7 @@ fn finalSourceReferenceGate() !void {
     }
 }
 
-test "schema 75 MySQL final source enforces exact reference and rejects only-new-reference-removed control" {
+test "schema 76 MySQL final source enforces exact reference and rejects only-new-reference-removed control" {
     const io = std.testing.io;
     mutex.lockUncancelable(io);
     defer mutex.unlock(io);

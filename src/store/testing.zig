@@ -238,6 +238,8 @@ pub fn stageEndingMessageUpgrade(storage: *Store, keep_pending_forward: bool) !v
     };
     // K10 is the 66 -> 67 transition, even after later formats append steps.
     const from: u32 = 66;
+    try dropActionLifecycle(storage);
+    try dropPinOrganization(storage);
     try dropObligationFrontier(storage);
     // Reconstruct the historical row width from its owning CREATE, not a
     // hand-maintained list of every column later formats append. Both engines
@@ -300,6 +302,103 @@ pub fn stageEndingMessageUpgrade(storage: *Store, keep_pending_forward: bool) !v
             for (step.mysql) |sql| try Native.exec(storage, sql);
         }
         try Native.exec(storage, comptime std.fmt.comptimePrint("UPDATE store_meta SET meta_value='{d}' WHERE meta_key='format'", .{schema.schema_version}));
+        try mysql_testing.restoreTouchOracleForTesting(storage, &.{ "message_admission", "session_stop", "action_operation" });
+    }
+}
+
+fn dropActionLifecycle(storage: *Store) !void {
+    const schema = @import("schema.zig");
+    const Native = struct {
+        fn exec(store: *Store, sql: [:0]const u8) !void {
+            if (store.engine == .mysql) return mysql_testing.rawExec(store, sql);
+            return sqlite.exec(store.sqliteDatabase(), sql);
+        }
+    };
+    try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM action_control_command", .{}));
+    try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM action_operation WHERE background_position IS NOT NULL", .{}));
+    try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM message_admission WHERE final_action_id IS NOT NULL", .{}));
+    try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM core_command WHERE kind IN (8,9)", .{}));
+    try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM session_stop WHERE action_cutoff<>0", .{}));
+    try Native.exec(storage, if (storage.engine == .mysql) "SET FOREIGN_KEY_CHECKS=0" else "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
+    defer Native.exec(storage, if (storage.engine == .mysql) "SET FOREIGN_KEY_CHECKS=1" else "PRAGMA foreign_keys=ON;PRAGMA legacy_alter_table=OFF") catch unreachable;
+    const names = .{ "message_admission", "session_stop", "action_operation", "core_command" };
+    inline for (names) |name| {
+        try Native.exec(storage, "CREATE TABLE upgrade_action_lifecycle_" ++ name ++ " AS SELECT * FROM " ++ name);
+    }
+    try Native.exec(storage, "DROP TABLE action_control_command");
+    inline for (names) |name| try Native.exec(storage, "DROP TABLE " ++ name);
+    inline for (names) |name| {
+        const old_sqlite = comptime parentTable(pin_parent_sqlite_ddl, name);
+        const columns = comptime blk: {
+            @setEvalBranchQuota(100 * old_sqlite.len);
+            var result: []const u8 = "";
+            for (schema.tables) |table| {
+                if (!std.mem.eql(u8, table.name, name)) continue;
+                for (table.columns) |column| {
+                    if (std.mem.indexOf(u8, old_sqlite, "\n " ++ column.name ++ " ") != null) {
+                        result = result ++ (if (result.len == 0) "" else ",") ++ column.name;
+                    }
+                }
+            }
+            break :blk result;
+        };
+        const ddl = if (storage.engine == .mysql) comptime parentTable(pin_parent_mysql_ddl, name) else old_sqlite;
+        try Native.exec(storage, ddl);
+        try Native.exec(storage, "INSERT INTO " ++ name ++ "(" ++ columns ++ ") SELECT " ++ columns ++ " FROM upgrade_action_lifecycle_" ++ name);
+        try Native.exec(storage, "DROP TABLE upgrade_action_lifecycle_" ++ name);
+    }
+    const ddl = if (storage.engine == .mysql) pin_parent_mysql_ddl else pin_parent_sqlite_ddl;
+    var statements = std.mem.splitSequence(u8, ddl, ";\n");
+    while (statements.next()) |statement| {
+        inline for (names) |name| {
+            if (std.mem.startsWith(u8, statement, "ALTER TABLE " ++ name ++ " ") or
+                ((std.mem.startsWith(u8, statement, "CREATE INDEX ") or std.mem.startsWith(u8, statement, "CREATE UNIQUE INDEX ")) and
+                    std.mem.indexOf(u8, statement, " ON " ++ name ++ "(") != null))
+            {
+                const text = try std.testing.allocator.dupeSentinel(u8, statement, 0);
+                defer std.testing.allocator.free(text);
+                try Native.exec(storage, text);
+            }
+        }
+    }
+}
+
+fn parentTable(comptime ddl: []const u8, comptime name: []const u8) [:0]const u8 {
+    comptime {
+        @setEvalBranchQuota(10 * ddl.len + 1000);
+        const prefix = "CREATE TABLE " ++ name ++ "(";
+        const start = std.mem.indexOf(u8, ddl, prefix) orelse @compileError("PIN parent fixture has no table " ++ name);
+        const end = std.mem.indexOfPos(u8, ddl, start, ";\n") orelse @compileError("PIN parent fixture has no statement end for " ++ name);
+        return (ddl[start..end] ++ "\x00")[0 .. end - start :0];
+    }
+}
+
+/// Rewind pin-free upgrade fixtures before replaying the format-75 step.
+fn dropPinOrganization(storage: *Store) !void {
+    const schema = @import("schema.zig");
+    const Native = struct {
+        fn exec(store: *Store, sql: [:0]const u8) !void {
+            if (store.engine == .mysql) return mysql_testing.rawExec(store, sql);
+            return sqlite.exec(store.sqliteDatabase(), sql);
+        }
+    };
+    try std.testing.expectEqual(@as(u64, 0), try queryU64(storage, "SELECT count(*) FROM session_pin_command", .{}));
+    try Native.exec(storage, "DROP TABLE session_pin");
+    try Native.exec(storage, "DROP TABLE session_pin_command");
+    if (storage.engine == .mysql) {
+        try Native.exec(storage, "SET @rui_pin_kind_ddl=NULL");
+        try Native.exec(storage, "SET @rui_pin_kind_ddl=(SELECT CONCAT('ALTER TABLE core_command DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`, ADD CHECK(kind BETWEEN 1 AND 6)') FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.TABLE_NAME='core_command' AND tc.CONSTRAINT_TYPE='CHECK' AND LOWER(TRIM(REPLACE(REPLACE(REPLACE(cc.CHECK_CLAUSE,'`',''),'(',''),')','')))='kind between 1 and 7')");
+        try Native.exec(storage, "PREPARE rui_pin_kind FROM @rui_pin_kind_ddl");
+        try Native.exec(storage, "EXECUTE rui_pin_kind");
+        try Native.exec(storage, "DEALLOCATE PREPARE rui_pin_kind");
+        try Native.exec(storage, "SET @rui_pin_kind_ddl=NULL");
+    } else {
+        try Native.exec(storage, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
+        defer Native.exec(storage, "PRAGMA foreign_keys=ON;PRAGMA legacy_alter_table=OFF") catch unreachable;
+        const step = schema.migrations[74 - schema.migration_baseline];
+        try Native.exec(storage, step.sqlite[0]);
+        try Native.exec(storage, schema.migrations[56 - schema.migration_baseline].sqlite[1]);
+        for (step.sqlite[2..5]) |sql| try Native.exec(storage, sql);
     }
 }
 
@@ -327,6 +426,7 @@ fn dropObligationFrontier(storage: *Store) !void {
 /// current format, before the runtime opens its SELECT/INSERT/UPDATE Store.
 pub fn stageObligationUpgrade(storage: *Store) !void {
     const schema = @import("schema.zig");
+    try dropPinOrganization(storage);
     try dropObligationFrontier(storage);
     if (storage.engine == .mysql) {
         try mysql_testing.rawExec(storage, "UPDATE store_meta SET meta_value='72' WHERE meta_key='format'");
@@ -402,6 +502,10 @@ pub fn fixtureTextError(comptime text: []const u8) ?[]const u8 {
         return null;
     }
 }
+
+// Exact canonical parent75 output; test-only migration boundary, not runtime compatibility.
+pub const pin_parent_sqlite_ddl: [:0]const u8 = @embedFile("migration_pin_parent.sqlite.sql");
+pub const pin_parent_mysql_ddl: [:0]const u8 = @embedFile("migration_pin_parent.mysql.sql");
 
 /// The Store at `schema.migration_baseline`, which the migration tests of
 /// each engine move to the current schema: its DDL as SQLite and MySQL ran

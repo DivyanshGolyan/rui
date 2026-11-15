@@ -245,6 +245,20 @@ fn encodeForTesting(encoder: *Encoder, carry: ?*Carry, items: []const TestItem, 
         };
         for (pieces.slice()) |piece| switch (piece) {
             .literal => |bytes| try out.writeAll(bytes),
+            .base64 => |handle| {
+                const encoding = @import("request_encoding.zig");
+                const Sink = struct {
+                    writer: *std.Io.Writer,
+                    pub fn write(self: *@This(), bytes: []const u8) !void {
+                        try self.writer.writeAll(bytes);
+                    }
+                };
+                var sink: Sink = .{ .writer = out };
+                var cursor: encoding.Base64Cursor = undefined;
+                cursor.init();
+                var allowance: usize = 17;
+                while (!try cursor.advance(encoding.MemorySource{ .bytes = item.handles[handle].? }, &sink, &allowance)) allowance = 17;
+            },
             .content => |content| switch (content.escape) {
                 .verbatim => try out.writeAll(item.handles[content.handle].?),
                 .json_string_v1 => try std.json.Stringify.encodeJsonStringChars(item.handles[content.handle].?, .{}, out),
@@ -425,4 +439,246 @@ test "the codec's JSON reader names each syntax error as validation did" {
     var hex: [64]u8 = undefined;
     _ = try std.fmt.bufPrint(&hex, "{x}", .{&names.hash.finalResult()});
     try std.testing.expectEqualStrings(expected, &hex);
+}
+
+fn legacyImageDomain(codec: protocol.Codec, compact: bool, out: *std.Io.Writer) !void {
+    var carry = initialCarry(codec, .low);
+    var encoder = resumeFrom(carry);
+    try encodeForTesting(&encoder, &carry, &.{
+        .{ .item = .{ .settings = .{ .effort = .high, .starting_effort = .low, .session_affinity = @splat(0), .model_length = 1 } }, .handles = &.{"m"} },
+        .{ .item = .instructions, .handles = &.{"i\"\\\n\x01é"} },
+        .{ .item = .{ .message = .user }, .handles = &.{ "body\"\\\n\x01é", "peer sender, not instructions" } },
+        .{ .item = .{ .message = .user }, .handles = &.{""} },
+        .{ .item = .{ .message = .instruction }, .handles = &.{""} },
+        .{ .item = .{ .operation = .low } },
+    }, out);
+    if (declaresTools(codec)) try encodeForTesting(&encoder, &carry, &.{
+        .{ .item = .declare_open },
+        .{ .item = .declared_tool, .handles = &.{ "browser", "observe\"\\\n", "{\"type\":\"object\"}" } },
+        .{ .item = .declare_close },
+    }, out);
+    try encodeForTesting(&encoder, &carry, &.{
+        .{ .item = .{ .output_open = .{ .kind = .reasoning, .phase = .unphased, .omit_reasoning_text = true } } },
+        .{ .item = .{ .output_part = .{ .array = .summary, .kind = .summary_text } }, .handles = &.{"summary"} },
+        .{ .item = .{ .output_part = .{ .array = .content, .kind = .reasoning_text } }, .handles = &.{"private, must not replay"} },
+        .{ .item = .output_close, .handles = &.{"\"encrypted_content\":\"opaque\",\"status\":\"completed\""} },
+        .{ .item = .{ .output_open = .{ .kind = .function_call, .phase = .unphased, .omit_reasoning_text = false } }, .handles = &.{ "browser", "call\"\\\n", "{\"url\":\"x\"}" } },
+        .{ .item = .output_close, .handles = &.{"\"id\":\"old-call\""} },
+        .{ .item = .tool_result, .handles = &.{ "call\"\\\n", "{\"content\":[{\"type\":\"text\",\"text\":\"MCP\\ntext\"}],\"isError\":false}" } },
+        .{ .item = .tool_result, .handles = &.{ "empty", "" } },
+        .{ .item = .tool_result, .handles = &.{ "legacy-image-json", "{\"content\":[{\"type\":\"image\",\"data\":\"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==\",\"mimeType\":\"image/png\"}],\"isError\":false}" } },
+        .{ .item = .{ .output_open = .{ .kind = .message, .phase = .final_answer, .omit_reasoning_text = false } } },
+        .{ .item = .{ .output_part = .{ .array = .content, .kind = .output_text } }, .handles = &.{ "", "\"annotations\":[]" } },
+        .{ .item = .{ .output_part = .{ .array = .content, .kind = .output_text } }, .handles = &.{"done"} },
+        .{ .item = .output_close },
+        .{ .item = .{ .message = .user }, .handles = &.{"next"} },
+        .{ .item = .{ .operation = .high } },
+        .{ .item = .history_end },
+    }, out);
+    if (compact) try encodeForTesting(&encoder, &carry, &.{.{ .item = .compaction_trigger }}, out);
+    try encodeForTesting(&encoder, &carry, &.{.{ .item = .tools_start }}, out);
+    if (!declaresTools(codec)) try encodeForTesting(&encoder, &carry, &.{.{ .item = .tool, .handles = &.{ "browser", "observe\"\\\n", "{\"type\":\"object\"}" } }}, out);
+    try encodeForTesting(&encoder, &carry, &.{
+        .{ .item = .web_search },
+        .{ .item = .text_format, .handles = &.{"{\"type\":\"object\",\"properties\":{}}"} },
+        .{ .item = .request_end },
+    }, out);
+}
+
+test "additive image legacy requests retain their original bytes" {
+    for ([_]protocol.Codec{ .@"openai-responses/1", .@"openai-responses/2", .@"openai-responses/3" }) |codec| {
+        for ([_]bool{ false, true }) |compact| {
+            var buffer: [8192]u8 = undefined;
+            var out: std.Io.Writer = .fixed(&buffer);
+            try legacyImageDomain(codec, compact, &out);
+            try expectLegacyImageGolden(codec, compact, out.buffered());
+            const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, out.buffered(), .{});
+            defer parsed.deinit();
+            const history = parsed.value.object.get("input").?.array.items;
+            var tool_outputs: usize = 0;
+            for (history) |item| {
+                const tag = item.object.get("type") orelse continue;
+                if (!std.mem.eql(u8, tag.string, "function_call_output")) continue;
+                try std.testing.expect(item.object.get("output").? == .string);
+                tool_outputs += 1;
+            }
+            try std.testing.expectEqual(@as(usize, 3), tool_outputs);
+        }
+    }
+}
+
+fn expectLegacyImageGolden(codec: protocol.Codec, compact: bool, actual: []const u8) !void {
+    const expected: []const u8 = switch (codec) {
+        .@"openai-responses/1" => if (compact) @embedFile("codecs/fixtures/image-input/1-compaction.json") else @embedFile("codecs/fixtures/image-input/1-regular.json"),
+        .@"openai-responses/2" => if (compact) @embedFile("codecs/fixtures/image-input/2-compaction.json") else @embedFile("codecs/fixtures/image-input/2-regular.json"),
+        .@"openai-responses/3" => if (compact) @embedFile("codecs/fixtures/image-input/3-compaction.json") else @embedFile("codecs/fixtures/image-input/3-regular.json"),
+    };
+    try std.testing.expectEqualStrings(expected, actual);
+}
+
+const additive_png = @embedFile("codecs/fixtures/image-input/pixel.png");
+const additive_base64 = @embedFile("codecs/fixtures/image-input/pixel.base64");
+const additive_image_history = [_]TestItem{
+    .{ .item = .{ .message = .user }, .handles = &.{"legacy-prefix"} },
+    .{ .item = .{ .image_message_open = .user } },
+    .{ .item = .input_text, .handles = &.{""} },
+    .{ .item = .input_text, .handles = &.{"What is in this screenshot?"} },
+    .{ .item = .input_text, .handles = &.{""} },
+    .{ .item = .{ .input_image = .png }, .handles = &.{additive_png} },
+    .{ .item = .image_message_close },
+    .{ .item = .{ .output_open = .{ .kind = .function_call, .phase = .unphased, .omit_reasoning_text = false } }, .handles = &.{ "browser", "screenshot-call", "{}" } },
+    .{ .item = .output_close },
+    .{ .item = .image_tool_open, .handles = &.{"screenshot-call"} },
+    .{ .item = .input_text, .handles = &.{"Observed browser screenshot"} },
+    .{ .item = .{ .input_image = .png }, .handles = &.{additive_png} },
+    .{ .item = .input_text, .handles = &.{""} },
+    .{ .item = .image_tool_close },
+    .{ .item = .{ .output_open = .{ .kind = .function_call, .phase = .unphased, .omit_reasoning_text = false } }, .handles = &.{ "browser", "text-call", "{}" } },
+    .{ .item = .output_close },
+    .{ .item = .tool_result, .handles = &.{ "text-call", "Fresh text-only observation remains a string" } },
+};
+const additive_image_tail = [_]TestItem{
+    .{ .item = .history_end },
+    .{ .item = .{ .operation = .high } },
+    .{ .item = .tools_start },
+    .{ .item = .text_format },
+    .{ .item = .request_end },
+};
+
+fn additiveImageStart(codec: protocol.Codec, encoder: *Encoder, carry: *Carry, out: *std.Io.Writer) !void {
+    carry.* = initialCarry(codec, .low);
+    encoder.* = resumeFrom(carry.*);
+    try encodeForTesting(encoder, carry, &.{
+        .{ .item = .{ .settings = .{ .effort = .high, .starting_effort = .low, .session_affinity = @splat(0), .model_length = 1 } }, .handles = &.{"m"} },
+        .{ .item = .instructions, .handles = &.{"i"} },
+    }, out);
+}
+
+test "additive image inputs use typed parts and preserve whole-element carry" {
+    try std.testing.expect(codec_abi.ItemKind.image_message_open.resumes());
+    try std.testing.expect(codec_abi.ItemKind.image_tool_open.resumes());
+    try std.testing.expect(codec_abi.ItemKind.image_message_close.endsElement());
+    try std.testing.expect(codec_abi.ItemKind.image_tool_close.endsElement());
+    for ([_]codec_abi.ItemKind{ .input_text, .input_image }) |kind| {
+        try std.testing.expect(!kind.resumes());
+        try std.testing.expect(!kind.endsElement());
+    }
+    for ([_]protocol.Codec{ .@"openai-responses/1", .@"openai-responses/2", .@"openai-responses/3" }) |codec| {
+        var buffer: [8192]u8 = undefined;
+        var out: std.Io.Writer = .fixed(&buffer);
+        var carry = initialCarry(codec, .low);
+        var encoder = resumeFrom(carry);
+        try additiveImageStart(codec, &encoder, &carry, &out);
+        try encodeForTesting(&encoder, &carry, &additive_image_history, &out);
+        try encodeForTesting(&encoder, &carry, &additive_image_tail, &out);
+        const expected = switch (codec) {
+            .@"openai-responses/1" => @embedFile("codecs/fixtures/image-input/1-image.json"),
+            .@"openai-responses/2" => @embedFile("codecs/fixtures/image-input/2-image.json"),
+            .@"openai-responses/3" => @embedFile("codecs/fixtures/image-input/3-image.json"),
+        };
+        try std.testing.expectEqualStrings(expected, out.buffered());
+        const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, out.buffered(), .{});
+        defer parsed.deinit();
+        const history = parsed.value.object.get("input").?.array.items;
+        const user = history[1].object;
+        try std.testing.expectEqualStrings("user", user.get("role").?.string);
+        const parts = user.get("content").?.array.items;
+        try std.testing.expectEqual(@as(usize, 4), parts.len);
+        try std.testing.expectEqualStrings("", parts[0].object.get("text").?.string);
+        try std.testing.expectEqualStrings("", parts[2].object.get("text").?.string);
+        try std.testing.expectEqualStrings("input_image", parts[3].object.get("type").?.string);
+        try std.testing.expectEqualStrings("data:image/png;base64," ++ additive_base64, parts[3].object.get("image_url").?.string);
+        try std.testing.expectEqualStrings("auto", parts[3].object.get("detail").?.string);
+        const tool = history[3].object;
+        try std.testing.expectEqualStrings("function_call_output", tool.get("type").?.string);
+        try std.testing.expectEqualStrings("screenshot-call", tool.get("call_id").?.string);
+        const observed = tool.get("output").?.array.items;
+        try std.testing.expectEqual(@as(usize, 3), observed.len);
+        try std.testing.expectEqualStrings("input_text", observed[0].object.get("type").?.string);
+        try std.testing.expectEqualStrings("input_image", observed[1].object.get("type").?.string);
+        try std.testing.expectEqualStrings("data:image/png;base64," ++ additive_base64, observed[1].object.get("image_url").?.string);
+        try std.testing.expectEqualStrings("auto", observed[1].object.get("detail").?.string);
+        try std.testing.expectEqualStrings("", observed[2].object.get("text").?.string);
+        try std.testing.expectEqualStrings("text-call", history[5].object.get("call_id").?.string);
+        try std.testing.expectEqualStrings("Fresh text-only observation remains a string", history[5].object.get("output").?.string);
+        for (0..additive_image_history.len + 1) |cut| {
+            if (cut != 0) {
+                const kind: codec_abi.ItemKind = additive_image_history[cut - 1].item;
+                if (!kind.endsElement()) continue;
+            }
+            var resumed_buffer: [8192]u8 = undefined;
+            var resumed: std.Io.Writer = .fixed(&resumed_buffer);
+            try additiveImageStart(codec, &encoder, &carry, &resumed);
+            try encodeForTesting(&encoder, &carry, additive_image_history[0..cut], &resumed);
+            encoder = resumeFrom(initialCarry(codec, .low));
+            try encodeForTesting(&encoder, &carry, additive_image_history[cut..], &resumed);
+            try encodeForTesting(&encoder, &carry, &additive_image_tail, &resumed);
+            try std.testing.expectEqualStrings(out.buffered(), resumed.buffered());
+        }
+        var prefix_buffer: [1024]u8 = undefined;
+        var prefix: std.Io.Writer = .fixed(&prefix_buffer);
+        try additiveImageStart(codec, &encoder, &carry, &prefix);
+        try encodeForTesting(&encoder, &carry, additive_image_history[0..1], &prefix);
+        try std.testing.expectStringStartsWith(out.buffered(), prefix.buffered());
+    }
+}
+
+test "additive typed image pieces stay bounded over the new value domain" {
+    for (std.enums.values(responses.Version)) |version| {
+        for ([_]bool{ false, true }) |comma| {
+            for (std.enums.values(codec_abi.ImageMime)) |mime| {
+                for ([_]codec_abi.Item{
+                    .{ .image_message_open = .user },
+                    .{ .image_message_open = .instruction },
+                    .image_tool_open,
+                    .input_text,
+                    .{ .input_image = mime },
+                    .image_message_close,
+                    .image_tool_close,
+                }) |item| {
+                    var encoder: responses.Encoder = .{ .carry = .{ .version = version, .input_comma = comma }, .input_part_comma = comma };
+                    var pieces: codec_abi.Pieces = .{ .len = 0 };
+                    const header: codec_abi.ItemHeader = .{ .item = item, .handles = 0b1 };
+                    try encoder.encodeItem(&header, &pieces);
+                    try std.testing.expect(pieces.len <= codec_abi.max_pieces);
+                    for (pieces.slice()) |piece| switch (piece) {
+                        .literal => |bytes| try std.testing.expect(bytes.len != 0),
+                        .content => |content| try std.testing.expect(header.has(content.handle)),
+                        .base64 => |handle| try std.testing.expect(header.has(handle)),
+                    };
+                }
+            }
+        }
+    }
+}
+
+test "additive image-only and repeated parts keep MIME framing and order" {
+    const expected_png = "{\"type\":\"input_image\",\"image_url\":\"data:image/png;base64," ++ additive_base64 ++ "\",\"detail\":\"auto\"}";
+    const expected_jpeg = "{\"type\":\"input_image\",\"image_url\":\"data:image/jpeg;base64,/9j/2Q==\",\"detail\":\"auto\"}";
+    for ([_]protocol.Codec{ .@"openai-responses/1", .@"openai-responses/2", .@"openai-responses/3" }) |codec| {
+        for (std.enums.values(codec_abi.Author)) |author| {
+            var buffer: [2048]u8 = undefined;
+            var out: std.Io.Writer = .fixed(&buffer);
+            var carry = initialCarry(codec, null);
+            var encoder = resumeFrom(carry);
+            try encodeForTesting(&encoder, &carry, &.{
+                .{ .item = .{ .image_message_open = author } },
+                .{ .item = .{ .input_image = .png }, .handles = &.{additive_png} },
+                .{ .item = .image_message_close },
+            }, &out);
+            try std.testing.expectEqualStrings(if (author == .user) "{\"role\":\"user\",\"content\":[" ++ expected_png ++ "]}" else "{\"role\":\"developer\",\"content\":[" ++ expected_png ++ "]}", out.buffered());
+            out.end = 0;
+            carry = initialCarry(codec, null);
+            encoder = resumeFrom(carry);
+            try encodeForTesting(&encoder, &carry, &.{
+                .{ .item = .image_tool_open, .handles = &.{"call\"\n"} },
+                .{ .item = .{ .input_image = .png }, .handles = &.{additive_png} },
+                .{ .item = .input_text, .handles = &.{"between"} },
+                .{ .item = .{ .input_image = .jpeg }, .handles = &.{"\xff\xd8\xff\xd9"} },
+                .{ .item = .{ .input_image = .png }, .handles = &.{additive_png} },
+                .{ .item = .image_tool_close },
+            }, &out);
+            try std.testing.expectEqualStrings("{\"type\":\"function_call_output\",\"call_id\":\"call\\\"\\n\",\"output\":[" ++ expected_png ++ ",{\"type\":\"input_text\",\"text\":\"between\"}," ++ expected_jpeg ++ "," ++ expected_png ++ "]}", out.buffered());
+        }
+    }
 }

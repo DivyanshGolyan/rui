@@ -20,7 +20,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 75;
+pub const schema_version: u32 = 76;
 
 pub const IdentityMismatch = struct {
     saved_selector: Bounded(store_path.max_bytes) = .{},
@@ -61,7 +61,8 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 72, .digest = 0x93ee71c21e7438ab },
     .{ .schema_version = 73, .digest = 0x515b60c7f5df332d },
     .{ .schema_version = 74, .digest = 0xda8e267adbfcef45 },
-    .{ .schema_version = 75, .digest = 0xb58d130e72afa580 },
+    .{ .schema_version = 75, .digest = 0xcea5bf4db0d3978d },
+    .{ .schema_version = 76, .digest = 0x0000000000000000 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -702,15 +703,37 @@ pub const migrations = [_]Migration{
     .{
         .from = 74,
         .sqlite = &.{
-            "ALTER TABLE core_command RENAME TO core_command_before_75",
-            "CREATE TABLE core_command(\n command_key TEXT NOT NULL UNIQUE CHECK(length(CAST(command_key AS BLOB))<=128),\n kind INTEGER NOT NULL CHECK(kind BETWEEN 1 AND 8),\n target TEXT NOT NULL CHECK(length(CAST(target AS BLOB))<=128),\n input_digest BLOB NOT NULL CHECK(length(input_digest)=32),\n primary_content_id INTEGER REFERENCES content(content_id),\n secondary_content_id INTEGER REFERENCES content(content_id),\n accepted INTEGER NOT NULL CHECK(accepted IN (0,1)),\n code TEXT NOT NULL CHECK(length(CAST(code AS BLOB))<=96),\n revision INTEGER NOT NULL CHECK(revision>=0),\n created INTEGER NOT NULL CHECK(created IN (0,1)),\n command_seq INTEGER PRIMARY KEY NOT NULL CHECK(command_seq>0)\n) STRICT",
-            "INSERT INTO core_command SELECT * FROM core_command_before_75",
-            "DROP TABLE core_command_before_75",
+            "ALTER TABLE core_command RENAME TO core_command_pin_previous",
+            "CREATE TABLE core_command(\n command_key TEXT NOT NULL UNIQUE CHECK(length(CAST(command_key AS BLOB))<=128),\n kind INTEGER NOT NULL CHECK(kind BETWEEN 1 AND 7),\n target TEXT NOT NULL CHECK(length(CAST(target AS BLOB))<=128),\n input_digest BLOB NOT NULL CHECK(length(input_digest)=32),\n primary_content_id INTEGER REFERENCES content(content_id),\n secondary_content_id INTEGER REFERENCES content(content_id),\n accepted INTEGER NOT NULL CHECK(accepted IN (0,1)),\n code TEXT NOT NULL CHECK(length(CAST(code AS BLOB))<=96),\n revision INTEGER NOT NULL CHECK(revision>=0),\n created INTEGER NOT NULL CHECK(created IN (0,1)),\n command_seq INTEGER PRIMARY KEY NOT NULL CHECK(command_seq>0)\n) STRICT",
+            "INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq) SELECT command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq FROM core_command_pin_previous",
+            "DROP TABLE core_command_pin_previous",
             "CREATE INDEX core_command_target_order ON core_command(target,kind,command_seq)",
-            "ALTER TABLE action_operation RENAME TO action_operation_before_75",
+            "CREATE TABLE session_pin(\n session_ref TEXT PRIMARY KEY NOT NULL REFERENCES session(session_ref),\n command_key TEXT UNIQUE REFERENCES core_command(command_key)\n) STRICT, WITHOUT ROWID",
+            "CREATE TABLE session_pin_command(\n command_key TEXT PRIMARY KEY NOT NULL REFERENCES core_command(command_key),\n pinned INTEGER NOT NULL CHECK(pinned IN (0,1))\n) STRICT, WITHOUT ROWID",
+        },
+        .mysql = &.{
+            "SET @rui_pin_kind_ddl=NULL",
+            "SET @rui_pin_kind_ddl=(SELECT CONCAT('ALTER TABLE core_command DROP CHECK `',REPLACE(tc.CONSTRAINT_NAME,'`','``'),'`, ADD CHECK(kind BETWEEN 1 AND 7)') FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc ON cc.CONSTRAINT_SCHEMA=tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME=tc.CONSTRAINT_NAME WHERE tc.TABLE_SCHEMA=DATABASE() AND tc.TABLE_NAME='core_command' AND tc.CONSTRAINT_TYPE='CHECK' AND LOWER(TRIM(REPLACE(REPLACE(REPLACE(cc.CHECK_CLAUSE,'`',''),'(',''),')','')))='kind between 1 and 6')",
+            "PREPARE rui_pin_kind FROM @rui_pin_kind_ddl",
+            "EXECUTE rui_pin_kind",
+            "DEALLOCATE PREPARE rui_pin_kind",
+            "SET @rui_pin_kind_ddl=NULL",
+            "CREATE TABLE session_pin(\n session_ref VARCHAR(6) NOT NULL,\n command_key VARCHAR(128),\n PRIMARY KEY(session_ref),\n UNIQUE(command_key),\n FOREIGN KEY(session_ref) REFERENCES session(session_ref),\n FOREIGN KEY(command_key) REFERENCES core_command(command_key)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
+            "CREATE TABLE session_pin_command(\n command_key VARCHAR(128) NOT NULL,\n pinned TINYINT NOT NULL,\n PRIMARY KEY(command_key),\n FOREIGN KEY(command_key) REFERENCES core_command(command_key),\n CHECK(pinned IN (0,1))\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
+        },
+    },
+    .{
+        .from = 75,
+        .sqlite = &.{
+            "ALTER TABLE core_command RENAME TO core_command_before_76",
+            "CREATE TABLE core_command(\n command_key TEXT NOT NULL UNIQUE CHECK(length(CAST(command_key AS BLOB))<=128),\n kind INTEGER NOT NULL CHECK(kind BETWEEN 1 AND 9),\n target TEXT NOT NULL CHECK(length(CAST(target AS BLOB))<=128),\n input_digest BLOB NOT NULL CHECK(length(input_digest)=32),\n primary_content_id INTEGER REFERENCES content(content_id),\n secondary_content_id INTEGER REFERENCES content(content_id),\n accepted INTEGER NOT NULL CHECK(accepted IN (0,1)),\n code TEXT NOT NULL CHECK(length(CAST(code AS BLOB))<=96),\n revision INTEGER NOT NULL CHECK(revision>=0),\n created INTEGER NOT NULL CHECK(created IN (0,1)),\n command_seq INTEGER PRIMARY KEY NOT NULL CHECK(command_seq>0)\n) STRICT",
+            "INSERT INTO core_command SELECT * FROM core_command_before_76",
+            "DROP TABLE core_command_before_76",
+            "CREATE INDEX core_command_target_order ON core_command(target,kind,command_seq)",
+            "ALTER TABLE action_operation RENAME TO action_operation_before_76",
             "CREATE TABLE action_operation(\n action_id INTEGER PRIMARY KEY NOT NULL CHECK(action_id>0),\n parent_operation_id INTEGER NOT NULL REFERENCES model_operation(operation_id),\n call_ordinal INTEGER NOT NULL CHECK(call_ordinal>=0),\n session_ref TEXT NOT NULL REFERENCES session(session_ref),\n tool_kind INTEGER NOT NULL CHECK(tool_kind=1),\n permission_revision INTEGER NOT NULL CHECK(permission_revision>0),\n authorized INTEGER NOT NULL CHECK(authorized IN (0,1)),\n attempt_ordinal INTEGER NOT NULL DEFAULT 0 CHECK(attempt_ordinal IN (0,1)),\n bash_timeout_override_ms INTEGER CHECK(bash_timeout_override_ms IS NULL OR bash_timeout_override_ms>0),\n attempt_timeout_ms INTEGER CHECK(attempt_timeout_ms IS NULL OR attempt_timeout_ms>0),\n sender_handle TEXT CHECK(sender_handle IS NULL OR (length(CAST(sender_handle AS BLOB))=32 AND (sender_handle NOT GLOB '*[^0-9a-f]*' AND length(sender_handle)=length(CAST(sender_handle AS BLOB))))),\n resolution_code TEXT CHECK(resolution_code IS NULL OR (resolution_code='denied' OR resolution_code='cancelled' OR resolution_code='succeeded' OR resolution_code='failed' OR resolution_code='timed_out' OR resolution_code='indeterminate' OR resolution_code='storage_failed' OR resolution_code='spawn_failed' OR resolution_code='infrastructure_shutdown')),\n resolution_content_id INTEGER REFERENCES content(content_id),\n acceptance_position INTEGER CHECK(acceptance_position IS NULL OR acceptance_position>0),\n attempt_at INTEGER CHECK(attempt_at IS NULL OR attempt_at>0),\n decided_at INTEGER CHECK(decided_at IS NULL OR decided_at>0),\n resolved_at INTEGER CHECK(resolved_at IS NULL OR resolved_at>0),\n approval_position INTEGER CHECK(approval_position IS NULL OR approval_position>0),\n background_content_id INTEGER REFERENCES content(content_id),\n background_position INTEGER CHECK((background_content_id IS NULL AND background_position IS NULL) OR (background_content_id IS NOT NULL AND background_position IS NOT NULL AND background_position>0 AND (acceptance_position IS NULL OR background_position<acceptance_position))),\n background_at INTEGER CHECK((background_position IS NULL AND background_at IS NULL) OR (background_position IS NOT NULL AND background_at IS NOT NULL AND background_at>0)),\n UNIQUE(parent_operation_id,call_ordinal),\n FOREIGN KEY(parent_operation_id,session_ref) REFERENCES model_operation(operation_id,session_ref),\n FOREIGN KEY(parent_operation_id,call_ordinal,tool_kind) REFERENCES model_tool_call(operation_id,call_ordinal,action_kind),\n FOREIGN KEY(session_ref,permission_revision) REFERENCES session_revision(session_ref,revision),\n CHECK((resolution_code IS NOT 'denied') OR (authorized=0 AND attempt_ordinal=0)),\n CHECK((attempt_ordinal=0 AND attempt_timeout_ms IS NULL) OR (attempt_ordinal=1 AND attempt_timeout_ms IS NOT NULL)),\n CHECK((resolution_code IS NULL AND resolution_content_id IS NULL AND acceptance_position IS NULL) OR (resolution_code IS NOT NULL AND resolution_content_id IS NOT NULL AND acceptance_position IS NOT NULL)),\n CHECK((attempt_ordinal=1)=(attempt_at IS NOT NULL)),\n CHECK((authorized=1)=(decided_at IS NOT NULL)),\n CHECK((resolution_code IS NULL)=(resolved_at IS NULL))\n) STRICT",
-            "INSERT INTO action_operation SELECT old.*,NULL,NULL,NULL FROM action_operation_before_75 old",
-            "DROP TABLE action_operation_before_75",
+            "INSERT INTO action_operation SELECT old.*,NULL,NULL,NULL FROM action_operation_before_76 old",
+            "DROP TABLE action_operation_before_76",
             "CREATE INDEX action_operation_acceptance ON action_operation(session_ref,acceptance_position)",
             "CREATE INDEX action_operation_approval ON action_operation(session_ref,approval_position) WHERE approval_position IS NOT NULL",
             "CREATE INDEX action_operation_executable ON action_operation(action_id) WHERE authorized=1 AND resolution_code IS NULL AND attempt_ordinal=0",
@@ -722,18 +745,18 @@ pub const migrations = [_]Migration{
             "CREATE INDEX action_operation_background ON action_operation(session_ref,background_position)",
             "CREATE INDEX action_operation_background_results ON action_operation(session_ref,parent_operation_id,background_position) WHERE background_position IS NOT NULL",
             "CREATE INDEX action_operation_session_results ON action_operation(session_ref,parent_operation_id,acceptance_position) WHERE acceptance_position IS NOT NULL AND background_position IS NULL",
-            "ALTER TABLE session_stop RENAME TO session_stop_before_75",
+            "ALTER TABLE session_stop RENAME TO session_stop_before_76",
             "CREATE TABLE session_stop(\n command_key TEXT PRIMARY KEY NOT NULL REFERENCES core_command(command_key),\n session_ref TEXT NOT NULL REFERENCES session(session_ref),\n selected_turn_id INTEGER REFERENCES turn(turn_id),\n position INTEGER CHECK(position>0),\n admission_cutoff INTEGER NOT NULL CHECK(admission_cutoff>=0),\n stopped_at INTEGER NOT NULL CHECK(stopped_at>0),\n parent_caused INTEGER NOT NULL DEFAULT 0 CHECK(parent_caused IN (0,1)),\n action_cutoff INTEGER NOT NULL DEFAULT 0 CHECK(action_cutoff>=0)\n) STRICT, WITHOUT ROWID",
-            "INSERT INTO session_stop SELECT old.*,0 FROM session_stop_before_75 old",
-            "DROP TABLE session_stop_before_75",
+            "INSERT INTO session_stop SELECT old.*,0 FROM session_stop_before_76 old",
+            "DROP TABLE session_stop_before_76",
             "CREATE INDEX session_stop_exclusion ON session_stop(session_ref,admission_cutoff,position)",
             "CREATE INDEX session_stop_position ON session_stop(session_ref,position)",
             "CREATE INDEX session_stop_turn ON session_stop(selected_turn_id)",
             "CREATE INDEX session_stop_unpositioned ON session_stop(session_ref) WHERE position IS NULL",
-            "ALTER TABLE message_admission RENAME TO message_admission_before_75",
+            "ALTER TABLE message_admission RENAME TO message_admission_before_76",
             "CREATE TABLE message_admission(\n admission_id INTEGER PRIMARY KEY NOT NULL CHECK(admission_id>0),\n session_ref TEXT NOT NULL REFERENCES session(session_ref),\n command_key TEXT UNIQUE REFERENCES core_command(command_key),\n content_id INTEGER NOT NULL REFERENCES content(content_id),\n admission_position INTEGER CHECK(admission_position>0),\n turn_id INTEGER REFERENCES turn(turn_id),\n admitted_at INTEGER NOT NULL CHECK(admitted_at>0),\n sender_session_ref TEXT REFERENCES session(session_ref),\n sender_position INTEGER CHECK(sender_position>0),\n final_action_id INTEGER UNIQUE,\n FOREIGN KEY(session_ref,final_action_id,content_id) REFERENCES action_operation(session_ref,action_id,resolution_content_id),\n CHECK((sender_session_ref IS NULL)=(sender_position IS NULL)),\n CHECK((final_action_id IS NULL AND command_key IS NOT NULL) OR (final_action_id IS NOT NULL AND command_key IS NULL AND sender_session_ref IS NULL AND sender_position IS NULL))\n) STRICT",
-            "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at,sender_session_ref,sender_position) SELECT admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at,sender_session_ref,sender_position FROM message_admission_before_75",
-            "DROP TABLE message_admission_before_75",
+            "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at,sender_session_ref,sender_position) SELECT admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at,sender_session_ref,sender_position FROM message_admission_before_76",
+            "DROP TABLE message_admission_before_76",
             "CREATE UNIQUE INDEX message_admission_sent ON message_admission(sender_session_ref,sender_position) WHERE sender_session_ref IS NOT NULL",
             "CREATE INDEX message_admission_session_order ON message_admission(session_ref,turn_id,admission_id)",
             "CREATE INDEX message_admission_pending ON message_admission(admission_id,session_ref) WHERE turn_id IS NULL",
@@ -745,8 +768,8 @@ pub const migrations = [_]Migration{
             "CREATE INDEX action_control_stop ON action_control_command(selected_action_id,selection_position) WHERE selection='stop'",
         },
         .mysql = &.{
-            "SET @rui_kind_check=(SELECT constraint_name FROM information_schema.check_constraints WHERE constraint_schema=DATABASE() AND constraint_name IN (SELECT constraint_name FROM information_schema.table_constraints WHERE table_schema=DATABASE() AND table_name='core_command' AND constraint_type='CHECK') AND REPLACE(REPLACE(REPLACE(REPLACE(LOWER(check_clause),'`',''),' ',''),'(',''),')','')='kindbetween1and6')",
-            "SET @rui_kind_alter=CONCAT('ALTER TABLE core_command DROP CHECK `',REPLACE(@rui_kind_check,'`','``'),'`, ADD CHECK(kind BETWEEN 1 AND 8)')",
+            "SET @rui_kind_check=(SELECT constraint_name FROM information_schema.check_constraints WHERE constraint_schema=DATABASE() AND constraint_name IN (SELECT constraint_name FROM information_schema.table_constraints WHERE table_schema=DATABASE() AND table_name='core_command' AND constraint_type='CHECK') AND REPLACE(REPLACE(REPLACE(REPLACE(LOWER(check_clause),'`',''),' ',''),'(',''),')','')='kindbetween1and7')",
+            "SET @rui_kind_alter=CONCAT('ALTER TABLE core_command DROP CHECK `',REPLACE(@rui_kind_check,'`','``'),'`, ADD CHECK(kind BETWEEN 1 AND 9)')",
             "PREPARE rui_kind_statement FROM @rui_kind_alter",
             "EXECUTE rui_kind_statement",
             "DEALLOCATE PREPARE rui_kind_statement",
@@ -1239,7 +1262,7 @@ pub const tables = [_]Table{
         .name = "core_command",
         .columns = &.{
             .{ .name = "command_key", .type = .{ .text = .{ .max = 128 } } },
-            .{ .name = "kind", .type = .int, .check = "kind BETWEEN 1 AND 8" },
+            .{ .name = "kind", .type = .int, .check = "kind BETWEEN 1 AND 9" },
             .{ .name = "target", .type = .{ .text = .{ .max = 128 } } },
             .{ .name = "input_digest", .type = .{ .bytes = .{ .min = 32, .max = 32 } } },
             .{ .name = "primary_content_id", .type = .int, .nullable = true },
@@ -1439,6 +1462,30 @@ pub const tables = [_]Table{
         .columns = &.{
             .{ .name = "command_key", .type = .{ .text = null } },
             .{ .name = "archived", .type = .flag },
+        },
+        .primary_key = &.{"command_key"},
+        .foreign_keys = &.{references("command_key", "core_command", command_reference)},
+        .without_rowid = true,
+    },
+    .{
+        .name = "session_pin",
+        .columns = &.{
+            .{ .name = "session_ref", .type = .{ .text = null } },
+            .{ .name = "command_key", .type = .{ .text = null }, .nullable = true },
+        },
+        .primary_key = &.{"session_ref"},
+        .uniques = &.{&.{"command_key"}},
+        .foreign_keys = &.{
+            references("session_ref", "session", session_reference),
+            references("command_key", "core_command", command_reference),
+        },
+        .without_rowid = true,
+    },
+    .{
+        .name = "session_pin_command",
+        .columns = &.{
+            .{ .name = "command_key", .type = .{ .text = null } },
+            .{ .name = "pinned", .type = .flag },
         },
         .primary_key = &.{"command_key"},
         .foreign_keys = &.{references("command_key", "core_command", command_reference)},
@@ -3051,6 +3098,103 @@ test "MySQL sessions read literals as rsql copies them, and strictly" {
         } else false;
         try std.testing.expect(found);
     }
+}
+
+test "schema 75 migration creates canonical pin objects on SQLite and MySQL" {
+    const step = migrations[74 - migration_baseline];
+    inline for (.{ rsql.Dialect.sqlite, rsql.Dialect.mysql }) |dialect| {
+        const expected = comptime objects(dialect);
+        const statements = if (dialect == .sqlite) step.sqlite else step.mysql;
+        var matched: usize = 0;
+        for (statements) |statement| {
+            if (!std.mem.startsWith(u8, statement, "CREATE ")) continue;
+            for (expected) |object| {
+                const expected_sql = try std.mem.replaceOwned(u8, std.testing.allocator, object.sql, if (std.mem.eql(u8, object.name, "core_command")) "kind BETWEEN 1 AND 9" else "\x00", "kind BETWEEN 1 AND 7");
+                defer std.testing.allocator.free(expected_sql);
+                if (std.mem.eql(u8, expected_sql, statement)) {
+                    matched += 1;
+                    break;
+                }
+            } else return error.NoncanonicalMigrationObject;
+        }
+        try std.testing.expectEqual(@as(usize, if (dialect == .sqlite) 4 else 2), matched);
+    }
+}
+
+test "schema 75 preserves Commands and references while adding empty pin organization" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [store_path.max_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var path_buffer: [store_path.max_bytes + 32]u8 = undefined;
+    const path = try std.fmt.bufPrintSentinel(&path_buffer, "{s}/store.sqlite3", .{root}, 0);
+    var raw: ?*c.sqlite3 = null;
+    defer _ = c.sqlite3_close(raw);
+    try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_open(path, &raw));
+    const database = raw.?;
+    try sqlite.exec(database, @embedFile("migration_baseline.sqlite.sql"));
+    try sqlite.exec(database, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
+    try sqlite.exec(database, @embedFile("migration_baseline_rows.sql"));
+    for (migrations) |step| {
+        if (step.from >= 74) break;
+        for (step.sqlite) |statement| try sqlite.exec(database, statement);
+    }
+    try sqlite.exec(database, "CREATE TEMP TABLE original_commands AS SELECT * FROM core_command");
+    try sqlite.exec(database, "CREATE TEMP TABLE original_stops AS SELECT * FROM session_stop");
+    try sqlite.exec(database, "PRAGMA foreign_keys=ON;PRAGMA legacy_alter_table=OFF;PRAGMA user_version=74");
+    try sqlite.exec(database, identity_sql);
+    const meta = try sqlite.prepare(database, "INSERT INTO store_meta(meta_key,meta_value) VALUES('store_selector',?1),('format','74')");
+    defer _ = c.sqlite3_finalize(meta);
+    try sqlite.bindText(meta, 1, root);
+    try sqlite.expectDone(meta);
+    try openExisting(std.testing.io, database, root, null, null);
+    try std.testing.expectEqual(schema_version, try sqlite.pragmaInt(database, "PRAGMA user_version"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM original_commands EXCEPT SELECT * FROM core_command)"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM core_command EXCEPT SELECT * FROM original_commands)"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM original_stops EXCEPT SELECT command_key,session_ref,selected_turn_id,position,admission_cutoff,stopped_at,parent_caused FROM session_stop)"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM session_pin"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM session_pin_command"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM pragma_foreign_key_check"));
+    try sqlite.exec(database, "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) VALUES('pin-migration',7,'d8mv7p',zeroblob(32),1,'',0,0,100)");
+    try sqlite.exec(database, "INSERT INTO session_pin_command(command_key,pinned) VALUES('pin-migration',1)");
+    try sqlite.exec(database, "INSERT INTO session_pin(session_ref,command_key) VALUES('d8mv7p','pin-migration')");
+    try sqlite.exec(database, "UPDATE session_pin SET command_key=NULL WHERE session_ref='d8mv7p'");
+    try openExisting(std.testing.io, database, root, null, null);
+    try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT count(*) FROM session_pin WHERE command_key IS NULL"));
+    try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT pinned FROM session_pin_command WHERE command_key='pin-migration'"));
+}
+
+test "schema 76 preserves populated PIN parent commands and organization on SQLite" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [store_path.max_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var path_buffer: [store_path.max_bytes + 32]u8 = undefined;
+    const path = try std.fmt.bufPrintSentinel(&path_buffer, "{s}/store.sqlite3", .{root}, 0);
+    var raw: ?*c.sqlite3 = null;
+    defer _ = c.sqlite3_close(raw);
+    try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_open(path, &raw));
+    const database = raw.?;
+    try sqlite.exec(database, @embedFile("migration_pin_parent.sqlite.sql"));
+    try sqlite.exec(database, "PRAGMA foreign_keys=OFF");
+    try sqlite.exec(database, @embedFile("migration_expected_rows.sql"));
+    try sqlite.exec(database, "PRAGMA foreign_keys=ON;PRAGMA user_version=75");
+    try sqlite.exec(database, identity_sql);
+    const meta = try sqlite.prepare(database, "INSERT INTO store_meta(meta_key,meta_value) VALUES('store_selector',?1),('format','75')");
+    defer _ = c.sqlite3_finalize(meta);
+    try sqlite.bindText(meta, 1, root);
+    try sqlite.expectDone(meta);
+    try sqlite.exec(database, "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) VALUES('pin-kept',7,'d8mv7p',zeroblob(32),1,'',0,0,101),('pin-cleared',7,'brhkcj',zeroblob(32),1,'',0,0,102)");
+    try sqlite.exec(database, "INSERT INTO session_pin_command(command_key,pinned) VALUES('pin-kept',1),('pin-cleared',1);INSERT INTO session_pin(session_ref,command_key) VALUES('d8mv7p','pin-kept'),('brhkcj',NULL)");
+    try sqlite.exec(database, "CREATE TEMP TABLE original_commands AS SELECT * FROM core_command;CREATE TEMP TABLE original_pins AS SELECT * FROM session_pin;CREATE TEMP TABLE original_pin_commands AS SELECT * FROM session_pin_command");
+    try openExisting(std.testing.io, database, root, null, null);
+    try std.testing.expectEqual(schema_version, try sqlite.pragmaInt(database, "PRAGMA user_version"));
+    inline for (.{ .{ "original_commands", "core_command" }, .{ "original_pins", "session_pin" }, .{ "original_pin_commands", "session_pin_command" } }) |pair| {
+        try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM " ++ pair[0] ++ " EXCEPT SELECT * FROM " ++ pair[1] ++ ")"));
+        try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM " ++ pair[1] ++ " EXCEPT SELECT * FROM " ++ pair[0] ++ ")"));
+    }
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM session_stop WHERE action_cutoff<>0"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM pragma_foreign_key_check"));
 }
 
 test "schema 74 migration only deletes the saved wire label on SQLite and MySQL" {

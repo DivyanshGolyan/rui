@@ -83,6 +83,8 @@ export interface SessionArchiveResult {
 	completion: "pending" | "completed";
 }
 
+export type SessionPinResult = Pick<Extract<Schemas["SessionPinReply"]["answer"], { status: "accepted" }>, "pinned">;
+
 export interface SessionSummary {
 	id: string;
 	label: string | null;
@@ -304,6 +306,34 @@ export class Session {
 		if (completion === "unavailable") throw new RuiRequestError("invocation_error", "invalid_response");
 		this.#link.activity?.notify(this.id);
 		return { archived: answer.archived, completion };
+	}
+
+	/** Pins this Session without starting or interrupting work. Repeated pins preserve its position. */
+	pin(options?: WriteOptions): Promise<SessionPinResult> {
+		return this.#setPinned(true, options);
+	}
+
+	/** Removes this Session's pin without changing its work. */
+	unpin(options?: WriteOptions): Promise<SessionPinResult> {
+		return this.#setPinned(false, options);
+	}
+
+	async #setPinned(pinned: boolean, options?: WriteOptions): Promise<SessionPinResult> {
+		const idempotencyKey = key(options);
+		const reply = parse<Schemas["SessionPinReply"]>(await this.#link.exchange(
+			"/v1/control/session-pin",
+			(store) => JSON.stringify({
+				version: WIRE_VERSION,
+				kind: "session_pin",
+				store,
+				key: idempotencyKey,
+				session: this.id,
+				pinned,
+			} satisfies Schemas["SessionPinRequest"]),
+		));
+		const answer = accepted(reply.answer);
+		this.#link.activity?.notify(this.id);
+		return { pinned: answer.pinned };
 	}
 
 	/**

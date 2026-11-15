@@ -10,6 +10,7 @@ export {
 	type ListSessionsOptions,
 	type SessionArchiveState,
 	type SessionArchiveResult,
+	type SessionPinResult,
 	type SessionCreate,
 	type ModelSummary,
 	type SendOptions,

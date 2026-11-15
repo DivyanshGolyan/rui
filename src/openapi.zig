@@ -149,6 +149,14 @@ pub const routes = [_]Route{
         .conflict = jsonReply(.{protocol.session_archive_reply.conflict}),
     },
     .{
+        .path = protocol.CommandKind.session_pin.route(),
+        .kind = .session_pin,
+        .summary = "Pins or unpins a Session without changing its work. Retried by its key.",
+        .variants = &.{variant(protocol.session_pin_request.all, .{})},
+        .reply = jsonReply(.{ protocol.session_pin_reply.accepted, protocol.session_pin_reply.rejected }),
+        .conflict = jsonReply(.{protocol.session_pin_reply.conflict}),
+    },
+    .{
         .path = protocol.CommandKind.model_interruption.route(),
         .kind = .model_interruption,
         .summary = "Interrupts one model Operation. Retried by its key.",
@@ -510,6 +518,7 @@ fn observationSchema(d: *Document) anyerror!Value {
             .message => o.message_variants,
             .session_stop => .{ .{}, o.session_stop },
             .session_archive => .{ .{}, o.session_archive },
+            .session_pin => .{ .{}, o.session_pin },
             .model_interruption => .{ .{}, o.model_interruption },
             .permission_decision => .{ .{}, o.permission_decision },
             .action_background, .action_stop => .{ o.action_target, o.action_target ++ o.action_selection },
@@ -1858,7 +1867,7 @@ test "statuses, media types and required headers match what the Host sends" {
     var document: Document = .init(arena.allocator());
     const built = try document.build();
     const paths = built.object.get("paths").?.object;
-    const mutations = [_]protocol.CommandKind{ .configure, .message, .session_stop, .session_archive, .model_interruption, .permission_decision };
+    const mutations = [_]protocol.CommandKind{ .configure, .message, .session_stop, .session_archive, .session_pin, .model_interruption, .permission_decision };
     for (mutations) |kind| {
         const responses = paths.get(kind.route()).?.object.get("post").?.object.get("responses").?.object;
         try std.testing.expect(responses.contains("409"));

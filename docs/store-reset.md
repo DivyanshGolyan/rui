@@ -78,4 +78,4 @@ Move aside any Store now at that path, then copy the complete backup there.
 Read it with a compatible build.
 To make it your default again, run `"$RUI" defaults configure --store "$STORE"` with that build.
 
-The [Store format policy](../ARCHITECTURE.md#store-format-and-upgrades) describes the plans for migrations.
+The [Store format policy](contracts/store.md#store-format-and-upgrades) describes the plans for migrations.

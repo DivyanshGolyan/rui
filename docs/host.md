@@ -33,7 +33,7 @@ The Version row in the terminal's app settings starts the same run from the over
 After installing, it redraws in the new Rui and returns to the same place with unsent drafts intact.
 Restart keeps the current Store even if saved defaults changed, and restores existing work without requiring fresh-session preferences or local sign-in.
 That also resolves the old client's protocol/restart hold; a failed or unconfirmed Host activation still needs its recovery instructions.
-If Rui must show recovery or repair instructions, follow the departure guidance instead; see the [Upgrade contract](../ARCHITECTURE.md#store-format-and-upgrades).
+If Rui must show recovery or repair instructions, follow the departure guidance instead; see the [Upgrade contract](contracts/store.md#store-format-and-upgrades).
 
 A selected source build or managed build with unknown release identity is refused before installation.
 The [standalone release installer](../README.md#install) can deliberately convert it to a release.
@@ -79,7 +79,7 @@ At Host startup, Rui backs up and migrates supported SQLite formats.
 MySQL schema changes are operator-owned.
 For MySQL TCP URLs, the only query option is `ssl-ca=/absolute/path/to/ca.pem` (the path may be percent-encoded), which replaces system trust with that PEM bundle alone; socket URLs and verification-disabling options are refused.
 If target compatibility facts are unavailable, compatibility is unknown until startup validates it.
-See [Store format and upgrades](../ARCHITECTURE.md#store-format-and-upgrades) for the contract.
+See [Store format and upgrades](contracts/store.md#store-format-and-upgrades) for the contract.
 
 ### Capacity and file limits
 
@@ -158,7 +158,7 @@ An auto-started Host takes it from the command that starts it, and a running Hos
 An invalid one stops a Host explicitly configured to serve `openai`; with automatic provider selection, the Host reports it and starts serving its ChatGPT sign-ins only.
 Sessions of a provider the Host does not serve wait until a Host that serves it starts.
 Without a `providers` setting, every start path uses automatic provider selection: device-code sign-in is served even while signed out, browser sign-in when its credential is usable, and OpenAI when its key is usable. To serve no model providers, pass `--set 'providers={}'`.
-The [Host reference](../ARCHITECTURE.md#platforms-and-server-lifetime) states the startup and shutdown guarantees.
+The [Host reference](contracts/host.md#platforms-and-server-lifetime) states the startup and shutdown guarantees.
 
 ## Export a failed model response
 

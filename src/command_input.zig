@@ -375,6 +375,22 @@ pub const SessionArchiveCommand = struct {
     }
 };
 
+pub const SessionPinCommand = struct {
+    store: Bounded(max_store_bytes) = .{},
+    key: Bounded(max_key_bytes) = .{},
+    session: Bounded(max_session_bytes) = .{},
+
+    pinned: bool = true,
+
+    pub fn semanticDigest(self: *const SessionPinCommand) [32]u8 {
+        var hash = std.crypto.hash.sha2.Sha256.init(.{});
+        hashField(&hash, "rui/core/session-pin/v1");
+        hashField(&hash, self.session.slice());
+        hash.update(&.{@intFromBool(self.pinned)});
+        return hash.finalResult();
+    }
+};
+
 pub const ModelInterruptionCommand = struct {
     store: Bounded(max_store_bytes) = .{},
     key: Bounded(max_key_bytes) = .{},

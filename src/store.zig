@@ -92,6 +92,7 @@ pub const SessionReportCapture = report_domain.SessionReportCapture;
 pub const checkSessionReportsForTesting = @import("store/tests.zig").checkSessionReportsForTesting;
 pub const SessionStopReply = command_domain.SessionStopReply;
 pub const SessionArchiveReply = command_domain.SessionArchiveReply;
+pub const SessionPinReply = command_domain.SessionPinReply;
 pub const settleCompactionForTesting = store_testing.settleCompactionForTesting;
 pub const setLoadedToolsForTesting = store_testing.setLoadedToolsForTesting;
 pub const setLegacyNullEffortForTesting = store_testing.setLegacyNullEffortForTesting;
@@ -161,6 +162,7 @@ test {
     _ = @import("store/tests/transition.zig");
     _ = @import("store/tests/turn.zig");
     _ = @import("store/archive_tests.zig");
+    _ = @import("store/pin_tests.zig");
     _ = @import("store/sqlite_tests.zig");
     _ = @import("store/sqlite_tests/access.zig");
     _ = @import("store/sqlite_tests/action.zig");
