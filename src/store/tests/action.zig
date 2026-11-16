@@ -1550,6 +1550,12 @@ test "interrupt regression: a new Message declines pending approvals through the
             for (0..2) |_| {
                 const work = (try storage.nextCoreWork(.fromFree(2, true))).?;
                 try std.testing.expect(work == .auto_deny);
+                var late_allow: protocol.PermissionDecisionCommand = .{ .action_id = work.auto_deny.action_id, .decision = .allow_once };
+                late_allow.session = work.auto_deny.session;
+                const allow_key = try std.fmt.bufPrint(&late_allow.key.bytes, "late-allow-{d}", .{late_allow.action_id});
+                late_allow.key.len = allow_key.len;
+                const late_result = storage.decidePermission(&late_allow, .{});
+                try std.testing.expect(late_result == .rejected and late_result.rejected.code == .action_not_pending);
                 var decision: protocol.PermissionDecisionCommand = .{ .action_id = work.auto_deny.action_id };
                 decision.session = work.auto_deny.session;
                 const key = try std.fmt.bufPrint(&decision.key.bytes, "rui.core/message-decline/{d}", .{decision.action_id});

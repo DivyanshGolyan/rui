@@ -1948,11 +1948,12 @@ pub const InterruptModel = struct {
 
 const decision_action = rsql.Read(.{
     .sql = "SELECT s.session_ref,s.workspace_key,s.next_position,a.authorized,a.background_position IS NOT NULL AS background," ++ action_domain.actionStoppedSql("a", "operation") ++ " AS stopped,a.resolution_code IS NULL AS unresolved,(t.outcome_code IS NULL OR a.background_position IS NOT NULL) AS turn_open,t.turn_id," ++
-        "EXISTS(SELECT 1 FROM session_forward f WHERE f.target_ref=?2 AND f.kind=1 AND f.source_id=a.action_id AND f.position IS NOT NULL) AS forwarded " ++
+        "EXISTS(SELECT 1 FROM session_forward f WHERE f.target_ref=?2 AND f.kind=1 AND f.source_id=a.action_id AND f.position IS NOT NULL) AS forwarded," ++
+        "EXISTS(SELECT 1 FROM message_admission m WHERE m.session_ref=a.session_ref AND m.turn_id IS NULL AND m.source_action_id IS NULL AND m.admission_position>a.approval_position AND t.outcome_code IS NULL AND t.operation_id=operation.operation_id) AS message_decline " ++
         "FROM action_operation a JOIN session s ON s.session_ref=a.session_ref " ++
         "JOIN model_operation operation ON operation.operation_id=a.parent_operation_id JOIN turn t ON t.turn_id=operation.turn_id WHERE a.action_id=?1",
     .Args = struct { action_id: u64, target: []const u8 },
-    .Row = struct { session: rsql.SessionHead, authorized: bool, background: bool, stopped: bool, unresolved: bool, turn_open: bool, turn_id: rsql.Positive, forwarded: bool },
+    .Row = struct { session: rsql.SessionHead, authorized: bool, background: bool, stopped: bool, unresolved: bool, turn_open: bool, turn_id: rsql.Positive, forwarded: bool, message_decline: bool },
     .cardinality = .optional,
 });
 
@@ -1986,13 +1987,14 @@ fn decisionRejection(
     command: *const command_input.PermissionDecisionCommand,
     target: target_session.Result,
     action: decision_action.Result,
+    automatic: bool,
 ) ?mutation_answer.PermissionDecisionRejection {
     if (!session_id.valid(command.session.slice())) return .invalid_session_reference;
     if (!validId(command.action_id)) return .invalid_target;
     if (target == null) return .unknown_session;
     const found = action orelse return .unknown_action;
     if (!std.mem.eql(u8, &found.session.ref, command.session.slice()) and !found.forwarded) return .target_mismatch;
-    if (found.authorized or !found.unresolved or !found.turn_open) return .action_not_pending;
+    if (found.authorized or !found.unresolved or !found.turn_open or (found.message_decline and !automatic)) return .action_not_pending;
     return null;
 }
 
@@ -2042,7 +2044,7 @@ pub const DecidePermission = struct {
             .rejected => |code| return .{ .done = .{ .rejected = .{ .replayed = true, .code = code } } },
         }
 
-        t.rejection = decisionRejection(command, t.target, t.action);
+        t.rejection = decisionRejection(command, t.target, t.action, t.input.denial_reason != null);
         t.answer = .{ .accepted = t.rejection == null };
         if (t.rejection) |code| try t.answer.code.set(@tagName(code));
         try queueCommand(r, command.key.slice(), .permission_decision, session, &t.digest, null, null, &t.answer);
