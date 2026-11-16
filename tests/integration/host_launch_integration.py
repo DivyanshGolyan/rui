@@ -755,7 +755,10 @@ def detached_settings_checks(root, env):
         ("relative-secret", {"providers": {"openai": {"key": {"file": "relative/key"}}}}, (), "absolute path"),
         ("unsaved-placement", {"interface": {"dir": str(root / "elsewhere")}}, (), "unsaved Store or interface"),
         ("unknown-leaf", {"unknown": True}, (), "unknown"),
-        ("seal", {"execution": {"activeCapacity": 0}}, (), "execution.activeCapacity"),
+        ("zero-capacity", {"execution": {"activeCapacity": 0}}, (), None),
+        ("invalid-count", {"execution": {"activeCapacity": -1}}, (), "execution.activeCapacity"),
+        ("seal", {"providers": {"codex": {"endpoint": "https://example.com/responses",
+                   "credentialFile": str(root / "unread-credential")}}}, (), "providers.codex.endpoint"),
         ("resolve", {"providers": {"openai": {"key": {"env": "DETACHED_CHECK_ABSENT_KEY"}}}}, (), "providers.openai.key"),
     )
     for name, document, assignments, reason in cases:

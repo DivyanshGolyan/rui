@@ -2661,10 +2661,13 @@ test "Host detached check shares source admission then resolves and seals withou
         .{ .args = &.{ "--set", "tools.bash.path=relative/bash" }, .detached = false },
         .{ .args = &.{ "--set", "tools.bash.path=relative/bash", "--set", "tools.bash.path=/bin/bash" } },
         .{ .args = &.{ "--set", "interface.dir=/tmp/unsaved-check-interface" }, .detached = false },
-        .{ .args = &.{ "--set", "execution.activeCapacity=0" }, .foreground = false, .detached = false },
+        .{ .args = &.{ "--set", "execution.activeCapacity=0" } },
+        .{ .args = &.{ "--set", "execution.activeCapacity=-1" }, .foreground = false, .detached = false },
+        .{ .args = &.{ "--set", "providers.codex.credentialFile=/tmp/check-credential", "--set", "providers.codex.endpoint=https://example.com/responses" }, .foreground = false, .detached = false },
         .{ .args = &.{ "--set", "providers.openai.key=env:CHECK_ABSENT_KEY" }, .foreground = false, .detached = false },
     };
-    for (cases) |case| for (std.enums.values(Admission)) |door| {
+    for (cases, 0..) |case, index| for (std.enums.values(Admission)) |door| {
+        errdefer std.debug.print("check admission case {d}, door {s}\n", .{ index, @tagName(door) });
         settings.* = .{};
         defer settings.deinit();
         var failure: start_report.Failure = undefined;
