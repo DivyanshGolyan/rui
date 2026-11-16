@@ -214,15 +214,16 @@ def main():
             client_env = dict(os.environ, RUI_SETTINGS_MYSQL_URL=url)
             client_env.pop("RUI_RUNTIME_DIR", None)
 
-            def command(*args):
-                result = subprocess.run([rui, *map(str, args)], env=client_env, cwd=root,
+            def command(*args, message=None):
+                result = subprocess.run([rui, *map(str, args)], env=client_env, cwd=root, input=message,
                                         text=True, capture_output=True, timeout=40)
                 assert result.returncode == 0, result
                 assert url not in result.stdout + result.stderr
                 return result
 
             command("host", "set", "--store", directory, "store.mysql.url", "env:RUI_SETTINGS_MYSQL_URL")
-            command("host", "set", "--store", directory, "providers", "{}")
+            command("host", "set", "--store", directory, "providers.codex.unauthenticated", "true")
+            command("host", "set", "--store", directory, "execution.paused", "true")
             if explicit_interface:
                 command("host", "set", "--store", directory, "interface.dir", runtime)
             started = None
@@ -233,10 +234,11 @@ def main():
                 record = directory / "request.json"
                 receipt = json.loads(command("session", "start", "--store", directory,
                                              "--record", record, "--key", "directory-start",
-                                             "--provider", "codex", "--model", "gpt-5.5", "--workspace", root).stdout)
+                                             "--provider", "codex", "--model", "gpt-5.5", "--workspace", root,
+                                             message="Saved MySQL placement evidence").stdout)
                 assert receipt["context"]["store"] == store_id, receipt
                 command("request", "inspect", "--store", directory, "--key", "directory-start")
-                command("request", "recover", "--store", directory, "--record", record, "--kind", "configure")
+                command("request", "recover", "--store", directory, "--record", record, "--kind", "message")
             finally:
                 if started is not None:
                     command("host", "pause", "--store", directory, "--instance", started["instance"])

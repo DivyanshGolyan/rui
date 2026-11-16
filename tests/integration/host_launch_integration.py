@@ -819,7 +819,7 @@ def saved_settings(root, env):
             command = subprocess.run([RUI, "session", "start", "--store", str(moved),
                                       "--record", str(record), "--key", "placement-start",
                                       "--provider", "codex", "--model", "gpt-5.5", "--workspace", str(root)],
-                                     env=env, text=True, capture_output=True, timeout=COMMAND_TIMEOUT)
+                                     env=env, input="Saved placement evidence", text=True, capture_output=True, timeout=COMMAND_TIMEOUT)
             assert command.returncode == 0, command
             receipt = json.loads(command.stdout)
             expected_store = (moved / "data" if relocate_store else moved).resolve()
@@ -827,7 +827,7 @@ def saved_settings(root, env):
             observed = subprocess.run([RUI, "request", "inspect", "--store", str(moved), "--key", "placement-start"],
                                       env=env, text=True, capture_output=True, timeout=COMMAND_TIMEOUT)
             assert observed.returncode == 0, observed
-            replay = subprocess.run([RUI, "request", "recover", "--store", str(moved), "--record", str(record), "--kind", "configure"],
+            replay = subprocess.run([RUI, "request", "recover", "--store", str(moved), "--record", str(record), "--kind", "message"],
                                     env=env, text=True, capture_output=True, timeout=COMMAND_TIMEOUT)
             assert replay.returncode == 0, replay
             paused = host_command(env, "pause", "--store", moved)

@@ -1704,6 +1704,11 @@ pub fn checkStart(init: std.process.Init, request: Spawn, failure: *start_report
     settings.* = .{};
     defer settings.deinit();
     try readDetached(init, request, settings, failure);
+    // Only overridden sources need a comparison with the saved placement.
+    if (request.settings_file == null and request.assignments.len == 0) {
+        try anchorPlacement(init, settings, request.dir, failure);
+        return;
+    }
     // Only saved placement is discoverable by subsequent directory clients.
     const saved_settings = try init.gpa.create(hs.Settings);
     defer init.gpa.destroy(saved_settings);

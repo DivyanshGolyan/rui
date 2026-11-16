@@ -135,6 +135,7 @@ Use `rui host set --store PATH SETTING @FILE` to read a JSON value from a file.
 Changes apply to the next Host; they do not reconfigure a running one.
 `rui host start` takes `--settings FILE` but not `-`, because a started Host has no stdin; pass a document on stdin with `rui host serve --settings -`.
 Clients given `--store PATH` read that directory's saved placement, including MySQL, a moved `interface.dir`, or a different `store.sqlite.dir`.
+Pause the Host before changing placement: directory-based clients immediately use the saved location, while a running Host keeps its original settings.
 Save Store and interface placement with `rui host set`; a differing placement supplied only through `host start --settings` or `--set` is refused because a later client cannot see it.
 Other one-off settings still apply to a new Host. Foreground `host serve` permits unsaved placement, but directory-based clients need the same placement saved.
 A started Host runs in `/` without stdin. Relative paths you type on the command line (`--settings FILE`, `@FILE`, and `--set` paths or `file:` sources) are taken from the directory you run the command in.
