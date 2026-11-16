@@ -47,11 +47,12 @@ Overview and chat states use a pattern for nameless `○ ID` rows followed only 
 `$V frames HEADSHA --before BASESHA --only NAME,... --sizes 140x40,46x30 --record` runs the existing capture flow twice on already-built pinned revisions.
 It writes `before/`, `after/`, `pairs.json` and a side-by-side `index.html` in one output directory, changed pairs first.
 A pair is `same` only when committed cell contents, styles, dimensions and terminal foreground/background are identical; cursor position and timing are not cell differences.
+The before run loads BASE’s pinned `frames.json`, while an explicit `--scenario FILE` intentionally supplies one recipe for both builds. Both use the selected HEAD state names and viewports.
+A state absent from BASE is marked `new` in `pairs.json`, with only an after capture; existing BASE states must pass their own steps and assertions.
 Both sides retain their capture status and failures still fail the command after preserving the paired evidence.
 
-`$V publish DIR [--states NAME,...] [--all] [--repo-remote origin]` publishes the manifests' PNGs and GIFs, excluding same pairs unless `--all` is given.
-It refuses failed or missing captures and unknown states.
-Each publication gets a content-derived subdirectory under `<head-sha>/` on the append-only orphan branch `pr-evidence`; publication never changes the current checkout or PR branch.
-A rejected push refetches and retries on the new tip, at most four attempts with backoff, without force.
-The command checks one immutable raw image URL for HTTP 200 and an image content type before printing the `## Screens` Markdown to stdout.
-Paste the block into the PR description before opening or pushing the PR; see [Prove a UI PR](../SKILL.md#prove-a-ui-pr).
+`$V publish DIR --pr N [--states NAME,...] [--all] [--ssh HOST]` attaches the manifests' PNGs and GIFs to the PR's `## Screens`, excluding same pairs unless `--all` is given.
+It refuses failed or missing captures and unknown states. Each image has state/size/side alt text; recordings are labelled as such.
+The upload machine needs gh 2.104.0+ with `--attach`, a classic PAT or gh OAuth token and repository push access. Readback verifies user-attachments embeds after each batch of at most 50 files; partial failures retain their actual PR updates and fail clearly.
+Cloud threads use `--ssh rui-box` after `rui-box-up.sh` setup: only selected files and the shared worker are staged remotely, and the fresh directory is removed after upload/readback. The local mode runs the same worker directly.
+Publish before the next push, or rerun failed PR Shape jobs after attachment; see [Prove a UI PR](../SKILL.md#prove-a-ui-pr). All later body writes must also go through the box, since the container gateway would defang the embedded images.

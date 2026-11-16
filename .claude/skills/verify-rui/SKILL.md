@@ -81,16 +81,21 @@ V=.claude/skills/verify-rui/scripts/verify-rui
 $V build "$HEAD" --pkg-dir "${ZIG_LOCAL_PKG_DIR:-$PWD/zig-pkg}"
 $V build "$BASE" --pkg-dir "${ZIG_LOCAL_PKG_DIR:-$PWD/zig-pkg}"
 $V frames "$HEAD" --before "$BASE" --only <states for the changed screens> --sizes 140x40,46x30 [--record]
-$V publish DIR
+$V publish DIR --pr N --ssh rui-box
 ```
 
 Replace the angle-bracket placeholder with comma-separated state names, omit the brackets around optional `--record`, and use the printed frames directory for `DIR`.
 In this container, prefix builds with `zb` and set `RUI_BUILD_JOBS=2`; fetch dependencies as described in Launch and `.agents/setup` if needed.
 Comparison captures live in `before/` and `after/`; `index.html` and `pairs.json` list changed pairs first and mark identical committed cells `same`.
+The before run uses BASE’s pinned scenario, including its steps and expectations; explicit `--scenario FILE` uses that recipe on both builds. A selected state absent from BASE is `new` with only an after capture. A failure under BASE’s own recipe still fails the comparison.
 Both builds must already exist; ordinary `frames` without `--before` keeps its single-build flow.
-The publisher selects changed pairs by default (`--all` includes same pairs, `--states a,b` filters states, and `--repo-remote origin` selects the GitHub remote).
-It appends PNGs and GIFs to the one public orphan branch `pr-evidence` with immutable commit-pinned URLs and leaves your working tree and branch alone.
-Paste its entire `## Screens` block into the PR body before opening it, or before the next push: check.yml reruns PR Shape on push, not body edits.
+The publisher selects changed/new pairs by default (`--all` includes same pairs and `--states a,b` filters states).
+`publish DIR --pr N [--ssh HOST]` attaches PNGs/GIFs with state/size alt text under `## Screens`, retaining the head/base/sizes/surface facts and other PR sections. It batches at the CLI's 50-file limit, reads the body back after each batch, and refuses missing embeds or partial uploads. Inspect the body before retrying a partial upload.
+The upload machine needs gh **2.104.0+** with `--attach`, a classic PAT or gh OAuth token, and repository push access. Without `--ssh` the same worker runs locally, for example on Divyansh's box.
+Cloud threads use `--ssh rui-box`: set up the alias with `bash /mnt/project-files/rui-dev/rui-box-up.sh THREAD-NAME` if needed. The publisher copies only selected media and its worker to a fresh remote directory, uploads and verifies there, and removes that directory. Credentials stay on the box.
+Cloud GitHub writes filter image embeds, and their proxy blocks the CLI's GraphQL lookup. Once images are present, **every later PR body edit must also run on the box**: copy the body file there, then use `ssh rui-box 'gh pr edit N -R OWNER/REPO --body-file /path/on/box/body.md'`. Container REST, open_pr.py and MCP body writes would break the screenshots again.
+Open the PR to obtain `N`, then publish before its next push so the synchronize check sees the images. PR Shape runs on opened/synchronize/reopened/ready_for_review, not body edits; if the opening run already failed, publish and manually rerun the failed jobs. The check reads the current body from GitHub.
+Show the before/after PNGs to the person who requested the work in your own conversation when possible.
 A UI-path change that provably draws nothing different may instead carry a line `No screen change: <nonempty reason>`.
 Humans with browsers may also upload `github.com/user-attachments` images or videos.
 

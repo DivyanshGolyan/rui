@@ -1,6 +1,3 @@
-//! The Store's public surface. The Store itself lives in src/store/; code
-//! outside that directory imports this file, never a file under it.
-
 const action_domain = @import("store/domain/action.zig");
 const command_domain = @import("store/domain/command.zig");
 const configuration_domain = @import("store/domain/configuration.zig");
@@ -25,7 +22,6 @@ pub const BoundSkill = @import("store/domain/skills.zig").BoundSkill;
 pub const InitialSkills = @import("store/domain/skills.zig").Initial;
 pub const MysqlStartError = @import("store/engine/mysql_refusal.zig").StartError;
 
-/// The DB team applies this file; opening a MySQL Store never performs DDL.
 pub const mysql_schema = store_schema.ddl(.mysql);
 pub const mysqlMigrationFrom = store_schema.mysqlMigrationFrom;
 

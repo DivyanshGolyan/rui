@@ -28,9 +28,6 @@ import tarfile
 import threading
 import time
 import tempfile
-import urllib.request
-import urllib.error
-import uuid
 from urllib.parse import quote
 
 CACHE = pathlib.Path(os.environ.get("VERIFY_RUI_CACHE", pathlib.Path.home() / ".cache/verify-rui"))
@@ -2708,7 +2705,7 @@ def frame_capture_selected(state, selected):
 
 def run_frames(args):
     try:
-        scenario = load_scenario(args.scenario, args.sizes)
+        scenario = load_scenario(args.scenario or HERE.with_name("frames.json"), args.sizes)
         selected = set(args.only.split(",")) if args.only else {s["name"] for s in scenario["states"]}
         unknown = selected - {s["name"] for s in scenario["states"]}
         if unknown:
@@ -2890,20 +2887,24 @@ def run_frames(args):
         raise SystemExit(1)
 
 
-def paired_frames(out, head, base):
+def paired_frames(out, head, base, new_states=()):
     """Join the existing captures by state and viewport, comparing committed cells."""
     sides = {}
     for side in ("before", "after"):
         records = json.loads((out / side / "frames.json").read_text())
         sides[side] = {(r["name"], r["size"]): {**r, "files": {
             ext: f"{side}/{path}" for ext, path in r["files"].items()}} for r in records}
-    if sides["before"].keys() != sides["after"].keys():
+    expected_before = {key for key in sides["after"] if key[0] not in new_states}
+    if sides["before"].keys() != expected_before:
         raise ValueError("before and after captures have different states or sizes")
     pairs = []
     for (name, size), after in sides["after"].items():
-        before = sides["before"][name, size]
-        same = bool(before.get("cells_sha256")) and before["cells_sha256"] == after.get("cells_sha256")
-        pairs.append(dict(name=name, size=size, same=same, before=before, after=after))
+        before = sides["before"].get((name, size))
+        same = bool(before and before.get("cells_sha256")) and before["cells_sha256"] == after.get("cells_sha256")
+        pair = dict(name=name, size=size, same=same, new=name in new_states, after=after)
+        if before is not None:
+            pair["before"] = before
+        pairs.append(pair)
     pairs.sort(key=lambda pair: pair["same"])
     result = dict(head=head, base=base, pairs=pairs)
     (out / "pairs.json").write_text(json.dumps(result, indent=2) + "\n")
@@ -2912,6 +2913,9 @@ def paired_frames(out, head, base):
         caption = html.escape(f"{pair['name']} · {pair['size']}")
         views = []
         for side in ("before", "after"):
+            if side == "before" and pair["new"]:
+                views.append("<td><p>New screen</p></td>")
+                continue
             record = pair[side]
             files = record["files"]
             media = files.get("gif", files.get("png"))
@@ -2919,7 +2923,7 @@ def paired_frames(out, head, base):
                     f'<iframe title="{side} {caption}" src="{html.escape(files["html"], quote=True)}"></iframe>'
                     if "html" in files else "No capture")
             views.append(f'<td><p>{side}: {html.escape(record["reason"] or record["status"])}</p>{view}</td>')
-        status = "same" if pair["same"] else "changed"
+        status = "new" if pair["new"] else "same" if pair["same"] else "changed"
         sections.append(f'<section><h2>{caption} — {status}</h2><table><tr>{"".join(views)}</tr></table></section>')
     (out / "index.html").write_text('<!doctype html><meta charset="utf-8"><title>Rui before / after</title>'
         '<style>body{font:16px system-ui;background:#ddd;padding:20px}table{width:100%;table-layout:fixed}'
@@ -2937,21 +2941,56 @@ def cmd_frames(args):
     head, base = pinned(args.sha), pinned(args.before)
     for sha in (head, base):
         require_screen(load_build(sha))
-    out = pathlib.Path(args.out).resolve() if args.out else CACHE / "pairs" / f"{time.time_ns()}-{head[:7]}"
-    if out.exists() and any(out.iterdir()):
-        die(f"comparison output must be empty: {out}")
-    out.mkdir(parents=True, exist_ok=True)
-    failed = False
-    for side, sha in (("before", base), ("after", head)):
-        child = argparse.Namespace(**{**vars(args), "sha": sha, "out": str(out / side), "before": None})
-        with contextlib.redirect_stdout(sys.stderr):
-            try:
-                run_frames(child)
-            except SystemExit as error:
-                if error.code != 1:
-                    raise
-                failed = True
-    paired_frames(out, head, base)
+    # A baseline uses its own pinned recipe. Explicit --scenario intentionally
+    # supplies one recipe for both builds. Both still share the same runner.
+    with tempfile.TemporaryDirectory(prefix="verify-rui-before-") as temporary:
+        try:
+            head_scenario = load_scenario(getattr(args, "scenario", None) or HERE.with_name("frames.json"), args.sizes)
+            states = {state["name"]: state for state in head_scenario["states"]}
+            selected = set(args.only.split(",")) if args.only else set(states)
+            unknown = selected - states.keys()
+            if unknown:
+                raise ValueError("unknown states: " + ", ".join(sorted(unknown)))
+            if getattr(args, "scenario", None):
+                before_scenario = head_scenario
+            else:
+                raw = subprocess.check_output(["git", "-C", str(HERE.parents[4]), "show",
+                                               f"{base}:.claude/skills/verify-rui/scripts/frames.json"], text=True)
+                before_scenario = validate_scenario(json.loads(raw), args.sizes)
+            before_names = {state["name"] for state in before_scenario["states"]}
+            new_states = selected - before_names
+            # Keep BASE's steps and assertions; drive the same requested viewports.
+            for state in before_scenario["states"]:
+                if state["name"] in selected:
+                    state["sizes"] = states[state["name"]]["sizes"]
+            before_path = pathlib.Path(temporary) / "scenario.json"
+            before_path.write_text(json.dumps(scenario_snapshot(before_scenario)))
+        except (OSError, ValueError, TypeError, subprocess.CalledProcessError) as error:
+            die(f"cannot prepare comparison recipes: {error}")
+        out = pathlib.Path(args.out).resolve() if args.out else CACHE / "pairs" / f"{time.time_ns()}-{head[:7]}"
+        if out.exists() and any(out.iterdir()):
+            die(f"comparison output must be empty: {out}")
+        out.mkdir(parents=True, exist_ok=True)
+        failed = False
+        for side, sha in (("before", base), ("after", head)):
+            child = argparse.Namespace(**{**vars(args), "sha": sha, "out": str(out / side), "before": None})
+            if side == "before":
+                child.scenario = str(before_path)
+                child.only = ",".join(state["name"] for state in before_scenario["states"]
+                                      if state["name"] in selected)
+                if not child.only:
+                    (out / side).mkdir()
+                    frames_index(out / side, [], False)
+                    (out / side / "scenario.json").write_text(before_path.read_text())
+                    continue
+            with contextlib.redirect_stdout(sys.stderr):
+                try:
+                    run_frames(child)
+                except SystemExit as error:
+                    if error.code != 1:
+                        raise
+                    failed = True
+        paired_frames(out, head, base, new_states)
     print(out)
     if failed:
         raise SystemExit(1)
@@ -2979,7 +3018,7 @@ def publication_frames(out, states=None, include_same=False):
     rows = [r for r in rows if r["name"] in selected and (include_same or not r["same"])]
     files = {}
     for row in rows:
-        for side in (("before", "after") if base else ("after",)):
+        for side in (("before", "after") if base and not row.get("new") else ("after",)):
             record = row[side]
             if not record["ok"]:
                 raise ValueError(f"cannot publish failed capture: {row['name']}@{row['size']}: {record['reason']}")
@@ -2988,7 +3027,7 @@ def publication_frames(out, states=None, include_same=False):
                 raise ValueError(f"no PNG for {row['name']}@{row['size']}; run frames without --no-png")
             for ext, name in media.items():
                 path = out / name
-                if (path.is_symlink() or not path.resolve().is_relative_to(out.resolve())
+                if (pathlib.Path(name).is_absolute() or path.is_symlink() or not path.resolve().is_relative_to(out.resolve())
                         or path.suffix != "." + ext or not path.is_file()):
                     raise ValueError(f"invalid capture file: {name}")
                 files[name] = path
@@ -2997,69 +3036,50 @@ def publication_frames(out, states=None, include_same=False):
     return head, base, rows, files
 
 
-def evidence_repo(url):
+def github_repository(url):
     match = re.fullmatch(r"(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)([\w.-]+)/([\w.-]+?)(?:\.git)?/?", url.strip())
     if not match:
-        raise ValueError(f"expected a GitHub repository remote, got {url!r}")
+        raise ValueError("origin must be a GitHub repository remote")
     return f"{match[1]}/{match[2]}"
 
 
-def push_evidence(repo, remote, head, files):
-    """Append immutable media using a private index and ref; never checkout or force push."""
-    def git(*args, **kwargs):
-        return subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True, **kwargs)
-
-    def checked(*args, **kwargs):
-        result = git(*args, **kwargs)
-        if result.returncode:
-            raise ValueError(f"git {args[0]} failed: {result.stderr.strip()}")
-        return result.stdout.strip()
-
-    blobs = {name: checked("hash-object", "-w", str(path)) for name, path in sorted(files.items())}
-    # Separate publications under one head without ever replacing earlier screenshots.
-    capture = hashlib.sha256(json.dumps(blobs, sort_keys=True).encode()).hexdigest()[:16]
-    prefix = f"{head}/{capture}"
-    ref = "refs/verify-rui/evidence/" + uuid.uuid4().hex
-    branch = "refs/heads/pr-evidence"
+def gh(*args, cwd=None):
     try:
-        with tempfile.TemporaryDirectory(prefix="verify-rui-publish-") as temporary:
-            env = {**os.environ, "GIT_INDEX_FILE": str(pathlib.Path(temporary) / "index")}
-            for attempt in range(4):
-                # Fetch before every attempt, including the first. Absence is distinct from a network error.
-                fetched = git("fetch", "--no-tags", "--no-write-fetch-head", remote, f"{branch}:{ref}")
-                if fetched.returncode:
-                    exists = git("ls-remote", "--exit-code", "--heads", remote, branch)
-                    if exists.returncode != 2:
-                        raise ValueError("cannot fetch pr-evidence: " + fetched.stderr.strip())
-                    tip = None
-                else:
-                    tip = checked("rev-parse", ref)
-                checked("read-tree", tip or "--empty", env=env)
-                for name, blob in blobs.items():
-                    target = f"{prefix}/{name}"
-                    current = checked("ls-files", "--stage", "--", target, env=env)
-                    if current and current.split()[:2] != ["100644", blob]:
-                        raise ValueError(f"refusing to replace append-only evidence: {target}")
-                    checked("update-index", "--add", "--cacheinfo", "100644", blob, target, env=env)
-                tree = checked("write-tree", env=env)
-                commit = checked("commit-tree", tree, *(["-p", tip] if tip else []),
-                                 input=f"PR screen evidence for {head}\n")
-                pushed = git("push", "--porcelain", remote, f"{commit}:{branch}")
-                if pushed.returncode == 0:
-                    return commit, prefix
-                if attempt == 3:
-                    raise ValueError("pr-evidence push rejected after 4 attempts: " + pushed.stderr.strip())
-                print("verify-rui: evidence push rejected; refetching before retry", file=sys.stderr)
-                time.sleep(2 ** attempt)
-    finally:
-        checked("update-ref", "-d", ref)
+        result = subprocess.run(["gh", *args], cwd=cwd, capture_output=True, text=True)
+    except FileNotFoundError:
+        raise ValueError("gh 2.104.0+ with --attach is required; install GitHub CLI") from None
+    if result.returncode:
+        raise ValueError(f"gh {args[0]} failed: {result.stderr.strip()}")
+    return result.stdout
 
 
-def screens_markdown(owner_repo, commit, prefix, head, base, rows):
+def require_attachments(repository, cwd):
+    version = re.search(r"gh version (\d+)\.(\d+)\.(\d+)", gh("--version", cwd=cwd))
+    if not version or tuple(map(int, version.groups())) < (2, 104, 0):
+        raise ValueError("gh 2.104.0+ with --attach is required; upgrade GitHub CLI")
+    if "--attach" not in gh("pr", "edit", "--help", cwd=cwd):
+        raise ValueError("gh 2.104.0+ with --attach is required; upgrade GitHub CLI")
+    try:
+        token = gh("auth", "token", cwd=cwd).strip()
+        if not token.startswith(("ghp_", "gho_")):
+            raise ValueError("unsupported token")
+        if json.loads(gh("api", f"repos/{repository}", cwd=cwd)).get("permissions", {}).get("push") is not True:
+            raise ValueError("no push permission")
+    except (ValueError, OSError):
+        raise ValueError("a classic PAT or gh OAuth token with repository push access is required") from None
+
+
+def screens_markdown(head, base, rows):
+    attachments = {}
     def images(record, side, row):
-        return " ".join(f"![{row['name']} {row['size']} {side}{' recording' if ext == 'gif' else ''}]"
-                        f"(https://raw.githubusercontent.com/{owner_repo}/{commit}/{quote(prefix + '/' + name, safe='/')})"
-                        for ext, name in record["files"].items() if ext in ("png", "gif"))
+        images = []
+        for ext, name in record["files"].items():
+            if ext not in ("png", "gif"):
+                continue
+            alt = f"{row['name']} {row['size']} {side}" + (" recording" if ext == "gif" else "")
+            attachments[name] = alt
+            images.append(f"![{alt}]({quote(name, safe='/@')})")
+        return " ".join(images)
     lines = ["## Screens", "", f"Head: `{head}`", f"Base: `{base}`" if base else "Base: none (single build)",
              "Sizes: " + ", ".join(dict.fromkeys(r["size"] for r in rows)), "Surface: plain PTY, L1 synthetic input", ""]
     for name in dict.fromkeys(row["name"] for row in rows):
@@ -3069,33 +3089,121 @@ def screens_markdown(owner_repo, commit, prefix, head, base, rows):
         for row in (row for row in rows if row["name"] == name):
             size = row["size"] + (" (same)" if row["same"] else "")
             if base:
-                lines.append(f"| {size} | {images(row['before'], 'before', row)} | {images(row['after'], 'after', row)} |")
+                before = "New screen" if row.get("new") else images(row["before"], "before", row)
+                lines.append(f"| {size} | {before} | {images(row['after'], 'after', row)} |")
             else:
                 lines += [size, "", images(row["after"], "after", row), ""]
         lines.append("")
-    return "\n".join(lines)
+    return "\n".join(lines), attachments
 
 
-def verify_image_url(url):
+def screens_parts(body):
+    """Locate the top-level Screens section without treating fenced examples as headings."""
+    offset, start, fence = 0, None, None
+    for line in body.splitlines(keepends=True):
+        text = line.rstrip("\r\n")
+        if fence:
+            if re.fullmatch(r" {0,3}" + re.escape(fence[0]) + r"{%d,}[ \t]*" % len(fence), text):
+                fence = None
+        elif opened := re.match(r"^ {0,3}(`{3,}|~{3,})", text):
+            fence = opened[1]
+        elif re.match(r"^#{1,2} ", text):
+            if start is not None:
+                return body[:start], body[start:offset], body[offset:]
+            if text.rstrip() == "## Screens":
+                start = offset
+        offset += len(line)
+    if start is not None:
+        return body[:start], body[start:], ""
+    return body.rstrip() + "\n\n", "", ""
+
+
+def verify_attachments(body, attachments, facts):
+    _, screens, _ = screens_parts(body)
+    embedded = dict(re.findall(r"!\[([^\]\n]*)\]\(\s*(https://github\.com/user-attachments/[^\s)]+)\s*\)", screens))
+    if not all(alt in embedded for alt in attachments.values()) or not all(fact in screens for fact in facts):
+        raise ValueError("PR readback is missing embedded Screens attachments; inspect the body before retrying")
+
+
+def publish_attachments(out, repository, number, head, base, rows):
+    """The one upload/readback owner, run locally or copied unchanged over SSH."""
+    require_attachments(repository, cwd=out)
+    endpoint = f"repos/{repository}/pulls/{number}"
+    body = json.loads(gh("api", endpoint, cwd=out))["body"] or ""
+    prefix, _old, suffix = screens_parts(body)
+    screens, attachments = screens_markdown(head, base, rows)
+    body = prefix + screens + "\n" + suffix
+    facts = screens.splitlines()[2:6]
+    uploaded = {}
+    with tempfile.TemporaryDirectory(prefix="verify-rui-attach-") as temporary:
+        body_file = pathlib.Path(temporary) / "body.md"
+        items = list(attachments.items())
+        for offset in range(0, len(items), 50):
+            batch = items[offset:offset + 50]
+            body_file.write_text(body)
+            command = ["gh", "pr", "edit", str(number), "-R", repository, "--body-file", str(body_file)]
+            for name, alt in batch:
+                command += ["--attach", f"{name}#{alt}"]
+            result = subprocess.run(command, cwd=out, capture_output=True, text=True)
+            # The CLI can update the PR even on partial failure; always read it back.
+            body = json.loads(gh("api", endpoint, cwd=out))["body"] or ""
+            if result.returncode:
+                raise ValueError("attachment upload failed (requires a classic PAT or gh OAuth token with push access); PR may be partially updated, inspect its body before retrying")
+            uploaded.update(batch)
+            verify_attachments(body, uploaded, facts)
+    return f"Updated PR #{number}: {len(attachments)} embedded Screens attachments verified by readback"
+
+
+def publish_over_ssh(host, files, job):
+    """Stage one worker and its selected inputs; always remove the owned remote directory."""
+    if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.@:-]*", host):
+        raise ValueError("--ssh must name an SSH host or user@host")
+    def remote(command):
+        result = subprocess.run(["ssh", "-oBatchMode=yes", host, shlex.join(command)], capture_output=True, text=True)
+        if result.returncode:
+            raise ValueError("SSH publisher failed: " + result.stderr.strip())
+        return result.stdout
+    directory = remote(["mktemp", "-d", "/tmp/verify-rui-attachments.XXXXXXXXXX"]).strip()
+    if not re.fullmatch(r"/tmp/verify-rui-attachments\.[A-Za-z0-9_-]+", directory):
+        raise ValueError("SSH publisher returned an unexpected temporary directory")
     try:
-        with urllib.request.urlopen(url, timeout=30) as response:
-            if response.status != 200 or not response.headers.get("Content-Type", "").lower().startswith("image/"):
-                raise ValueError(f"published URL must return HTTP 200 and image content type: {url}")
-    except (OSError, urllib.error.URLError) as error:
-        raise ValueError(f"published evidence URL is not viewable: {url}: {error}") from error
+        with tempfile.TemporaryDirectory(prefix="verify-rui-stage-") as temporary:
+            stage = pathlib.Path(temporary)
+            for name, source in files.items():
+                target = stage / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(source, target)
+            shutil.copyfile(HERE, stage / "__verify_rui_publish__.py")
+            (stage / "__publish_job__.json").write_text(json.dumps(job))
+            result = subprocess.run(["scp", "-oBatchMode=yes", "-r", str(stage) + "/.", f"{host}:{directory}/"],
+                                    capture_output=True, text=True)
+            if result.returncode:
+                raise ValueError("cannot copy selected captures over SSH: " + result.stderr.strip())
+            output = remote(["python3", directory + "/__verify_rui_publish__.py", "_publish", directory + "/__publish_job__.json"])
+    finally:
+        remote(["rm", "-rf", "--", directory])
+    return output.strip()
+
+
+def cmd_publish_worker(args):
+    job = pathlib.Path(args.job).resolve()
+    try:
+        print(publish_attachments(job.parent, **json.loads(job.read_text())))
+    except (OSError, ValueError, KeyError, subprocess.CalledProcessError) as error:
+        die(f"publish failed: {error}")
 
 
 def cmd_publish(args):
     try:
         out = pathlib.Path(args.directory).resolve()
         head, base, rows, files = publication_frames(out, args.states, args.all)
-        repo = HERE.parents[4]
-        url = subprocess.check_output(["git", "-C", str(repo), "remote", "get-url", args.repo_remote], text=True).strip()
-        owner_repo = evidence_repo(url)
-        commit, prefix = push_evidence(repo, args.repo_remote, head, files)
-        first = next(iter(files))
-        verify_image_url(f"https://raw.githubusercontent.com/{owner_repo}/{commit}/{quote(prefix + '/' + first, safe='/')}")
-        print(screens_markdown(owner_repo, commit, prefix, head, base, rows))
+        if args.pr <= 0:
+            raise ValueError("--pr must be a positive PR number")
+        url = subprocess.check_output(["git", "-C", str(HERE.parents[4]), "remote", "get-url", "origin"], text=True).strip()
+        job = dict(repository=github_repository(url), number=args.pr, head=head, base=base, rows=rows)
+        print(publish_over_ssh(args.ssh, files, job) if args.ssh else publish_attachments(out, **job))
+    except FileNotFoundError as error:
+        die("publish failed: gh 2.104.0+ with --attach is required; install GitHub CLI" if error.filename == "gh" else f"publish failed: {error}")
     except (OSError, ValueError, KeyError, subprocess.CalledProcessError) as error:
         die(f"publish failed: {error}")
 
@@ -3123,7 +3231,7 @@ def main():
     p = sub.add_parser("frames", help="render committed PTY screen states to text, ANSI, HTML, PNG and recordings")
     p.add_argument("sha")
     p.add_argument("--before", help="compare the same states against this already-built commit")
-    p.add_argument("--scenario", default=str(HERE.with_name("frames.json")))
+    p.add_argument("--scenario", help="explicit recipe for both builds (default: each revision’s own recipe)")
     p.add_argument("--only", metavar="NAME,...")
     p.add_argument("--sizes", metavar="WxH,...")
     p.add_argument("--out")
@@ -3131,12 +3239,16 @@ def main():
     p.add_argument("--record", action="store_true", help="record committed transitions at each state's first size as GIF")
     p.add_argument("--keep", action="store_true")
     p.set_defaults(func=cmd_frames)
-    p = sub.add_parser("publish", help="append frames media to pr-evidence and print PR Markdown")
+    p = sub.add_parser("publish", help="attach frames media to a PR Screens section (gh 2.104.0+)")
     p.add_argument("directory", metavar="DIR")
+    p.add_argument("--pr", required=True, type=int, help="PR number to attach captures to")
     p.add_argument("--states", metavar="NAME,...")
     p.add_argument("--all", action="store_true", help="include pairs with identical committed cells")
-    p.add_argument("--repo-remote", default="origin")
+    p.add_argument("--ssh", metavar="HOST", help="upload on HOST using its gh credentials (cloud: rui-box)")
     p.set_defaults(func=cmd_publish)
+    p = sub.add_parser("_publish", help=argparse.SUPPRESS)
+    p.add_argument("job")
+    p.set_defaults(func=cmd_publish_worker)
     p = sub.add_parser("restart-host", help="stop the run's Host and start a fresh one on the same Store and fixture")
     p.add_argument("run")
     p.set_defaults(func=cmd_restart_host)

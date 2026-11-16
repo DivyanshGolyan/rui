@@ -1,5 +1,3 @@
-//! Observation SQLite mechanism tests.
-
 const shared_fixtures = @import("../sqlite_tests.zig");
 const tests = @import("../tests.zig");
 const std = @import("std");
@@ -49,7 +47,6 @@ test "Message recovery observation seeks stay bounded as the Turn accumulates re
         var prefix: [40]u8 = undefined;
         _ = try tests.recoverPairForTesting(&storage, &tmp, binding, try std.fmt.bufPrint(&prefix, "bounded-recovery-{d}", .{i}));
         if (i == 2 or i == 11) {
-            // Warm every statement before metering the actual observation.
             var out: store_core.Observed = undefined;
             try storage.observeCommand("bounded-recovery", null, &out);
             var meter: TestingSteps = .{};

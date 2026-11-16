@@ -1,4 +1,3 @@
-//! Owned Session inspection facts shared by the chat line and chat info panel.
 const std = @import("std");
 const Bounded = @import("bounded.zig").Bounded;
 const built_in_tool = @import("built_in_tool.zig");
@@ -20,19 +19,15 @@ pub const max_recent = 10;
 
 pub const Session = struct {
     session: Bounded(max_session_bytes),
-    /// Empty when the Session has no name.
     label: Bounded(max_label_bytes),
     workspace: Bounded(max_path_bytes),
     provider: Provider,
     model: Bounded(max_model_bytes),
-    /// The saved spec's effort; null omits reasoning.
     effort: ?ReasoningEffort,
     effort_override: bool,
     permission: enum { ask, bypass },
     tools: built_in_tool.Selection,
-    /// The Session was configured with instructions.
     instructions: bool,
-    /// Null when the Host sets no automatic threshold.
     compaction_trigger: ?u64,
     compaction_override: bool,
     context_estimate: ?u64,
@@ -41,7 +36,6 @@ pub const Session = struct {
     work: Work,
     archive_state: ArchiveState = .active,
 
-    /// The page shows the same Session and work.
     pub fn eql(self: *const Session, other: *const Session) bool {
         inline for (comptime std.meta.fieldNames(Session)) |name| {
             const a = &@field(self, name);
@@ -56,12 +50,9 @@ pub const Session = struct {
 
 pub const Work = struct {
     state: WorkKind,
-    /// Actions awaiting approval, which the page lists one per line after
-    /// this part, and a digest of their IDs in Current's order.
     approvals: u64,
     actions: u64,
     current_message: ?Bounded(max_key_bytes),
-    /// The first indeterminate Action of the active Turn, and how many there are.
     indeterminate: ?u64,
     indeterminate_count: u64,
     recent: [max_recent]Recent,
@@ -89,7 +80,6 @@ pub fn archiveBadge(state: ArchiveState) ?[]const u8 {
     };
 }
 
-/// One Action awaiting approval, after `render`.
 pub fn writeAction(action: u64, out: *std.Io.Writer) !void {
     try out.print(indent ++ "Action requiring attention: {d}\n", .{action});
 }

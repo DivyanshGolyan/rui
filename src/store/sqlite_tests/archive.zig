@@ -1,5 +1,3 @@
-//! Archive SQLite mechanism tests.
-
 const shared_fixtures = @import("../sqlite_tests.zig");
 const tests = @import("../tests.zig");
 const std = @import("std");
@@ -19,7 +17,6 @@ const testingSessionReportWithProfile = tests.testingSessionReportWithProfile;
 const testingStore = store_testing.testingSqliteStore;
 const attemptBashForTesting = shared_fixtures.attemptBashForTesting;
 
-/// Archive transitions use the command boundary, never seeded projection rows.
 const ArchiveReportTesting = struct {
     fn set(storage: *Store, key: []const u8, session: []const u8, archived: bool) !protocol.SessionStopCompletion {
         var command: protocol.SessionArchiveCommand = .{ .archived = archived };
@@ -150,8 +147,6 @@ test "archive full list filtering precedes pagination and keeps the creation cei
                 }
                 try std.testing.expect(page.next != null);
                 request = page.next.?;
-                // The generic test helper predates archive filters; clients
-                // retain the invocation's filter across every continuation.
                 request.archive = filter;
                 try std.testing.expectEqual(@as(u64, references.len), request.ceiling);
             }

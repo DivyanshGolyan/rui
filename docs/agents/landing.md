@@ -23,20 +23,19 @@ Documentation-only edits that preserve the reviewed contract also reuse the clea
 Two more changes merge on green `admission` without another Codex review: a commit that only applies the Store format renumber `tests/ci/schema_number.py` computes, and a pure revert of the one merged PR that broke `main`.
 Any other non-test change, including CI, build, release or other operational scripts (the rest of `tests/ci/`, workflows and `build.zig`), needs Codex clean on the new head again.
 Performance changes include A/B numbers.
-Every UI PR embeds actual-implementation screenshots or a screen recording in its PR description before it is merge-ready.
-Use [verify-rui](../../.claude/skills/verify-rui/SKILL.md) for the independent plain-PTY journey; reuse its raw captures to render media where possible.
-For interaction changes, show the sequence with a recording or labelled screenshots; include meaningful before/after layout views when available.
-State the source revision, terminal surface and limits, retain raw capture provenance, and exclude secrets.
-Build both pinned revisions with verify-rui, then run `$V frames HEAD --before BASE --only <states for the changed screens> --sizes 140x40,46x30 --record` and `$V publish DIR` (set `V=.claude/skills/verify-rui/scripts/verify-rui`).
-Use the [feature map](../../.claude/skills/verify-rui/features/README.md) to select states.
-The publisher appends PNGs and GIFs to the public orphan branch `pr-evidence`, under the captured head SHA; it never stores evidence on the PR branch.
-It prints a `## Screens` block whose raw.githubusercontent.com image URLs are pinned to the evidence commit.
-Paste that block into the PR description before opening the PR, or before the next push: `Require PR Shape` in check.yml enforces embedded media for UI changes and reruns on pushes, not description edits.
-The check derives UI paths from Overview's production import closure minus the Host's closure, including the base tree for deleted files, and also covers verify-rui's `frames.json`.
-For a UI-path change that provably draws nothing different, put `No screen change: <nonempty reason>` on its own line instead.
-Humans with a browser may still upload images or videos through GitHub's description editor as `github.com/user-attachments` media.
-Read back the description and verify the media is viewable; inspect the updated body before retrying any partial upload.
-A comment, local path or artifact pointer alone does not meet the description requirement; visual evidence does not replace behavior assertions or hosted acceptance.
+Every UI PR embeds actual-implementation screenshots or a screen recording in its description before it is merge-ready.
+Use [verify-rui](../../.claude/skills/verify-rui/SKILL.md) and the [feature map](../../.claude/skills/verify-rui/features/README.md) to select states for the changed screens.
+Build both pinned revisions, then run `$V frames HEAD --before BASE --only <states for the changed screens> --sizes 140x40,46x30 --record` and `$V publish DIR --pr N [--ssh HOST]` (set `V=.claude/skills/verify-rui/scripts/verify-rui`).
+The publisher selects changed/new PNGs and GIFs, attaches them through `gh pr edit --attach` under `## Screens` with head/base/sizes/surface facts and state/size alt text, and verifies the embeds by reading the body back. `--all` includes unchanged pairs.
+The upload machine requires gh **2.104.0+**, a classic PAT or gh OAuth token, and repository push access. The command fails clearly if those are missing, and reads back partial uploads before refusing them; inspect the body before retrying.
+Cloud threads use `$V publish DIR --pr N --ssh rui-box`, after `bash /mnt/project-files/rui-dev/rui-box-up.sh THREAD-NAME` establishes the SSH alias if needed. The same upload worker runs on the box, using its credentials, after staging only selected media in a fresh directory that is removed afterward. Omit `--ssh` when running on the box itself.
+Cloud writes filter image embeds and the proxy blocks the CLI's GraphQL lookup. **After images have been attached, every later body edit must run on the box too**: copy the file there, then `ssh rui-box 'gh pr edit N -R OWNER/REPO --body-file /path/on/box/body.md'`. Writing the body from a container through REST, open_pr.py or MCP would break its images again.
+Open the PR to obtain its number, then publish before the next push. `Require PR Shape` runs on opened/synchronize/reopened/ready_for_review; body edits do not trigger it. If the opening run failed before upload, manually rerun the failed jobs after publishing; PR Shape reads the current body, falling back to the event payload if that read fails.
+The check accepts embedded media or `No screen change: <nonempty reason>` on its own line for changes that provably draw nothing different. Plain image links and repository page links do not pass.
+It derives UI paths from Overview's production import closure minus Host dependencies and test owners, including the base tree for deleted files, and also covers verify-rui's `frames.json`.
+For interaction changes, show the sequence with a recording or labelled before/after screenshots. State the source revision, terminal surface and limits, retain raw capture provenance, and exclude secrets.
+Show before/after PNGs to the person who requested the work in your own conversation when possible. Humans with browsers may still upload images or videos as `github.com/user-attachments` media.
+A comment, local path or CI artifact pointer alone does not meet the description requirement; visual evidence does not replace behavior assertions or hosted acceptance.
 Keep published commits unchanged so their CI evidence retains its SHA.
 
 Green means the required `admission` check completed successfully for the PR's current head; it need not be rerun after `main` moves.

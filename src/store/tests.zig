@@ -1,5 +1,3 @@
-//! The Store's tests and their helpers.
-
 const std = @import("std");
 const named_scratch = @import("../named_scratch.zig");
 const protocol = @import("../protocol.zig");
@@ -7,14 +5,11 @@ const wire_request = @import("../wire_request.zig");
 const tool_defs = @import("../tools.zig");
 const tool_set_domain = @import("domain/tool_set.zig");
 
-/// Asserts exact saved-set membership by names, independent of tool ownership.
 pub fn expectToolSetNames(storage: *Store, set: u64, names: []const []const u8) !void {
     try std.testing.expectEqual(@as(u64, @intCast(names.len)), try store_testing.queryU64(storage, "SELECT count(*) FROM tool_set_member WHERE tool_set_id=?1", .{set}));
     for (names) |name| try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(storage, "SELECT count(*) FROM tool_set_member member JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id WHERE member.tool_set_id=?1 AND tool.name=?2", .{ set, name }));
 }
 
-// A stored Host tool set must contain every native tool. Keep that inventory
-// canonical while each fixture independently states its MCP schema and offer.
 pub fn testingHostToolRecords(comptime extras: []const tool_defs.Record) [tool_defs.built_in_tool_set.records.len + extras.len]tool_defs.Record {
     var records = tool_defs.built_in_tool_set.records[0..tool_defs.built_in_tool_set.records.len].* ++ extras[0..extras.len].*;
     std.sort.heap(tool_defs.Record, &records, {}, struct {
@@ -121,7 +116,6 @@ test {
     _ = @import("queue.zig");
 }
 
-/// Tests read a view's settings by value; the Host fills them in place.
 pub fn testSettings(view: *TestingPage) !HistoricalSettings {
     var settings: HistoricalSettings = undefined;
     try view.settings(&settings);
@@ -163,7 +157,6 @@ pub fn testingBytesContent(tmp: *std.testing.TmpDir, name: []const u8, bytes: []
     };
 }
 
-/// A content row's length and digest, for a test's own checks.
 pub fn testingContentReference(storage: *Store, content_id: u64) !ContentReference {
     const entry = try store_core.enter(storage, .none);
     defer entry.release();
@@ -175,10 +168,6 @@ pub fn testingContentReference(storage: *Store, content_id: u64) !ContentReferen
     return .{ .length = row.byte_length, .digest = row.digest };
 }
 
-/// Records that the running entry point changed `session`, as an Access's
-/// `@session` tie does, for a test that writes its rows by hand. It
-/// repeats `Access.touch` because that is private to Access, so that only a
-/// typed write touches, and a hand-written row has no typed write.
 pub fn touchForTesting(storage: *Store, session: []const u8) !void {
     const workspace = try store_testing.queryU64(storage, "SELECT workspace_key FROM session WHERE session_ref=?1", .{session});
     if (storage.touched.needsEntry(session)) storage.touched.add(.{ .session = session[0..change_ring.id_bytes].*, .workspace = workspace });
@@ -312,7 +301,6 @@ pub fn settleCallsForTestingWithFaults(
         &retained_metadata,
     );
     defer metadata.deinit();
-    // Acceptance's own recorder, so the metadata is what acceptance writes.
     for (ranges, 0..) |range, ordinal| {
         const record = try output_decode.recordItemForTesting(&metadata, source, range[0], range[1], ordinal, .assistant_response);
         std.debug.assert(record.kind == .function_call);
@@ -475,9 +463,6 @@ pub fn testingSessionReportWithExecution(
     return bytes;
 }
 
-/// Visits real Current and Full captures, including absent, idle, terminal
-/// and active approval work and a pending MCP call. The caller supplies the
-/// schema checker.
 pub fn checkSessionReportsForTesting(context: anytype) !void {
     const Fixture = struct {
         fn run(engine: *store_testing.Case, checker: @TypeOf(context)) !void {
@@ -511,8 +496,6 @@ pub fn checkSessionReportsForTesting(context: anytype) !void {
             try std.testing.expectEqual(@as(usize, 2), unresolved.len);
             try std.testing.expectEqualStrings("approval", active_json.value.object.get("work").?.object.get("state").?.object.get("kind").?.string);
             try Profiles.check(checker, &storage, &tmp, session.slice());
-            // Keep one unresolved Action while the other supplies a resolved row,
-            // permission decision and ordered Tool Result to both profiles.
             var deny: protocol.PermissionDecisionCommand = .{ .action_id = try std.fmt.parseInt(u64, unresolved[0].object.get("action").?.string, 10), .decision = .deny };
             try deny.key.set("schema-deny");
             try deny.session.set(session.slice());
@@ -521,7 +504,6 @@ pub fn checkSessionReportsForTesting(context: anytype) !void {
             try mcp(engine, checker, Profiles);
         }
 
-        /// An unresolved MCP call, which names an MCP tool and its server.
         fn mcp(engine: *store_testing.Case, checker: @TypeOf(context), comptime Profiles: type) !void {
             const records = comptime testingHostToolRecords(&.{
                 .{ .name = "fetch_page", .owner = .mcp, .server = "docs", .description = "Fetch a docs page.", .input_schema = "{\"type\":\"object\"}" },
@@ -579,8 +561,6 @@ pub const TestingReportOptions = struct {
     fail_unlink: bool = false,
 };
 
-/// A report captured as the server captures one: the Store's read
-/// written by the Host's reply into an unlinked scratch file.
 pub fn testingCaptureSessionReport(storage: *Store, session_ref: []const u8, options: TestingReportOptions) !SessionReport {
     var capture: report_domain.SessionReportCapture = .{ .io = storage.io, .writer = null, .budget = options.scratch_budget };
     try capture.create(options.scratch_path, options.request_number, options.fail_unlink);
@@ -592,8 +572,6 @@ pub fn testingCaptureSessionReport(storage: *Store, session_ref: []const u8, opt
 
 pub const TestingListReply = session_list_reply.Reply(report_domain.SessionReportCapture);
 
-/// A list page captured as the server captures one: the Store's read
-/// written by the Host's reply into an unlinked scratch file.
 pub fn testingSessionListReport(storage: *Store, request: *const protocol.ListSessions, scratch_path: []const u8, budget: ScratchBudget, request_number: u64) !SessionReport {
     try request.validate();
     var capture: report_domain.SessionReportCapture = .{ .io = storage.io, .writer = null, .budget = budget };
@@ -620,7 +598,6 @@ pub fn testingSessionList(storage: *Store, tmp: *std.testing.TmpDir, request: pr
     return bytes;
 }
 
-/// One list page as a client reads it, and the request that continues it.
 pub const TestingListing = struct {
     delta: protocol.ListDelta,
     since: protocol.SinceToken,
@@ -670,21 +647,11 @@ pub fn testingIdLess(_: void, left: change_ring.Id, right: change_ring.Id) bool 
     return std.mem.order(u8, &left, &right) == .lt;
 }
 
-/// What a `TestingScript` body asks for after a step.
 pub const TestingAsk = enum { round, commit, done };
 
-/// A test's own steps on the runner's writer, inside one transaction:
-/// `Body.step(body, r, ran)` queues on `r`, the step's `transition.Round`,
-/// and asks for another round, the commit, or the end, which rolls back;
-/// `ran` counts the rounds run before it. A test that holds what the writer
-/// does within and between rounds reaches it as a production step does: it
-/// never opens a writer itself, and only the runner runs or commits.
-/// `Body` declares `Guards`, and optionally `pass` and `failed(body)`,
-/// which the runner calls on an error before its transaction rolls back.
 pub fn TestingScript(comptime Body: type) type {
     return struct {
         const Self = @This();
-        /// One round, which runs as often as the body asks.
         pub const rounds = transition.rounds(.{ .round = .{.paged} });
         pub const round_budget = 1;
         pub const commit: transition.Commit = .transaction;
@@ -714,7 +681,6 @@ pub fn TestingScript(comptime Body: type) type {
             if (comptime @hasDecl(Body, "failed")) t.input.failed();
         }
 
-        /// Runs `body`'s steps under `entry`'s lock.
         pub fn run(entry: *const store_core.Entry, body: *Body) !void {
             var t: Self = .{ .input = body };
             return transition.run(entry, Self, &t, .{});
@@ -722,25 +688,17 @@ pub fn TestingScript(comptime Body: type) type {
     };
 }
 
-/// A `TestingScript` body that prepares, validates and applies
-/// `configuration` as Configure's steps do, one round at a time, then runs
-/// the round its writes queued and ends, rolling them back. `Check`, held
-/// as `check`, may declare `ready(check, plan, reads)`, called once
-/// validation readied `plan`, and `applied(check, plan, reads, applied)`,
-/// called once application accepted it, both in the transaction.
 pub fn TestingConfiguring(comptime Check: type) type {
     return struct {
         const Self = @This();
         pub const Guards = error{SessionUpdateFailed};
 
         storage: *Store,
-        /// Empty for a creation.
         session: []const u8,
         configuration: *const @FieldType(wire_request.ConfigureCommand, "configuration"),
         check: Check = .{},
         reads: *configuration_domain.ConfigurationReads = undefined,
         saved: tool_set_domain.SavedSelection = undefined,
-        /// What validation readied.
         plan: *const configuration_domain.ValidatedConfiguration = undefined,
         at: union(enum) {
             prepare,
@@ -815,7 +773,6 @@ pub const TestingRound = struct {
     });
 };
 
-/// One Session's listed row, from one unfiltered page.
 pub const TestingListRow = struct {
     parsed: std.json.Parsed(std.json.Value),
     row: std.json.Value,
@@ -847,8 +804,6 @@ pub fn testingListRow(storage: *Store, tmp: *std.testing.TmpDir, session: []cons
     return error.TestUnexpectedResult;
 }
 
-/// Current and an activity page report the same work, and its kind is
-/// `kind`. Returns the state's `since`.
 pub fn expectOneWork(storage: *Store, tmp: *std.testing.TmpDir, session: []const u8, kind: []const u8) !u64 {
     const bytes = try testingSessionReport(storage, tmp, session, 1024 * 1024);
     defer std.testing.allocator.free(bytes);
@@ -864,8 +819,6 @@ pub fn expectOneWork(storage: *Store, tmp: *std.testing.TmpDir, session: []const
     var request: protocol.ActivityPage = .{};
     try request.session.set(session);
     const page = try store_core.activityPageForTesting(storage, request);
-    // Both an upcoming retry and its elapsed/pending projection are unsafe
-    // for commit-only tokens, including when the wall clock moves backward.
     if (page.work.work.state == .retrying or page.work.work.state == .pending)
         try std.testing.expect(page.token == null);
     var paged: [protocol.WorkStateJson.max_json_bytes]u8 = undefined;
@@ -880,8 +833,6 @@ pub fn expectOneWork(storage: *Store, tmp: *std.testing.TmpDir, session: []const
     return page.work.work.state.since();
 }
 
-/// Reconcile after a fixture changes immutable times or topology outside a
-/// Store entry point. Production transitions enter this owner automatically.
 pub fn refreshFrontierForTesting(storage: *Store, session: []const u8) !void {
     return refreshFrontiersForTesting(storage, &.{session});
 }
@@ -914,8 +865,6 @@ pub fn refreshFrontiersForTesting(storage: *Store, sessions: []const []const u8)
     return entry.finishTransaction(store_core.Ordinary.none, .{}, TestingScript(Refresh).run(&entry, &refresh));
 }
 
-/// `count` message items, each its own id and text unless `same_text`,
-/// whose item `repeat_at` (if any) repeats item 0's id; the last answers.
 pub fn settleMessagesForTesting(storage: *Store, tmp: *std.testing.TmpDir, binding: AttemptBinding, comptime count: usize, same_text: bool, repeat_at: ?usize) !void {
     var buffers: [count][128]u8 = undefined;
     var items: [count][]const u8 = undefined;
@@ -930,7 +879,6 @@ pub fn settleMessagesForTesting(storage: *Store, tmp: *std.testing.TmpDir, bindi
     try settleItemsForTesting(storage, tmp, binding, &items, answer);
 }
 
-/// Records each `MessageCommitted` call, as the Host's environment install sees it.
 pub const TestingCommits = struct {
     calls: [4]struct { session: protocol.Bounded(protocol.max_session_bytes), admission_id: u64, from_peer: bool } = undefined,
     count: usize = 0,
@@ -968,9 +916,6 @@ pub fn readTestingContent(view: *TestingPage, content: HistoricalContent, out: *
     }
 }
 
-/// Renders a historical entry as the Store holds it: a user entry's text,
-/// an earlier Operation's effort (`operation.high`), or an output item's
-/// kind, bag, call fields and parts (`array.kind=text{bag}`).
 pub fn renderTestingEntry(view: *TestingPage, entry: HistoricalEntry, buffer: []u8) ![]const u8 {
     var out = std.Io.Writer.fixed(buffer);
     if (entry.kind == .operation) {
@@ -1013,9 +958,6 @@ pub const TestingHistoryCursor = struct {
     }
 };
 
-/// The next history entry after `after` that is no earlier Operation's
-/// effort boundary: the history these tests check, without the boundaries
-/// the codec places between it (tested on their own).
 pub fn nextTestingItem(view: *TestingPage, after: u64) !?HistoricalEntry {
     var position = after;
     while (try view.nextEntry(position)) |entry| {
@@ -1025,8 +967,6 @@ pub fn nextTestingItem(view: *TestingPage, after: u64) !?HistoricalEntry {
     return null;
 }
 
-/// Opens `view` and reads its settings, whose round checks the binding;
-/// a view that fails is closed.
 pub fn openCheckedView(storage: *Store, binding: AttemptBinding, view: *TestingPage) !void {
     view.open(storage, binding);
     var settings: HistoricalSettings = undefined;
@@ -1036,7 +976,6 @@ pub fn openCheckedView(storage: *Store, binding: AttemptBinding, view: *TestingP
     };
 }
 
-/// The rounds and content rounds `store` took since `start`.
 pub const ViewRounds = struct {
     store: *Store,
     rounds: u16,
@@ -1051,9 +990,6 @@ pub const ViewRounds = struct {
     }
 };
 
-/// The rendered text of the one statement the failure table `named`
-/// holds whose text holds `fragment`, among those it names `failed` when
-/// that is not null.
 pub fn namedStatementForTesting(comptime named: anytype, comptime failed: ?anyerror, comptime fragment: []const u8) [:0]const u8 {
     @setEvalBranchQuota(200_000);
     comptime var found: ?[:0]const u8 = null;
@@ -1066,9 +1002,6 @@ pub fn namedStatementForTesting(comptime named: anytype, comptime failed: ?anyer
     return found orelse @compileError("no statement holds " ++ fragment);
 }
 
-/// A Session in each work shape the list and report read: no Message, a
-/// finished Turn, a queued Message a stop excluded, and a Turn awaiting
-/// a permission decision.
 pub const TestingWorkShape = enum {
     idle,
     finished,
@@ -1101,9 +1034,6 @@ pub const TestingWorkShape = enum {
     }
 };
 
-/// One tool cycle of the cost fixture: a Message whose Operation proposes
-/// two Bash calls and an unknown one; one call is allowed and runs, one
-/// denied, the unknown one rejected; the continuation answers.
 pub fn costCycleForTesting(storage: *Store, tmp: *std.testing.TmpDir, session: []const u8, index: usize) !void {
     var name: [64]u8 = undefined;
     var key: [64]u8 = undefined;
@@ -1128,10 +1058,6 @@ pub fn costCycleForTesting(storage: *Store, tmp: *std.testing.TmpDir, session: [
     try settleItemsForTesting(storage, tmp, continued, &items, "Two files; the removal was denied.");
 }
 
-/// `session`'s Full history read alone, on an Access of its own, and
-/// written by the Host's reply as it follows the Current facts, inside
-/// `{"head":0...}` so it parses. The bytes are the caller's; `rounds` gets
-/// the rounds `readFull` ran, not its `readRaw` windows.
 pub fn testingFullHistory(storage: *Store, tmp: *std.testing.TmpDir, session: []const u8, rounds: ?*u32) ![]u8 {
     var root: [protocol.max_store_bytes]u8 = undefined;
     const length = try tmp.dir.realPath(std.testing.io, &root);
@@ -1161,7 +1087,6 @@ pub fn testingFullHistory(storage: *Store, tmp: *std.testing.TmpDir, session: []
     return bytes;
 }
 
-/// A Store holding one admitted Attempt, its Message's content and a seal.
 pub const TestingAttempt = struct {
     binding: AttemptBinding,
     content: ContentReference,
@@ -1179,9 +1104,6 @@ pub const TestingAttempt = struct {
     pub fn handoff(_: void) !void {}
 };
 
-/// The functions that enter the Store (`enter(self, ...)`), each a
-/// separate transition while the Store is held, by the name the source
-/// gives it (less the `Held` of a body an entry point queues).
 pub const EntryPoint = enum {
     saveHostToolSet,
     saveModelFacts,
@@ -1259,12 +1181,6 @@ pub const EntryPoint = enum {
     checkAttempt,
 };
 
-/// Each entry point's rounds (`Access.run` and `commit`, counted in
-/// `Store.testing_content_work.rounds`) on the path the round budget test
-/// drives it. Content rounds (`readRaw` windows) differ by engine, so
-/// `content_round_budgets` holds them apart. Frontier maintenance shares the
-/// existing write/COMMIT round, regardless of ancestry. Otherwise settled work
-/// reads add one saved-key read, never a tree seed.
 pub const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .commandExists = 1,
     .readSkills = 2,
@@ -1273,8 +1189,6 @@ pub const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .submitMessageWithModel = 2,
     .stopSession = 2,
     .archiveSession = 2,
-    // Fresh admission runs saved, branch facts, then commit; the transition
-    // declaration counts only its always round and commit.
     .pinSession = 3,
     .interruptModel = 2,
     .decidePermission = 2,
@@ -1328,10 +1242,8 @@ pub const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .validateHistoricalOutputsStep = 1,
     .readPrefixSeal = 1,
     .recordPrefixSeal = 2,
-    // The entry batch's page already holds the item's parts.
     .readHistoricalParts = 0,
     .readHistoricalToolResult = 1,
-    // A page of a tool walk, which holds the tools after its first.
     .readTools = 1,
     .readProviderTool = 1,
     .checkAttempt = 1,
@@ -1340,7 +1252,6 @@ pub const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .readModelCatalog = 1,
     .modelFact = 1,
     .readOpenAiModelIds = 1,
-    // A Host tool set is saved once; each later open finds it.
     .saveHostToolSet = 1,
     .readHostToolSetSet = 1,
     .readHostToolSetRecords = 1,
@@ -1356,9 +1267,6 @@ pub const RoundMeter = struct {
 
     pub const Measured = struct { rounds: u16, content_rounds: u16, shape: QueryShape };
 
-    /// Actual protocol sends beside independently counted semantic work.
-    /// Empty Access rounds send nothing; deferred BEGIN/SAVEPOINT share the
-    /// next pass, RELEASE sends nothing, and only real controls count here.
     pub const QueryShape = struct {
         queries: u64 = 0,
         access_passes: u64 = 0,
@@ -1409,8 +1317,6 @@ pub const RoundMeter = struct {
     }
 };
 
-/// A `start_agent` spec as the Host's check leaves it: gpt-6.1-sol at low
-/// effort, `tools`, `permission_mode` and no label.
 pub fn testingAgentSpec(tools: []const []const u8, permission_mode: []const u8) !wire_request.Configuration {
     var spec: wire_request.Configuration = .{};
     spec.model.state = .value;
@@ -1426,12 +1332,6 @@ pub fn testingAgentSpec(tools: []const []const u8, permission_mode: []const u8) 
     return spec;
 }
 
-// The rounds twins of the work tests in sqlite_tests/. Each test there
-// holds a population's VM steps or statements still, which only SQLite
-// shows; its twin in tests/ holds the rounds of the same work at the same
-// two sizes, which every engine shows.
-
-/// The rounds `store` took since `start`: its Accesses' runs and commits.
 pub const TwinRounds = struct {
     store: *Store,
     before: u16,
@@ -1445,8 +1345,6 @@ pub const TwinRounds = struct {
     }
 };
 
-/// A Session whose active Turn's one Operation proposed `count` calls of
-/// an unknown tool, each rejected, so the report lists every one.
 pub fn rejectedCallsForTesting(storage: *Store, tmp: *std.testing.TmpDir, count: usize) !protocol.Bounded(protocol.max_session_bytes) {
     const session = try configureTestSession(storage, "one-operation-config");
     try submitTestMessage(storage, tmp, "one-operation-input", "one-operation-key", session.slice(), "many calls");
@@ -1461,21 +1359,18 @@ pub fn rejectedCallsForTesting(storage: *Store, tmp: *std.testing.TmpDir, count:
     return session;
 }
 
-/// `failed_operations_sql`, the Operations alternating in purpose.
 pub const failed_purpose_operations_sql = "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,purpose," ++
     "output_reservation,attempt_ordinal,resolution_code,resolved_at,tool_set_id,context_window) " ++
     "WITH RECURSIVE sequence(value) AS (SELECT 1 UNION ALL SELECT value+1 FROM sequence WHERE value<?1) " ++
     "SELECT 100+value,current.turn_id,current.session_ref,current.settings_revision,current.input_cutoff,100+value,value%2," ++
     "0,1,'failed',1,current.tool_set_id,current.context_window FROM sequence CROSS JOIN model_operation current WHERE current.operation_id=?2";
 
-// Engine transcripts and content boundary tests remain part of the native suite.
 test {
     _ = @import("engine/Mysql.zig");
     _ = @import("engine/mysql_content.zig");
     _ = @import("mysql_testing.zig");
 }
 
-/// Two real attempted Actions whose unknown outcomes are saved by recovery.
 pub fn recoverPairForTesting(storage: *Store, tmp: *std.testing.TmpDir, binding: AttemptBinding, prefix: []const u8) ![2]u64 {
     try settleTwoActionsForTesting(storage, tmp, binding, prefix);
     var ids: [2]u64 = undefined;
@@ -1486,13 +1381,8 @@ pub fn recoverPairForTesting(storage: *Store, tmp: *std.testing.TmpDir, binding:
 
 const runtime_catalog = @import("../model_catalog.zig");
 
-// Native filesystem capture belongs to the Host. These distinct, immutable
-// values exercise only the Store's composed transaction and provenance owners.
 const skills_fixture_domain = @import("domain/skills.zig");
 
-/// Both real format-69 fixtures call this after the owning 69 -> 70 step.
-/// The fixed historical rows contain a finished root and two Bash calls in
-/// its attached child's open Turn, one authorized and one awaiting approval.
 pub fn expectWireMigrationFacts(storage: *Store, tmp: *std.testing.TmpDir) !void {
     _ = try expectOneWork(storage, tmp, "d8mv7p", "working");
     _ = try expectOneWork(storage, tmp, "brhkcj", "pending");

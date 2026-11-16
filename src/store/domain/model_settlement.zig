@@ -1,6 +1,3 @@
-//! Model Attempt settlement: importing a validated output, saving failures and
-//! reports, and fencing Attempts superseded by a control.
-
 const std = @import("std");
 const model_attempt = @import("model_attempt.zig");
 const tool_proposal = @import("../../tool_proposal.zig");
@@ -48,8 +45,6 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 const context_changed = model_admission_domain.context_changed;
 
-/// Durations of the final Attempt only, measured on the awake monotonic clock.
-/// A missing send or response event remains NULL, never a fabricated zero.
 pub const ModelTimings = @import("../../model_timing.zig").Values;
 
 pub const ModelFailureClass = union(enum) {
@@ -57,35 +52,22 @@ pub const ModelFailureClass = union(enum) {
     effort_change_refused,
     context_overflow,
     retryable: retry_policy.Input,
-    /// A model 401 whose one forced credential refresh completed under this
-    /// Operation's claim: the replacement is due now, within the allowance.
     refreshed,
 };
 
-/// What the provider returned decides which provenance a failed Attempt's
-/// settlement must carry, so an answered failure cannot settle without it.
 pub const ModelFailure = union(enum) {
-    /// No provider HTTP status reached classification: preparation,
-    /// transport or capture failure. The code is the only recorded fact.
     uncorrelated: []const u8,
-    /// The provider answered: an HTTP error status, or a sealed successful
-    /// response that never reached validation.
     correlated: Correlated,
-    /// Validation or settlement rejected a sealed successful response.
     rejected: Rejected,
 
     pub const Correlated = struct {
         code: []const u8,
-        /// The provider's own correlation; empty when it sent none.
         request_id: Bounded(256),
-        /// The provider's own words, `code: message`; empty when it sent
-        /// none. A terminal failure keeps it as its outcome's report.
         report: []const u8,
     };
 
     pub const Rejected = struct {
         code: []const u8,
-        // Borrowed for settlement only; never Turn output or model continuation.
         diagnostic: []const u8,
         request_id: Bounded(256),
         report: []const u8,
@@ -136,13 +118,10 @@ pub const ValidatedOutput = struct {
     answer_length: u64,
     answer_digest: [32]u8,
     response_id: Bounded(256),
-    /// Adapter-certified opaque observations; Store never decodes provider grammar.
     model_evidence: Bounded(775),
     request_id: Bounded(256),
 };
 
-/// The purpose of the Attempt `binding` names, in an Entry of its own,
-/// while the binding is current (`attemptKind`).
 pub fn checkAttempt(self: *Store, binding: AttemptBinding) !ModelOperationKind {
     return self.queue().run(checkAttemptHeld, .{ self, binding });
 }
@@ -153,20 +132,14 @@ fn checkAttemptHeld(self: *Store, binding: AttemptBinding) !ModelOperationKind {
     return entry.finish(Ordinary.attempt_binding, readAttemptKind(&entry, binding));
 }
 
-/// `attemptKind` in a read Access of its own under `entry`. Noinline, so
-/// the Access is not on the frame of what runs after the check under the
-/// same Entry: a dispatch handoff.
 pub noinline fn readAttemptKind(entry: *const store_core.Entry, binding: AttemptBinding) !ModelOperationKind {
     var a: store_access.Access(.read, error{}) = .open(entry);
     defer a.deinit();
     return attemptKind(&a, binding);
 }
 
-/// The columns of an Operation `o` that decide whether a binding is
-/// current (`attemptStanding`).
 const standing_columns = "o.turn_id,o.attempt_ordinal,o.resolution_code IS NOT NULL AS resolved,o.interrupted_by_command_key IS NOT NULL AS interrupted";
 
-/// What decides whether a binding is current, and the Operation's purpose.
 pub const attempt_standing = rsql.Read(.{
     .sql = "SELECT " ++ standing_columns ++ ",o.purpose AS compaction FROM model_operation o WHERE o.operation_id=?1",
     .Args = struct { operation_id: u64 },
@@ -174,10 +147,6 @@ pub const attempt_standing = rsql.Read(.{
     .cardinality = .optional,
 });
 
-/// The purpose of the Operation `binding` names, in one round, while
-/// `attemptStanding` finds the binding current; a missing Operation is
-/// `StaleAttemptBinding`. A failed step is `OperationReadFailed`, main's
-/// name for its Attempt read. Public so a test counts its rounds.
 pub fn attemptKind(a: anytype, binding: AttemptBinding) !ModelOperationKind {
     var found: attempt_standing.Result = undefined;
     queueAttemptKind(a, binding, &found);
@@ -185,8 +154,6 @@ pub fn attemptKind(a: anytype, binding: AttemptBinding) !ModelOperationKind {
     return attemptKindOf(found, binding);
 }
 
-/// Queues `attemptKind`'s read in a round its caller shares and ends;
-/// `attemptKindOf` answers from `found` after it.
 pub fn queueAttemptKind(a: anytype, binding: AttemptBinding, found: *attempt_standing.Result) void {
     a.read(attempt_standing, .{ .operation_id = binding.operation_id }, found);
 }
@@ -197,15 +164,10 @@ pub fn attemptKindOf(found: attempt_standing.Result, binding: AttemptBinding) er
     return if (row.compaction) .compaction else .assistant_response;
 }
 
-/// Whether `binding` names the Attempt whose Turn and ordinal these are.
 fn namesAttempt(turn_id: i64, attempt_ordinal: i64, binding: AttemptBinding) bool {
     return turn_id == binding.turn_id and attempt_ordinal == binding.attempt_ordinal;
 }
 
-/// The one rule for a binding, over a row of `standing_columns`: current
-/// while it names its Operation's unresolved Attempt; otherwise
-/// `SupersededByControl` when a control interrupted that Attempt, else
-/// `StaleAttemptBinding`.
 fn attemptStanding(facts: anytype, binding: AttemptBinding) error{ StaleAttemptBinding, SupersededByControl }!void {
     if (!namesAttempt(facts.turn_id, facts.attempt_ordinal, binding)) return error.StaleAttemptBinding;
     if (!facts.resolved) return;
@@ -213,11 +175,6 @@ fn attemptStanding(facts: anytype, binding: AttemptBinding) error{ StaleAttemptB
     return error.StaleAttemptBinding;
 }
 
-/// The Operation `operation_id`'s Attempt as settling it reads it: its
-/// binding, whether it is resolved or interrupted, its purpose and claim,
-/// its Session, and, when `closes`, whether its Turn is open on this
-/// Operation; otherwise `turn_open` is false and unread. A missing Session
-/// row fails to decode, `CorruptStore`, as main's session facts read was.
 const attempt_facts = rsql.Read(.{
     .sql = "SELECT " ++ standing_columns ++ ",o.purpose AS compaction,o.admission_position," ++
         "coalesce(o.retry_due_at_ms,0)<>0 AS retry_waiting,o.auth_refresh_claimed AS refresh_claimed," ++
@@ -226,8 +183,6 @@ const attempt_facts = rsql.Read(.{
         "AND t.operation_id=o.operation_id) ELSE 0 END AS turn_open," ++
         "CASE WHEN ?3 THEN " ++ turn_domain.unowedChildrenSql("o.session_ref") ++ " ELSE 0 END AS unowed_children " ++
         "FROM model_operation o LEFT JOIN session s ON s.session_ref=o.session_ref WHERE o.operation_id=?1",
-    // `context_full`: the settlement may end the Turn out of context,
-    // which stops the Session's attached children (D38).
     .Args = struct { operation_id: u64, closes: bool, context_full: bool = false },
     .Row = struct {
         turn_id: i64,
@@ -245,16 +200,12 @@ const attempt_facts = rsql.Read(.{
     .cardinality = .optional,
 });
 
-/// After an `attempt_facts` round: its row while `attemptStanding` finds
-/// `binding` current; a missing Operation is `StaleAttemptBinding`.
 fn currentAttempt(facts: *const attempt_facts.Result, binding: AttemptBinding) error{ StaleAttemptBinding, SupersededByControl }!*const attempt_facts.Row {
     const row = &(facts.* orelse return error.StaleAttemptBinding);
     try attemptStanding(row, binding);
     return row;
 }
 
-/// What decides whether a binding is current, and the Operation's Session.
-/// A missing Session row fails to decode, `CorruptStore`.
 const attempt_session = rsql.Read(.{
     .sql = "SELECT " ++ standing_columns ++ "," ++ rsql.session_head_columns ++ " " ++
         "FROM model_operation o LEFT JOIN session s ON s.session_ref=o.session_ref WHERE o.operation_id=?1",
@@ -263,13 +214,6 @@ const attempt_session = rsql.Read(.{
     .cardinality = .optional,
 });
 
-/// The Session of the Attempt `binding` names, read in one round a
-/// transition runs, while the binding is current: what a write for the
-/// Attempt ties to with `@session`. `queue` queues the read, and
-/// `session`, after that round, answers; a missing Operation is
-/// `StaleAttemptBinding`. The round's failed step is
-/// `OperationReadFailed`, which its caller names. A transition keeps it
-/// in its own value, which outlives the round.
 pub const AttemptSession = struct {
     found: attempt_session.Result = undefined,
 
@@ -277,7 +221,6 @@ pub const AttemptSession = struct {
         r.read(attempt_session, .{ .operation_id = binding.operation_id }, &read.found);
     }
 
-    /// After `queue`'s round.
     pub fn session(read: *const AttemptSession, binding: AttemptBinding) !rsql.SessionHead {
         const row = read.found orelse return error.StaleAttemptBinding;
         try attemptStanding(row, binding);
@@ -292,7 +235,6 @@ const superseding_control = rsql.Read(.{
     .cardinality = .optional,
 });
 
-/// The control that interrupted the Attempt `binding` names, or null.
 pub fn operationSupersededByControl(a: anytype, binding: AttemptBinding) !?SupersedingControl {
     var found: superseding_control.Result = undefined;
     a.read(superseding_control, .{ .operation_id = binding.operation_id }, &found);
@@ -306,21 +248,13 @@ const claim_auth_refresh = rsql.Write(.{
     .sql = "UPDATE model_operation SET auth_refresh_claimed=1 WHERE operation_id=?1 AND session_ref=@session(?3) " ++
         "AND resolution_code IS NULL AND retry_due_at_ms=0 AND attempt_ordinal=?2 AND auth_refresh_claimed=0 AND " ++ retry_allowance_open_sql,
     .Args = struct { operation_id: u64, attempt_ordinal: u64, session: rsql.SessionHead },
-    // Main answered false when it changed no row; `claimModelAuthRefresh`
-    // still does.
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.AuthRefreshUnclaimed } },
 });
 
-/// The error a failed step of an Operation read reports, as on main.
 fn runOperationRead(a: anytype) !void {
     try store_access.runAs(a, error.OperationReadFailed);
 }
 
-/// Claims the Attempt's one forced auth refresh. Round 1 reads the
-/// Attempt; the claim is written only when the round found it running,
-/// unclaimed and within the allowance. Otherwise, or when the claim's
-/// UPDATE changes no row, nothing is written and the answer is false, as
-/// on main.
 pub const ClaimAuthRefresh = struct {
     pub const rounds = transition.rounds(.{ .facts = .{ .always, error.OperationReadFailed } });
     pub const round_budget = 2;
@@ -356,9 +290,6 @@ pub const ClaimAuthRefresh = struct {
     }
 };
 
-/// Resolves an unresolved Attempt with a failure: `ordinary`, a context
-/// overflow and an exhausted retry. `last_failure_code` null keeps the
-/// saved one.
 const resolve_failure = model_attempt.Write(.{
     .end = .resolution,
     .set = "retry_due_at_ms=NULL,resolution_code=?2,resolution_content_id=?3,request_id=?4," ++
@@ -368,7 +299,6 @@ const resolve_failure = model_attempt.Write(.{
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.StaleAttemptBinding } },
 });
 
-/// Ends a failed Attempt with a retry due at `due_at_ms`.
 const schedule_retry = model_attempt.Write(.{
     .end = .retry,
     .set = "retry_due_at_ms=?2,last_failure_code=?3",
@@ -377,8 +307,6 @@ const schedule_retry = model_attempt.Write(.{
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.StaleAttemptBinding } },
 });
 
-/// Admission, not revision history, owns whether this request emitted a
-/// refusable choice. A replay restoration or an unchanged effort is ordinary.
 const refused_effort_source = rsql.Read(.{
     .sql = "SELECT o.effort_source_revision AS revision FROM model_operation o WHERE o.operation_id=?1 AND " ++ operation_effort.refusalEligibleSql("o"),
     .Args = struct { operation: u64 },
@@ -404,7 +332,6 @@ fn queueEffortRefusal(a: anytype, session: rsql.SessionHead, revision: u64, oper
     a.write(invalidate_effort_prefix, .{ .session = session });
 }
 
-/// The content a failure settles with: its diagnostic and its report.
 const FailureContent = struct {
     diagnostic: ?content_domain.Import,
     report: ?content_domain.Import,
@@ -418,7 +345,6 @@ const FailureContent = struct {
         };
     }
 
-    /// Queues the lookups of both values: one statement for one or two.
     fn lookup(content: *FailureContent, a: anytype) void {
         if (content.diagnostic != null and content.report != null) {
             content_domain.lookupPair(a, &content.diagnostic.?, &content.report.?, &content.pair);
@@ -427,7 +353,6 @@ const FailureContent = struct {
         } else if (content.report) |*value| content_domain.lookup(a, value);
     }
 
-    /// After the lookup round.
     fn found(content: *FailureContent) void {
         if (content.diagnostic != null and content.report != null) content_domain.foundPair(&content.pair, &content.diagnostic.?, &content.report.?);
     }
@@ -437,27 +362,12 @@ const FailureContent = struct {
         return try content_domain.importBytes(a, value, failure.diagnostic().?);
     }
 
-    /// The report's row. One equal to the diagnostic is the diagnostic's
-    /// (`content.importSlot`).
     fn importReport(content: *FailureContent, a: anytype, failure: *const ModelFailure) !?u64 {
         const value = if (content.report) |*value| value else return null;
         return try content_domain.importBytes(a, value, failure.report());
     }
 };
 
-/// Settles a failed Attempt. Round 1 reads the Attempt and, for a
-/// failure that resolves it, looks up the failure's diagnostic and report.
-/// A context overflow reads in a round of its own whether compaction can
-/// recover it, which needs the Attempt's position: a compaction's walk
-/// for a deeper floor, a page a round, or a call's changed context. The
-/// commit round resolves the Attempt or schedules its retry, and closes
-/// its Turn or records its continuation.
-///
-/// An effort refusal first reads, in a round of its own, whether this
-/// request emitted the refused effort. The refusal and retry share a
-/// commit; an exhausted allowance still keeps the refusal, so later
-/// Operations do not reuse the rejected effort, and settles as an
-/// exhausted retry; one that was not emitted settles as ordinary.
 pub const SettleFailure = struct {
     pub const rounds = transition.rounds(.{
         .refusal = .{ .branch, error.OperationReadFailed },
@@ -469,8 +379,6 @@ pub const SettleFailure = struct {
     pub const round_budget = 2;
     pub const commit: transition.Commit = .transaction;
     pub const begin: ?rounds.At = .refusal;
-    /// `failure` and `disposition` are the Held body's own: the failure's
-    /// texts are read in place.
     pub const Input = struct { io: std.Io, binding: AttemptBinding, failure: *const ModelFailure, disposition: *const ModelFailureClass };
     pub const Result = void;
     pub const Ordinary = store_core.Ordinary.attempt_binding;
@@ -478,17 +386,12 @@ pub const SettleFailure = struct {
     pub const Declined = error{};
 
     input: Input,
-    /// The refused revision an exhausted allowance still records.
     exhausted_refusal: ?u64 = null,
     retry_random: u64 = 0,
     facts: attempt_facts.Result = undefined,
     content: FailureContent = .{ .diagnostic = null, .report = null },
-    /// The refusal round's source, then an overflow's recovery read.
     reads: union { source: refused_effort_source.Result, floor: history_floor_domain.FloorSearch, context: context_changed.Result } = undefined,
 
-    /// What the settlement resolves as: an effort refusal the refusal
-    /// round did not retry is an exhausted retry when it kept the refusal,
-    /// else an ordinary failure.
     fn disposition(t: *const SettleFailure) ModelFailureClass {
         if (t.input.disposition.* != .effort_change_refused) return t.input.disposition.*;
         if (t.exhausted_refusal != null) return .{ .retryable = .{ .waits_ms = retry_policy.default_waits_ms } };
@@ -528,8 +431,6 @@ pub const SettleFailure = struct {
                 t.content.found();
                 const row = try currentAttempt(&t.facts, binding);
                 if (t.disposition() != .context_overflow) return t.settle(r, false);
-                // An overflowing call compacts; an overflowing compaction makes
-                // room with a deeper floor while one drops more (D217).
                 if (row.compaction) {
                     t.reads = .{ .floor = .{ .operation = binding.operation_id } };
                     t.reads.floor.start(r);
@@ -547,14 +448,10 @@ pub const SettleFailure = struct {
         }
     }
 
-    /// Queues the round that reads the Attempt, and the failure's content
-    /// when the settlement resolves it.
     fn queueFacts(t: *SettleFailure, r: *transition.Round(SettleFailure)) transition.Next(SettleFailure) {
         const binding = t.input.binding;
         const settles_as = t.disposition();
         if (settles_as == .retryable) t.input.io.random(std.mem.asBytes(&t.retry_random));
-        // Only a resolving failure saves content: an ordinary one, an overflow,
-        // or a retry that exhausts the allowance.
         const resolves = switch (settles_as) {
             .ordinary, .context_overflow => true,
             .refreshed => false,
@@ -568,8 +465,6 @@ pub const SettleFailure = struct {
         return .{ .round = .facts };
     }
 
-    /// Queues the commit round's writes; `compact` is whether an overflow
-    /// compacts instead of ending the Turn.
     fn settle(t: *SettleFailure, r: *transition.Round(SettleFailure), compact: bool) !transition.Next(SettleFailure) {
         const binding = t.input.binding;
         const failure = t.input.failure;
@@ -633,7 +528,6 @@ pub const SettleFailure = struct {
                         .operation_id = binding.operation_id,
                         .resolution = "retry_exhausted",
                         .content_id = diagnostic_id,
-                        // The settling Attempt's correlation, like a terminal failure.
                         .request_id = optionalText(failure.requestId()),
                         .last_failure_code = code,
                         .attempt_ordinal = binding.attempt_ordinal,
@@ -654,7 +548,6 @@ pub const SettleFailure = struct {
     pub fn committed(_: *const SettleFailure) Result {}
 };
 
-/// Text that binds NULL when empty, as `sqlite.bindOptionalText` did.
 fn optionalText(text: []const u8) ?[]const u8 {
     return if (text.len == 0) null else text;
 }
@@ -663,8 +556,6 @@ fn optionalId(id: ?u64) ?i64 {
     return if (id) |value| @intCast(value) else null;
 }
 
-/// Unresolved last Attempts with no retry due, in id order, with their
-/// Session and whether their Turn is open on them.
 const exhausted_attempts = rsql.Read(.{
     .sql = "SELECT o.turn_id,o.operation_id," ++ rsql.session_head_columns ++ "," ++
         "EXISTS(SELECT 1 FROM turn t WHERE t.turn_id=o.turn_id AND t.outcome_code IS NULL " ++
@@ -684,7 +575,6 @@ const resolve_exhausted = model_attempt.Write(.{
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.SelectionChanged } },
 });
 
-/// Picks the first scanned Attempt no execution slot holds.
 const ExhaustedChoice = struct {
     active: ActiveOperationFilter,
     chosen: ?exhausted_attempts.Row = null,
@@ -696,11 +586,6 @@ const ExhaustedChoice = struct {
     }
 };
 
-/// Resolves one exhausted Attempt no slot holds and closes its Turn. Its
-/// scan runs outside any transaction, so a pass that finds none runs only
-/// the scan; the scan stops at the first Attempt `active` does not hold,
-/// after at most one more than it can exclude. The Store runs no other
-/// entry point meanwhile, so the commit writes from what the scan read.
 pub const RecoverExhausted = struct {
     pub const rounds = transition.rounds(.{ .scan = .{ .always, error.RetryRecoveryFailed } });
     pub const round_budget = 2;
@@ -741,9 +626,6 @@ const builtin_names_sql = blk: {
     break :blk names;
 };
 
-/// The Operation's frozen offered names and revision presence, owner validity,
-/// the Session's permission mode and revision,
-/// and the last Conversation ordinal. Earlier names are checked per batch.
 const success_facts = rsql.Read(.{
     .sql = "SELECT r.revision AS frozen_revision,coalesce(" ++ tool_set.namesSql("o.tool_set_id") ++ ",'') AS tool_names," ++
         "EXISTS(SELECT 1 FROM tool_set_member member JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id " ++
@@ -757,10 +639,6 @@ const success_facts = rsql.Read(.{
     .cardinality = .optional,
 });
 
-/// The Messages of the Operation's Session that no Turn took and no stop
-/// excludes, as main's pending count (`command.pending_messages`): one
-/// statement of its own, so a failed step reports main's
-/// `SessionStopReadFailed`.
 const pending_messages = rsql.Read(.{
     .sql = "SELECT count(*) AS pending FROM model_operation o JOIN message_admission m ON m.session_ref=o.session_ref " ++
         "WHERE o.operation_id=?1 AND m.turn_id IS NULL AND m.admission_id>coalesce((" ++
@@ -770,7 +648,6 @@ const pending_messages = rsql.Read(.{
     .cardinality = .one,
 });
 
-/// "?k,?k+1,...": `count` parameters from `first`.
 fn parameters(comptime first: usize, comptime count: usize) []const u8 {
     comptime {
         @setEvalBranchQuota(20_000);
@@ -780,10 +657,6 @@ fn parameters(comptime first: usize, comptime count: usize) []const u8 {
     }
 }
 
-/// Args of the `u64` fields `lead`, then `width` digests `d1..`, bound
-/// by value in the order an IN list binds them. Extern, so the digests sit
-/// back to back after the lead and a batch binds its own storage in place:
-/// `Batch.identity_digests` for a lookup, `Batch.ids` for a duplicate read.
 fn DigestArgs(comptime lead: []const [:0]const u8, comptime width: usize) type {
     @setEvalBranchQuota(20_000);
     const count = lead.len + width;
@@ -800,10 +673,6 @@ fn DigestArgs(comptime lead: []const [:0]const u8, comptime width: usize) type {
     return @Struct(.@"extern", null, &names, &types, &@splat(.{}));
 }
 
-/// `width` digests from `digests[0]`, as `S`'s Args: the first `count`
-/// are the read's, and the slots after them take the first again, since a
-/// repeated digest adds no row to an IN list. The slots past `count` are
-/// ones the batch does not use, so writing them loses nothing.
 fn digestArgs(comptime S: type, comptime width: usize, digests: *[width][32]u8, count: usize) *const S.Args {
     comptime std.debug.assert(@sizeOf(S.Args) == width * 32 and @offsetOf(S.Args, "d1") == 0);
     std.debug.assert(count != 0 and count <= width);
@@ -811,9 +680,6 @@ fn digestArgs(comptime S: type, comptime width: usize, digests: *[width][32]u8, 
     return @ptrCast(digests);
 }
 
-/// Every content row with one of `width` digests. A digest names one
-/// length (import verifies it), so each has at most a public and a private
-/// row: `n` distinct digests return at most `2n` rows.
 fn ContentBatch(comptime width: usize) type {
     return rsql.Read(.{
         .sql = "SELECT content_id,digest,byte_length,private FROM content WHERE digest IN (" ++ parameters(1, width) ++ ")",
@@ -825,10 +691,6 @@ fn ContentBatch(comptime width: usize) type {
 
 const LookupRow = struct { content_id: rsql.Positive, digest: [32]u8, byte_length: u64, private: bool };
 
-/// The item ids among `width` that the Operation already saved: one row
-/// each at most, as `(operation_id, item_id_digest)` is unique. Read with
-/// `readEach`, so `DuplicateVisitor` keeps the lowest batch index any row
-/// names, which `.optional` could not.
 fn DuplicateItems(comptime width: usize) type {
     return rsql.Read(.{
         .sql = "SELECT item_id_digest AS digest FROM model_output_item WHERE operation_id=?1 AND item_id_digest IN (" ++ parameters(2, width) ++ ")",
@@ -838,9 +700,6 @@ fn DuplicateItems(comptime width: usize) type {
     });
 }
 
-/// The call ids among `width` that the Operation already saved: one row
-/// each at most, as `(operation_id, call_id_content_id)` is unique and a
-/// call id is public content.
 fn DuplicateCalls(comptime width: usize) type {
     return rsql.Read(.{
         .sql = "SELECT c.digest FROM model_tool_call t JOIN content c ON c.content_id=t.call_id_content_id " ++
@@ -851,9 +710,6 @@ fn DuplicateCalls(comptime width: usize) type {
     });
 }
 
-/// Each digest read in two widths: a batch binds the narrow one when its
-/// digests fit it, so a reply of at most `narrow_width` items or calls
-/// runs main's statements, and the wide one past that.
 const content_batch = ContentBatch(narrow_width);
 const content_batch_wide = ContentBatch(lookup_width);
 const duplicate_items = DuplicateItems(narrow_width);
@@ -862,12 +718,9 @@ const duplicate_calls = DuplicateCalls(narrow_width);
 const duplicate_calls_wide = DuplicateCalls(batch_items);
 
 comptime {
-    // `queueReads` binds `duplicate_items`' Args to a calls read too.
     std.debug.assert(duplicate_items.Args == duplicate_calls.Args and duplicate_items_wide.Args == duplicate_calls_wide.Args);
 }
 
-/// The Operation and a batch's item or call id digests, laid out as the
-/// wide duplicate read's Args, whose narrow Args are a prefix of it.
 const DuplicateIds = extern struct {
     operation_id: u64,
     digests: [batch_items][32]u8,
@@ -880,7 +733,6 @@ const DuplicateIds = extern struct {
         }
     }
 
-    /// The ids as `S`'s Args, padded past `count` as `digestArgs` pads.
     fn args(ids: *DuplicateIds, comptime S: type, comptime width: usize, count: usize) *const S.Args {
         std.debug.assert(count != 0 and count <= width);
         for (ids.digests[count..width]) |*slot| slot.* = ids.digests[0];
@@ -919,7 +771,6 @@ const insert_item = rsql.Write(.{
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
-/// A visible message's Conversation entry, at its item's position.
 const insert_entry = rsql.Write(.{
     .sql = "INSERT INTO conversation_entry(session_ref,entry_ordinal,session_position,entry_kind,turn_id,source_operation_id,source_item_ordinal,content_id,recorded_at) " ++
         "VALUES(@session(?1),?2,?3,3,?4,?5,?6,?7,@now)",
@@ -948,10 +799,6 @@ const insert_call = rsql.Write(.{
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
-/// An accepted call's Action, decided now when the revision bypasses asks
-/// or the core runs it.
-/// Under an `ask` revision it keeps its call's position as the feed's
-/// approval request.
 const insert_action = rsql.Write(.{
     .sql = "INSERT INTO action_operation(action_id,parent_operation_id,call_ordinal,session_ref,tool_kind,permission_revision,authorized,bash_timeout_override_ms,resolution_code,decided_at,approval_position) " ++
         "VALUES(?1,?2,?3,@session(?4),1,?5,?6,?7,NULL,CASE WHEN ?6=1 THEN @now END,?8)",
@@ -959,7 +806,6 @@ const insert_action = rsql.Write(.{
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
-/// Resolves the settling Attempt with its output.
 const resolve_success = model_attempt.Write(.{
     .end = .resolution,
     .set = "retry_due_at_ms=NULL,resolution_code=?2,resolution_content_id=?3,response_id=?4,model_evidence=?5,request_id=?6,output_item_count=?7," ++
@@ -983,33 +829,17 @@ const resolve_success = model_attempt.Write(.{
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.StaleAttemptBinding } },
 });
 
-/// The most items or calls one batch holds: the wide duplicate read binds
-/// one digest each beside the Operation, the Store's 65 variables
-/// (`SQLITE_LIMIT_VARIABLE_NUMBER`).
 const batch_items = 64;
-/// The digests a narrow digest read binds, as main's sixteen.
 const narrow_width = 16;
-/// The digests one wide `content_batch` statement binds.
 const lookup_width = batch_items;
-/// The most distinct content identities one batch looks up: a call imports
-/// at most four (its name,
-/// call_id, arguments and rejection text). Unknown calls also look up the
-/// shared removed-tool text, before history decides which result applies.
-/// The final narrow lookup pads temporary arguments, not resident storage.
 const batch_identities = 4 * lookup_width + 1;
-/// The identities left above which a lookup takes a wide statement:
-/// measured on digests the Store lacks, 48 took 369 steps in three narrow
-/// statements and 395 in one wide one padded to 64 values, and 49 took
-/// 432 in four narrow and 399 in one wide.
 const wide_lookup_above = 3 * narrow_width;
-/// The `content_batch` statements `n` identities take.
 fn lookupCount(n: usize) usize {
     var left = n;
     var count: usize = 0;
     while (left != 0) : (count += 1) left -= @min(if (left > wide_lookup_above) lookup_width else narrow_width, left);
     return count;
 }
-/// The most `content_batch` statements one batch queues.
 const max_lookups = blk: {
     @setEvalBranchQuota(100_000);
     var most: usize = 0;
@@ -1017,18 +847,13 @@ const max_lookups = blk: {
     break :blk most;
 };
 
-/// A content identity a batch imports, beside its digest in
-/// `Batch.identity_digests`, and its row: 0 until the lookup round found
-/// one or the batch inserted one.
 const Identity = struct {
     length: u64,
     row: packed struct(u64) { content_id: u63, private: bool },
 };
 
-/// Matches one `content_batch` statement's rows to its batch's identities.
 const LookupVisitor = struct {
     batch: *Batch,
-    /// `2n` for `n` distinct digests; one more row is `CorruptStore`.
     limit: u8,
     rows: u8 = 0,
     overflow: bool = false,
@@ -1044,7 +869,6 @@ const LookupVisitor = struct {
     }
 };
 
-/// Finds the lowest index of a batch digest the Operation already saved.
 const DuplicateVisitor = struct {
     batch: *Batch,
     rows: u8 = 0,
@@ -1101,44 +925,25 @@ const HistoryVisitor = struct {
     }
 };
 
-/// One stretch of the output's metadata, imported in two rounds: the round
-/// that looks up its content and duplicates, then the round that writes it.
-/// Every row a batch writes binds its values by value, so the next batch is
-/// collected into the same table as soon as this one's rows are queued.
 pub const Batch = struct {
-    /// The names read with success facts, retained through every batch.
     offered_names: Bounded(tool_set.max_names_bytes),
-    /// History flags share the identities' indices; no second name copy.
     withdrawn: [batch_identities]bool,
     history_visitor: HistoryVisitor,
     history_needed: bool,
     kind: enum { items, calls },
-    /// The metadata records it covers: `[start, end)`.
     start: u64,
     end: u64,
-    /// What stopped the collecting walk at `end`, which the write walk
-    /// returns when it gets there, as main's walk would.
     stopped: ?anyerror,
-    /// Whether no records follow `end` for a later batch of this kind.
     last: bool,
-    /// Each identity's digest, back to back, so a lookup binds a run of
-    /// them in place.
     identity_digests: [batch_identities][32]u8,
     identities: [batch_identities]Identity,
     identity_count: u16,
-    /// Each item's id digest, or each call's call_id digest, in order.
     ids: DuplicateIds,
     digest_count: u8,
     lookups: [max_lookups]LookupVisitor,
     lookup_count: u8,
     duplicates: DuplicateVisitor,
 
-    /// Names are needed only while binding history's fixed-value Args, a
-    /// 4.6 KB window in pages of its own for the call (`pages.Mapped`): the
-    /// read runs only for a call batch with a name the Operation did not
-    /// offer, and its queueing sits on the engine thread's deepest chain.
-    /// Access copies every Bounded argument before returning, so none
-    /// borrows the pages once they are unmapped.
     noinline fn queueHistory(batch: *Batch, a: anytype, operation_id: u64, output: *const ValidatedOutput, io: std.Io) !void {
         @setEvalBranchQuota(20_000);
         const Name = Bounded(tool_record.max_name_bytes);
@@ -1152,7 +957,6 @@ pub const Batch = struct {
         defer mapped.unmap();
         const args = mapped.value;
         args.operation_id = operation_id;
-        // Zeroed pages: every name starts empty.
         const names: *[batch_items]Name = @ptrCast(&args.n0);
         var reader = try OutputMetadataReader.init(io, output.metadata);
         reader.offset = batch.start;
@@ -1186,9 +990,6 @@ pub const Batch = struct {
         batch.duplicates = .{ .batch = batch };
     }
 
-    /// Ends the batch at `at`, where the collecting walk failed with
-    /// `failure`. With no failure, the write walk walks on and fails at
-    /// the same record, as main's walk does.
     fn stop(batch: *Batch, failure: ?anyerror, at: u64) void {
         batch.stopped = failure;
         batch.end = if (failure == null) std.math.maxInt(u64) else at;
@@ -1202,9 +1003,6 @@ pub const Batch = struct {
         return null;
     }
 
-    /// When the batch's first item outgrows it, keeps only what that item
-    /// collected through `boundary`, after its last part that fit, and
-    /// cuts the item there (`collectItems`).
     fn cutFirst(batch: *Batch, boundary: ?PartBoundary, cut: *?u64) void {
         if (batch.digest_count != 0) return;
         const at = boundary orelse return;
@@ -1212,7 +1010,6 @@ pub const Batch = struct {
         cut.* = at.offset;
     }
 
-    /// Adds an identity unless the batch has it; false when it is full.
     fn add(batch: *Batch, value: content_domain.Import) bool {
         if (batch.find(&value) != null) return true;
         if (batch.identity_count == batch_identities) return false;
@@ -1222,8 +1019,6 @@ pub const Batch = struct {
         return true;
     }
 
-    /// Queues the batch's content lookups, padding only unused slots.
-    /// Keep the final window's padding off the history-argument call chain.
     noinline fn queueContentReads(batch: *Batch, a: anytype) void {
         var first: u16 = 0;
         while (first < batch.identity_count) {
@@ -1232,7 +1027,6 @@ pub const Batch = struct {
             const chunk = batch.identity_digests[first..][0..count];
             var distinct: u8 = 0;
             for (chunk, 0..) |*digest, index| {
-                // A public and a private identity of one value share a digest.
                 const seen = for (chunk[0..index]) |*earlier| {
                     if (std.mem.eql(u8, earlier, digest)) break true;
                 } else false;
@@ -1242,9 +1036,6 @@ pub const Batch = struct {
             visitor.* = .{ .batch = batch, .limit = 2 * distinct };
             batch.lookup_count += 1;
             const limit = 2 * @as(u64, distinct) + 1;
-            // A wide view is used only with more than 48 identities left,
-            // so its 64 slots fit. The last narrow run may need padding past
-            // resident storage: fixed digest Args are copied when queued.
             if (count <= narrow_width) {
                 if (first + narrow_width <= batch_identities) {
                     a.readEachFrom(content_batch, digestArgs(content_batch, narrow_width, batch.identity_digests[first..][0..narrow_width], count), limit, visitor);
@@ -1260,7 +1051,6 @@ pub const Batch = struct {
         }
     }
 
-    /// Queues content, historical membership and duplicate reads together.
     fn queueReads(batch: *Batch, a: anytype, operation_id: u64, output: *const ValidatedOutput, io: std.Io) !void {
         @setEvalBranchQuota(20_000);
         batch.queueContentReads(a);
@@ -1282,15 +1072,11 @@ pub const Batch = struct {
         }
     }
 
-    /// After the reads' round: more rows than identities allow is a
-    /// corrupt Store.
     fn checkReads(batch: *const Batch) error{CorruptStore}!void {
         for (batch.lookups[0..batch.lookup_count]) |visitor| if (visitor.overflow) return error.CorruptStore;
         if (batch.duplicates.overflow) return error.CorruptStore;
     }
 
-    /// Whether the digest at `index` repeats an earlier one in the batch,
-    /// or the Store already holds it.
     fn duplicate(batch: *const Batch, index: u8) bool {
         if (batch.duplicates.lowest) |lowest| if (lowest == index) return true;
         for (batch.ids.digests[0..index]) |*earlier| if (std.mem.eql(u8, earlier, &batch.ids.digests[index])) return true;
@@ -1298,10 +1084,6 @@ pub const Batch = struct {
     }
 };
 
-/// The identity a metadata record imports, if any, as main imports it:
-/// a decoded part text, a bag, a message text, and a call's name,
-/// call_id and arguments. The usage record imports nothing: only its
-/// counts are kept.
 fn recordImport(record: *const OutputMetadataRecord) ?content_domain.Import {
     const length: u64, const private = switch (record.tag) {
         .part => switch (record.part_kind) {
@@ -1316,16 +1098,6 @@ fn recordImport(record: *const OutputMetadataRecord) ?content_domain.Import {
     return .{ .digest = record.content_digest, .length = length, .private = private };
 }
 
-/// Collects the next items from `start`: whole items, at most
-/// `batch_items`, while their identities fit, an empty answer's included.
-/// A first item whose identities do not all fit is taken alone and cut
-/// after its last part whose identities fit (`cut`): the write walk pauses
-/// there, and the next batch, `resuming` the item, collects from the cut
-/// to the item's own record, cut again where its identities do not fit. An
-/// item with no part to cut at is taken as it fits, and its write walk
-/// fails where main's did. Never fails: a metadata read failure stops the
-/// batch there, for the write walk to return. Keep scan scratch off the
-/// orchestration frame that later queues SQL.
 noinline fn collectItems(batch: *Batch, output: *const ValidatedOutput, io: std.Io, start: u64, resuming: bool, cut: *?u64) void {
     batch.reset(.items, start);
     cut.* = null;
@@ -1334,8 +1106,6 @@ noinline fn collectItems(batch: *Batch, output: *const ValidatedOutput, io: std.
     var unit_start = start;
     var unit_identities = batch.identity_count;
     var unfit = false;
-    // Where the first item can be cut: after its last part so far, with
-    // the identities collected through it.
     var boundary: ?PartBoundary = null;
     while (true) {
         const record_start = reader.offset;
@@ -1344,7 +1114,6 @@ noinline fn collectItems(batch: *Batch, output: *const ValidatedOutput, io: std.
             batch.last = true;
             return;
         };
-        // The usage record imports nothing but still closes the last item.
         if (record.tag == .item or record.tag == .usage) {
             if (record.tag == .item and !unfit and output.answer_length == 0 and output.answer_item_ordinal == record.ordinal and
                 !batch.add(content_domain.empty_content))
@@ -1357,15 +1126,12 @@ noinline fn collectItems(batch: *Batch, output: *const ValidatedOutput, io: std.
                 batch.end = unit_start;
                 return;
             }
-            // A resumed item's id was read with its first batch.
             if (record.tag == .item and !resuming) {
                 batch.ids.digests[batch.digest_count] = record.id_digest;
                 batch.digest_count += 1;
             }
             unit_start = reader.offset;
             unit_identities = batch.identity_count;
-            // A unit taken unfit is a first item too big for a batch, and
-            // a resumed one ends at its own record.
             if (unfit or resuming or batch.digest_count == batch_items) {
                 batch.end = reader.offset;
                 return;
@@ -1384,15 +1150,8 @@ noinline fn collectItems(batch: *Batch, output: *const ValidatedOutput, io: std.
     }
 }
 
-/// The record after a part's bag, and the identities a batch collected
-/// through it.
 const PartBoundary = struct { offset: u64, identities: u16 };
 
-/// Collects the next calls from `start`, as `collectItems` does items:
-/// each call's name, call_id and arguments, and, when the tool set rejects
-/// it, its rejection text. Unknown names collect both possible results before
-/// the history read, so deciding withdrawn versus unknown adds no round.
-/// Noinline keeps call inspection scratch off the subsequent SQL call chain.
 noinline fn collectCalls(batch: *Batch, output: *const ValidatedOutput, io: std.Io, start: u64, offered: *const tool_record.Offered) void {
     @setEvalBranchQuota(20_000);
     comptime std.debug.assert(batch_identities >= 4 * batch_items + 1);
@@ -1412,16 +1171,12 @@ noinline fn collectCalls(batch: *Batch, output: *const ValidatedOutput, io: std.
             .name => name = record,
             .call_id => call_id = record,
             .arguments => {
-                // The write walk reports a malformed call where main does.
                 const name_record = name orelse return batch.stop(null, record_start);
                 const call_id_record = call_id orelse return batch.stop(null, record_start);
                 for ([_]*const OutputMetadataRecord{ &name_record, &call_id_record, &record }) |field| {
                     const fits = batch.add(recordImport(field).?);
                     std.debug.assert(fits);
                 }
-                // The write walk inspects the call again and returns a
-                // failure here, or of its rejection text, where main does;
-                // collecting only needs the text's identity.
                 if (inspectOutputCall(io, output.source, name_record, record, offered)) |facts| {
                     const provisional = facts.tool == null and !facts.removed;
                     if (provisional) {
@@ -1451,14 +1206,11 @@ noinline fn collectCalls(batch: *Batch, output: *const ValidatedOutput, io: std.
     }
 }
 
-/// A rejected call's result text, from its name in the source.
 fn rejectionText(io: std.Io, output: *const ValidatedOutput, code: tool_proposal.Rejection, facts: *const tool_defs.CallFacts, name: OutputMetadataRecord, buffer: *[192]u8) ![]const u8 {
     var rejected_name: output_format.NameReader = .{ .io = io, .file = output.source, .position = name.start, .end = try name.end() };
     return tool_defs.rejectionResult(code, facts, &rejected_name, name.decoded_length, name.content_digest, buffer);
 }
 
-/// Main's checks on the candidate output, before any import: compaction
-/// items and calls must fit the Operation's purpose.
 fn validateCandidate(io: std.Io, output: *const ValidatedOutput, purpose: ModelOperationKind) !void {
     var candidate_metadata = try OutputMetadataReader.init(io, output.metadata);
     var compaction_count: u64 = 0;
@@ -1474,30 +1226,7 @@ fn validateCandidate(io: std.Io, output: *const ValidatedOutput, purpose: ModelO
     } else if (compaction_count != 0) return error.InvalidProviderEnvelope;
 }
 
-/// Settles a model's validated output as its Attempt's success.
-/// The `.facts` round opens the transaction and reads the Attempt, the
-/// settling facts, and the first batch's content and duplicate item ids.
-/// Then Zig checks the binding and the candidate output against the
-/// Operation's purpose, as main does before any import. Each `.batch`
-/// round writes one batch, its new content streamed into its rows in
-/// process, and reads the next batch's (`Settlement.advance`). The commit
-/// resolves the Operation and closes its Turn or records its continuation.
-/// An item batch closes at 64 items or before the item whose identities
-/// would pass 257, a call batch at 64 calls, which always fit, so the
-/// rounds are the item batches plus the call batches plus one: a reply of
-/// at most 64 items whose identities fit settles in 2 rounds, and in 3
-/// when it proposes calls. Both possible results of a call whose name the
-/// Operation did not offer are collected before the history read, so
-/// deciding withdrawn versus unknown adds no round. A first item whose
-/// identities pass 257 is cut after its last part that fits, and each cut
-/// adds one `.batch` round, which writes the parts before it and reads the
-/// identities after it (`collectItems`).
 pub const SettleSuccess = struct {
-    /// The names main gave a failed read's step: the Attempt and the facts
-    /// read beside it `OperationReadFailed` (main's operation read joined
-    /// the revision), the pending Messages `SessionStopReadFailed`, and the
-    /// output's content and duplicate reads `OutputReadFailed`. A write's
-    /// failed step stays `StatementFailed`.
     const named = .{
         .{ attempt_facts, error.OperationReadFailed },
         .{ success_facts, error.OperationReadFailed },
@@ -1516,16 +1245,13 @@ pub const SettleSuccess = struct {
     });
     pub const round_budget = 2;
     pub const commit: transition.Commit = .transaction;
-    /// A batch's rows outnumber a write's twelve-statement pass.
     pub const pass: transition.Pass = .wide;
-    /// The facts read opens the transaction, as main's first statement did.
     pub const begin: ?rounds.At = .facts;
     pub const Input = struct {
         io: std.Io,
         binding: AttemptBinding,
         output: *const ValidatedOutput,
         faults: Faults,
-        /// The Store's settlement scratch (`Store.settlementBatch`).
         batch: *Batch,
     };
     pub const Result = void;
@@ -1559,26 +1285,21 @@ pub const SettleSuccess = struct {
         r.read(attempt_facts, .{ .operation_id = operation_id, .closes = true }, &t.facts);
         r.readInto(success_facts, .{ .operation_id = operation_id }, &t.success, &t.success_found);
         r.read(pending_messages, .{ .operation_id = operation_id }, &t.pending);
-        // BEGIN IMMEDIATE ran when the first read was queued.
         if (t.input.faults.settlement_trace) |trace| if (r.transactionOpen()) trace.mark(.transaction_active);
         collectItems(batch, t.input.output, t.input.io, 0, false, &t.oversized.cut);
         try batch.queueReads(r, operation_id, t.input.output, t.input.io);
         return .{ .round = .facts };
     }
 
-    /// After the facts round: the checks main made before any import, then
-    /// the settlement's state for its batches.
     noinline fn settleFacts(t: *SettleSuccess, r: *transition.Round(SettleSuccess)) !void {
         const io = t.input.io;
         const output = t.input.output;
         const binding = t.input.binding;
         const row = try currentAttempt(&t.facts, binding);
-        // The Operation was found, so only its revision row can be missing.
         if (!t.success_found.get()) return error.CorruptStore;
         if (t.success.frozen_revision == null) return error.StaleAttemptBinding;
         if (t.success.invalid_owner) return error.CorruptStore;
         const purpose: ModelOperationKind = if (row.compaction) .compaction else .assistant_response;
-        // Main checked the candidate before any output read.
         try validateCandidate(io, output, purpose);
         try t.input.batch.checkReads();
 
@@ -1602,8 +1323,6 @@ pub const SettleSuccess = struct {
         t.settlement.call_item = try t.settlement.call_items.nextItem();
     }
 
-    /// Once every batch is written: resolves the Operation, closes its Turn
-    /// or records its continuation, and commits.
     noinline fn finish(t: *SettleSuccess, r: *transition.Round(SettleSuccess)) !transition.Next(SettleSuccess) {
         const s = &t.settlement;
         const row = &t.facts.?;
@@ -1619,7 +1338,6 @@ pub const SettleSuccess = struct {
             .model_evidence = .{ .bytes = output.model_evidence.slice() },
             .request_id = optionalText(output.request_id.slice()),
             .item_count = output.item_count,
-            // The provider parser admits only counts that fit an SQLite integer.
             .uncached = if (usage) |counts| counts.uncached else null,
             .cache_read = if (usage) |counts| counts.cache_read else null,
             .cache_write = if (usage) |counts| counts.cache_write else null,
@@ -1637,39 +1355,25 @@ pub const SettleSuccess = struct {
     }
 };
 
-/// An item whose identities pass a batch's, written a batch at a time:
-/// where the current batch cuts it (`collectItems`), and the item paused
-/// there, if any.
 const Oversized = struct {
     cut: ?u64 = null,
     paused: ?Paused = null,
 
     const Paused = struct {
-        /// The metadata offset of the item's own record.
         item_at: u64,
-        /// Where its records start.
         region_start: u64,
         progress: ItemProgress,
     };
 };
 
-/// How far an item's import walked: the record it resumes at, and what
-/// the parts before it set. Only a part's bag ends a cut, so only an
-/// item with parts (a message or a reasoning item) pauses, before its
-/// item bag; a hosted call's action and pattern records follow its item
-/// bag, and its import never pauses.
 const ItemProgress = struct {
     offset: u64,
     part_count: u64 = 0,
     text_length: u64 = 0,
 };
 
-/// A content row a settlement value imports: found, or inserted by this
-/// settlement, when `fresh` says its bytes are still to stream.
 const ContentRow = struct { id: u64, fresh: bool };
 
-/// One success settlement's state across its batches. Its methods queue on
-/// the round handle `a` they are given.
 const Settlement = struct {
     io: std.Io,
     binding: AttemptBinding,
@@ -1687,16 +1391,9 @@ const Settlement = struct {
     answer_id: ?u64 = null,
     usage_seen: bool = false,
     usage: ?output_format.Usage = null,
-    /// The function_call items, walked beside the calls' records.
     call_items: OutputMetadataReader,
     call_item: ?OutputMetadataRecord = null,
 
-    /// Writes the batch the last round read and collects the next one,
-    /// the items first, then the calls, as main's second pass imports
-    /// them, until a batch has reads to queue: true once it queued them
-    /// for a `.batch` round, false once every batch is written. The
-    /// written batch's rows bind their values by value, so the next batch
-    /// is collected into the same table before they step.
     fn advance(s: *Settlement, a: anytype, batch: *Batch, oversized: *Oversized) !bool {
         while (true) {
             switch (batch.kind) {
@@ -1716,7 +1413,6 @@ const Settlement = struct {
                     collectCalls(batch, s.output, s.io, batch.end, &s.tools);
                 },
             }
-            // A batch with nothing to read has nothing to write.
             if (batch.identity_count != 0 or batch.digest_count != 0) {
                 try batch.queueReads(a, s.binding.operation_id, s.output, s.io);
                 return true;
@@ -1731,10 +1427,6 @@ const Settlement = struct {
         if (s.purpose == .assistant_response and s.output.answer_length != 0 and s.answer_id == null) return error.CorruptOutputMetadata;
     }
 
-    /// The row of an identity the batch collected, inserting it at its
-    /// first use when the lookup found none. Every identity a batch's
-    /// records import was collected from the same records, so one missing
-    /// means the output changed under the settlement.
     fn content(a: anytype, batch: *Batch, imported: content_domain.Import) !ContentRow {
         const identity = batch.find(&imported) orelse return error.OutputSourceChanged;
         if (identity.row.content_id != 0) return .{ .id = identity.row.content_id, .fresh = false };
@@ -1743,18 +1435,11 @@ const Settlement = struct {
         return .{ .id = id, .fresh = true };
     }
 
-    /// A sink for a fresh row with bytes, else null.
     fn sinkFor(a: anytype, row: ContentRow, length: u64) !?store_access.ContentSink {
         if (!row.fresh or length == 0) return null;
         return try a.contentSink(row.id, length);
     }
 
-    /// Walks the batch's records in main's order: each item's ordinal,
-    /// its duplicate check, its parts and bags, its row, and a visible
-    /// message's entry; the usage record where it lies. An item cut in
-    /// this batch pauses at its cut (`Oversized`), and the next batch
-    /// resumes it. Keep import scratch separate from the next batch's
-    /// read-argument construction.
     noinline fn writeItems(s: *Settlement, a: anytype, batch: *Batch, oversized: *Oversized) !void {
         if (oversized.paused != null) return s.resumeItem(a, batch, oversized);
         var reader = try OutputMetadataReader.init(s.io, s.output.metadata);
@@ -1765,7 +1450,6 @@ const Settlement = struct {
             const record_start = reader.offset;
             const record = try reader.next() orelse break;
             if (record.tag == .usage) {
-                // Only the four counts are kept; the provider's report is not.
                 if (s.usage_seen) return error.CorruptOutputMetadata;
                 s.usage_seen = true;
                 s.usage = record.usage;
@@ -1779,7 +1463,6 @@ const Settlement = struct {
             var description: tool_record.Description = .{};
             var progress: ItemProgress = .{ .offset = region_start };
             const neutral = try s.importItem(a, batch, record, region_start, reader.offset, &progress, oversized.cut, &description) orelse {
-                // Cut, so the batch's only item.
                 oversized.paused = .{ .item_at = record_start, .region_start = region_start, .progress = progress };
                 return;
             };
@@ -1789,8 +1472,6 @@ const Settlement = struct {
         if (batch.stopped) |err| return err;
     }
 
-    /// Imports the rest of the paused item, from where it paused to its
-    /// next cut or its own record, which ends the batch.
     fn resumeItem(s: *Settlement, a: anytype, batch: *Batch, oversized: *Oversized) !void {
         if (batch.stopped) |err| return err;
         const paused = &oversized.paused.?;
@@ -1803,8 +1484,6 @@ const Settlement = struct {
         try s.recordItem(a, batch, record, record.id_digest, neutral, &description);
     }
 
-    /// The row of an imported item, and a visible message's Conversation
-    /// entry.
     fn recordItem(s: *Settlement, a: anytype, batch: *Batch, record: OutputMetadataRecord, id_digest: [32]u8, neutral: ImportedNeutral, description: *const tool_record.Description) !void {
         a.write(insert_item, .{
             .operation_id = s.binding.operation_id,
@@ -1823,15 +1502,9 @@ const Settlement = struct {
             .call_failed = neutral.call_failed,
         });
         s.imported_items += 1;
-        // Items own stream positions. Each visible message is a
-        // Conversation entry at its own item's position, so text
-        // remains before/among calls, not after the complete call
-        // group. Only the selected message is the result.
         if (s.purpose != .assistant_response or record.kind != .message) return;
         const text = neutral.text.?;
         if (s.output.answer_item_ordinal == record.ordinal) {
-            // The selected result can be empty while the exact message
-            // text (including whitespace) remains in Conversation.
             const empty = &content_domain.empty_content;
             const answer: ContentRow = if (s.output.answer_length == 0) try content(a, batch, empty.*) else .{ .id = text, .fresh = false };
             const length, const digest = if (s.output.answer_length == 0) .{ empty.length, &empty.digest } else .{ neutral.text_length, &neutral.text_digest };
@@ -1850,14 +1523,6 @@ const Settlement = struct {
         });
     }
 
-    /// Saves one accepted item in Rui's own form from its metadata
-    /// records in `[metadata_start, metadata_end)`: its parts, its
-    /// provider bags and, for a message, its text (every text part's
-    /// decoded text back to back, one row its parts are lengths of).
-    /// It walks from `progress.offset`: the item's first record, or where
-    /// an earlier batch paused it. At `cut`, which follows a part's bag,
-    /// it records how far it walked in `progress` and answers null. A
-    /// hosted call's description goes to `description`.
     fn importItem(s: *Settlement, a: anytype, batch: *Batch, item: OutputMetadataRecord, metadata_start: u64, metadata_end: u64, progress: *ItemProgress, cut: ?u64, description: *tool_record.Description) !?ImportedNeutral {
         var metadata = try OutputMetadataReader.init(s.io, s.output.metadata);
         metadata.offset = progress.offset;
@@ -1867,17 +1532,11 @@ const Settlement = struct {
         var text_record: ?OutputMetadataRecord = null;
         var text_length = progress.text_length;
         var part_count = progress.part_count;
-        // The open part: its record's offset and its own text row. Every
-        // part closes with its bag, so one INSERT writes the whole row.
         var part: ?struct { record: OutputMetadataRecord, start: u64, text: ?u64 } = null;
-        // A hosted call's action record, and its pattern record if any.
         var action: ?OutputMetadataRecord = null;
         var pattern: ?OutputMetadataRecord = null;
         while (true) {
             if (cut) |at| if (metadata.offset == at) {
-                // A cut follows a part's bag, which closed the part, and
-                // no bag, text, action or pattern closes the item before
-                // its last part.
                 std.debug.assert(part == null and item_bag == null and text == null and action == null);
                 progress.* = .{ .offset = at, .part_count = part_count, .text_length = text_length };
                 return null;
@@ -1967,9 +1626,6 @@ const Settlement = struct {
         return row.id;
     }
 
-    /// Copies one bag, the `member` records of `trailer`'s scope in
-    /// `[start, end)` joined by commas, into a private row, verifying
-    /// a found one.
     fn importBag(s: *Settlement, a: anytype, batch: *Batch, trailer: OutputMetadataRecord, start: u64, end: u64) !u64 {
         const row = try content(a, batch, recordImport(&trailer).?);
         const sink = try sinkFor(a, row, trailer.decoded_length);
@@ -1978,8 +1634,6 @@ const Settlement = struct {
         return row.id;
     }
 
-    /// Decodes one saved string (a part's text or a call field) into
-    /// its own row. A row with the same bytes is shared.
     fn importDecoded(s: *Settlement, a: anytype, batch: *Batch, part: OutputMetadataRecord) !u64 {
         const row = try content(a, batch, recordImport(&part).?);
         const sink = try sinkFor(a, row, part.decoded_length) orelse return row.id;
@@ -1988,10 +1642,6 @@ const Settlement = struct {
         return row.id;
     }
 
-    /// Walks the batch's records for calls in main's order: each
-    /// call's fields, its duplicate check, its classification, its
-    /// row and, when runnable, its Action. Keep call scratch separate
-    /// from the next batch's read-argument construction.
     noinline fn writeCalls(s: *Settlement, a: anytype, batch: *Batch) !void {
         var reader = try OutputMetadataReader.init(s.io, s.output.metadata);
         reader.offset = batch.start;
@@ -2022,13 +1672,9 @@ const Settlement = struct {
             }
         }
         if (batch.stopped) |err| return err;
-        // A batch ends before a call's first field, so fields left open
-        // at the last batch's end belong to no call.
         if (batch.last and (name_record != null or call_id_record != null)) return error.CorruptOutputMetadata;
     }
 
-    /// Imports one accepted call: its fields, its classification and,
-    /// when it is runnable, its Action.
     fn importCall(s: *Settlement, a: anytype, batch: *Batch, index: u8, fields: [3]OutputMetadataRecord) !void {
         const name, const call_id, const record = fields;
         const name_content_id = try s.importDecoded(a, batch, name);
@@ -2052,17 +1698,11 @@ const Settlement = struct {
         try s.recordCall(a, &fields, .{ name_content_id, call_id_content_id, arguments_content_id }, &call_facts, rejection_code, rejection_content_id);
     }
 
-    /// All content sinks have closed before saving the certificate and
-    /// line. Keep their bounded row-binding scratch off those sink paths.
     noinline fn recordCall(s: *Settlement, a: anytype, fields: *const [3]OutputMetadataRecord, content_ids: [3]u64, call_facts: *const tool_defs.CallFacts, rejection_code: ?tool_proposal.Rejection, rejection_content_id: ?u64) !void {
         const record = fields[2];
         const name_content_id, const call_id_content_id, const arguments_content_id = content_ids;
-        // The call's certificate: (little-endian length, SHA-256) for its
-        // name, call_id and arguments, in ProposalField order.
         var field_metadata: FieldCertificate.Bytes = undefined;
         for (fields.*, 0..) |field, at| FieldCertificate.write(&field_metadata, at, .{ .length = field.decoded_length, .digest = field.content_digest });
-        // A Bash call keeps its valid line even when not offered; malformed
-        // Bash arguments have none. MCP uses its saved line or tool name.
         const description = try callDescription(call_facts, s.io, s.output.source, record);
 
         a.write(insert_call, .{
@@ -2081,7 +1721,6 @@ const Settlement = struct {
             .session = s.session,
         });
         if (rejection_code != null) return;
-        // A core tool acts only on the Store, so no person decides it.
         const authorized = call_facts.tool.?.runner() == .core or s.settling.permission_mode;
         const action_id = try a.identity(.action_id);
         a.write(insert_action, .{
@@ -2098,12 +1737,8 @@ const Settlement = struct {
     }
 };
 
-/// An item in Rui's own form; a message's text identity; whether a hosted
-/// call's description was written, and its outcome.
 const ImportedNeutral = struct { bag: u64, part_count: u64, text: ?u64, text_length: u64, text_digest: [32]u8, described: bool, call_failed: bool };
 
-/// A hosted call's description from its action and pattern records.
-/// noinline: its excerpt windows live in this frame only.
 noinline fn describeWebSearch(io: std.Io, source: std.Io.File, call: OutputMetadataRecord, pattern: ?OutputMetadataRecord) !tool_record.Description {
     var target: [tool_defs.WebSearchCall.excerpt_bytes]u8 = undefined;
     var found: [tool_defs.WebSearchCall.excerpt_bytes]u8 = undefined;
@@ -2114,8 +1749,6 @@ noinline fn describeWebSearch(io: std.Io, source: std.Io.File, call: OutputMetad
     } });
 }
 
-/// The first decoded bytes of a certified string `record`, as many as
-/// `buffer` holds.
 fn excerpt(io: std.Io, source: std.Io.File, record: OutputMetadataRecord, buffer: []u8) ![]const u8 {
     var reader: output_format.NameReader = .{ .io = io, .file = source, .position = record.start, .end = try record.end() };
     var length: usize = 0;
@@ -2123,8 +1756,6 @@ fn excerpt(io: std.Io, source: std.Io.File, record: OutputMetadataRecord, buffer
     return buffer[0..length];
 }
 
-/// Hashes `bytes` at `written` within `length`, writing them to `sink`
-/// when there is one.
 fn writeChecked(sink: ?store_access.ContentSink, hash: *std.crypto.hash.sha2.Sha256, bytes: []const u8, written: *u64, length: u64) !void {
     if (bytes.len > length - written.*) return error.OutputSourceChanged;
     hash.update(bytes);
@@ -2132,8 +1763,6 @@ fn writeChecked(sink: ?store_access.ContentSink, hash: *std.crypto.hash.sha2.Sha
     written.* += bytes.len;
 }
 
-/// Streams a bag's members in `[start, end)` into `sink`, if any,
-/// checking its length and digest.
 noinline fn streamBag(io: std.Io, output: *const ValidatedOutput, trailer: OutputMetadataRecord, start: u64, end: u64, sink: ?store_access.ContentSink, faults: Faults) !void {
     var members = try OutputMetadataReader.init(io, output.metadata);
     members.offset = start;
@@ -2160,7 +1789,6 @@ noinline fn streamBag(io: std.Io, output: *const ValidatedOutput, trailer: Outpu
     if (written != trailer.decoded_length or !std.mem.eql(u8, &copy.hash.finalResult(), &trailer.content_digest)) return error.OutputSourceChanged;
 }
 
-/// Decodes a message's text parts among `[start, end)` into `sink`.
 noinline fn streamMessageText(io: std.Io, output: *const ValidatedOutput, text: OutputMetadataRecord, start: u64, end: u64, sink: store_access.ContentSink, faults: Faults) !void {
     var parts = try OutputMetadataReader.init(io, output.metadata);
     parts.offset = start;
@@ -2175,7 +1803,6 @@ noinline fn streamMessageText(io: std.Io, output: *const ValidatedOutput, text: 
     if (written != text.decoded_length or !std.mem.eql(u8, &decoded.hash.finalResult(), &text.content_digest)) return error.OutputSourceChanged;
 }
 
-/// Decodes one saved string into `sink`.
 noinline fn streamDecoded(io: std.Io, output: *const ValidatedOutput, part: OutputMetadataRecord, sink: store_access.ContentSink, faults: Faults) !void {
     var decoded: content_domain.HashedWindow(import_window_bytes) = .{ .hash = content_string.hasher() };
     var written: u64 = 0;
@@ -2184,8 +1811,6 @@ noinline fn streamDecoded(io: std.Io, output: *const ValidatedOutput, part: Outp
     if (written != part.decoded_length or !std.mem.eql(u8, &decoded.hash.finalResult(), &part.content_digest)) return error.OutputSourceChanged;
 }
 
-/// Decodes `part`'s encoded string from the source into `sink` at
-/// `written`, within `length`, hashing what it writes.
 fn writeDecoded(io: std.Io, output: *const ValidatedOutput, sink: store_access.ContentSink, decoded: *content_domain.HashedWindow(import_window_bytes), part: OutputMetadataRecord, written: *u64, length: u64) !void {
     if (try part.end() > output.source_length) return error.CorruptOutputMetadata;
     var count: usize = 0;
@@ -2201,21 +1826,15 @@ fn writeDecoded(io: std.Io, output: *const ValidatedOutput, sink: store_access.C
     try writeChecked(sink, &decoded.hash, decoded.window[0..count], written, length);
 }
 
-/// Noinline: description rendering does not retain its bounded scratch on
-/// the import frame while that frame opens SQLite content sinks.
 noinline fn callDescription(facts: *const tool_defs.CallFacts, io: std.Io, file: std.Io.File, arguments: OutputMetadataRecord) !?tool_record.Description {
     if (facts.tool) |*tool| if (tool.runner() == .mcp) {
         var fallback: tool_record.Description = .{ .len = 0 };
         try fallback.set(tool.name);
-        // Classification already checked the JSON. Invalid arguments retain
-        // the name without trying to extract a line from a rejected document.
         if (facts.invalid_mcp_arguments) return fallback;
         var source: output_format.JsonStringSource = .{
             .encoded = .{ .io = io, .file = file, .position = arguments.start, .end = try arguments.end() },
         };
         const range = try mcp_arguments.descriptionRange(&source) orelse return fallback;
-        // The range addresses the decoded arguments, not the provider's outer
-        // JSON string. Replay that bounded source to read the selected contents.
         source = .{ .encoded = .{ .io = io, .file = file, .position = arguments.start, .end = try arguments.end() } };
         for (0..@intCast(range.start)) |_| _ = try source.take();
         var encoded: [6 * tool_presentation.max_description_bytes]u8 = undefined;
@@ -2231,9 +1850,6 @@ noinline fn callDescription(facts: *const tool_defs.CallFacts, io: std.Io, file:
     return facts.description();
 }
 
-/// One function call's tool-set facts: its name and, for bash, its
-/// arguments. noinline: the arguments' content window lives in this frame
-/// only, not in the settlement frame that walks the output's metadata.
 noinline fn inspectOutputCall(io: std.Io, source: std.Io.File, name: OutputMetadataRecord, arguments: OutputMetadataRecord, offered: *const tool_record.Offered) !tool_defs.CallFacts {
     var call_name: output_format.NameReader = .{ .io = io, .file = source, .position = name.start, .end = try name.end() };
     var encoded: output_format.JsonStringSource = .{
@@ -2242,9 +1858,6 @@ noinline fn inspectOutputCall(io: std.Io, source: std.Io.File, name: OutputMetad
     return tool_defs.inspectCall(&call_name, name.decoded_length, &encoded, offered);
 }
 
-/// noinline: its read buffer serves the rare schema check, not every
-/// configure frame.
-/// D113: bounded start_agent schema bytes are validated without file capture.
 pub fn validateJsonBytes(bytes: []const u8) !bool {
     var scanner = std.json.Scanner.initCompleteInput(std.heap.c_allocator, bytes);
     defer scanner.deinit();

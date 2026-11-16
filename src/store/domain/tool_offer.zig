@@ -1,5 +1,3 @@
-//! A Session's current offer: its tool intent projected onto the Host's saved
-//! tool set. Derived on every read, frozen only by Operation admission.
 const std = @import("std");
 const tools = @import("../../tool_record.zig");
 const tool_name = @import("../../tool_name.zig");
@@ -8,8 +6,6 @@ const rsql = @import("../rsql.zig");
 const tool_set = @import("tool_set.zig");
 const tool_offer = @This();
 
-/// One relational projection for current offers. Intent supplies membership;
-/// the Host supplies MCP identities, while built-in identities remain frozen.
 const projected = rsql.Read(.{
     .sql = "SELECT tool.name,tool.owner,tool.server,tool.read_only,description.digest AS description,input_schema.digest AS input_schema," ++
         "description.content_id,description.byte_length,CASE WHEN intended.owner='mcp' THEN host.tool_set_id ELSE member.tool_set_id END AS source," ++
@@ -38,10 +34,6 @@ const projected = rsql.Read(.{
 });
 pub const OfferedRecord = projected.Row;
 
-/// Queues reading a current offer without saving any derived state, in a
-/// round its caller runs. The caller owns the bounded sink, which must
-/// outlive the round; both admission and find_tools consume this same
-/// projection.
 pub fn project(a: anytype, allowed: u64, loaded: ?u64, sink: anytype) void {
     a.readEach(projected, .{ .allowed = allowed, .loaded = loaded orelse allowed }, tool_name.max_tools + 1, sink);
 }
@@ -71,27 +63,14 @@ const Projection = struct {
     }
 };
 
-/// True when the loaded intent of Session alias `s` names an MCP record the
-/// Host's saved tool set no longer holds. Records are saved once per identity,
-/// so otherwise the projection is the loaded intent set itself.
 pub const stale_sql = "EXISTS(SELECT 1 FROM tool_set_member tm JOIN tool_record tool ON tool.tool_record_id=tm.tool_record_id " ++
     "WHERE tm.tool_set_id=" ++ tool_set.offeredSetSql("s") ++ " AND tool.owner='mcp' AND tm.tool_record_id NOT IN " ++
     "(SELECT hm.tool_record_id FROM host_tool_set host JOIN tool_set_member hm ON hm.tool_set_id=host.tool_set_id WHERE host.slot=1))";
 
-/// Only Operation admission saves the effective offer, in the rounds its
-/// caller runs. Intent that is not `stale` (see `stale_sql`) already names
-/// it, requiring no additional round (`unchanged`). Otherwise `project`
-/// queues the projection; after its round, `intern` queues the lookup of
-/// the projected set; after that round, `set` answers its id, having
-/// queued a new set's rows when none was saved: a round of their own then
-/// runs them (`Interning.inserted`), so the queued member names it borrows
-/// are consumed before the caller's storage changes. Over 14 KiB: its
-/// caller keeps it in the Store's scratch.
 pub const Freeze = struct {
     projection: Projection = .{},
     interning: tool_set.Interning = .{},
 
-    /// The offer when the intent is not `stale`, or null.
     pub fn unchanged(allowed: u64, loaded: ?u64, stale: bool) ?u64 {
         return if (stale) null else loaded orelse allowed;
     }
@@ -101,13 +80,11 @@ pub const Freeze = struct {
         tool_offer.project(a, allowed, loaded, &freeze.projection);
     }
 
-    /// After `project`'s round.
     pub fn intern(freeze: *Freeze, a: anytype) !void {
         if (freeze.projection.invalid) return error.CorruptStore;
         freeze.interning.queue(a, freeze.members());
     }
 
-    /// After `intern`'s round.
     pub fn set(freeze: *Freeze, a: anytype) !u64 {
         return freeze.interning.finish(a, freeze.members());
     }

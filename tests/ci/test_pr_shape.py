@@ -6,7 +6,7 @@ import sys
 import tempfile
 import tarfile
 import unittest
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from unittest.mock import patch
 
 import pr_shape
@@ -21,6 +21,12 @@ class PrShapeTest(unittest.TestCase):
         self.assertIsInstance(reason, str)
         self.assertIn("## Shape", reason)
         self.assertEqual(len(reason.splitlines()), 1)
+
+    def test_refusal_explains_edit_and_rerun(self):
+        reason = pr_shape.refusal(["src/cli.zig"], "")
+        self.assertIn("Add a ## Shape section to the PR body", reason)
+        self.assertIn("re-run the failed jobs of this run", reason)
+        self.assertIn("no push needed", reason)
 
     def test_src_changes_need_shape(self):
         for paths in (["src/cli.zig"], ["src/store/Store.zig"],
@@ -118,6 +124,12 @@ class ScreenEvidenceTest(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertIsNone(pr_shape.refusal([path], "## Shape"))
 
+    def test_repository_page_links_do_not_replace_embedded_media(self):
+        for ref in ("a" * 40, "main", "pr-evidence"):
+            for view in ("tree", "blob"):
+                self.assertIsInstance(pr_shape.refusal(["src/overview_view.zig"],
+                    f"## Shape\n[Screens](https://github.com/owner/repo/{view}/{ref}/capture)"), str)
+
     def test_graph_classifies_transitive_ui_but_excludes_host_and_test_imports(self):
         graph = pr_shape.tree_graph()
         self.assertIn("src/Overview.zig", graph.production["src/cli.zig"])
@@ -163,6 +175,26 @@ class PrShapeMainTest(unittest.TestCase):
         base = patch.object(pr_shape, "revision_ui_paths", return_value=set())
         base.start()
         self.addCleanup(base.stop)
+
+    def test_current_body_wins_and_failed_reads_fall_back(self):
+        cases = (
+            ("placeholder", {"body": "## Shape"}, None, 0, "current PR body from GitHub"),
+            ("## Shape", {"body": "placeholder"}, None, 1, "current PR body from GitHub"),
+            ("## Shape", None, OSError("offline"), 0, "event payload body"),
+            ("placeholder", None, OSError("offline"), 1, "event payload body"),
+            ("## Shape", {"body": None}, None, 1, "current PR body from GitHub"),
+        )
+        for payload, live, failure, expected, source in cases:
+            with self.subTest(payload=payload, live=live, failure=failure), \
+                 patch.dict(os.environ, {"BASE": "base", "PR_BODY": payload,
+                                         "GITHUB_REPOSITORY": "owner/repo", "PR_NUMBER": "42"}, clear=True), \
+                 patch.object(sys, "argv", ["pr_shape.py"]), \
+                 patch.object(pr_shape, "changed_paths", return_value=(["src/cli.zig"], "base")), \
+                 patch.object(pr_shape, "github", return_value=live, side_effect=failure) as api, \
+                 redirect_stdout(io.StringIO()) as stdout, redirect_stderr(io.StringIO()):
+                self.assertEqual(pr_shape.main(), expected)
+                api.assert_called_once_with("GET", "repos/owner/repo/pulls/42")
+                self.assertIn(source, stdout.getvalue())
 
     def test_argument_overrides_base_environment_and_body_stays_data(self):
         for body, expected in (("", 1), ("Summary\n## Shape\n$(exit 99)", 0)):

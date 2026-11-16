@@ -1,5 +1,3 @@
-//! Skills Store conformance tests.
-
 const shared_fixtures = @import("../tests.zig");
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
@@ -52,8 +50,6 @@ test "skills start_agent imports six distinct contents atomically and retries af
                 defer if (opened) storage.close() catch unreachable;
                 var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
                 const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
-                // The parent predates capture: none of the child's new content
-                // can be deduplicated against an inherited catalog or reload.
                 var create = try completeConfiguration("skills-six-parent", "", workspace, "model-a");
                 create.configuration.tools = try .of(&.{"start_agent"});
                 const parent = (try storage.configure(&create, .{})).accepted.session;
@@ -193,8 +189,6 @@ test "skills empty initial snapshot is valid and schema rejects mismatched catal
             try reload.key.set("skills-empty-reload");
             const candidate: skills_fixture_domain.Capture = .{ .reload = .{ .entries = &.{.{ .name = "nonempty", .description = "now available", .path = "/skills/nonempty/SKILL.md" }} } };
             try std.testing.expect(try storage.configureWithCapturedSkills(&reload, null, null, &candidate, std.testing.allocator, .{}) == .accepted);
-            // Position zero exists, so the FK alone cannot reject this: the
-            // catalog instruction must certify its own conversation position.
             const constraint_error = if (case.engine == .mysql) error.MysqlFixtureFailed else error.StatementFailed;
             try std.testing.expectError(constraint_error, store_testing.exec(&storage, "UPDATE conversation_entry SET source_catalog_position=0 WHERE session_ref=?1 AND source_catalog_position IS NOT NULL", .{session.slice()}));
             try std.testing.expect(!storage.isFenced());
@@ -321,8 +315,6 @@ test "skills reload out of memory in configure or the skill tool rolls back with
             var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
             defer arena.deinit();
             const skills = @import("../../skills.zig");
-            // Enough entries that reading the saved catalog allocates
-            // inside the write, not only the candidate's encoding.
             const entries = try arena.allocator().alloc(skills.Entry, 66);
             for (entries, 0..) |*entry, index| entry.* = .{
                 .name = try std.fmt.allocPrint(arena.allocator(), "skill-{d:0>3}", .{index}),
@@ -420,8 +412,6 @@ test "skills peer refusal persists authenticated activity diagnostic and keyed r
             try std.testing.expect(rejected == .rejected and !rejected.rejected.replayed);
             try std.testing.expectEqual(protocol.MessageRejection.skill_file_unavailable, rejected.rejected.code);
             try storage.revokeActionSender(action);
-            // Neither later capture text nor a revoked handle may rewrite the
-            // original keyed outcome, including after a genuine database reopen.
             const later: skills_fixture_domain.MessageCapture = .{ .failed = .{ .code = .skill_text_invalid, .bytes = "A different later disk failure" } };
             for (0..2) |pass| {
                 if (pass == 1) {
@@ -484,7 +474,6 @@ test "inline skills a peer Session's Message may list the recipient's skills" {
             try command.sender.?.store.set(storage.selector.slice());
             command.sender.?.session = sender;
             command.sender_handle = input.sender_handle;
-            // The Host bound demo against the receiver's catalog.
             const body = "Skill file: \"/receiver/skills/demo/SKILL.md\"\n\nreceiver body";
             const capture: skills_fixture_domain.MessageCapture = .{ .bound = &.{.{ .name = "demo", .bytes = body }} };
             var activity_request: protocol.ActivityPage = .{ .session = receiver };
@@ -499,7 +488,6 @@ test "inline skills a peer Session's Message may list the recipient's skills" {
             };
             try std.testing.expectEqualStrings("skills-peer-accept", received.key.slice());
             try std.testing.expectEqualStrings(sender.slice(), received.sender.?.session.slice());
-            // The Message is the text the peer sent; the skill is saved after it.
             try std.testing.expectEqualSlices(u8, &protocol.contentDigest(authored), &received.content.digest);
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_skill k JOIN message_admission m ON m.admission_id=k.admission_id JOIN content c ON c.content_id=k.content_id WHERE m.command_key='skills-peer-accept' AND k.position=1 AND k.name='demo' AND c.digest=?1", .{store_testing.Blob{ .bytes = &protocol.contentDigest(body) }}));
         }
@@ -569,8 +557,6 @@ test "skills reload settles catalog and result atomically across faults retry re
                 opened = false;
                 try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
                 opened = true;
-                // A failed settlement publishes neither half of the catalog
-                // change, its command acknowledgment, nor a replacement view.
                 try std.testing.expectEqual(original_content, try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
                 try std.testing.expectEqual(original_commands, try store_testing.queryU64(&storage, "SELECT count(*) FROM core_command", .{}));
                 try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM core_command WHERE command_key=?1", .{command.key.slice()}));
@@ -688,8 +674,6 @@ test "skills native reload validates targets after replay without changing ordin
                 try std.testing.expect(answer == .rejected);
                 try std.testing.expectEqual(expected, answer.rejected.code);
                 try std.testing.expect(!answer.rejected.replayed);
-                // Reopen before replay: the refusal must stay typed and saved,
-                // even without a capture and with the target still absent.
                 try storage.close();
                 opened = false;
                 try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
@@ -738,13 +722,10 @@ test "a skills reload is refused when it carries settings or has no catalog, and
             var bytes: [diagnostic.len]u8 = undefined;
             try std.testing.expectEqual(bytes.len, try reader.read(0, &bytes));
             try std.testing.expectEqualStrings(diagnostic, &bytes);
-            // A replay answers the saved refusal, whatever the Host captures now.
             const replay = try storage.configureWithCapturedSkills(&command, null, null, null, std.testing.allocator, .{});
             try std.testing.expect(replay == .rejected and replay.rejected.replayed);
             try std.testing.expectEqual(protocol.ConfigurationRejection.skills_unavailable, replay.rejected.code);
             try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_skill_catalog", .{}));
-            // A reload changes nothing else: one that carries a setting, or
-            // requires a model, is refused before its capture is read.
             const empty: skills_fixture_domain.Capture = .{ .reload = .{ .entries = &.{} } };
             for (0..2) |index| {
                 var mixed: wire_request.ConfigureCommand = .{ .session = session, .reload_skills = true };
@@ -757,7 +738,6 @@ test "a skills reload is refused when it carries settings or has no catalog, and
                 try std.testing.expect(answer == .rejected and !answer.rejected.replayed);
                 try std.testing.expectEqual(protocol.ConfigurationRejection.incomplete_initial_configuration, answer.rejected.code);
             }
-            // Without a catalog to reload, the skills are unavailable.
             const invocation: skills_fixture_domain.Capture = .{ .invocation = "a model tool's capture" };
             for ([_]?*const skills_fixture_domain.Capture{ null, &invocation }, 0..) |captured, index| {
                 var uncaptured: wire_request.ConfigureCommand = .{ .session = session, .reload_skills = true };
@@ -811,8 +791,6 @@ test "inline skills keep the typed text once and project each bound skill as its
             var command = try completeMessage("bound-message", session.slice(), try tmp.dir.createFile(std.testing.io, "typed", .{ .read = true }), typed);
             try command.text.file.?.writeStreamingAll(std.testing.io, typed);
             defer command.removeTemporaryContent(std.testing.io) catch unreachable;
-            // Eight skills, more than one Access's table of imported rows
-            // holds, in the order the text names them; two share bytes.
             const capture: skills_fixture_domain.MessageCapture = .{ .bound = &.{
                 .{ .name = "other", .bytes = body }, .{ .name = "demo", .bytes = body }, .{ .name = "s3", .bytes = "three" }, .{ .name = "s4", .bytes = "four" },
                 .{ .name = "s5", .bytes = "five" },  .{ .name = "s6", .bytes = "six" },  .{ .name = "s7", .bytes = "seven" }, .{ .name = "s8", .bytes = "eight" },
@@ -822,10 +800,8 @@ test "inline skills keep the typed text once and project each bound skill as its
             try std.testing.expectEqualSlices(u8, &protocol.contentDigest(typed), &reply.accepted.content.digest);
             const page = try store_core.activityPageForTesting(&storage, .{ .session = session, .kinds = .initOne(.admission) });
             try std.testing.expectEqualSlices(u8, &protocol.contentDigest(typed), &page.items[0].value.admission.content.digest);
-            // Equal bodies share one content row.
             try std.testing.expectEqual(@as(u64, 7), try store_testing.queryU64(&storage, "SELECT count(DISTINCT content_id) FROM message_skill", .{}));
             _ = (try storage.admitNextModelAttempt(.{})).?;
-            // The Message's entry, then each skill's, in the text's order.
             const Entry = struct { kind: u64, skill: u64, name: []const u8, bytes: []const u8 };
             const expected = [_]Entry{ .{ .kind = 1, .skill = 0, .name = "", .bytes = typed }, .{ .kind = 4, .skill = 1, .name = "other", .bytes = body }, .{ .kind = 4, .skill = 2, .name = "demo", .bytes = body }, .{ .kind = 4, .skill = 8, .name = "s8", .bytes = "eight" } };
             const first = try store_testing.queryU64(&storage, "SELECT min(session_position) FROM conversation_entry WHERE session_ref=?1 AND entry_kind IN (1,4)", .{session.slice()});
@@ -835,7 +811,6 @@ test "inline skills keep the typed text once and project each bound skill as its
                     "LEFT JOIN message_skill k ON k.admission_id=e.source_skill_admission_id AND k.position=e.source_skill_position " ++
                     "WHERE e.session_ref=?1 AND e.session_position=?2 AND e.entry_kind=?3 AND coalesce(e.source_skill_position,0)=?4 AND coalesce(k.name,'')=?5 AND c.digest=?6", .{ session.slice(), first + offset, entry.kind, entry.skill, entry.name, store_testing.Blob{ .bytes = &protocol.contentDigest(entry.bytes) } }));
             }
-            // A skill entry must name its Message's skill.
             const constraint_error = if (case.engine == .mysql) error.MysqlFixtureFailed else error.SqliteExecFailed;
             try std.testing.expectError(constraint_error, store_testing.exec(&storage, "UPDATE conversation_entry SET source_skill_position=NULL WHERE entry_kind=4", .{}));
         }
@@ -887,8 +862,6 @@ test "inline skills initial failure preserves all ordinary configuration refusal
 
 test "inline skills configuration validation borrows one Store-owned plan through content imports" {
     const Ready = @FieldType(configuration_domain.Validation, "ready");
-    // The validation-only phase must not return another Settings value onto
-    // the Host's creation/import chain. This is an ownership API contract.
     try std.testing.expect(Ready == *const configuration_domain.ValidatedConfiguration);
     if (comptime Ready == *const configuration_domain.ValidatedConfiguration) {
         try store_testing.forEachEngine(struct {
@@ -957,7 +930,6 @@ test "find_tools and the skill tool leave a call whose Session owes a stop to th
             var create = try completeConfiguration("owed-calls", "", try canonicalCwd(std.testing.io, &path), "model-a");
             create.configuration.tools = try .of(&.{ "find_tools", "skill" });
             const session = (try storage.configure(&create, .{})).accepted.session;
-            // The Session is a child, so its parent's stop makes it owe one.
             const root = try configureTestSession(&storage, "owed-calls-root");
             try store_testing.exec(&storage, "UPDATE session SET parent_ref=?1 WHERE session_ref=?2", .{ root.slice(), session.slice() });
             try submitTestMessage(&storage, &tmp, "owed-calls-input", "owed-calls-key", session.slice(), "find and invoke");
@@ -984,7 +956,6 @@ test "find_tools and the skill tool leave a call whose Session owes a stop to th
             try std.testing.expect(!try storage.findTools(find.binding, arena.allocator(), &words, null, .{}));
             const invocation: skills_fixture_domain.Capture = .{ .invocation = "a skill's body" };
             try std.testing.expect(!try storage.settleSkillTool(skill, arena.allocator(), &invocation, .{}));
-            // Neither call saved a command, a revision or a resolution.
             try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, open_sql, .{model.operation_id}));
             try std.testing.expectEqual(revisions, try store_testing.queryU64(&storage, "SELECT count(*) FROM session_revision WHERE session_ref=?1", .{session.slice()}));
             const key = try std.fmt.allocPrint(arena.allocator(), "rui.core/find_tools/{d}", .{find.binding.action_id});
@@ -1022,7 +993,6 @@ test "the skill tool resolves an invocation or a failed capture with its text, a
                 .{ .captured = &failed, .code = "failed", .text = "Rui could not read the skill's file." },
             }) |expected| {
                 const pending = (try storage.nextCoreWork(.{ .free_credit = .one, .mcp_open = true })).?.action;
-                // An injected fault rolls back the result and resolution.
                 for ([_]struct { Faults, anyerror }{
                     .{ .{ .content_import = true }, error.InjectedContentImportFailure },
                     .{ .{ .before_commit = true }, error.InjectedCommitFailure },

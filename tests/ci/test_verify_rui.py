@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import runpy
 import site
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -1976,95 +1977,6 @@ class EvidencePublicationTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "failed capture.*did not load"):
                 select(out)
 
-    def test_single_build_markdown_pinned_urls_and_remote_spellings(self):
-        for remote in ("https://github.com/owner/repo", "https://github.com/owner/repo.git",
-                       "git@github.com:owner/repo.git", "ssh://git@github.com/owner/repo.git"):
-            self.assertEqual(self.helper["evidence_repo"](remote), "owner/repo")
-        with self.assertRaisesRegex(ValueError, "GitHub"):
-            self.helper["evidence_repo"]("https://example.com/owner/repo")
-        with tempfile.TemporaryDirectory() as directory:
-            out = Path(directory)
-            record = self.capture(out)
-            (out / "frames.json").write_text(json.dumps([record]))
-            head, base, rows, files = self.helper["publication_frames"](out)
-            self.assertIsNone(base)
-            text = self.helper["screens_markdown"]("owner/repo", "c" * 40, head + "/capture", head, base, rows)
-            self.assertIn("## Screens", text)
-            self.assertIn("plain PTY, L1 synthetic input", text)
-            self.assertIn("![overview 140x40 after]", text)
-            self.assertIn("![overview 140x40 after recording]", text)
-            self.assertIn("raw.githubusercontent.com/owner/repo/" + "c" * 40 + "/" + head, text)
-            self.assertNotIn("| Before |", text)
-            record["files"]["png"] = "../outside.png"
-            (out / "frames.json").write_text(json.dumps([record]))
-            with self.assertRaisesRegex(ValueError, "invalid capture file"):
-                self.helper["publication_frames"](out)
-
-    def test_paired_markdown_contains_both_images_and_capture_shas(self):
-        with tempfile.TemporaryDirectory() as directory:
-            out = Path(directory)
-            self.comparison(out)
-            head, base, rows, _ = self.helper["publication_frames"](out)
-            narrow = copy.deepcopy(rows[0])
-            narrow["size"] = "46x30"
-            rows.append(narrow)
-            text = self.helper["screens_markdown"]("owner/repo", "c" * 40, head + "/capture", head, base, rows)
-            self.assertEqual(text.count("### changed"), 1)
-            self.assertIn("| 46x30 |", text)
-            for marker in (head, base, "| Before | After |", "![changed 140x40 before]", "![changed 140x40 after]",
-                           "/before/changed%40140x40.gif", "/after/changed%40140x40.png"):
-                self.assertIn(marker, text)
-
-    def test_url_verification_rejects_unviewable_publication(self):
-        verify = self.helper["verify_image_url"]
-        for status, content, ok in ((200, "image/png", True), (200, "image/gif", True),
-                                     (200, "text/html", False), (404, "image/png", False)):
-            response = types.SimpleNamespace(status=status, headers={"Content-Type": content})
-            with self.subTest(status=status, content=content), patch("urllib.request.urlopen", return_value=contextlib.nullcontext(response)):
-                if ok:
-                    verify("https://example.test/a.png")
-                else:
-                    with self.assertRaisesRegex(ValueError, "HTTP 200 and image"):
-                        verify("https://example.test/a.png")
-
-    def test_publish_prints_markdown_only_after_push_and_url_verification(self):
-        command = self.helper["cmd_publish"]
-        scope = command.__globals__
-        events = []
-        def push(*_args):
-            events.append("push")
-            return "c" * 40, self.head + "/capture"
-        def verify(url):
-            events.append("verify")
-            self.assertIn("/" + "c" * 40 + "/", url)
-        with tempfile.TemporaryDirectory() as directory:
-            out = Path(directory)
-            self.comparison(out)
-            args = types.SimpleNamespace(directory=directory, states=None, all=False, repo_remote="screens")
-            for success in (True, False):
-                events.clear()
-                stdout, stderr = io.StringIO(), io.StringIO()
-                def check(url):
-                    verify(url)
-                    if not success:
-                        raise ValueError("not viewable")
-                with (patch.dict(scope, push_evidence=push, verify_image_url=check),
-                      patch("subprocess.check_output", return_value="git@github.com:owner/repo.git") as remote,
-                      contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr)):
-                    if success:
-                        command(args)
-                    else:
-                        with self.assertRaises(SystemExit):
-                            command(args)
-                self.assertEqual(events, ["push", "verify"])
-                self.assertEqual(remote.call_args.args[0][-1], "screens")
-                if success:
-                    self.assertTrue(stdout.getvalue().startswith("## Screens\n"))
-                    self.assertEqual(stderr.getvalue(), "")
-                else:
-                    self.assertEqual(stdout.getvalue(), "")
-                    self.assertIn("publish failed: not viewable", stderr.getvalue())
-
     def test_frames_before_reuses_both_runs_checks_builds_first_and_keeps_failure(self):
         command = self.helper["cmd_frames"]
         scope = command.__globals__
@@ -2078,8 +1990,11 @@ class EvidencePublicationTest(unittest.TestCase):
                 (target / "frames.json").write_text(json.dumps([record]))
                 if args.sha == self.base:
                     raise SystemExit(1)
+            scenario = Path(directory) / "explicit.json"
+            scenario.write_text(json.dumps({"sizes": "140x40,46x30", "states": [
+                {"name": "overview", "open": "overview", "steps": []}]}))
             args = types.SimpleNamespace(sha=self.head, before=self.base, out=str(out), only="overview",
-                                         sizes="140x40,46x30", record=True)
+                                         sizes="140x40,46x30", record=True, scenario=str(scenario))
             with (patch.dict(scope, run_frames=run, load_build=lambda sha: calls.append(("build", sha)),
                              require_screen=lambda _: None),
                   patch("subprocess.check_output", side_effect=[self.head + "\n", self.base + "\n"]),
@@ -2097,6 +2012,95 @@ class EvidencePublicationTest(unittest.TestCase):
         with (patch.dict(scope, load_build=missing, run_frames=lambda args: self.fail("allocated run")),
               patch("subprocess.check_output", side_effect=[self.head, self.base]), self.assertRaises(SystemExit)):
             command(args)
+
+    def compare_recipes(self, head_recipe, base_recipe, *, selected="overview", explicit=False, fail_before=False):
+        command = self.helper["cmd_frames"]
+        scope = command.__globals__
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fake_script = root / "a/b/c/d/verify-rui"
+            fake_script.parent.mkdir(parents=True)
+            head_path = fake_script.with_name("frames.json")
+            head_path.write_text(json.dumps(head_recipe))
+            calls = []
+            def run(args):
+                recipe = self.helper["load_scenario"](args.scenario or head_path, args.sizes)
+                chosen = set(args.only.split(",")) if args.only else {state["name"] for state in recipe["states"]}
+                records = []
+                for state in recipe["states"]:
+                    if state["name"] not in chosen:
+                        continue
+                    calls.append((args.sha, state["name"], state["steps"], state["expect"]))
+                    self.assertEqual(state["expect"], head_recipe["states"][-1]["expect"] if args.sha == self.head
+                                     else (head_recipe if explicit else base_recipe)["states"][0]["expect"])
+                    for size in state["sizes"]:
+                        record = self.capture(Path(args.out), name=state["name"], size=self.helper["size_name"](size),
+                                              cells=state["expect"][0], sha=args.sha)
+                        if args.sha == self.base and fail_before:
+                            record.update(ok=False, reason="base readiness failed", status="failed")
+                        records.append(record)
+                (Path(args.out) / "frames.json").write_text(json.dumps(records))
+                if args.sha == self.base and fail_before:
+                    raise SystemExit(1)
+            args = types.SimpleNamespace(sha=self.head, before=self.base, out=str(root / "out"),
+                                         only=selected, sizes=None, scenario=str(head_path) if explicit else None,
+                                         record=False)
+            def output(argv, **_kwargs):
+                if argv[1] == "rev-parse":
+                    return self.head if argv[-1].startswith(self.head) else self.base
+                self.assertIn("show", argv)
+                self.assertEqual(argv[-1], self.base + ":.claude/skills/verify-rui/scripts/frames.json")
+                return json.dumps(base_recipe)
+            with (patch.dict(scope, HERE=fake_script, run_frames=run, load_build=lambda sha: {}, require_screen=lambda _: None),
+                  patch("subprocess.check_output", side_effect=output), contextlib.redirect_stdout(io.StringIO())):
+                if fail_before:
+                    with self.assertRaises(SystemExit) as failure:
+                        command(args)
+                    self.assertEqual(failure.exception.code, 1)
+                else:
+                    command(args)
+            out = root / "out"
+            data = json.loads((out / "pairs.json").read_text())
+            if fail_before:
+                with self.assertRaisesRegex(ValueError, "base readiness failed"):
+                    self.helper["publication_frames"](out)
+            else:
+                _head, _base, _rows, files = self.helper["publication_frames"](out, include_same=True)
+                self.assertTrue(files)
+                screens, _attachments = self.helper["screens_markdown"](self.head, self.base, data["pairs"])
+                if data["pairs"][0]["new"]:
+                    self.assertIn("New screen", screens)
+                    self.assertEqual(set(files), {"after/overview@140x40.png", "after/overview@140x40.gif"})
+                    self.assertNotIn("before", data["pairs"][0])
+            return calls, data
+
+    def recipe(self, text="Same screen", name="overview"):
+        return {"sizes": "140x40", "states": [{"name": name, "open": "overview", "steps": [{"wait": text}], "expect": [text]}]}
+
+    def test_comparison_unchanged_screen_uses_base_recipe(self):
+        calls, data = self.compare_recipes(self.recipe(), self.recipe())
+        self.assertEqual([call[0] for call in calls], [self.base, self.head])
+        self.assertTrue(data["pairs"][0]["same"])
+        self.assertFalse(data["pairs"][0]["new"])
+
+    def test_comparison_changed_expectation_uses_each_revisions_own_recipe(self):
+        calls, data = self.compare_recipes(self.recipe("New label"), self.recipe("Old label"))
+        self.assertEqual([call[-1] for call in calls], [["Old label"], ["New label"]])
+        self.assertEqual([call[2] for call in calls], [[{"wait": "Old label"}], [{"wait": "New label"}]])
+        self.assertFalse(data["pairs"][0]["same"])
+        self.assertFalse(data["pairs"][0]["new"])
+
+    def test_comparison_new_screen_has_only_an_after_capture(self):
+        calls, data = self.compare_recipes(self.recipe("New screen"), self.recipe("Existing", "older"))
+        self.assertEqual([call[0] for call in calls], [self.head])
+        self.assertTrue(data["pairs"][0]["new"])
+
+    def test_comparison_explicit_scenario_is_used_for_both_builds(self):
+        calls, _data = self.compare_recipes(self.recipe("Explicit"), self.recipe("Old"), explicit=True)
+        self.assertEqual([call[-1] for call in calls], [["Explicit"], ["Explicit"]])
+
+    def test_comparison_failure_under_the_base_recipe_still_fails(self):
+        self.compare_recipes(self.recipe("New"), self.recipe("Old"), fail_before=True)
 
     def test_missing_build_names_head_or_base_before_allocating_either_run(self):
         command = self.helper["cmd_frames"]
@@ -2119,65 +2123,265 @@ class EvidencePublicationTest(unittest.TestCase):
                 self.assertIn(f"verify-rui build {missing}", stderr.getvalue())
                 self.assertFalse((cache / "out").exists())
 
-    def test_git_publication_is_orphan_append_only_and_retries_on_concurrent_tip(self):
+
+
+    def test_native_publish_remote_spellings_and_invalid_capture_paths(self):
+        for url in ("https://github.com/owner/repo", "https://github.com/owner/repo.git",
+                    "git@github.com:owner/repo.git", "ssh://git@github.com/owner/repo.git"):
+            self.assertEqual(self.helper["github_repository"](url), "owner/repo")
+        with self.assertRaisesRegex(ValueError, "GitHub"):
+            self.helper["github_repository"]("https://example.test/owner/repo")
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            repo, remote = root / "work", root / "remote.git"
-            def git(*args, cwd=repo):
-                return subprocess.check_output(["git", "-C", str(cwd), *args], text=True, stderr=subprocess.PIPE).strip()
-            subprocess.run(["git", "init", "-q", str(repo)], check=True)
-            subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True)
-            git("config", "user.name", "Test")
-            git("config", "user.email", "test@example.test")
-            (repo / "source").write_text("original")
-            git("add", "source")
-            git("commit", "-qm", "source")
-            git("remote", "add", "origin", str(remote))
-            original = git("rev-parse", "HEAD")
-            (repo / "source").write_text("staged")
-            git("add", "source")
-            (repo / "source").write_text("unstaged")
-            status, index = git("status", "--porcelain"), (repo / ".git/index").read_bytes()
-            image = root / "a.png"
-            image.write_bytes(b"first")
-            publish = self.helper["push_evidence"]
-            first, prefix = publish(repo, "origin", self.head, {"before/a.png": image})
-            self.assertEqual(git("show", f"{first}:{prefix}/before/a.png"), "first")
-            self.assertEqual(git("rev-list", "--parents", first), first)
-            image.write_bytes(b"second")
-            real_run = subprocess.run
-            pushes = []
-            competing = []
-            def concurrent(argv, **kwargs):
-                if "push" in argv:
-                    pushes.append(argv)
-                    if len(pushes) == 1:
-                        tree = git("rev-parse", first + "^{tree}")
-                        parent = git("-c", "user.name=Other", "-c", "user.email=other@example.test",
-                                     "commit-tree", tree, "-p", first, "-m", "concurrent", cwd=remote)
-                        git("update-ref", "refs/heads/pr-evidence", parent, cwd=remote)
-                        competing.append(parent)
-                return real_run(argv, **kwargs)
-            with patch("subprocess.run", concurrent), patch("time.sleep") as backoff, contextlib.redirect_stderr(io.StringIO()):
-                second, second_prefix = publish(repo, "origin", self.head, {"after/a.png": image})
-            self.assertEqual(len(pushes), 2)
-            backoff.assert_called_once_with(1)
-            self.assertEqual(git("rev-parse", second + "^"), competing[0])
-            self.assertEqual(git("show", f"{second}:{prefix}/before/a.png"), "first")
-            self.assertEqual(git("show", f"{second}:{second_prefix}/after/a.png"), "second")
-            self.assertEqual(git("rev-parse", "HEAD"), original)
-            self.assertEqual(git("status", "--porcelain"), status)
-            self.assertEqual((repo / ".git/index").read_bytes(), index)
-            self.assertEqual(git("for-each-ref", "refs/verify-rui"), "")
-            def rejected(argv, **kwargs):
-                if "push" in argv:
-                    return types.SimpleNamespace(returncode=1, stdout="", stderr="rejected")
-                return real_run(argv, **kwargs)
-            with (patch("subprocess.run", rejected), patch("time.sleep") as backoff,
-                  contextlib.redirect_stderr(io.StringIO()), self.assertRaisesRegex(ValueError, "4 attempts")):
-                publish(repo, "origin", self.head, {"after/a.png": image})
-            self.assertEqual([c.args[0] for c in backoff.call_args_list], [1, 2, 4])
-            self.assertEqual(git("for-each-ref", "refs/verify-rui"), "")
+            out = Path(directory)
+            record = self.capture(out)
+            for name in ("../outside.png", str(out / "overview@140x40.png")):
+                record["files"]["png"] = name
+                (out / "frames.json").write_text(json.dumps([record]))
+                with self.subTest(name=name), self.assertRaisesRegex(ValueError, "invalid capture file"):
+                    self.helper["publication_frames"](out)
+
+    def publish(self, out, pr="1549", ssh=False, **options):
+        """Exercise the real CLI boundary with a fake gh executable on PATH."""
+        fake = out.parent / "fake-gh"
+        fake.mkdir(exist_ok=True)
+        config = fake / "config.json"
+        log = fake / "commands.jsonl"
+        log.write_text("")
+        config.write_text(json.dumps({"body": "attribution\n\n## Summary\nsummary\n\n## Screens\npending\n\n## Evidence\nkeep evidence\n\n## Merge danger\nkeep danger\nfooter\n", **options}))
+        # Make origin deterministic on forks; reject any attempt to write through git.
+        git = fake / "git"
+        git.write_text("#!" + sys.executable + "\nimport sys\nassert sys.argv[-3:] == ['remote', 'get-url', 'origin']\nprint('https://github.com/DivyanshGolyan/rui.git')\n")
+        git.chmod(0o755)
+        executable = fake / "gh"
+        executable.write_text("#!" + sys.executable + "\n" + r'''import hashlib, json, os, re, sys
+from pathlib import Path
+from urllib.parse import quote
+config = Path(os.environ["FAKE_GH_CONFIG"])
+data = json.loads(config.read_text())
+args = sys.argv[1:]
+event = {"argv": args, "cwd": os.getcwd()}
+if args[:2] == ["pr", "edit"] and "--body-file" in args:
+    event["body"] = Path(args[args.index("--body-file") + 1]).read_text()
+with open(os.environ["FAKE_GH_LOG"], "a") as log:
+    log.write(json.dumps(event) + "\n")
+if args == ["--version"]:
+    version = "2.89.0" if data.get("local_old") and not Path.cwd().name.startswith("verify-rui-attachments.") else data.get("version", "2.104.0")
+    print("gh version " + version)
+elif args == ["pr", "edit", "--help"]:
+    print("--attach file" if data.get("attach_help", True) else "--body-file file")
+elif args == ["auth", "token"]:
+    if data.get("no_token"):
+        sys.exit(1)
+    print(data.get("token", "ghp_fake_test_token"))
+elif args[0] == "api":
+    endpoint = args[1]
+    if "/pulls?" in endpoint:
+        print(json.dumps([{"number": 1549}] if not data.get("no_pr") else []))
+    elif "/pulls/" in endpoint:
+        print(json.dumps({"body": data["body"]}))
+    else:
+        print(json.dumps({"permissions": {"push": data.get("push", True)}}))
+elif args[:2] == ["pr", "edit"]:
+    body = event["body"]
+    files = [args[i + 1] for i, value in enumerate(args) if value == "--attach"]
+    if data.get("partial_failure"):
+        files = files[:1]
+    for attachment in files:
+        name, alt = attachment.rsplit("#", 1)
+        assert Path(name).is_file(), name
+        reference = "![" + alt + "](" + quote(name, safe="/@") + ")"
+        url = "https://github.com/user-attachments/assets/" + hashlib.sha256(name.encode()).hexdigest()
+        body = body.replace(reference, "![" + alt + "](" + url + ")")
+    if data.get("mangle"):
+        body = body.replace("![", "[")
+    data["body"] = body
+    config.write_text(json.dumps(data))
+    print("https://github.com/DivyanshGolyan/rui/pull/1549")
+    sys.exit(1 if data.get("partial_failure") else 0)
+else:
+    raise AssertionError(args)
+''')
+        executable.chmod(0o755)
+        if ssh:
+            transport = r'''import json, os, shlex, shutil, subprocess, sys, tempfile
+from pathlib import Path
+args = sys.argv[1:]
+kind = Path(sys.argv[0]).name
+config = json.loads(Path(os.environ["FAKE_GH_CONFIG"]).read_text())
+event = {"transport": kind, "argv": args, "cwd": os.getcwd()}
+if kind == "scp":
+    source, target = args[-2:]
+    destination = target.split(":", 1)[1]
+    event["files"] = sorted(str(p.relative_to(Path(source))) for p in Path(source).rglob("*") if p.is_file())
+with open(os.environ["FAKE_GH_LOG"], "a") as log:
+    log.write(json.dumps(event) + "\n")
+if kind == "scp":
+    if config.get("scp_failure"):
+        print("copy failed", file=sys.stderr)
+        sys.exit(1)
+    shutil.copytree(source, destination, dirs_exist_ok=True)
+else:
+    command = shlex.split(args[-1])
+    if command[0] == "mktemp":
+        print(tempfile.mkdtemp(prefix="verify-rui-attachments."))
+    elif command[0] == "rm":
+        shutil.rmtree(command[-1])
+    elif command[0] == "python3":
+        sys.exit(subprocess.run([sys.executable, *command[1:]]).returncode)
+    else:
+        raise AssertionError(command)
+'''
+            for name in ("ssh", "scp"):
+                program = fake / name
+                program.write_text("#!" + sys.executable + "\n" + transport)
+                program.chmod(0o755)
+        command = [sys.executable, str(SCRIPT), "publish", str(out)]
+        if ssh:
+            command += ["--ssh", "test-box"]
+        if pr is not None:
+            command += ["--pr", pr]
+        result = subprocess.run(command, capture_output=True, text=True,
+            env={**os.environ, "PATH": str(fake) + os.pathsep + os.environ["PATH"],
+                 "FAKE_GH_CONFIG": str(config), "FAKE_GH_LOG": str(log)})
+        calls = [json.loads(line) for line in log.read_text().splitlines()]
+        for call in calls:
+            if call.get("transport") == "scp":
+                self.addCleanup(shutil.rmtree, call["argv"][-1].split(":", 1)[1], ignore_errors=True)
+        return result, calls, json.loads(config.read_text())["body"]
+
+    def test_native_publish_command_alt_text_placement_and_readback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            out = Path(directory) / "captures with spaces"
+            self.comparison(out)
+            result, calls, body = self.publish(out)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            edits = [call for call in calls if "--body-file" in call["argv"]]
+            self.assertEqual(len(edits), 1)
+            args = edits[0]["argv"]
+            self.assertEqual(args[:5], ["pr", "edit", "1549", "-R", "DivyanshGolyan/rui"])
+            self.assertEqual(edits[0]["cwd"], str(out))
+            attachments = [args[i + 1] for i, value in enumerate(args) if value == "--attach"]
+            self.assertEqual(attachments, [f"{side}/changed@140x40.{ext}#changed 140x40 {side}" +
+                                          (" recording" if ext == "gif" else "")
+                                          for side in ("before", "after") for ext in ("png", "gif")])
+            self.assertIn("![changed 140x40 before](before/changed@140x40.png)", edits[0]["body"])
+            self.assertIn("| Size | Before | After |", body)
+            self.assertIn(self.head, body)
+            self.assertIn(self.base, body)
+            self.assertIn("Sizes: 140x40", body)
+            self.assertIn("Surface: plain PTY, L1 synthetic input", body)
+            self.assertNotIn("pending", body)
+            self.assertNotIn("same@", body)
+            self.assertTrue(body.startswith("attribution\n\n## Summary\nsummary"))
+            self.assertTrue(body.endswith("keep danger\nfooter\n"))
+            self.assertEqual(body.count("## Screens"), 1)
+            self.assertEqual(body.count("https://github.com/user-attachments/assets/"), 4)
+            self.assertEqual(calls[-1]["argv"], ["api", "repos/DivyanshGolyan/rui/pulls/1549"])
+            self.assertIn("4 embedded Screens attachments verified by readback", result.stdout)
+
+    def test_native_publish_single_build_requires_explicit_pr(self):
+        with tempfile.TemporaryDirectory() as directory:
+            out = Path(directory) / "frames"
+            record = self.capture(out)
+            (out / "frames.json").write_text(json.dumps([record]))
+            result, calls, body = self.publish(out)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(any("/pulls?" in str(c["argv"]) for c in calls))
+            self.assertIn("Base: none (single build)", body)
+            self.assertIn("![overview 140x40 after](https://github.com/user-attachments/", body)
+            self.assertIn("2 embedded Screens attachments", result.stdout)
+            result, calls, _body = self.publish(out, pr=None)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("required: --pr", result.stderr)
+            self.assertEqual(calls, [])
+
+    def test_native_publish_refuses_missing_cli_capability_or_push_token(self):
+        cases = (({"version": "2.103.0"}, "gh 2.104.0+"),
+                 ({"attach_help": False}, "gh 2.104.0+"),
+                 ({"no_token": True}, "classic PAT or gh OAuth token"),
+                 ({"token": "github_pat_fine_grained"}, "classic PAT or gh OAuth token"),
+                 ({"push": False}, "push access"))
+        with tempfile.TemporaryDirectory() as directory:
+            out = Path(directory) / "frames"
+            self.comparison(out)
+            for options, reason in cases:
+                with self.subTest(options=options):
+                    result, calls, _body = self.publish(out, **options)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(len(result.stderr.splitlines()), 1)
+                    self.assertIn(reason, result.stderr)
+                    self.assertFalse(any("--body-file" in c["argv"] for c in calls))
+                    self.assertEqual(result.stdout, "")
+                    self.assertNotIn("ghp_fake_test_token", result.stderr)
+
+    def test_native_publish_detects_filtered_readback_and_partial_upload(self):
+        with tempfile.TemporaryDirectory() as directory:
+            out = Path(directory) / "frames"
+            self.comparison(out)
+            for options, message in (({"mangle": True}, "missing embedded Screens attachments"),
+                                     ({"partial_failure": True}, "PR may be partially updated")):
+                with self.subTest(options=options):
+                    result, calls, _body = self.publish(out, **options)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(message, result.stderr)
+                    self.assertEqual(result.stdout, "")
+                    self.assertEqual(calls[-1]["argv"], ["api", "repos/DivyanshGolyan/rui/pulls/1549"])
+                    self.assertIn("inspect", result.stderr)
+
+    def test_native_publish_batches_at_cli_limit_and_preserves_previous_uploads(self):
+        with tempfile.TemporaryDirectory() as directory:
+            out = Path(directory) / "frames"
+            records = [self.capture(out, name=f"state-{i}") for i in range(26)]
+            (out / "frames.json").write_text(json.dumps(records))
+            result, calls, body = self.publish(out, token="gho_fake_oauth_token")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            edits = [c for c in calls if "--body-file" in c["argv"]]
+            self.assertEqual([c["argv"].count("--attach") for c in edits], [50, 2])
+            self.assertEqual(edits[1]["body"].count("https://github.com/user-attachments/"), 50)
+            self.assertEqual(body.count("https://github.com/user-attachments/"), 52)
+            self.assertIn("52 embedded Screens attachments", result.stdout)
+
+    def test_ssh_publisher_uses_same_worker_copies_only_selected_files_and_cleans(self):
+        with tempfile.TemporaryDirectory() as directory:
+            out = Path(directory) / "frames"
+            self.comparison(out)
+            (out / "secret.txt").write_text("must not copy")
+            result, calls, body = self.publish(out, ssh=True, local_old=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            copies = [c for c in calls if c.get("transport") == "scp"]
+            self.assertEqual(len(copies), 1)
+            self.assertEqual(set(copies[0]["files"]), {"__verify_rui_publish__.py", "__publish_job__.json",
+                *(f"{side}/changed@140x40.{ext}" for side in ("before", "after") for ext in ("png", "gif"))})
+            edits = [c for c in calls if "--body-file" in c["argv"]]
+            self.assertEqual(len(edits), 1)
+            remote = Path(edits[0]["cwd"])
+            self.assertTrue(remote.name.startswith("verify-rui-attachments."))
+            self.assertFalse(remote.exists())
+            self.assertEqual(calls[-1]["transport"], "ssh")
+            self.assertIn("rm -rf -- /tmp/verify-rui-attachments.", calls[-1]["argv"][-1])
+            self.assertEqual(body.count("https://github.com/user-attachments/assets/"), 4)
+            self.assertTrue(body.startswith("attribution"))
+            self.assertTrue(body.endswith("keep danger\nfooter\n"))
+
+    def test_ssh_publisher_cleans_after_copy_or_readback_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            out = Path(directory) / "frames"
+            self.comparison(out)
+            for options in ({"scp_failure": True}, {"mangle": True}, {"no_token": True}):
+                with self.subTest(options=options):
+                    result, calls, _body = self.publish(out, ssh=True, **options)
+                    self.assertNotEqual(result.returncode, 0)
+                    cleanup = calls[-1]
+                    self.assertEqual(cleanup.get("transport"), "ssh")
+                    self.assertIn("rm -rf -- /tmp/verify-rui-attachments.", cleanup["argv"][-1])
+                    self.assertFalse(Path(cleanup["argv"][-1].split()[-1]).exists())
+
+    def test_screens_parts_preserves_fenced_example_and_other_sections(self):
+        body = "## Summary\n```md\n## Screens\nfake\n```\n\n## Screens\nold\n\n## Evidence\nproof\n"
+        prefix, screens, suffix = self.helper["screens_parts"](body)
+        self.assertIn("fake", prefix)
+        self.assertEqual(screens, "## Screens\nold\n\n")
+        self.assertEqual(suffix, "## Evidence\nproof\n")
 
 
 if __name__ == "__main__":

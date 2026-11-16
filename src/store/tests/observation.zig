@@ -1,5 +1,3 @@
-//! Observation Store conformance tests.
-
 const shared_fixtures = @import("../tests.zig");
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
@@ -29,7 +27,6 @@ test "Message request state has one Host precedence rule" {
     };
     try std.testing.expectEqual(protocol.MessageRequestState.queued, observed.requestState().?);
     observed.kind.message.?.work.?.state = .{ .approval = .{ .since = 2 } };
-    // A queued admission behind another Turn needing approval also waits.
     try std.testing.expectEqual(protocol.MessageRequestState.waiting_for_permission, observed.requestState().?);
     const binding: AttemptBinding = .{ .turn_id = 3, .operation_id = 4, .attempt_ordinal = 1 };
     observed.kind.message.?.queue.?.state = .{ .processing = binding };
@@ -98,8 +95,6 @@ test "Message observation keeps bounded newest Action recovery across continuati
                 try std.testing.expectEqual(ids[5 - i], call.action_id);
                 try std.testing.expectEqual(operations[(5 - i) / 2], call.operation_id);
             }
-            // A later Turn does not inherit old recovery, and its own recovery
-            // cannot backfill this completed request's bounded Operation range.
             try submitTestMessage(&storage, &tmp, "recovery-next-input", "recovery-next", session.slice(), "next");
             const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             var newer = try store_testing.observeCommandForTesting(&storage, "recovery-next");
@@ -202,8 +197,6 @@ test "observation since falls back for foreign future uncovered and restarted to
                 try expectFull(&storage, foreign, saved, &observed);
                 try expectFull(&storage, saved.at(saved.generation + 1), saved, &observed);
 
-                // An older token is uncovered after the ring has forgotten a
-                // generation, even when that generation only names a sibling.
                 var sibling = try completeConfiguration("observe-fallback-sibling", "", workspace, "model-a");
                 try std.testing.expect(try storage.configure(&sibling, .{}) == .accepted);
                 const generation = storage.commit_generation.load(.acquire);
@@ -298,9 +291,7 @@ test "activity since sibling commit preserves end and own commit returns new ite
             try storage.activityPage(&request, &page);
             try std.testing.expect(page.not_modified);
             try std.testing.expectEqualDeep(token, page.token.?);
-            // The unchanged answer deliberately leaves the caller's page intact.
             try std.testing.expectEqual(end, page.end);
-            // Bounded and backward traversals must not reuse a follow hint.
             request.end = end;
             try storage.activityPage(&request, &page);
             try std.testing.expect(!page.not_modified);
@@ -325,12 +316,10 @@ test "activity since sibling commit preserves end and own commit returns new ite
             try std.testing.expect(!page.not_modified);
             try std.testing.expect(page.count > 0);
             try std.testing.expectEqualDeep(token.at(storage.commit_generation.load(.acquire)), page.token.?);
-            // A second changed field gives this fixture two actual public rows.
             var second_update = try completeConfiguration("activity-token-second-update", parent.slice(), workspace, "model-a");
             second_update.configuration.label.state = .value;
             try second_update.configuration.label.value.set("Second own change");
             try std.testing.expect(try storage.configure(&second_update, .{}) == .accepted);
-            // A page with unread lookahead cannot issue a follow token.
             request.position = 0;
             request.limit = 1;
             request.since = null;
@@ -345,15 +334,12 @@ test "activity since sibling commit preserves end and own commit returns new ite
             try std.testing.expect(!page.not_modified);
             try std.testing.expect(page.end > end);
             try std.testing.expect(page.count > 0);
-            // A queued message is pending: it cannot grant a token because
-            // pending also represents a retry whose deadline has elapsed.
             try std.testing.expect(page.token == null);
             var found = false;
             for (page.items[0..page.count]) |*item| {
                 found = found or item.value == .admission;
             }
             try std.testing.expect(found);
-            // A token for the sibling must never suppress this Session's read.
             request.since.?.session = sibling_session.slice()[0..protocol.session_id_bytes].*;
             try storage.activityPage(&request, &page);
             try std.testing.expect(!page.not_modified);

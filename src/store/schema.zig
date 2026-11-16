@@ -1,7 +1,3 @@
-//! The Store schema as one value: its tables and indexes, from which each
-//! engine's DDL derives. A new database gets the DDL; an existing one's
-//! stored DDL is compared with it when it opens.
-
 const std = @import("std");
 const session_settings = @import("../session_settings.zig");
 const store_path = @import("../store_path.zig");
@@ -19,17 +15,13 @@ const c = sqlite.c;
 const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql;
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
-pub const application_id: u32 = 0x4c544631; // LTF1
+pub const application_id: u32 = 0x4c544631;
 pub const schema_version: u32 = 76;
 
 pub const IdentityMismatch = struct {
     saved_selector: Bounded(store_path.max_bytes) = .{},
 };
 
-/// `digest()` of each schema_version, oldest first. Each format PR appends
-/// its own version and forward step (D226); main's digests and steps are
-/// immutable even before release. tests/ci/test_store_schema_version.py
-/// checks both main's prefix and every released format.
 pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 45, .digest = 0xcc384bb0b78d3949 },
     .{ .schema_version = 46, .digest = 0xf3129842e4a7d447 },
@@ -79,44 +71,15 @@ comptime {
     ));
 }
 
-/// The oldest format a Store moves forward from (D204). An older Store, or
-/// a newer one, is refused with WrongStoreVersion, as before migrations.
 pub const migration_baseline: u32 = 51;
 
-/// One forward step of the Store format, from `from` to `from + 1`, as
-/// statements per engine. SQLite runs `sqlite` when a Store opens
-/// (`openExisting`). Rui runs no DDL on MySQL (D203): the DB team runs
-/// `mysql`, which `mysqlMigration` joins. Every statement is one string
-/// literal, so the source is the text that runs: a CHECK or predicate is
-/// copied from the schema's rendered text (`ddl`), whose source passed
-/// `rsql.expressionError`, and the migration tests hold the migrated Store
-/// to that text. tests/ci/test_store_schema_version.py refuses an entry
-/// that is anything but literals, and compares every step whose `from` is
-/// below the released schema_version with its text at the release.
-///
-/// SQLite keeps each CREATE text as run, and a Store opens only when every
-/// object's text equals a fresh bootstrap's. ALTER TABLE ADD COLUMN splices
-/// the new column into the stored text, and RENAME quotes the new name, so
-/// a step that changes a table rebuilds it: it renames the table aside,
-/// creates it with the new text, copies its rows, drops the old table and
-/// creates its indexes again. `migrate` runs the steps with foreign keys
-/// off and legacy_alter_table on, so other tables' references keep the
-/// table's name, and checks every foreign key before it commits.
 pub const Migration = struct {
     from: u32,
     sqlite: []const [:0]const u8,
     mysql: []const [:0]const u8,
 };
 
-/// Every step from `migration_baseline` to `schema_version`, oldest first.
-/// The baseline snapshots (migration_baseline.*.sql) never change; the
-/// chain grows; steps already on main or released never change (D226).
 pub const migrations = [_]Migration{
-    // 52 (T1e): MCP tool records name their server, host_catalog originally named
-    // the Host tool set, which holds up to
-    // max_host_tool_records. Every record so far is Rui's or a provider's,
-    // so its server is empty. MySQL names a table's CHECKs in order, so
-    // the third of tool_record and of tool_set is the one replaced.
     .{
         .from = 51,
         .sqlite = &.{
@@ -139,7 +102,6 @@ pub const migrations = [_]Migration{
             "CREATE TABLE host_catalog(\n slot BIGINT NOT NULL,\n tool_set_id BIGINT NOT NULL,\n PRIMARY KEY(slot),\n FOREIGN KEY(tool_set_id) REFERENCES tool_set(tool_set_id),\n CHECK(slot=1)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
         },
     },
-    // Schema 53: a Session's parent (D27).
     .{
         .from = 52,
         .sqlite = &.{
@@ -153,17 +115,6 @@ pub const migrations = [_]Migration{
             "ALTER TABLE session ADD COLUMN parent_ref VARCHAR(6),ADD FOREIGN KEY(parent_ref) REFERENCES session(session_ref),ADD CHECK(parent_ref IS NULL OR parent_ref<>session_ref)",
         },
     },
-    // Schema 54: the stops an attached child owes (D38) and the endings
-    // its parent is owed (D39), and independently loaded tools (T4a):
-    // NULL loaded_tool_set_id keeps the full configured set.
-    // Then (8b): each Store gets a random store_id. On MySQL,
-    // store_owner and content_chunk are new; each content's payload moves
-    // into chunks of content_chunk_bytes (chunk.i reaches 9999, past the
-    // 8192 chunks of the largest content) before the column goes; each
-    // leading partial index gets its generated first column; store_meta's
-    // one CHECK and content's fourth are the ones replaced. session_parent
-    // gets its plain twin first, since parent_ref's foreign key needs an
-    // index that leads with it.
     .{
         .from = 53,
         .sqlite = &.{
@@ -224,8 +175,6 @@ pub const migrations = [_]Migration{
             "CREATE INDEX session_forward_feed ON session_forward(target_ref,position)",
         },
     },
-    // Schema 55 (C2a, D226): saved model facts and their publication source.
-    // Both tables start empty until the first successful catalog refresh.
     .{
         .from = 54,
         .sqlite = &.{
@@ -237,7 +186,6 @@ pub const migrations = [_]Migration{
             "CREATE TABLE model_catalog_source(\n slot BIGINT NOT NULL,\n etag TEXT,\n generation BIGINT NOT NULL,\n fetched_at BIGINT NOT NULL,\n PRIMARY KEY(slot),\n CHECK(slot=1),\n CHECK(etag IS NULL OR OCTET_LENGTH(etag)<=512)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
         },
     },
-    // Schema 56: bounded outcome-unknown Message recovery and wire 9.
     .{
         .from = 55,
         .sqlite = &.{
@@ -249,8 +197,6 @@ pub const migrations = [_]Migration{
             "UPDATE store_meta SET meta_value='9' WHERE meta_key='wire_version' AND meta_value='8'",
         },
     },
-    // Schema 57: archive intent retains its original stop, and Commands
-    // retain their requested archive value for replay and observation.
     .{
         .from = 56,
         .sqlite = &.{
@@ -284,8 +230,6 @@ pub const migrations = [_]Migration{
             "ALTER TABLE session_ending_owed ADD COLUMN suppress_message TINYINT NOT NULL DEFAULT 0, ADD CHECK(suppress_message IN (0,1))",
         },
     },
-    // Schema 58: failed-send targets become nullable on wire 10. Saved
-    // Commands and sender refusals keep their original identity and position.
     .{
         .from = 57,
         .sqlite = &.{
@@ -296,7 +240,6 @@ pub const migrations = [_]Migration{
         },
     },
     .{
-        // Schema 59: append-only skill catalogs on unreleased native wire 10.
         .from = 58,
         .sqlite = &.{
             "CREATE TABLE session_skill_catalog(\n session_ref TEXT NOT NULL REFERENCES session(session_ref),\n position INTEGER NOT NULL CHECK(position>=0),\n catalog_content_id INTEGER NOT NULL REFERENCES content(content_id),\n PRIMARY KEY(session_ref,position)\n) STRICT, WITHOUT ROWID",
@@ -311,11 +254,6 @@ pub const migrations = [_]Migration{
             "ALTER TABLE conversation_entry MODIFY turn_id BIGINT NULL, ADD COLUMN source_catalog_position BIGINT AFTER source_revision, ADD UNIQUE(session_ref,source_catalog_position), ADD FOREIGN KEY(session_ref,source_catalog_position) REFERENCES session_skill_catalog(session_ref,position), DROP CHECK conversation_entry_chk_7, ADD CHECK((turn_id IS NULL)=(source_catalog_position IS NOT NULL)), ADD CHECK(source_catalog_position IS NULL OR source_catalog_position=session_position), ADD CHECK((entry_kind=1 AND source_admission_id IS NOT NULL AND source_revision IS NULL AND source_catalog_position IS NULL AND source_operation_id IS NULL) OR (entry_kind=2 AND source_admission_id IS NULL AND ((source_revision IS NOT NULL AND source_catalog_position IS NULL) OR (source_revision IS NULL AND source_catalog_position IS NOT NULL)) AND source_operation_id IS NULL) OR (entry_kind=3 AND source_admission_id IS NULL AND source_revision IS NULL AND source_catalog_position IS NULL AND source_operation_id IS NOT NULL))",
         },
     },
-    // Schema 60 (wire 11): a Message's `/name` words bind skills after
-    // send. message_skill keeps each bound skill's body, and a skill entry
-    // (kind 4) projects it right after its Message's entry. MySQL rebuilds
-    // conversation_entry too, in a fresh Store's order, so no CHECK is
-    // dropped by a name MySQL generated.
     .{
         .from = 59,
         .sqlite = &.{
@@ -338,8 +276,6 @@ pub const migrations = [_]Migration{
             "UPDATE store_meta SET meta_value='11' WHERE meta_key='wire_version' AND meta_value='10'",
         },
     },
-    // Schema 61 (D227): call lines retain up to 200 decoded UTF-8 bytes.
-    // Existing lines already fit; rebuilding only changes their byte bounds.
     .{
         .from = 60,
         .sqlite = &.{
@@ -365,10 +301,6 @@ pub const migrations = [_]Migration{
             "ALTER TABLE model_tool_call DROP CHECK model_tool_call_chk_3, ADD CHECK(description IS NULL OR OCTET_LENGTH(description) BETWEEN 1 AND 200)",
         },
     },
-    // Schema 62 (D184): the frozen MCP ordering hint is record identity.
-    // Existing records remain read_only=0 with their original digests.
-    // MySQL's original CHECK names run through 5 after the step to 52;
-    // append the read_only CHECK as 6, leaving existing names untouched.
     .{
         .from = 61,
         .sqlite = &.{
@@ -383,11 +315,6 @@ pub const migrations = [_]Migration{
             "ALTER TABLE tool_record ADD CHECK(read_only IN (0,1) AND (read_only=0 OR owner='mcp'))",
         },
     },
-    // Schema 63: the Store keeps the four usage counts, not the provider's
-    // raw usage report. Reports no other row shares are deleted with it;
-    // the file keeps the freed pages until it is vacuumed. MySQL's
-    // usage_content_id foreign key is its third and the counts' CHECK its
-    // 28th, as the baseline created them.
     .{
         .from = 62,
         .sqlite = &.{
@@ -411,7 +338,6 @@ pub const migrations = [_]Migration{
             "ALTER TABLE model_operation DROP COLUMN usage_content_id",
         },
     },
-    // Schema 64: name the Host tool set and runner-independent timeout.
     .{
         .from = 63,
         .sqlite = &.{
@@ -428,8 +354,6 @@ pub const migrations = [_]Migration{
             "ALTER TABLE action_operation ADD CHECK(attempt_timeout_ms IS NULL OR attempt_timeout_ms>0), ADD CHECK((attempt_ordinal=0 AND attempt_timeout_ms IS NULL) OR (attempt_ordinal=1 AND attempt_timeout_ms IS NOT NULL))",
         },
     },
-    // Schema 65: Session sets become intent, conservatively retaining current
-    // names. Each old Operation keeps the offer of its own settings revision.
     .{
         .from = 64,
         .sqlite = &.{
@@ -451,7 +375,6 @@ pub const migrations = [_]Migration{
             "ALTER TABLE model_operation MODIFY tool_set_id BIGINT NOT NULL,ADD CHECK(tool_set_id>0),ADD FOREIGN KEY(tool_set_id) REFERENCES tool_set(tool_set_id)",
         },
     },
-    // Schema 66 (base 65 + 1): Operation-owned effort emissions/refusals and wire 13.
     .{
         .from = 65,
         .sqlite = &.{
@@ -503,7 +426,6 @@ pub const migrations = [_]Migration{
             "UPDATE store_meta SET meta_value='13' WHERE meta_key='wire_version' AND meta_value='12'",
         },
     },
-    // Schema 67 (D39, D180): the first ending hop is the sole owed fact.
     .{
         .from = 66,
         .sqlite = &.{
@@ -526,7 +448,6 @@ pub const migrations = [_]Migration{
             "CREATE INDEX session_forward_message ON session_forward(message_delivered,source_id)",
         },
     },
-    // Schema 68 (D219): final-attempt timings stay absent on old Operations.
     .{
         .from = 67,
         .sqlite = &.{
@@ -537,11 +458,6 @@ pub const migrations = [_]Migration{
             "ALTER TABLE model_operation ADD COLUMN latency_ms BIGINT CHECK(latency_ms IS NULL OR latency_ms>=0) AFTER previous_effort_override, ADD COLUMN first_event_ms BIGINT CHECK(first_event_ms IS NULL OR first_event_ms>=0) AFTER latency_ms",
         },
     },
-    // Schema 69 (D238): freeze capacity once per model Operation. This literal
-    // mapping is the pre-change shipped snapshot, not a live catalog lookup.
-    // Old rows retain legacy escalation policy, not an invented saved window.
-    // Chunk the temporary mapping below the Store's SQL-length limit. Default
-    // and null windows need no entry: the backfill's literal fallback owns them.
     .{
         .from = 68,
         .sqlite = &.{
@@ -671,7 +587,6 @@ pub const migrations = [_]Migration{
             "UPDATE store_meta SET meta_value='16' WHERE meta_key='wire_version' AND meta_value='15'",
         },
     },
-    // D239: the nullable fact and its live index are the durable frontier.
     .{
         .from = 72,
         .sqlite = &.{
@@ -687,10 +602,6 @@ pub const migrations = [_]Migration{
             "WITH RECURSIVE own_owed(session_ref,since) AS (SELECT t.session_ref,m.admitted_at AS since FROM turn t JOIN message_admission m ON m.admission_id=t.first_admission_id WHERE t.outcome_code IS NULL UNION SELECT m.session_ref,m.admitted_at FROM message_admission m WHERE m.turn_id IS NULL AND m.admission_id>coalesce((SELECT admission_cutoff FROM session_stop WHERE session_ref=m.session_ref ORDER BY admission_cutoff DESC LIMIT 1),0) UNION SELECT f.target_ref,m.admitted_at FROM session_forward f LEFT JOIN action_operation a ON f.kind=1 AND a.action_id=f.source_id LEFT JOIN model_operation op ON op.operation_id=a.parent_operation_id JOIN turn t ON t.turn_id=CASE WHEN f.kind=2 THEN f.source_id ELSE op.turn_id END JOIN message_admission m ON m.admission_id=t.first_admission_id WHERE f.position IS NULL OR f.message_delivered=0),owed(session_ref,since) AS (SELECT session_ref,since FROM own_owed UNION SELECT s.parent_ref,o.since FROM owed o JOIN session s ON s.session_ref=o.session_ref WHERE s.parent_ref IS NOT NULL) UPDATE session s JOIN (SELECT session_ref,min(since) AS since FROM owed GROUP BY session_ref) o ON o.session_ref=s.session_ref SET s.obligation_since=o.since",
         },
     },
-    // Schema 74: the Store keeps no wire label. Each wire check uses the wire
-    // the running Host reports (host_info), so a wire bump needs no format
-    // step. The key CHECK keeps the retired name: narrowing it on SQLite
-    // would rebuild store_meta, whose CREATE text open compares.
     .{
         .from = 73,
         .sqlite = &.{
@@ -787,11 +698,6 @@ comptime {
     ));
 }
 
-/// The statements of the step from `from`, as one text for the DB team to
-/// run on a MySQL Store at `from`; `ddl(.mysql)` is a new MySQL Store's.
-/// `rui store schema --engine mysql --from N` prints the remaining steps. Rui takes
-/// no backup of a MySQL Store: backing it up before applying the text is the
-/// DB team's job.
 pub fn mysqlMigration(comptime from: u32) [:0]const u8 {
     return comptime blk: {
         if (from < migration_baseline or from - migration_baseline >= migrations.len)
@@ -803,10 +709,6 @@ pub fn mysqlMigration(comptime from: u32) [:0]const u8 {
     };
 }
 
-/// All forward steps from a runtime-selected format, oldest first, without
-/// allocation. After the steps, set the format once, as opening the
-/// migrated Store requires it to match this build. The current format needs
-/// no SQL; unsupported formats have no text.
 pub fn mysqlMigrationFrom(from: u64) ?[:0]const u8 {
     const texts = comptime blk: {
         var result: [schema_version - migration_baseline + 1][:0]const u8 = undefined;
@@ -845,10 +747,6 @@ test "store schema --from prints every remaining MySQL migration then sets the f
     try std.testing.expect(mysqlMigrationFrom(std.math.maxInt(u64)) == null);
 }
 
-/// SQL membership of `column` in a closed set of enum tags or text literals:
-/// IN up to two values, else an OR of equalities, because SQLite builds a
-/// temporary b-tree for an IN list of more than two each time the statement
-/// runs.
 pub inline fn oneOf(comptime column: []const u8, comptime set: anytype) []const u8 {
     return comptime blk: {
         var names: []const []const u8 = &.{};
@@ -863,10 +761,6 @@ pub inline fn oneOf(comptime column: []const u8, comptime set: anytype) []const 
     };
 }
 
-/// The Resolutions whose output later context reads, as fixed literals: the
-/// `model_operation_context_history` predicate and every query that must
-/// repeat it term for term share this set, so the Store format never follows
-/// `turn_policy.accepted` silently.
 pub const accepted_resolutions = [_]turn_policy.Resolution{ .answer, .compacted, .tool_proposals };
 comptime {
     if (!std.mem.eql(turn_policy.Resolution, &accepted_resolutions, &turn_policy.accepted))
@@ -877,20 +771,13 @@ pub inline fn resolutionIs(comptime column: []const u8, comptime resolution: tur
     return column ++ "='" ++ @tagName(resolution) ++ "'";
 }
 
-/// Byte bounds of a text or bytes column.
 pub const Octets = struct { min: u32 = 0, max: u32 };
 
 pub const ColumnType = union(enum) {
-    /// 64-bit integer; range checks beyond that are the column's `check`.
     int,
-    /// 0 or 1, never a boolean type, so `c=1` reads the same on every engine.
     flag,
-    /// UTF-8 text with a CHECK on its bytes, or null for unchecked text.
     text: ?Octets,
-    /// Bytes with a CHECK on their length, or null for unchecked bytes.
     bytes: ?Octets,
-    /// A closed set of literal text. The format never follows a Zig enum
-    /// silently: changing a set changes the format.
     tag: []const []const u8,
 };
 
@@ -899,21 +786,12 @@ pub const Column = struct {
     type: ColumnType,
     nullable: bool = false,
     default: ?[]const u8 = null,
-    /// Rui SQL, joined to the type's own CHECK with AND.
     check: ?[]const u8 = null,
-    /// Which of a row's Sessions read this column, in a table that names
-    /// two (`sessionColumns`). Every other table's one Session reads all
-    /// of its columns, and leaves this `.recipient`.
     read_by: ReadBy = .recipient,
     engines: Engines = .all,
-    /// SQLite ADD COLUMN appends ", " rather than a new line. Keep its
-    /// exact stored CREATE text on bootstrap too, so admission still checks
-    /// byte-for-byte equality after an additive migration.
     sqlite_added: bool = false,
 };
 
-/// The engines a table or column exists on. Each engine's DDL, catalog
-/// and rendered INSERTs hold only its own (`on`).
 pub const Engines = enum {
     all,
     sqlite,
@@ -928,30 +806,20 @@ pub const Engines = enum {
     }
 };
 
-/// The Sessions whose pages read a column of a table that names two
-/// Sessions: `.recipient`, only its `session_ref`'s; `.both`, its
-/// `sender_session_ref`'s too. A change to a `.both` column changes the
-/// sender's facts, so its writer names the sender (`rsql.sessionError`)
-/// and touches it, and the touch oracle records the sender.
 pub const ReadBy = enum { recipient, both };
 
-/// Checked when its row is written, on every engine: writers insert a
-/// parent before its children.
 pub const ForeignKey = struct {
     columns: []const []const u8,
     references: []const u8,
     referenced: []const []const u8,
 };
 
-/// A key or reference of one column is written on that column; one of
-/// several columns is written after the columns.
 pub const Table = struct {
     name: []const u8,
     columns: []const Column,
     primary_key: []const []const u8,
     uniques: []const []const []const u8 = &.{},
     foreign_keys: []const ForeignKey = &.{},
-    /// Rui SQL.
     checks: []const []const u8 = &.{},
     without_rowid: bool = false,
     engines: Engines = .all,
@@ -960,11 +828,8 @@ pub const Table = struct {
 pub const Index = struct {
     name: []const u8,
     table: []const u8,
-    /// Column names, each optionally followed by DESC.
     columns: []const []const u8,
     unique: bool = false,
-    /// Rui SQL. Queries that use a partial index repeat its terms, which is
-    /// why spliced terms come from the constants those queries share.
     where: ?[]const u8 = null,
 };
 
@@ -976,23 +841,14 @@ fn references(comptime column: []const u8, comptime table: []const u8, comptime 
     return .{ .columns = &.{column}, .references = table, .referenced = referenced };
 }
 
-// A label's syntax, not a provider list, so a new provider is no format change.
 const provider_column: Column = .{ .name = "provider", .type = .{ .text = .{ .min = 1, .max = 16 } }, .check = "@initial(provider,'a-z') AND @charset(provider,'a-z0-9_-')" };
-// The tool records a Session's settings offer (D48), saved once by content.
 const tool_set_column: Column = .{ .name = "tool_set_id", .type = .int, .check = "tool_set_id>0" };
 const permission_mode_column: Column = .{ .name = "permission_mode", .type = .int, .check = "permission_mode BETWEEN 0 AND 1" };
 const compaction_trigger_column: Column = .{ .name = "compaction_trigger", .type = .int, .nullable = true, .check = "compaction_trigger IS NULL OR compaction_trigger>0" };
 const reasoning_effort_column: Column = .{ .name = "reasoning_effort", .type = .{ .tag = &.{ "none", "low", "medium", "high", "xhigh", "max" } }, .nullable = true };
 const label_column: Column = .{ .name = "label", .type = .{ .text = .{ .min = 1, .max = 100 } }, .nullable = true };
 
-/// store_meta's keys, as bootstrap writes them and open reads them: a
-/// closed set, so a key is a tag, which MySQL can key. `store_id` is the
-/// Store's own random id, drawn once when it is created and never changed
-/// (D204, format 54).
 pub const MetaKey = enum { store_selector, format, store_id };
-/// The keys store_meta's CHECK allows: `wire_version`, whose row format 74
-/// deletes and nothing writes or reads, then MetaKey's. Dropping it from the
-/// CHECK would rebuild store_meta on SQLite, so the CHECK keeps it.
 const meta_keys = blk: {
     var names: [1 + std.enums.values(MetaKey).len][]const u8 = undefined;
     names[0] = "wire_version";
@@ -1006,8 +862,6 @@ const MetaSeed = struct {
     value: union(enum) { binding: u8, literal: []const u8, random_id },
 };
 
-/// One seed policy, with engine-owned bindings/randomness. Both engines
-/// bind the canonical selector independently of the durable random id.
 pub fn metaSeed(comptime dialect: rsql.Dialect) []const MetaSeed {
     return comptime blk: {
         var seed: []const MetaSeed = &.{};
@@ -1023,14 +877,12 @@ pub fn metaSeed(comptime dialect: rsql.Dialect) []const MetaSeed {
     };
 }
 
-/// Draw only when a missing id will be inserted. No additional id cache.
 pub fn drawStoreId(io: std.Io) [2 * store_id_bytes]u8 {
     var random: [store_id_bytes]u8 = undefined;
     io.random(&random);
     return std.fmt.bytesToHex(random, .lower);
 }
 
-/// MySQL's missing-key repair; transaction and ownership stay with admission.
 pub fn writeMissingMeta(w: *std.Io.Writer, seen: MetaPresence, id: *const [2 * store_id_bytes]u8, selector: []const u8) !void {
     for (comptime metaSeed(.mysql)) |entry| {
         if (seen.contains(entry.key)) continue;
@@ -1045,13 +897,10 @@ pub fn writeMissingMeta(w: *std.Io.Writer, seen: MetaPresence, id: *const [2 * s
             try w.writeAll("' COLLATE utf8mb4_0900_bin);");
             continue;
         }
-        // Other values are schema literals or a lower-case hexadecimal id.
         try w.print("INSERT INTO store_meta(meta_key,meta_value) VALUES('{s}','{s}');", .{ @tagName(entry.key), value });
     }
 }
 
-/// The bytes of one MySQL `content_chunk` row; the last of a content's
-/// chunks holds the rest. Under 16 MiB, so a chunk is one packet.
 pub const content_chunk_bytes = 128 * 1024;
 
 pub const tables = [_]Table{
@@ -1063,10 +912,6 @@ pub const tables = [_]Table{
         },
         .primary_key = &.{"meta_key"},
     },
-    // The Host that owns a MySQL Store (one row): open bumps `epoch`, and
-    // each write transaction bumps `commit_seq` only where both still
-    // read as this Host left them, so a lost session or a restored backup
-    // fences it. SQLite's file lock owns its Store instead.
     .{
         .name = "store_owner",
         .columns = &.{
@@ -1084,15 +929,11 @@ pub const tables = [_]Table{
             .{ .name = "digest", .type = .{ .bytes = .{ .min = 32, .max = 32 } } },
             .{ .name = "byte_length", .type = .int, .check = "byte_length>=0 AND byte_length<=1073737728" },
             .{ .name = "private", .type = .flag },
-            // MySQL holds the bytes in `content_chunk` instead.
             .{ .name = "payload", .type = .{ .bytes = null }, .check = "length(payload)=byte_length", .engines = .sqlite },
         },
         .primary_key = &.{"content_id"},
         .uniques = &.{&.{ "digest", "byte_length", "private" }},
     },
-    // A MySQL content's bytes, `content_chunk_bytes` per row from index
-    // 0, so no statement carries more than one chunk; an empty content
-    // has none.
     .{
         .name = "content_chunk",
         .columns = &.{
@@ -1104,10 +945,6 @@ pub const tables = [_]Table{
         .foreign_keys = &.{references("content_id", "content", content_reference)},
         .engines = .mysql,
     },
-    // One tool as the model is told about it (D48): its name, who owns it
-    // (`rui`; `provider` for a tool the provider runs, whose text the codec
-    // writes; `mcp` for an MCP server's, which `server` names), and its
-    // description and input schema as content.
     .{
         .name = "tool_record",
         .columns = &.{
@@ -1130,10 +967,6 @@ pub const tables = [_]Table{
             references("input_schema_content_id", "content", content_reference),
         },
     },
-    // An ordered set of tool records, saved once: `digest` names its
-    // members' content (tool_record.zig `SetDigest`). A Session's set holds at
-    // most max_tools, the wire's bound; the Host tool set up to
-    // max_host_tool_records.
     .{
         .name = "tool_set",
         .columns = &.{
@@ -1158,8 +991,6 @@ pub const tables = [_]Table{
         },
         .without_rowid = true,
     },
-    // The Host tool set: the set its last open saved (tool_record.zig
-    // `HostToolSet`), which the next start reads back. One row.
     .{
         .name = "host_tool_set",
         .columns = &.{
@@ -1171,7 +1002,6 @@ pub const tables = [_]Table{
             references("tool_set_id", "tool_set", &.{"tool_set_id"}),
         },
     },
-    // models.dev facts are published with their source generation atomically.
     .{
         .name = "model_fact",
         .columns = &.{
@@ -1199,10 +1029,8 @@ pub const tables = [_]Table{
             .{ .name = "session_ref", .type = .{ .text = .{ .min = 6, .max = 6 } }, .check = "@charset(session_ref,'0123456789abcdefghjkmnpqrstvwxyz')" },
             .{ .name = "workspace", .type = .{ .text = .{ .min = 1, .max = 4096 } } },
             provider_column,
-            // The Session's immutable binding: grammar version and its options.
             .{ .name = "codec", .type = .{ .text = .{ .min = 3, .max = 40 } } },
             .{ .name = "codec_options", .type = .{ .bytes = .{ .min = 1, .max = 512 } }, .nullable = true },
-            // What the last fully rebuilt history span encoded to (prefix_seal.zig).
             .{ .name = "prefix_seal", .type = .{ .bytes = .{ .min = prefix_seal.encoded_bytes, .max = prefix_seal.encoded_bytes } }, .nullable = true },
             .{ .name = "model", .type = .{ .text = .{ .min = 1, .max = 256 } } },
             .{ .name = "instructions_content_id", .type = .int },
@@ -1217,15 +1045,9 @@ pub const tables = [_]Table{
             label_column,
             .{ .name = "created_at", .type = .int, .check = "created_at>0" },
             .{ .name = "next_position", .type = .int, .check = "next_position>0" },
-            // Creation order: list cursors and the Workspace key, allocated
-            // by the Host in the creating transaction.
             .{ .name = "created_seq", .type = .int, .check = "created_seq>0" },
-            // SHA-256 of `workspace`. Workspace equality compares it, then the
-            // text, so a collision never merges two Workspaces.
             .{ .name = "workspace_digest", .type = .{ .bytes = .{ .min = 32, .max = 32 } } },
-            // The change ring's key: created_seq of the Workspace's first Session.
             .{ .name = "workspace_key", .type = .int },
-            // The Session that started this one as its attached child (D27).
             .{ .name = "parent_ref", .type = .{ .text = null }, .nullable = true },
             .{ .name = "obligation_since", .type = .int, .nullable = true, .sqlite_added = true, .check = "obligation_since IS NULL OR obligation_since>0" },
         },
@@ -1253,8 +1075,6 @@ pub const tables = [_]Table{
             .{ .name = "code", .type = .{ .text = .{ .max = 96 } } },
             .{ .name = "revision", .type = .int, .check = "revision>=0" },
             .{ .name = "created", .type = .flag },
-            // Command order, allocated by the Host in the recording
-            // transaction: the rowid, so command order costs no index.
             .{ .name = "command_seq", .type = .int, .check = "command_seq>0" },
         },
         .primary_key = &.{"command_seq"},
@@ -1299,12 +1119,6 @@ pub const tables = [_]Table{
         .without_rowid = true,
     },
     .{
-        // The feed's change list (D138, D218): one row per setting a
-        // revision changed, written in the revision's own commit and never
-        // edited. The revision keeps the current values; a row records
-        // when its change was accepted. A revision's rows share one
-        // position, one ordinal each. An effort refusal is appended later,
-        // naming that effort revision with the provider's bounded report.
         .name = "session_change",
         .columns = &.{
             .{ .name = "session_ref", .type = .{ .text = null } },
@@ -1328,12 +1142,6 @@ pub const tables = [_]Table{
     },
     .{
         .name = "message_admission",
-        // `.both`: what the sender's activity page reads of a sent Message,
-        // by sender_session_ref: its sources (`reads.activitySources`, kind
-        // 8: sender_position, admission_id) and its item (`reads.zig`, kind
-        // 8: session_ref, content_id, admitted_at, and command_key, which
-        // joins the command), keyed by admission_id, sender_session_ref and
-        // sender_position.
         .columns = &.{
             .{ .name = "admission_id", .type = .int, .check = "admission_id>0", .read_by = .both },
             .{ .name = "session_ref", .type = .{ .text = null }, .read_by = .both },
@@ -1351,8 +1159,6 @@ pub const tables = [_]Table{
             references("session_ref", "session", session_reference),
             references("command_key", "core_command", command_reference),
             references("content_id", "content", content_reference),
-            // The one reference cycle, with turn.first_admission_id: an
-            // Admission is written with turn_id NULL, and set once its Turn exists.
             references("turn_id", "turn", &.{"turn_id"}),
             references("sender_session_ref", "session", session_reference),
         },
@@ -1405,7 +1211,6 @@ pub const tables = [_]Table{
             .{ .name = "position", .type = .int, .nullable = true, .check = "position>0" },
             .{ .name = "admission_cutoff", .type = .int, .check = "admission_cutoff>=0" },
             .{ .name = "stopped_at", .type = .int, .check = "stopped_at>0" },
-            // Causal provenance, independent of which Command recorded the stop.
             .{ .name = "parent_caused", .type = .flag, .default = "0" },
             .{ .name = "action_cutoff", .type = .int, .default = "0", .check = "action_cutoff>=0", .sqlite_added = true },
         },
@@ -1418,9 +1223,6 @@ pub const tables = [_]Table{
         .without_rowid = true,
     },
     .{
-        // Current archive intent points to the durable stop first recorded
-        // for this archive, not a later idempotent archive command. A NULL
-        // command_key retains the row after restore without DELETE authority.
         .name = "session_archive",
         .columns = &.{
             .{ .name = "session_ref", .type = .{ .text = null } },
@@ -1434,7 +1236,6 @@ pub const tables = [_]Table{
         .without_rowid = true,
     },
     .{
-        // The request's desired value never follows mutable archive intent.
         .name = "session_archive_command",
         .columns = &.{
             .{ .name = "command_key", .type = .{ .text = null } },
@@ -1469,10 +1270,6 @@ pub const tables = [_]Table{
         .without_rowid = true,
     },
     .{
-        // An attached child owes a stop because its parent stopped or ran
-        // out of context (D38); the Host runs it as the child's own stop,
-        // which settles the row. The first cause names the stop's key. Host
-        // work, not a Session's state: no reader of a Session reads it.
         .name = "session_stop_owed",
         .columns = &.{
             .{ .name = "child_ref", .type = .{ .text = null } },
@@ -1488,9 +1285,6 @@ pub const tables = [_]Table{
         .without_rowid = true,
     },
     .{
-        // Owed ancestor feed work claims no position until delivery. Like
-        // session_stop_owed, enqueueing it does not change a Session head.
-        // The first ending hop also owes the parent a Message (D39).
         .name = "session_forward",
         .columns = &.{
             .{ .name = "forward_id", .type = .int, .check = "forward_id>0" },
@@ -1501,9 +1295,7 @@ pub const tables = [_]Table{
             .{ .name = "position", .type = .int, .nullable = true, .check = "position IS NULL OR position>0" },
             .{ .name = "ordinal", .type = .int, .check = "ordinal=0" },
             .{ .name = "delivered_at", .type = .int, .nullable = true, .check = "delivered_at IS NULL OR delivered_at>0" },
-            // Null on approvals/later hops, false while owed, true once settled.
             .{ .name = "message_delivered", .type = .flag, .nullable = true },
-            // Archive suppression survives restoring the parent.
             .{ .name = "suppress_message", .type = .flag, .default = "0" },
         },
         .primary_key = &.{"forward_id"},
@@ -1519,7 +1311,6 @@ pub const tables = [_]Table{
         .columns = &.{
             .{ .name = "command_key", .type = .{ .text = null } },
             .{ .name = "session_ref", .type = .{ .text = .{ .max = 128 } } },
-            // A u64 in decimal: ASCII digits, so bytes and characters agree.
             .{ .name = "turn_id", .type = .{ .text = .{ .min = 1, .max = 20 } }, .check = "@charset(turn_id,'0-9')" },
             .{ .name = "operation_id", .type = .{ .text = .{ .min = 1, .max = 20 } }, .check = "@charset(operation_id,'0-9')" },
         },
@@ -1558,26 +1349,16 @@ pub const tables = [_]Table{
             .{ .name = "attempt_at", .type = .int, .nullable = true, .check = "attempt_at IS NULL OR attempt_at>0" },
             .{ .name = "retry_scheduled_at", .type = .int, .nullable = true, .check = "retry_scheduled_at IS NULL OR retry_scheduled_at>0" },
             .{ .name = "resolved_at", .type = .int, .nullable = true, .check = "resolved_at IS NULL OR resolved_at>0" },
-            // A compaction that makes room (D217): it and every request on
-            // its base omit the drop units that begin at or below the
-            // floor, a Session position; the level, 1 to 3, sets how much
-            // room it aimed for.
             .{ .name = "history_floor", .type = .int, .nullable = true, .check = "history_floor IS NULL OR history_floor>0" },
             .{ .name = "history_level", .type = .int, .nullable = true, .check = "history_level IS NULL OR history_level BETWEEN 1 AND 3" },
-            // The conversation entries the floor dropped beyond its base's
-            // or the compaction before it; the feed's `compacted` row shows
-            // it, and zero for a compaction without a floor.
             .{ .name = "history_dropped", .type = .int, .nullable = true, .check = "history_dropped IS NULL OR history_dropped>=0" },
-            // Effective offer frozen at admission; Session sets are intent.
             tool_set_column,
-            // One admission snapshot; later refusals never rewrite it.
             .{ .name = "effort_source_revision", .type = .int, .default = "1", .check = "effort_source_revision>0 AND effort_source_revision<=settings_revision" },
             .{ .name = "previous_reasoning_effort", .type = reasoning_effort_column.type, .nullable = true },
             .{ .name = "effort_update", .type = .flag, .default = "0", .check = "(effort_update=0 OR reasoning_effort IS NOT NULL)" },
             .{ .name = "previous_effort_override", .type = reasoning_effort_column.type, .nullable = true },
             .{ .name = "latency_ms", .type = .int, .nullable = true, .sqlite_added = true, .check = "latency_ms IS NULL OR latency_ms>=0" },
             .{ .name = "first_event_ms", .type = .int, .nullable = true, .sqlite_added = true, .check = "first_event_ms IS NULL OR first_event_ms>=0" },
-            // Admission-time capacity, including the effective unknown-model fallback.
             .{ .name = "context_window", .type = .int, .check = "context_window BETWEEN 0 AND 4294967295" },
         },
         .primary_key = &.{"operation_id"},
@@ -1590,27 +1371,20 @@ pub const tables = [_]Table{
             .{ .columns = &.{ "session_ref", "settings_revision" }, .references = "session_revision", .referenced = &.{ "session_ref", "revision" } },
         },
         .checks = &.{
-            // Usage counts are all present or all absent.
             "(usage_uncached_tokens IS NULL AND usage_cache_read_tokens IS NULL AND usage_cache_write_tokens IS NULL AND usage_output_tokens IS NULL) OR " ++
                 "(usage_uncached_tokens IS NOT NULL AND usage_cache_read_tokens IS NOT NULL AND usage_cache_write_tokens IS NOT NULL AND " ++
                 "usage_output_tokens IS NOT NULL)",
             "(resolution_code IS NULL AND retry_due_at_ms IS NOT NULL) OR (resolution_code IS NOT NULL AND retry_due_at_ms IS NULL)",
-            // The second the current state began: exactly the time its state owns.
             "(resolution_code IS NULL AND retry_due_at_ms=0 AND attempt_at IS NOT NULL AND retry_scheduled_at IS NULL AND resolved_at IS NULL) OR " ++
                 "(resolution_code IS NULL AND retry_due_at_ms>0 AND attempt_at IS NULL AND retry_scheduled_at IS NOT NULL AND resolved_at IS NULL) OR " ++
                 "(resolution_code IS NOT NULL AND attempt_at IS NULL AND retry_scheduled_at IS NULL AND resolved_at IS NOT NULL)",
             "(@same(resolution_code,'interrupted') AND interrupted_by_command_key IS NOT NULL) OR " ++
                 "(coalesce(resolution_code,'')!='interrupted' AND interrupted_by_command_key IS NULL)",
-            // A level and its dropped count are the room a compaction made;
-            // one that made none keeps its base's floor.
             "(history_floor IS NULL AND history_level IS NULL AND history_dropped IS NULL) OR (history_floor IS NOT NULL AND purpose=1 AND " ++
                 "((history_level IS NULL AND history_dropped IS NULL) OR (history_level IS NOT NULL AND history_dropped IS NOT NULL)))",
         },
     },
     .{
-        // A skill a Message's `/name` word bound, in order after the
-        // Message: its name and its body as read at send. A Turn that takes
-        // the Message projects each as its own entry right after it.
         .name = "message_skill",
         .columns = &.{
             .{ .name = "admission_id", .type = .int },
@@ -1690,18 +1464,13 @@ pub const tables = [_]Table{
             .{ .name = "session_ref", .type = .{ .text = null } },
             .{ .name = "session_position", .type = .int, .check = "session_position>0" },
             .{ .name = "item_kind", .type = .int, .check = "item_kind BETWEEN 1 AND 5" },
-            // A message's text: its text parts back to back, stored once.
             .{ .name = "message_content_id", .type = .int, .nullable = true, .check = "(message_content_id IS NOT NULL)=(item_kind=2)" },
             .{ .name = "attempt_ordinal", .type = .int, .check = "attempt_ordinal>0" },
             .{ .name = "item_id_digest", .type = .{ .bytes = .{ .min = 32, .max = 32 } } },
             .{ .name = "replay_omits_reasoning_text", .type = .flag, .check = "(replay_omits_reasoning_text=0 OR item_kind=1)" },
-            // Rui's own form: the message phase, the parts below, and the
-            // provider bag of what that form does not hold.
             .{ .name = "phase", .type = .int, .default = "0", .check = "phase IN (0,1,2) AND (phase=0 OR item_kind=2)" },
             .{ .name = "extras_content_id", .type = .int },
             .{ .name = "part_count", .type = .int, .check = "part_count>=0 AND (part_count=0 OR item_kind IN (1,2))" },
-            // A hosted tool call's description and outcome: every tool
-            // call is shown by its description.
             .{ .name = "description", .type = .{ .text = .{ .min = 1, .max = 200 } }, .nullable = true, .check = "(description IS NOT NULL)=(item_kind=5)" },
             .{ .name = "call_failed", .type = .flag, .default = "0", .check = "(call_failed=0 OR item_kind=5)" },
         },
@@ -1721,11 +1490,7 @@ pub const tables = [_]Table{
             .{ .name = "item_ordinal", .type = .int },
             .{ .name = "part_ordinal", .type = .int, .check = "part_ordinal>=0" },
             .{ .name = "part_array", .type = .int, .check = "part_array IN (1,2)" },
-            // output_text and refusal are message content, summary_text a
-            // summary, reasoning_text reasoning content; 0 is an opaque block.
             .{ .name = "part_kind", .type = .int, .check = "part_kind=0 OR (part_kind IN (1,2,4) AND part_array=1) OR (part_kind=3 AND part_array=2)" },
-            // A message part's text is the next text_length bytes of its
-            // item's message text; a reasoning part's text is its own row.
             .{ .name = "text_length", .type = .int, .nullable = true, .check = "text_length IS NULL OR text_length>=0" },
             .{ .name = "text_content_id", .type = .int, .nullable = true },
             .{ .name = "extras_content_id", .type = .int },
@@ -1780,9 +1545,6 @@ pub const tables = [_]Table{
             .{ .name = "session_ref", .type = .{ .text = null } },
             .{ .name = "tool_kind", .type = .int, .check = "tool_kind=1" },
             .{ .name = "permission_revision", .type = .int, .check = "permission_revision>0" },
-            // Written only by the insert, under a `bypass` revision, and by an
-            // accepted `allow_once` decision. Stored because it keys the
-            // admission index, and no partial index can see the revision or grant.
             .{ .name = "authorized", .type = .flag },
             .{ .name = "attempt_ordinal", .type = .int, .default = "0", .check = "attempt_ordinal IN (0,1)" },
             .{ .name = "bash_timeout_override_ms", .type = .int, .nullable = true, .check = "bash_timeout_override_ms IS NULL OR bash_timeout_override_ms>0" },
@@ -1798,9 +1560,6 @@ pub const tables = [_]Table{
             .{ .name = "attempt_at", .type = .int, .nullable = true, .check = "attempt_at IS NULL OR attempt_at>0" },
             .{ .name = "decided_at", .type = .int, .nullable = true, .check = "decided_at IS NULL OR decided_at>0" },
             .{ .name = "resolved_at", .type = .int, .nullable = true, .check = "resolved_at IS NULL OR resolved_at>0" },
-            // The position of the call that asked a person, written by the
-            // insert under an `ask` revision and never changed. Stored
-            // because the feed seeks it and no index can see the revision.
             .{ .name = "approval_position", .type = .int, .nullable = true, .check = "approval_position IS NULL OR approval_position>0" },
             .{ .name = "background_content_id", .type = .int, .nullable = true, .sqlite_added = true },
             .{ .name = "background_position", .type = .int, .nullable = true, .check = "(background_content_id IS NULL AND background_position IS NULL) OR (background_content_id IS NOT NULL AND background_position IS NOT NULL AND background_position>0 AND (acceptance_position IS NULL OR background_position<acceptance_position))", .sqlite_added = true },
@@ -1871,8 +1630,6 @@ pub const indexes = [_]Index{
     .{ .name = "message_admission_unpositioned", .table = "message_admission", .columns = &.{"session_ref"}, .where = "admission_position IS NULL" },
     .{ .name = "message_admission_position", .table = "message_admission", .columns = &.{ "session_ref", "admission_position" } },
     .{ .name = "core_command_target_order", .table = "core_command", .columns = &.{ "target", "kind", "command_seq" } },
-    // A content's owner in a Full report (`report.full_revisions`): its
-    // first revision, since each key ends in the primary key's revision.
     .{ .name = "session_revision_instructions", .table = "session_revision", .columns = &.{ "session_ref", "instructions_content_id" } },
     .{ .name = "session_revision_output_schema", .table = "session_revision", .columns = &.{ "session_ref", "output_schema_content_id" } },
     .{ .name = "session_stop_exclusion", .table = "session_stop", .columns = &.{ "session_ref", "admission_cutoff", "position" } },
@@ -1880,26 +1637,19 @@ pub const indexes = [_]Index{
     .{ .name = "session_stop_position", .table = "session_stop", .columns = &.{ "session_ref", "position" } },
     .{ .name = "session_stop_turn", .table = "session_stop", .columns = &.{"selected_turn_id"} },
     .{ .name = "session_parent", .table = "session", .columns = &.{"parent_ref"}, .where = "parent_ref IS NOT NULL" },
-    // The Host's next owed stop, skipping settled rows.
     .{ .name = "session_stop_open", .table = "session_stop_owed", .columns = &.{ "settled", "child_ref" } },
-    // The Host's next owed ending, skipping settled and feed-only rows.
     .{ .name = "session_forward_message", .table = "session_forward", .columns = &.{ "message_delivered", "source_id" } },
     .{ .name = "session_forward_open", .table = "session_forward", .columns = &.{"forward_id"}, .where = "position IS NULL" },
     .{ .name = "session_forward_feed", .table = "session_forward", .columns = &.{ "target_ref", "position" } },
     .{ .name = "action_operation_session_order", .table = "action_operation", .columns = &.{ "session_ref", "action_id" } },
     .{ .name = "action_operation_sender_handle", .table = "action_operation", .columns = &.{"sender_handle"}, .unique = true, .where = "sender_handle IS NOT NULL" },
     .{ .name = "action_operation_acceptance", .table = "action_operation", .columns = &.{ "session_ref", "acceptance_position" } },
-    // Results walk it (`report.full_results`): the predicate holds exactly
-    // for a resolved Action (action_operation's CHECK).
     .{ .name = "action_operation_session_results", .table = "action_operation", .columns = &.{ "session_ref", "parent_operation_id", "acceptance_position" }, .where = "acceptance_position IS NOT NULL AND background_position IS NULL" },
     .{ .name = "action_operation_approval", .table = "action_operation", .columns = &.{ "session_ref", "approval_position" }, .where = "approval_position IS NOT NULL" },
     .{ .name = "action_operation_executable", .table = "action_operation", .columns = &.{"action_id"}, .where = "authorized=1 AND resolution_code IS NULL AND attempt_ordinal=0" },
     .{ .name = "action_operation_unresolved_attempt", .table = "action_operation", .columns = &.{"action_id"}, .where = "resolution_code IS NULL AND attempt_ordinal=1" },
     .{ .name = "action_operation_indeterminate", .table = "action_operation", .columns = &.{ "session_ref", "parent_operation_id", "call_ordinal" }, .where = "resolution_code='indeterminate'" },
-    // Calls walk it (`report.full_calls`).
     .{ .name = "model_tool_call_session_order", .table = "model_tool_call", .columns = &.{ "session_ref", "operation_id", "call_ordinal" } },
-    // Results walk it: the predicate holds exactly for a rejected call
-    // (model_tool_call's CHECK).
     .{ .name = "model_tool_call_session_results", .table = "model_tool_call", .columns = &.{ "session_ref", "operation_id", "acceptance_position" }, .where = "acceptance_position IS NOT NULL" },
     .{ .name = "model_tool_call_acceptance", .table = "model_tool_call", .columns = &.{ "session_ref", "acceptance_position" }, .where = "acceptance_position IS NOT NULL" },
     .{ .name = "model_operation_retry_due", .table = "model_operation", .columns = &.{ "retry_due_at_ms", "operation_id" }, .where = "resolution_code IS NULL AND " ++ retry_allowance_open_sql },
@@ -1910,8 +1660,6 @@ pub const indexes = [_]Index{
     .{ .name = "action_operation_background_ready", .table = "action_operation", .columns = &.{ "parent_operation_id", "action_id" }, .where = "background_position IS NOT NULL AND authorized=1 AND resolution_code IS NULL AND attempt_ordinal=0" },
     .{ .name = "action_operation_awaiting", .table = "action_operation", .columns = &.{ "session_ref", "action_id" }, .where = "authorized=0 AND resolution_code IS NULL" },
     .{ .name = "model_operation_turn_history", .table = "model_operation", .columns = &.{ "turn_id", "operation_id" } },
-    // Every Operation by admission, whatever its outcome: request history
-    // places each earlier Operation's effort boundary (codec /2).
     .{ .name = "session_change_refused_operation", .table = "session_change", .columns = &.{ "refused_operation_id", "session_ref", "revision" } },
     .{ .name = "model_operation_effort_source", .table = "model_operation", .columns = &.{ "operation_id", "session_ref", "effort_source_revision" }, .unique = true },
     .{ .name = "model_operation_admission", .table = "model_operation", .columns = &.{ "session_ref", "admission_position" } },
@@ -1928,24 +1676,16 @@ pub const indexes = [_]Index{
     .{ .name = "turn_outcome_position", .table = "turn", .columns = &.{ "session_ref", "outcome_position" } },
 };
 
-/// Whether `table`'s rows belong to Sessions: it has a `session_ref` or a
-/// `sender_session_ref`, except the command logs whose `session_ref` is the
-/// target text a command named, which need not be a Session (an invalid or
-/// unknown target is recorded with its rejection). The tests' touch oracle
-/// watches exactly these tables.
 pub fn carriesSessions(comptime table: []const u8) bool {
     return comptime session_ownership.get(table) orelse @compileError("schema: no table named " ++ table);
 }
 
-// Compute once, rather than rescanning every table for every touch-oracle
-// assertion as the schema grows. This map is used only at comptime.
 const session_ownership = std.StaticStringMap(bool).initComptime(blk: {
     var entries: [tables.len]struct { []const u8, bool } = undefined;
     for (tables, &entries) |table, *entry| entry.* = .{ table.name, tableCarriesSessions(table) };
     break :blk entries;
 });
 
-/// The columns that name a Session, in the order `sessionColumns` lists them.
 pub const session_column_names = [_][]const u8{ "session_ref", "sender_session_ref" };
 
 fn tableCarriesSessions(comptime table: Table) bool {
@@ -1954,7 +1694,6 @@ fn tableCarriesSessions(comptime table: Table) bool {
     return false;
 }
 
-/// Whether `table` has `column` only on engines other than `dialect`.
 pub fn lacks(comptime dialect: rsql.Dialect, comptime table: []const u8, comptime column: []const u8) bool {
     comptime {
         @setEvalBranchQuota(10_000);
@@ -1965,7 +1704,6 @@ pub fn lacks(comptime dialect: rsql.Dialect, comptime table: []const u8, comptim
     }
 }
 
-/// Whether `table` has a column named `column`.
 pub fn hasColumn(comptime table: []const u8, comptime column: []const u8) bool {
     comptime {
         @setEvalBranchQuota(10_000);
@@ -1978,8 +1716,6 @@ pub fn hasColumn(comptime table: []const u8, comptime column: []const u8) bool {
     }
 }
 
-/// The columns of `table` that name a Session: `session_ref`, then
-/// `sender_session_ref`, those it has.
 pub fn sessionColumns(comptime table: []const u8) []const []const u8 {
     comptime {
         var columns: []const []const u8 = &.{};
@@ -1990,8 +1726,6 @@ pub fn sessionColumns(comptime table: []const u8) []const []const u8 {
     }
 }
 
-/// The columns of `table` its second Session reads too (`ReadBy.both`):
-/// none unless it names two Sessions.
 pub fn readByBoth(comptime table: []const u8) []const []const u8 {
     comptime {
         for (tables) |candidate| {
@@ -2007,7 +1741,6 @@ pub fn readByBoth(comptime table: []const u8) []const []const u8 {
     }
 }
 
-/// Whether `table`'s column `column` may hold NULL.
 pub fn isNullable(comptime table: []const u8, comptime column: []const u8) bool {
     comptime {
         for (tables) |candidate| {
@@ -2019,9 +1752,6 @@ pub fn isNullable(comptime table: []const u8, comptime column: []const u8) bool 
     }
 }
 
-/// The column sets that identify one row of `table`: its primary key, its
-/// unique constraints, and its unique indexes without a WHERE (a partial
-/// index identifies rows only under its predicate).
 pub fn keys(comptime table: []const u8) []const []const []const u8 {
     comptime {
         for (tables) |candidate| {
@@ -2037,15 +1767,8 @@ pub fn keys(comptime table: []const u8) []const []const []const u8 {
     }
 }
 
-/// The branches rendering every object takes, which whichever statement
-/// first asks `hasIndex` spends, now that each CHECK and predicate is also
-/// parsed (`expression`). The unit test binary's build failed at
-/// 30,000 per object (measured); this is four times that. A quota
-/// only raises the evaluation's limit, so a statement whose own quota is
-/// larger adds this to it (`rsql.renderStatement`).
 pub const objects_quota = 120_000 * (tables.len + indexes.len);
 
-/// Whether the schema has an index named `name`.
 pub fn hasIndex(comptime name: []const u8) bool {
     comptime {
         @setEvalBranchQuota(objects_quota);
@@ -2054,8 +1777,6 @@ pub fn hasIndex(comptime name: []const u8) bool {
     }
 }
 
-// Cache the DDL's names once; checking every forceable catalog name must
-// not regenerate every table's DDL for each index.
 const mysql_index_names: []const []const u8 = blk: {
     @setEvalBranchQuota(objects_quota);
     var names: []const []const u8 = &.{};
@@ -2065,9 +1786,6 @@ const mysql_index_names: []const []const u8 = blk: {
     break :blk names;
 };
 
-/// Whether MySQL's DDL has this named index on real columns. A lowered
-/// partial index cannot serve a query on its original prefix: forcing it
-/// would replace a lookup with a full index scan.
 pub fn mysqlCanForceIndex(comptime name: []const u8) bool {
     comptime {
         @setEvalBranchQuota(objects_quota);
@@ -2096,7 +1814,6 @@ fn canForceMysqlIndex(comptime every: []const Table, comptime all_indexes: []con
     return false;
 }
 
-/// The DDL that creates every table, then every index.
 pub fn ddl(comptime dialect: rsql.Dialect) [:0]const u8 {
     return comptime blk: {
         @setEvalBranchQuota(objects_quota);
@@ -2107,7 +1824,6 @@ pub fn ddl(comptime dialect: rsql.Dialect) [:0]const u8 {
     };
 }
 
-/// The tables of `all` on `dialect`, each with only its columns there.
 fn onEngine(comptime all: []const Table, comptime dialect: rsql.Dialect) []const Table {
     comptime {
         var result: []const Table = &.{};
@@ -2124,11 +1840,8 @@ fn onEngine(comptime all: []const Table, comptime dialect: rsql.Dialect) []const
     }
 }
 
-/// `foreign_key`: only on MySQL (`mysqlObjects`).
 pub const Object = struct { kind: enum { table, index, foreign_key }, name: []const u8, sql: []const u8 };
 
-/// Every table and named index, each with the statement that creates it,
-/// and on MySQL the foreign keys `mysqlObjects` adds after them.
 pub fn objects(comptime dialect: rsql.Dialect) []const Object {
     return comptime blk: {
         @setEvalBranchQuota(objects_quota);
@@ -2143,29 +1856,15 @@ pub fn objects(comptime dialect: rsql.Dialect) []const Object {
     };
 }
 
-/// What every MySQL message on a Store sets before its statements: the
-/// collation the DDL's keys compare in, a strict `sql_mode` with
-/// ONLY_FULL_GROUP_BY and NO_BACKSLASH_ESCAPES, and `@list`'s length.
-/// The engine prefixes each COM_QUERY with them (`engine/mysql_open.zig`).
 pub const mysql_session = [_][:0]const u8{
     "SET NAMES utf8mb4 COLLATE utf8mb4_0900_bin",
     "SET SESSION sql_mode='ONLY_FULL_GROUP_BY,STRICT_ALL_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION,NO_BACKSLASH_ESCAPES'",
-    // `@list` of a Session's tool names whole: MySQL's default cuts at 1024.
     std.fmt.comptimePrint("SET SESSION group_concat_max_len={d}", .{tool_name.max_names_bytes}),
-    // Reads after a COMMIT in the same message (`Mysql.queueCommit`) run
-    // in autocommit, whatever the server's default.
     "SET SESSION autocommit=1",
 };
 
 const MysqlObjects = union(enum) { refused: []const u8, objects: []const Object };
 
-/// The MySQL 8.4 DDL of `all` and `all_indexes`, or why it has none.
-/// Each table is InnoDB in utf8mb4_0900_bin, with each column typed by
-/// `mysqlColumnType` and every key, CHECK and foreign key at table level:
-/// MySQL ignores a column's inline REFERENCES, and refuses a column CHECK
-/// that names another column. A foreign key to a table created later
-/// (the turn and admission cycle) is an ALTER TABLE after every table and
-/// index. Each index takes its `mysqlIndexForm`.
 fn mysqlObjects(comptime every: []const Table, comptime all_indexes: []const Index) MysqlObjects {
     comptime {
         @setEvalBranchQuota(50_000 * (every.len + all_indexes.len));
@@ -2218,30 +1917,6 @@ fn mysqlObjects(comptime every: []const Table, comptime all_indexes: []const Ind
     }
 }
 
-/// The catalog of a MySQL Store as its open reads it (D203): one line per
-/// table, column, index and foreign key, and each table's count of
-/// CHECKs, from information_schema for the database `database` names (an
-/// SQL expression, such as `DATABASE()`). It holds what the schema value
-/// decides and leaves out what MySQL names or spells itself: CHECK and
-/// expression texts, which servers normalise differently, and the names
-/// of CHECKs, foreign keys and server-generated keys. Forceable indexes
-/// include their canonical names: statements depend on those names, not
-/// just equivalent definitions. This admission digest is not stored or
-/// pinned by Store format; `digest()` covers bootstrap SQL separately.
-/// MySQL 8.4 STATISTICS plan domain: TABLE_NAME and forceable INDEX_NAME identify
-/// the key; NON_UNIQUE, ordered COLUMN_NAME (SEQ_IN_INDEX), COLLATION,
-/// SUB_PART, INDEX_TYPE, PACKED and IS_VISIBLE describe its usable shape.
-/// Visibility applies to every index: canonical DDL makes all visible, and
-/// hiding even an unhinted key weakens a Store plan. NULLABLE is derived
-/// from the checked COLUMNS; functional parts are nullable. EXPRESSION's
-/// presence is the `*` part; its server-normalized text is not a forced-plan
-/// dependency, since mysqlCanForceIndex excludes every functional key.
-/// TABLE_CATALOG is always def; TABLE_SCHEMA/INDEX_SCHEMA only locate the
-/// database. Only CARDINALITY (estimates), COMMENT (server status prose)
-/// and INDEX_COMMENT (DBA prose) are ignored mutable index metadata: none
-/// changes the key's definition or availability to a statement.
-/// Each value is cast to binary, so the lines compare as bytes whatever
-/// information_schema's collations.
 pub fn catalogSql(comptime database: []const u8) [:0]const u8 {
     return comptime blk: {
         @setEvalBranchQuota(objects_quota);
@@ -2273,14 +1948,10 @@ fn binary(comptime column: []const u8) []const u8 {
     return "CAST(" ++ column ++ " AS BINARY)";
 }
 
-/// One line's share of a catalog digest. A digest is the wrapping sum of
-/// its lines' shares, so it does not depend on the order rows arrive in.
 pub fn catalogLineDigest(line: []const u8) u64 {
     return std.hash.Fnv1a_64.hash(line);
 }
 
-/// The digest of the catalog `catalogSql` reads from a MySQL Store at
-/// schema_version, derived from the schema value.
 pub fn catalogDigest() u64 {
     return comptime blk: {
         @setEvalBranchQuota(objects_quota);
@@ -2290,11 +1961,6 @@ pub fn catalogDigest() u64 {
     };
 }
 
-/// The lines `catalogSql` returns for a database made by
-/// `mysqlObjects(every, all_indexes)`, in no particular order. An index
-/// part MySQL computes is `*`. InnoDB adds an index for a foreign key
-/// that no index leads with (MySQL 8.4 manual, FOREIGN KEY Constraints),
-/// and drops it when a later index does.
 fn catalogLines(comptime every: []const Table, comptime all_indexes: []const Index) []const []const u8 {
     comptime {
         @setEvalBranchQuota(50_000 * (every.len + all_indexes.len));
@@ -2310,7 +1976,6 @@ fn catalogLines(comptime every: []const Table, comptime all_indexes: []const Ind
                 if (columnCheck(column) != null) checks += 1;
             }
             if (checks != 0) lines = lines ++ .{std.fmt.comptimePrint("k {s} {d}", .{ table.name, checks })};
-            // Each index as its parts: a column, `*`, then ` desc` if descending.
             var parts: []const []const []const u8 = &.{table.primary_key};
             for (table.uniques) |unique| parts = parts ++ .{unique};
             var flags: []const bool = &.{true};
@@ -2352,8 +2017,6 @@ fn catalogLines(comptime every: []const Table, comptime all_indexes: []const Ind
                 }
             }
             for (parts, flags, forced_names, 0..) |index_parts, unique, forced_name, position| {
-                // InnoDB keeps no index it added for a foreign key when a
-                // longer one it added for another key leads with it.
                 const implicit = parts[parts.len - added ..];
                 const covered = position >= parts.len - added and for (implicit) |other| {
                     if (other.len > index_parts.len and eqlList(other[0..index_parts.len], index_parts)) break true;
@@ -2365,7 +2028,6 @@ fn catalogLines(comptime every: []const Table, comptime all_indexes: []const Ind
     }
 }
 
-/// `catalogLines` of the schema, for the live check's report.
 pub fn catalogLinesForTesting() []const []const u8 {
     return comptime blk: {
         @setEvalBranchQuota(objects_quota);
@@ -2373,7 +2035,6 @@ pub fn catalogLinesForTesting() []const []const u8 {
     };
 }
 
-/// A MySQL type as information_schema's COLUMN_TYPE spells it.
 fn catalogType(comptime name: []const u8) []const u8 {
     var lower: [name.len]u8 = undefined;
     for (name, &lower) |byte, *out| out.* = std.ascii.toLower(byte);
@@ -2381,19 +2042,12 @@ fn catalogType(comptime name: []const u8) []const u8 {
     return &result;
 }
 
-/// The collation information_schema gives a column of MySQL type `name`:
-/// the table's for text, none (`-`) for numbers and bytes.
 fn catalogCollation(comptime name: []const u8) []const u8 {
     return if (std.mem.startsWith(u8, name, "VARCHAR") or std.mem.endsWith(u8, name, "TEXT")) "utf8mb4_0900_bin" else "-";
 }
 
-/// The most bytes InnoDB keys in one index, under the DYNAMIC row format
-/// MySQL 8.4 defaults to.
 const innodb_key_bytes = 3072;
 
-/// Why `key`, columns of `table` that MySQL indexes together, is wider
-/// than `innodb_key_bytes`, or null. Each column counts its type's
-/// `key_bytes`; a `unique_when` part keys the same value as its column.
 fn mysqlKeyError(comptime all: []const Table, comptime all_indexes: []const Index, comptime table: Table, comptime key: []const []const u8) ?[]const u8 {
     var bytes: usize = 0;
     for (key) |name| bytes += switch (mysqlColumnType(all, all_indexes, table, columnNamed(table, name))) {
@@ -2404,22 +2058,9 @@ fn mysqlKeyError(comptime all: []const Table, comptime all_indexes: []const Inde
     return std.fmt.comptimePrint("schema: the key {s}({s}) is {d} bytes on MySQL, past InnoDB's {d}", .{ table.name, list(key), bytes, innodb_key_bytes });
 }
 
-/// A MySQL column type, and the bytes a key on it takes at most: 8 for
-/// BIGINT, 1 for TINYINT, 4 per character for utf8mb4 VARCHAR, n for
-/// VARBINARY(n), and 0 for TEXT and BLOB types, which no key holds.
 const MysqlType = struct { name: []const u8, key_bytes: usize };
 const MysqlColumnType = union(enum) { refused: []const u8, type: MysqlType };
 
-/// `column`'s MySQL type. A column of a foreign key takes the type of the
-/// column it references. Otherwise `.int` is BIGINT, `.flag` TINYINT and
-/// `.tag` VARCHAR of its longest tag; bounded `.text` and `.bytes` are
-/// VARCHAR and VARBINARY of their bound when `mysqlKeyed`, else TEXT and
-/// BLOB up to 65,535 bytes and LONGTEXT and LONGBLOB past it. An unbounded
-/// Session column (one of `session_column_names` in a table that carries
-/// Sessions) takes session.session_ref's type, because rsql's write rules
-/// give it only a SessionHead's reference or a copy of one
-/// (`rsql.sessionError`). Other unbounded text and bytes are LONGTEXT and
-/// LONGBLOB, and refused when keyed: MySQL keys only bounded values.
 fn mysqlColumnType(comptime all: []const Table, comptime all_indexes: []const Index, comptime table: Table, comptime column: Column) MysqlColumnType {
     comptime {
         for (table.foreign_keys) |key| for (key.columns, key.referenced) |name, referenced| if (std.mem.eql(u8, name, column.name)) {
@@ -2454,9 +2095,6 @@ fn mysqlColumnType(comptime all: []const Table, comptime all_indexes: []const In
     }
 }
 
-/// Whether MySQL indexes `table`'s column `name` by its value: it is in
-/// the table's primary key, a unique, an index's columns, or the columns
-/// another table's foreign key references.
 fn mysqlKeyed(comptime all: []const Table, comptime all_indexes: []const Index, comptime table: Table, comptime name: []const u8) bool {
     comptime {
         if (contains(table.primary_key, name)) return true;
@@ -2471,26 +2109,12 @@ fn mysqlKeyed(comptime all: []const Table, comptime all_indexes: []const Index, 
     }
 }
 
-/// How MySQL, which has no partial index, holds a partial one. Each is
-/// derived from the index alone.
 pub const MysqlIndexForm = enum {
-    /// Not unique: an index whose first column is generated
-    /// (`leadingColumn`), its first column's value where the predicate
-    /// holds and NULL elsewhere, so a walk of one value of it skips the
-    /// rows SQLite's index leaves out. Its predicate only narrowed what
-    /// SQLite stores, never what it allows.
     leading,
-    /// Unique, and its predicate is exactly the text `c IS NOT NULL` for
-    /// one of its columns c: a plain unique index, since MySQL never finds
-    /// two NULLs equal, so rows the predicate excludes never collide.
     plain_unique,
-    /// Any other unique partial index: a unique index on
-    /// `(CASE WHEN predicate THEN c END)` for each column c, NULL, and so
-    /// never colliding, where the predicate fails.
     unique_when,
 };
 
-/// `index`'s MySQL form, or null when it has no predicate.
 pub fn mysqlIndexForm(comptime index: Index) ?MysqlIndexForm {
     const where = index.where orelse return null;
     if (!index.unique) return .leading;
@@ -2498,7 +2122,6 @@ pub fn mysqlIndexForm(comptime index: Index) ?MysqlIndexForm {
     return .unique_when;
 }
 
-/// A `leading` index's generated column on MySQL, named after the index.
 fn leadingColumn(comptime index: Index) []const u8 {
     const name = index.name ++ "_lead";
     checkIdentifier(name);
@@ -2506,8 +2129,6 @@ fn leadingColumn(comptime index: Index) []const u8 {
     return name;
 }
 
-/// The value of `leadingColumn(index)`: its first column where its
-/// predicate holds, else NULL.
 fn leadingValue(comptime all: []const Table, comptime index: Index) []const u8 {
     return "CASE WHEN " ++ expression(.mysql, all[tablePosition(all, index.table)], index.where.?) ++ " THEN " ++ indexColumn(index.columns[0]).name ++ " END";
 }
@@ -2527,16 +2148,11 @@ fn createMysqlIndex(comptime all: []const Table, comptime index: Index) []const 
     return "CREATE " ++ (if (index.unique) "UNIQUE " else "") ++ "INDEX " ++ index.name ++ " ON " ++ index.table ++ "(" ++ parts ++ ")";
 }
 
-/// An index column's name, and its order as written after it (" DESC" or "").
 fn indexColumn(comptime column: []const u8) struct { name: []const u8, order: []const u8 } {
     const space = std.mem.indexOfScalar(u8, column, ' ') orelse return .{ .name = column, .order = "" };
     return .{ .name = column[0..space], .order = column[space..] };
 }
 
-/// `text`, a CHECK or index predicate on `table`, in `dialect`'s spelling,
-/// once it meets a typed statement's expression rules
-/// (`rsql.expressionError`), which let `length` count `table`'s `.bytes`
-/// columns only.
 fn expression(comptime dialect: rsql.Dialect, comptime table: Table, comptime text: []const u8) []const u8 {
     var bytes: []const []const u8 = &.{};
     for (table.columns) |column| if (column.type == .bytes) {
@@ -2567,10 +2183,6 @@ fn joinLines(comptime lines: []const []const u8) []const u8 {
     return body;
 }
 
-/// FNV-1a over every statement `bootstrap` executes, in order, so changing
-/// any of them without changing bootstrap_digests fails the build. FNV-1a, not
-/// SHA-256: it is a fixed algorithm, and SHA-256 costs seconds of every
-/// compile.
 pub fn digest() u64 {
     return comptime blk: {
         var text: []const u8 = "";
@@ -2582,11 +2194,7 @@ pub fn digest() u64 {
 
 const identity_sql = std.fmt.comptimePrint("PRAGMA application_id={d}", .{application_id});
 const version_sql = std.fmt.comptimePrint("PRAGMA user_version={d}", .{schema_version});
-/// `schema_version` as store_meta's `format` row holds it.
 const format_text = std.fmt.comptimePrint("{d}", .{schema_version});
-/// The Store selector is bound, not spliced: it is the caller's path.
-/// The Store id is 16 bytes from SQLite's randomness, which it seeds from
-/// the OS, in lower-case hex, as `migrations` writes it too.
 pub fn sqliteMetaSeedSql() [:0]const u8 {
     return comptime blk: {
         var sql: []const u8 = "INSERT INTO store_meta(meta_key,meta_value) VALUES";
@@ -2602,7 +2210,6 @@ pub fn sqliteMetaSeedSql() [:0]const u8 {
     };
 }
 const store_meta_sql = sqliteMetaSeedSql();
-/// The bytes of a Store id; store_meta holds them as twice as many hex digits.
 pub const store_id_bytes = 16;
 const bootstrap_sql = [_][:0]const u8{ ddl(.sqlite), identity_sql, version_sql, store_meta_sql };
 
@@ -2639,7 +2246,6 @@ fn columnDefinition(comptime table: Table, comptime column: Column) []const u8 {
         .bytes => "BLOB",
     };
     if (primary) text = text ++ " PRIMARY KEY";
-    // Also on a key: SQLite lets a rowid table's non-integer key be NULL.
     if (!column.nullable) text = text ++ " NOT NULL";
     if (column.default) |value| text = text ++ " DEFAULT " ++ value;
     for (table.uniques) |unique| {
@@ -2652,7 +2258,6 @@ fn columnDefinition(comptime table: Table, comptime column: Column) []const u8 {
     return text;
 }
 
-/// The column's CHECK in Rui SQL: its type's bound, then its own check.
 fn columnCheck(comptime column: Column) ?[]const u8 {
     const name = column.name;
     const bound: ?[]const u8 = switch (column.type) {
@@ -2715,10 +2320,6 @@ pub fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
     try sqlite.exec(database, "COMMIT");
 }
 
-/// Told when `openExisting` begins migrating a Store, with the format it
-/// moves from, and when the migration commits. The backup a migration
-/// writes first is as large as the Store, so a caller waiting on the open
-/// can learn why it takes long.
 pub const MigrationNotice = struct {
     context: *anyopaque,
     notify: *const fn (context: *anyopaque, event: Event) void,
@@ -2726,8 +2327,6 @@ pub const MigrationNotice = struct {
     pub const Event = union(enum) { begin: u32, end };
 };
 
-/// Opens a Store of this application at schema_version, or moves one at a
-/// format from migration_baseline on to it first (`migrate`).
 pub fn openExisting(io: std.Io, database: *c.sqlite3, selector: []const u8, identity_mismatch: ?*IdentityMismatch, notice: ?MigrationNotice) !void {
     if (try sqlite.pragmaInt(database, "PRAGMA application_id") != application_id) return error.WrongStoreIdentity;
     const found = try sqlite.pragmaInt(database, "PRAGMA user_version");
@@ -2738,16 +2337,8 @@ pub fn openExisting(io: std.Io, database: *c.sqlite3, selector: []const u8, iden
     if (notice) |told| told.notify(told.context, .end);
 }
 
-/// First writes `migrationBackup`; a Store whose backup fails is refused
-/// with nothing migrated. Then, in one transaction: runs `steps`' SQLite statements on a Store at
-/// format `from`, sets its format to schema_version, and commits only if
-/// the Store then validates as a fresh bootstrap's would
-/// (`validateCurrent`) and every foreign key holds. A Store whose
-/// store_meta format is not `from` is a WrongStoreVersion, and any failure
-/// leaves the Store as it was.
 pub noinline fn migrate(io: std.Io, database: *c.sqlite3, selector: []const u8, from: u32, steps: []const Migration, identity_mismatch: ?*IdentityMismatch) !void {
     try migrationBackup(io, database);
-    // Both outside the transaction, where PRAGMA foreign_keys takes effect.
     try sqlite.exec(database, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
     defer sqlite.exec(database, "PRAGMA foreign_keys=ON;PRAGMA legacy_alter_table=OFF") catch {};
     try sqlite.exec(database, "BEGIN EXCLUSIVE");
@@ -2770,15 +2361,6 @@ pub noinline fn migrate(io: std.Io, database: *c.sqlite3, selector: []const u8, 
     try sqlite.exec(database, "COMMIT");
 }
 
-/// Before a migration, a copy of the Store at `from` beside its file: for
-/// `<name>.sqlite3`, `<name>.backup`, written page by page through SQLite's
-/// online backup API, so it holds the last committed state and is as large
-/// as the Store. Its path is a byte shorter than the Store's, so it and its
-/// journal fit wherever the Store's do. The one name per file means an
-/// earlier copy is replaced and nothing else beside the Store is touched;
-/// the copy's own user_version says which format it holds. The copy and
-/// its directory entry are synced before the migration starts. Every
-/// failure is a MigrationBackupFailed.
 fn migrationBackup(io: std.Io, database: *c.sqlite3) !void {
     return writeMigrationBackup(io, database) catch |err| switch (err) {
         error.MigrationBackupFailed => err,
@@ -2799,10 +2381,8 @@ fn writeMigrationBackup(io: std.Io, database: *c.sqlite3) !void {
     const path = std.mem.span(c.sqlite3_db_filename(database, "main") orelse return error.MigrationBackupFailed);
     if (!std.mem.endsWith(u8, path, store_extension)) return error.MigrationBackupFailed;
     const directory_path = std.fs.path.dirname(path) orelse return error.MigrationBackupFailed;
-    // Iterable, so the handle is a real descriptor (not O_PATH) that fsync takes.
     var directory = try std.Io.Dir.cwd().openDir(io, directory_path, .{ .iterate = true });
     defer directory.close(io);
-    // SQLite's allocator, not a path-sized stack buffer: the Host's stack frame budget.
     const backup_text = c.sqlite3_mprintf("%.*s" ++ backup_extension, @as(c_int, @intCast(path.len - store_extension.len)), path.ptr) orelse return error.MigrationBackupFailed;
     defer c.sqlite3_free(backup_text);
     const backup = std.mem.span(backup_text);
@@ -2811,8 +2391,6 @@ fn writeMigrationBackup(io: std.Io, database: *c.sqlite3) !void {
         error.FileNotFound => {},
         else => return err,
     };
-    // The online backup API, not VACUUM INTO: the build sets
-    // SQLITE_MAX_ATTACHED=0, and VACUUM INTO attaches its target.
     {
         var target: ?*c.sqlite3 = null;
         defer _ = c.sqlite3_close(target);
@@ -2828,14 +2406,6 @@ fn writeMigrationBackup(io: std.Io, database: *c.sqlite3) !void {
     if (std.c.fsync(directory.handle) != 0) return error.MigrationBackupFailed;
 }
 
-/// Refuses a Store unless its tables and indexes are exactly the ones
-/// bootstrap creates, each with the same CREATE text. SQLite keeps that text
-/// as run, and only bootstrap and `migrate` write it, so a dropped CHECK, a
-/// changed column, a migration that leaves other text than bootstrap's, or a
-/// missing or extra index or trigger is a WrongStoreSchema. A
-/// network engine keeps no such text: MySQL's open compares its catalog's
-/// structure instead (`catalogDigest`), which sees a CHECK only by count.
-/// Its caller has read user_version as schema_version, or set it.
 fn validateCurrent(database: *c.sqlite3, selector: []const u8, identity_mismatch: ?*IdentityMismatch) !void {
     {
         const expected = comptime objects(.sqlite);
@@ -2850,7 +2420,6 @@ fn validateCurrent(database: *c.sqlite3, selector: []const u8, identity_mismatch
             }
             const kind = try columnText(statement, 0);
             if (c.sqlite3_column_type(statement, 3) == c.SQLITE_NULL) {
-                // An automatic index of a key: its table's text covers it.
                 if (!std.mem.eql(u8, kind, "index")) return error.WrongStoreSchema;
                 for (expected) |object| {
                     if (object.kind == .table and std.mem.eql(u8, object.name, try columnText(statement, 2))) continue :rows;
@@ -2891,13 +2460,11 @@ fn validateCurrent(database: *c.sqlite3, selector: []const u8, identity_mismatch
     }
 }
 
-/// Column `column` of the current row, which is not NULL, as text.
 fn columnText(statement: *c.sqlite3_stmt, column: c_int) ![]const u8 {
     const text = c.sqlite3_column_text(statement, column) orelse return error.OutOfMemory;
     return text[0..@intCast(c.sqlite3_column_bytes(statement, column))];
 }
 
-/// Whether store_meta holds exactly `expected` under `key`.
 fn metaEquals(database: *c.sqlite3, comptime key: []const u8, expected: []const u8) !bool {
     const statement = try sqlite.prepare(database, "SELECT meta_value FROM store_meta WHERE meta_key='" ++ key ++ "'");
     defer _ = c.sqlite3_finalize(statement);
@@ -2907,7 +2474,6 @@ fn metaEquals(database: *c.sqlite3, comptime key: []const u8, expected: []const 
     return std.mem.eql(u8, text[0..@intCast(c.sqlite3_column_bytes(statement, 0))], expected);
 }
 
-// Two tables whose keys reference each other, for the MySQL DDL test.
 const mysql_test_order: Table = .{
     .name = "turn",
     .columns = &.{
@@ -3020,7 +2586,6 @@ test "a leading index's MySQL table computes its first column" {
     try std.testing.expect(std.mem.indexOf(u8, mysql_ddl, " action_operation_indeterminate_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN resolution_code='indeterminate' THEN session_ref END) STORED,") != null);
     try std.testing.expect(std.mem.indexOf(u8, mysql_ddl, "CREATE INDEX action_operation_indeterminate ON action_operation(action_operation_indeterminate_lead,parent_operation_id,call_ordinal);") != null);
     try std.testing.expect(std.mem.indexOf(u8, comptime ddl(.sqlite), "CREATE INDEX action_operation_indeterminate ON action_operation(session_ref,parent_operation_id,call_ordinal) WHERE resolution_code='indeterminate';") != null);
-    // SQLite keeps its partial index.
     try std.testing.expect(std.mem.indexOf(u8, comptime ddl(.sqlite), "CREATE INDEX session_stop_unpositioned ON session_stop(session_ref) WHERE position IS NULL;") != null);
 }
 
@@ -3072,7 +2637,6 @@ test "MySQL sessions read literals as rsql copies them, and strictly" {
     const mode = for (mysql_session) |statement| {
         if (std.mem.startsWith(u8, statement, prefix)) break statement[prefix.len .. statement.len - 1];
     } else return error.NoSqlMode;
-    // Literals: mysqlRendering copies them unchanged. Strict: DIV by zero and overflow in a write fail as the docs say.
     for ([_][]const u8{ "NO_BACKSLASH_ESCAPES", "STRICT_ALL_TABLES", "ERROR_FOR_DIVISION_BY_ZERO", "ONLY_FULL_GROUP_BY" }) |wanted| {
         var names = std.mem.tokenizeScalar(u8, mode, ',');
         const found = while (names.next()) |name| {
@@ -3184,7 +2748,6 @@ test "schema 74 migration only deletes the saved wire label on SQLite and MySQL"
         try std.testing.expectEqualStrings("DELETE FROM store_meta WHERE meta_key='wire_version'", statements[0]);
     }
     try std.testing.expectEqualStrings("DELETE FROM store_meta WHERE meta_key='wire_version';\n", mysqlMigration(73));
-    // Older formats' composed text ends with the format alone, never a wire label.
     try std.testing.expect(std.mem.endsWith(u8, mysqlMigrationFrom(migration_baseline).?, "UPDATE store_meta SET meta_value='" ++ format_text ++ "' WHERE meta_key='format';\n"));
 }
 
@@ -3313,11 +2876,7 @@ test "schema 57 preserves Commands and stop references while adding nullable arc
         try sqlite.bindText(meta, 1, root);
         try sqlite.expectDone(meta);
     }
-    // Exercise both optional content references and every saved field when
-    // the referenced Commands table is rebuilt, not just its row count.
     try sqlite.exec(database, "UPDATE core_command SET primary_content_id=1,secondary_content_id=2,revision=17,code='retained' WHERE command_key='fixture-stop'");
-    // Historical child stops were identified by this reserved prefix. Keep
-    // both its exact bytewise boundaries and unrelated caller stops distinct.
     const legacy_stops = [_]struct { key: []const u8, parent_caused: bool }{
         .{ .key = "rui.core/stop/", .parent_caused = true },
         .{ .key = "rui.core/stop/d8mv7p/rhvzwc/1", .parent_caused = true },
@@ -3351,7 +2910,6 @@ test "schema 57 preserves Commands and stop references while adding nullable arc
     try openExisting(std.testing.io, database, root, null, told.notice());
     try std.testing.expectEqual(@as(?u32, 56), told.begun);
     try std.testing.expect(told.ended);
-    // A Store already at schema_version opens without a migration to announce.
     var reopened: MigrationRecorder = .{};
     try openExisting(std.testing.io, database, root, null, reopened.notice());
     try std.testing.expectEqual(@as(?u32, null), reopened.begun);
@@ -3391,11 +2949,9 @@ test "schema 57 preserves Commands and stop references while adding nullable arc
         "UPDATE core_command SET kind=9 WHERE command_key='archive-request'",
         "UPDATE core_command SET command_key='fixture-stop' WHERE command_key='archive-request'",
         "INSERT INTO session_archive(session_ref,command_key) VALUES('k7m2qx','fixture-stop')",
-        // A Command without a durable stop cannot become archive intent.
         "INSERT INTO session_archive(session_ref,command_key) VALUES('rhvzwc','archive-request')",
         "INSERT INTO session_archive_command(command_key,archived) VALUES('missing-request',1)",
     }) |statement| try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, statement));
-    // Legacy stop insert callers that omit provenance retain the false default.
     try sqlite.exec(database, "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,position,admission_cutoff,stopped_at) VALUES('archive-request','rhvzwc',NULL,NULL,0,1)");
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT parent_caused FROM session_stop WHERE command_key='archive-request'"));
     try sqlite.exec(database, "INSERT INTO session_archive(session_ref,command_key) VALUES('rhvzwc','fixture-stop')");
@@ -3407,9 +2963,7 @@ test "schema 57 preserves Commands and stop references while adding nullable arc
         "UPDATE session_archive_command SET archived=NULL WHERE command_key='archive-request'",
         "INSERT INTO session_archive_command(command_key,archived) VALUES('archive-request',0)",
     }) |statement| try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, statement));
-    // Causal ending suppression remains durable after restoring the parent.
     try sqlite.exec(database, "UPDATE session_forward SET suppress_message=1 WHERE source_id=1");
-    // Restore changes only current intent; each request keeps its own bool.
     try sqlite.exec(database, "UPDATE session_archive SET command_key=NULL WHERE session_ref='rhvzwc'");
     try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT count(*) FROM session_archive WHERE session_ref='rhvzwc' AND command_key IS NULL"));
     try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT archived FROM session_archive_command WHERE command_key='archive-request'"));
@@ -3444,8 +2998,6 @@ test "schema 61 migration preserves saved call rows and accepts 200 UTF-8 bytes"
         try sqlite.bindText(meta, 1, root);
         try sqlite.expectDone(meta);
     }
-    // Preserve a hosted line at the old byte limit, a nullable call line,
-    // and the fixture's original accepted line and dependent rows.
     try sqlite.exec(database, "INSERT INTO model_output_item(operation_id,item_ordinal,session_ref,session_position,item_kind,message_content_id,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,phase,extras_content_id,part_count,description,call_failed) VALUES(2,2,'brhkcj',6,5,NULL,1,zeroblob(32),0,0,7,0,'" ++ @as([100]u8, @splat('h')) ++ "',1)");
     try sqlite.exec(database, "UPDATE model_tool_call SET description=NULL WHERE call_ordinal=1");
     const ascii_line: [200]u8 = @splat('a');
@@ -3493,7 +3045,6 @@ test "schema 61 migration preserves saved call rows and accepts 200 UTF-8 bytes"
     }
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM action_operation WHERE background_content_id IS NOT NULL OR background_position IS NOT NULL OR background_at IS NOT NULL"));
     inline for (updates) |sql| {
-        // Both ASCII and multibyte UTF-8 use byte, not character, bounds.
         for ([_][]const u8{ &ascii_line, &utf8_line }) |line| {
             const statement = try sqlite.prepare(database, sql);
             defer _ = c.sqlite3_finalize(statement);
@@ -3510,7 +3061,6 @@ test "schema 61 migration preserves saved call rows and accepts 200 UTF-8 bytes"
     try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT count(*) FROM model_tool_call WHERE operation_id=2 AND call_ordinal=0 AND length(CAST(description AS BLOB))=200 AND description='" ++ utf8_line ++ "'"));
     try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT count(*) FROM model_output_item WHERE operation_id=2 AND item_ordinal=2 AND length(CAST(description AS BLOB))=200 AND description='" ++ utf8_line ++ "'"));
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM pragma_foreign_key_check"));
-    // The widened lines and canonical table/index shapes survive reopening.
     try openExisting(std.testing.io, database, root, null, null);
 }
 

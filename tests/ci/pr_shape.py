@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tarfile
 
+from conflict_alert import github
 from select_tests import Graph, STACK_FRAMES_GATE, changed_paths, tree_graph
 
 
@@ -64,15 +65,19 @@ def screen_evidence(body):
     visible = "\n".join(lines)
     if re.search(r"^No screen change:[ \t]*\S[^\n]*$", visible, re.M):
         return True
-    return bool(re.search(r"!\[[^\]\n]*\]\(\s*[^\s)]+[^\n]*\)|!\[[^\]\n]*\]\[[^\]\n]*\]"
+    if re.search(r"!\[[^\]\n]*\]\(\s*[^\s)]+[^\n]*\)|!\[[^\]\n]*\]\[[^\]\n]*\]"
                           r"|<img\b|<video\b|https://github\.com/user-attachments/[^\s<>)]+",
-                          visible, re.I))
+                          visible, re.I):
+        return True
+    return False
 
 
 def refusal(changed_paths, body, *, base=None) -> str | None:
     if any(path.startswith("src/") for path in changed_paths) and not (
             re.search(r"^##\s+Shape\s*$", body, re.M) or summary_sketch(body)):
-        return "PRs changing src/ need a nonempty fenced sketch in ## Summary or a legacy ## Shape section (CODING_STANDARDS.md#shape-before-code)."
+        return ("PRs changing src/ need a nonempty fenced sketch in ## Summary or a legacy ## Shape section "
+                "(CODING_STANDARDS.md#shape-before-code). Add a ## Shape section to the PR body, "
+                "then re-run the failed jobs of this run; no push needed.")
     paths = set(changed_paths)
     if not any(path.startswith("src/") for path in paths) and ".claude/skills/verify-rui/scripts/frames.json" not in paths:
         return None
@@ -80,8 +85,8 @@ def refusal(changed_paths, body, *, base=None) -> str | None:
     if base is not None and any(path.startswith("src/") for path in paths):
         ui |= revision_ui_paths(base)
     if paths & (ui | {".claude/skills/verify-rui/scripts/frames.json"}) and not screen_evidence(body):
-        return ("UI PRs need an embedded image or video, or a line 'No screen change: <reason>'. "
-                "Run verify-rui frames HEAD --before BASE, then verify-rui publish DIR and paste its ## Screens block into the PR body.")
+        return ("UI PRs need embedded media or a line 'No screen change: <reason>'. "
+                "Run verify-rui frames HEAD --before BASE, then verify-rui publish DIR --pr PR (gh 2.104.0+ and a classic PAT or gh OAuth token with push access); attach before the next push or re-run failed jobs after updating the body.")
     return None
 
 
@@ -92,7 +97,19 @@ def main():
     if not args.base:
         parser.error("provide BASE as an argument or environment variable")
     paths, base = changed_paths(args.base, "HEAD")
-    reason = refusal(paths, os.environ.get("PR_BODY", ""), base=base)
+    body = os.environ.get("PR_BODY", "")
+    repo, number = os.environ.get("GITHUB_REPOSITORY"), os.environ.get("PR_NUMBER")
+    if repo and number:
+        try:
+            result = github("GET", f"repos/{repo}/pulls/{number}")
+            live_body = result["body"]
+            if live_body is not None and not isinstance(live_body, str):
+                raise ValueError("invalid PR body")
+            body = live_body or ""
+            print("Judging current PR body from GitHub.")
+        except (OSError, subprocess.CalledProcessError, KeyError, TypeError, ValueError) as error:
+            print(f"Could not read current PR body from GitHub ({error}); judging event payload body.")
+    reason = refusal(paths, body, base=base)
     if reason:
         print(reason, file=sys.stderr)
         return 1
