@@ -3,7 +3,6 @@ const vaxis = @import("vaxis");
 const Viewport = @import("ConversationViewport.zig");
 const Document = Viewport.Document;
 const Position = Viewport.Position;
-const slash_commands = @import("slash_commands.zig");
 const ConsentPolicy = @import("session_consent.zig");
 const feed_window = @import("feed_window.zig");
 const Self = @This();
@@ -24,7 +23,6 @@ action_view: ?struct { io: std.Io, file: std.Io.File } = null,
 consent: ?ConsentPolicy.Pending = null,
 message_return: ViewKind = .feed,
 drawn: struct { first: Position = .{}, rows: u16 = 0 } = .{},
-commands: ?slash_commands.Shown = null,
 height: u16 = 1,
 colour: bool,
 
