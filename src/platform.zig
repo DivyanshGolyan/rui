@@ -1345,10 +1345,13 @@ test "saved and legacy explicit interfaces share private directory admission bef
             settings.interface.dir.anchored = false;
             if (door == .saved_mysql) settings.store = .{ .mysql = .{} } else try settings.store.sqlite.dir.text.set(host.root[0..host.root_len]);
             const paths = if (door == .legacy_mysql) mysqlClientPaths(io, id, directory) else placementPaths(io, settings);
-            if (mode == 0o700) {
+            // Private-directory admission excludes other-user permissions.
+            // A mode-000 directory is private too; connecting may separately
+            // fail for lack of search permission (openDir can use O_PATH).
+            if (mode == 0o700 or mode == 0) {
                 _ = try paths;
             } else {
-                try std.testing.expectError(if (mode == 0) error.AccessDenied else error.InsecureDirectoryPermissions, paths);
+                try std.testing.expectError(error.InsecureDirectoryPermissions, paths);
             }
         }
     }
