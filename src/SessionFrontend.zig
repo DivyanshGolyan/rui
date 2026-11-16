@@ -1753,7 +1753,7 @@ test "a Session lists the skills it saved for the caret's /word, and Tab or Ente
     held.self.skill_read = Fake.read;
     try held.keys("/");
     try Fake.answered(held);
-    try std.testing.expectEqual(@as(usize, 16), held.screen.commands.?.list.count);
+    try std.testing.expectEqual(slash_commands.starting("").count + 2, held.screen.commands.?.list.count);
     try held.keys("re\x1b[B\x1b[B\x1b[B\x1b[B\r");
     try std.testing.expectEqualStrings("/recap ", held.self.input.composition().bytes);
     try std.testing.expect(held.self.submission.view() == null);

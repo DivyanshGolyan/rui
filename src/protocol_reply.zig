@@ -3148,7 +3148,11 @@ test "keyed observation validates every operation shape and binding" {
         writer = std.Io.Writer.fixed(&output);
         try rejected.writeJson(&writer);
         try std.testing.expectEqualStrings("{\"status\":\"rejected\",\"kind\":\"" ++ case[0] ++ "\",\"target\":\"k7m2qx\",\"code\":\"unknown_session\"" ++ case[2] ++ "}", writer.buffered());
-        try std.testing.expectError(error.InvalidObservation, CommandObservation.parse(.{ .status = 200, .body = prefix ++ "\"kind\":\"" ++ case[0] ++ "\",\"status\":\"accepted\"}}" }, "k"));
+        const incomplete = comptime if (std.mem.eql(u8, case[0], "session_group"))
+            testing_observation_prefix ++ "{\"kind\":\"session_group\",\"status\":\"accepted\"}}"
+        else
+            prefix ++ "\"kind\":\"" ++ case[0] ++ "\",\"status\":\"accepted\"}}";
+        try std.testing.expectError(error.InvalidObservation, CommandObservation.parse(.{ .status = 200, .body = incomplete }, "k"));
         if (!std.mem.eql(u8, case[0], "message")) {
             try std.testing.expectError(error.InvalidObservation, CommandObservation.parse(.{ .status = 200, .body = accepted[0 .. accepted.len - 2] ++ ",\"state\":\"queued\"}}" }, "k"));
         }

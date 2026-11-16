@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Rui Host",
-    "version": "21",
+    "version": "20",
     "description": "The Rui Host's local protocol: HTTP/1.1 over the Unix socket of a running Host, one POST per request, generated from the Host's own wire types.\n\nRequest bodies list their fields in the order this document lists them; the Host refuses another order. Numbers that may exceed 2^53 travel as decimal strings. String bounds are in UTF-8 bytes (`x-rui-max-bytes`)."
   },
   "paths": {
@@ -1373,7 +1373,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "21"
+            "const": "20"
           },
           "type": {
             "const": "action_background_reply"
@@ -1422,7 +1422,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "21"
+                "const": "20"
               },
               "type": {
                 "const": "action_background_reply"
@@ -1486,7 +1486,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "21"
+                "const": "20"
               },
               "type": {
                 "const": "action_background_reply"
@@ -1544,7 +1544,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "21"
+            "const": "20"
           },
           "kind": {
             "const": "action_background"
@@ -1582,7 +1582,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "21"
+            "const": "20"
           },
           "kind": {
             "const": "activity_content"
@@ -2762,7 +2762,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "21"
+                "const": "20"
               },
               "type": {
                 "const": "activity_page"
@@ -2830,7 +2830,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "21"
+                "const": "20"
               },
               "type": {
                 "const": "activity_page"
@@ -2858,7 +2858,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "21"
+            "const": "20"
           },
           "kind": {
             "const": "activity_page"
@@ -3044,7 +3044,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "21"
+            "const": "20"
           },
           "type": {
             "const": "activity_search"
@@ -3078,7 +3078,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "21"
+            "const": "20"
           },
           "kind": {
             "const": "activity_search"
@@ -3402,7 +3402,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "21"
+            "const": "20"
           },
           "type": {
             "const": "configuration_reply"
@@ -3464,7 +3464,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "21"
+                "const": "20"
               },
               "type": {
                 "const": "configuration_reply"
@@ -3528,7 +3528,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "21"
+                "const": "20"
               },
               "type": {
                 "const": "configuration_reply"
@@ -3600,7 +3600,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "21"
+                "const": "20"
               },
               "type": {
                 "const": "configuration_reply"
@@ -3708,7 +3708,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "21"
+            "const": "20"
           },
           "kind": {
             "const": "configure"
@@ -3757,7 +3757,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "21"
+            "const": "20"
           },
           "kind": {
             "const": "conversation_content"
@@ -3802,7 +3802,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "21"
+                "const": "20"
               },
               "type": {
                 "const": "conversation_page"
@@ -4111,7 +4111,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "21"
+                "const": "20"
               },
               "type": {
                 "const": "conversation_page"
@@ -4430,7 +4430,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "21"
+            "const": "20"
           },
           "kind": {
             "const": "conversation_page"
@@ -4475,7 +4475,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "21"
+            "const": "20"
           },
           "type": {
             "type": "string",
@@ -4570,7 +4570,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "21"
+            "const": "20"
           },
           "type": {
             "const": "host_info"
@@ -4682,7 +4682,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "21"
+            "const": "20"
           },
           "kind": {
             "const": "host_info"
@@ -4704,7 +4704,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "21"
+            "const": "20"
           },
           "type": {
             "const": "host_pause_reply"
@@ -4724,7 +4724,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "21"
+            "const": "20"
           },
           "kind": {
             "const": "host_pause"
@@ -5524,7 +5524,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "21"
+            "const": "20"
           },
           "type": {
             "const": "host_stop_reply"
@@ -5544,7 +5544,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "21"
+            "const": "20"
           },
           "kind": {
             "const": "host_stop"
@@ -5568,7 +5568,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "21"
+                "const": "20"
               },
               "type": {
                 "const": "session_report"
@@ -5671,7 +5671,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "21"
+                "const": "20"
               },
               "type": {
                 "const": "session_report"
@@ -5770,7 +5770,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "21"
+                "const": "20"
               },
               "type": {
                 "const": "session_report"
@@ -5823,7 +5823,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "21"
+                "const": "20"
               },
               "type": {
                 "const": "session_report"
@@ -5872,7 +5872,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "21"
+                "const": "20"
               },
               "kind": {
                 "const": "inspect_session"
@@ -5912,7 +5912,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "21"
+                "const": "20"
               },
               "kind": {
                 "const": "inspect_session"
@@ -5944,7 +5944,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "21"
+                "const": "20"
               },
               "kind": {
                 "const": "inspect_session"
@@ -6017,7 +6017,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "21"
+                "const": "20"
               },
               "type": {
                 "const": "session_list"
@@ -6071,7 +6071,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "21"
+                "const": "20"
               },
               "type": {
                 "const": "session_list"
@@ -6127,7 +6127,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "21"
+                "const": "20"
               },
               "type": {
                 "const": "session_list"
@@ -6170,7 +6170,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "21"
+            "const": "20"
           },
           "kind": {
             "const": "list_sessions"
@@ -6233,7 +6233,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "21"
+            "const": "20"
           },
           "type": {
             "const": "message_reply"
@@ -6345,7 +6345,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "21"
+                "const": "20"
               },
               "type": {
                 "const": "message_reply"
@@ -6440,7 +6440,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "21"
+                "const": "20"
               },
               "type": {
                 "const": "message_reply"
@@ -6571,7 +6571,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "21"
+            "const": "20"
           },
           "kind": {
             "const": "message"
@@ -6670,7 +6670,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "21"
+            "const": "20"
           },
           "type": {
             "const": "model_interruption_reply"
@@ -6732,7 +6732,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "21"
+                "const": "20"
               },
               "type": {
                 "const": "model_interruption_reply"
@@ -6788,7 +6788,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "21"
+                "const": "20"
               },
               "type": {
                 "const": "model_interruption_reply"
@@ -6858,7 +6858,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "21"
+            "const": "20"
           },
           "kind": {
             "const": "model_interruption"
@@ -6958,7 +6958,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "21"
+            "const": "20"
           },
           "type": {
             "const": "model_list"
@@ -6981,7 +6981,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "21"
+            "const": "20"
           },
           "kind": {
             "const": "model_list"
@@ -7032,7 +7032,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "21"
+                "const": "20"
               },
               "type": {
                 "const": "command_observation"
@@ -7075,7 +7075,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "21"
+                "const": "20"
               },
               "type": {
                 "const": "command_observation"
@@ -7255,7 +7255,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "21"
+                "const": "20"
               },
               "type": {
                 "const": "command_observation"
@@ -10533,7 +10533,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "21"
+                "const": "20"
               },
               "type": {
                 "const": "command_observation"
@@ -10779,7 +10779,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "21"
+                "const": "20"
               },
               "type": {
                 "const": "command_observation"
@@ -10985,7 +10985,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "21"
+                "const": "20"
               },
               "type": {
                 "const": "command_observation"
@@ -11195,7 +11195,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "21"
+                "const": "20"
               },
               "type": {
                 "const": "command_observation"
@@ -11401,7 +11401,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "21"
+                "const": "20"
               },
               "type": {
                 "const": "command_observation"
@@ -11573,7 +11573,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "21"
+                "const": "20"
               },
               "type": {
                 "const": "command_observation"
@@ -11831,7 +11831,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "21"
+                "const": "20"
               },
               "type": {
                 "const": "command_observation"
@@ -11935,7 +11935,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "21"
+                "const": "20"
               },
               "type": {
                 "const": "command_observation"
@@ -11969,7 +11969,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "21"
+            "const": "20"
           },
           "kind": {
             "const": "observe_command"
@@ -12113,7 +12113,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "21"
+            "const": "20"
           },
           "type": {
             "const": "permission_decision_reply"
@@ -12170,7 +12170,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "21"
+                "const": "20"
               },
               "type": {
                 "const": "permission_decision_reply"
@@ -12221,7 +12221,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "21"
+                "const": "20"
               },
               "type": {
                 "const": "permission_decision_reply"
@@ -12286,7 +12286,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "21"
+            "const": "20"
           },
           "kind": {
             "const": "permission_decision"
@@ -12356,7 +12356,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "21"
+            "const": "20"
           },
           "kind": {
             "const": "read_action_arguments"
@@ -12388,7 +12388,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "21"
+            "const": "20"
           },
           "kind": {
             "const": "read_action_call_id"
@@ -12422,7 +12422,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "21"
+                "const": "20"
               },
               "type": {
                 "const": "action_read"
@@ -12461,7 +12461,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "21"
+                "const": "20"
               },
               "type": {
                 "const": "action_read"
@@ -12557,7 +12557,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "21"
+            "const": "20"
           },
           "kind": {
             "const": "read_action"
@@ -12592,7 +12592,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "21"
+            "const": "20"
           },
           "kind": {
             "const": "read_result"
@@ -12620,7 +12620,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "21"
+            "const": "20"
           },
           "type": {
             "const": "session_archive_reply"
@@ -12678,7 +12678,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "21"
+                "const": "20"
               },
               "type": {
                 "const": "session_archive_reply"
@@ -12738,7 +12738,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "21"
+                "const": "20"
               },
               "type": {
                 "const": "session_archive_reply"
@@ -12801,7 +12801,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "21"
+            "const": "20"
           },
           "kind": {
             "const": "session_archive"
@@ -12838,7 +12838,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "21"
+            "const": "20"
           },
           "type": {
             "const": "session_group_reply"
@@ -12883,7 +12883,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "21"
+                "const": "20"
               },
               "type": {
                 "const": "session_group_reply"
@@ -12922,7 +12922,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "21"
+                "const": "20"
               },
               "type": {
                 "const": "session_group_reply"
@@ -12977,7 +12977,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "21"
+                "const": "20"
               },
               "kind": {
                 "const": "session_group"
@@ -13021,7 +13021,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "21"
+                "const": "20"
               },
               "kind": {
                 "const": "session_group"
@@ -13059,7 +13059,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "21"
+                "const": "20"
               },
               "kind": {
                 "const": "session_group"
@@ -13097,7 +13097,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "21"
+                "const": "20"
               },
               "kind": {
                 "const": "session_group"
@@ -13145,7 +13145,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "21"
+                "const": "20"
               },
               "kind": {
                 "const": "session_group"
@@ -13193,7 +13193,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "21"
+            "const": "20"
           },
           "type": {
             "const": "session_pin_reply"
@@ -13238,7 +13238,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "21"
+                "const": "20"
               },
               "type": {
                 "const": "session_pin_reply"
@@ -13281,7 +13281,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "21"
+                "const": "20"
               },
               "type": {
                 "const": "session_pin_reply"
@@ -13332,7 +13332,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "21"
+            "const": "20"
           },
           "kind": {
             "const": "session_pin"
@@ -13533,7 +13533,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "21"
+            "const": "20"
           },
           "type": {
             "const": "session_stop_reply"
@@ -13591,7 +13591,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "21"
+                "const": "20"
               },
               "type": {
                 "const": "session_stop_reply"
@@ -13671,7 +13671,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "21"
+                "const": "20"
               },
               "type": {
                 "const": "session_stop_reply"
@@ -13733,7 +13733,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "21"
+            "const": "20"
           },
           "kind": {
             "const": "session_stop"
@@ -13812,7 +13812,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "21"
+            "const": "20"
           },
           "type": {
             "const": "skill_suggestions"
@@ -13864,7 +13864,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "21"
+                "const": "20"
               },
               "kind": {
                 "const": "skill_suggestions"
@@ -13898,7 +13898,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "21"
+                "const": "20"
               },
               "kind": {
                 "const": "skill_suggestions"
@@ -15783,7 +15783,7 @@
         "description": "The wire version this document describes. Any other version is refused.",
         "schema": {
           "type": "string",
-          "const": "21"
+          "const": "20"
         }
       },
       "HostInstance": {
