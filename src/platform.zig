@@ -533,7 +533,8 @@ fn pathsFromOpenStore(store_dir: std.Io.Dir, io: std.Io) !Paths {
     return pathsForCanonicalStore(canonical_buffer[0..canonical_length]);
 }
 
-fn pathsForCanonicalStore(canonical: []const u8) !Paths {
+// Construction scratch does not belong to a caller retaining other Paths.
+noinline fn pathsForCanonicalStore(canonical: []const u8) !Paths {
     try validateCanonicalPath(canonical);
     var paths: Paths = .{};
     try paths.store.set(canonical);
