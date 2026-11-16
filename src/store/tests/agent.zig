@@ -338,7 +338,13 @@ test "session message writer covers peer message_agent start_agent and ending wi
     // four private copies of this transition. Pair the structural invariant
     // with the durable behavior of every caller below.
     const owner = @embedFile("../domain/command.zig");
-    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, owner, "a.write(admit_sent_message,"));
+    const admission_owner = @embedFile("../domain/sourced_input.zig");
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, owner, "INSERT INTO message_admission"));
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, owner, "identity(.admission_id)"));
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, owner, "sourced_input.admit("));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, admission_owner, "identity(.admission_id)"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, admission_owner, "a.write(admit_message,"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, admission_owner, "a.write(admit_sent_message,"));
     try std.testing.expectEqual(@as(usize, 4), std.mem.count(u8, owner, "try admitFromSession("));
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
