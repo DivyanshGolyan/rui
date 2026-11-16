@@ -309,10 +309,10 @@ pub const ClientSelection = union(Kind) {
     sqlite: []const u8,
     mysql: struct { store: []const u8, runtime: []const u8 },
 
-    pub noinline fn paths(self: ClientSelection, io: std.Io) !Paths {
-        return switch (self) {
-            .mysql => |value| mysqlClientPaths(io, value.store, value.runtime),
-            .sqlite => |path| blk: {
+    pub fn paths(self: ClientSelection, io: std.Io) !Paths {
+        switch (self) {
+            .mysql => |value| return mysqlClientPaths(io, value.store, value.runtime),
+            .sqlite => |path| {
                 // Preserve the directory's admission before reading its saved placement.
                 var canonical: [protocol.max_store_bytes]u8 = undefined;
                 const host = try existingStoreDestination(io, path, &canonical);
@@ -320,15 +320,15 @@ pub const ClientSelection = union(Kind) {
                     // A ready default Host remains attachable if its saved
                     // startup document was edited to an invalid value. Only a
                     // new start admits that document; never guess moved paths.
-                    error.SettingsInvalid => break :blk try pathsForCanonicalStore(host),
+                    error.SettingsInvalid => return pathsForCanonicalStore(host),
                     else => return err,
                 };
                 // Until client lookup learns MySQL's opaque identity, retain
                 // its directory selector for consumers saving a selection.
                 if (result.kind == .mysql) try result.store.set(host);
-                break :blk result;
+                return result;
             },
-        };
+        }
     }
 };
 
