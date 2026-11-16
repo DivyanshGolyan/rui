@@ -365,7 +365,7 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                 },
                 .tool => {
                     const marker = self.lineMarker(start) orelse return null;
-                    if (!std.mem.eql(u8, marker.uri, tool_fold.output_uri)) return null;
+                    if (!std.mem.eql(u8, self.bytes[start..marker.end], tool_fold.output_uri)) return null;
                     body_start = marker.end;
                     if (std.mem.startsWith(u8, self.text()[body_start..end], "    ")) body_start += 4;
                 },
