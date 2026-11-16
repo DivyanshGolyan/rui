@@ -218,36 +218,7 @@ pub const TestingSteps = struct {
     }
 };
 
-/// Interrupts the one statement whose text is `sql` as it steps, the way an
-/// I/O fault fails a read. No schema changes, so no cached plan expires.
-pub const TestingStatementFault = struct {
-    sql: [:0]const u8,
-    running: bool = false,
-    failed: u64 = 0,
-
-    pub fn arm(self: *TestingStatementFault, database: *c.sqlite3) void {
-        _ = c.sqlite3_trace_v2(database, c.SQLITE_TRACE_STMT, traced, self);
-        c.sqlite3_progress_handler(database, 1, progress, self);
-    }
-
-    pub fn disarm(_: *const TestingStatementFault, database: *c.sqlite3) void {
-        _ = c.sqlite3_trace_v2(database, 0, null, null);
-        c.sqlite3_progress_handler(database, 0, null, null);
-    }
-
-    pub fn traced(_: c_uint, context: ?*anyopaque, statement: ?*anyopaque, _: ?*anyopaque) callconv(.c) c_int {
-        const self: *TestingStatementFault = @ptrCast(@alignCast(context.?));
-        self.running = std.mem.eql(u8, std.mem.span(c.sqlite3_sql(@ptrCast(statement))), self.sql);
-        return 0;
-    }
-
-    pub fn progress(context: ?*anyopaque) callconv(.c) c_int {
-        const self: *TestingStatementFault = @ptrCast(@alignCast(context.?));
-        if (!self.running) return 0;
-        self.failed += 1;
-        return 1;
-    }
-};
+pub const TestingStatementFault = store_testing.TestingStatementFault;
 
 /// Every claimed Session position is used exactly once: the claims, from
 /// every table that saves one, are exactly 1 through `next_position - 1`.
