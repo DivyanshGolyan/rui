@@ -2,6 +2,7 @@
 
 [Architecture](../../ARCHITECTURE.md) owns shared guarantees, terminology, and the source map.
 [Verification](../../VERIFICATION.md) owns global evidence rules and gates.
+[Design principles](../../DESIGN.md) own the reasons screens look and read the way they do; this contract owns their behavior.
 
 ## Accepted contract
 
