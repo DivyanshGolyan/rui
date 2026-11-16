@@ -285,10 +285,15 @@ def main():
                 if work is None: del wire["work"]
                 else: wire["work"].update(work)
                 mock_reply(fields["socket"], store, "page", json.dumps(wire).encode(), ok=ok)
-            for turn, completion, ok in ((None, "completed", True), ("1", "pending", True), (None, "pending", False)):
-                wire = copy.deepcopy(valid)
-                wire["items"] = [{"position": "1", "ordinal": "0", "at": "1", "value": {"stop": {"key": "stop", "turn": turn, "cutoff": "0", "completion": completion}}}]
-                mock_reply(fields["socket"], store, "page", json.dumps(wire).encode(), ok=ok)
+            for turn in (None, "1"):
+                for completion in ("pending", "completed"):
+                    wire = copy.deepcopy(valid)
+                    wire["items"] = [{"position": "1", "ordinal": "0", "at": "1", "value": {"stop": {"key": "stop", "turn": turn, "cutoff": "0", "completion": completion}}}]
+                    mock_reply(fields["socket"], store, "page", json.dumps(wire).encode(), ok=True)
+            for fault in ({"turn": "0"}, {"turn": "-1"}, {"completion": "unknown"}, {"completion": None}, {"cutoff": "-1"}):
+                wire["items"][0]["value"]["stop"].update(fault)
+                mock_reply(fields["socket"], store, "page", json.dumps(wire).encode())
+                wire["items"][0]["value"]["stop"] = {"key": "stop", "turn": None, "cutoff": "0", "completion": "pending"}
             def received(sender):
                 # Another Session's Message is a received row, which names
                 # its sender; a person's admission row never does.
