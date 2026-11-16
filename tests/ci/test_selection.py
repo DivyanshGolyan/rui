@@ -2,7 +2,7 @@ import ast
 import json
 import re
 import os
-from contextlib import ExitStack
+from contextlib import ExitStack, chdir
 from pathlib import Path
 import signal
 import shutil
@@ -272,6 +272,119 @@ class AssertedTextSelectionTest(unittest.TestCase):
             self.assertIn("host-launch-integration", result[field])
         self.assertEqual(result["reasons"].count(
             "Asserted text: a fixture waits for text this file draws"), 1)
+
+
+class BinarySourceSelectionTest(unittest.TestCase):
+    """Run the production CLI against committed blobs and its actual tree readers."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        owner = Path(__file__).resolve().parents[2]
+        ci = self.root / "tests/ci"
+        ci.mkdir(parents=True)
+        for name in ("select_tests", "build_files", "import_architecture", "platform_boundary",
+                     "qualification", "strict_paths", "release_numbers"):
+            shutil.copyfile(owner / f"tests/ci/{name}.py", ci / f"{name}.py")
+        shutil.copyfile(owner / "build.zig", self.root / "build.zig")
+        shutil.copytree(owner / "build", self.root / "build")
+        self.write("src/logic_tests.zig", b"const cores = .{\n};\n")
+        self.git("init", "-q")
+        self.git("config", "user.name", "Selector test")
+        self.git("config", "user.email", "selector@example.invalid")
+        self.git("config", "core.autocrlf", "false")
+
+    def write(self, name, content):
+        path = self.root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+
+    def git(self, *args):
+        return subprocess.run(["git", "-C", str(self.root), *args], check=True,
+                              capture_output=True, text=True, encoding="utf-8",
+                              errors="surrogateescape").stdout.strip()
+
+    def commit(self):
+        self.git("add", "-A")
+        self.git("commit", "--allow-empty", "-qm", "Selector input")
+        return self.git("rev-parse", "HEAD")
+
+    def plan(self, base):
+        result = subprocess.run([sys.executable, "tests/ci/select_tests.py", "--base", base],
+                                cwd=self.root, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        plan = json.loads(result.stdout)
+        self.assertEqual(plan["base"], base)
+        self.assertEqual(plan["head"], self.git("rev-parse", "HEAD"))
+        return plan
+
+    def test_binary_add_edit_delete_preserve_graph_and_fallback(self):
+        # A PNG header and every byte value cover invalid UTF-8, NUL and newlines.
+        payload = b"\x89PNG\r\n\x1a\n" + bytes(range(256))
+        for embedded in (False, True):
+            for filename in ("octets.bin", "pixel.png", "octets-\udc80.bin"):
+                path = f"src/codecs/fixtures/image-input/{filename}"
+                source = 'const cores = .{\n};\n'
+                if embedded:
+                    source += f'const image = @embedFile("{path[4:]}");\n'
+                self.write("src/logic_tests.zig", source.encode("utf-8", "surrogateescape"))
+                base = self.commit()
+                for change in ("add", "edit", "delete"):
+                    with self.subTest(embedded=embedded, filename=filename, change=change):
+                        if change == "delete":
+                            (self.root / path).unlink()
+                        else:
+                            self.write(path, payload + (b"\xffedited" if change == "edit" else b""))
+                        head = self.commit()
+                        result = self.plan(base)
+                        expected = ["test-logic"] if embedded else ["check"]
+                        self.assertEqual(result["native_targets"], expected)
+                        self.assertEqual(result["targets"], ["stack-frames", *expected] if embedded else expected)
+                        self.assertTrue(result["native_required"])
+                        self.assertEqual(result["typecheck_macos"], embedded)
+                        self.assertIn("Import graph: the unit roots and fixtures that reach the changed file"
+                                      if embedded else "Source no import or rule reaches: full fallback",
+                                      result["reasons"])
+                    base = head
+
+    def test_unchanged_binary_counts_toward_asserted_text_ownership(self):
+        text = "A fixture waits for this message"
+        self.write("src/logic_tests.zig", b'const cores = .{\n};\nconst prose = @import("prose.zig");\n')
+        # A shell fixture also exercises the shared tree reader on invalid bytes.
+        self.write("tests/integration/admission_integration.sh", b"# Invalid byte in a shell comment: \x80\n")
+        self.write("tests/integration/host_launch_integration.py", f'expected = "{text}"\n'.encode())
+        self.write("src/other.zig", f'const text = "{text}";\n'.encode())
+        for count in (1, 2):
+            with self.subTest(binary_files=count):
+                # Two production files leave prose uncommon; three make it shared.
+                self.write(f"src/codecs/fixtures/image-input/octets-{count}-\udc80.bin",
+                           b"\x80\x00" + f'"{text}"'.encode() + bytes(range(256)))
+                self.write("src/prose.zig", f'const text = "{text}";\r\n// \x80\r'.encode("latin-1"))
+                base = self.commit()
+                self.write("src/prose.zig", b'const text = "Other screen prose";\r\n// \x80\r')
+                self.commit()
+                result = self.plan(base)
+                expected = ["host-launch-integration", "test-logic"] if count == 1 else ["test-logic"]
+                for field in ("targets", "native_targets"):
+                    self.assertEqual(result[field], expected)
+                self.assertEqual("Asserted text: a fixture waits for text this file draws" in result["reasons"],
+                                 count == 1)
+
+    def test_readers_retain_bytes_and_universal_newlines(self):
+        from select_tests import revision_text, tree_text
+
+        path = "src/codecs/fixtures/image-input/octets-\udc80.bin"
+        raw = bytes(range(256)) + " café ☃".encode() + b"\r\nline\rfinal\n"
+        expected = raw.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+        self.write(path, raw)
+        head = self.commit()
+        with chdir(self.root), patch("select_tests.ROOT", self.root):
+            working = tree_text(path)
+            committed = revision_text(head, path)
+            self.assertIsNone(revision_text(head, "src/absent.bin"))
+        for text in (working, committed):
+            self.assertEqual(text.encode("utf-8", "surrogateescape"), expected)
 
 
 class WorkflowEntrypointsTest(unittest.TestCase):
