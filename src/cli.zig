@@ -908,11 +908,11 @@ noinline fn runUpgrade(init: std.process.Init, args: []const []const u8) !void {
     holdStore(store);
     const upgrade = @import("upgrade.zig");
     const allocator = std.heap.c_allocator;
-    var download: upgrade.DownloadDiagnostic = .{};
+    var download: upgrade.Download = .{};
     defer download.deinit(allocator);
     var checked = upgrade.check(init, allocator, store, null, &download) catch |err| {
         stderr.diagnostic("rui: upgrade check failed; no installation or Host was changed ({s}).\n", .{@tagName(caller_error.of(@as(anyerror, err)))});
-        upgradeDownloadDiagnostic(err, &download);
+        upgradeDownload(err, &download);
         recordExit(.environment);
         return error.Reported;
     };
@@ -938,7 +938,7 @@ noinline fn runUpgrade(init: std.process.Init, args: []const []const u8) !void {
     }
     var result = upgrade.install(init, allocator, &checked, null, null, &cleanup, &download) catch |err| {
         stderr.diagnostic("rui: upgrade failed before publication; the selected build and Host were not changed ({s}).\n", .{@tagName(caller_error.of(@as(anyerror, err)))});
-        upgradeDownloadDiagnostic(err, &download);
+        upgradeDownload(err, &download);
         recordExit(.environment);
         return error.Reported;
     };
@@ -948,7 +948,7 @@ noinline fn runUpgrade(init: std.process.Init, args: []const []const u8) !void {
     if (result.hosts.totals().failed != 0) return error.HostRestartFailed;
 }
 
-noinline fn upgradeDownloadDiagnostic(err: anyerror, download: *const @import("upgrade.zig").DownloadDiagnostic) void {
+noinline fn upgradeDownload(err: anyerror, download: *const @import("upgrade.zig").Download) void {
     if (caller_error.of(err) != .upgrade_download_failed) return;
     const facts = caller_error.facts(.upgrade_download_failed);
     stderr.diagnostic("{s} {s}\n", .{ facts.says, facts.next });
