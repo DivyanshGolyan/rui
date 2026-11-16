@@ -32,6 +32,7 @@ const store_core = @import("../Store.zig");
 const Store = store_core.Store;
 const configuration_domain = @import("configuration.zig");
 const content_domain = @import("content.zig");
+const sourced_input = @import("sourced_input.zig");
 const report_domain = @import("report.zig");
 const session_list_domain = @import("session_list_read.zig");
 const store_schema = @import("../schema.zig");
@@ -1398,7 +1399,7 @@ const activity_message = rsql.Read(.{
     .sql = "SELECT m.command_key,m.turn_id,m.content_id," ++
         "EXISTS(SELECT 1 FROM conversation_entry e WHERE e.session_ref=m.session_ref AND e.source_admission_id=m.admission_id AND e.session_position<=?2) AS applied," ++
         "EXISTS(SELECT 1 FROM session_stop s WHERE s.session_ref=m.session_ref AND s.admission_cutoff>=m.admission_id AND s.position<=?2) AS excluded," ++
-        "c.kind=2 AND c.accepted=1 AND c.target=m.session_ref AND c.primary_content_id=m.content_id " ++
+        sourced_input.consistentSql("m", "c") ++ " " ++
         "AND (m.turn_id IS NULL OR (t.session_ref=m.session_ref AND EXISTS(SELECT 1 FROM conversation_entry e " ++
         "WHERE e.source_admission_id=m.admission_id AND e.session_ref=m.session_ref AND e.turn_id=m.turn_id AND e.content_id=m.content_id))) AS consistent," ++
         "m.admitted_at,m.sender_session_ref FROM message_admission m " ++
@@ -1527,7 +1528,7 @@ fn checkCallDetails(details: *const call_details.Row, metadata: *const activity_
 /// A Message the Session sent from position ?3, with whether its command
 /// agrees with it.
 const sent_message = rsql.Read(.{
-    .sql = "SELECT m.session_ref,m.content_id,m.admitted_at,c.kind=2 AND c.accepted=1 AND c.target=m.session_ref AND c.primary_content_id=m.content_id AS consistent " ++
+    .sql = "SELECT m.session_ref,m.content_id,m.admitted_at," ++ sourced_input.consistentSql("m", "c") ++ " AS consistent " ++
         "FROM message_admission m LEFT JOIN core_command c ON c.command_key=m.command_key WHERE m.admission_id=?1 AND m.sender_session_ref=?2 AND m.sender_position=?3",
     .Args = struct { admission: u64, session: []const u8, position: u64 },
     .Row = struct { session_ref: SessionText, content_id: rsql.Positive, admitted_at: rsql.Positive, consistent: bool },
