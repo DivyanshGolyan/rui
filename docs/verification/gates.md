@@ -184,6 +184,13 @@ Cache policy is the proof and the prune script themselves, and changed non-comme
 The required `admission` aggregate includes this job when selected.
 Build-cache keys separate native tools, Apple SDK, architecture, dependency pins, scripts, source inputs and shard.
 Only `main` saves caches; PR jobs restore main's snapshots and save none, so PR caches never feed a privileged workflow or evict main's.
+Setup restores caches and captures missing exact keys; an explicit `save-only` invocation of the same cache composite runs under `always()` after compilation, before long failure diagnostics.
+It saves compiler, build, package and build-runner caches even after failed or step-timed-out work, but never overwrites an exact hit; the compiler is published only after installation and version verification finish.
+Cold acceptance still bypasses build, package and build-runner caches.
+A [job timeout cancels the job](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idtimeout-minutes), and [cancellation forcibly terminates remaining work after five minutes](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-cancellation), so `always()` alone cannot guarantee an upload then.
+Setup and long compile/test steps have separate timeouts below the job budget, reserving time for saves; hard runner loss, forced cancellation or an upload failure can still prevent publication.
+Partial Zig compilation caches are safe to restore: [Zig's content-addressed cache validates hashed inputs and manifests, treating incomplete manifests as misses](https://github.com/ziglang/zig/blob/0.17.1/lib/std/Build/Cache.zig).
+That safety argument is source inspection, not a claim of native interrupted-build qualification; cached output never substitutes for test execution.
 
 Each platform builds its target closure once with `ci-build -Dci-targets=...`.
 On Linux and macOS, when the selection compiles the single-threaded unit test binary alongside other gates, one producer builds only that binary (`-Dci-part=unit`) and another builds the rest (`-Dci-part=rest`); build.zig refuses a split whose selection never reaches the unit compile.
@@ -209,11 +216,13 @@ Uploads expire after three days.
 Successful gates do not capture.
 Native observation failure metadata is copied after reap and before temporary-root deletion.
 
-[Cache maintenance](../../.github/workflows/cache-maintenance.yml) warms production compilation after trusted main pushes that change build, dependency or maintenance inputs.
+[Cache maintenance](../../.github/workflows/cache-maintenance.yml) warms production compilation (`baseline`) and both split producer partitions (`compiled` and `compiled-unit`) on Linux and macOS after trusted main pushes that change build, dependency or maintenance inputs.
+The producer warmers run the same `build_artifact.py build` command as Selected checks and Promote, using `rest` and `unit` respectively with the full promotion core (`check-full`, `test-logic`, `admission-debug-integration`, plus Linux `stack-frames`).
+Each has a 120-minute job budget and a 90-minute compile step, leaving time to save even partial progress. The existing 60-minute producer safety nets remain; Linux unit compilation now has that budget too.
 A build partition restores its own newest snapshot, for the current dependencies first and then across a dependency repin; a partition with neither, such as one only pull requests run, starts from that baseline for the current dependencies, and no partition restores another's snapshot.
 It also compiles the build runner on six Linux slots and one Mac, so test shards on the CPU models those slots drew restore it from main.
 Cleanup keeps main's newest snapshot per platform and partition, per build-runner CPU model, of each platform's compiler and of the package set, and removes every PR cache; these are targets, not a quota.
-Warm baselines are not test acceptance.
+Warm compilation snapshots are not test acceptance. Cleanup waits for all maintenance publishers, including the previous-release warmer.
 Maintenance also builds the pinned previous release per platform for the read-only upgrade check.
 The API-only cleanup job runs trusted main code with cache-deletion permission and consumes no producer code, caches or artifacts.
 

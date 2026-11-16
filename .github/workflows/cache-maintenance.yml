@@ -19,16 +19,16 @@ permissions:
   contents: read
 
 concurrency:
-  # Completion cleanups must not replace a pending push baseline.
+  # Completion cleanups must not replace a pending push warmup.
   group: cache-maintenance-${{ github.event_name == 'workflow_run' && 'prune' || 'baseline' }}
   # Finish cache saves; only superseded pending refreshes may be replaced.
   cancel-in-progress: false
 
 jobs:
   prune:
-    needs: [baseline, runner]
-    # Job completion includes post-job saves. A successful matrix peer can save
-    # even when another fails; workflow_run skips baseline but still cleans up.
+    needs: [baseline, compiled, runner, previous_release]
+    # Job completion includes explicit failure-safe saves. workflow_run
+    # skips warming but still reconciles snapshots from failed producers.
     if: ${{ always() && !github.event.repository.private && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -58,16 +58,18 @@ jobs:
           - runner: macos-15
             arch: arm64
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
       - uses: ./.github/actions/setup
+        timeout-minutes: 15
         with:
           check-part: baseline
       - name: Warm production compilation, not test acceptance
+        timeout-minutes: 90
         env:
           EXPECTED_ARCH: ${{ matrix.arch }}
         run: |
@@ -75,13 +77,21 @@ jobs:
           test "$(uname -m)" = "$EXPECTED_ARCH"
           zig build -Doptimize=ReleaseSafe --summary all
           echo "Compilation cache baseline for $(git rev-parse HEAD) on $(uname -s)/$(uname -m). No test acceptance or release qualification." >> "$GITHUB_STEP_SUMMARY"
+      - name: Save reusable caches even after failure
+        if: ${{ always() }}
+        timeout-minutes: 10
+        uses: ./.github/actions/setup/caches
+        with:
+          save-only: 'true'
       # Selected checks' policy job restores this tarball from main.
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: actionlint-cache
         if: ${{ runner.os == 'Linux' }}
         with:
           path: ${{ runner.temp }}/actionlint
           key: rui-actionlint-1.7.7-linux-amd64
       - name: Publish the pinned workflow linter
+        timeout-minutes: 3
         if: ${{ runner.os == 'Linux' }}
         env:
           GH_TOKEN: ${{ github.token }}
@@ -89,6 +99,45 @@ jobs:
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/actionlint"
           bash .github/scripts/install-actionlint.sh "$RUNNER_TEMP/actionlint"
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: ${{ always() && runner.os == 'Linux' && steps.actionlint-cache.outputs.cache-hit != 'true' && steps.actionlint-cache.outputs.cache-primary-key != '' }}
+        with:
+          path: ${{ runner.temp }}/actionlint
+          key: ${{ steps.actionlint-cache.outputs.cache-primary-key }}
+  compiled:
+    # Match Selected checks/Promote's split producers, not only ReleaseSafe.
+    # ci-build compiles their gates without executing or caching acceptance.
+    if: ${{ github.event_name != 'workflow_run' && !github.event.repository.private && github.ref == 'refs/heads/main' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, macos-15]
+        part: [compiled, compiled-unit]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    env:
+      TARGETS: ${{ matrix.runner == 'ubuntu-24.04' && '["check-full","test-logic","admission-debug-integration","stack-frames"]' || '["check-full","test-logic","admission-debug-integration"]' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        timeout-minutes: 15
+        with:
+          targets: ${{ matrix.part == 'compiled' && env.TARGETS || '[]' }}
+          check-part: ${{ matrix.part }}
+      - name: Compile the same gates as the split producers
+        timeout-minutes: 90
+        env:
+          PART: ${{ matrix.part == 'compiled-unit' && 'unit' || 'rest' }}
+        run: python3 -B tests/ci/build_artifact.py build "$TARGETS" --part "$PART"
+      - name: Save reusable caches even after failure
+        if: ${{ always() }}
+        timeout-minutes: 10
+        uses: ./.github/actions/setup/caches
+        with:
+          save-only: 'true'
   runner:
     # Test shards restore the build runner compiled for their CPU model, which
     # saves them a median 89 s, and only main saves it. Each Linux slot lands
@@ -100,13 +149,14 @@ jobs:
       matrix:
         slot: [1, 2, 3, 4, 5, 6, mac]
     runs-on: ${{ matrix.slot == 'mac' && 'macos-15' || 'ubuntu-24.04' }}
-    timeout-minutes: 15
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
       - uses: ./.github/actions/setup
+        timeout-minutes: 15
         with:
           compiled: 'true'
       # Shards get packages from the producer artifact; this has none.
@@ -116,9 +166,16 @@ jobs:
           key: rui-packages-v1-${{ hashFiles('build.zig.zon') }}
           restore-keys: rui-packages-v1-
       - name: Compile and configure the build runner as a test shard does
+        timeout-minutes: 10
         env:
           GH_TOKEN: ${{ github.token }}
         run: bash src/fetch_dependencies.sh
+      - name: Save reusable caches even after failure
+        if: ${{ always() }}
+        timeout-minutes: 10
+        uses: ./.github/actions/setup/caches
+        with:
+          save-only: 'true'
   previous_release:
     # The upgrade check restores this; requested refs cannot publish caches.
     if: ${{ github.event_name != 'workflow_run' && !github.event.repository.private && github.ref == 'refs/heads/main' }}
@@ -127,13 +184,14 @@ jobs:
       matrix:
         runner: [ubuntu-24.04, macos-15]
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 45
+    timeout-minutes: 70
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
       - uses: ./.github/actions/setup
+        timeout-minutes: 15
         with:
           check-part: previous-release
       - name: Check out the pinned previous release
@@ -153,14 +211,22 @@ jobs:
             ${{ runner.temp }}/previous-release/zig-pkg
           key: rui-previous-release-${{ runner.os }}-${{ runner.arch }}-0.17.1-0e4b2225d106dd63fa9c38801188facb5e9c6335
       - name: Build the previous release as its installer does
+        timeout-minutes: 35
         if: ${{ steps.restore.outputs.cache-hit != 'true' }}
         working-directory: ${{ runner.temp }}/previous-release
         run: |
           set -euo pipefail
           bash src/fetch_dependencies.sh
           zig build -Doptimize=ReleaseSafe --prefix "$RUNNER_TEMP/previous-install" --summary all
+      - name: Save reusable caches even after failure
+        if: ${{ always() }}
+        timeout-minutes: 10
+        uses: ./.github/actions/setup/caches
+        with:
+          save-only: 'true'
       - name: Publish the previous-release compilation
-        if: ${{ steps.restore.outputs.cache-hit != 'true' }}
+        if: ${{ always() && steps.restore.outputs.cache-hit != 'true' && steps.restore.outputs.cache-primary-key != '' }}
+        timeout-minutes: 5
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |

@@ -41,6 +41,9 @@ Before blaming the commit under test or calling it a stale base, look up the sig
   Read the aggregate job's "Name each failed job and its cause" lines.
   A Mac job cancelled at exactly 15 minutes with no steps never got a runner; rerun the failed jobs.
   A compile job that times out after a dependency change may have restored only a cold cache: compare its "Cache restored from key" line and snapshot size with the last green run of that job.
+  Cache maintenance now warms `baseline`, `compiled` and `compiled-unit` on Linux and macOS when trusted main build/dependency pins change.
+  Main publishers explicitly save missing exact compiler/build/package/runner keys with `always()` after bounded compilation, including step failures/timeouts; PRs remain restore-only and exact hits are immutable.
+  Check for the explicit save step and its upload result: a job timeout, runner loss or forced cancellation can still prevent saving, whereas a step timeout leaves the reserved save window. A compiler installation must finish verification before it is published.
   Suspect the diff only after these are ruled out.
 - **Broken main** when the failing file or fixture is not in the PR's diff.
   Reproduce on main HEAD before routing it to the PR's owner: `gh workflow run check.yml --ref main -f base=$(git rev-parse origin/stable)`.

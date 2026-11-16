@@ -1748,20 +1748,20 @@ fi
                 self.assertNotIn('publish-caches', workflow, f'{path.name} native checks must keep publishing')
         self.assertNotIn('actions/cache', Path('.github/actions/setup/action.yml').read_text())
         setup = Path('.github/actions/setup/caches/action.yml').read_text()
-        self.assertNotIn('actions/cache/save@', setup)
-        steps = re.findall(r'(?m)^    - uses: actions/cache(/restore)?@.*\n((?:      .*\n)+)', setup)
-        def guard(body):
-            return re.search(r'(?m)^      if: \$\{\{ (.*) \}\}$', body).group(1)
-        def contents(body):
-            return re.sub(r'(?m)^      (?:if|id): .*\n', '', body)
-        saves = [body for restore, body in steps if not restore]
-        restores = [body for restore, body in steps if restore]
-        self.assertEqual(len(saves), setup.count('uses: actions/cache@'))
-        self.assertEqual(len(saves), len(restores))
-        for save, restore in zip(saves, restores):
-            self.assertRegex(guard(save), r"^inputs\.publish-caches == 'true'(?: && [^|]*)?$")
-            self.assertEqual(guard(restore), guard(save).replace("publish-caches == 'true'", "publish-caches != 'true'", 1))
-            self.assertEqual(contents(restore), contents(save))
+        self.assertNotIn('uses: actions/cache@', setup)
+        restores = re.findall(r'(?m)^    - uses: actions/cache/restore@.*\n((?:      .*\n)+)', setup)
+        saves = re.findall(r'(?m)^    - uses: actions/cache/save@.*\n((?:      .*\n)+)', setup)
+        self.assertEqual(len(restores), 4)
+        self.assertEqual(len(saves), 4)
+        for restore, save in zip(restores, saves):
+            name = re.search(r'id: ([a-z]+)-cache', restore).group(1).upper()
+            self.assertIn("inputs.save-only != 'true'", restore)
+            self.assertIn("always() && inputs.save-only == 'true'", save)
+            self.assertIn(f"env.RUI_CACHE_{name}_KEY != ''", save)
+            self.assertIn(f'key: ${{{{ env.RUI_CACHE_{name}_KEY }}}}', save)
+            path = lambda body: re.search(r'(?ms)^        path: (.*?)(?=^        key:)', body).group(1)
+            self.assertEqual(path(restore), path(save))
+        self.assertIn("env.RUI_CACHE_COMPILER_READY == 'true'", saves[0])
 
     def test_ci_test_methods_cannot_silently_replace_another_check(self):
         for path in Path('tests/ci').glob('test_*.py'):
