@@ -36,6 +36,24 @@ class FixtureUserTest(unittest.TestCase):
         self.addCleanup(scratch.cleanup)
         self.root = Path(scratch.name)
 
+    def test_export_disables_automatic_maintenance_on_every_fetch(self):
+        inputs = fixture_user.Inputs("0" * 40, self.root / "source", "origin", {}, {})
+        commands = []
+
+        def run(argv, **kwargs):
+            commands.append(argv)
+            return subprocess.CompletedProcess(argv, 0)
+
+        with patch.object(fixture_user.subprocess, "run", side_effect=run), \
+                patch.object(fixture_user, "share"):
+            fixture_user.export(inputs, self.root / "source.git", os.getgid())
+        fetches = [command for command in commands if "fetch" in command]
+        self.assertEqual(len(fetches), len(fixture_user.EXPORTED) + 2)
+        for command in fetches:
+            with self.subTest(command=command):
+                self.assertIn("maintenance.auto=false", command[:command.index("fetch")])
+                self.assertIn("gc.auto=0", command[:command.index("fetch")])
+
     def test_each_lane_gets_its_own_user_and_malformed_lanes_are_refused(self):
         self.assertEqual(fixture_user.user_for("pr4"), "rui-pr4")
         self.assertNotEqual(fixture_user.user_for("a"), fixture_user.user_for("a-1"))
