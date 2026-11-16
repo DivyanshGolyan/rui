@@ -503,3 +503,32 @@ test "a model admission freezes an offer the Host's tool set no longer holds, an
         }
     }.run);
 }
+
+test "stop_action follows the frozen read_action offer" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            for (0..4) |mask| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+                var configure = try completeConfiguration("paired-config", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
+                configure.configuration.tools = try switch (mask) {
+                    0 => @import("../../command_input.zig").ToolsField.of(&.{}),
+                    1 => @import("../../command_input.zig").ToolsField.of(&.{"read_action"}),
+                    2 => @import("../../command_input.zig").ToolsField.of(&.{"stop_action"}),
+                    3 => @import("../../command_input.zig").ToolsField.of(&.{ "read_action", "stop_action" }),
+                    else => unreachable,
+                };
+                const session = (try storage.configure(&configure, .{})).accepted.session;
+                try submitTestMessage(&storage, &tmp, "paired-input", "paired-input", session.slice(), "check tools");
+                const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                const frozen = try store_testing.queryU64(&storage, "SELECT tool_set_id FROM model_operation WHERE operation_id=?1", .{model.operation_id});
+                const count = try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_set_member m JOIN tool_record t ON t.tool_record_id=m.tool_record_id WHERE m.tool_set_id=?1 AND t.name='stop_action'", .{frozen});
+                try std.testing.expectEqual(@as(u64, if (mask & 1 != 0) 1 else 0), count);
+            }
+        }
+    }.run);
+}

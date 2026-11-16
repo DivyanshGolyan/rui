@@ -4336,8 +4336,9 @@ test "read_action uses the frozen configured offer and returns one provider tool
     const declaration = request.object.get("input").?.array.items[1].object;
     try std.testing.expectEqualStrings("additional_tools", declaration.get("type").?.string);
     const definitions = declaration.get("tools").?.array.items;
-    try std.testing.expectEqual(@as(usize, 1), definitions.len);
+    try std.testing.expectEqual(@as(usize, 2), definitions.len);
     try std.testing.expectEqualStrings("read_action", definitions[0].object.get("name").?.string);
+    try std.testing.expectEqualStrings("stop_action", definitions[1].object.get("name").?.string);
     try std.testing.expectEqual(@as(usize, 0), request.object.get("tools").?.array.items.len);
     try configure.key.set("withdraw-read-action");
     configure.configuration.tools = try .of(&.{});

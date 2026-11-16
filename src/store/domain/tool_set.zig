@@ -45,6 +45,7 @@ pub fn namesSql(comptime set_column: []const u8) []const u8 {
 }
 
 pub const max_names_bytes = tool_name.max_names_bytes;
+pub const max_offered_names_bytes = max_names_bytes + 1 + "stop_action".len;
 
 const insert_selected_member = rsql.Write(.{
     .sql = "INSERT INTO tool_set_member(tool_set_id,ordinal,tool_record_id) SELECT ?1,?2,member.tool_record_id " ++
