@@ -5628,6 +5628,10 @@ test "capture routing round trips six placements without conflating selector and
         defer gpa.free(directory);
         const data = try std.fs.path.join(gpa, &.{ root, "data" });
         defer gpa.free(data);
+        if (kind == .sqlite_moved) {
+            var data_dir = try tmp.dir.createDirPathOpen(io, "data", .{ .permissions = .fromMode(0o700) });
+            data_dir.close(io);
+        }
         const runtime = try std.fs.path.join(gpa, &.{ root, "iface" });
         defer gpa.free(runtime);
         var document: std.Io.Writer.Allocating = .init(gpa);
