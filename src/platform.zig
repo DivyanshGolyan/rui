@@ -316,10 +316,11 @@ pub const ClientSelection = union(Kind) {
         return switch (self) {
             .mysql => |value| mysqlClientPaths(io, value.store, value.runtime),
             .sqlite => |path| blk: {
-                var store_dir = try std.Io.Dir.cwd().openDir(io, path, .{});
-                defer store_dir.close(io);
-                try validatePrivateDirectory(store_dir, io);
-                break :blk pathsFromOpenStore(store_dir, io);
+                // Preserve the directory's admission before reading its saved placement.
+                _ = try sqliteClientPaths(io, path);
+                var result = try @import("host_start.zig").savedPlacement(io, path);
+                if (result.kind == .mysql) try @import("client.zig").resolveMysqlIdentity(io, &result);
+                break :blk result;
             },
         };
     }
@@ -356,11 +357,35 @@ pub fn mysqlClientPaths(io: std.Io, store: []const u8, runtime: []const u8) !Pat
     var dir = try std.Io.Dir.cwd().openDir(io, runtime, .{});
     defer dir.close(io);
     try validatePrivateDirectory(dir, io);
-    var paths: Paths = .{ .kind = .mysql };
+    return interfacePaths(.mysql, store, runtime);
+}
+
+/// The single Paths construction for both saved placement and legacy MySQL hints.
+fn interfacePaths(kind: Kind, store: []const u8, runtime: []const u8) !Paths {
+    var paths: Paths = .{ .kind = kind };
     try paths.store.set(store);
-    paths.socket.len = (try std.fmt.bufPrint(&paths.socket.bytes, "{s}/rui.sock", .{runtime})).len;
-    paths.scratch.len = (try std.fmt.bufPrint(&paths.scratch.bytes, "{s}/scratch", .{runtime})).len;
+    try paths.socket.set(try std.fmt.bufPrint(&paths.socket.bytes, "{s}/rui.sock", .{runtime}));
+    try paths.scratch.set(try std.fmt.bufPrint(&paths.scratch.bytes, "{s}/scratch", .{runtime}));
     return paths;
+}
+
+pub fn placementPaths(io: std.Io, settings: *const @import("host_settings.zig").Settings) !Paths {
+    if (settings.store == .mysql) return interfacePaths(.mysql, "", settings.interface.dir.slice());
+    var canonical: [protocol.max_store_bytes]u8 = undefined;
+    var paths = try pathsForCanonicalStore(try canonicalStoreDestination(io, settings.store.sqlite.dir.slice(), &canonical));
+    if (!settings.interface.dir.anchored) {
+        const interface = try interfacePaths(.sqlite, paths.store.slice(), settings.interface.dir.slice());
+        paths.socket = interface.socket;
+        paths.scratch = interface.scratch;
+    }
+    return paths;
+}
+
+pub fn sqliteClientPaths(io: std.Io, supplied_path: []const u8) !Paths {
+    var store_dir = try std.Io.Dir.cwd().openDir(io, supplied_path, .{});
+    defer store_dir.close(io);
+    try validatePrivateDirectory(store_dir, io);
+    return pathsFromOpenStore(store_dir, io);
 }
 
 /// Read-only destination check before authentication repair. Existing Stores
@@ -386,7 +411,7 @@ pub noinline fn canonicalStoreDestination(io: std.Io, supplied_path: []const u8,
 // These workspaces are sequential, not resident together. Keep the existing
 // Paths result out of the missing-parent walk's canonicalization workspace.
 noinline fn existingStoreDestination(io: std.Io, supplied_path: []const u8, buffer: *[protocol.max_store_bytes]u8) ![]const u8 {
-    const paths = try resolveClientPaths(io, supplied_path);
+    const paths = try sqliteClientPaths(io, supplied_path);
     @memcpy(buffer[0..paths.store.len], paths.store.slice());
     return buffer[0..paths.store.len];
 }
@@ -463,9 +488,11 @@ fn pathsFromOpenStore(store_dir: std.Io.Dir, io: std.Io) !Paths {
         else => return err,
     };
     if (canonical_length > protocol.max_store_bytes) return error.StorePathTooLong;
-    const canonical = canonical_buffer[0..canonical_length];
-    try validateCanonicalPath(canonical);
+    return pathsForCanonicalStore(canonical_buffer[0..canonical_length]);
+}
 
+fn pathsForCanonicalStore(canonical: []const u8) !Paths {
+    try validateCanonicalPath(canonical);
     var paths: Paths = .{};
     try paths.store.set(canonical);
     var database_buffer: [max_database_path_bytes]u8 = undefined;
@@ -571,6 +598,11 @@ fn runtimeDirectory(buffer: []u8) ![]const u8 {
 
 fn runtimeDirectoryForUid(buffer: []u8, uid: u32) ![]const u8 {
     return std.fmt.bufPrint(buffer, "{s}{d}", .{ runtime_prefix, uid });
+}
+
+pub fn defaultMysqlInterface(canonical: []const u8, buffer: []u8) ![]const u8 {
+    const socket = try socketPathForCanonical(canonical, buffer);
+    return socket[0 .. socket.len - socket_suffix.len];
 }
 
 fn socketPathForCanonical(canonical: []const u8, buffer: []u8) ![]const u8 {

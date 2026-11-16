@@ -582,11 +582,38 @@ pub fn fillAt(init: std.process.Init, parsed: *const cli_args.Parsed, dir: []con
     const intent = try readSources(init, .{ .dir = dir, .settings_file = parsed.get("settings"), .assignments = parsed.all("set") }, settings, failure);
     try finishSources(init, settings, intent, failure);
     try fixtureInputs(init, parsed, settings, fixtures, failure);
-    // --store is an interface anchor for MySQL, never a SQLite Adapter override.
-    if (settings.store == .mysql and settings.interface.dir.anchored and parsed.get("store") != null) {
-        var canonical: [protocol.max_store_bytes]u8 = undefined;
-        try text(settings, init.gpa, "interface.dir", try platform.canonicalStoreDestination(init.io, dir, &canonical), failure);
+}
+
+/// One placement owner for serving, starting and directory-based client lookup.
+/// Reading placement never resolves a secret or inspects provider credentials.
+pub fn anchorPlacement(init: std.process.Init, settings: *hs.Settings, dir: []const u8, failure: *start_report.Failure) !void {
+    var canonical: [protocol.max_store_bytes]u8 = undefined;
+    const host = try platform.canonicalStoreDestination(init.io, dir, &canonical);
+    if (settings.store == .mysql and settings.interface.dir.anchored) {
+        var runtime: [platform.max_socket_path_bytes]u8 = undefined;
+        try text(settings, init.gpa, "interface.dir", try platform.defaultMysqlInterface(host, &runtime), failure);
     }
+    hs.anchor(settings, host) catch return invalid(failure, "store.sqlite.dir", "Host directory exceeds the path byte bound");
+}
+
+fn existingPlacement(io: std.Io, dir: []const u8) !platform.Paths {
+    _ = try platform.sqliteClientPaths(io, dir);
+    return savedPlacement(io, dir);
+}
+
+pub fn savedPlacement(io: std.Io, dir: []const u8) !platform.Paths {
+    var wiping: secret_value.WipingAllocator = .{ .backing = std.heap.c_allocator };
+    var arena: std.heap.ArenaAllocator = .init(wiping.allocator());
+    defer arena.deinit();
+    var env: std.process.Environ.Map = .init(arena.allocator());
+    const init: std.process.Init = .{ .minimal = .{ .args = .{ .vector = &.{} }, .environ = .empty }, .arena = &arena, .gpa = arena.allocator(), .io = io, .environ_map = &env, .preopens = .empty };
+    const settings = try init.gpa.create(hs.Settings);
+    settings.* = .{};
+    defer settings.deinit();
+    var failure: start_report.Failure = undefined;
+    _ = try readSources(init, .{ .dir = dir }, settings, &failure);
+    try anchorPlacement(init, settings, dir, &failure);
+    return platform.placementPaths(io, settings);
 }
 
 /// A private, empty Host directory: tests must not read the checkout's cwd.
@@ -694,7 +721,8 @@ pub noinline fn report(io: std.Io, failure: *const start_report.Failure) void {
 /// reaches server. Saved sign-ins stay file sources: their Adapter owns leasing.
 pub fn prepare(init: std.process.Init, settings: *hs.Settings, fixtures: providers.Fixtures, failure: *start_report.Failure) !hs.Prepared {
     var cwd: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    if (settings.store == .mysql and settings.interface.dir.anchored) return invalid(failure, "interface.dir", "MySQL requires an explicit private interface directory");
+    if (settings.store == .mysql and settings.interface.dir.anchored)
+        try anchorPlacement(init, settings, cwd[0..try std.Io.Dir.cwd().realPath(init.io, &cwd)], failure);
     hs.anchor(settings, cwd[0..try std.Io.Dir.cwd().realPath(init.io, &cwd)]) catch return invalid(failure, "store.sqlite.dir", "Host directory exceeds the path byte bound");
     try resolveProviders(init, settings, fixtures, failure);
     if (settings.store == .mysql) resolve(init, &settings.store.mysql.url) catch |err| return resolutionFailure(failure, "store.mysql.url", err);
@@ -805,7 +833,7 @@ pub fn intake(init: std.process.Init, parsed: *const cli_args.Parsed, dir: []con
 /// The caller selects the Host directory using platform policy; an explicit
 /// document Adapter keeps its own Store location.
 pub fn admitSelected(init: std.process.Init, dir: []const u8, settings: *hs.Settings, fixtures: providers.Fixtures, failure: *start_report.Failure) !hs.Prepared {
-    if (settings.store == .sqlite and settings.store.sqlite.dir.anchored) try selectStore(init, settings, dir, false, failure);
+    try anchorPlacement(init, settings, dir, failure);
     return prepare(init, settings, fixtures, failure);
 }
 
@@ -1467,8 +1495,6 @@ pub fn launchReady(result: *HostLaunchResult, ready: @import("protocol_reply.zig
     result.outcome.ready.diagnostics_directory.set(paths.diagnosticsDirectory()) catch unreachable;
 }
 
-const moved = "bare rui and rui host start reach only a Host that listens in its Host directory; start this one with rui host serve --store DIR";
-
 pub const ProviderIntent = enum { automatic, explicit };
 
 /// Read saved host.json, the optional document, then ordered assignments into
@@ -1676,22 +1702,33 @@ pub fn checkStart(init: std.process.Init, request: Spawn, failure: *start_report
     settings.* = .{};
     defer settings.deinit();
     try readDetached(init, request, settings, failure);
-    if (settings.store == .mysql) return invalid(failure, "store.mysql", moved);
-    if (!settings.interface.dir.anchored) return invalid(failure, "interface.dir", moved);
-    if (!settings.store.sqlite.dir.anchored) {
-        var host: [protocol.max_store_bytes]u8 = undefined;
-        var chosen: [protocol.max_store_bytes]u8 = undefined;
-        const a = try platform.canonicalStoreDestination(init.io, request.dir, &host);
-        const b = platform.canonicalStoreDestination(init.io, settings.store.sqlite.dir.slice(), &chosen) catch return invalid(failure, "store.sqlite.dir", moved);
-        if (!std.mem.eql(u8, a, b)) return invalid(failure, "store.sqlite.dir", moved);
+    // Only saved placement is discoverable by subsequent directory clients.
+    const saved_settings = try init.gpa.create(hs.Settings);
+    defer init.gpa.destroy(saved_settings);
+    saved_settings.* = .{};
+    defer saved_settings.deinit();
+    _ = try readSources(init, .{ .dir = request.dir }, saved_settings, failure);
+    var wiping: secret_value.WipingAllocator = .{ .backing = init.gpa };
+    var comparison: std.heap.ArenaAllocator = .init(wiping.allocator());
+    defer comparison.deinit();
+    const current = try complete(comparison.allocator(), settings, failure);
+    const persisted = try complete(comparison.allocator(), saved_settings, failure);
+    for ([_][]const u8{ "store", "interface.dir" }) |path| {
+        const a = try encoded(comparison.allocator(), lookup(current, path).?);
+        const b = try encoded(comparison.allocator(), lookup(persisted, path).?);
+        if (!std.mem.eql(u8, a, b)) {
+            failure.* = .init(.settings_invalid, "unsaved Store or interface placement cannot be found by later clients; save it with rui host set --store DIR, then retry");
+            return error.SettingsInvalid;
+        }
     }
+    try anchorPlacement(init, settings, request.dir, failure);
 }
 
 pub noinline fn spawn(init: std.process.Init, typed: Spawn, ops: Ops, progress: ?Progress, result: *HostLaunchResult) void {
     const selected = typed.dir;
     const io = init.io;
     const selection = platform.resolveClientSelection(selected);
-    const resolved: ?platform.Paths = selection.paths(io) catch |err| switch (err) {
+    const resolved: ?platform.Paths = (if (selection == .mysql) selection.paths(io) else existingPlacement(io, selected)) catch |err| switch (err) {
         error.FileNotFound => null,
         else => return launchFailure(result, .store_access, error.StoreAccessFailed, null),
     };
@@ -1725,7 +1762,7 @@ pub noinline fn spawn(init: std.process.Init, typed: Spawn, ops: Ops, progress: 
     };
     var dir = std.Io.Dir.cwd().createDirPathOpen(io, selected, .{ .permissions = .fromMode(0o700) }) catch |err| return launchFailure(result, .setup, err, null);
     dir.close(io);
-    const paths = resolved orelse (selection.paths(io) catch |err| return launchFailure(result, .store_access, err, null));
+    const paths = resolved orelse (savedPlacement(io, selected) catch |err| return launchFailure(result, .store_access, err, null));
     var executable_buffer: [std.Io.Dir.max_path_bytes + 1]u8 = undefined;
     const length = std.process.executablePath(io, &executable_buffer) catch |err| return launchFailure(result, .setup, err, paths.store.slice());
     if (length == executable_buffer.len) return launchFailure(result, .setup, error.ExecutablePathTooLong, paths.store.slice());
@@ -1739,7 +1776,9 @@ pub noinline fn spawn(init: std.process.Init, typed: Spawn, ops: Ops, progress: 
     argv[1] = "host";
     argv[2] = "serve";
     argv[3] = "--store";
-    const directory = gpa.dupeSentinel(u8, paths.store.slice(), 0) catch |err| return launchFailure(result, .setup, err, paths.store.slice());
+    var host_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const host_dir = platform.canonicalStoreDestination(io, selected, &host_buffer) catch |err| return launchFailure(result, .setup, err, null);
+    const directory = gpa.dupeSentinel(u8, host_dir, 0) catch |err| return launchFailure(result, .setup, err, paths.store.slice());
     defer gpa.free(directory);
     argv[4] = directory.ptr;
     const settings_file = if (request.settings_file) |file| gpa.dupeSentinel(u8, file, 0) catch |err| return launchFailure(result, .setup, err, paths.store.slice()) else null;

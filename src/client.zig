@@ -134,7 +134,8 @@ pub const Requests = struct {
         self.check() catch |err| return .fail(null, err);
         const carried: ?Environment = if (captured.target == .message) environment else null;
         if (carried) |value| if (value.bytes() > protocol.max_environment_bytes) return .fail(null, error.EnvironmentTooLarge);
-        const paths = platform.resolveClientPaths(self.io, captured.saved.store.slice()) catch |err| return .fail(.store, err);
+        const paths = captured.paths orelse (platform.resolveClientPaths(self.io, captured.saved.store.slice()) catch |err| return .fail(.store, err));
+        if (!paths.store.eql(captured.saved.store.slice())) return .fail(.store, error.RequestBindingMismatch);
         const reply = switch (sendSource(self, &paths, std.meta.activeTag(captured.target).route(), self.mutation_timing, captured.length, &captured.file, null, null, carried, reply_buffer, null)) {
             .done => |reply| reply,
             .failed => |failure| return .fail(failure.step, failure.err),
@@ -1149,7 +1150,7 @@ pub fn hostLockState(io: std.Io, store_path: []const u8) HostLockState {
 }
 
 fn lockState(io: std.Io, paths: *const platform.Paths) HostLockState {
-    var store_dir = std.Io.Dir.cwd().openDir(io, paths.store.slice(), .{}) catch return .failure;
+    var store_dir = std.Io.Dir.cwd().openDir(io, paths.store.slice(), .{}) catch |err| return if (err == error.FileNotFound) .free else .failure;
     defer store_dir.close(io);
     // A replaced lock node may be a FIFO: open must not wait for a writer
     // before the nonblocking lock probe can classify the selected Store.
@@ -1247,7 +1248,26 @@ fn readHostInfo(io: std.Io, paths: *const platform.Paths, deadline: ?i128) proto
     };
     if (reply.status == 503) return if (protocol_reply.validHostUnavailable(reply.body)) .owned_unavailable else .incompatible;
     if (reply.status != 200) return .incompatible;
+    if (paths.kind == .mysql and paths.store.len == 0) {
+        // Empty-Store host-info already exists for MySQL discovery. Learn only
+        // a shaped identity and validate the entire existing response grammar.
+        var memory: [protocol.max_host_info_response_bytes * 2]u8 = undefined;
+        var fixed: std.heap.FixedBufferAllocator = .init(&memory);
+        const hint = std.json.parseFromSliceLeaky(struct { store: []const u8 }, fixed.allocator(), reply.body, .{ .ignore_unknown_fields = true }) catch return .incompatible;
+        if (!platform.validStoreId(hint.store)) return .incompatible;
+        return protocol_reply.parseHostInfo(reply.body, hint.store) catch .incompatible;
+    }
     return protocol_reply.parseHostInfo(reply.body, paths.store.slice()) catch .incompatible;
+}
+
+/// Resolve an opaque identity through the existing private socket, never a login.
+pub fn resolveMysqlIdentity(io: std.Io, paths: *platform.Paths) !void {
+    switch (hostStatusAt(io, paths, null)) {
+        .ready => |ready| paths.store = ready.store,
+        .unavailable, .owned_unavailable => return error.FileNotFound,
+        .incompatible => return error.WrongWireVersion,
+        .access_failure => return error.AccessDenied,
+    }
 }
 
 pub fn captureSessionStop(io: std.Io, input: SessionStopInput, target: CaptureTarget) !CapturedRecord {
@@ -1267,7 +1287,7 @@ pub fn captureSessionArchive(io: std.Io, input: SessionArchiveInput, target: Cap
     var key_buffer: [36]u8 = undefined;
     const location = try target.resolve(io, &path_buffer, &key_buffer);
     try protocol_reply.validateIdentityInputs(location.key, input.session);
-    return runCapture(io, paths.store.slice(), &location, input.session, .session_archive, null, Capture.writeRequest, .{ protocol.session_archive_request.all, .{ paths.store.slice(), location.key, input.session, input.archived } });
+    return runCapture(io, &paths, &location, input.session, .session_archive, null, Capture.writeRequest, .{ protocol.session_archive_request.all, .{ paths.store.slice(), location.key, input.session, input.archived } });
 }
 
 pub fn captureSessionPin(io: std.Io, input: SessionPinInput, target: CaptureTarget) !CapturedRecord {
@@ -1276,7 +1296,7 @@ pub fn captureSessionPin(io: std.Io, input: SessionPinInput, target: CaptureTarg
     var key_buffer: [36]u8 = undefined;
     const location = try target.resolve(io, &path_buffer, &key_buffer);
     try protocol_reply.validateIdentityInputs(location.key, input.session);
-    return runCapture(io, paths.store.slice(), &location, input.session, .session_pin, null, Capture.writeRequest, .{ protocol.session_pin_request.all, .{ paths.store.slice(), location.key, input.session, input.pinned } });
+    return runCapture(io, &paths, &location, input.session, .session_pin, null, Capture.writeRequest, .{ protocol.session_pin_request.all, .{ paths.store.slice(), location.key, input.session, input.pinned } });
 }
 
 pub fn captureModelInterruption(io: std.Io, input: ModelInterruptionInput, target: CaptureTarget) !CapturedRecord {
@@ -1600,6 +1620,7 @@ pub const CapturedRecord = struct {
     saved: protocol_reply.MutationIdentity,
     target: protocol_reply.MutationTarget,
     replay: Replay,
+    paths: ?platform.Paths = null,
 
     pub fn identity(self: *const CapturedRecord) *const protocol_reply.MutationIdentity {
         return &self.saved;
@@ -1663,7 +1684,7 @@ pub fn openCaptured(io: std.Io, saved: SavedRecord) !CapturedRecord {
         .generated => .generated,
         .explicit => |explicit| .{ .explicit = explicit.record },
     };
-    return .{ .file = file, .length = try file.length(io), .saved = binding.saved, .target = binding.target, .replay = replay };
+    return .{ .file = file, .length = try file.length(io), .saved = binding.saved, .target = binding.target, .replay = replay, .paths = if (saved == .explicit) paths else null };
 }
 
 /// Metadata-only projection for listing/inspection; cannot authorize a send or
@@ -1841,7 +1862,8 @@ pub fn captureConfigure(io: std.Io, input: ConfigureInput, target: CaptureTarget
 fn stepCapture(io: std.Io, input: anytype, target: CaptureTarget, comptime write: anytype) Stepped(CaptureError, CapturedRecord) {
     const paths = platform.resolveClientPaths(io, input.store) catch |err| return .fail(.store, err);
     var input_failure: ?Step = null;
-    const record = write(io, &paths, input, target, &input_failure) catch |err| return .fail(input_failure orelse .capture, err);
+    var record = write(io, &paths, input, target, &input_failure) catch |err| return .fail(input_failure orelse .capture, err);
+    record.paths = paths;
     return .{ .done = record };
 }
 
@@ -1855,7 +1877,7 @@ fn writeConfigureCapture(io: std.Io, paths: *const platform.Paths, input: Config
     };
     if (location.key.len > protocol.max_key_bytes or !std.unicode.utf8ValidateSlice(location.key)) return error.InvalidKey;
     if (input.session == .named and !protocol.validSessionId(session)) return error.InvalidSession;
-    return runCapture(io, paths.store.slice(), &location, session, .configure, input_failure, writeConfigureRequest, .{ paths.store.slice(), location.key, session, input });
+    return runCapture(io, paths, &location, session, .configure, input_failure, writeConfigureRequest, .{ paths.store.slice(), location.key, session, input });
 }
 
 fn writeConfigureRequest(capture: *Capture, store: []const u8, key: []const u8, session: []const u8, input: ConfigureInput) !void {
@@ -1871,7 +1893,7 @@ fn writeConfigureRequest(capture: *Capture, store: []const u8, key: []const u8, 
 /// validate their input first, so a refused input opens nothing.
 fn runCapture(
     io: std.Io,
-    store: []const u8,
+    paths: *const platform.Paths,
     location: *const CaptureTarget.Location,
     session: []const u8,
     kind: protocol.CommandKind,
@@ -1884,7 +1906,9 @@ fn runCapture(
     capture.input_failure = input_failure;
     errdefer capture.abort();
     try @call(.auto, write, .{&capture} ++ args);
-    return finishCapture(io, &capture, location, store, session, kind);
+    var record = try finishCapture(io, &capture, location, paths.store.slice(), session, kind);
+    record.paths = paths.*;
+    return record;
 }
 
 /// The one check of a peer identity's shape, shared by the CLI (which
@@ -1914,7 +1938,7 @@ fn writeMessageCapture(io: std.Io, paths: *const platform.Paths, input: MessageI
     if (input.configuration != null) {
         if (input.session.len != 0 or location.key.len > protocol.max_key_bytes or !std.unicode.utf8ValidateSlice(location.key)) return error.InvalidSession;
     } else try protocol_reply.validateIdentityInputs(location.key, input.session);
-    return runCapture(io, paths.store.slice(), &location, input.session, .message, input_failure, writeMessageRequest, .{ paths.store.slice(), location.key, input });
+    return runCapture(io, paths, &location, input.session, .message, input_failure, writeMessageRequest, .{ paths.store.slice(), location.key, input });
 }
 
 fn writeMessageRequest(capture: *Capture, store: []const u8, key: []const u8, input: MessageInput) !void {
@@ -1943,7 +1967,7 @@ fn writeMessageRequest(capture: *Capture, store: []const u8, key: []const u8, in
 }
 
 fn writeSessionStopCapture(io: std.Io, paths: *const platform.Paths, input: SessionStopInput, location: CaptureTarget.Location) !CapturedRecord {
-    return runCapture(io, paths.store.slice(), &location, input.session, .session_stop, null, Capture.writeRequest, .{ protocol.session_stop_request, .{ paths.store.slice(), location.key, input.session } });
+    return runCapture(io, &paths, &location, input.session, .session_stop, null, Capture.writeRequest, .{ protocol.session_stop_request, .{ paths.store.slice(), location.key, input.session } });
 }
 
 fn writeModelInterruptionCapture(
@@ -1952,7 +1976,7 @@ fn writeModelInterruptionCapture(
     input: ModelInterruptionInput,
     location: CaptureTarget.Location,
 ) !CapturedRecord {
-    return runCapture(io, paths.store.slice(), &location, input.session, .model_interruption, null, Capture.writeRequest, .{ protocol.model_interruption_request, .{ paths.store.slice(), location.key, input.session, input.turn_id, input.operation_id } });
+    return runCapture(io, &paths, &location, input.session, .model_interruption, null, Capture.writeRequest, .{ protocol.model_interruption_request, .{ paths.store.slice(), location.key, input.session, input.turn_id, input.operation_id } });
 }
 
 pub fn capturePermissionDecision(io: std.Io, input: PermissionDecisionInput, target: CaptureTarget) !CapturedRecord {
@@ -1962,7 +1986,7 @@ pub fn capturePermissionDecision(io: std.Io, input: PermissionDecisionInput, tar
     const location = try target.resolve(io, &path_buffer, &key_buffer);
     try protocol_reply.validateIdentityInputs(location.key, input.session);
     if (input.action_id == 0) return error.InvalidTarget;
-    return runCapture(io, paths.store.slice(), &location, input.session, .permission_decision, null, Capture.writePermissionDecision, .{ paths.store.slice(), location.key, input });
+    return runCapture(io, paths, &location, input.session, .permission_decision, null, Capture.writePermissionDecision, .{ paths.store.slice(), location.key, input });
 }
 
 fn finishCapture(io: std.Io, capture: *Capture, location: *const CaptureTarget.Location, store: []const u8, session: []const u8, kind: protocol.CommandKind) !CapturedRecord {
